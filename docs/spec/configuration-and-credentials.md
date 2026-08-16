@@ -503,12 +503,15 @@ fail-closed:
   `version = 1` fails startup.
 - At least one `[[adapter_mappings]]` entry is required. Each entry gives one
   exact `model_family`, the build-provided `adapter`, and the non-secret
-  `credential_pool` whose members may authenticate that family. The pool must
-  name one declared `[[credential_pools]]` entry, and every member of that pool
-  must carry the mapping's adapter. Duplicate families, an adapter this daemon
-  build does not provide, an undeclared pool, and an adapter disagreement
-  between a mapping and its pool are typed startup failures. Nothing is inferred
-  from model spelling.
+  `credential_pool` whose members may authenticate that family. The committed
+  workspace-instruction slice adds the all-or-none
+  `workspace_instruction_transport = "typed_system"` and positive `u32`
+  `workspace_instruction_capacity_bytes` fields owned below; omission of both
+  means unsupported. The pool must name one declared `[[credential_pools]]`
+  entry, and every member of that pool must carry the mapping's adapter.
+  Duplicate families, an adapter this daemon build does not provide, an
+  undeclared pool, and an adapter disagreement between a mapping and its pool
+  are typed startup failures. Nothing is inferred from model spelling.
 - At least one `[[credential_profiles]]` entry is required. Each exact `name`
   carries the build-provided `adapter` it authenticates, one closed
   `billing_kind` (`api_metered` or `subscription`), and one closed `delivery`
@@ -640,8 +643,14 @@ effective serving record, including an alternate fast target, is authoritative
 for a call. Its adapter mapping must declare support for the same typed-system
 transport and at least that byte capacity, or startup rejects the configuration.
 Context-window tokens are an independent limit and are never converted into this
-byte value. No present parser or adapter exposes these fields until the admission
-slice lands.
+byte value. Each `[[adapter_mappings]]` entry accepts those same two optional
+all-or-none fields in addition to its three implemented keys. The mapping's
+capacity is the adapter implementation's maximum exact serialized region bytes
+for that family; it must be at least 65,536 and at least every model or serving
+target in the family. A mapping omitting the pair can map only targets that also
+omit it. These declarations are static adapter capability, not values inferred
+from model token windows. No present parser or adapter exposes these fields
+until the admission slice lands.
 
 The conversation-import bound was verified against PR #401
 (`agent/import-chunks-protocol`). The optional `[conversation_import]` table has
@@ -2108,11 +2117,13 @@ restore.
 
 ## Credential pools and selection
 
-This build maps a model family to exactly one credential pool. Each
+This build maps a model family to exactly one credential pool. Each implemented
 `[[adapter_mappings]]` entry accepts exactly `model_family`, `adapter`, and
-`credential_pool` and rejects every other key
-(`apps/signalboxd/src/configuration.rs:706`). The pool must name one declared
-`[[credential_pools]]` entry whose adapter agrees with the mapping's.
+`credential_pool`; the committed workspace-instruction slice also accepts
+exactly the all-or-none transport and byte-capacity pair defined in
+[model capability configuration](#model-selection-validation). Every other key
+is rejected (`apps/signalboxd/src/configuration.rs:706`). The pool must name one
+declared `[[credential_pools]]` entry whose adapter agrees with the mapping's.
 
 Selection is deliberately degenerate in this build, and it happens once per
 session rather than once per call. Configuration parsing takes each pool's

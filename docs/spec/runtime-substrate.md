@@ -102,8 +102,8 @@ controls unless an adapter's owning section records a capability-limited
 advisory exception; an adapter never silently presents prompt instructions as
 hard transport controls.
 
-**Committed unimplemented functionality — workspace-instruction transport.**
-The instruction-admission slice adds
+**Committed unimplemented functionality — workspace-instruction transport.** The
+instruction-admission slice adds
 `workspace_instructions: Option<WorkspaceInstructionRegion>` beside `system` and
 conversation history. The region is a validated nonempty exact UTF-8 byte value
 bounded by the selected target's declared workspace-instruction byte capacity;

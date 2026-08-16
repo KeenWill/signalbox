@@ -615,11 +615,13 @@ every request in the batch is executed or denied, one continuation transaction:
 
 **Committed unimplemented functionality — instruction admission continuation.**
 When `instructions.read` is implemented, this transaction additionally folds the
-batch's durable successful instruction admissions in request order and creates
-exactly one successor turn-instruction manifest authenticated by the new
-`Prepared` model call. No present tool or transaction supplies this fifth
-effect; the compatibility constraint is that the four implemented effects and
-the successor manifest must eventually commit or roll back together.
+batch's fresh durable successful instruction-admission rows in request order and
+creates exactly one successor turn-instruction manifest authenticated by the new
+`Prepared` model call. An idempotent replay receipt or an `already_admitted`
+receipt contributes no row and cannot duplicate a bundle or alter the successor
+manifest digest. No present tool or transaction supplies this fifth effect; the
+compatibility constraint is that the four implemented effects and the successor
+manifest must eventually commit or roll back together.
 
 When at least one request entered execution, the continuation turn attempt
 already entered `Running` during tool authorization. It owns the new `Prepared`

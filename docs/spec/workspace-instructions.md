@@ -106,13 +106,15 @@ limit finding.
 
 One scan emits a canonical source path only once even when workspace and
 configured roots overlap; the first read fixes its source hash for that scan.
-Workspace roots sort before configured roots and each kind sorts by canonical
-path. The first root whose kind-specific discovery rules actually yielded the
-candidate is its primary authorizing root; mere path containment grants no
-candidate authority. The complete ordered root inventory preserves every other
-root that also yielded that source. Registration therefore assigns one identity,
-and admission cannot render the same source twice through root aliases or
-observe two versions from a mid-scan edit.
+Workspace roots sort before configured roots and discovery within each kind
+sorts by canonical path. This order governs filesystem discovery and primary
+authority selection only; it is not the provider-safe root comparator below. The
+first root whose kind-specific discovery rules actually yielded the candidate is
+its primary authorizing root; mere path containment grants no candidate
+authority. The complete ordered root inventory preserves every other root that
+also yielded that source. Registration therefore assigns one identity, and
+admission cannot render the same source twice through root aliases or observe
+two versions from a mid-scan edit.
 
 The greedy walk intentionally exceeds terminal clients' common
 root-to-working-directory behavior: a daemon owns the workspace and must make
@@ -165,18 +167,18 @@ or CRLF, but mixed line endings are rejected. Between those delimiters every
 nonempty line is one top-level `key: value` pair. A key is ASCII letters or
 hyphen, a single ASCII space follows the colon, and a value is a nonempty
 single-line UTF-8 plain scalar with no leading or trailing whitespace, NUL,
-colon, number sign, quotation mark, reverse solidus, or YAML indicator. Duplicate
-keys, comments, quoting, escapes, tags, anchors, aliases, flow collections,
-multiline scalars, nested mappings, and sequences are rejected rather than
-delegated to a library-selected YAML revision.
+colon, number sign, quotation mark, reverse solidus, or YAML indicator.
+Duplicate keys, comments, quoting, escapes, tags, anchors, aliases, flow
+collections, multiline scalars, nested mappings, and sequences are rejected
+rather than delegated to a library-selected YAML revision.
 
 Exactly one `name` and one `description` are required. `name` is 1 through 64
 ASCII bytes, uses only lowercase letters, digits, and single interior hyphens,
 and may neither begin nor end with a hyphen; it must equal the parent directory
 name. `description` is 1 through 1,024 UTF-8 bytes. Version one additionally
 recognizes optional `license`, `compatibility`, and `allowed-tools` scalar keys,
-each at most 1,024 UTF-8 bytes; they are retained as source metadata but grant no
-authority. Every other key is a typed unsupported-metadata rejection. These
+each at most 1,024 UTF-8 bytes; they are retained as source metadata but grant
+no authority. Every other key is a typed unsupported-metadata rejection. These
 local rules, rather than the unversioned external page, determine registration
 inventory until a later contract deliberately widens the grammar.
 
@@ -244,6 +246,13 @@ that effective input ignores. Additions and removal of identities absent from
 both sets can still take effect at the next turn boundary; the later unload
 transition owns removal from both sets.
 
+Replacement also rejects adding or retaining a registered identity whose
+canonical source path is already represented in the session's admitted set by a
+different bundle identity. `instructions.read` repeats that guard while
+serialized on the admitted-set head. A changed source may create new
+registration evidence, but contradictory versions of one source cannot become
+simultaneously admitted until unload can retire the old admission.
+
 **Committed unimplemented functionality — eligibility control.** The first
 implementation slice records the empty snapshot and exposes no replacement
 command. Template authoring, session replacement, and visibility variants such
@@ -261,9 +270,15 @@ root-relative source and scope paths. The root reference is the closed
 nor any other result field contains a canonical absolute path. For `AGENTS.md`,
 an empty scope means the root and a nested scope applies only to that directory
 and descendants. Catalog order is root, then increasing scope depth, then raw
-relative path. An ancestor document precedes a descendant document, so a
-deliberately admitted descendant is the later, more specific instruction;
-sibling scopes never apply to each other.
+relative path. The provider-safe root comparator orders `workspace` before
+`configured`; all workspace bundles have the same root key, while configured
+roots compare by the 32 raw bytes of `ConfiguredInstructionRootId` in ascending
+lexicographic order. Canonical absolute paths never participate. This comparator
+is used wherever this page says root or projection order, including catalog
+order, projection order, admitted-set records, and manifest records. An ancestor
+document precedes a descendant document, so a deliberately admitted descendant
+is the later, more specific instruction; sibling scopes never apply to each
+other.
 
 Version one returns at most 32 identities and 524,288 catalog-result bytes per
 page. Those bytes are compact UTF-8 JSON with object keys sorted by raw ASCII
@@ -291,12 +306,21 @@ Version one splits the revalidated UTF-8 source on LF and removes one terminal
 CR from each line only when the registered document consistently uses CRLF. It
 recognizes only ATX headings: zero through three leading ASCII spaces, one
 through six `#` bytes, then end of line or one ASCII space or tab. The returned
-heading records are in source order and contain the one-based line number, level,
-and heading text after removing leading and trailing spaces or tabs and an
-optional closing run of `#` bytes that is preceded by whitespace. A heading text
-longer than 512 UTF-8 bytes is shortened at a scalar boundary and reports its
-full byte length and truncation boundary. Setext headings, headings inside fenced
-blocks, and other Markdown constructs are not interpreted.
+heading records are in source order and contain the one-based line number,
+level, and heading text after removing leading and trailing spaces or tabs and
+an optional closing run of `#` bytes that is preceded by whitespace. A heading
+text longer than 512 UTF-8 bytes is shortened at a scalar boundary and reports
+its full byte length and truncation boundary. Setext headings, headings inside
+fenced blocks, and other Markdown constructs are not interpreted. Fence
+recognition uses this version-one state machine over the normalized lines.
+Outside a fence, zero through three leading ASCII spaces followed by at least
+three identical backticks or tildes opens a fence. The remainder of a backtick
+opener must contain no backtick; the remainder of a tilde opener is ignored.
+State retains the marker byte and opening run length. Inside a fence, only zero
+through three leading ASCII spaces, a run of the retained marker at least as
+long as the opener, and then only ASCII spaces or tabs closes it. Every other
+line remains fenced. EOF does not close an unmatched fence, so all later
+apparent headings remain excluded.
 
 Preview returns at most 128 heading records and at most 65,536 encoded result
 bytes using the compact canonical JSON rules of `instructions.list`. It stops
@@ -479,13 +503,14 @@ uniquely decodable. The empty turn-start vector ends immediately after literal
 
 Version one fixes every admission's per-bundle source-byte budget at 32,768
 bytes. `instructions.read` has no caller-supplied budget field. Rendering
-preserves UTF-8 and emits the complete source or truncates at a character
-boundary no later than that fixed budget before applying the required content
-escaping and wrapper. It never borrows a shared pool whose earlier entries can
-starve later ones. Why fixed and per source: identical registered evidence must
-render identically on replay, and one large ancestor document must not consume
-the budget of a more specific bundle. Rendered byte length, source truncation
-boundary, and retained exact wrapper bytes are evidence.
+preserves UTF-8 and emits the complete source or truncates to the unique longest
+UTF-8 prefix whose byte length does not exceed that fixed budget before applying
+the required content escaping and wrapper. It never borrows a shared pool whose
+earlier entries can starve later ones. Why fixed and per source: identical
+registered evidence must render identically on replay, and one large ancestor
+document must not consume the budget of a more specific bundle. Rendered byte
+length, source truncation boundary, and retained exact wrapper bytes are
+evidence.
 
 Version one has a fixed 65,536-byte aggregate workspace-instruction-region
 budget, including every wrapper. A provider model with a smaller instruction
@@ -495,8 +520,8 @@ the current region plus its candidate against that aggregate budget and the
 active turn's pinned model target before committing its receipt or admission.
 Concurrent and same-batch reads therefore observe one ordered predecessor and
 cannot commit a set whose instruction region alone is unrenderable. Aggregate
-exhaustion is a typed failed read and changes no durable admitted set. The owning
-model catalog declares transport support and its byte capacity for every
+exhaustion is a typed failed read and changes no durable admitted set. The
+owning model catalog declares transport support and its byte capacity for every
 selectable and serving target; no token-window conversion or adapter inference
 supplies this value.
 
