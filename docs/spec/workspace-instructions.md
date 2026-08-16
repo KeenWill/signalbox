@@ -441,12 +441,38 @@ a touched file, or present in a template. Version one admits only by the closed
 `model_requested` route. Path-triggered or template-eager routes need separate
 variants and triggering evidence.
 
+`instructions.read` declares the `Confirm` permission default required of every
+entry in the owning
+[tool catalog](tool-loop.md#provider-bridge-and-daemon-catalog) and declares no
+approval-posture override, so a configured `Auto` or `Delegated` posture
+resolves it exactly as it resolves any other `Confirm` tool. `Confirm` rather
+than `Auto`: eligibility authorizes which bundles a session may admit, not that
+the model may spend the admission itself, and admission durably places
+repository-controlled bytes in every later projection. `Confirm` rather than
+`AlwaysConfirm`: the eligibility allow-list already bounds what can be reached
+and the region is delivered under the subordinate-authority preamble, so this is
+not the class of effect for which automation must be refused outright. List and
+preview declare `Auto`; both are bounded reads that admit nothing.
+
 **Committed unimplemented functionality — model-facing operations.** No present
 tool supplies list, preview, or read unless an implementing child explicitly
-advances this section's verified reference. Unloading is not implemented in the
-first slice.
+advances this section's verified reference, and no present registry entry
+carries the permission defaults just stated. Unloading is not implemented in the
+first slice. The same holds for everything the rest of this page builds on those
+operations: the durable admission transition, the projection and its region
+bytes, the render budgets, and the per-turn manifest's admission-bearing rows
+are all committed unimplemented functionality, recorded because they constrain
+what the present slice may do, and no present persistence or runtime surface
+provides them. The one exception is the turn-start manifest with an empty
+eligibility and admitted set, which the first slice does insert; each section
+below says so where it applies.
 
 ## Durable admission transition
+
+**Committed unimplemented functionality.** This whole section is a compatibility
+constraint on the present slice, not a description of it: no present tool
+supplies `instructions.read`, and no present persistence surface stores an
+admitted-set head or an `InstructionAdmission`.
 
 Each `instructions.read` request has a replay-stable tool-request identity. The
 owning
@@ -469,6 +495,12 @@ deterministically folds. Process memory and the live workspace are never
 authority for the admitted set.
 
 ## Projection rather than transcript append
+
+**Committed unimplemented functionality.** No present runtime surface carries a
+`WorkspaceInstructionRegion`, so this section — the projection, its exact region
+bytes, the preamble, and the wrapper — is a compatibility constraint the
+implementing child must meet. The design comparison at its end records why the
+constraint is shaped this way rather than proposing an open question.
 
 Admitted instructions are a model-input **projection rebuilt each turn**, not
 semantic transcript entries. The daemon holds the declared admitted set,
@@ -638,28 +670,33 @@ budgeted renderings of one registered bundle.
 
 The manifest hash begins with `signalbox-turn-instruction-manifest-v1`, then
 session UUID, turn UUID, the 32-byte eligibility hash, the 32-byte admitted-set
-hash of the head this manifest snapshotted, the unsigned region version under
-which its rendered rows were built, and its boundary: literal `turn_start`, or
-literal `model_call` plus model-call UUID. The admitted-set hash is
-authenticated here because it covers each admission UUID while the rendered rows
-below do not: without it, two distinct admitted-set heads whose rendered
-evidence is identical would produce the same manifest hash, and reconstitution
-could not prove which head activation actually snapshotted. The region version
-is authenticated here because the preamble is deliberately not stored: a later
-version changing those fixed bytes would otherwise let one set of retained
-wrapper rows reconstruct different provider input while the manifest still
-validated. Version one writes region version 1, and reconstitution rebuilds the
-region under the version its manifest names rather than the daemon's current
-one. Rendered bundle records follow in projection order. Each is bundle UUID,
-length-framed kind, length-framed canonical source path, length-framed
-authorizing-root kind, length-framed root-relative source label, 32-byte source
-hash, 32-byte rendered hash, rendered byte length, length-framed admission
-route, then one byte `0` for no truncation or byte `1` plus the truncation
-boundary as an unsigned length. Fixed-width identities and digests plus length
-framing make the representation uniquely decodable. The empty turn-start vector
-ends immediately after literal `turn_start`.
+hash of the head this manifest snapshotted, the region version under which its
+rendered rows were built as an eight-byte big-endian unsigned value like every
+other count on this page, and its boundary: literal `turn_start`, or literal
+`model_call` plus model-call UUID. The admitted-set hash is authenticated here
+because it covers each admission UUID while the rendered rows below do not:
+without it, two distinct admitted-set heads whose rendered evidence is identical
+would produce the same manifest hash, and reconstitution could not prove which
+head activation actually snapshotted. The region version is authenticated here
+because the preamble is deliberately not stored: a later version changing those
+fixed bytes would otherwise let one set of retained wrapper rows reconstruct
+different provider input while the manifest still validated. Version one writes
+region version 1, and reconstitution rebuilds the region under the version its
+manifest names rather than the daemon's current one. Rendered bundle records
+follow in projection order. Each is bundle UUID, length-framed kind,
+length-framed canonical source path, length-framed authorizing-root kind,
+length-framed root-relative source label, 32-byte source hash, 32-byte rendered
+hash, rendered byte length, length-framed admission route, then one byte `0` for
+no truncation or byte `1` plus the truncation boundary as an unsigned length.
+Fixed-width identities and digests plus length framing make the representation
+uniquely decodable. The empty turn-start vector ends immediately after literal
+`turn_start`.
 
 ## Budgets and rendered content
+
+**Committed unimplemented functionality.** Nothing renders a bundle in the
+present slice, so every budget, preflight, and target check below constrains the
+implementing child rather than describing current behavior.
 
 Version one fixes every admission's per-bundle source-byte budget at 32,768
 bytes. `instructions.read` has no caller-supplied budget field. Rendering
@@ -724,6 +761,15 @@ fits, preparation fails before provider spawn. Context pressure does not
 implicitly unload, summarize, or evict instructions.
 
 ## Durable per-turn instruction manifest
+
+This section is split between the two categories, and the split is exactly the
+first slice's boundary. The turn-start manifest with an empty eligibility and
+admitted set is implemented behavior: the first slice inserts it in the
+activation transaction and authenticates it. **Committed unimplemented
+functionality.** Everything here that depends on an admission — successor
+manifests at model-call boundaries, rendered bundle rows, and the region version
+selecting a preamble to prepend — constrains the implementing child; no present
+surface produces a nonempty manifest.
 
 Every turn owns an append-only sequence of immutable `TurnInstructionManifest`
 values, beginning with exactly one turn-start manifest even when the eligibility
