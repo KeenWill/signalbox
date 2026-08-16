@@ -8,8 +8,8 @@ untrusted processor-response boundary, stable agent tool contracts,
 visibility-authorizing application bridge, and fresh daemon-supervised worker
 runtime.
 
-The text-family adapter coverage is verified against
-`agent/file-media-text-family`.
+The text-family adapter coverage is verified against PR #903
+(`agent/file-media-text-family`).
 
 This page owns typed interpretation above immutable blob bytes. Blob identity,
 catalog placement, replica verification, raw reads, attachment visibility, and
