@@ -1092,7 +1092,10 @@ async fn eager_main_advance_dispatches_its_mergeable_dependent_immediately()
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(initial_observation),
-                    vec![opened_event_for(MAIN_OPENED_EVENT_ID, dependent.clone())?],
+                    vec![identified_event(opened_event_for(
+                        MAIN_OPENED_EVENT_ID,
+                        dependent.clone(),
+                    )?)],
                 ),
             )
             .await?,
@@ -1113,10 +1116,10 @@ async fn eager_main_advance_dispatches_its_mergeable_dependent_immediately()
             RepoWatchCommitRequest::new(
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(current_observation.clone()),
-                vec![base_advanced_event(
+                vec![identified_event(base_advanced_event(
                     MAIN_BASE_ADVANCED_EVENT_ID,
                     dependent.clone(),
-                )?],
+                )?)],
             ),
         )
         .await?;
@@ -1184,8 +1187,14 @@ async fn eager_parent_advance_dispatches_only_its_mergeable_child_immediately()
                     None,
                     RepoWatchCursorCandidate::new(initial_observation),
                     vec![
-                        opened_event_for(STACK_BOTTOM_OPENED_EVENT_ID, initial_parent.clone())?,
-                        opened_event_for(STACK_TOP_OPENED_EVENT_ID, child.clone())?,
+                        identified_event(opened_event_for(
+                            STACK_BOTTOM_OPENED_EVENT_ID,
+                            initial_parent.clone(),
+                        )?),
+                        identified_event(opened_event_for(
+                            STACK_TOP_OPENED_EVENT_ID,
+                            child.clone(),
+                        )?),
                     ],
                 ),
             )
@@ -1214,12 +1223,15 @@ async fn eager_parent_advance_dispatches_only_its_mergeable_child_immediately()
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(current_observation.clone()),
                 vec![
-                    head_changed_event(
+                    identified_event(head_changed_event(
                         STACK_PARENT_HEAD_CHANGED_EVENT_ID,
                         advanced_parent.clone(),
                         INITIAL_HEAD,
-                    )?,
-                    base_advanced_event(STACK_BASE_ADVANCED_EVENT_ID, child.clone())?,
+                    )?),
+                    identified_event(base_advanced_event(
+                        STACK_BASE_ADVANCED_EVENT_ID,
+                        child.clone(),
+                    )?),
                 ],
             ),
         )
