@@ -643,6 +643,15 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
         }
     }
 
+    /// Composes the ports without admitting authoritative passes.
+    pub const fn paused(work_source: WorkSource, pass: Pass) -> Self {
+        Self {
+            work_source,
+            pass,
+            max_in_flight_passes: 0,
+        }
+    }
+
     /// Returns both ports, primarily for explicit ownership handoff.
     pub fn into_parts(self) -> (WorkSource, Pass) {
         (self.work_source, self.pass)
@@ -666,6 +675,10 @@ where
         Shutdown: Future<Output = ()> + Send,
     {
         pin!(shutdown);
+        if self.max_in_flight_passes == 0 {
+            shutdown.await;
+            return SchedulerLoopExit::Shutdown;
+        }
         let mut passes = JoinSet::new();
         let mut task_sessions = HashMap::new();
         let mut in_flight_sessions = HashSet::new();
@@ -1570,6 +1583,33 @@ mod tests {
         assert_eq!(observed.len(), 2);
         assert!(observed.contains(&first));
         assert!(observed.contains(&second));
+    }
+
+    #[tokio::test]
+    async fn inv007_paused_scheduler_admits_no_authoritative_passes() {
+        let selected = session(50);
+        let (unused_shutdown, shutdown_receiver) = oneshot::channel();
+        let pass = FakePass::failing_once(selected, 1, unused_shutdown);
+        let observed = Arc::clone(&pass.state);
+        let mut scheduler = SchedulerLoop::paused(
+            FakeWorkSource {
+                hints: VecDeque::from([Ok(selected)]),
+            },
+            pass,
+        );
+
+        assert_eq!(
+            scheduler.run_until(ready(())).await,
+            SchedulerLoopExit::Shutdown
+        );
+        assert!(
+            observed
+                .lock()
+                .expect("fake-pass state is not poisoned")
+                .observed
+                .is_empty()
+        );
+        drop(shutdown_receiver);
     }
 
     #[tokio::test]

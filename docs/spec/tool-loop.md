@@ -503,8 +503,10 @@ cannot strand an issued request or roll back its command.
 
 If the executor returns an operator failure without trustworthy evidence after
 authorization, the service retains the dispatch gate and applies the attempt's
-effect-class crash-loss transition before surfacing that failure. A failed
-classification retains the exact attempt identity and permit for another
+effect-class crash-loss transition. A committed classification contains the
+failure as the ordinary `CrashClassified` outcome, so the affected turn either
+fails or parks for reconciliation without failing unrelated session execution. A
+failed classification retains the exact attempt identity and permit for another
 classification pass, and the returned combined error preserves both the executor
 failure and the classification failure. Evidence carrying a different dispatch
 correlation follows the same classification-before-release path, surfacing the
@@ -616,16 +618,19 @@ its assistant text and `TurnCompleted` marker terminalize the turn.
 At most 32 requests may appear in one completed provider tool response. A
 response with a thirty-third request closes the producing model call as
 `KnownFailed` without creating a partial batch, request record, or tool-use
-entry. At most 32 provider rounds in one turn may complete with admitted tool
+entry. At most 256 provider rounds in one turn may complete with admitted tool
 requests. The application counts distinct producing calls for the current turn,
 so every multi-request batch counts once and inherited tool history from earlier
-turns does not count. After the thirty-second batch resolves, the ordinary
-continuation transaction still projects all results and creates its fresh
-`Prepared` call; model execution closes that checkpoint as `KnownFailed` before
-provider capability preparation or send. The normal known-failure boundary then
-fails the turn honestly. These durable-content bounds avoid wall-clock policy
-and ensure one model-controlled response or chain cannot retain the progressing
-slot indefinitely.
+turns does not count. After the 256th batch resolves, the ordinary continuation
+transaction still projects all results and creates its fresh `Prepared` call;
+model execution closes that checkpoint as `KnownFailed` before provider
+capability preparation or send. At that enforcement site it emits a warning
+carrying the limit and observed round count, and the guarded pre-send closure
+carries `ToolRoundLimitReached`. The terminal event consequently uses
+`tool_round_limit_reached`, distinct from `capability_known_failure` (INV-061).
+These durable-content bounds avoid wall-clock policy and ensure one
+model-controlled response or chain cannot retain the progressing slot
+indefinitely.
 
 If an applied stop terminalizes before continuation, the same materialization
 algorithm appends results for executed and denied requests, closes every request

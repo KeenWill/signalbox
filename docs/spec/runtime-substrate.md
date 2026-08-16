@@ -20,18 +20,19 @@ probe, and pinned version were verified against the `0.146.0` executable through
 PR #321 (`renovate/openai-codex-0.x`). Its twice-daily schedule and
 workflow-self-change trigger were verified through PR #471
 (`agent/codex-smoke-schedule`). The Codex CLI adapter's prompt tool-authority
-preamble is verified against this PR (`agent/phantom-prohibition`). The
-`signalboxd` names this page states for the composition root, its telemetry, and
-the production `FileCredentialAccess` were verified through PR #258
-(`agent/signalboxd-rename`); the Anthropic and OpenAI adapter-scoped file
-catalogs are verified against this PR (`agent/credential-pools-parser`). The
-Anthropic adapter's server-side `fallback`-block recognition was verified
-through PR #280 (`agent/provider-identity-normalization`). The HTTP
-fallback-body redaction ordering was verified through PR #330
-(`agent/audit-verified-fixes`). The five persistence-repository families in the
-operator-failure inventory were verified through PR #288
-(`agent/audit-fix-docs-coherence`). The streamed-delivery bridge and ephemeral
-text-delta projection were verified through PR #300
+preamble is verified against this PR (`agent/phantom-prohibition`). The Codex
+response-envelope material constraint is verified against this PR
+(`agent/daemon-ops-overnight`). The `signalboxd` names this page states for the
+composition root, its telemetry, and the production `FileCredentialAccess` were
+verified through PR #258 (`agent/signalboxd-rename`); the Anthropic and OpenAI
+adapter-scoped file catalogs are verified against this PR
+(`agent/credential-pools-parser`). The Anthropic adapter's server-side
+`fallback`-block recognition was verified through PR #280
+(`agent/provider-identity-normalization`). The HTTP fallback-body redaction
+ordering was verified through PR #330 (`agent/audit-verified-fixes`). The five
+persistence-repository families in the operator-failure inventory were verified
+through PR #288 (`agent/audit-fix-docs-coherence`). The streamed-delivery bridge
+and ephemeral text-delta projection were verified through PR #300
 (`agent/token-level-streaming`); the Claude 5-family thinking-signature stream
 shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
 CLI redaction contract was verified through PR #316
@@ -833,14 +834,16 @@ Exit zero without `turn.completed` is
 
 `turn.completed` is success evidence only when the last completed agent-message
 item decodes as the adapter's response envelope and satisfies the declared-tool
-constraints. A named ordinary-tool choice admits at least one proposal and
-requires every proposal to carry that selected name. For a structured-output
-contract, zero or several contract-named proposals remain definitive completion
-material for the provider-independent structured decoder above to classify. The
-decoded envelope is checked against the shared JSON nesting bound independently
-of the escaped outer event; envelope decode errors are content-silent. The
-envelope distinguishes completion from refusal. Within the envelope each tool
-call carries its argument object as JSON text inside a string: strict
+constraints. The response schema requires nonempty text on every outcome, so a
+schema-valid `turn.completed` cannot reach the decoder without completion
+material. A named ordinary-tool choice admits at least one proposal and requires
+every proposal to carry that selected name. For a structured-output contract,
+zero or several contract-named proposals remain definitive completion material
+for the provider-independent structured decoder above to classify. The decoded
+envelope is checked against the shared JSON nesting bound independently of the
+escaped outer event; envelope decode errors are content-silent. The envelope
+distinguishes completion from refusal. Within the envelope each tool call
+carries its argument object as JSON text inside a string: strict
 structured-output validation refuses any schema object that does not supply
 `additionalProperties: false` and require all its properties, so a free-form
 argument object is not expressible in the output schema and the live API rejects

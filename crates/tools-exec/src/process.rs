@@ -485,7 +485,7 @@ pub enum ProcessEnvironment {
 pub enum ProcessStatusProtocol {
     /// Interpret only the outer supervisor's status.
     Direct,
-    /// Require and interpret the sandbox dispatcher's nested launcher status.
+    /// Require and interpret the sandbox dispatcher's nested status after exit.
     SandboxDispatch,
 }
 
@@ -1735,14 +1735,20 @@ async fn read_supervised_stdout(
     let status = serde_json::from_slice(encoded)
         .map_err(|_| std::io::Error::other("supervisor status trailer is malformed"))?;
     let launcher_trailer = match (status_protocol, status) {
-        (ProcessStatusProtocol::SandboxDispatch, SupervisorStatus::SpawnFailed { .. }) => None,
-        (ProcessStatusProtocol::SandboxDispatch, _) => {
+        (ProcessStatusProtocol::SandboxDispatch, SupervisorStatus::Exited { .. }) => {
             let (launcher_marker, launcher_status) = parse_launcher_status(&tail[..marker])
                 .ok_or_else(|| {
                     std::io::Error::other("sandbox launcher status trailer is malformed")
                 })?;
             Some((launcher_marker, launcher_status))
         }
+        (
+            ProcessStatusProtocol::SandboxDispatch,
+            SupervisorStatus::TimedOut
+            | SupervisorStatus::Cancelled
+            | SupervisorStatus::SpawnFailed { .. }
+            | SupervisorStatus::SupervisionFailed { .. },
+        ) => None,
         (ProcessStatusProtocol::Direct, _) => None,
     };
     let first_trailer = launcher_trailer
@@ -3293,6 +3299,29 @@ mod tests {
                 reason: SupervisorSpawnFailure::NotFound,
             }
         );
+        assert_eq!(launcher_status, None);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandbox_dispatch_preserves_timeout_output_without_launcher_status()
+    -> Result<(), Box<dyn Error>> {
+        let expected_output = b"target started\n";
+        let mut output = expected_output.to_vec();
+        output.extend_from_slice(SUPERVISOR_STATUS_TRAILER);
+        serde_json::to_writer(&mut output, &SupervisorStatus::TimedOut)?;
+        output.push(b'\n');
+
+        let (captured, status, launcher_status) = read_supervised_stdout(
+            output.as_slice(),
+            EXEC_CAPTURE_BYTES,
+            ProcessStatusProtocol::SandboxDispatch,
+        )
+        .await?;
+
+        assert_eq!(captured.bytes, expected_output);
+        assert_eq!(status, SupervisorStatus::TimedOut);
         assert_eq!(launcher_status, None);
         Ok(())
     }

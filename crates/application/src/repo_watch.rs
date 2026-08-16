@@ -1,20 +1,29 @@
 //! Pure repository-state comparison for the repository-watch event boundary.
 
-use std::{collections::BTreeSet, error::Error, fmt, future::Future};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    future::Future,
+    num::NonZeroU64,
+};
+
+use sha2::{Digest, Sha256};
 
 use signalbox_domain::{
     AcceptedInputId, BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha,
     ContextFrontierId, CreateSession, DeliveryRequest, DurableCommandId, GitHubObjectId,
-    GoalTextError, GoalUserAction, GoalUserCommand, MergeableState, ModelSelectionOverride,
-    PerInputConfigurationChoices, PreparedCreateSession, PullRequestEventContext,
-    PullRequestNumber, ReactionChange, ReactionContent, ReactionSubject, RepoWatchActionV1,
-    RepoWatchAuthorLogin, RepoWatchDispatchContextError, RepoWatchDispatchId, RepoWatchEvent,
-    RepoWatchEventConstructionError, RepoWatchEventId, RepoWatchEventKindV1, RepoWatchEventTarget,
-    RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
-    RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SessionTemplateName,
-    SessionTemplateProvenance, SubmitInput, TranscriptAncestry, TurnId, UserContent, WorkflowName,
+    GoalTextError, GoalUserAction, GoalUserCommand, LabelName, MergeableState,
+    ModelSelectionOverride, PerInputConfigurationChoices, PreparedCreateSession,
+    PullRequestEventContext, PullRequestNumber, ReactionChange, ReactionContent, ReactionSubject,
+    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchDispatchContextError, RepoWatchDispatchId,
+    RepoWatchEvent, RepoWatchEventConstructionError, RepoWatchEventId, RepoWatchEventKindNameV1,
+    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchRuleId,
+    RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt, RepositorySlug,
+    ReviewState, ReviewThreadId, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SessionTemplateName, SessionTemplateProvenance, SubmitInput, TranscriptAncestry,
+    TurnId, UserContent, WorkflowName,
 };
 
 /// Supplies identities in the exact order in which the differ emits facts.
@@ -29,6 +38,156 @@ pub struct UuidV7RepoWatchEventIdGenerator;
 impl RepoWatchEventIdGenerator for UuidV7RepoWatchEventIdGenerator {
     fn next_event_id(&mut self) -> RepoWatchEventId {
         RepoWatchEventId::from_uuid(uuid::Uuid::now_v7())
+    }
+}
+
+const REPO_WATCH_EVENT_CONTENT_IDENTITY_DOMAIN_V1: &[u8] =
+    b"signalbox/repo-watch/event-content-identity/v1";
+const REPO_WATCH_EVENT_STREAM_IDENTITY_DOMAIN_V1: &[u8] =
+    b"signalbox/repo-watch/event-stream-identity/v1";
+const MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS: usize = 1_000_000;
+
+/// A source-independent SHA-256 identity for one normalized event occurrence.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RepoWatchEventContentIdentityV1([u8; 32]);
+
+impl RepoWatchEventContentIdentityV1 {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Last assigned occurrence number for one recurring source-independent stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepoWatchEventIdentityFrontierEntryV1 {
+    stream_identity: [u8; 32],
+    sequence: NonZeroU64,
+}
+
+impl RepoWatchEventIdentityFrontierEntryV1 {
+    pub const fn new(stream_identity: [u8; 32], sequence: NonZeroU64) -> Self {
+        Self {
+            stream_identity,
+            sequence,
+        }
+    }
+
+    pub const fn stream_identity(&self) -> &[u8; 32] {
+        &self.stream_identity
+    }
+
+    pub const fn sequence(&self) -> NonZeroU64 {
+        self.sequence
+    }
+}
+
+/// Canonical per-repository occurrence counters carried by the durable cursor.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RepoWatchEventIdentityFrontierV1 {
+    sequences: BTreeMap<[u8; 32], NonZeroU64>,
+}
+
+impl RepoWatchEventIdentityFrontierV1 {
+    pub fn try_from_entries(
+        entries: Vec<RepoWatchEventIdentityFrontierEntryV1>,
+    ) -> Result<Self, RepoWatchEventIdentityFrontierError> {
+        if entries.len() > MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS {
+            return Err(RepoWatchEventIdentityFrontierError::StreamLimit);
+        }
+        let mut sequences = BTreeMap::new();
+        for entry in entries {
+            if sequences
+                .insert(entry.stream_identity, entry.sequence)
+                .is_some()
+            {
+                return Err(RepoWatchEventIdentityFrontierError::DuplicateStream);
+            }
+        }
+        Ok(Self { sequences })
+    }
+
+    pub fn entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = RepoWatchEventIdentityFrontierEntryV1> + '_ {
+        self.sequences.iter().map(|(stream, sequence)| {
+            RepoWatchEventIdentityFrontierEntryV1::new(*stream, *sequence)
+        })
+    }
+
+    fn advance(
+        &mut self,
+        stream_identity: [u8; 32],
+    ) -> Result<NonZeroU64, RepoWatchEventIdentityFrontierError> {
+        let next = match self.sequences.get(&stream_identity) {
+            Some(sequence) => sequence
+                .get()
+                .checked_add(1)
+                .and_then(NonZeroU64::new)
+                .ok_or(RepoWatchEventIdentityFrontierError::SequenceExhausted)?,
+            None => {
+                if self.sequences.len() >= MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS {
+                    return Err(RepoWatchEventIdentityFrontierError::StreamLimit);
+                }
+                NonZeroU64::MIN
+            }
+        };
+        self.sequences.insert(stream_identity, next);
+        Ok(next)
+    }
+}
+
+/// Why an occurrence frontier could not represent another event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchEventIdentityFrontierError {
+    DuplicateStream,
+    StreamLimit,
+    SequenceExhausted,
+}
+
+impl fmt::Display for RepoWatchEventIdentityFrontierError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::DuplicateStream => "repository-watch identity frontier repeats a stream",
+            Self::StreamLimit => "repository-watch identity frontier exceeds 1000000 streams",
+            Self::SequenceExhausted => "repository-watch identity occurrence sequence is exhausted",
+        })
+    }
+}
+
+impl Error for RepoWatchEventIdentityFrontierError {}
+
+/// One normalized event paired with its source-independent content identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchEventOccurrenceV1 {
+    event: RepoWatchEvent,
+    content_identity: RepoWatchEventContentIdentityV1,
+}
+
+impl RepoWatchEventOccurrenceV1 {
+    pub const fn from_parts(
+        event: RepoWatchEvent,
+        content_identity: RepoWatchEventContentIdentityV1,
+    ) -> Self {
+        Self {
+            event,
+            content_identity,
+        }
+    }
+
+    pub const fn event(&self) -> &RepoWatchEvent {
+        &self.event
+    }
+
+    pub const fn content_identity(&self) -> RepoWatchEventContentIdentityV1 {
+        self.content_identity
+    }
+
+    pub fn into_event(self) -> RepoWatchEvent {
+        self.event
     }
 }
 
@@ -199,6 +358,222 @@ pub enum RepoWatchThreadState {
     Open,
     Resolved,
 }
+
+/// GitHub's aggregate review decision for one pull-request head.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchReviewDecision {
+    None,
+    Approved,
+    ReviewRequired,
+    ChangesRequested,
+}
+
+/// Durable repository-watch convergence classification for one exact head.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchConvergenceVerdict {
+    NotConverged,
+    InternallyConverged,
+    MergeReady,
+}
+
+const MERGE_READY_BASE_BRANCH: &str = "main";
+
+/// Field-labeled construction input for one exact-head convergence assessment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchConvergenceAssessmentInput {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub base_branch: BranchName,
+    pub base_revision: CommitSha,
+    pub mergeable_state: MergeableState,
+    pub review_decision: RepoWatchReviewDecision,
+    pub unresolved_threads: Vec<ReviewThreadId>,
+    pub gating_check_count: u64,
+    pub non_green_gating_checks: Vec<CheckRunName>,
+}
+
+/// Complete evidence and derived judgement for one exact pull-request head.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchConvergenceAssessment {
+    number: PullRequestNumber,
+    head_sha: CommitSha,
+    base_branch: BranchName,
+    base_revision: CommitSha,
+    mergeable_state: MergeableState,
+    review_decision: RepoWatchReviewDecision,
+    unresolved_threads: Box<[ReviewThreadId]>,
+    gating_check_count: u64,
+    non_green_gating_checks: Box<[CheckRunName]>,
+    verdict: RepoWatchConvergenceVerdict,
+}
+
+impl RepoWatchConvergenceAssessment {
+    /// Validates complete evidence and derives the reference convergence rule.
+    pub fn try_new(
+        mut input: RepoWatchConvergenceAssessmentInput,
+    ) -> Result<Self, RepoWatchConvergenceAssessmentError> {
+        input.unresolved_threads.sort();
+        input.unresolved_threads.dedup();
+        input
+            .non_green_gating_checks
+            .sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        if input.non_green_gating_checks.len() as u64 > input.gating_check_count {
+            return Err(RepoWatchConvergenceAssessmentError);
+        }
+        let blocked = !input.unresolved_threads.is_empty()
+            || !input.non_green_gating_checks.is_empty()
+            || input.mergeable_state == MergeableState::Conflicting
+            || input.review_decision == RepoWatchReviewDecision::ChangesRequested;
+        let verdict = if blocked {
+            RepoWatchConvergenceVerdict::NotConverged
+        } else if input.base_branch.as_str() == MERGE_READY_BASE_BRANCH {
+            RepoWatchConvergenceVerdict::MergeReady
+        } else {
+            RepoWatchConvergenceVerdict::InternallyConverged
+        };
+        Ok(Self {
+            number: input.number,
+            head_sha: input.head_sha,
+            base_branch: input.base_branch,
+            base_revision: input.base_revision,
+            mergeable_state: input.mergeable_state,
+            review_decision: input.review_decision,
+            unresolved_threads: input.unresolved_threads.into_boxed_slice(),
+            gating_check_count: input.gating_check_count,
+            non_green_gating_checks: input.non_green_gating_checks.into_boxed_slice(),
+            verdict,
+        })
+    }
+
+    pub const fn number(&self) -> PullRequestNumber {
+        self.number
+    }
+
+    pub const fn head_sha(&self) -> &CommitSha {
+        &self.head_sha
+    }
+
+    pub const fn base_branch(&self) -> &BranchName {
+        &self.base_branch
+    }
+
+    pub const fn base_revision(&self) -> &CommitSha {
+        &self.base_revision
+    }
+
+    pub const fn mergeable_state(&self) -> MergeableState {
+        self.mergeable_state
+    }
+
+    pub const fn review_decision(&self) -> RepoWatchReviewDecision {
+        self.review_decision
+    }
+
+    pub fn unresolved_threads(&self) -> &[ReviewThreadId] {
+        &self.unresolved_threads
+    }
+
+    pub const fn gating_check_count(&self) -> u64 {
+        self.gating_check_count
+    }
+
+    pub fn non_green_gating_checks(&self) -> &[CheckRunName] {
+        &self.non_green_gating_checks
+    }
+
+    pub const fn verdict(&self) -> RepoWatchConvergenceVerdict {
+        self.verdict
+    }
+}
+
+/// Incoherent convergence evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepoWatchConvergenceAssessmentError;
+
+impl fmt::Display for RepoWatchConvergenceAssessmentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "repository-watch convergence evidence is incoherent"
+        )
+    }
+}
+
+impl Error for RepoWatchConvergenceAssessmentError {}
+
+/// One stale blocking review eligible for conservative automatic dismissal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchStaleReviewClearanceCandidate {
+    number: PullRequestNumber,
+    current_head_sha: CommitSha,
+    review_node_id: Box<str>,
+    reviewer: RepoWatchAuthorLogin,
+    reviewed_head_sha: CommitSha,
+}
+
+impl RepoWatchStaleReviewClearanceCandidate {
+    /// Requires the aggregate review decision to be the exact head's only
+    /// remaining convergence blocker and the review to target an older head.
+    pub fn try_new(
+        assessment: &RepoWatchConvergenceAssessment,
+        review_node_id: String,
+        reviewer: RepoWatchAuthorLogin,
+        reviewed_head_sha: CommitSha,
+    ) -> Result<Self, RepoWatchStaleReviewClearanceCandidateError> {
+        if assessment.review_decision() != RepoWatchReviewDecision::ChangesRequested
+            || !assessment.unresolved_threads().is_empty()
+            || !assessment.non_green_gating_checks().is_empty()
+            || assessment.mergeable_state() == MergeableState::Conflicting
+            || &reviewed_head_sha == assessment.head_sha()
+            || review_node_id.is_empty()
+            || review_node_id.len() > 256
+            || review_node_id.contains('\0')
+        {
+            return Err(RepoWatchStaleReviewClearanceCandidateError);
+        }
+        Ok(Self {
+            number: assessment.number(),
+            current_head_sha: assessment.head_sha().clone(),
+            review_node_id: review_node_id.into_boxed_str(),
+            reviewer,
+            reviewed_head_sha,
+        })
+    }
+
+    pub const fn number(&self) -> PullRequestNumber {
+        self.number
+    }
+
+    pub const fn current_head_sha(&self) -> &CommitSha {
+        &self.current_head_sha
+    }
+
+    pub const fn review_node_id(&self) -> &str {
+        &self.review_node_id
+    }
+
+    pub const fn reviewer(&self) -> &RepoWatchAuthorLogin {
+        &self.reviewer
+    }
+
+    pub const fn reviewed_head_sha(&self) -> &CommitSha {
+        &self.reviewed_head_sha
+    }
+}
+
+/// A review is not stale, or another exact-head convergence blocker remains.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepoWatchStaleReviewClearanceCandidateError;
+
+impl fmt::Display for RepoWatchStaleReviewClearanceCandidateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "repository-watch stale review clearance requires an older-head review and no blocker except changes requested",
+        )
+    }
+}
+
+impl Error for RepoWatchStaleReviewClearanceCandidateError {}
 
 /// One current review-thread projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -590,23 +965,109 @@ impl fmt::Display for RepoWatchRepositoryStateError {
 
 impl Error for RepoWatchRepositoryStateError {}
 
-/// Internal coherence failure while deriving a domain event.
+enum RepoWatchEventStreamKeyV1<'value> {
+    PullRequestKind {
+        number: PullRequestNumber,
+        kind: RepoWatchEventKindNameV1,
+    },
+    Label {
+        number: PullRequestNumber,
+        kind: RepoWatchEventKindNameV1,
+        label: &'value LabelName,
+    },
+    CheckSuite {
+        number: PullRequestNumber,
+        suite: GitHubObjectId,
+        completion_generation: &'value RepoWatchCheckCompletionGeneration,
+    },
+    CheckRun {
+        number: PullRequestNumber,
+        run: GitHubObjectId,
+        completion_generation: &'value RepoWatchCheckCompletionGeneration,
+    },
+    Review {
+        number: PullRequestNumber,
+        review: GitHubObjectId,
+    },
+    Thread {
+        number: PullRequestNumber,
+        kind: RepoWatchEventKindNameV1,
+        thread: &'value ReviewThreadId,
+    },
+    Workflow {
+        branch: &'value BranchName,
+        workflow: GitHubObjectId,
+        run: GitHubObjectId,
+        attempt: RepoWatchWorkflowRunAttempt,
+    },
+    BaseAdvance {
+        number: PullRequestNumber,
+        branch: &'value BranchName,
+    },
+    Reaction {
+        number: PullRequestNumber,
+        subject: ReactionSubject,
+        reactor: &'value RepoWatchAuthorLogin,
+        content: &'value ReactionContent,
+        change: ReactionChange,
+    },
+}
+
+impl RepoWatchEventStreamKeyV1<'_> {
+    const fn is_recurring(&self) -> bool {
+        !matches!(
+            self,
+            Self::CheckSuite { .. }
+                | Self::CheckRun { .. }
+                | Self::Review { .. }
+                | Self::Workflow { .. }
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RepoWatchDifferError(RepoWatchEventConstructionError);
+enum RepoWatchDifferFailure {
+    EventConstruction(RepoWatchEventConstructionError),
+    IdentityFrontier(RepoWatchEventIdentityFrontierError),
+}
+
+/// Internal coherence failure while deriving a domain event or its identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepoWatchDifferError(RepoWatchDifferFailure);
 
 impl fmt::Display for RepoWatchDifferError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "repository-watch differ produced an invalid event: {}",
-            self.0
-        )
+        match self.0 {
+            RepoWatchDifferFailure::EventConstruction(error) => write!(
+                formatter,
+                "repository-watch differ produced an invalid event: {error}"
+            ),
+            RepoWatchDifferFailure::IdentityFrontier(error) => write!(
+                formatter,
+                "repository-watch differ could not advance event identity: {error}"
+            ),
+        }
     }
 }
 
 impl Error for RepoWatchDifferError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(&self.0)
+        match &self.0 {
+            RepoWatchDifferFailure::EventConstruction(error) => Some(error),
+            RepoWatchDifferFailure::IdentityFrontier(error) => Some(error),
+        }
+    }
+}
+
+impl From<RepoWatchEventConstructionError> for RepoWatchDifferError {
+    fn from(value: RepoWatchEventConstructionError) -> Self {
+        Self(RepoWatchDifferFailure::EventConstruction(value))
+    }
+}
+
+impl From<RepoWatchEventIdentityFrontierError> for RepoWatchDifferError {
+    fn from(value: RepoWatchEventIdentityFrontierError) -> Self {
+        Self(RepoWatchDifferFailure::IdentityFrontier(value))
     }
 }
 
@@ -615,8 +1076,9 @@ pub fn derive_repo_watch_events(
     repository: &RepositorySlug,
     previous: Option<&RepoWatchObservation>,
     current: &RepoWatchObservation,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
-) -> Result<Vec<RepoWatchEvent>, RepoWatchDifferError> {
+) -> Result<Vec<RepoWatchEventOccurrenceV1>, RepoWatchDifferError> {
     let mut events = Vec::new();
     let reaction_filter_unchanged =
         previous.is_none_or(|prior| prior.signal_reviewers() == current.signal_reviewers());
@@ -636,6 +1098,7 @@ pub fn derive_repo_watch_events(
                 current: current.state(),
                 reaction_filter_unchanged,
             },
+            identity_frontier,
             ids,
             &mut events,
         )?;
@@ -645,9 +1108,10 @@ pub fn derive_repo_watch_events(
             repository,
             previous.state(),
             current.state(),
+            identity_frontier,
             ids,
             &mut events,
-        );
+        )?;
     }
     Ok(events)
 }
@@ -664,8 +1128,9 @@ fn derive_pull_request_events(
     previous: Option<&RepoWatchPullRequestState>,
     current: &RepoWatchPullRequestState,
     repository_comparison: RepositoryComparison<'_>,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
-    events: &mut Vec<RepoWatchEvent>,
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
 ) -> Result<(), RepoWatchDifferError> {
     let context = current.context();
     let opened_now = current.lifecycle() == RepoWatchPullRequestLifecycle::Open
@@ -683,6 +1148,11 @@ fn derive_pull_request_events(
                 repository,
                 context,
                 RepoWatchEventKindV1::PullRequestOpened,
+                RepoWatchEventStreamKeyV1::PullRequestKind {
+                    number: context.number(),
+                    kind: RepoWatchEventKindNameV1::PullRequestOpened,
+                },
+                identity_frontier,
                 ids,
                 events,
             )?;
@@ -692,6 +1162,11 @@ fn derive_pull_request_events(
                 repository,
                 context,
                 RepoWatchEventKindV1::PullRequestClosed,
+                RepoWatchEventStreamKeyV1::PullRequestKind {
+                    number: context.number(),
+                    kind: RepoWatchEventKindNameV1::PullRequestClosed,
+                },
+                identity_frontier,
                 ids,
                 events,
             )?;
@@ -704,6 +1179,11 @@ fn derive_pull_request_events(
                 repository,
                 context,
                 RepoWatchEventKindV1::PullRequestMerged,
+                RepoWatchEventStreamKeyV1::PullRequestKind {
+                    number: context.number(),
+                    kind: RepoWatchEventKindNameV1::PullRequestMerged,
+                },
+                identity_frontier,
                 ids,
                 events,
             )?;
@@ -724,6 +1204,11 @@ fn derive_pull_request_events(
             RepoWatchEventKindV1::MergeableStateChanged {
                 current: current.mergeable_state(),
             },
+            RepoWatchEventStreamKeyV1::PullRequestKind {
+                number: context.number(),
+                kind: RepoWatchEventKindNameV1::MergeableStateChanged,
+            },
+            identity_frontier,
             ids,
             events,
         )?;
@@ -735,6 +1220,7 @@ fn derive_pull_request_events(
                 previous_repository,
                 repository_comparison.current,
                 current,
+                identity_frontier,
                 ids,
                 events,
             )?;
@@ -749,6 +1235,11 @@ fn derive_pull_request_events(
                 previous: previous.context().head_sha().clone(),
                 current: context.head_sha().clone(),
             },
+            RepoWatchEventStreamKeyV1::PullRequestKind {
+                number: context.number(),
+                kind: RepoWatchEventKindNameV1::HeadChanged,
+            },
+            identity_frontier,
             ids,
             events,
         )?;
@@ -760,26 +1251,67 @@ fn derive_pull_request_events(
             RepoWatchEventKindV1::MergeableStateChanged {
                 current: current.mergeable_state(),
             },
+            RepoWatchEventStreamKeyV1::PullRequestKind {
+                number: context.number(),
+                kind: RepoWatchEventKindNameV1::MergeableStateChanged,
+            },
+            identity_frontier,
             ids,
             events,
         )?;
     }
-    derive_check_events(repository, previous, current, ids, events)?;
-    derive_review_events(repository, previous, current, ids, events)?;
-    derive_thread_events(repository, previous, current, ids, events)?;
-    derive_label_events(repository, previous, current, ids, events)?;
+    derive_check_events(
+        repository,
+        previous,
+        current,
+        identity_frontier,
+        ids,
+        events,
+    )?;
+    derive_review_events(
+        repository,
+        previous,
+        current,
+        identity_frontier,
+        ids,
+        events,
+    )?;
+    derive_thread_events(
+        repository,
+        previous,
+        current,
+        identity_frontier,
+        ids,
+        events,
+    )?;
+    derive_label_events(
+        repository,
+        previous,
+        current,
+        identity_frontier,
+        ids,
+        events,
+    )?;
     if let Some(previous_repository) = repository_comparison.previous {
         derive_base_advanced_event(
             repository,
             previous_repository,
             repository_comparison.current,
             current,
+            identity_frontier,
             ids,
             events,
         )?;
     }
     if repository_comparison.reaction_filter_unchanged {
-        derive_reaction_events(repository, previous, current, ids, events)?;
+        derive_reaction_events(
+            repository,
+            previous,
+            current,
+            identity_frontier,
+            ids,
+            events,
+        )?;
     }
     Ok(())
 }
@@ -788,8 +1320,9 @@ fn derive_check_events(
     repository: &RepositorySlug,
     previous: &RepoWatchPullRequestState,
     current: &RepoWatchPullRequestState,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
-    events: &mut Vec<RepoWatchEvent>,
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
 ) -> Result<(), RepoWatchDifferError> {
     for suite in current.completed_check_suites() {
         if !previous.completed_check_suites().iter().any(|prior| {
@@ -802,6 +1335,12 @@ fn derive_check_events(
                 RepoWatchEventKindV1::ChecksCompleted {
                     outcome: suite.outcome(),
                 },
+                RepoWatchEventStreamKeyV1::CheckSuite {
+                    number: current.context().number(),
+                    suite: suite.id(),
+                    completion_generation: suite.completion_generation(),
+                },
+                identity_frontier,
                 ids,
                 events,
             )?;
@@ -820,6 +1359,12 @@ fn derive_check_events(
                     name: run.name().clone(),
                     conclusion: run.conclusion(),
                 },
+                RepoWatchEventStreamKeyV1::CheckRun {
+                    number: current.context().number(),
+                    run: run.id(),
+                    completion_generation: run.completion_generation(),
+                },
+                identity_frontier,
                 ids,
                 events,
             )?;
@@ -832,8 +1377,9 @@ fn derive_review_events(
     repository: &RepositorySlug,
     previous: &RepoWatchPullRequestState,
     current: &RepoWatchPullRequestState,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
-    events: &mut Vec<RepoWatchEvent>,
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
 ) -> Result<(), RepoWatchDifferError> {
     for review in current.reviews() {
         let newly_observed = !previous
@@ -849,6 +1395,11 @@ fn derive_review_events(
                     state,
                     commit: review.commit().clone(),
                 },
+                RepoWatchEventStreamKeyV1::Review {
+                    number: current.context().number(),
+                    review: review.id(),
+                },
+                identity_frontier,
                 ids,
                 events,
             )?;
@@ -861,8 +1412,9 @@ fn derive_thread_events(
     repository: &RepositorySlug,
     previous: &RepoWatchPullRequestState,
     current: &RepoWatchPullRequestState,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
-    events: &mut Vec<RepoWatchEvent>,
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
 ) -> Result<(), RepoWatchDifferError> {
     for thread in current.threads() {
         let previous_state = previous
@@ -877,6 +1429,12 @@ fn derive_thread_events(
                 RepoWatchEventKindV1::ThreadOpened {
                     thread: thread.thread().clone(),
                 },
+                RepoWatchEventStreamKeyV1::Thread {
+                    number: current.context().number(),
+                    kind: RepoWatchEventKindNameV1::ThreadOpened,
+                    thread: thread.thread(),
+                },
+                identity_frontier,
                 ids,
                 events,
             )?;
@@ -889,6 +1447,12 @@ fn derive_thread_events(
                     RepoWatchEventKindV1::ThreadResolved {
                         thread: thread.thread().clone(),
                     },
+                    RepoWatchEventStreamKeyV1::Thread {
+                        number: current.context().number(),
+                        kind: RepoWatchEventKindNameV1::ThreadResolved,
+                        thread: thread.thread(),
+                    },
+                    identity_frontier,
                     ids,
                     events,
                 )?;
@@ -900,6 +1464,12 @@ fn derive_thread_events(
                     RepoWatchEventKindV1::ThreadOpened {
                         thread: thread.thread().clone(),
                     },
+                    RepoWatchEventStreamKeyV1::Thread {
+                        number: current.context().number(),
+                        kind: RepoWatchEventKindNameV1::ThreadOpened,
+                        thread: thread.thread(),
+                    },
+                    identity_frontier,
                     ids,
                     events,
                 )?;
@@ -915,8 +1485,9 @@ fn derive_label_events(
     repository: &RepositorySlug,
     previous: &RepoWatchPullRequestState,
     current: &RepoWatchPullRequestState,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
-    events: &mut Vec<RepoWatchEvent>,
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
 ) -> Result<(), RepoWatchDifferError> {
     for label in current.context().labels() {
         if !previous.context().labels().contains(label) {
@@ -926,6 +1497,12 @@ fn derive_label_events(
                 RepoWatchEventKindV1::Labeled {
                     label: label.clone(),
                 },
+                RepoWatchEventStreamKeyV1::Label {
+                    number: current.context().number(),
+                    kind: RepoWatchEventKindNameV1::Labeled,
+                    label,
+                },
+                identity_frontier,
                 ids,
                 events,
             )?;
@@ -939,6 +1516,12 @@ fn derive_label_events(
                 RepoWatchEventKindV1::Unlabeled {
                     label: label.clone(),
                 },
+                RepoWatchEventStreamKeyV1::Label {
+                    number: current.context().number(),
+                    kind: RepoWatchEventKindNameV1::Unlabeled,
+                    label,
+                },
+                identity_frontier,
                 ids,
                 events,
             )?;
@@ -952,8 +1535,9 @@ fn derive_base_advanced_event(
     previous_repository: &RepoWatchRepositoryState,
     current_repository: &RepoWatchRepositoryState,
     current_pull_request: &RepoWatchPullRequestState,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
-    events: &mut Vec<RepoWatchEvent>,
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
 ) -> Result<(), RepoWatchDifferError> {
     if current_pull_request.lifecycle() != RepoWatchPullRequestLifecycle::Open {
         return Ok(());
@@ -970,6 +1554,11 @@ fn derive_base_advanced_event(
             RepoWatchEventKindV1::BaseAdvanced {
                 branch: branch.clone(),
             },
+            RepoWatchEventStreamKeyV1::BaseAdvance {
+                number: current_pull_request.context().number(),
+                branch,
+            },
+            identity_frontier,
             ids,
             events,
         )?;
@@ -981,8 +1570,9 @@ fn derive_reaction_events(
     repository: &RepositorySlug,
     previous: &RepoWatchPullRequestState,
     current: &RepoWatchPullRequestState,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
-    events: &mut Vec<RepoWatchEvent>,
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
 ) -> Result<(), RepoWatchDifferError> {
     for reaction in current.reactions() {
         if !previous.reactions().contains(reaction) {
@@ -991,6 +1581,7 @@ fn derive_reaction_events(
                 current,
                 reaction,
                 ReactionChange::Added,
+                identity_frontier,
                 ids,
                 events,
             )?;
@@ -1003,6 +1594,7 @@ fn derive_reaction_events(
                 current,
                 reaction,
                 ReactionChange::Removed,
+                identity_frontier,
                 ids,
                 events,
             )?;
@@ -1016,8 +1608,9 @@ fn push_reaction_event(
     current: &RepoWatchPullRequestState,
     reaction: &RepoWatchReactionObservation,
     change: ReactionChange,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
-    events: &mut Vec<RepoWatchEvent>,
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
 ) -> Result<(), RepoWatchDifferError> {
     push_pull_request_event(
         repository,
@@ -1028,6 +1621,14 @@ fn push_reaction_event(
             content: reaction.content().clone(),
             change,
         },
+        RepoWatchEventStreamKeyV1::Reaction {
+            number: current.context().number(),
+            subject: reaction.subject(),
+            reactor: reaction.reactor(),
+            content: reaction.content(),
+            change,
+        },
+        identity_frontier,
         ids,
         events,
     )
@@ -1037,9 +1638,10 @@ fn derive_workflow_events(
     repository: &RepositorySlug,
     previous: &RepoWatchRepositoryState,
     current: &RepoWatchRepositoryState,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
-    events: &mut Vec<RepoWatchEvent>,
-) {
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
+) -> Result<(), RepoWatchDifferError> {
     for run in current.workflow_runs() {
         let already_observed = previous.workflow_runs().iter().any(|prior| {
             prior.branch() == run.branch()
@@ -1047,23 +1649,37 @@ fn derive_workflow_events(
                 && prior.attempt() == run.attempt()
         });
         if !already_observed {
-            events.push(RepoWatchEvent::branch_workflow(
+            let event = RepoWatchEvent::branch_workflow(
                 ids.next_event_id(),
                 repository.clone(),
                 run.branch().clone(),
                 run.workflow().clone(),
                 run.conclusion(),
-            ));
+            );
+            push_identified_event(
+                event,
+                RepoWatchEventStreamKeyV1::Workflow {
+                    branch: run.branch(),
+                    workflow: run.workflow_id(),
+                    run: run.id(),
+                    attempt: run.attempt(),
+                },
+                identity_frontier,
+                events,
+            )?;
         }
     }
+    Ok(())
 }
 
 fn push_pull_request_event(
     repository: &RepositorySlug,
     context: &PullRequestEventContext,
     kind: RepoWatchEventKindV1,
+    stream_key: RepoWatchEventStreamKeyV1<'_>,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
-    events: &mut Vec<RepoWatchEvent>,
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
 ) -> Result<(), RepoWatchDifferError> {
     let event = RepoWatchEvent::try_pull_request(
         ids.next_event_id(),
@@ -1071,9 +1687,323 @@ fn push_pull_request_event(
         context.clone(),
         kind,
     )
-    .map_err(RepoWatchDifferError)?;
-    events.push(event);
+    .map_err(RepoWatchDifferError::from)?;
+    push_identified_event(event, stream_key, identity_frontier, events)
+}
+
+fn push_identified_event(
+    event: RepoWatchEvent,
+    stream_key: RepoWatchEventStreamKeyV1<'_>,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
+) -> Result<(), RepoWatchDifferError> {
+    let is_recurring = stream_key.is_recurring();
+    let stream_identity = repo_watch_event_stream_identity_v1(stream_key);
+    let sequence = if is_recurring {
+        identity_frontier.advance(stream_identity)?
+    } else {
+        NonZeroU64::MIN
+    };
+    let content_identity = repo_watch_event_content_identity_v1(&event, stream_identity, sequence);
+    events.push(RepoWatchEventOccurrenceV1 {
+        event,
+        content_identity,
+    });
     Ok(())
+}
+
+struct RepoWatchIdentityHasher(Sha256);
+
+impl RepoWatchIdentityHasher {
+    fn new(domain: &[u8]) -> Self {
+        let mut value = Self(Sha256::new());
+        value.frame(domain);
+        value
+    }
+
+    fn frame(&mut self, value: &[u8]) {
+        self.0.update((value.len() as u64).to_be_bytes());
+        self.0.update(value);
+    }
+
+    fn text(&mut self, value: &str) {
+        self.frame(value.as_bytes());
+    }
+
+    fn u64(&mut self, value: u64) {
+        self.frame(&value.to_be_bytes());
+    }
+
+    fn boolean(&mut self, value: bool) {
+        self.frame(&[u8::from(value)]);
+    }
+
+    fn finish(self) -> [u8; 32] {
+        self.0.finalize().into()
+    }
+}
+
+fn repo_watch_event_stream_identity_v1(key: RepoWatchEventStreamKeyV1<'_>) -> [u8; 32] {
+    let mut hash = RepoWatchIdentityHasher::new(REPO_WATCH_EVENT_STREAM_IDENTITY_DOMAIN_V1);
+    match key {
+        RepoWatchEventStreamKeyV1::PullRequestKind { number, kind } => {
+            hash.text("pull_request_kind");
+            hash.u64(number.get());
+            hash.text(repo_watch_event_kind_discriminator(kind));
+        }
+        RepoWatchEventStreamKeyV1::Label {
+            number,
+            kind,
+            label,
+        } => {
+            hash.text("label");
+            hash.u64(number.get());
+            hash.text(repo_watch_event_kind_discriminator(kind));
+            hash.text(label.as_str());
+        }
+        RepoWatchEventStreamKeyV1::CheckSuite {
+            number,
+            suite,
+            completion_generation,
+        } => {
+            hash.text("check_suite");
+            hash.u64(number.get());
+            hash.u64(suite.get());
+            hash.text(completion_generation.as_str());
+        }
+        RepoWatchEventStreamKeyV1::CheckRun {
+            number,
+            run,
+            completion_generation,
+        } => {
+            hash.text("check_run");
+            hash.u64(number.get());
+            hash.u64(run.get());
+            hash.text(completion_generation.as_str());
+        }
+        RepoWatchEventStreamKeyV1::Review { number, review } => {
+            hash.text("review");
+            hash.u64(number.get());
+            hash.u64(review.get());
+        }
+        RepoWatchEventStreamKeyV1::Thread {
+            number,
+            kind,
+            thread,
+        } => {
+            hash.text("thread");
+            hash.u64(number.get());
+            hash.text(repo_watch_event_kind_discriminator(kind));
+            hash.text(thread.as_str());
+        }
+        RepoWatchEventStreamKeyV1::Workflow {
+            branch,
+            workflow,
+            run,
+            attempt,
+        } => {
+            hash.text("workflow");
+            hash.text(branch.as_str());
+            hash.u64(workflow.get());
+            hash.u64(run.get());
+            hash.u64(attempt.get());
+        }
+        RepoWatchEventStreamKeyV1::BaseAdvance { number, branch } => {
+            hash.text("base_advance");
+            hash.u64(number.get());
+            hash.text(branch.as_str());
+        }
+        RepoWatchEventStreamKeyV1::Reaction {
+            number,
+            subject,
+            reactor,
+            content,
+            change,
+        } => {
+            hash.text("reaction");
+            hash.u64(number.get());
+            hash_reaction_subject(&mut hash, subject);
+            hash.text(reactor.as_str());
+            hash.text(content.as_str());
+            hash.text(reaction_change_discriminator(change));
+        }
+    }
+    hash.finish()
+}
+
+fn repo_watch_event_content_identity_v1(
+    event: &RepoWatchEvent,
+    stream_identity: [u8; 32],
+    sequence: NonZeroU64,
+) -> RepoWatchEventContentIdentityV1 {
+    let mut hash = RepoWatchIdentityHasher::new(REPO_WATCH_EVENT_CONTENT_IDENTITY_DOMAIN_V1);
+    hash.text(event.repository().as_str());
+    hash.u64(1);
+    match event.target() {
+        RepoWatchEventTarget::PullRequest(context) => {
+            hash.text("pull_request");
+            hash.u64(context.number().get());
+            hash.text(context.head_sha().as_str());
+            hash.text(context.head_repository().as_str());
+            hash.text(context.base_branch().as_str());
+            hash.text(context.head_branch().as_str());
+            hash.text(context.title().as_str());
+            hash.text(context.body().as_str());
+            hash.u64(context.labels().len() as u64);
+            for label in context.labels() {
+                hash.text(label.as_str());
+            }
+            hash.boolean(context.draft());
+            match context.author() {
+                Some(author) => {
+                    hash.frame(&[1]);
+                    hash.text(author.as_str());
+                }
+                None => hash.frame(&[0]),
+            }
+        }
+        RepoWatchEventTarget::Branch => hash.text("branch"),
+    }
+    hash_event_kind(&mut hash, event.kind());
+    hash.frame(&stream_identity);
+    hash.u64(sequence.get());
+    RepoWatchEventContentIdentityV1::from_bytes(hash.finish())
+}
+
+fn hash_event_kind(hash: &mut RepoWatchIdentityHasher, kind: &RepoWatchEventKindV1) {
+    hash.text(repo_watch_event_kind_discriminator(kind.name()));
+    match kind {
+        RepoWatchEventKindV1::PullRequestOpened
+        | RepoWatchEventKindV1::PullRequestClosed
+        | RepoWatchEventKindV1::PullRequestMerged => {}
+        RepoWatchEventKindV1::HeadChanged { previous, current } => {
+            hash.text(previous.as_str());
+            hash.text(current.as_str());
+        }
+        RepoWatchEventKindV1::MergeableStateChanged { current } => {
+            hash.text(mergeable_state_discriminator(*current));
+        }
+        RepoWatchEventKindV1::ChecksCompleted { outcome } => {
+            hash.text(checks_outcome_discriminator(*outcome));
+        }
+        RepoWatchEventKindV1::CheckRunCompleted { name, conclusion } => {
+            hash.text(name.as_str());
+            hash.text(check_conclusion_discriminator(*conclusion));
+        }
+        RepoWatchEventKindV1::BranchWorkflowRunCompleted {
+            branch,
+            workflow,
+            conclusion,
+        } => {
+            hash.text(branch.as_str());
+            hash.text(workflow.as_str());
+            hash.text(check_conclusion_discriminator(*conclusion));
+        }
+        RepoWatchEventKindV1::ReviewSubmitted {
+            reviewer,
+            state,
+            commit,
+        } => {
+            hash.text(reviewer.as_str());
+            hash.text(review_state_discriminator(*state));
+            hash.text(commit.as_str());
+        }
+        RepoWatchEventKindV1::ThreadOpened { thread }
+        | RepoWatchEventKindV1::ThreadResolved { thread } => hash.text(thread.as_str()),
+        RepoWatchEventKindV1::Labeled { label } | RepoWatchEventKindV1::Unlabeled { label } => {
+            hash.text(label.as_str());
+        }
+        RepoWatchEventKindV1::BaseAdvanced { branch } => hash.text(branch.as_str()),
+        RepoWatchEventKindV1::ReactionChanged {
+            subject,
+            reactor,
+            content,
+            change,
+        } => {
+            hash_reaction_subject(hash, *subject);
+            hash.text(reactor.as_str());
+            hash.text(content.as_str());
+            hash.text(reaction_change_discriminator(*change));
+        }
+    }
+}
+
+fn hash_reaction_subject(hash: &mut RepoWatchIdentityHasher, subject: ReactionSubject) {
+    match subject {
+        ReactionSubject::PullRequestBody => hash.text("pull_request_body"),
+        ReactionSubject::IssueComment { id } => {
+            hash.text("issue_comment");
+            hash.u64(id.get());
+        }
+        ReactionSubject::ReviewComment { id } => {
+            hash.text("review_comment");
+            hash.u64(id.get());
+        }
+    }
+}
+
+const fn repo_watch_event_kind_discriminator(kind: RepoWatchEventKindNameV1) -> &'static str {
+    match kind {
+        RepoWatchEventKindNameV1::PullRequestOpened => "pull_request_opened",
+        RepoWatchEventKindNameV1::PullRequestClosed => "pull_request_closed",
+        RepoWatchEventKindNameV1::PullRequestMerged => "pull_request_merged",
+        RepoWatchEventKindNameV1::HeadChanged => "head_changed",
+        RepoWatchEventKindNameV1::MergeableStateChanged => "mergeable_state_changed",
+        RepoWatchEventKindNameV1::ChecksCompleted => "checks_completed",
+        RepoWatchEventKindNameV1::CheckRunCompleted => "check_run_completed",
+        RepoWatchEventKindNameV1::BranchWorkflowRunCompleted => "branch_workflow_run_completed",
+        RepoWatchEventKindNameV1::ReviewSubmitted => "review_submitted",
+        RepoWatchEventKindNameV1::ThreadOpened => "thread_opened",
+        RepoWatchEventKindNameV1::ThreadResolved => "thread_resolved",
+        RepoWatchEventKindNameV1::Labeled => "labeled",
+        RepoWatchEventKindNameV1::Unlabeled => "unlabeled",
+        RepoWatchEventKindNameV1::BaseAdvanced => "base_advanced",
+        RepoWatchEventKindNameV1::ReactionChanged => "reaction_changed",
+    }
+}
+
+const fn mergeable_state_discriminator(value: MergeableState) -> &'static str {
+    match value {
+        MergeableState::Mergeable => "mergeable",
+        MergeableState::Conflicting => "conflicting",
+        MergeableState::Unknown => "unknown",
+    }
+}
+
+const fn checks_outcome_discriminator(value: ChecksOutcome) -> &'static str {
+    match value {
+        ChecksOutcome::Success => "success",
+        ChecksOutcome::Failure => "failure",
+    }
+}
+
+const fn check_conclusion_discriminator(value: CheckConclusion) -> &'static str {
+    match value {
+        CheckConclusion::Success => "success",
+        CheckConclusion::Failure => "failure",
+        CheckConclusion::Neutral => "neutral",
+        CheckConclusion::Cancelled => "cancelled",
+        CheckConclusion::Skipped => "skipped",
+        CheckConclusion::TimedOut => "timed_out",
+        CheckConclusion::ActionRequired => "action_required",
+        CheckConclusion::Stale => "stale",
+        CheckConclusion::StartupFailure => "startup_failure",
+    }
+}
+
+const fn review_state_discriminator(value: ReviewState) -> &'static str {
+    match value {
+        ReviewState::Approved => "approved",
+        ReviewState::ChangesRequested => "changes_requested",
+        ReviewState::Commented => "commented",
+    }
+}
+
+const fn reaction_change_discriminator(value: ReactionChange) -> &'static str {
+    match value {
+        ReactionChange::Added => "added",
+        ReactionChange::Removed => "removed",
+    }
 }
 
 fn find_pull_request(
@@ -1302,6 +2232,7 @@ pub enum RepoWatchRuleEvaluationOutcome {
     Inactive,
     NotMatched,
     TargetClosed,
+    TargetConverged,
     Occupied,
     Cooldown,
     Dispatched {
@@ -1699,11 +2630,225 @@ mod tests {
     const CHECK_SUITE_ID: u64 = 101;
     const CHECK_RUN_ID: u64 = 102;
     const REVIEW_ID: u64 = 103;
+    const REVIEW_NODE_ID: &str = "review-node-103";
     const WORKFLOW_RUN_ID: u64 = 104;
     const NEXT_WORKFLOW_RUN_ID: u64 = 105;
     const WORKFLOW_ID: u64 = 106;
     const OTHER_WORKFLOW_ID: u64 = 107;
     const WORKFLOW_IDENTITIES: [u64; 2] = [WORKFLOW_ID, OTHER_WORKFLOW_ID];
+
+    struct ConvergenceFacts {
+        base_branch: &'static str,
+        mergeable_state: MergeableState,
+        review_decision: RepoWatchReviewDecision,
+        unresolved_threads: Vec<ReviewThreadId>,
+        gating_check_count: u64,
+        non_green_gating_checks: Vec<CheckRunName>,
+    }
+
+    fn convergence_assessment(
+        facts: ConvergenceFacts,
+    ) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+        Ok(RepoWatchConvergenceAssessment::try_new(
+            RepoWatchConvergenceAssessmentInput {
+                number: pull_request_number(PULL_REQUEST_NUMBER),
+                head_sha: CommitSha::try_new(String::from(INITIAL_HEAD))?,
+                base_branch: BranchName::try_new(String::from(facts.base_branch))?,
+                base_revision: CommitSha::try_new(String::from(CHANGED_HEAD))?,
+                mergeable_state: facts.mergeable_state,
+                review_decision: facts.review_decision,
+                unresolved_threads: facts.unresolved_threads,
+                gating_check_count: facts.gating_check_count,
+                non_green_gating_checks: facts.non_green_gating_checks,
+            },
+        )?)
+    }
+
+    #[test]
+    fn exact_green_main_head_is_merge_ready_without_an_approval() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Unknown,
+            review_decision: RepoWatchReviewDecision::None,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::MergeReady
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exact_green_stacked_head_is_only_internally_converged() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: FIRST_STACK_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::Approved,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::InternallyConverged
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_thread_blocks_an_otherwise_green_head() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::Approved,
+            unresolved_threads: vec![ReviewThreadId::try_new(String::from(THREAD_ID))?],
+            gating_check_count: 0,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::NotConverged
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stale_blocking_review_blocks_an_otherwise_green_head() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::NotConverged
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn older_head_review_is_clearable_when_it_is_the_only_blocker() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let candidate = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        )?;
+
+        assert_eq!(candidate.number(), assessment.number());
+        assert_eq!(candidate.current_head_sha(), assessment.head_sha());
+        assert_eq!(candidate.review_node_id(), REVIEW_NODE_ID);
+        assert_eq!(candidate.reviewer().as_str(), REVIEWER);
+        assert_eq!(candidate.reviewed_head_sha().as_str(), REVIEW_COMMIT);
+        Ok(())
+    }
+
+    #[test]
+    fn current_head_blocking_review_is_not_clearable() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            assessment.head_sha().clone(),
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_thread_prevents_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: vec![ReviewThreadId::try_new(String::from(THREAD_ID))?],
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    #[test]
+    fn non_green_check_prevents_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: vec![CheckRunName::try_new(String::from(CHECK_NAME))?],
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    #[test]
+    fn merge_conflict_prevents_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Conflicting,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
 
     /// Deterministic event identities; their values are arbitrary and only their order matters.
     struct FixedEventIds {
@@ -1923,11 +3068,33 @@ mod tests {
         previous: Option<&RepoWatchObservation>,
         current: &RepoWatchObservation,
     ) -> Result<Vec<RepoWatchEvent>, Box<dyn Error>> {
+        let mut identity_frontier = RepoWatchEventIdentityFrontierV1::default();
         Ok(derive_repo_watch_events(
             &repository()?,
             previous,
             current,
+            &mut identity_frontier,
             &mut FixedEventIds::new(),
+        )?
+        .into_iter()
+        .map(RepoWatchEventOccurrenceV1::into_event)
+        .collect())
+    }
+
+    fn derive_occurrences(
+        previous: Option<&RepoWatchObservation>,
+        current: &RepoWatchObservation,
+        identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
+        first_event_id: u128,
+    ) -> Result<Vec<RepoWatchEventOccurrenceV1>, Box<dyn Error>> {
+        Ok(derive_repo_watch_events(
+            &repository()?,
+            previous,
+            current,
+            identity_frontier,
+            &mut FixedEventIds {
+                next: first_event_id,
+            },
         )?)
     }
 
@@ -3095,5 +4262,124 @@ mod tests {
             first, second,
             "successive event candidates must be distinct"
         );
+    }
+
+    #[test]
+    fn equal_normalized_occurrences_ignore_random_event_identity() -> Result<(), Box<dyn Error>> {
+        let current = observation(
+            vec![pull_request(PullRequestFacts::matching(
+                PULL_REQUEST_NUMBER,
+            ))?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut first_frontier = RepoWatchEventIdentityFrontierV1::default();
+        let mut second_frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let first = derive_occurrences(None, &current, &mut first_frontier, 1)?;
+        let second = derive_occurrences(None, &current, &mut second_frontier, 100)?;
+
+        assert_ne!(first[0].event().id(), second[0].event().id());
+        assert_eq!(first[0].content_identity(), second[0].content_identity());
+        assert_eq!(first[1].content_identity(), second[1].content_identity());
+        Ok(())
+    }
+
+    #[test]
+    fn equal_later_transition_advances_its_content_identity() -> Result<(), Box<dyn Error>> {
+        let without_label = observation(
+            vec![pull_request(PullRequestFacts::matching(
+                PULL_REQUEST_NUMBER,
+            ))?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let with_label = observation(
+            vec![pull_request(PullRequestFacts {
+                labels: vec![label(LABEL_READY)?],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let first = derive_occurrences(Some(&without_label), &with_label, &mut frontier, 1)?;
+        let removed = derive_occurrences(Some(&with_label), &without_label, &mut frontier, 2)?;
+        let repeated = derive_occurrences(Some(&without_label), &with_label, &mut frontier, 3)?;
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(repeated.len(), 1);
+        assert_ne!(first[0].content_identity(), repeated[0].content_identity());
+        Ok(())
+    }
+
+    #[test]
+    fn provider_keyed_check_suites_have_distinct_content_identities() -> Result<(), Box<dyn Error>>
+    {
+        let previous = observation(
+            vec![pull_request(PullRequestFacts::matching(
+                PULL_REQUEST_NUMBER,
+            ))?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let current = observation(
+            vec![pull_request(PullRequestFacts {
+                completed_check_suites: vec![
+                    RepoWatchCheckSuiteObservation::new(
+                        object_id(CHECK_SUITE_ID),
+                        completion_generation(CHECK_COMPLETION_GENERATION)?,
+                        ChecksOutcome::Success,
+                    ),
+                    RepoWatchCheckSuiteObservation::new(
+                        object_id(CHECK_SUITE_ID + 1),
+                        completion_generation(CHECK_COMPLETION_GENERATION)?,
+                        ChecksOutcome::Success,
+                    ),
+                ],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let events = derive_occurrences(Some(&previous), &current, &mut frontier, 1)?;
+
+        assert_eq!(events.len(), 2);
+        assert_ne!(events[0].content_identity(), events[1].content_identity());
+        assert_eq!(frontier.entries().len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn opened_event_content_identity_has_a_stable_v1_fixture() -> Result<(), Box<dyn Error>> {
+        let current = observation(
+            vec![pull_request(PullRequestFacts::matching(
+                PULL_REQUEST_NUMBER,
+            ))?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let events = derive_occurrences(None, &current, &mut frontier, 1)?;
+
+        assert_eq!(
+            events[0].content_identity().as_bytes(),
+            &[
+                223, 185, 48, 253, 187, 59, 190, 103, 33, 168, 251, 14, 111, 116, 146, 49, 83, 238,
+                232, 90, 92, 56, 217, 66, 135, 45, 24, 220, 226, 228, 105, 30,
+            ]
+        );
+        Ok(())
     }
 }
