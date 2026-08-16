@@ -302,10 +302,7 @@ fn checked_execution_directory(
     {
         return Err(RunnerWorkspaceError::ManifestConflict);
     }
-    let text = canonical
-        .to_str()
-        .ok_or(RunnerWorkspaceError::CorruptManifest)?;
-    WorkingDirectory::try_new(text.to_owned()).map_err(|_| RunnerWorkspaceError::CorruptManifest)
+    represented_execution_directory(path)
 }
 
 fn represented_execution_directory(path: &Path) -> Result<WorkingDirectory, RunnerWorkspaceError> {
@@ -857,6 +854,30 @@ mod tests {
 
         assert!(matches!(failure, RunnerWorkspaceError::CommitAmbiguous(_)));
         assert!(published.is_dir());
+    }
+
+    #[test]
+    fn private_root_replay_preserves_authored_path_after_root_relink() {
+        let (parent, state) = fixture_root();
+        let first = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_private_root(&request(RUNNER))
+            .expect("the private workspace publishes");
+        let original_root = parent.path().join("runner-state");
+        let moved_root = parent.path().join("moved-runner-state");
+        fs::rename(&original_root, &moved_root)
+            .expect("the opened runner root moves after publication");
+        std::os::unix::fs::symlink(&moved_root, &original_root)
+            .expect("the original runner-root path is relinked");
+
+        let replay = state
+            .workspace_store()
+            .expect("the locked root forms another workspace store")
+            .prepare_private_root(&request(RUNNER))
+            .expect("the relinked private workspace replays");
+
+        assert_eq!(replay, first);
     }
 
     #[test]
