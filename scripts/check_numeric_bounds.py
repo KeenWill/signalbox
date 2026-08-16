@@ -10,10 +10,14 @@ spellings, so no accepted spelling carries an undeclared bound past the gate.
 
 Test-only modules are inventoried but do not gate because their constants
 describe fixtures, not runtime safety. A module written ``#[cfg(test)] mod
-tests;`` is test-only across the separate file it names, whether that file is
-found by Rust's directory rule or named outright by a ``#[path]`` attribute,
-and across the module tree beneath that file: once a module is test-only its
-children are too, whatever their own configuration.
+tests;`` is test-only across the separate file it names and the whole module
+tree beneath it, because a module reached only through a test module is itself
+reached only in test builds. Finding that tree means walking from each crate
+root, since where a file's own ``mod name;`` declarations resolve depends on how
+that file was reached: beneath its own stem for an ordinary child, beside it for
+one named by ``#[path]``, and under the enclosing inline module's name when the
+declaration sits inside a ``mod name { ... }`` block. Those three rules were
+checked against rustc rather than inferred.
 The whole attribute run is read, so an intervening attribute and a compound
 ``cfg(all(test, not(windows)))`` both still count; ``cfg(any(test, ...))`` and
 ``cfg(not(test))`` do not, because those modules also compile without ``test``
@@ -129,7 +133,10 @@ DERIVED_DECLARATION = re.compile(
     r"^\s*// numeric-bound: derived (?P<kind>ceiling|tunable) from "
     r"(?P<source>[A-Z][A-Z0-9_]*)\s*$"
 )
-REFERENCED_BOUND = re.compile(r"(?<![\w:])(?P<name>[A-Z][A-Z0-9_]*)\b")
+REFERENCED_BOUND = re.compile(
+    r"(?<![\w:])(?P<qualifier>(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)(?P<name>[A-Z][A-Z0-9_]*)\b"
+)
+INLINE_MODULE = re.compile(r"\bmod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\{")
 DECLARED_MODULE = re.compile(
     r"(?P<attributes>(?:#\s*\[[^\]]*\]\s*)*)"
     r"(?:pub(?:\([^)]*\))?\s+)?\bmod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<form>[{;])",
@@ -137,7 +144,7 @@ DECLARED_MODULE = re.compile(
 )
 CFG_ATTRIBUTE = re.compile(r"#\s*\[\s*cfg\s*\((?P<predicate>[^\]]*)\)\s*\]")
 PATH_ATTRIBUTE = re.compile(r"#\s*\[\s*path\s*=\s*\"(?P<path>[^\"]+)\"\s*\]")
-MODULE_ROOTS = frozenset({"lib.rs", "main.rs", "mod.rs"})
+CRATE_ROOTS = frozenset({"lib.rs", "main.rs"})
 
 
 @dataclass(frozen=True)
@@ -311,39 +318,76 @@ def innermost_scope(offset: int, ranges: list[tuple[int, int]]) -> tuple[int, in
     return max(enclosing, default=None)
 
 
-def module_sources(path: Path, text: str, code: str, gated: bool) -> set[Path]:
-    """Report the separate sources the `mod name;` declarations in ``path`` own.
+def inline_module_ranges(code: str) -> list[tuple[int, int, str]]:
+    """Report the span and name of every inline `mod name { ... }` block."""
+    ranges = []
+    for match in INLINE_MODULE.finditer(code):
+        ranges.append(
+            (match.start(), matching_brace(code, match.end() - 1), match.group("name"))
+        )
+    return ranges
 
-    With ``gated`` only `#[cfg(test)]`-configured declarations count, which
-    seeds the test-only set; without it every declaration counts, which walks
-    the rest of an already test-only module tree. Rust reaches such a module
-    either through an explicit ``#[path]``, relative to the declaring file's
-    directory, or through the directory that file owns; both spellings are
-    followed, and a returned directory owns every source beneath it. Attributes
-    are matched against ``code`` so a commented-out declaration cannot claim a
-    file, then re-read from ``text`` because blanking has emptied the
-    ``#[path]`` string literal.
+
+def enclosing_module_names(offset: int, ranges: list[tuple[int, int, str]]) -> list[str]:
+    """Name the inline modules containing ``offset``, outermost first."""
+    return [name for start, end, name in sorted(ranges) if start <= offset <= end]
+
+
+def declared_modules(
+    path: Path, text: str, code: str, directory: Path
+) -> list[tuple[Path, Path, bool]]:
+    """Report `(file, its own child directory, test-gated)` per `mod name;`.
+
+    ``directory`` is where this file's top-level declarations resolve. An
+    inline `mod name { ... }` moves the declarations inside it into
+    ``directory/name``; a `#[path]` names its file relative to the declaring
+    file's own directory and then resolves that file's children beside it,
+    rather than beneath its stem. Attributes are matched against ``code`` so a
+    commented-out declaration cannot claim a file, then re-read from ``text``
+    because blanking has emptied the ``#[path]`` string literal.
     """
-    directory = path.parent if path.name in MODULE_ROOTS else path.with_suffix("")
-    owned: set[Path] = set()
+    inline = inline_module_ranges(code)
+    found = []
     for match in DECLARED_MODULE.finditer(code):
         if match.group("form") != ";":
             continue
-        if gated and not requires_test(match.group("attributes")):
-            continue
+        gated = requires_test(match.group("attributes"))
         attributes = text[match.start("attributes") : match.end("attributes")]
         explicit = PATH_ATTRIBUTE.search(attributes)
         if explicit is not None:
-            owned.add(Path(os.path.normpath(path.parent / explicit.group("path"))))
+            file = Path(os.path.normpath(path.parent / explicit.group("path")))
+            found.append((file, file.parent, gated))
             continue
+        base = directory.joinpath(*enclosing_module_names(match.start(), inline))
         name = match.group("name")
-        owned.add(directory / f"{name}.rs")
-        owned.add(directory / name)
-    return owned
+        found.append((base / f"{name}.rs", base / name, gated))
+        found.append((base / name / "mod.rs", base / name, gated))
+    return found
 
 
-def in_test_sources(path: Path, test_sources: set[Path]) -> bool:
-    return path in test_sources or any(parent in test_sources for parent in path.parents)
+def test_only_sources(sources: dict[Path, str], blanked: dict[Path, str]) -> set[Path]:
+    """Report every source Rust reaches only through a `#[cfg(test)]` module.
+
+    The walk starts at each crate root and carries the directory a file's own
+    declarations resolve in, because that directory depends on how the file was
+    reached and cannot be recovered from its name. A file reachable both inside
+    and outside a test module is production, since a production build compiles
+    it.
+    """
+    reached: dict[bool, set[Path]] = {True: set(), False: set()}
+    frontier = [
+        (path, path.parent, False) for path in sources if path.name in CRATE_ROOTS
+    ]
+    while frontier:
+        path, directory, gated = frontier.pop()
+        if path not in sources or path in reached[gated]:
+            continue
+        reached[gated].add(path)
+        for file, child_directory, child_gated in declared_modules(
+            path, sources[path], blanked[path], directory
+        ):
+            frontier.append((file, child_directory, gated or child_gated))
+    return reached[True] - reached[False]
 
 
 def in_ranges(position: int, ranges: list[tuple[int, int]]) -> bool:
@@ -378,20 +422,7 @@ def source_files(root: Path) -> list[Path]:
 def inventory(root: Path) -> list[Bound]:
     sources = {path: path.read_text(encoding="utf-8") for path in source_files(root)}
     blanked = {path: blank_non_code(text) for path, text in sources.items()}
-    test_sources: set[Path] = set()
-    for path, text in sources.items():
-        test_sources |= module_sources(path, text, blanked[path], gated=True)
-    # A test-only module owns its children whatever their own configuration, so
-    # the set grows until no further source joins it. Trees are one or two deep,
-    # so this settles in a pass or two.
-    while True:
-        reached = set()
-        for path, text in sources.items():
-            if in_test_sources(path, test_sources):
-                reached |= module_sources(path, text, blanked[path], gated=False)
-        if reached <= test_sources:
-            break
-        test_sources |= reached
+    test_sources = test_only_sources(sources, blanked)
     bounds = []
     for path, text in sources.items():
         code = blanked[path]
@@ -406,7 +437,7 @@ def inventory(root: Path) -> list[Bound]:
             continue
         ranges = test_ranges(code)
         blocks = block_ranges(code)
-        external = in_test_sources(path, test_sources)
+        external = path in test_sources
         lines = text.splitlines()
         relative = path.relative_to(root)
         for match in matches:
@@ -503,7 +534,9 @@ def validate(bounds: list[Bound]) -> list[str]:
         A derivation inherits one rationale, so every bound feeding the value
         has to carry the kind being inherited — and one this scan cannot
         resolve is unproven rather than harmless, so it is reported with no
-        owner and fails the escape. Only boundary-named identifiers count; the
+        owner and fails the escape. A path-qualified name is never resolved for
+        the same reason it is never accepted as the source: it denotes an item
+        this scan cannot see. Only boundary-named identifiers count; the
         inventory would not track any other constant as a bound either.
         """
         found = []
@@ -511,7 +544,8 @@ def validate(bounds: list[Bound]) -> list[str]:
             name = match.group("name")
             if name in {source, bound.name} or not is_boundary_name(name):
                 continue
-            found.append((name, visible_owner(bound, name)))
+            qualified = bool(match.group("qualifier"))
+            found.append((name, None if qualified else visible_owner(bound, name)))
         return found
 
     for bound in enforced:

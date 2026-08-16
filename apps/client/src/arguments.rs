@@ -2547,7 +2547,7 @@ fn delegation_text_argument(
 }
 
 fn template_name(value: &str) -> Result<String, String> {
-    // numeric-bound: ceiling - protects identifiers and diagnostics from oversized input
+    // numeric-bound: tunable - mirrors the canonical session-template name grammar
     const MAX_UTF8_BYTES: usize = 128;
 
     let first_is_admitted = value

@@ -300,6 +300,7 @@ class NumericBoundCheckerTests(unittest.TestCase):
     def test_path_attribute_test_module_bound_is_inventoried_without_gating(self) -> None:
         result = run_checker_tree(
             {
+                ENFORCED_FILE: "mod scheduler;\n",
                 ENFORCED_MODULE_FILE: (
                     '#[cfg(test)]\n#[path = "scheduler_corpus_tests.rs"]\nmod corpus_tests;\n'
                 ),
@@ -313,13 +314,16 @@ class NumericBoundCheckerTests(unittest.TestCase):
         self.assertIn("1 test-only", result.stdout)
 
     def test_child_of_a_path_attributed_test_module_does_not_gate(self) -> None:
+        # rustc resolves a `#[path]`-loaded module's children beside that file,
+        # not beneath its stem; verified against the compiler.
         result = run_checker_tree(
             {
+                ENFORCED_FILE: "mod scheduler;\n",
                 ENFORCED_MODULE_FILE: (
                     '#[cfg(test)]\n#[path = "scheduler_corpus_tests.rs"]\nmod corpus_tests;\n'
                 ),
                 ENFORCED_MODULE_FILE.with_name("scheduler_corpus_tests.rs"): "mod child;\n",
-                ENFORCED_MODULE_FILE.with_name("scheduler_corpus_tests") / "child.rs": (
+                ENFORCED_MODULE_FILE.with_name("child.rs"): (
                     "const MAX_FIXTURE_BYTES: usize = 4;\n"
                 ),
             }
@@ -327,6 +331,31 @@ class NumericBoundCheckerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("1 test-only", result.stdout)
+
+    def test_test_module_under_an_inline_module_does_not_gate(self) -> None:
+        result = run_checker_tree(
+            {
+                ENFORCED_FILE: "mod outer {\n    #[cfg(test)]\n    mod tests;\n}\n",
+                ENFORCED_FILE.with_name("outer") / "tests.rs": (
+                    "const MAX_FIXTURE_BYTES: usize = 4;\n"
+                ),
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
+    def test_module_reachable_outside_a_test_module_still_gates(self) -> None:
+        result = run_checker_tree(
+            {
+                ENFORCED_FILE: "#[cfg(test)]\nmod tests;\nmod shared;\n",
+                ENFORCED_FILE.with_name("tests.rs"): "",
+                ENFORCED_FILE.with_name("shared.rs"): "const MAX_SHARED_BYTES: usize = 4;\n",
+            }
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_SHARED_BYTES", result.stdout)
 
     def test_outside_scope_bound_is_inventoried_without_gating(self) -> None:
         result = run_checker(OUTSIDE_FILE, "const MAX_DOMAIN_BYTES: usize = 4;\n")
