@@ -256,12 +256,23 @@ Session creation copies those selectors as unresolved eligibility input; it does
 not scan an unbound workspace or invent bundle identities.
 
 A session-specific allow-list replacement may name a configured-root bundle from
-any scan because its stable configured-root identity is the sharing authority.
-It may name a workspace-root bundle only when the target session has a complete
-discovery snapshot that used its fixed workspace binding as the workspace root
-and linked that exact registered identity as a candidate. A canonical-path match
-without that session-correlated discovery link is not authority. A mismatch is a
-typed rejection and exposes no source metadata to the target session.
+any scan because its stable configured-root identity is the sharing authority —
+but only while the live configuration still declares that
+`ConfiguredInstructionRootId`. Registrations and their alias records are
+durable, so an operator who removes a configured root and restarts would
+otherwise leave every bundle any earlier scan found beneath it grantable to new
+sessions, and admission rereads the registered path, so the daemon would go on
+serving a directory the current configuration no longer authorizes. Naming a
+bundle whose only authority is a root absent from the live catalog is therefore
+a typed rejection. Preserving historical snapshots and manifests does not
+preserve future eligibility grants: earlier turns keep their evidence, and the
+same bundle remains grantable through any other root the live configuration
+still declares. It may name a workspace-root bundle only when the target session
+has a complete discovery snapshot that used its fixed workspace binding as the
+workspace root and linked that exact registered identity as a candidate. A
+canonical-path match without that session-correlated discovery link is not
+authority. A mismatch is a typed rejection and exposes no source metadata to the
+target session.
 
 Before a session carrying selectors can activate its first turn, the daemon
 resolves its configured-root selectors and, when a workspace selector is
@@ -627,13 +638,19 @@ budgeted renderings of one registered bundle.
 
 The manifest hash begins with `signalbox-turn-instruction-manifest-v1`, then
 session UUID, turn UUID, the 32-byte eligibility hash, the 32-byte admitted-set
-hash of the head this manifest snapshotted, and its boundary: literal
-`turn_start`, or literal `model_call` plus model-call UUID. The admitted-set
-hash is authenticated here because it covers each admission UUID while the
-rendered rows below do not: without it, two distinct admitted-set heads whose
-rendered evidence is identical would produce the same manifest hash, and
-reconstitution could not prove which head activation actually snapshotted.
-Rendered bundle records follow in projection order. Each is bundle UUID,
+hash of the head this manifest snapshotted, the unsigned region version under
+which its rendered rows were built, and its boundary: literal `turn_start`, or
+literal `model_call` plus model-call UUID. The admitted-set hash is
+authenticated here because it covers each admission UUID while the rendered rows
+below do not: without it, two distinct admitted-set heads whose rendered
+evidence is identical would produce the same manifest hash, and reconstitution
+could not prove which head activation actually snapshotted. The region version
+is authenticated here because the preamble is deliberately not stored: a later
+version changing those fixed bytes would otherwise let one set of retained
+wrapper rows reconstruct different provider input while the manifest still
+validated. Version one writes region version 1, and reconstitution rebuilds the
+region under the version its manifest names rather than the daemon's current
+one. Rendered bundle records follow in projection order. Each is bundle UUID,
 length-framed kind, length-framed canonical source path, length-framed
 authorizing-root kind, length-framed root-relative source label, 32-byte source
 hash, 32-byte rendered hash, rendered byte length, length-framed admission
@@ -661,24 +678,34 @@ fixed preamble, every wrapper, and every separator between them. A provider
 model with a smaller instruction capacity or no typed system-instruction
 transport is not eligible for this capability. A successful read serializes on
 the admitted-set head and preflights the current region plus its candidate
-against that aggregate budget, the active turn's pinned model target, and the
-effective serving record of the session's currently installed defaults epoch,
-read under that pointer row at the position the
-[persistence lock protocol](persistence-protocol.md#lock-protocol) fixes, before
-committing its receipt or admission. The installed epoch is checked as well as
-the pin because the two can already differ: a turn pinned to an
-instruction-capable target may still be active with an empty admitted set when a
-replacement installs a target without the transport — which the replacement's
-own retained-region check permits, the retained region being empty — and the old
-turn could then admit a bundle validated only against its stale pin. The next
-input would be rejected against the now-current defaults, with no unload to
-recover. Validating the installed epoch at admission closes that order without
-forbidding replacements while a turn is active. Concurrent and same-batch reads
-therefore observe one ordered predecessor and cannot commit a set whose
-instruction region alone is unrenderable. Aggregate exhaustion is a typed failed
-read and changes no durable admitted set. The owning model catalog declares
-transport support and its byte capacity for every selectable and serving target;
-no token-window conversion or adapter inference supplies this value.
+against that aggregate budget and every model target that can still be required
+to carry the resulting region: the active turn's pinned target, the effective
+serving record of the session's currently installed defaults epoch, read under
+that pointer row at the position the
+[persistence lock protocol](persistence-protocol.md#lock-protocol) fixes, and
+the frozen target of every already-accepted origin still queued, read under the
+scheduler lock the transaction already holds. All three are checked because any
+of them can differ from the others, and a target that cannot transport the
+region strands the session wherever it appears. The installed epoch is checked
+as well as the pin because a turn pinned to an instruction-capable target may
+still be active with an empty admitted set when a replacement installs a target
+without the transport — which the replacement's own retained-region check
+permits, the retained region being empty — and the old turn could then admit a
+bundle validated only against its stale pin. The next input would be rejected
+against the now-current defaults, with no unload to recover. A queued origin is
+checked because it froze its own target when it was accepted and keeps it across
+later replacements: an origin accepted under an uncapable target while the
+admitted set was empty passed acceptance honestly, and if a replacement then
+installs a capable target, the pin and the installed epoch both admit a bundle
+the queued turn still cannot transport when it activates. Checking all three at
+admission closes every such order without forbidding replacements while a turn
+is active, and without demanding transport capability of an origin accepted for
+a session that has admitted nothing. Concurrent and same-batch reads therefore
+observe one ordered predecessor and cannot commit a set whose instruction region
+alone is unrenderable. Aggregate exhaustion is a typed failed read and changes
+no durable admitted set. The owning model catalog declares transport support and
+its byte capacity for every selectable and serving target; no token-window
+conversion or adapter inference supplies this value.
 
 Later session-default replacement cannot strand existing admissions. The owning
 [session-default contract](sessions-and-transcript.md#session-defaults-and-replacement)
@@ -711,6 +738,8 @@ Each manifest records:
 
 - session and turn identities, the eligibility-set hash, and the admitted-set
   hash of the head it snapshotted;
+- the region version its rendered rows were built under, which selects the fixed
+  preamble that reconstitution prepends;
 - its call boundary, or `turn_start` before a call-specific successor;
 - for each rendered bundle in projection order, bundle identity, kind, canonical
   source path, provider-visible root kind and root-relative source label,
