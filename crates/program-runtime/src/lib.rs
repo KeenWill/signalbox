@@ -247,6 +247,22 @@ impl ProgramHost {
         artifact: &ProgramArtifact,
         live_deliveries: &mut impl LiveDeliverySource,
     ) -> Result<ProgramExecutionOutcome, ProgramHostError> {
+        let durable_tail = journal
+            .entries()
+            .last()
+            .map_or(0, |entry| entry.position().as_u64());
+        let mut execution = ExecutionState::new(ReplayCursor::new(journal), durable_tail);
+        // An outcome recorded before this attempt outranks the artifact itself,
+        // so it is taken before an isolate exists at all. A malformed artifact
+        // or one importing outside the contract fails the module load below,
+        // and that isolate error would otherwise mask a `run_cancel` or `fault`
+        // that is already durable.
+        if let Some(delivery) = execution.cursor.take_terminal_delivery()
+            && let Some(outcome) = execution.apply_delivery(delivery)?
+        {
+            return Ok(outcome);
+        }
+
         let (request_sender, mut request_receiver) = mpsc::unbounded_channel();
         let (mut runtime, module_loader) = isolate(request_sender)?;
         let sdk_specifier = ModuleSpecifier::parse(PROGRAM_SDK_PRELOAD_SPECIFIER)
@@ -272,20 +288,14 @@ impl ProgramHost {
             .load_main_es_module_from_code(&main_specifier, artifact.source().to_owned())
             .await?;
         let mut evaluation = Box::pin(runtime.mod_evaluate(module));
-        let durable_tail = journal
-            .entries()
-            .last()
-            .map_or(0, |entry| entry.position().as_u64());
-        let mut execution = ExecutionState::new(ReplayCursor::new(journal), durable_tail);
         let mut completed_evaluation = None;
 
         loop {
-            // A recorded terminal outcome outranks anything this attempt could
-            // still produce, and a valid journal both can open with one and can
-            // place one directly behind the delivery just applied. Replaying it
-            // before the artifact runs is what keeps it durable: an artifact
-            // that requests immediately is otherwise refused as
-            // `DeliveryPending`, and one that blocks wedges the host instead.
+            // The same precedence, now for a terminal delivery the journal
+            // places behind the delivery just applied. Replaying it before the
+            // artifact runs again is what keeps it durable: an artifact that
+            // requests immediately is otherwise refused as `DeliveryPending`,
+            // and one that blocks wedges the host instead.
             if let Some(delivery) = execution.cursor.take_terminal_delivery()
                 && let Some(outcome) = execution.apply_delivery(delivery)?
             {
