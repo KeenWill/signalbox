@@ -509,7 +509,7 @@ impl RunnerStateRoot {
                 });
             }
         };
-        validate_operation_journal_owner(&state, &inventory, ready_workspace.as_ref())?;
+        validate_operation_journal_authority(&state, &inventory, ready_workspace.as_ref())?;
         Ok(Self {
             directory,
             state,
@@ -1039,7 +1039,7 @@ impl RunnerStateRoot {
     }
 }
 
-fn validate_operation_journal_owner(
+fn validate_operation_journal_authority(
     state: &RunnerState,
     inventory: &ReconnectInventory,
     ready_workspace: Option<&WorkspaceReady>,

@@ -69,7 +69,7 @@ the durable transactions before acknowledgement is re-verified through this PR
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
 contract was re-verified through PR #322 (`agent/docs-discipline`; pinned and
-pinned-loss request mismatches). Owner-private storage of the one retained lease
+pinned-loss request mismatches). Effective-user-private storage of the one retained lease
 and its monotonic fsynced phases is re-verified through this PR
 (`agent/runner-operation-journal`). Matching terminal-result retention and
 atomic acknowledgement clearing are re-verified through this PR
@@ -1695,7 +1695,7 @@ before both the availability probe and dispatch, recreates standard usr-merge
 aliases only when their targets are inside the configured mounts, and derives
 `PATH` only from configured mounts. The proof-only generic exec-family runner
 composes that constructor and advertises `WorkspaceRestricted`. Resource limits
-remain separate work, with first-release resource limits still owner-gated in
+remain separate work, with first-release resource limits still user-gated in
 [open questions](../open-questions.md#identity-credentials-and-resource-governance).
 
 Confinement is defined over that writable root, which need not be a repository.
@@ -2174,7 +2174,7 @@ workspace manifest. The candidate binds the session, exact retired placement
 revision, cleanup-owning runner, and protected manifest identity. It is not
 cleanup authority: the consuming durable transaction must still authenticate the
 exact retired predecessor against the current placement head, the empty lease
-and result boundary, and the live owner connection. A plain exact directory has
+and result boundary, and the live cleanup-authority connection. A plain exact directory has
 no manifest and produces no candidate.
 
 A release exists only for a workspace the runner itself created: a provisioned
