@@ -285,6 +285,7 @@ impl ProgramJournal {
         run: ProgramRunId,
         entries: Vec<JournalEntry>,
     ) -> Result<Self, ProgramJournalError>;
+    pub fn terminal_delivery(&self) -> Option<&DeliveryFrame>;
     // accessors: run(), entries()
 }
 
@@ -319,7 +320,6 @@ pub struct ReplayCursor { /* private */ }
 impl ReplayCursor {
     pub fn new(journal: ProgramJournal) -> Self;
     pub fn next_instruction(&mut self) -> ReplayInstruction;
-    pub fn take_terminal_delivery(&mut self) -> Option<DeliveryFrame>;
     pub fn submit_request(
         &mut self,
         observed: RequestFrame,

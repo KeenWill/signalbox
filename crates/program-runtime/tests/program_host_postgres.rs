@@ -533,6 +533,50 @@ async fn a_journal_opening_with_a_run_cancel_replays_before_the_artifact_request
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn a_recorded_terminal_outcome_behind_a_request_outranks_an_unloadable_artifact()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = distinct_run_id(10);
+    repository.create_stream(run).await?;
+    let recorded_request = repository
+        .append_request(run, None, RequestKind::Now(payload(&[REPLAY_REQUEST_BYTE])))
+        .await?;
+    let recorded_cancel = repository
+        .append_delivery(run, DeliveryKind::RunCancel(payload(&[RUN_CANCEL_BYTE])))
+        .await?;
+    let artifact = ProgramArtifact::new(r#"import "./outside-the-contract.js";"#);
+    let host = ProgramHost::new(repository.clone());
+    let mut live_must_not_run = ScriptedDeliveries::new([]);
+
+    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+
+    assert_eq!(
+        outcome,
+        ProgramExecutionOutcome::RunCancelled(payload(&[RUN_CANCEL_BYTE]))
+    );
+    assert!(live_must_not_run.observed_outstanding.is_empty());
+    let journal = repository
+        .load(run)
+        .await?
+        .expect("the created journal stream exists");
+    assert_eq!(journal.entries().len(), 2);
+    assert_eq!(
+        journal.entries()[0].frame(),
+        &JournalFrame::Request(recorded_request)
+    );
+    assert_eq!(
+        journal.entries()[1].frame(),
+        &JournalFrame::Delivery(recorded_cancel)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_leading_run_cancel_outranks_an_artifact_that_cannot_load() -> Result<(), Box<dyn Error>>
 {
     let (container, pool) = migrated_postgres().await?;

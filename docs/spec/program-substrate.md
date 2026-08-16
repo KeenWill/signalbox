@@ -244,13 +244,14 @@ that differs from its journaled twin returns a typed nondeterminism failure
 carrying both complete frames, which the persistence adapter can append as a
 closed `fault` delivery; divergence is never silent and never a panic. The seam
 yields at most one recorded delivery per step, committing the future isolate
-host to drain its microtask queue to quiescence between deliveries; a terminal
-delivery is taken through a step of its own, ahead of any executor progress,
-because it resolves no promise and ends the attempt. Concurrent outstanding
-requests are permitted — the journaled delivery order is what makes promise
-interleaving identical across live execution and replay. Virtualized time
-advances only at journaled points, and each randomness draw is journaled. Why:
-recording the delivery order is the one discipline that buys unrestricted
+host to drain its microtask queue to quiescence between deliveries. A journal
+that already records a terminal delivery never reaches that seam: because such a
+delivery resolves no request and ends the attempt that recorded it, the first
+one is the run's outcome and the journal names it without replay. Concurrent
+outstanding requests are permitted — the journaled delivery order is what makes
+promise interleaving identical across live execution and replay. Virtualized
+time advances only at journaled points, and each randomness draw is journaled.
+Why: recording the delivery order is the one discipline that buys unrestricted
 intra-program concurrency without restricting the language.
 
 **Implemented behavior.** The program-runtime host applies that cursor to a real
@@ -260,21 +261,21 @@ nondeterminism fault on mismatch. A matching replay delivery is applied to its
 named promise without consulting the live-delivery source. After each individual
 delivery the host polls the engine to a microtask quiescence point before it
 observes another request or applies another delivery. A recorded `run_cancel` or
-`fault` is the exception, taken at the head of every step before the host polls
-the engine or accepts a request: an outcome already durable outranks anything
-the attempt could still produce, so an artifact that requests immediately or
-blocks cannot displace it. At the durable tail it appends the request and the
-caller-supplied delivery through the repository's conditional methods, each
-compare-and-append conditioned on the tail this attempt loaded: a concurrent
-attempt that has already advanced that tail makes the append insert nothing, and
-this attempt fails with a changed-tail protocol error rather than extending a
-journal it no longer describes. It then continues through the same
-promise-resolution path. The delivery-source seam receives only the currently
-outstanding durable request frames; it is the boundary later capability
-executors implement. A module that throws is an isolate failure carrying the
-engine's own message, never a completion: the engine reports the exception
-through its event loop while the module's evaluation future still fulfills, so
-the host reads the engine result first.
+`fault` anywhere in the loaded journal is resolved before any of that: the host
+reads the recorded outcome and returns it before it creates an isolate, so an
+attempt cannot displace an outcome already durable — not by requesting
+immediately, not by blocking, and not by failing to compile at all. At the
+durable tail it appends the request and the caller-supplied delivery through the
+repository's conditional methods, each compare-and-append conditioned on the
+tail this attempt loaded: a concurrent attempt that has already advanced that
+tail makes the append insert nothing, and this attempt fails with a changed-tail
+protocol error rather than extending a journal it no longer describes. It then
+continues through the same promise-resolution path. The delivery-source seam
+receives only the currently outstanding durable request frames; it is the
+boundary later capability executors implement. A module that throws is an
+isolate failure carrying the engine's own message, never a completion: the
+engine reports the exception through its event loop while the module's
+evaluation future still fulfills, so the host reads the engine result first.
 
 The implemented journal anchor truthfully pins only frame-contract version one.
 It is not yet a complete run aggregate. Registration identity, artifact digest,

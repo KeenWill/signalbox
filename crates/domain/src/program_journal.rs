@@ -362,6 +362,22 @@ pub struct ProgramJournal {
 }
 
 impl ProgramJournal {
+    /// The recorded terminal outcome, if this run already ended.
+    ///
+    /// A `run_cancel` or `fault` resolves no request and ends the attempt that
+    /// recorded it, so every later frame is behind an outcome that is already
+    /// durable. The first such delivery is therefore the run's outcome, and it
+    /// is knowable from the journal alone — a resumed run cannot produce a
+    /// different one, whatever its artifact does or whether it loads at all.
+    pub fn terminal_delivery(&self) -> Option<&DeliveryFrame> {
+        self.entries.iter().find_map(|entry| match entry.frame() {
+            JournalFrame::Delivery(delivery) if delivery.kind().resolves().is_none() => {
+                Some(delivery)
+            }
+            JournalFrame::Delivery(_) | JournalFrame::Request(_) => None,
+        })
+    }
+
     /// Validates all three contiguous orders and resolution correlations.
     pub fn try_new(
         run: ProgramRunId,
@@ -518,10 +534,9 @@ impl Error for NondeterminismError {}
 /// The future isolate host must alternate `next_instruction` with executor
 /// request emission. Recorded deliveries are applied one at a time in journal
 /// order, which gives the host a quiescence point after every delivery. A
-/// terminal delivery is the one exception, taken through
-/// [`ReplayCursor::take_terminal_delivery`] before the executor runs: it
-/// resolves no request, so no executor progress separates it from the delivery
-/// before it. Once `Live` is returned the cursor never consults history again.
+/// journal that already records a terminal outcome never reaches this seam:
+/// [`ProgramJournal::terminal_delivery`] answers it without replay. Once `Live`
+/// is returned the cursor never consults history again.
 #[derive(Clone, Debug)]
 pub struct ReplayCursor {
     run: ProgramRunId,
@@ -555,32 +570,6 @@ impl ReplayCursor {
                 ReplayInstruction::Live
             }
         }
-    }
-
-    /// Takes the next recorded frame when it is a terminal delivery: a
-    /// `run_cancel` or `fault` that resolves no request and ends the attempt.
-    ///
-    /// A valid journal can open with one, and one can also sit directly behind
-    /// the delivery a host just applied. Either way the host must replay it
-    /// before it runs the executor or accepts another request, because an
-    /// outcome already durable outranks anything the attempt could still
-    /// produce. Resolving nothing is what makes taking it early safe: there is
-    /// no promise whose resolution order the skipped quiescence could change.
-    pub fn take_terminal_delivery(&mut self) -> Option<DeliveryFrame> {
-        if self.live {
-            return None;
-        }
-        let Some(JournalFrame::Delivery(delivery)) =
-            self.entries.get(self.next).map(JournalEntry::frame)
-        else {
-            return None;
-        };
-        if delivery.kind().resolves().is_some() {
-            return None;
-        }
-        let delivery = delivery.clone();
-        self.next += 1;
-        Some(delivery)
     }
 
     pub fn submit_request(
@@ -734,60 +723,51 @@ mod tests {
     }
 
     #[test]
-    fn a_journal_opening_with_a_run_cancel_yields_it_before_any_instruction() {
+    fn a_journal_opening_with_a_run_cancel_reports_it_as_the_terminal_outcome() {
         let run_cancel = run_cancel(1, b"cancelled");
-        let mut replay = ReplayCursor::new(journal(vec![entry(
-            1,
-            JournalFrame::Delivery(run_cancel.clone()),
-        )]));
+        let ended = journal(vec![entry(1, JournalFrame::Delivery(run_cancel.clone()))]);
 
-        assert_eq!(replay.take_terminal_delivery(), Some(run_cancel));
-        assert_eq!(replay.take_terminal_delivery(), None);
-        assert_eq!(replay.next_instruction(), ReplayInstruction::Live);
+        assert_eq!(ended.terminal_delivery(), Some(&run_cancel));
     }
 
     #[test]
-    fn a_terminal_delivery_behind_a_recorded_answer_is_taken_next() {
+    fn a_terminal_delivery_behind_earlier_frames_is_still_the_terminal_outcome() {
         let recorded_request = request(1, b"recorded");
         let recorded_answer = delivery(1, 1, b"recorded-answer");
         let run_cancel = run_cancel(2, b"cancelled");
-        let mut replay = ReplayCursor::new(journal(vec![
-            entry(1, JournalFrame::Request(recorded_request.clone())),
-            entry(2, JournalFrame::Delivery(recorded_answer.clone())),
+        let ended = journal(vec![
+            entry(1, JournalFrame::Request(recorded_request)),
+            entry(2, JournalFrame::Delivery(recorded_answer)),
             entry(3, JournalFrame::Delivery(run_cancel.clone())),
-        ]));
+        ]);
 
-        assert_eq!(replay.take_terminal_delivery(), None);
-        assert_eq!(
-            replay.submit_request(recorded_request),
-            Ok(ReplayedRequest::Matched)
-        );
-        assert_eq!(
-            replay.next_instruction(),
-            ReplayInstruction::Deliver(recorded_answer)
-        );
-        assert_eq!(replay.take_terminal_delivery(), Some(run_cancel));
+        assert_eq!(ended.terminal_delivery(), Some(&run_cancel));
     }
 
     #[test]
-    fn a_resolving_delivery_is_never_taken_as_terminal() {
+    fn the_first_terminal_delivery_wins_over_frames_recorded_behind_it() {
+        let recorded_request = request(1, b"recorded");
+        let first_cancel = run_cancel(1, b"first");
+        let later_cancel = run_cancel(2, b"later");
+        let ended = journal(vec![
+            entry(1, JournalFrame::Request(recorded_request)),
+            entry(2, JournalFrame::Delivery(first_cancel.clone())),
+            entry(3, JournalFrame::Delivery(later_cancel)),
+        ]);
+
+        assert_eq!(ended.terminal_delivery(), Some(&first_cancel));
+    }
+
+    #[test]
+    fn a_journal_of_resolving_deliveries_records_no_terminal_outcome() {
         let recorded_request = request(1, b"recorded");
         let recorded_answer = delivery(1, 1, b"recorded-answer");
-        let mut replay = ReplayCursor::new(journal(vec![
-            entry(1, JournalFrame::Request(recorded_request.clone())),
-            entry(2, JournalFrame::Delivery(recorded_answer.clone())),
-        ]));
+        let running = journal(vec![
+            entry(1, JournalFrame::Request(recorded_request)),
+            entry(2, JournalFrame::Delivery(recorded_answer)),
+        ]);
 
-        assert_eq!(replay.take_terminal_delivery(), None);
-        assert_eq!(
-            replay.submit_request(recorded_request),
-            Ok(ReplayedRequest::Matched)
-        );
-        assert_eq!(replay.take_terminal_delivery(), None);
-        assert_eq!(
-            replay.next_instruction(),
-            ReplayInstruction::Deliver(recorded_answer)
-        );
+        assert_eq!(running.terminal_delivery(), None);
     }
 
     /// INV-061: a replay mismatch is a typed failure carrying both frames.

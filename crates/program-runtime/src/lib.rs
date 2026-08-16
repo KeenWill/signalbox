@@ -247,21 +247,21 @@ impl ProgramHost {
         artifact: &ProgramArtifact,
         live_deliveries: &mut impl LiveDeliverySource,
     ) -> Result<ProgramExecutionOutcome, ProgramHostError> {
+        // A run that already ended has its outcome in the journal, whatever
+        // frames precede the terminal delivery, so this asks before anything
+        // about the attempt exists. Replaying to rediscover a recorded outcome
+        // would need the artifact, and an artifact that is malformed or imports
+        // outside the contract fails the module load below — masking a
+        // `run_cancel` or `fault` that is already durable behind an isolate
+        // error.
+        if let Some(outcome) = journal.terminal_delivery().and_then(terminal_outcome) {
+            return Ok(outcome);
+        }
         let durable_tail = journal
             .entries()
             .last()
             .map_or(0, |entry| entry.position().as_u64());
         let mut execution = ExecutionState::new(ReplayCursor::new(journal), durable_tail);
-        // An outcome recorded before this attempt outranks the artifact itself,
-        // so it is taken before an isolate exists at all. A malformed artifact
-        // or one importing outside the contract fails the module load below,
-        // and that isolate error would otherwise mask a `run_cancel` or `fault`
-        // that is already durable.
-        if let Some(delivery) = execution.cursor.take_terminal_delivery()
-            && let Some(outcome) = execution.apply_delivery(delivery)?
-        {
-            return Ok(outcome);
-        }
 
         let (request_sender, mut request_receiver) = mpsc::unbounded_channel();
         let (mut runtime, module_loader) = isolate(request_sender)?;
@@ -291,17 +291,6 @@ impl ProgramHost {
         let mut completed_evaluation = None;
 
         loop {
-            // The same precedence, now for a terminal delivery the journal
-            // places behind the delivery just applied. Replaying it before the
-            // artifact runs again is what keeps it durable: an artifact that
-            // requests immediately is otherwise refused as `DeliveryPending`,
-            // and one that blocks wedges the host instead.
-            if let Some(delivery) = execution.cursor.take_terminal_delivery()
-                && let Some(outcome) = execution.apply_delivery(delivery)?
-            {
-                return Ok(outcome);
-            }
-
             let runtime_status = poll_runtime_once(&mut runtime).await;
             poll_evaluation_once(&mut evaluation, &mut completed_evaluation).await;
             // A module that throws reports the exception through the event loop
@@ -479,6 +468,22 @@ impl ProgramHost {
             .ok_or(ProgramHostProtocolError::JournalTailChanged)?;
         execution.advance_durable_tail()?;
         execution.apply_delivery(delivery).map_err(Into::into)
+    }
+}
+
+/// The outcome a delivery carries when it ends the run instead of resolving a
+/// request. Terminal kinds resolve nothing, which is what lets the journal name
+/// the outcome without replaying the artifact that produced it.
+fn terminal_outcome(delivery: &DeliveryFrame) -> Option<ProgramExecutionOutcome> {
+    match delivery.kind() {
+        DeliveryKind::RunCancel(payload) => {
+            Some(ProgramExecutionOutcome::RunCancelled(payload.clone()))
+        }
+        DeliveryKind::Fault(fault) => Some(ProgramExecutionOutcome::Faulted(fault.clone())),
+        DeliveryKind::Answer { .. }
+        | DeliveryKind::Wake { .. }
+        | DeliveryKind::Reject { .. }
+        | DeliveryKind::Cancel { .. } => None,
     }
 }
 
@@ -710,10 +715,7 @@ impl ExecutionState {
                 )?;
                 Ok(None)
             }
-            DeliveryKind::RunCancel(payload) => {
-                Ok(Some(ProgramExecutionOutcome::RunCancelled(payload.clone())))
-            }
-            DeliveryKind::Fault(fault) => Ok(Some(ProgramExecutionOutcome::Faulted(fault.clone()))),
+            DeliveryKind::RunCancel(_) | DeliveryKind::Fault(_) => Ok(terminal_outcome(&delivery)),
         }
     }
 
