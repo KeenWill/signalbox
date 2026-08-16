@@ -263,14 +263,18 @@ observes another request or applies another delivery. A recorded `run_cancel` or
 `fault` is the exception, taken at the head of every step before the host polls
 the engine or accepts a request: an outcome already durable outranks anything
 the attempt could still produce, so an artifact that requests immediately or
-blocks cannot displace it. At the durable tail it uses the journal repository's
-ordinary append methods for the request and the caller-supplied delivery, then
-continues through the same promise-resolution path. The delivery-source seam
-receives only the currently outstanding durable request frames; it is the
-boundary later capability executors implement. A module that throws is an
-isolate failure carrying the engine's own message, never a completion: the
-engine reports the exception through its event loop while the module's
-evaluation future still fulfills, so the host reads the engine result first.
+blocks cannot displace it. At the durable tail it appends the request and the
+caller-supplied delivery through the repository's conditional methods, each
+compare-and-append conditioned on the tail this attempt loaded: a concurrent
+attempt that has already advanced that tail makes the append insert nothing, and
+this attempt fails with a changed-tail protocol error rather than extending a
+journal it no longer describes. It then continues through the same
+promise-resolution path. The delivery-source seam receives only the currently
+outstanding durable request frames; it is the boundary later capability
+executors implement. A module that throws is an isolate failure carrying the
+engine's own message, never a completion: the engine reports the exception
+through its event loop while the module's evaluation future still fulfills, so
+the host reads the engine result first.
 
 The implemented journal anchor truthfully pins only frame-contract version one.
 It is not yet a complete run aggregate. Registration identity, artifact digest,
