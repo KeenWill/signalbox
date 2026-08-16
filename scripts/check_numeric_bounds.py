@@ -153,6 +153,9 @@ DECLARED_MODULE = re.compile(
     r"(?:pub(?:\([^)]*\))?\s+)?\bmod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<form>[{;])",
     re.MULTILINE,
 )
+TEST_GATED_ITEM = re.compile(
+    r"(?P<attributes>(?:#\s*\[[^\]]*\]\s*)+)(?:[^;{}]*?)\{", re.MULTILINE
+)
 CFG_ATTRIBUTE = re.compile(r"#\s*\[\s*cfg\s*\((?P<predicate>[^\]]*)\)\s*\]")
 PATH_ATTRIBUTE = re.compile(r"#\s*\[\s*path\s*=\s*\"(?P<path>[^\"]+)\"\s*\]")
 CRATE_ROOTS = frozenset({"lib.rs", "main.rs"})
@@ -164,7 +167,7 @@ class Bound:
     name: str
     line: int
     offset: int
-    extent: int
+    reads_at: int
     scope: tuple[int, int] | None
     initializer: str
     annotation: str
@@ -307,9 +310,15 @@ def requires_test(attributes: str) -> bool:
 
 
 def test_ranges(code: str) -> list[tuple[int, int]]:
+    """Report the span of every braced item that compiles only under test.
+
+    A module is the common case, but `#[cfg(test)] fn fixture() { ... }` and a
+    gated `impl` exclude their contents from a production build just as firmly,
+    so the pattern is the attribute run and whatever item head follows it.
+    """
     ranges = []
-    for match in DECLARED_MODULE.finditer(code):
-        if match.group("form") != "{" or not requires_test(match.group("attributes")):
+    for match in TEST_GATED_ITEM.finditer(code):
+        if not requires_test(match.group("attributes")):
             continue
         ranges.append((match.start(), matching_brace(code, match.end() - 1)))
     return ranges
@@ -534,7 +543,7 @@ def inventory(root: Path) -> tuple[list[Bound], list[Import]]:
                     name=name,
                     line=line,
                     offset=match.start(),
-                    extent=end,
+                    reads_at=match.end(),
                     scope=innermost_scope(match.start(), blocks),
                     initializer=code[match.end() : end],
                     annotation=annotation,
@@ -576,21 +585,21 @@ def validate(bounds: list[Bound], imports: list[Import]) -> list[str]:
     def depth(candidate: Bound | Import) -> int:
         return -1 if candidate.scope is None else candidate.scope[0]
 
-    def in_scope(candidate: Bound | Import, bound: Bound) -> bool:
-        """Report whether ``candidate`` is visible where ``bound`` reads it.
+    def in_scope(candidate: Bound | Import, reference: int) -> bool:
+        """Report whether ``candidate`` is visible at the offset ``reference``.
 
-        Visibility is judged at the reference rather than at the declaration:
-        a block inside the initializer sits after the declared item's own
-        offset, so `const TOTAL: usize = { const BASE: usize = 1; BASE * 4 };`
-        resolves through the second clause.
+        Visibility is judged where the name is read, not where the reading item
+        is declared. That is what lets an initializer block declare its own
+        source — `const TOTAL: usize = { const BASE: usize = 1; BASE * 4 };` —
+        while a sibling block inside the same initializer, which does not
+        contain the reference, supplies nothing.
         """
-        if candidate.scope is None:
-            return True
-        start, end = candidate.scope
-        return start <= bound.offset <= end or bound.offset <= start <= end <= bound.extent
+        return candidate.scope is None or (
+            candidate.scope[0] <= reference <= candidate.scope[1]
+        )
 
-    def visible_owner(bound: Bound, source: str) -> Bound | None:
-        """Resolve ``source`` as the Rust scope around ``bound`` would.
+    def visible_owner(bound: Bound, source: str, reference: int) -> Bound | None:
+        """Resolve ``source`` as the Rust scope at ``reference`` would.
 
         A file-level declaration is visible everywhere in its file, and one
         inside a block only within that block, so a sibling module or another
@@ -605,7 +614,7 @@ def validate(bounds: list[Bound], imports: list[Import]) -> list[str]:
         visible = [
             candidate
             for candidate in declarations.get((bound.path, source), ())
-            if in_scope(candidate, bound)
+            if in_scope(candidate, reference)
         ]
         if not visible:
             return None
@@ -616,7 +625,7 @@ def validate(bounds: list[Bound], imports: list[Import]) -> list[str]:
             return None
         owner = nearest[0]
         shadowed = any(
-            in_scope(binding, bound) and depth(binding) >= depth(owner)
+            in_scope(binding, reference) and depth(binding) >= depth(owner)
             for binding in bindings.get((bound.path, source), ())
         )
         return None if shadowed else owner
@@ -629,10 +638,18 @@ def validate(bounds: list[Bound], imports: list[Import]) -> list[str]:
         if source is None:
             return bool(parsed[1].strip())
         bare = rf"(?<![\w:]){re.escape(source)}\b"
-        if source in seen or re.search(bare, bound.initializer) is None:
+        # Every occurrence is resolved, not just the first: an initializer may
+        # both declare the source in a nested block and read it outside that
+        # block, where the name means something else entirely.
+        reads = list(re.finditer(bare, bound.initializer))
+        if source in seen or not reads:
             return False
-        owner = visible_owner(bound, source)
-        if owner is None or not resolves_to_direct(owner, kind, seen | {source}):
+        owners = [
+            visible_owner(bound, source, bound.reads_at + read.start()) for read in reads
+        ]
+        if any(owner is None for owner in owners):
+            return False
+        if not all(resolves_to_direct(owner, kind, seen | {source}) for owner in owners):
             return False
         return all(
             contributor is not None
@@ -661,7 +678,10 @@ def validate(bounds: list[Bound], imports: list[Import]) -> list[str]:
                 continue
             if not is_boundary_name(name):
                 continue
-            found.append((name, None if qualified else visible_owner(bound, name)))
+            reference = bound.reads_at + match.start("name")
+            found.append(
+                (name, None if qualified else visible_owner(bound, name, reference))
+            )
         return found
 
     for bound in enforced:

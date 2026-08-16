@@ -303,6 +303,34 @@ class NumericBoundCheckerTests(unittest.TestCase):
         self.assertIn("MAX_BYTES", result.stdout)
         self.assertIn("no numeric-bound declaration", result.stdout)
 
+    def test_bound_inside_a_test_gated_function_is_inventoried_without_gating(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "#[cfg(test)]\nfn fixture() {\n    const MAX_FIXTURE_BYTES: usize = 4;\n}\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
+    def test_derived_escape_fails_on_a_sibling_block_inside_the_initializer(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "// numeric-bound: tunable - controls the ordinary retained size\n"
+            "const MAX_BASE: usize = 64;\n"
+            "// numeric-bound: derived ceiling from MAX_BASE\n"
+            "const MAX_TOTAL_BYTES: usize = {\n"
+            "    {\n"
+            "        // numeric-bound: ceiling - protects against oversized text\n"
+            "        const MAX_BASE: usize = 1024;\n"
+            "    }\n"
+            "    MAX_BASE * 4\n"
+            "};\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_TOTAL_BYTES", result.stdout)
+        self.assertIn("invalid derived declaration", result.stdout)
+
     def test_item_level_test_configuration_is_inventoried_without_gating(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
