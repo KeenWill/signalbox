@@ -7,7 +7,7 @@
 use std::{
     collections::{BTreeSet, HashSet},
     error::Error,
-    num::NonZeroU16,
+    num::{NonZeroU16, NonZeroU64},
 };
 
 use signalbox_application::{
@@ -15,14 +15,15 @@ use signalbox_application::{
     RepoWatchCheckSuiteObservation, RepoWatchEventContentIdentityV1, RepoWatchEventIdGenerator,
     RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPullRequestLifecycle,
     RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateInput, derive_repo_watch_events,
+    RepoWatchRepositoryStateInput, RepoWatchWorkflowRunObservation, derive_repo_watch_events,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
     MergeableState, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
     PullRequestNumber, PullRequestTitle, ReactionChange, ReactionContent, ReactionSubject,
     RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
-    RepoWatchEventKindV1, RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
+    RepoWatchEventKindV1, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId,
+    WorkflowName,
 };
 use signalbox_persistence::{
     MIGRATOR, disposable_test_container_labels, local_test_connection_options, migrate,
@@ -2076,5 +2077,150 @@ async fn every_reaction_subject_survives_a_commit_and_load_round_trip() -> Resul
         Some(&review_comment),
         "a committed repository-watch event must load back unchanged"
     );
+    Ok(())
+}
+
+const REAPPEARING_WORKFLOW_RUN_ID: u64 = 71;
+const REAPPEARING_WORKFLOW_ID: u64 = 72;
+
+/// An observation carrying only the reappearing branch-workflow run, or none.
+fn workflow_run_observation(present: bool) -> Result<RepoWatchObservation, Box<dyn Error>> {
+    let workflow_runs = if present {
+        vec![RepoWatchWorkflowRunObservation::new(
+            GitHubObjectId::new(REAPPEARING_WORKFLOW_RUN_ID.try_into()?),
+            GitHubObjectId::new(REAPPEARING_WORKFLOW_ID.try_into()?),
+            RepoWatchWorkflowRunAttempt::new(NonZeroU64::MIN),
+            BranchName::try_new(BASE_BRANCH.to_owned())?,
+            WorkflowName::try_new(WORKFLOW_NAME.to_owned())?,
+            CheckConclusion::Success,
+        )]
+    } else {
+        Vec::new()
+    };
+    Ok(RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: Vec::new(),
+            workflow_runs,
+            branch_heads: Vec::new(),
+        })?,
+    ))
+}
+
+/// A branch-workflow run that leaves the observation and returns re-derives a
+/// byte-identical content identity. Before commit coalescing that duplicate
+/// aborted the whole cursor-and-event transaction, so the cursor never left the
+/// run-absent generation and every later poll repeated the same failure.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_reappearing_workflow_run_advances_the_cursor_without_a_duplicate_event()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let mut ids = FixedEventIds::default();
+
+    let empty = RepoWatchCursorCandidate::new(workflow_run_observation(false)?);
+    let first = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, empty.clone(), Vec::new()),
+            )
+            .await?,
+    );
+
+    // The run completes and is recorded.
+    let mut frontier = empty.event_identity_frontier().clone();
+    let present = workflow_run_observation(true)?;
+    let recorded = derive_repo_watch_events(
+        &repository,
+        Some(empty.observation()),
+        &present,
+        &mut frontier,
+        &mut ids,
+    )?;
+    assert_eq!(recorded.len(), 1);
+    let identity = recorded[0].content_identity();
+    let present_candidate =
+        RepoWatchCursorCandidate::with_event_identity_frontier(present, frontier);
+    let second = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(Some(first), present_candidate.clone(), recorded),
+            )
+            .await?,
+    );
+
+    // The branch is deleted, so the run leaves the observation.
+    let mut frontier = present_candidate.event_identity_frontier().clone();
+    let absent = workflow_run_observation(false)?;
+    let none_derived = derive_repo_watch_events(
+        &repository,
+        Some(present_candidate.observation()),
+        &absent,
+        &mut frontier,
+        &mut ids,
+    )?;
+    assert!(none_derived.is_empty());
+    let absent_candidate = RepoWatchCursorCandidate::with_event_identity_frontier(absent, frontier);
+    let third = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(Some(second), absent_candidate.clone(), none_derived),
+            )
+            .await?,
+    );
+
+    // The branch is recreated and the historical run reappears. The differ
+    // re-derives the same occurrence, identity and all.
+    let mut frontier = absent_candidate.event_identity_frontier().clone();
+    let returned = workflow_run_observation(true)?;
+    let reemitted = derive_repo_watch_events(
+        &repository,
+        Some(absent_candidate.observation()),
+        &returned,
+        &mut frontier,
+        &mut ids,
+    )?;
+    assert_eq!(reemitted.len(), 1);
+    assert_eq!(reemitted[0].content_identity(), identity);
+    assert_ne!(
+        reemitted[0].event().id(),
+        RepoWatchEventId::from_uuid(Uuid::from_u128(1))
+    );
+    let returned_candidate =
+        RepoWatchCursorCandidate::with_event_identity_frontier(returned, frontier);
+
+    let outcome = store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(Some(third), returned_candidate, reemitted),
+        )
+        .await?;
+
+    // The commit succeeds and the cursor advances rather than stalling.
+    let fourth = committed_generation(outcome);
+    assert_eq!(fourth.get(), third.get() + 1);
+    assert_eq!(
+        store
+            .load_cursor(&repository)
+            .await?
+            .expect("cursor remains readable")
+            .generation(),
+        fourth
+    );
+    // The occurrence is recorded exactly once, so the identity still names one row.
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_event
+          WHERE repository = $1 AND content_identity = $2",
+    )
+    .bind(REPOSITORY)
+    .bind(identity.as_bytes().as_slice())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(rows, 1);
     Ok(())
 }
