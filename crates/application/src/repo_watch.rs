@@ -826,13 +826,24 @@ enum RepoWatchEventStreamKeyV1<'value> {
 }
 
 impl RepoWatchEventStreamKeyV1<'_> {
+    /// Whether this stream can state more than one fact.
+    ///
+    /// A stream is non-recurring only when the differ suppresses re-emission on
+    /// members the stream key already names, so a second occurrence cannot
+    /// arise. Check suites key on suite and completion generation, reviews on
+    /// the provider review identity, and workflow runs on branch, run, and
+    /// attempt; none of those admit a second fact under one key.
+    ///
+    /// Check runs are recurring despite being provider-keyed. The differ
+    /// re-emits when a completed run's conclusion changes under an unchanged
+    /// identity and completion generation, so a run edited back to an earlier
+    /// conclusion would otherwise restate that conclusion's exact content
+    /// identity, and the commit would coalesce the restored conclusion away
+    /// instead of announcing it.
     const fn is_recurring(&self) -> bool {
         !matches!(
             self,
-            Self::CheckSuite { .. }
-                | Self::CheckRun { .. }
-                | Self::Review { .. }
-                | Self::Workflow { .. }
+            Self::CheckSuite { .. } | Self::Review { .. } | Self::Workflow { .. }
         )
     }
 }
@@ -3995,6 +4006,60 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// A completed check run edited back to an earlier conclusion restates that
+    /// conclusion's facts exactly. Its occurrence sequence has to advance, or the
+    /// restored conclusion carries the first event's content identity and commit
+    /// coalescing drops it, announcing no event and dispatching no work.
+    #[test]
+    fn check_run_edited_back_to_an_earlier_conclusion_keeps_a_distinct_identity()
+    -> Result<(), Box<dyn Error>> {
+        fn with_conclusion(
+            conclusion: Option<CheckConclusion>,
+        ) -> Result<RepoWatchObservation, Box<dyn Error>> {
+            let completed_check_runs = match conclusion {
+                Some(conclusion) => vec![RepoWatchCheckRunObservation::new(
+                    object_id(CHECK_RUN_ID),
+                    completion_generation(CHECK_COMPLETION_GENERATION)?,
+                    CheckRunName::try_new(String::from(CHECK_NAME))?,
+                    conclusion,
+                )],
+                None => Vec::new(),
+            };
+            Ok(observation(
+                vec![pull_request(PullRequestFacts {
+                    completed_check_runs,
+                    ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+                })?],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )?)
+        }
+
+        let absent = with_conclusion(None)?;
+        let failed = with_conclusion(Some(CheckConclusion::Failure))?;
+        let succeeded = with_conclusion(Some(CheckConclusion::Success))?;
+        let mut frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let first = derive_occurrences(Some(&absent), &failed, &mut frontier, 1)?;
+        let edited = derive_occurrences(Some(&failed), &succeeded, &mut frontier, 10)?;
+        let restored = derive_occurrences(Some(&succeeded), &failed, &mut frontier, 20)?;
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(edited.len(), 1);
+        assert_eq!(restored.len(), 1);
+        // The restored conclusion states the same facts as the first event, so
+        // only the advancing occurrence sequence keeps their identities apart.
+        assert_ne!(
+            first[0].content_identity(),
+            restored[0].content_identity(),
+            "a restored check-run conclusion must not reuse the first event's identity"
+        );
+        assert_ne!(first[0].content_identity(), edited[0].content_identity());
+        assert_ne!(edited[0].content_identity(), restored[0].content_identity());
+        Ok(())
     }
 
     #[test]

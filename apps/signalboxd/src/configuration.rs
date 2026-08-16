@@ -4558,24 +4558,37 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         );
     }
 
-    #[test]
-    fn repository_watch_webhook_rejects_route_capture_syntax_in_local_path() {
-        for candidate in [
-            CAPTURE_WATCH_WEBHOOK_PATH,
-            LEGACY_CAPTURE_WATCH_WEBHOOK_PATH,
-            WILDCARD_WATCH_WEBHOOK_PATH,
-        ] {
-            let configured = configuration_with_repository_watch_webhook().replace(
-                &format!("path = \"{WATCH_WEBHOOK_PATH}\""),
-                &format!("path = \"{candidate}\""),
-            );
+    /// Parses the webhook fixture with `path` replaced, returning any failure.
+    fn repository_watch_webhook_path_failure(path: &str) -> Option<HubModelConfigurationError> {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("path = \"{WATCH_WEBHOOK_PATH}\""),
+            &format!("path = \"{path}\""),
+        );
+        HubModelConfiguration::parse(&configured).err()
+    }
 
-            assert_eq!(
-                HubModelConfiguration::parse(&configured).err(),
-                Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration),
-                "{candidate} is routing syntax, not one literal request path"
-            );
-        }
+    #[test]
+    fn repository_watch_webhook_rejects_a_braced_capture_local_path() {
+        assert_eq!(
+            repository_watch_webhook_path_failure(CAPTURE_WATCH_WEBHOOK_PATH),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_legacy_capture_local_path() {
+        assert_eq!(
+            repository_watch_webhook_path_failure(LEGACY_CAPTURE_WATCH_WEBHOOK_PATH),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_wildcard_local_path() {
+        assert_eq!(
+            repository_watch_webhook_path_failure(WILDCARD_WATCH_WEBHOOK_PATH),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
     }
 
     #[test]
