@@ -406,6 +406,7 @@ pub enum RepoWatchObservationApplyV1 {
     Applied(RepoWatchObservation),
     DuplicateState,
     Superseded,
+    Ignored(RepoWatchWebhookIgnoredReasonV1),
     NeedsTargetedRefresh {
         observation: RepoWatchObservation,
         refreshes: Box<[RepoWatchTargetedRefreshV1]>,
@@ -453,6 +454,7 @@ enum ChangeApplyDispositionV1 {
     Applied,
     Duplicate,
     Superseded,
+    Ignored(RepoWatchWebhookIgnoredReasonV1),
     NeedsRefresh(RepoWatchTargetedRefreshV1),
 }
 
@@ -474,6 +476,9 @@ pub fn apply_repo_watch_observation_patch_v1(
             ChangeApplyDispositionV1::Duplicate => {}
             ChangeApplyDispositionV1::Superseded => {
                 return Ok(RepoWatchObservationApplyV1::Superseded);
+            }
+            ChangeApplyDispositionV1::Ignored(reason) => {
+                return Ok(RepoWatchObservationApplyV1::Ignored(reason));
             }
             ChangeApplyDispositionV1::NeedsRefresh(refresh) => {
                 if !refreshes.contains(&refresh) {
@@ -728,10 +733,25 @@ fn apply_check_run_union(
     Ok(ChangeApplyDispositionV1::Applied)
 }
 
+// Polling admits a workflow run only for a branch in the repository's current
+// branch set, so a run whose branch has since been deleted is a fact polling
+// will never produce. Admitting it from a payload would leave a webhook-only
+// observation that no reconciliation can ever match, and under a later write
+// mode a dispatch target that no longer exists. The delivery is therefore
+// ignored rather than queried: there is nothing to reconcile toward.
 fn apply_workflow_run(
     state: &mut RepoWatchRepositoryStateInput,
     run: &RepoWatchWorkflowRunObservation,
 ) -> Result<ChangeApplyDispositionV1, RepoWatchWebhookApplyError> {
+    if !state
+        .branch_heads
+        .iter()
+        .any(|branch_head| branch_head.branch() == run.branch())
+    {
+        return Ok(ChangeApplyDispositionV1::Ignored(
+            RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowBranch,
+        ));
+    }
     let retained_index = state
         .workflow_runs
         .iter()
@@ -861,6 +881,7 @@ pub enum RepoWatchWebhookIgnoredReasonV1 {
     UnmappedAction,
     NonBranchPush,
     ForeignWorkflowRepository,
+    AbsentWorkflowBranch,
 }
 
 /// Mapping disposition for one signature-valid admitted delivery.
@@ -2611,6 +2632,39 @@ mod tests {
         };
 
         assert_eq!(current.state().workflow_runs(), [expected]);
+    }
+
+    #[test]
+    fn a_workflow_run_on_a_deleted_branch_is_ignored_without_projection() {
+        let previous = canonical_observation(CURRENT_HEAD);
+        let deleted_branch_run = RepoWatchWorkflowRunObservation::new(
+            object_id(DIFFERENT_WORKFLOW_RUN),
+            object_id(RETAINED_WORKFLOW),
+            RepoWatchWorkflowRunAttempt::new(
+                NonZeroU64::new(NEWER_WORKFLOW_ATTEMPT)
+                    .expect("fixture workflow attempt is positive"),
+            ),
+            BranchName::try_new(String::from(DELETED_BRANCH)).expect("fixture branch is valid"),
+            WorkflowName::try_new(String::from("retained-workflow"))
+                .expect("fixture workflow name is valid"),
+            CheckConclusion::Failure,
+        );
+        let patch = RepoWatchObservationPatchV1::new(
+            vec![RepoWatchObservationChangeV1::WorkflowRun {
+                run: deleted_branch_run,
+            }],
+            Vec::new(),
+        );
+
+        let outcome = apply_repo_watch_observation_patch_v1(&previous, &patch)
+            .expect("a run on a deleted branch is not an apply error");
+
+        assert_eq!(
+            outcome,
+            RepoWatchObservationApplyV1::Ignored(
+                RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowBranch
+            )
+        );
     }
 
     #[test]

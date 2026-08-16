@@ -716,6 +716,19 @@ impl RepositoryWatchTask {
                         )
                         .await
                     }
+                    RepoWatchObservationApplyV1::Ignored(reason) => {
+                        *baseline = Some(shadow);
+                        // Projecting nothing is the point: polling would never
+                        // produce this fact, so a projection would stand as a
+                        // permanent webhook-only parity row.
+                        self.record_webhook_terminal(
+                            pending,
+                            Vec::new(),
+                            RepoWatchWebhookDisposition::Ignored,
+                            Some(webhook_ignored_reason_code(reason)),
+                        )
+                        .await
+                    }
                     RepoWatchObservationApplyV1::Applied(observation) => {
                         let projections =
                             shadow_event_projections(&self.repository, &mut shadow, &observation)?;
@@ -1199,6 +1212,7 @@ const fn webhook_ignored_reason_code(reason: RepoWatchWebhookIgnoredReasonV1) ->
         RepoWatchWebhookIgnoredReasonV1::UnmappedAction => "unmapped_action",
         RepoWatchWebhookIgnoredReasonV1::NonBranchPush => "non_branch_push",
         RepoWatchWebhookIgnoredReasonV1::ForeignWorkflowRepository => "foreign_workflow_repository",
+        RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowBranch => "absent_workflow_branch",
     }
 }
 

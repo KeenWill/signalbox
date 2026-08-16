@@ -7397,6 +7397,7 @@ pub enum RepoWatchObservationApplyV1 {
     Applied(RepoWatchObservation),
     DuplicateState,
     Superseded,
+    Ignored(RepoWatchWebhookIgnoredReasonV1),
     NeedsTargetedRefresh {
         observation: RepoWatchObservation,
         refreshes: Box<[RepoWatchTargetedRefreshV1]>,
@@ -7418,6 +7419,7 @@ pub enum RepoWatchWebhookIgnoredReasonV1 {
     UnmappedAction,
     NonBranchPush,
     ForeignWorkflowRepository,
+    AbsentWorkflowBranch,
 }
 
 pub enum RepoWatchWebhookMappingV1 {

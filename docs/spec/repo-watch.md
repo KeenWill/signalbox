@@ -32,8 +32,8 @@ identity, its durable frontier, and the one-time storage migration are verified
 against this PR (`agent/repo-watch-content-identity`). The authenticated webhook
 intake, shadow projection, parity view, and targeted refresh behavior are
 verified against this PR (`agent/repo-watch-webhook-receiver`). The projection
-coverage enumeration, pull-request issue-comment behavior, and per-page
-hydration coalescing below are verified against this PR
+coverage enumeration, pull-request issue-comment behavior, per-page hydration
+coalescing, and workflow-run branch symmetry below are verified against this PR
 (`agent/webhook-event-mapping`).
 
 ## Configuration and credential boundary
@@ -791,15 +791,23 @@ action:
 | `pull_request_review_thread: resolved`, `unresolved`                                     | Guarded thread state; may derive `ThreadResolved` or `ThreadOpened`                                                                                                                                      |
 | `check_run: completed`                                                                   | An unambiguous watched pull request gets a guarded provider-run union and check-rollup query; otherwise only a head-SHA check-rollup query; may derive `CheckRunCompleted` and poll-derived rollup facts |
 | `check_suite: completed`                                                                 | Head-SHA check-rollup query; only its poll-normalized result may derive `ChecksCompleted`                                                                                                                |
-| `workflow_run: completed` for the watched repository                                     | Guarded workflow/run/attempt state; may derive `BranchWorkflowRunCompleted`                                                                                                                              |
+| `workflow_run: completed` for the watched repository                                     | Guarded workflow/run/attempt state when the run's head branch is still in the observed branch set; may derive `BranchWorkflowRunCompleted`                                                               |
 | `push` on `refs/heads/*`                                                                 | Guarded branch create, advance, or delete; an advance may derive `BaseAdvanced` for affected open pull requests                                                                                          |
 | `ping`                                                                                   | Mapped endpoint-health no-change                                                                                                                                                                         |
 
 Ordinary issue comments, other actions in those families, tag pushes, the
 separate `create` and `delete` event families, foreign-repository workflow
-heads, and every other signature-valid event are ignored successfully. Guards
-make stale head, lifecycle, branch, workflow-attempt, and immutable-provider
-facts superseded or duplicate rather than allowing regression.
+heads, workflow runs whose head branch is absent from the observed branch set,
+and every other signature-valid event are ignored successfully. That last one
+holds the two producers to the same fact set: polling admits a workflow run only
+for a branch it currently observes, so a run on a deleted branch is a fact
+polling can never produce, and projecting it would leave a webhook-only parity
+row nothing can ever match and, under a later write mode, a dispatch target that
+no longer exists. It is ignored rather than turned into a targeted query for the
+same reason — there is nothing to reconcile toward. The workflow-run generation
+guard is unchanged for a branch that is still present. Guards make stale head,
+lifecycle, branch, workflow-attempt, and immutable-provider facts superseded or
+duplicate rather than allowing regression.
 
 A completed check run rerequested under the same provider identity carries a new
 completion generation or conclusion, which the differ treats as a new observable
