@@ -40,6 +40,7 @@ const SECOND_LIVE_REQUEST_BYTE: u8 = 3;
 const SECOND_LIVE_ANSWER_BYTE: u8 = 33;
 const DIVERGENT_REQUEST_BYTE: u8 = 9;
 const RUN_CANCEL_BYTE: u8 = 44;
+const THROWN_MESSAGE: &str = "the artifact threw";
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -418,6 +419,37 @@ now(new Uint8Array([{FIRST_LIVE_REQUEST_BYTE}]));
         .await?
         .expect("the created journal stream exists");
     assert_eq!(journal.entries().len(), 2);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_module_that_throws_is_an_isolate_failure_not_a_completion() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = distinct_run_id(8);
+    repository.create_stream(run).await?;
+    let artifact = ProgramArtifact::new(format!(r#"throw new Error("{THROWN_MESSAGE}");"#));
+    let host = ProgramHost::new(repository);
+    let mut live_must_not_run = ScriptedDeliveries::new([]);
+
+    let failure = host
+        .execute(run, &artifact, &mut live_must_not_run)
+        .await
+        .expect_err("a module that throws must not report completion");
+
+    let ProgramHostError::Isolate(error) = failure else {
+        panic!("expected the typed isolate failure, got {failure:?}");
+    };
+    assert!(
+        error.to_string().contains(THROWN_MESSAGE),
+        "the isolate failure must carry the artifact's own message, got {error}"
+    );
+    assert!(live_must_not_run.observed_outstanding.is_empty());
 
     pool.close().await;
     drop(container);

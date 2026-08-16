@@ -294,6 +294,20 @@ impl ProgramHost {
 
             let runtime_status = poll_runtime_once(&mut runtime).await;
             poll_evaluation_once(&mut evaluation, &mut completed_evaluation).await;
+            // A module that throws reports the exception through the event loop
+            // while its `mod_evaluate` future still fulfills with `Ok`, so the
+            // engine result is the only record that the artifact failed. Take
+            // it before any path below reads that fulfilled evaluation and
+            // calls the attempt complete. A ready engine error with no
+            // fulfilled evaluation is left to those paths, which name a
+            // never-resolved top-level await `Stalled` rather than an engine
+            // failure.
+            let runtime_status = match runtime_status {
+                Poll::Ready(Err(error)) if completed_evaluation.is_some() => {
+                    return Err(error.into());
+                }
+                status => status,
+            };
             while let Ok(request) = request_receiver.try_recv() {
                 self.accept_request(run, &mut execution, request).await?;
             }

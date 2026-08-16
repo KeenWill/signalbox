@@ -130,8 +130,9 @@ shared buffer and its atomics go because `Atomics.wait` blocks the isolate
 thread and `Atomics.waitAsync` settles on a wall clock; the prototype methods go
 because their results follow the host's default locale and ICU data, which two
 hosts running the same run need not share. Its only admitted asynchronous
-operation is the closed request op behind the synthetic SDK module. A caller supplies the stripped artifact and an existing
-run journal; no isolate is retained between attempts.
+operation is the closed request op behind the synthetic SDK module. A caller
+supplies the stripped artifact and an existing run journal; no isolate is
+retained between attempts.
 
 **Committed unimplemented functionality.** No admitted run-creation surface
 invokes the host yet. The standalone `deno_core` repository is archived and the
@@ -241,11 +242,11 @@ closed `fault` delivery; divergence is never silent and never a panic. The seam
 yields at most one recorded delivery per step, committing the future isolate
 host to drain its microtask queue to quiescence between deliveries; a terminal
 delivery is taken through a step of its own, ahead of any executor progress,
-because it resolves no promise and ends the attempt. Concurrent
-outstanding requests are permitted — the journaled delivery order is what makes
-promise interleaving identical across live execution and replay. Virtualized
-time advances only at journaled points, and each randomness draw is journaled.
-Why: recording the delivery order is the one discipline that buys unrestricted
+because it resolves no promise and ends the attempt. Concurrent outstanding
+requests are permitted — the journaled delivery order is what makes promise
+interleaving identical across live execution and replay. Virtualized time
+advances only at journaled points, and each randomness draw is journaled. Why:
+recording the delivery order is the one discipline that buys unrestricted
 intra-program concurrency without restricting the language.
 
 **Implemented behavior.** The program-runtime host applies that cursor to a real
@@ -258,11 +259,14 @@ observes another request or applies another delivery. A recorded `run_cancel` or
 `fault` is the exception, taken at the head of every step before the host polls
 the engine or accepts a request: an outcome already durable outranks anything
 the attempt could still produce, so an artifact that requests immediately or
-blocks cannot displace it. At the durable tail it
-uses the journal repository's ordinary append methods for the request and the
-caller-supplied delivery, then continues through the same promise-resolution
-path. The delivery-source seam receives only the currently outstanding durable
-request frames; it is the boundary later capability executors implement.
+blocks cannot displace it. At the durable tail it uses the journal repository's
+ordinary append methods for the request and the caller-supplied delivery, then
+continues through the same promise-resolution path. The delivery-source seam
+receives only the currently outstanding durable request frames; it is the
+boundary later capability executors implement. A module that throws is an
+isolate failure carrying the engine's own message, never a completion: the
+engine reports the exception through its event loop while the module's
+evaluation future still fulfills, so the host reads the engine result first.
 
 The implemented journal anchor truthfully pins only frame-contract version one.
 It is not yet a complete run aggregate. Registration identity, artifact digest,
