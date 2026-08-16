@@ -11,7 +11,9 @@ spellings, so no accepted spelling carries an undeclared bound past the gate.
 Test-only modules are inventoried but do not gate because their constants
 describe fixtures, not runtime safety. A module written ``#[cfg(test)] mod
 tests;`` is test-only across the separate file it names, whether that file is
-found by Rust's directory rule or named outright by a ``#[path]`` attribute.
+found by Rust's directory rule or named outright by a ``#[path]`` attribute,
+and across the module tree beneath that file: once a module is test-only its
+children are too, whatever their own configuration.
 The whole attribute run is read, so an intervening attribute and a compound
 ``cfg(all(test, not(windows)))`` both still count; ``cfg(any(test, ...))`` and
 ``cfg(not(test))`` do not, because those modules also compile without ``test``
@@ -55,9 +57,11 @@ shadows a farther one as Rust resolves it. What this lexical scan cannot follow,
 it refuses: a name reachable only through a ``use`` from outside the file leaves
 the escape unproven and the declaration is rejected.
 
-Every other bound the initializer names must carry the inherited kind too. A
-value assembled from a ceiling and a tunable inherits no single rationale, so
-the escape is unavailable to it and it declares its own kind.
+Every other boundary-named constant the initializer reads must resolve, in the
+same scope, to the inherited kind. A value assembled from a ceiling and a
+tunable inherits no single rationale, and one assembled from a contributor this
+scan cannot see is unproven rather than proven; either way the escape is
+unavailable and the constant declares its own kind.
 
 Because discovery is deliberately lexical, a fixed representation fact whose
 name contains a boundary token may declare ``not-a-bound`` with a one-line
@@ -126,9 +130,9 @@ DERIVED_DECLARATION = re.compile(
     r"(?P<source>[A-Z][A-Z0-9_]*)\s*$"
 )
 REFERENCED_BOUND = re.compile(r"(?<![\w:])(?P<name>[A-Z][A-Z0-9_]*)\b")
-ATTRIBUTED_MODULE = re.compile(
-    r"(?P<attributes>(?:#\s*\[[^\]]*\]\s*)+)"
-    r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<form>[{;])",
+DECLARED_MODULE = re.compile(
+    r"(?P<attributes>(?:#\s*\[[^\]]*\]\s*)*)"
+    r"(?:pub(?:\([^)]*\))?\s+)?\bmod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<form>[{;])",
     re.MULTILINE,
 )
 CFG_ATTRIBUTE = re.compile(r"#\s*\[\s*cfg\s*\((?P<predicate>[^\]]*)\)\s*\]")
@@ -276,7 +280,7 @@ def requires_test(attributes: str) -> bool:
 
 def test_ranges(code: str) -> list[tuple[int, int]]:
     ranges = []
-    for match in ATTRIBUTED_MODULE.finditer(code):
+    for match in DECLARED_MODULE.finditer(code):
         if match.group("form") != "{" or not requires_test(match.group("attributes")):
             continue
         ranges.append((match.start(), matching_brace(code, match.end() - 1)))
@@ -307,20 +311,25 @@ def innermost_scope(offset: int, ranges: list[tuple[int, int]]) -> tuple[int, in
     return max(enclosing, default=None)
 
 
-def external_test_sources(path: Path, text: str, code: str) -> set[Path]:
-    """Report the sources a `#[cfg(test)] mod name;` in ``path`` owns.
+def module_sources(path: Path, text: str, code: str, gated: bool) -> set[Path]:
+    """Report the separate sources the `mod name;` declarations in ``path`` own.
 
-    Rust reaches such a module either through an explicit ``#[path]``, which is
-    relative to the declaring file's directory, or through the directory that
-    file owns; both spellings are followed, and a returned directory owns every
-    source beneath it. Attributes are matched against ``code`` so a
-    commented-out declaration cannot claim a file, then re-read from ``text``
-    because blanking has emptied the ``#[path]`` string literal.
+    With ``gated`` only `#[cfg(test)]`-configured declarations count, which
+    seeds the test-only set; without it every declaration counts, which walks
+    the rest of an already test-only module tree. Rust reaches such a module
+    either through an explicit ``#[path]``, relative to the declaring file's
+    directory, or through the directory that file owns; both spellings are
+    followed, and a returned directory owns every source beneath it. Attributes
+    are matched against ``code`` so a commented-out declaration cannot claim a
+    file, then re-read from ``text`` because blanking has emptied the
+    ``#[path]`` string literal.
     """
     directory = path.parent if path.name in MODULE_ROOTS else path.with_suffix("")
     owned: set[Path] = set()
-    for match in ATTRIBUTED_MODULE.finditer(code):
-        if match.group("form") != ";" or not requires_test(match.group("attributes")):
+    for match in DECLARED_MODULE.finditer(code):
+        if match.group("form") != ";":
+            continue
+        if gated and not requires_test(match.group("attributes")):
             continue
         attributes = text[match.start("attributes") : match.end("attributes")]
         explicit = PATH_ATTRIBUTE.search(attributes)
@@ -371,7 +380,18 @@ def inventory(root: Path) -> list[Bound]:
     blanked = {path: blank_non_code(text) for path, text in sources.items()}
     test_sources: set[Path] = set()
     for path, text in sources.items():
-        test_sources |= external_test_sources(path, text, blanked[path])
+        test_sources |= module_sources(path, text, blanked[path], gated=True)
+    # A test-only module owns its children whatever their own configuration, so
+    # the set grows until no further source joins it. Trees are one or two deep,
+    # so this settles in a pass or two.
+    while True:
+        reached = set()
+        for path, text in sources.items():
+            if in_test_sources(path, test_sources):
+                reached |= module_sources(path, text, blanked[path], gated=False)
+        if reached <= test_sources:
+            break
+        test_sources |= reached
     bounds = []
     for path, text in sources.items():
         code = blanked[path]
@@ -472,25 +492,26 @@ def validate(bounds: list[Bound]) -> list[str]:
         if owner is None or not resolves_to_direct(owner, kind, seen | {source}):
             return False
         return all(
-            resolves_to_direct(contributor, kind, seen | {source, name})
+            contributor is not None
+            and resolves_to_direct(contributor, kind, seen | {source, name})
             for name, contributor in contributors(bound, source)
         )
 
-    def contributors(bound: Bound, source: str) -> list[tuple[str, Bound]]:
-        """Report the other in-scope bounds the initializer reads.
+    def contributors(bound: Bound, source: str) -> list[tuple[str, Bound | None]]:
+        """Report the other boundary-named constants the initializer reads.
 
         A derivation inherits one rationale, so every bound feeding the value
-        has to carry the kind being inherited. Names that resolve to no
-        enforced bound contribute nothing to inherit and are left alone.
+        has to carry the kind being inherited — and one this scan cannot
+        resolve is unproven rather than harmless, so it is reported with no
+        owner and fails the escape. Only boundary-named identifiers count; the
+        inventory would not track any other constant as a bound either.
         """
         found = []
         for match in REFERENCED_BOUND.finditer(bound.initializer):
             name = match.group("name")
-            if name in {source, bound.name}:
+            if name in {source, bound.name} or not is_boundary_name(name):
                 continue
-            contributor = visible_owner(bound, name)
-            if contributor is not None:
-                found.append((name, contributor))
+            found.append((name, visible_owner(bound, name)))
         return found
 
     for bound in enforced:

@@ -183,6 +183,19 @@ class NumericBoundCheckerTests(unittest.TestCase):
         self.assertIn("MAX_TOTAL_BYTES", result.stdout)
         self.assertIn("invalid derived declaration", result.stdout)
 
+    def test_derived_escape_fails_when_a_contributor_cannot_be_resolved(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "// numeric-bound: ceiling - protects against oversized responses\n"
+            "const MAX_LOCAL_BYTES: usize = 1024;\n"
+            "// numeric-bound: derived ceiling from MAX_LOCAL_BYTES\n"
+            "const MAX_TOTAL_BYTES: usize = MAX_LOCAL_BYTES + MAX_IMPORTED_BYTES;\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_TOTAL_BYTES", result.stdout)
+        self.assertIn("invalid derived declaration", result.stdout)
+
     def test_derived_escape_fails_when_the_source_is_in_another_function(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
@@ -291,6 +304,22 @@ class NumericBoundCheckerTests(unittest.TestCase):
                     '#[cfg(test)]\n#[path = "scheduler_corpus_tests.rs"]\nmod corpus_tests;\n'
                 ),
                 ENFORCED_MODULE_FILE.with_name("scheduler_corpus_tests.rs"): (
+                    "const MAX_FIXTURE_BYTES: usize = 4;\n"
+                ),
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
+    def test_child_of_a_path_attributed_test_module_does_not_gate(self) -> None:
+        result = run_checker_tree(
+            {
+                ENFORCED_MODULE_FILE: (
+                    '#[cfg(test)]\n#[path = "scheduler_corpus_tests.rs"]\nmod corpus_tests;\n'
+                ),
+                ENFORCED_MODULE_FILE.with_name("scheduler_corpus_tests.rs"): "mod child;\n",
+                ENFORCED_MODULE_FILE.with_name("scheduler_corpus_tests") / "child.rs": (
                     "const MAX_FIXTURE_BYTES: usize = 4;\n"
                 ),
             }
