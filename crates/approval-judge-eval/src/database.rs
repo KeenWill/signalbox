@@ -3,8 +3,8 @@ use std::path::Path;
 use sqlx::{PgPool, Row};
 
 use crate::{
-    ApprovalJudgeCorpus,
-    manifest::{corpus_digest, load_manifest_corpus},
+    ApprovalJudgeCorpus, CORPUS_FORMAT_VERSION,
+    manifest::{ManifestError, corpus_digest, load_manifest_corpus},
     store::{
         CorpusKey, CorpusRegistration, CorpusSourceDescriptor, CorpusStore, CorpusStoreCorruption,
         CorpusStoreError, CorpusStoreFuture, Sha256Digest,
@@ -196,6 +196,13 @@ fn validate_registration(
     if registration.format_version != corpus.format_version {
         return Err(CorpusStoreError::CorruptRegistration(
             CorpusStoreCorruption::FormatVersionMismatch,
+        ));
+    }
+    if registration.format_version != CORPUS_FORMAT_VERSION {
+        return Err(CorpusStoreError::Manifest(
+            ManifestError::UnsupportedCorpusVersion {
+                observed: registration.format_version,
+            },
         ));
     }
     if registration.case_count != count {

@@ -43,7 +43,7 @@ pub struct CorpusManifest {
 
 /// Case content forms a portable manifest can name.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ManifestCaseSource {
     /// A file in the repository containing the manifest.
     Repository {
@@ -536,6 +536,19 @@ mod tests {
         let decoded = decode_manifest(&encoded).expect("the blob reference shape is admitted");
 
         assert_eq!(decoded, manifest);
+    }
+
+    #[test]
+    fn manifest_source_variants_reject_unknown_fields() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        manifest["case_source"]["future_field"] = serde_json::Value::Bool(true);
+        let encoded = serde_json::to_vec(&manifest).expect("the modified manifest serializes");
+
+        let error =
+            decode_manifest(&encoded).expect_err("an unknown source-variant field is rejected");
+
+        assert!(error.to_string().contains("unknown field `future_field`"));
     }
 
     fn manifest_source(manifest: &CorpusManifest) -> CorpusSourceDescriptor {

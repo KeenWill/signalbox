@@ -56,7 +56,9 @@ CREATE TABLE evaluation_corpus (
                     source_blob_store IS NULL
                     OR octet_length(source_blob_store) BETWEEN 1 AND 64
                 )
+                AND source_blob_digest IS NOT NULL
                 AND octet_length(source_blob_digest) = 32
+                AND source_blob_byte_length IS NOT NULL
                 AND source_blob_byte_length >= 1
                 AND source_blob_byte_length <= 18446744073709551615
             )

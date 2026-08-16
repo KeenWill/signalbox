@@ -106,6 +106,46 @@ async fn manifest_import_conforms_with_disk_and_scores_identically() -> Result<(
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn blob_source_constraint_requires_digest_and_byte_length() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let digest = [0_u8; 32];
+
+    insert_blob_registration(&pool, "missing-digest", None, Some("1"))
+        .await
+        .expect_err("a blob registration without a digest is rejected");
+    insert_blob_registration(&pool, "missing-byte-length", Some(&digest), None)
+        .await
+        .expect_err("a blob registration without a byte length is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn insert_blob_registration(
+    pool: &PgPool,
+    corpus_version: &str,
+    blob_digest: Option<&[u8]>,
+    blob_byte_length: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let corpus_digest = [0_u8; 32];
+    sqlx::query(
+        "INSERT INTO evaluation_corpus (
+            corpus_name, corpus_version, format_version, corpus_digest, case_count,
+            source_kind, source_blob_digest, source_blob_byte_length
+         ) VALUES ('constraint-fixture', $1, 1, $2, 0, 'blob_reference', $3, $4::numeric)",
+    )
+    .bind(corpus_version)
+    .bind(corpus_digest.as_slice())
+    .bind(blob_digest)
+    .bind(blob_byte_length)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
 fn fixture_model() -> (
     RuntimeApprovalJudgeModel<ScriptedModel<ModelCallId>>,
     ApprovalJudgeEvalBinding,
