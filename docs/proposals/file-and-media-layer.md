@@ -190,8 +190,11 @@ Detection follows one fixed algorithm:
    streaming UTF-8 and control-policy validation. After successful validation,
    compare the canonical text type with any syntactically valid declared type;
    disagreement returns `DeclaredTypeMismatch` rather than a validated file.
-8. Validation failure after a recognized signature is `Malformed`, never a
-   fallback to text or a weaker candidate.
+8. Authenticated structural-invalid evidence after a recognized signature is
+   `Malformed`, never a fallback to text or a weaker candidate. Operational,
+   cancellation, and locked outcomes propagate unchanged as `ProcessorTimedOut`,
+   `ProcessorFailed`, `Cancelled`, or `EncryptedOrLocked`; they are never
+   converted into content evidence.
 9. No successful candidate is ordinary `UnknownType`; the blob stays stored and
    raw-readable.
 
@@ -255,6 +258,13 @@ duplicate view names, non-object schemas, unsupported output kinds, absent or
 above-process limits, unbounded access/output, or unavailable isolation. Image
 views must bound dimensions, pixels, and bytes; audio views duration, samples,
 channels, and bytes; structured views nesting, nodes, strings, and bytes.
+Every image, audio, or file view also declares the finite set of canonical media
+types it can emit. Each model adapter declares its accepted canonical media types
+per presentation kind. Before processing or reserving a reference, `file_read`
+requires the view's complete emitted-type set to be accepted by the selected
+adapter, unless the view instead guarantees normalization to one accepted type.
+An unsupported combination returns typed modality-unsupported failure and cannot
+publish or commit a reference.
 
 Configuration may disable compiled providers and lower bounds. It cannot add
 aliases, choose precedence, raise compiled ceilings, or load executable plugins.
@@ -269,8 +279,10 @@ Runtime plugin loading would turn configuration into code authority.
 4. Add its constructor to daemon composition and optional strict configuration.
 5. Update owning specs in the implementation PR that exposes the provider.
 
-No common tool schema, wire enum, application branch, or model adapter changes
-when the provider uses existing output kinds.
+No common tool schema, wire enum, or application branch changes when the provider
+uses existing output kinds. A model adapter changes only when its reviewed
+canonical-media-type inventory is intentionally widened; registering a reader
+does not imply that support.
 
 ## Processor isolation
 
@@ -348,12 +360,18 @@ digest, selector, reader identity, and view.
 - `File` returns a reference only when the selected model adapter supports a
   reviewed general-file input contract; it never silently becomes text.
 
-Pagination uses a common opaque authenticated cursor binding digest, part
-selector, reader identity, view, normalized initial options, and position. It is
-at most 1,024 bytes and expires on restart; an expired cursor returns a typed
-invalid-continuation failure and the model may issue a new initial request
-rather than the executor guessing. Providers expose semantic positions such as
-page, row, section, frame, or time span, not parser offsets.
+Pagination uses a common opaque authenticated cursor of at most 1,024 bytes. The
+cursor is only a random token for bounded process-local state; it does not embed
+provider options or semantic positions. The state binds digest, part selector,
+reader identity, view, normalized initial options, and position. Registry
+construction requires normalized options to fit 16,384 canonical JSON bytes and
+each provider's encoded semantic position to fit 4,096 bytes; creation rejects
+larger state before returning a truncated result. At most one live continuation
+entry exists per admitted result, and turn and restart expiry remove it. A
+missing or expired token returns typed invalid-continuation failure, and the
+model may issue a new initial request rather than the executor guessing.
+Providers expose semantic positions such as page, row, section, frame, or time
+span, not parser offsets.
 
 Raw `blob_read` remains beside these tools as the unknown-format and diagnostic
 escape hatch. A typed reader never falls back to raw bytes for recognized
@@ -393,13 +411,19 @@ then ends before any worker or store I/O begins. Publication consumes no more
 than the durable reservation. A short completion transaction atomically
 registers the verified blob, consumes the reservation, releases unused bytes,
 and commits the reference; a known-failure completion transaction releases the
-reservation without registering a blob. Crash recovery converts an unfinished
-reservation to the request's durable failure and releases it before that request
-can be retried. A publication or completion failure may leave an unreferenced
-orphan, never a dangling result, but capacity rejection registers nothing. Thus
-every committed reference is admissible to its mandatory continuation call, and
-no transaction spans processor or store I/O. Equal output bytes converge by
-digest, and ambiguous publication cannot become tool success.
+reservation without registering a blob. Immediately before the first worker or
+store operation, the attempt durably crosses the owning tool loop's external-
+effect checkpoint. Recovery may convert a stranded reservation to known failure
+only when that checkpoint proves execution never began. After the checkpoint, a
+crash-lost attempt remains ambiguous and keeps its reservation through the
+existing reconciliation lifecycle; it cannot be retried, and reconciliation
+consumes or releases the reservation only when it establishes the terminal
+result. A publication or completion failure may leave an unreferenced orphan,
+never a dangling result, but capacity rejection registers nothing. Thus every
+committed reference is admissible to its mandatory continuation call, no
+transaction spans processor or store I/O, and crash recovery never erases an
+external effect. Equal output bytes converge by digest, and ambiguous
+publication cannot become tool success.
 
 Rendering first emits a bounded textual stub. Preparation then:
 
