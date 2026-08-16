@@ -7,9 +7,9 @@ use std::{error::Error, fmt, num::NonZeroU64};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition, Goal, GoalBlockProvenance,
-    GoalBlockedReasonKind, GoalCommandRejection, GoalCommandResult, GoalEvent, GoalEventKind,
-    GoalEventOrdinal, GoalGeneration, GoalGuidance, GoalModelBlockedReasonKind,
+    AcceptedInputId, DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition, Goal,
+    GoalBlockProvenance, GoalBlockedReasonKind, GoalCommandRejection, GoalCommandResult, GoalEvent,
+    GoalEventKind, GoalEventOrdinal, GoalGeneration, GoalGuidance, GoalModelBlockedReasonKind,
     GoalModelProvenance, GoalNeed, GoalReconstitutionFailure, GoalReconstitutionInput, GoalReport,
     GoalSchedulerProvenance, GoalState, GoalStatement, GoalTextError, GoalTransitionError,
     GoalTransitionFailure, GoalTurnSource, GoalUserAction, GoalUserCommand, GoalUserProvenance,
@@ -23,9 +23,9 @@ use crate::{
     commit_failure_is_ambiguous,
     goal_turn::{
         GoalTurnAcceptancePosition, GoalTurnCandidates, GoalTurnContinuationOutcome,
-        GoalTurnInsertion, GoalTurnTerminalState, continuation_exists, current_goal_turn,
-        goal_turn_frozen_alias_definition, goal_turn_generation, goal_turn_terminal_state,
-        insert_goal_turn, next_goal_turn_acceptance_position,
+        GoalTurnInsertion, GoalTurnTerminalState, bind_goal_turn, continuation_exists,
+        current_goal_turn, goal_turn_frozen_alias_definition, goal_turn_generation,
+        goal_turn_terminal_state, insert_goal_turn, next_goal_turn_acceptance_position,
         retired_queued_goal_turn_without_outbox,
     },
     mapping::{
@@ -689,7 +689,7 @@ fn scheduler_failure_rejection(
     }
 }
 
-/// Commissions a dispatched session's goal on the caller's open transaction.
+/// Commissions a dispatched session's goal against a turn the dispatch accepted.
 ///
 /// Repository-watch dispatch creates a session, its first input, and this goal
 /// at one commit boundary, so a dispatched session is never durably visible
@@ -697,19 +697,23 @@ fn scheduler_failure_rejection(
 /// session cannot perform this itself: only an existing goal admits a model
 /// declaration, so a session with no goal has no transition to make.
 ///
+/// The turn that carries the dispatch's tagged context is the generation's own
+/// first turn rather than a predecessor of one. Minting a separate turn for the
+/// statement would run the dispatched template a second time for one event, and
+/// scheduling that turn first would make the session act on the statement
+/// before the event it was dispatched for ever arrived, because a turn's
+/// acceptance position is also its execution order.
+///
 /// Every branch here is a fail-closed assertion rather than a recoverable
 /// outcome. The caller has just created this session inside this transaction,
 /// so a rejected commission, an absent session, or an occupied identity is a
 /// contradiction in durable state, not a race a dispatch could lose.
-pub(crate) async fn insert_fresh_commissioned_goal<SelectDefinition>(
+pub(crate) async fn insert_fresh_commissioned_goal(
     connection: &mut PgConnection,
     command: GoalUserCommand,
-    candidates: GoalTurnCandidates,
-    select_definition: SelectDefinition,
-) -> Result<(), GoalRepositoryError>
-where
-    SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
-{
+    accepted_input: AcceptedInputId,
+    turn: TurnId,
+) -> Result<(), GoalRepositoryError> {
     let claimed = sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
@@ -734,37 +738,103 @@ where
         return Err(GoalCorruption::Inconsistent("rejected dispatch goal commission").into());
     };
     lock_scheduler(connection, command.session()).await?;
-    let configuration =
-        match current_origin_configuration(connection, command.session(), select_definition).await?
-        {
-            CurrentOriginConfiguration::Selected(configuration) => configuration,
-            CurrentOriginConfiguration::UnknownAlias(_) => {
-                return Err(
-                    GoalCorruption::Inconsistent("dispatched goal turn model alias").into(),
-                );
-            }
-        };
-    let position = match next_goal_turn_acceptance_position(connection, command.session()).await? {
-        GoalTurnAcceptancePosition::Available(position) => position,
-        GoalTurnAcceptancePosition::Exhausted { .. } => {
-            return Err(GoalCorruption::Inconsistent("dispatched goal acceptance position").into());
-        }
-    };
     insert_command(connection, &command, &result).await?;
     insert_event(connection, command.session(), event).await?;
     let goal = load_goal_from_connection(connection, command.session())
         .await?
         .ok_or(GoalCorruption::Missing("dispatched goal"))?;
-    insert_goal_turn(
+    bind_goal_turn(
         connection,
         command.session(),
         goal.current().generation(),
         GoalTurnSource::UserEvent(event.ordinal()),
-        pursuit_input(&goal, event)?,
-        &configuration,
-        GoalTurnInsertion::new(position, candidates),
+        accepted_input,
+        turn,
     )
     .await
+}
+
+/// Composes a parent-only stop for a repository-watch commission that is still
+/// the session's original pursuing generation.
+///
+/// Repository watch owns the commission it created, but it must not stop a
+/// later user-authored generation or a goal that has already ended. The session
+/// lock makes that check and the stop one atomic decision. The ordinary durable
+/// stop receipt, termination cascade, and event shapes are retained.
+pub(crate) async fn insert_repo_watch_composed_stop(
+    connection: &mut PgConnection,
+    command: GoalUserCommand,
+) -> Result<bool, GoalRepositoryError> {
+    if !matches!(
+        command.action(),
+        GoalUserAction::Stop {
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+        }
+    ) {
+        return Err(GoalCorruption::Inconsistent(
+            "repository-watch cutoff command is not a parent-only stop",
+        )
+        .into());
+    }
+    if !lock_session(connection, command.session()).await? {
+        return Err(GoalCorruption::Missing("dispatched cutoff session").into());
+    }
+    let Some(goal) = load_goal_from_connection(connection, command.session()).await? else {
+        return Err(GoalCorruption::Missing("dispatched cutoff goal").into());
+    };
+    if goal.current().generation().get() != 1
+        || !matches!(
+            goal.current().state(),
+            GoalState::Pursuing | GoalState::Blocked { .. }
+        )
+    {
+        return Ok(false);
+    }
+    let claimed = sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, $2, $3, transaction_timestamp())
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(durable_command_id_to_uuid(command.command_id()))
+    .bind(GOAL_KIND)
+    .bind(STORAGE_VERSION)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected()
+        == 1;
+    if !claimed {
+        return Err(
+            GoalCorruption::Inconsistent("fresh repository-watch cutoff command identity").into(),
+        );
+    }
+    let result = apply_user_command(connection, &command).await?;
+    let GoalCommandResult::Applied(event) = &result else {
+        return Err(GoalCorruption::Inconsistent(
+            "repository-watch cutoff stop was rejected after locking",
+        )
+        .into());
+    };
+    lock_scheduler(connection, command.session()).await?;
+    insert_command(connection, &command, &result).await?;
+    insert_event(connection, command.session(), event).await?;
+    if let Some(retired) =
+        retired_queued_goal_turn_without_outbox(connection, command.session()).await?
+    {
+        outbox::append(
+            connection,
+            OutboxEvent::GoalTurnRetired {
+                session: command.session(),
+                turn: retired,
+            },
+        )
+        .await?;
+    }
+    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1)")
+        .bind(durable_command_id_to_uuid(command.command_id()))
+        .execute(&mut *connection)
+        .await?;
+    Ok(true)
 }
 
 fn event_starts_pursuit(event: &GoalEvent) -> bool {
@@ -988,7 +1058,15 @@ async fn block_goal_continuation(
     })
 }
 
-async fn lock_session(
+/// Locks the session row `FOR NO KEY UPDATE`, returning whether it exists.
+///
+/// Every goal transition serializes on this row and nothing else, so a
+/// transaction outside this module that must exclude goal transitions —
+/// approval-judge completion, which rechecks the authority in force before
+/// committing a decision — takes this lock, and takes it before any
+/// `session_scheduler` lock, following the session-before-scheduler pair
+/// order stated in `lock_inventory`.
+pub(crate) async fn lock_session(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<bool, sqlx::Error> {

@@ -7,9 +7,13 @@ and terminal-client verbs. The domain and persistence surface was verified
 through PR #384 (`agent/goal-mode-runtime`). The scheduling, model-tool,
 process, and terminal surfaces were verified through PR #384
 (`agent/goal-mode-runtime`). Dispatch-composed commissions and the generation a
-turn's authority resolves to are verified against this PR
-(`agent/dispatch-session-goals`). This bottom specification diff owns both stack
-slices. Identity and durable-command mechanics remain owned by
+turn's authority resolves to were verified through PR #562
+(`agent/dispatch-session-goals`). The binding of an already-accepted turn to a
+generation was verified through PR #578 (`agent/commission-binding`). Resolving
+that authority again when a consumer commits is verified against this PR
+(`agent/judge-completion-recheck`). Repository-watch-composed stops are verified
+against this PR (`agent/daemon-ops-overnight`). This bottom specification diff
+owns both stack slices. Identity and durable-command mechanics remain owned by
 [identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
 by [tool loop](tool-loop.md), and framing by
@@ -86,18 +90,38 @@ above.
 **Implemented behavior.** Every goal turn records the generation it belongs to,
 and a consumer reading the authority a turn ran under reads that generation and
 not the session's current one, so a supersession while the turn is parked cannot
-broaden what that consumer sees. A turn the goal machinery did not schedule
-carries no such record, and a goal session runs those too. Such a turn reads the
-session's goal only when two conditions hold together: the lineage has exactly
-one generation, so no supersession can have broadened it; and that generation is
-still open, so a goal already stopped or achieved supplies no statement. Any
-other shape resolves to no statement, leaving the consumer to treat the
-authority as unsettled.
+broaden what that consumer sees. A turn with no such record resolves to no
+statement, leaving the consumer to treat the authority as unsettled. A goal
+session runs such turns — an ordinary input submitted into a session that
+already has a goal — and no generation states anything about them, so inferring
+one from the lineage's shape would let a goal attached after the turn already
+existed supply authority it never covered.
 
-**Implemented behavior.** That resolution decides what a consumer reads, not
-what it commits. A consumer that reads the authority, performs work, and commits
-a decision afterwards holds the statement as it stood at the read: a generation
-closed in between is not seen by the commit.
+**Implemented behavior.** The delegated tool-approval judge is the one consumer
+that binds its read to its commit. It resolves the statement again when it
+commits, under the lock the commit takes, and compares it against the one it
+read. Equal statements commit the decision. A statement that resolved before and
+resolves to nothing now belongs to a generation that closed, whether it was
+stopped, achieved, or replaced by a supersession — a replacement closes the
+generation the decision was formed under rather than restating it, so it too
+resolves to nothing. That escalates to a human rather than committing a decision
+formed under authority no longer in force. A judge that read no statement
+decided without one, so a generation attached since withdraws nothing and leaves
+that decision alone: the comparison pins withdrawal, not novelty.
+
+**Implemented behavior.** The commit-time resolution is not the reading
+resolution. Reading binds a recorded generation exactly, so a supersession while
+a turn is parked cannot broaden what the consumer is shown. Committing asks
+whether the authority the decision was formed under is still in force, so a
+recorded generation supplies its statement only while it remains open. A
+resolution that bound the generation exactly at commit time would compare a
+statement against itself and find withdrawn authority intact.
+
+**Committed unimplemented functionality.** No consumer other than the approval
+judge resolves the authority it read a second time when it commits. Such a
+consumer commits under the statement as it stood at its read. A future consumer
+binding its own read to its own commit follows the escalation rule above rather
+than choosing again.
 
 **Implemented behavior.** A model may declare only `blocked` or `achieved`
 through the session-scoped goal declaration tool. The declaration has no
@@ -122,9 +146,12 @@ source turn and cannot be constructed from a model declaration.
 **Implemented behavior.** Stop and supersede are explicit user authority. Stop
 yields `user_stopped`, distinct from model-declared achievement and blocking;
 supersede is admitted only while the current generation is pursuing or blocked.
-Resume is admitted only while blocked, and its optional guidance becomes the
-next turn's input. Existing steer behavior is unchanged and remains the only
-mid-pursuit guidance path.
+Repository watch may compose that same durable parent-only stop solely to
+withdraw a generation-one commission it created when the target pull request
+closes or merges. It cannot stop descendants or a later user-authored
+generation. Resume is admitted only while blocked, and its optional guidance
+becomes the next turn's input. Existing steer behavior is unchanged and remains
+the only mid-pursuit guidance path.
 
 ## Scheduler continuation
 
@@ -212,6 +239,21 @@ projection (INV-048). Durable rules bind append, correlation, and provenance:
   and bind every scheduler failure event to the current unsuccessfully terminal
   goal turn.
 
+**Implemented behavior.** Migration `202608110013` supersedes the two rule
+functions `202608020013` installed for a goal turn's accepted input. A
+generation's turn is either scheduled by the goal machinery or bound to a turn a
+command already accepted. The machinery mints an accepted input with no
+accepting command and writes the statement, or the resume guidance, into it; the
+rule that a goal turn's input restate its immutable source verbatim applies to
+exactly that case, because it is what proves the machinery invented no text. A
+bound turn's text was authored by whoever issued its command — for
+repository-watch dispatch, the tagged context of the event dispatched on — so it
+carries that command instead. A goal turn therefore either restates its
+statement or names an accepting command, and never neither, and an accepted
+input with no command still requires exactly one goal source. Every other proof
+listed above is unchanged, and both relaxations only widen: no shape admitted
+before this migration stops being admitted, so it changes no stored row.
+
 **Implemented behavior.** The process protocol exposes attach, show, resume,
 stop, and supersede requests. Show returns the current generation and complete
 ordered event history, and the terminal client provides exactly the
@@ -245,31 +287,25 @@ goal priority or more than one concurrent goal per session. Future extension
 must preserve immutable statements, full lineage, and the version-one rule that
 at most one generation is pursuing or blocked.
 
-**Committed unimplemented functionality.** No present goal-mode surface rechecks
-a generation's state when a consumer commits a decision it read that generation
-for. A consumer holding a statement across a long operation can commit after the
-generation closed. Future work binding the read to the commit must do so without
-making goal state part of a durable judge binding that deliberately excludes it.
-What such a consumer should then do is an
-[open question](../open-questions.md#goal-mode).
-
-**Committed unimplemented functionality.** No present surface binds a turn the
-goal machinery did not schedule to the generation it runs under. A generation
-attached after such a turn already existed is therefore still readable by it,
-and the one-generation and open conditions do not exclude that case. Ordering
-the commission before the turn would, but a turn's acceptance position is also
-its execution order, so commissioning first makes a dispatched session act
-before its triggering event arrives — a worse defect than the one it closes. The
-structural answer is to let the dispatched work turn carry a recorded
-generation, which requires relaxing the constraints that forbid a goal turn on
-an input carrying a command and force a goal turn's input to equal its statement
-verbatim. Until then the exposure is bounded by the statement being prompt
-context feeding an escalation instruction rather than a commit gate.
+**Committed unimplemented functionality.** No present judge record carries both
+what the provider recommended and what the repository committed. Escalating a
+completion whose authority was withdrawn overwrites the provider's answer with
+the escalation, so the record retains only the second. A replay can therefore
+prove that a substitution was legitimate — the authority is still withdrawn, and
+a closed generation cannot reopen — but not which recommendation was
+substituted, so a retry offering a different recommendation from the one first
+offered is admitted as an exact replay. The structural answer is for the record
+to carry both, after which a replay compares the offered value against the
+stored offered value and needs no such proof. The same loss admits the mirror
+case: a provider's own escalation, committed while the authority was open and
+followed by a withdrawal, is indistinguishable from a substituted one, so a
+retry offering an approval or a denial is admitted there too. Until then the
+exposure is latent rather than live: no caller retries a completion with a
+recommendation other than the one it first offered, because the only
+uncertain-commit path fails an in-flight judge as ambiguous instead of
+re-entering completion.
 
 ## Open edges
 
-**Deferred or undecided work.** One goal-mode open question is recorded by this
-version-one contract: what a consumer does when the generation it read closes
-before it commits the decision it read that generation for. Binding the read to
-the commit is committed unimplemented functionality above; the behaviour that
-binding should then take is [undecided](../open-questions.md#goal-mode).
+**Deferred or undecided work.** No goal-mode open question is recorded by this
+version-one contract.
