@@ -721,6 +721,13 @@ pub enum ToolExecutionServiceOutcome {
     ContinuationPoolExhausted(Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
 }
 
+const fn is_fatal_executor_failure_class(failure: OperatorFailureClass) -> bool {
+    matches!(
+        failure,
+        OperatorFailureClass::FailClosedCorruption | OperatorFailureClass::CallerOrHubBug
+    )
+}
+
 /// Failure annotated with the exact tool orchestration stage.
 #[derive(Debug)]
 pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
@@ -1583,7 +1590,10 @@ where
             )
             .await;
         match (failure, classification) {
-            (UntrustedExecutorFailure::Executor(_), Ok(outcome)) => {
+            (UntrustedExecutorFailure::Executor(executor_error), Ok(outcome)) => {
+                if is_fatal_executor_failure_class(executor_error.operator_failure_class()) {
+                    return Err(ToolExecutionServiceError::Executor(executor_error));
+                }
                 tracing::warn!(
                     session_id = %correlation.session().as_uuid(),
                     turn_id = %correlation.turn().as_uuid(),
@@ -2142,6 +2152,8 @@ mod tests {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum FakeError {
         Ordinary,
+        Infrastructure,
+        Corruption,
         CommitAmbiguous,
     }
 
@@ -2149,6 +2161,8 @@ mod tests {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             formatter.write_str(match self {
                 Self::Ordinary => "fake tool-loop failure",
+                Self::Infrastructure => "fake infrastructure tool-loop failure",
+                Self::Corruption => "fake corrupt tool-loop state",
                 Self::CommitAmbiguous => "fake commit-ambiguous tool-loop failure",
             })
         }
@@ -2185,6 +2199,10 @@ mod tests {
         fn operator_failure_class(&self) -> OperatorFailureClass {
             match self {
                 Self::Ordinary => OperatorFailureClass::CallerOrHubBug,
+                Self::Infrastructure => OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                },
+                Self::Corruption => OperatorFailureClass::FailClosedCorruption,
                 Self::CommitAmbiguous => OperatorFailureClass::Infrastructure {
                     commit_ambiguous: true,
                 },
@@ -2454,6 +2472,7 @@ mod tests {
 
     struct FailingExecutor {
         events: Arc<Mutex<Vec<&'static str>>>,
+        error: FakeError,
     }
 
     struct DurableWaitExecutor {
@@ -2516,7 +2535,7 @@ mod tests {
             _invocation: ToolExecutionInvocation,
         ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
             self.events.lock().expect("event lock").push("execute");
-            Err(FakeError::Ordinary)
+            Err(self.error)
         }
     }
 
@@ -3284,11 +3303,12 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024 / INV-037: an executor operator failure cannot release
-    /// the interrupt gate while its durable attempt remains in flight, and its
-    /// committed crash classification contains the failure for this turn.
+    /// INV-011 / INV-024 / INV-037: an infrastructure executor failure cannot
+    /// release the interrupt gate while its durable attempt remains in flight,
+    /// and its committed crash classification contains the failure for this
+    /// turn.
     #[tokio::test]
-    async fn inv011_inv024_inv037_executor_failure_classifies_before_gate_release() {
+    async fn inv011_inv024_inv037_infrastructure_executor_failure_classifies_before_gate_release() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
         let prepared = current_attempt_fixture(&batch);
@@ -3319,6 +3339,7 @@ mod tests {
             catalog,
             FailingExecutor {
                 events: Arc::clone(&events),
+                error: FakeError::Infrastructure,
             },
             gate.clone(),
         );
@@ -3337,6 +3358,73 @@ mod tests {
         )
         .await
         .expect("durable crash classification releases the interrupt gate");
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["authorize", "execute", "classify"]
+        );
+    }
+
+    #[test]
+    fn fatal_executor_failure_classes_are_not_containable() {
+        assert!(is_fatal_executor_failure_class(
+            OperatorFailureClass::FailClosedCorruption
+        ));
+        assert!(is_fatal_executor_failure_class(
+            OperatorFailureClass::CallerOrHubBug
+        ));
+        assert!(!is_fatal_executor_failure_class(
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            }
+        ));
+        assert!(!is_fatal_executor_failure_class(
+            OperatorFailureClass::IdentityCollision
+        ));
+    }
+
+    /// INV-011 / INV-024 / INV-037: crash classification closes an authorized
+    /// attempt before a fail-closed executor error remains fatal to the daemon.
+    #[tokio::test]
+    async fn inv011_inv024_inv037_corrupt_executor_failure_remains_fatal_after_classification() {
+        let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = current_attempt_fixture(&batch);
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: true,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            FailingExecutor {
+                events: Arc::clone(&events),
+                error: FakeError::Corruption,
+            },
+            InProcessToolDispatchGate::default(),
+        );
+
+        assert!(matches!(
+            service.execute(batch.session(), batch.turn()).await,
+            Err(ToolExecutionServiceError::Executor(FakeError::Corruption))
+        ));
+        assert!(service.retained_state().is_none());
         assert_eq!(
             *events.lock().expect("event lock"),
             ["authorize", "execute", "classify"]
@@ -3380,6 +3468,7 @@ mod tests {
             catalog,
             FailingExecutor {
                 events: Arc::clone(&events),
+                error: FakeError::Infrastructure,
             },
             gate.clone(),
         );
@@ -3387,7 +3476,7 @@ mod tests {
         assert!(matches!(
             service.execute(batch.session(), batch.turn()).await,
             Err(ToolExecutionServiceError::ExecutorCrashClassification {
-                executor_error: FakeError::Ordinary,
+                executor_error: FakeError::Infrastructure,
                 classification_error: FakeError::Ordinary,
             })
         ));
