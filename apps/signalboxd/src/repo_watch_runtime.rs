@@ -3428,17 +3428,6 @@ impl PollCache {
     }
 }
 
-#[cfg(test)]
-struct PollCycleTiming {
-    interval: Duration,
-    elapsed: Duration,
-}
-
-#[cfg(test)]
-const fn remaining_interval(timing: PollCycleTiming) -> Duration {
-    timing.interval.saturating_sub(timing.elapsed)
-}
-
 fn reuse_pull_request(
     previous: &RepoWatchPullRequestState,
     reviews: Vec<RepoWatchReviewObservation>,
@@ -3851,8 +3840,8 @@ mod tests {
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
         ListedPullRequest, MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
         MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
-        PollCache, PollCycleTiming, PullRequestSettlement, PullResponse, ReactionContent,
-        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
+        PollCache, PullRequestSettlement, PullResponse, ReactionContent, RepoWatchAuthorLogin,
+        RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchChildExit,
@@ -3862,8 +3851,8 @@ mod tests {
         WebhookDrainRetry, WorkflowName, WorkflowResponse, derive_repo_watch_events,
         dispatch_context_json, inspect_webhook_drain, next_poll_deadline, next_repository_wake,
         normalize_checks_outcome, normalize_pull_request_context, object_id,
-        owed_dispatch_context_json_parts, remaining_interval, rule_activation_error,
-        run_until_shutdown, supervise_repository_tasks, targeted_pull_requests,
+        owed_dispatch_context_json_parts, rule_activation_error, run_until_shutdown,
+        supervise_repository_tasks, targeted_pull_requests,
     };
     use signalbox_application::{
         InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
@@ -5828,32 +5817,6 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_poll_within_its_interval_keeps_the_fixed_rate() {
-        let cycle_started = Instant::now();
-        let now = cycle_started + Duration::from_secs(30);
-
-        assert_eq!(
-            next_poll_deadline(cycle_started, POLL_INTERVAL, now),
-            cycle_started + POLL_INTERVAL
-        );
-    }
-
-    /// A poll that outlasts its own interval cannot hold the fixed rate, and a
-    /// missed tick left in the past would make the poll arm ready on entry to
-    /// every pass, so the task would never sleep and never reach the arms that
-    /// drain durable webhook work.
-    #[tokio::test(start_paused = true)]
-    async fn a_poll_that_outlasts_its_interval_still_leaves_the_task_idle() {
-        let cycle_started = Instant::now();
-        let now = cycle_started + POLL_INTERVAL + Duration::from_secs(1);
-
-        let next_poll = next_poll_deadline(cycle_started, POLL_INTERVAL, now);
-
-        assert_eq!(next_poll, now + POLL_INTERVAL);
-        assert!(next_poll > now, "an elapsed deadline never sleeps");
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn an_overdue_webhook_retry_precedes_an_overdue_poll() {
         let (_shutdown, mut shutdown_receiver) = watch::channel(false);
         let (_admissions, admitted) = watch::channel(());
@@ -6698,37 +6661,40 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_cycle_shorter_than_the_interval_waits_out_the_remainder() {
+    #[tokio::test(start_paused = true)]
+    async fn a_cycle_shorter_than_the_interval_waits_out_the_remainder() {
+        let cycle_started = Instant::now();
+        let completed = cycle_started + SHORT_CYCLE;
+
+        let next_poll = next_poll_deadline(cycle_started, POLL_INTERVAL, completed);
+
+        assert_eq!(next_poll, cycle_started + POLL_INTERVAL);
+        assert_eq!(next_poll - completed, SHORT_CYCLE_REMAINDER);
+    }
+
+    /// Following such a cycle immediately would leave the poll deadline elapsed
+    /// on entry to every pass, so the task would never sleep and never reach
+    /// the arms that drain durable webhook work.
+    #[tokio::test(start_paused = true)]
+    async fn a_cycle_that_reaches_the_interval_starts_a_fresh_interval() {
+        let cycle_started = Instant::now();
+        let completed = cycle_started + POLL_INTERVAL;
+
         assert_eq!(
-            remaining_interval(PollCycleTiming {
-                interval: POLL_INTERVAL,
-                elapsed: SHORT_CYCLE,
-            }),
-            SHORT_CYCLE_REMAINDER
+            next_poll_deadline(cycle_started, POLL_INTERVAL, completed),
+            completed + POLL_INTERVAL
         );
     }
 
-    #[test]
-    fn a_cycle_that_reaches_the_interval_starts_the_next_immediately() {
-        assert_eq!(
-            remaining_interval(PollCycleTiming {
-                interval: POLL_INTERVAL,
-                elapsed: POLL_INTERVAL,
-            }),
-            Duration::ZERO
-        );
-    }
+    #[tokio::test(start_paused = true)]
+    async fn a_cycle_that_overruns_the_interval_starts_a_fresh_interval() {
+        let cycle_started = Instant::now();
+        let completed = cycle_started + OVERRUNNING_CYCLE;
 
-    #[test]
-    fn a_cycle_that_overruns_the_interval_starts_the_next_immediately() {
-        assert_eq!(
-            remaining_interval(PollCycleTiming {
-                interval: POLL_INTERVAL,
-                elapsed: OVERRUNNING_CYCLE,
-            }),
-            Duration::ZERO
-        );
+        let next_poll = next_poll_deadline(cycle_started, POLL_INTERVAL, completed);
+
+        assert_eq!(next_poll, completed + POLL_INTERVAL);
+        assert!(next_poll > completed, "an elapsed deadline never sleeps");
     }
 
     #[tokio::test]

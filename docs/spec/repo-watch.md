@@ -129,11 +129,13 @@ conservatively probes one bounded successor; the cap page is reread
 unconditionally so that probe never manufactures page 101. A failed, rejected,
 partial, or unparseable poll submits no persistence candidate. The
 per-repository interval is measured start to start, so a cadence does not drift
-by the duration of its own attempt; attempts never overlap, and an attempt that
-reaches or exceeds the interval is followed immediately by the next. A webhook
-wake serializes with the same repository task and does not reset the full-poll
-deadline; a failed or unavailable webhook endpoint therefore loses acceleration,
-not reconciliation.
+by the duration of its own attempt, and attempts never overlap. An attempt that
+reaches or exceeds the interval cannot hold that cadence, and starts a fresh
+interval from its own completion rather than following immediately: a poll
+deadline left in the past would win every scheduling decision the repository
+task makes and starve the durable webhook drain. A webhook wake serializes with
+the same repository task and does not reset the full-poll deadline; a failed or
+unavailable webhook endpoint therefore loses acceleration, not reconciliation.
 
 **Implemented behavior.** One attempt fetches up to eight open pull requests
 concurrently. The fetch sequence within a single pull request stays ordered, and
