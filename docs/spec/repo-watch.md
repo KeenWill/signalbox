@@ -744,8 +744,12 @@ page peers reach terminal state. The repository task schedules a new drain
 attempt after five seconds without waiting for a full poll, another delivery, or
 a restart. Consecutive failures double that delay to a five-minute ceiling and a
 success returns it to five seconds, so a delivery that cannot be projected costs
-bounded repeated work rather than a fixed five-second loop. An overdue retry is
-taken ahead of an overdue poll, and a full poll that outlasts its own interval
+bounded repeated work rather than a fixed five-second loop. A failed full poll
+schedules that retry only when none is already owed, and an admission wake is
+suppressed while one is, so neither a rapidly failing poll nor an authenticated
+replay stream can defer or bypass the backoff; a suppressed wake coalesces and
+is observed by the attempt that follows the retry. An overdue retry is taken
+ahead of an overdue poll, and a full poll that outlasts its own interval
 schedules the next one a whole interval from completion; without both, a poll
 deadline that is always already elapsed would win every scheduling decision and
 starve durable webhook work for as long as polling kept failing. An independent

@@ -371,6 +371,24 @@ impl WebhookDrainRetry {
         self.deadline = Some(Instant::now() + self.delay());
     }
 
+    /// Whether a drain attempt is already owed, and therefore whether the
+    /// backoff earned by consecutive failures is currently in force.
+    const fn is_backing_off(&self) -> bool {
+        self.deadline.is_some()
+    }
+
+    /// Schedules a retry only when none is already owed.
+    ///
+    /// A failed full poll may never have reached the drain, so it must not
+    /// push an already-earned retry further out: with a poll interval shorter
+    /// than the current delay, every failure would reschedule the deadline and
+    /// the retry would never come due at all.
+    fn ensure_scheduled(&mut self) {
+        if self.deadline.is_none() {
+            self.schedule();
+        }
+    }
+
     fn clear(&mut self) {
         self.deadline = None;
         self.consecutive_failures = 0;
@@ -415,6 +433,14 @@ enum RepositoryWatchWake {
 /// of them and leave durable webhook deliveries pending for as long as polling
 /// kept failing. Deferring a poll costs at most one drain attempt, because
 /// taking the retry reschedules its deadline before the next pass.
+///
+/// An admission wake is disabled while a retry is owed, so it cannot start a
+/// drain the backoff has deferred. Admission is authenticated but not trusted
+/// to pace this worker: replays are acknowledged at the intake rate, and each
+/// one publishing an immediate drain would drive provider and database work at
+/// that rate for as long as the drain kept failing. Nothing is lost by waiting,
+/// because the wake coalesces and an unobserved one stays observable for the
+/// attempt that follows the retry.
 async fn next_repository_wake(
     shutdown: &mut watch::Receiver<bool>,
     next_poll: Instant,
@@ -432,7 +458,7 @@ async fn next_repository_wake(
         }
         () = webhook_retry.due() => RepositoryWatchWake::WebhookRetry,
         () = sleep_until(next_poll) => RepositoryWatchWake::Poll,
-        admitted = receive_webhook_work(webhook_work) => {
+        admitted = receive_webhook_work(webhook_work), if !webhook_retry.is_backing_off() => {
             if admitted {
                 RepositoryWatchWake::WebhookWork
             } else {
@@ -696,7 +722,7 @@ impl RepositoryWatchTask {
                         }
                         Err(error) => {
                             if self.webhook_work.is_some() {
-                                webhook_retry.update_after(&result);
+                                webhook_retry.ensure_scheduled();
                             }
                             tracing::warn!(
                                 repository = %self.repository.as_str(),
@@ -4126,6 +4152,10 @@ mod tests {
         )?)
     }
 
+    const fn drain_failure() -> Result<(), RepositoryWatchAttemptError> {
+        Err(RepositoryWatchAttemptError::Persistence)
+    }
+
     fn synchronize_admission(delivery: u128) -> Result<RepoWatchWebhookAdmission, Box<dyn Error>> {
         let body = serde_json::json!({
             "action": "synchronize",
@@ -5843,22 +5873,75 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn consecutive_drain_failures_back_off_to_a_bounded_delay() {
+    async fn a_second_consecutive_drain_failure_doubles_the_retry_delay() {
         let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
 
-        retry.update_after(&Err(RepositoryWatchAttemptError::Persistence));
-        assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_DELAY);
-        retry.update_after(&Err(RepositoryWatchAttemptError::Persistence));
+        retry.update_after(&drain_failure());
+
         assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_DELAY * 2);
-        for _ in 0..32 {
-            retry.update_after(&Err(RepositoryWatchAttemptError::Persistence));
-        }
+    }
+
+    /// The seventh consecutive failure is the first whose doubling reaches the
+    /// ceiling, and the eighth stays there rather than growing past it.
+    #[tokio::test(start_paused = true)]
+    async fn consecutive_drain_failures_stop_doubling_at_the_ceiling() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_DELAY * 32);
+
+        retry.update_after(&drain_failure());
         assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_MAX_DELAY);
+
+        retry.update_after(&drain_failure());
+
+        assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_MAX_DELAY);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_drained_webhook_page_clears_the_retry_backoff() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
 
         retry.update_after(&Ok(()));
 
         assert_eq!(retry.deadline, None);
         assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_DELAY);
+    }
+
+    /// A failed full poll may never have reached the drain, so it must not
+    /// push an already-earned retry further out: with a poll interval shorter
+    /// than the current delay, every failure would reschedule the deadline and
+    /// the retry would never come due.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_poll_never_defers_a_retry_that_is_already_owed() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        let owed = retry.deadline;
+
+        retry.ensure_scheduled();
+
+        assert_eq!(retry.deadline, owed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_poll_schedules_a_retry_when_none_is_owed() {
+        let scheduled_at = Instant::now();
+        let mut retry = WebhookDrainRetry::default();
+
+        retry.ensure_scheduled();
+
+        assert_eq!(
+            retry.deadline,
+            Some(scheduled_at + WEBHOOK_DRAIN_RETRY_DELAY)
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -5915,6 +5998,55 @@ mod tests {
         let wake = next_repository_wake(
             &mut shutdown_receiver,
             next_poll,
+            &webhook_retry,
+            &mut webhook_work,
+        )
+        .await;
+
+        assert_eq!(wake, RepositoryWatchWake::WebhookWork);
+    }
+
+    /// An authenticated sender can replay an admitted delivery at the intake
+    /// rate, so a wake must not start a drain the backoff has deferred.
+    #[tokio::test(start_paused = true)]
+    async fn an_admission_wake_defers_to_an_owed_retry() {
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let (admissions, admitted) = watch::channel(());
+        let mut webhook_work = Some(admitted);
+        let mut webhook_retry = WebhookDrainRetry::default();
+        webhook_retry.update_after(&drain_failure());
+        admissions
+            .send(())
+            .expect("the fixture task still holds the wake receiver");
+
+        let wake = next_repository_wake(
+            &mut shutdown_receiver,
+            Instant::now() + POLL_INTERVAL,
+            &webhook_retry,
+            &mut webhook_work,
+        )
+        .await;
+
+        assert_eq!(wake, RepositoryWatchWake::WebhookRetry);
+    }
+
+    /// The wake coalesces, so one deferred by the backoff is still there for
+    /// the attempt that follows the retry rather than being lost.
+    #[tokio::test(start_paused = true)]
+    async fn a_deferred_admission_wake_survives_the_backoff() {
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let (admissions, admitted) = watch::channel(());
+        let mut webhook_work = Some(admitted);
+        let mut webhook_retry = WebhookDrainRetry::default();
+        webhook_retry.update_after(&drain_failure());
+        admissions
+            .send(())
+            .expect("the fixture task still holds the wake receiver");
+        webhook_retry.update_after(&Ok(()));
+
+        let wake = next_repository_wake(
+            &mut shutdown_receiver,
+            Instant::now() + POLL_INTERVAL,
             &webhook_retry,
             &mut webhook_work,
         )
