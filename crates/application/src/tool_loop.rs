@@ -1591,13 +1591,16 @@ where
             .await;
         match (failure, classification) {
             (UntrustedExecutorFailure::Executor(executor_error), Ok(outcome)) => {
-                if is_fatal_executor_failure_class(executor_error.operator_failure_class()) {
+                let failure_class = executor_error.operator_failure_class();
+                if is_fatal_executor_failure_class(failure_class) {
                     return Err(ToolExecutionServiceError::Executor(executor_error));
                 }
                 tracing::warn!(
                     session_id = %correlation.session().as_uuid(),
                     turn_id = %correlation.turn().as_uuid(),
                     tool_attempt_id = %correlation.attempt().as_uuid(),
+                    failure_class = ?failure_class,
+                    cause_code = executor_error.operator_failure_cause_code(),
                     "tool executor failed after dispatch; durable crash classification contains the failure"
                 );
                 Ok(ToolExecutionServiceOutcome::CrashClassified(Box::new(
