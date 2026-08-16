@@ -25,6 +25,7 @@ pub struct ResolvedRunnerCredential {
     injection_env: String,
     value: String,
     escaped_value: String,
+    solidus_escaped_value: String,
 }
 
 impl ResolvedRunnerCredential {
@@ -53,14 +54,19 @@ impl ResolvedRunnerCredential {
         )
     }
 
-    /// Scrubs the exact value and its JSON-string-escaped form from captured text.
+    /// Scrubs the exact value and its JSON-string-escaped forms from captured text.
     pub fn redact_text(&self, text: String) -> String {
-        let redacted = text.replace(&self.value, REDACTED);
-        if self.escaped_value == self.value {
-            redacted
+        let replacement = if REDACTED.contains(&self.value)
+            || REDACTED.contains(&self.escaped_value)
+            || REDACTED.contains(&self.solidus_escaped_value)
+        {
+            ""
         } else {
-            redacted.replace(&self.escaped_value, REDACTED)
-        }
+            REDACTED
+        };
+        text.replace(&self.solidus_escaped_value, replacement)
+            .replace(&self.escaped_value, replacement)
+            .replace(&self.value, replacement)
     }
 }
 
@@ -72,6 +78,7 @@ impl fmt::Debug for ResolvedRunnerCredential {
             .field("injection_env", &self.injection_env)
             .field("value", &"<redacted>")
             .field("escaped_value", &"<redacted>")
+            .field("solidus_escaped_value", &"<redacted>")
             .finish()
     }
 }
@@ -188,11 +195,13 @@ pub fn resolve_runner_credential(
         .get(1..encoded_end)
         .ok_or_else(|| unavailable(profile))?
         .to_owned();
+    let solidus_escaped_value = escaped_value.replace('/', "\\/");
     Ok(ResolvedRunnerCredential {
         profile: profile.clone(),
         injection_env: configured.injection_env().to_owned(),
         value,
         escaped_value,
+        solidus_escaped_value,
     })
 }
 
@@ -302,8 +311,50 @@ injection_env = "{ENVIRONMENT}"
         );
         assert_eq!(
             format!("{resolved:?}"),
-            "ResolvedRunnerCredential { profile: ProfileName(\"github-runner\"), injection_env: \"GH_TOKEN\", value: \"<redacted>\", escaped_value: \"<redacted>\" }"
+            "ResolvedRunnerCredential { profile: ProfileName(\"github-runner\"), injection_env: \"GH_TOKEN\", value: \"<redacted>\", escaped_value: \"<redacted>\", solidus_escaped_value: \"<redacted>\" }"
         );
+    }
+
+    /// INV-035: valid optional JSON solidus escapes cannot expose the credential.
+    #[test]
+    fn inv_035_redaction_scrubs_the_solidus_escaped_json_form() {
+        let directory = TempDir::new().expect("a synthetic credential directory exists");
+        let path = directory.path().join("credential");
+        let value = "synthetic/token";
+        write_credential(&path, value.as_bytes());
+        let resolved = resolve_runner_credential(&configuration(&path), &profile())
+            .expect("the synthetic credential resolves");
+
+        assert_eq!(
+            resolved.redact_text(r"json=synthetic\/token".to_owned()),
+            "json=[redacted]"
+        );
+    }
+
+    /// INV-035: a short credential present in the usual marker is removed completely.
+    #[test]
+    fn inv_035_redaction_marker_cannot_reproduce_a_short_credential() {
+        let directory = TempDir::new().expect("a synthetic credential directory exists");
+        let path = directory.path().join("credential");
+        let value = "a";
+        write_credential(&path, value.as_bytes());
+        let resolved = resolve_runner_credential(&configuration(&path), &profile())
+            .expect("the short synthetic credential resolves");
+
+        assert_eq!(resolved.redact_text(value.to_owned()), "");
+    }
+
+    /// INV-035: a credential equal to the usual marker is removed completely.
+    #[test]
+    fn inv_035_redaction_marker_cannot_reproduce_an_equal_credential() {
+        let directory = TempDir::new().expect("a synthetic credential directory exists");
+        let path = directory.path().join("credential");
+        let value = REDACTED;
+        write_credential(&path, value.as_bytes());
+        let resolved = resolve_runner_credential(&configuration(&path), &profile())
+            .expect("the marker-equal synthetic credential resolves");
+
+        assert_eq!(resolved.redact_text(value.to_owned()), "");
     }
 
     /// INV-035: every physical resolution reopens the configured path so rotation is visible.
