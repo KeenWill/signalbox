@@ -1266,7 +1266,28 @@ impl HttpsBrokerSocketIdentity {
                     source: Some(source),
                 }
             })?;
-            if destination != path {
+            let current_process_descriptors =
+                PathBuf::from(format!("/proc/{}/fd", std::process::id()));
+            let descriptor_relative_path = path
+                .strip_prefix(&current_process_descriptors)
+                .ok()
+                .is_some_and(|relative| {
+                    let mut components = relative.components();
+                    let descriptor_is_numeric = components.next().is_some_and(|component| {
+                        matches!(component, std::path::Component::Normal(descriptor)
+                        if descriptor.to_str().is_some_and(|descriptor| {
+                            !descriptor.is_empty()
+                                && descriptor.bytes().all(|byte| byte.is_ascii_digit())
+                        }))
+                    });
+                    descriptor_is_numeric
+                        && components.next().is_some_and(|component| {
+                            matches!(component, std::path::Component::Normal(_))
+                        })
+                        && components
+                            .all(|component| matches!(component, std::path::Component::Normal(_)))
+                });
+            if destination != path && !descriptor_relative_path {
                 return Err(ExecToolConstructionError::HttpsBrokerSocket {
                     path: path.to_owned(),
                     source: None,
@@ -4811,6 +4832,37 @@ mod tests {
         );
         assert!(request.arguments.ends_with(&dispatch_arguments));
         assert_eq!(result.stdout.text, SANDBOXED_STDOUT);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runner_restricted_https_bridge_accepts_current_process_descriptor_path()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let broker_root = ReplacementWorkspace::new()?;
+        let broker_root_descriptor = std::fs::File::open(broker_root.path())?;
+        let broker_socket = broker_root.path().join("broker.sock");
+        let _broker = UnixListener::bind(&broker_socket)?;
+        let descriptor_socket = PathBuf::from(format!(
+            "/proc/{}/fd/{}/broker.sock",
+            std::process::id(),
+            std::os::fd::AsRawFd::as_raw_fd(&broker_root_descriptor),
+        ));
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+
+        let constructed = SandboxedCommandRunner::try_new_runner_restricted_with_https_broker(
+            runner,
+            workspace.path(),
+            &[read_only.path().to_owned()],
+            &descriptor_socket,
+        );
+
+        assert!(constructed.is_ok());
         Ok(())
     }
 
