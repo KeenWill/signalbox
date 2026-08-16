@@ -141,10 +141,12 @@ impl SandboxEnvironmentVariable {
         if !valid_name {
             return Err(InvalidSandboxEnvironmentVariable::Name);
         }
-        if matches!(
-            name.as_str(),
-            "HOME" | "HTTPS_PROXY" | "LANG" | "LC_ALL" | "PATH"
-        ) {
+        if name.starts_with("LD_")
+            || matches!(
+                name.as_str(),
+                "HOME" | "HTTPS_PROXY" | "LANG" | "LC_ALL" | "PATH"
+            )
+        {
             return Err(InvalidSandboxEnvironmentVariable::ReservedName);
         }
         if value.is_empty()
@@ -175,7 +177,8 @@ impl fmt::Debug for SandboxEnvironmentVariable {
 pub enum InvalidSandboxEnvironmentVariable {
     /// The name is not a canonical uppercase environment identifier.
     Name,
-    /// The name belongs to the fixed sandbox runtime environment.
+    /// The name belongs to the fixed sandbox runtime environment or controls
+    /// the dynamic loader used to start the outer supervisor.
     ReservedName,
     /// The value is empty, contains NUL, or exceeds 65,536 UTF-8 bytes.
     Value,
@@ -614,7 +617,7 @@ trait CommandExecution: Clone + Send {
 }
 
 /// Exact bounded request supplied to an injected process runner.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ProcessRequest {
     /// Executable name or path.
     pub program: OsString,
@@ -632,6 +635,37 @@ pub struct ProcessRequest {
     pub environment_inheritance: ProcessEnvironment,
     /// Trusted status protocol expected from the supervised target.
     pub status_protocol: ProcessStatusProtocol,
+}
+
+impl fmt::Debug for ProcessRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessRequest")
+            .field("program", &self.program)
+            .field("arguments", &self.arguments)
+            .field("working_directory", &self.working_directory)
+            .field("timeout", &self.timeout)
+            .field("capture_bytes", &self.capture_bytes)
+            .field(
+                "environment",
+                &RedactedProcessEnvironment(&self.environment),
+            )
+            .field("environment_inheritance", &self.environment_inheritance)
+            .field("status_protocol", &self.status_protocol)
+            .finish()
+    }
+}
+
+struct RedactedProcessEnvironment<'a>(&'a BTreeMap<OsString, OsString>);
+
+impl fmt::Debug for RedactedProcessEnvironment<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut map = formatter.debug_map();
+        for name in self.0.keys() {
+            map.entry(name, &"<redacted>");
+        }
+        map.finish()
+    }
 }
 
 /// Ambient-environment posture for an injected process request.
@@ -5026,11 +5060,35 @@ mod tests {
         )
         .expect("the synthetic environment fixture is valid");
         let rendered = format!("{environment:?}");
-
-        assert_eq!(
-            rendered,
-            "SandboxEnvironmentVariable { name: \"GH_TOKEN\", value: \"<redacted>\" }"
+        let expected = format!(
+            "SandboxEnvironmentVariable {{ name: {name:?}, value: \"<redacted>\" }}",
+            name = OsString::from(SYNTHETIC_ENVIRONMENT_NAME)
         );
+
+        assert_eq!(rendered, expected);
+        assert!(!rendered.contains(SYNTHETIC_ENVIRONMENT_VALUE));
+    }
+
+    #[test]
+    fn process_request_debug_output_redacts_environment_values() {
+        let request = ProcessRequest {
+            program: OsString::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: PathBuf::from("."),
+            timeout: Duration::from_secs(REQUEST_TIMEOUT_SECONDS),
+            capture_bytes: SETUP_CAPTURE_BYTES,
+            environment: BTreeMap::from([(
+                OsString::from(SYNTHETIC_ENVIRONMENT_NAME),
+                OsString::from(SYNTHETIC_ENVIRONMENT_VALUE),
+            )]),
+            environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::Direct,
+        };
+
+        let rendered = format!("{request:?}");
+
+        assert!(rendered.contains(SYNTHETIC_ENVIRONMENT_NAME));
+        assert!(rendered.contains("<redacted>"));
         assert!(!rendered.contains(SYNTHETIC_ENVIRONMENT_VALUE));
     }
 
@@ -5056,6 +5114,14 @@ mod tests {
             String::from("PATH"),
             String::from(SYNTHETIC_ENVIRONMENT_VALUE),
         );
+        let loader_preload = SandboxEnvironmentVariable::try_new(
+            String::from("LD_PRELOAD"),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        );
+        let loader_audit = SandboxEnvironmentVariable::try_new(
+            String::from("LD_AUDIT"),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        );
 
         assert_eq!(home, Err(InvalidSandboxEnvironmentVariable::ReservedName));
         assert_eq!(
@@ -5065,6 +5131,14 @@ mod tests {
         assert_eq!(lang, Err(InvalidSandboxEnvironmentVariable::ReservedName));
         assert_eq!(locale, Err(InvalidSandboxEnvironmentVariable::ReservedName));
         assert_eq!(path, Err(InvalidSandboxEnvironmentVariable::ReservedName));
+        assert_eq!(
+            loader_preload,
+            Err(InvalidSandboxEnvironmentVariable::ReservedName)
+        );
+        assert_eq!(
+            loader_audit,
+            Err(InvalidSandboxEnvironmentVariable::ReservedName)
+        );
     }
 
     #[test]
