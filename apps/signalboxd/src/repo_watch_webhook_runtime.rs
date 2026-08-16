@@ -5,9 +5,11 @@ use std::{
     error::Error,
     fmt,
     future::Future,
-    net::TcpListener as StdTcpListener,
+    net::{SocketAddr, TcpListener as StdTcpListener},
     num::NonZeroU64,
+    pin::Pin,
     sync::{Arc, Mutex, PoisonError},
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 
@@ -17,6 +19,7 @@ use axum::{
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, HeaderValue, Request, StatusCode},
     routing::post,
+    serve::Listener,
 };
 use hmac::{Hmac, KeyInit, Mac};
 use serde::Deserialize;
@@ -29,9 +32,10 @@ use signalbox_persistence::repo_watch_webhook::{
 };
 use sqlx::PgPool;
 use tokio::{
-    net::TcpListener,
-    sync::{Semaphore, watch},
-    time::timeout,
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    net::{TcpListener, TcpStream},
+    sync::{OwnedSemaphorePermit, Semaphore, watch},
+    time::{Instant as TokioInstant, Sleep, sleep, timeout},
 };
 use uuid::Uuid;
 
@@ -65,14 +69,21 @@ pub(crate) const MAX_WEBHOOK_IN_FLIGHT: usize = 64;
 pub(crate) const MAX_WEBHOOK_IN_FLIGHT_BYTES: usize = 128 * 1024 * 1024;
 /// Hard safety ceiling protecting one hook from sustained authenticated floods.
 pub(crate) const MAX_WEBHOOK_DELIVERIES_PER_MINUTE: u32 = 3_000;
-/// Hard safety ceiling on what one hook may present before proving the shared
-/// secret. It is a separate allowance so a forged flood cannot spend what real
-/// GitHub deliveries draw on.
-pub(crate) const MAX_WEBHOOK_UNVERIFIED_REQUESTS_PER_MINUTE: u32 = 3_000;
+/// Hard safety ceiling on connections held at once, including those that have
+/// sent no complete request yet. Nothing the handler bounds begins until whole
+/// request headers arrive, so this is what keeps a peer that opens sockets and
+/// withholds headers from exhausting daemon descriptors.
+pub(crate) const MAX_WEBHOOK_CONNECTIONS: usize = 256;
+/// Hard safety deadline for one connection read to make progress. It covers the
+/// request line and headers, which are read before any handler runs.
+pub(crate) const WEBHOOK_CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(15);
 /// Hard safety deadline for reading one request body. A peer that opens a
 /// request and then stalls its body would otherwise hold a concurrency permit
 /// and its share of the memory budget indefinitely.
 pub(crate) const WEBHOOK_BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a failed accept waits before the listener tries again, so a
+/// persistent listener fault cannot become a busy loop.
+const WEBHOOK_ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 /// Granularity of the shared body-memory budget, so one request reserves close
@@ -194,6 +205,11 @@ impl RepoWatchWebhookRuntime {
         }
         let listener =
             TcpListener::from_std(self.listener).map_err(RepoWatchWebhookRuntimeError)?;
+        let listener = BoundedWebhookListener {
+            listener,
+            connections: Arc::new(Semaphore::new(MAX_WEBHOOK_CONNECTIONS)),
+            read_timeout: WEBHOOK_CONNECTION_READ_TIMEOUT,
+        };
         let router = Router::new()
             .route(&self.path, post(admit_webhook))
             .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES))
@@ -214,6 +230,134 @@ fn bind_listener(
         .set_nonblocking(true)
         .map_err(RepoWatchWebhookRuntimeConstructionError::Socket)?;
     Ok(listener)
+}
+
+/// Accepts connections under a fixed budget and a read deadline.
+///
+/// Axum builds its Hyper connection without the timer Hyper's own header-read
+/// deadline needs, so nothing bounds a peer between accept and the first
+/// complete request. These two bounds do: the budget caps how many such peers
+/// can exist, and the deadline retires any one that stops making progress.
+struct BoundedWebhookListener {
+    listener: TcpListener,
+    connections: Arc<Semaphore>,
+    read_timeout: Duration,
+}
+
+impl Listener for BoundedWebhookListener {
+    type Io = DeadlinedConnection<TcpStream>;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            // Taken before accepting, so a peer beyond the budget waits in the
+            // kernel backlog rather than holding a daemon descriptor.
+            let permit = match Arc::clone(&self.connections).acquire_owned().await {
+                Ok(permit) => permit,
+                // This listener owns the budget and never closes it. Were that
+                // ever to change, admitting nothing is the safe reading.
+                Err(_) => std::future::pending().await,
+            };
+            match self.listener.accept().await {
+                Ok((stream, address)) => {
+                    return (
+                        DeadlinedConnection::new(stream, self.read_timeout, permit),
+                        address,
+                    );
+                }
+                Err(error) => {
+                    drop(permit);
+                    tracing::warn!(
+                        cause_code = "webhook_accept_failed",
+                        error = %error,
+                        "repository-watch webhook listener could not accept a connection"
+                    );
+                    sleep(WEBHOOK_ACCEPT_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
+/// One accepted connection that fails once a read stops making progress.
+///
+/// The deadline restarts on every byte received, so it retires stalled peers
+/// rather than capping a connection's lifetime; a peer that keeps dripping
+/// bytes is bounded by the connection budget instead.
+pub(crate) struct DeadlinedConnection<Stream> {
+    stream: Stream,
+    deadline: Pin<Box<Sleep>>,
+    read_timeout: Duration,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl<Stream> DeadlinedConnection<Stream> {
+    pub(crate) fn new(
+        stream: Stream,
+        read_timeout: Duration,
+        permit: OwnedSemaphorePermit,
+    ) -> Self {
+        Self {
+            stream,
+            deadline: Box::pin(sleep(read_timeout)),
+            read_timeout,
+            _permit: permit,
+        }
+    }
+}
+
+impl<Stream: AsyncRead + Unpin> AsyncRead for DeadlinedConnection<Stream> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let connection = self.as_mut().get_mut();
+        match Pin::new(&mut connection.stream).poll_read(context, buffer) {
+            Poll::Ready(result) => {
+                connection
+                    .deadline
+                    .as_mut()
+                    .reset(TokioInstant::now() + connection.read_timeout);
+                Poll::Ready(result)
+            }
+            Poll::Pending => match connection.deadline.as_mut().poll(context) {
+                Poll::Ready(()) => Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "repository-watch webhook connection stalled before completing a request",
+                ))),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+}
+
+impl<Stream: AsyncWrite + Unpin> AsyncWrite for DeadlinedConnection<Stream> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.as_mut().get_mut().stream).poll_write(context, buffer)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.as_mut().get_mut().stream).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.as_mut().get_mut().stream).poll_shutdown(context)
+    }
 }
 
 async fn webhook_shutdown(mut shutdown: watch::Receiver<bool>) {
@@ -270,12 +414,12 @@ async fn admit_webhook(
     let Some(hook) = state.hooks.get(&headers.hook_id()).cloned() else {
         return StatusCode::UNAUTHORIZED;
     };
-    // Charged before the body is read, against an allowance separate from the
-    // authenticated one, so an unauthenticated flood bounds its own cost without
-    // spending what signature-valid deliveries for this hook draw on.
-    if !state.rate_limiter.admit_unverified(headers.hook_id()) {
-        return StatusCode::TOO_MANY_REQUESTS;
-    }
+    // Nothing is charged before verification. A budget keyed on the hook a
+    // request claims is a lever the attacker holds and GitHub does not: spending
+    // it with forged signatures would reject the deliveries it exists to protect.
+    // Unauthenticated cost is bounded by resources instead — the connection
+    // budget, the concurrency permit, the shared body budget, and the deadlines.
+    //
     // An undeclared length may buffer up to the per-request ceiling, so it
     // reserves that much of the shared budget until the body is read.
     let read_limit = headers
@@ -314,9 +458,9 @@ async fn admit_webhook(
     if verify_github_signature(secret.expose_bytes(), &body, headers.signature()).is_err() {
         return StatusCode::UNAUTHORIZED;
     }
-    // Only a delivery that proved the shared secret spends the authenticated
-    // allowance, which is what this ceiling exists to bound.
-    if !state.rate_limiter.admit_verified(headers.hook_id()) {
+    // Only a delivery that proved the shared secret spends this allowance, which
+    // is what the ceiling exists to bound.
+    if !state.rate_limiter.admit(headers.hook_id()) {
         return StatusCode::TOO_MANY_REQUESTS;
     }
     let envelope: WebhookEnvelope = match serde_json::from_slice(&body) {
@@ -337,13 +481,18 @@ async fn admit_webhook(
         return StatusCode::BAD_REQUEST;
     }
     let body_digest: [u8; 32] = Sha256::digest(&body).into();
+    // The admission owns its own copy, so the received buffer is released before
+    // the persistence await rather than doubling what the budget accounts for
+    // across it.
+    let exact_body = body.to_vec();
+    drop(body);
     let admission = match RepoWatchWebhookAdmission::try_new(
         RepoWatchWebhookDeliveryKey::new(headers.hook_id(), headers.delivery_id()),
         repository,
         headers.event().to_owned(),
         envelope.action,
         body_digest,
-        body.to_vec(),
+        exact_body,
     ) {
         Ok(admission) => admission,
         Err(_) => return StatusCode::BAD_REQUEST,
@@ -637,11 +786,11 @@ pub(crate) fn verify_github_signature(
         .map_err(|_| WebhookHttpRejection::InvalidSignature)
 }
 
-/// Per-hook admission windows, kept separate for requests that have proved the
-/// shared secret and those that have not.
+/// Per-hook admission windows for deliveries that have proved the shared
+/// secret. Requests that have not are bounded by resources, not by a counter an
+/// unauthenticated peer could spend.
 #[derive(Debug)]
 pub(crate) struct WebhookRateLimiter {
-    unverified: Mutex<HashMap<NonZeroU64, HookRateWindow>>,
     verified: Mutex<HashMap<NonZeroU64, HookRateWindow>>,
 }
 
@@ -654,21 +803,11 @@ struct HookRateWindow {
 impl WebhookRateLimiter {
     pub(crate) fn new() -> Self {
         Self {
-            unverified: Mutex::new(HashMap::new()),
             verified: Mutex::new(HashMap::new()),
         }
     }
 
-    pub(crate) fn admit_unverified(&self, hook_id: NonZeroU64) -> bool {
-        Self::admit_at(
-            &self.unverified,
-            hook_id,
-            Instant::now(),
-            MAX_WEBHOOK_UNVERIFIED_REQUESTS_PER_MINUTE,
-        )
-    }
-
-    pub(crate) fn admit_verified(&self, hook_id: NonZeroU64) -> bool {
+    pub(crate) fn admit(&self, hook_id: NonZeroU64) -> bool {
         Self::admit_at(
             &self.verified,
             hook_id,
@@ -749,10 +888,10 @@ mod tests {
     use super::{
         FileCredentialAccess, GitHubWebhookHeadersV1, MAX_WEBHOOK_BODY_BYTES,
         MAX_WEBHOOK_DELIVERIES_PER_MINUTE, MAX_WEBHOOK_IN_FLIGHT, MAX_WEBHOOK_SECRET_BYTES,
-        MAX_WEBHOOK_UNVERIFIED_REQUESTS_PER_MINUTE, WEBHOOK_BODY_BUDGET_GRANULES,
-        WEBHOOK_BODY_READ_TIMEOUT, WebhookBodyRejection, WebhookHookBinding, WebhookHttpRejection,
-        WebhookHttpState, WebhookRateLimiter, admit_webhook, body_budget_granules,
-        parse_github_headers, read_body_within_deadline, verify_github_signature,
+        WEBHOOK_BODY_BUDGET_GRANULES, WEBHOOK_BODY_READ_TIMEOUT, WEBHOOK_CONNECTION_READ_TIMEOUT,
+        WebhookBodyRejection, WebhookHookBinding, WebhookHttpRejection, WebhookHttpState,
+        WebhookRateLimiter, admit_webhook, body_budget_granules, parse_github_headers,
+        read_body_within_deadline, verify_github_signature,
     };
 
     const FIXTURE_HOOK_ID: NonZeroU64 = NonZeroU64::new(4_242).expect("fixture is positive");
@@ -1088,19 +1227,44 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn an_unverified_flood_leaves_the_authenticated_allowance_intact() {
-        let limiter = WebhookRateLimiter::new();
-        let started = std::time::Instant::now();
-        WebhookRateLimiter::saturate(
-            &limiter.unverified,
-            FIXTURE_HOOK_ID,
-            started,
-            MAX_WEBHOOK_UNVERIFIED_REQUESTS_PER_MINUTE,
-        );
+    #[tokio::test]
+    async fn a_forged_signature_never_spends_the_authenticated_allowance() {
+        let (_directory, state) = fixture_state();
+        let limiter = std::sync::Arc::clone(&state.rate_limiter);
+        let request = fixture_request(FIXTURE_BODY.to_vec(), b"different-body");
 
-        assert!(!limiter.admit_unverified(FIXTURE_HOOK_ID));
-        assert!(limiter.admit_verified(FIXTURE_HOOK_ID));
+        let status = admit_webhook(State(state), request).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            limiter
+                .verified
+                .lock()
+                .expect("fixture limiter is uncontended")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_connection_read_fails_at_the_deadline() {
+        use tokio::io::AsyncReadExt as _;
+
+        let (client, server) = tokio::io::duplex(64);
+        let budget = std::sync::Arc::new(Semaphore::new(1));
+        let permit = std::sync::Arc::clone(&budget)
+            .try_acquire_owned()
+            .expect("the fixture budget has one permit");
+        let mut connection =
+            super::DeadlinedConnection::new(server, WEBHOOK_CONNECTION_READ_TIMEOUT, permit);
+        let mut received = [0_u8; 1];
+
+        let error = connection
+            .read(&mut received)
+            .await
+            .expect_err("a peer that never sends must not hold its connection");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        drop(client);
     }
 
     #[tokio::test(start_paused = true)]

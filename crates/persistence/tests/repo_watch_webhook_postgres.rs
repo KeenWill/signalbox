@@ -16,10 +16,10 @@ use signalbox_domain::{CommitSha, PullRequestNumber, RepoWatchEventKindNameV1, R
 use signalbox_persistence::{
     disposable_test_container_labels, local_test_connection_options, migrate,
     repo_watch_webhook::{
-        PostgresRepoWatchWebhookStore, RepoWatchWebhookAdmission, RepoWatchWebhookAdmissionOutcome,
-        RepoWatchWebhookDeliveryKey, RepoWatchWebhookDisposition, RepoWatchWebhookPendingPageSize,
-        RepoWatchWebhookProjection, RepoWatchWebhookTargetedQuery, RepoWatchWebhookTerminalOutcome,
-        RepoWatchWebhookTerminalRequest,
+        MAX_PENDING_PAGE_BYTES, PostgresRepoWatchWebhookStore, RepoWatchWebhookAdmission,
+        RepoWatchWebhookAdmissionOutcome, RepoWatchWebhookDeliveryKey, RepoWatchWebhookDisposition,
+        RepoWatchWebhookPendingPageSize, RepoWatchWebhookProjection, RepoWatchWebhookTargetedQuery,
+        RepoWatchWebhookTerminalOutcome, RepoWatchWebhookTerminalRequest,
     },
 };
 use sqlx::{
@@ -47,6 +47,8 @@ const BODY: &[u8] = br#"{"repository":{"full_name":"signalbox/repository"}}"#;
 const OTHER_BODY: &[u8] = br#"{"repository":{"full_name":"signalbox/other"}}"#;
 const DIGEST: [u8; 32] = [0x11; 32];
 const OTHER_DIGEST: [u8; 32] = [0x22; 32];
+const LARGE_BODY_BYTES: usize = 4 * 1024 * 1024;
+const LARGE_DELIVERY_BASE: u128 = 0x900;
 const MATCHED_IDENTITY: [u8; 32] = [0x31; 32];
 const WEBHOOK_ONLY_IDENTITY: [u8; 32] = [0x32; 32];
 const POLL_ONLY_IDENTITY: [u8; 32] = [0x33; 32];
@@ -105,6 +107,31 @@ fn admission(
         digest,
         body.to_vec(),
     )?)
+}
+
+/// Admits `count` deliveries whose bodies are each `body_bytes` long.
+///
+/// The loop lives here rather than in a test body so each test stays
+/// straight-line, as `docs/agents/testing-style.md` rule 2 requires.
+async fn seed_sized_pending_deliveries(
+    store: &PostgresRepoWatchWebhookStore,
+    count: usize,
+    body_bytes: usize,
+) -> Result<(), Box<dyn Error>> {
+    for index in 0..count {
+        let body = vec![b'x'; body_bytes];
+        store
+            .admit(&admission(
+                delivery_key(LARGE_DELIVERY_BASE + index as u128),
+                repository()?,
+                EVENT_NAME,
+                Some(ACTION_NAME),
+                DIGEST,
+                &body,
+            )?)
+            .await?;
+    }
+    Ok(())
 }
 
 fn pending_page_size() -> RepoWatchWebhookPendingPageSize {
@@ -541,6 +568,65 @@ async fn terminal_disposition_drains_pending_delivery() -> Result<(), Box<dyn Er
             .await?;
     assert_eq!(projection_count, 1);
     assert_eq!(disposition_count, 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pending_page_stops_at_the_retained_byte_ceiling() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool);
+    let admitted = MAX_PENDING_PAGE_BYTES / LARGE_BODY_BYTES + 1;
+    seed_sized_pending_deliveries(&store, admitted, LARGE_BODY_BYTES).await?;
+
+    let page = store
+        .load_pending(&repository()?, pending_page_size())
+        .await?;
+
+    assert_eq!(page.len(), MAX_PENDING_PAGE_BYTES / LARGE_BODY_BYTES);
+    assert!(page.len() < admitted);
+    assert_eq!(page[0].key(), delivery_key(LARGE_DELIVERY_BASE));
+    assert_eq!(page[0].body().len(), LARGE_BODY_BYTES);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn one_body_above_the_page_ceiling_still_drains() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool);
+    seed_sized_pending_deliveries(&store, 1, MAX_PENDING_PAGE_BYTES + 1).await?;
+
+    let page = store
+        .load_pending(&repository()?, pending_page_size())
+        .await?;
+
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].body().len(), MAX_PENDING_PAGE_BYTES + 1);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn committed_disposition_is_refused_by_the_schema() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x501);
+    admit_fixture(&store, key).await?;
+
+    let rejected = sqlx::query(
+        "INSERT INTO repo_watch_webhook_disposition (hook_id, delivery_id, disposition)
+         VALUES ($1, $2, 'committed')",
+    )
+    .bind(Decimal::from(key.hook_id().get()))
+    .bind(key.delivery_id())
+    .execute(&pool)
+    .await;
+
+    assert!(
+        rejected.is_err(),
+        "shadow mode reserves no committed disposition"
+    );
     Ok(())
 }
 

@@ -198,7 +198,11 @@ sequence, so the limit bounds one frontier near 40 MB. Exceeding it fails the
 comparison, because the alternative is reusing an occurrence number and minting
 a content identity that collides with an already-durable one. Sequence
 exhaustion fails the comparison rather than wrapping. Provider-keyed immutable
-facts use sequence one without occupying frontier space. The cursor does not
+facts use sequence one without occupying frontier space. A fact counts as
+immutable only when the differ suppresses re-emission on members its stream key
+already names, so completed check runs are not among them: their conclusion can
+change under an unchanged run identity and completion generation, and they
+advance a frontier sequence like any recurring stream. The cursor does not
 retain resource keys, ETags, accepted transport responses, raw provider
 payloads, or credentials. A per-repository atomic commit accepts an expected
 generation, one complete cursor candidate, and its ordered event-occurrence
@@ -233,8 +237,13 @@ domain-separated source-independent stream identity, and the stream's positive
 occurrence sequence. The stream identity is closed by event kind. Recurring PR
 lifecycle, mergeability, head, label, thread, branch-advance, and reaction
 streams name the PR and their kind-specific label, thread, branch, or reaction
-members. Immutable check-suite and check-run facts name their provider identity
-and completion generation; reviews name their provider review identity; workflow
+members. Check runs are recurring too, naming their provider run identity and
+completion generation: a completed run edited back to an earlier conclusion
+restates that conclusion's facts exactly, so only an advancing occurrence
+sequence keeps the restored event's identity distinct from the first, and
+without it the commit would coalesce the restored conclusion away rather than
+announce it. Immutable check-suite facts name their provider identity and
+completion generation; reviews name their provider review identity; workflow
 facts name branch, workflow identity, run identity, and attempt. The normalized
 review observation has no submitted-time member, so version one assumes the
 provider review identity alone uniquely identifies that immutable submission.
@@ -725,13 +734,23 @@ body's canonical repository must equal the selected repository. It admits at
 most 64 requests concurrently, retains at most 128 MiB of request bodies across
 them, and reads any one body within 30 seconds; a peer that stalls its body
 therefore releases its concurrency slot and memory reservation instead of
-holding both. Each hook admits at most 3,000 signature-valid deliveries in each
-60-second window, and at most 3,000 requests that have not yet proved the shared
-secret. Those two allowances are separate, and the authenticated one is charged
-only after verification, so a forged flood cannot spend what real deliveries
-draw on. These are hard safety ceilings, not configuration knobs. The listener
-does not grant GitHub-originated data process-protocol authority, session
-authority, or polling credentials.
+holding both. The received buffer is released before the delivery is persisted,
+so what the budget accounts for is what is actually held across that wait.
+
+Nothing the handler bounds begins until whole request headers arrive, so two
+bounds sit before it: the listener holds at most 256 connections at once, and it
+retires any connection whose read makes no progress for 15 seconds. The
+connection budget is what bounds a peer that keeps dripping bytes, since each
+byte received restarts that deadline.
+
+Each hook admits at most 3,000 deliveries in each 60-second window, charged only
+once a delivery has proved the shared secret. Nothing is charged before
+verification: a budget keyed on the hook a request claims is a lever the
+attacker holds and GitHub does not, and spending it with forged signatures would
+reject the deliveries it exists to protect. Unauthenticated cost is bounded by
+resources instead. These are hard safety ceilings, not configuration knobs. The
+listener does not grant GitHub-originated data process-protocol authority,
+session authority, or polling credentials.
 
 **Implemented behavior.** A verified delivery is durably admitted before the
 listener returns `202 Accepted`. `repo_watch_webhook_delivery` keeps the unique
@@ -745,7 +764,11 @@ that repository's drain task remains available to receive it. The wake is an
 accelerator over durable state, not a work inventory: the repository task drains
 durable pending deliveries on startup, when woken, and as part of every full
 poll for which no retry is already owed, and a wake arriving during a drain
-remains observable for a follow-up attempt. One drain visits a bounded number of
+remains observable for a follow-up attempt. One pending page is bounded by both
+its row count and the exact payload bytes it may hold, and it reads those bodies
+one at a time, so a backlog of near-limit deliveries cannot retain far more than
+admission itself is allowed to; the oldest delivery is always read, so one body
+at the admission ceiling still drains. One drain visits a bounded number of
 pending pages and then re-arms that same wake, so a sustained stream is
 accelerated without holding the worker past an overdue full poll. A delivery
 whose processing fails is deferred for the rest of that drain rather than
@@ -770,46 +793,67 @@ a restart. Consecutive failures double that delay to a five-minute ceiling and a
 success returns it to five seconds, so a delivery that cannot be projected costs
 bounded repeated work rather than a fixed five-second loop. A failed full poll
 schedules that retry only when none is already owed, an admission wake is
-suppressed while one is, and a full poll omits its own drain step while one is,
-so neither a rapidly failing poll nor an authenticated replay stream can defer
-or bypass the backoff; a suppressed wake coalesces and is observed by the
-attempt that follows the retry. An overdue retry is taken ahead of an overdue
-poll, and a full poll that outlasts its own interval schedules the next one a
-whole interval from completion; without both, a poll deadline that is always
-already elapsed would win every scheduling decision and starve durable webhook
-work for as long as polling kept failing. An independent per-repository observer
-checks durable pending work every thirty seconds, reading delivery identity and
-receipt time only and never the admitted body. That cadence is anchored, so a
-slow inspection does not push the next one out by its own duration, and the
-inspection is bounded at ten seconds so a connection pool exhausted by wedged
-repositories produces a closed timeout cause rather than silence; once the
-oldest delivery has remained undispositioned for one minute it emits an
-error-level stall signal with the repository, delivery identity, receipt
-sequence, pending age, and closed stall cause. Because the observer is not the
-serialized drain task, a task wedged in polling, projection, disposition, or
-dispatch cannot silence that signal, and the observer's own inspection is
-cancelled by shutdown so an unresponsive database cannot hold daemon
-termination.
+suppressed while one is, and a full poll omits both of its drain steps while one
+is, so neither a rapidly failing poll nor an authenticated replay stream can
+defer or bypass the backoff; a suppressed wake coalesces and is observed by the
+attempt that follows the retry. A poll taken during a backoff window can
+therefore advance the cursor past a pending delivery's transition, which that
+delivery then records as duplicate state — accepted as a bounded shadow-mode
+fidelity loss against an unbounded repetition of work already failing. An
+overdue retry is taken ahead of an overdue poll, and a full poll that outlasts
+its own interval schedules the next one a whole interval from completion;
+without both, a poll deadline that is always already elapsed would win every
+scheduling decision and starve durable webhook work for as long as polling kept
+failing. An independent per-repository observer checks durable pending work
+every thirty seconds, reading delivery identity and receipt time only and never
+the admitted body. That cadence is anchored, so a slow inspection does not push
+the next one out by its own duration, and the inspection is bounded at ten
+seconds so a connection pool exhausted by wedged repositories produces a closed
+timeout cause rather than silence; once the oldest delivery has remained
+undispositioned for one minute it emits an error-level stall signal with the
+repository, delivery identity, receipt sequence, pending age, and closed stall
+cause. Because the observer is not the serialized drain task, a task wedged in
+polling, projection, disposition, or dispatch cannot silence that signal, and
+the observer's own inspection is cancelled by shutdown so an unresponsive
+database cannot hold daemon termination.
 
 **Implemented behavior.** Shadow mode never inserts a webhook-produced row into
 `repo_watch_event` and never mutates the cursor from a payload-derived patch.
 Instead, the repository's single serialized worker applies the closed guarded
 patch to the latest cursor in memory and runs the same
 `derive_repo_watch_events` differ with the same
-`RepoWatchEventContentIdentityV1` frontier used by polling. Within one drain
-that baseline is cumulative: a projection that does not mutate the durable
-cursor still advances the observation and frontier the next delivery compares
-against, so dependent deliveries drained together are not recorded as
-superseding one another. A targeted query's commit replaces the shadow baseline
-with the cursor it produced, and the delivery's terminal disposition is recorded
-before that commit, so a failure between the two cannot make a retry re-derive
-projections against a cursor that has already moved past them.
-`repo_watch_webhook_projection` records each resulting version-one content
-identity and event kind, while `repo_watch_webhook_disposition` atomically
-records projected, duplicate-state, superseded, ignored, or quarantined terminal
-disposition. The `repo_watch_webhook_parity` view joins those identities to
-version-one poll-produced `repo_watch_event` rows since that repository's first
-shadow receipt and reports `matched`, `webhook_only`, `poll_only`, or
+`RepoWatchEventContentIdentityV1` frontier used by polling. That baseline is
+cumulative and belongs to the repository task rather than to one drain: a
+projection that does not mutate the durable cursor still advances the
+observation and frontier the next delivery compares against, whether that
+delivery arrives in the same batch, in a later wake, or after another delivery
+was deferred. A delivery advances it only once its own terminal disposition is
+durable, so a failure between deriving and recording leaves the accumulated
+shadow exactly as it was.
+
+Only a full poll replaces that baseline, because only a full poll is the
+complete reconciliation sweep. A targeted query reconciles just the pull
+requests it names, so its commit is left to the cursor and the shadow is kept;
+the accepted cost is that what a targeted query learns reaches the shadow at the
+next full poll rather than immediately. Pending deliveries are drained before a
+full poll as well as after it, so a poll that observes the same transition as an
+already-admitted delivery cannot advance the cursor past it and leave the
+delivery applying to state that already contains it. A delivery's targeted
+provider queries run before anything is recorded, so a transient provider
+failure leaves it pending and retryable rather than terminal with a query that
+never ran; its terminal disposition is then recorded before the resulting cursor
+commit, so a failure between those two cannot make a retry re-derive projections
+against a cursor that has already moved past them. On daemon restart the
+baseline is re-seeded from the durable cursor, which is the same complete
+reconciliation a full poll performs. `repo_watch_webhook_projection` records
+each resulting version-one content identity and event kind, while
+`repo_watch_webhook_disposition` atomically records projected, duplicate-state,
+superseded, ignored, or quarantined terminal disposition. Shadow mode reserves
+no committed disposition and no resulting cursor generation: the schema refuses
+both, so the durable shape a later write mode would need is left to the ruling
+that authorizes it. The `repo_watch_webhook_parity` view joins those identities
+to version-one poll-produced `repo_watch_event` rows since that repository's
+first shadow receipt and reports `matched`, `webhook_only`, `poll_only`, or
 `not_directly_mapped`. Event projections intentionally carry no uniqueness
 constraint because separate deliveries may represent one content occurrence.
 Terminal exact payload bytes remain for seven days, after which maintenance may
@@ -825,16 +869,25 @@ dismissal and ping are mapped no-change. Tag pushes, the separate `create` and
 `delete` event families, foreign-repository workflow heads, and every other
 signature-valid event or action are ignored successfully. Guards make stale
 head, lifecycle, branch, workflow-attempt, and immutable-provider facts
-superseded or duplicate rather than allowing regression. A completed check run
-rerequested under the same provider identity carries a new completion generation
-or conclusion, which the differ treats as a new observable completion, so the
-retained run is replaced under the same head guard. GitHub represents
-`pull_request.head.repo` as null once a tracked fork is deleted; like the poll
-normalizer, the mapper models that field as optional and application reuses the
-retained canonical head repository. An opened or reopened delivery whose pull
-request has no canonical baseline applies its complete delivered context rather
-than projecting only its hydration query, so the occurrence the following
-targeted poll also produces is matched instead of reported as poll-only.
+superseded or duplicate rather than allowing regression. A rerequested check run
+replaces the retained completion only when its provider completion generation is
+no older, so a delayed original completion is superseded instead of regressing
+the baseline; an equal generation still replaces, which is how a conclusion edit
+arrives. A workflow completion whose branch head is already gone is superseded,
+because polling projects workflow runs only for the heads it queries and could
+never reproduce it. A delivered run adopts the workflow name retained state
+already carries for that workflow identity, since polling names a run from the
+workflows endpoint's current name and the occurrence identity hashes it. A
+completed check run rerequested under the same provider identity carries a new
+completion generation or conclusion, which the differ treats as a new observable
+completion, so the retained run is replaced under the same head guard. GitHub
+represents `pull_request.head.repo` as null once a tracked fork is deleted; like
+the poll normalizer, the mapper models that field as optional and application
+reuses the retained canonical head repository. An opened or reopened delivery
+whose pull request has no canonical baseline applies its complete delivered
+context rather than projecting only its hydration query, so the occurrence the
+following targeted poll also produces is matched instead of reported as
+poll-only.
 
 **Implemented behavior.** Payloads do not authoritatively supply GitHub's
 computed mergeability or complete check rollups. A mapped delivery that needs a

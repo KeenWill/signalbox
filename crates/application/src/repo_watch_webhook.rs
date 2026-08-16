@@ -601,10 +601,19 @@ fn apply_check_run_union(
         .completed_check_runs()
         .iter()
         .position(|item| item.id() == check_run.id());
-    if retained_index
-        .is_some_and(|position| &previous.completed_check_runs()[position] == check_run)
-    {
-        return Ok(ChangeApplyDispositionV1::Duplicate);
+    if let Some(position) = retained_index {
+        let retained = &previous.completed_check_runs()[position];
+        if retained == check_run {
+            return Ok(ChangeApplyDispositionV1::Duplicate);
+        }
+        // A rerequest carries a later completion generation. One carrying an
+        // earlier generation is a delayed original completion, and applying it
+        // would regress the baseline and project a stale completion that the
+        // following targeted poll can correct but never withdraw. An equal
+        // generation still replaces, which is how a conclusion edit arrives.
+        if check_run.completion_generation() < retained.completion_generation() {
+            return Ok(ChangeApplyDispositionV1::Superseded);
+        }
     }
     if previous.context().head_sha() != expected_head {
         return Ok(ChangeApplyDispositionV1::Superseded);
@@ -629,19 +638,30 @@ fn apply_workflow_run(
     state: &mut RepoWatchRepositoryStateInput,
     run: &RepoWatchWorkflowRunObservation,
 ) -> Result<ChangeApplyDispositionV1, RepoWatchWebhookApplyError> {
+    // Polling projects workflow runs only for the branch heads it hands the
+    // provider, so a completion whose branch has already been deleted names an
+    // observation polling can never reproduce.
+    if !state
+        .branch_heads
+        .iter()
+        .any(|head| head.branch() == run.branch())
+    {
+        return Ok(ChangeApplyDispositionV1::Superseded);
+    }
+    let run = canonical_workflow_run(state, run);
     let retained_index = state
         .workflow_runs
         .iter()
         .position(|item| item.branch() == run.branch() && item.workflow_id() == run.workflow_id());
     let Some(index) = retained_index else {
-        state.workflow_runs.push(run.clone());
+        state.workflow_runs.push(run);
         return Ok(ChangeApplyDispositionV1::Applied);
     };
     let retained = &state.workflow_runs[index];
     let retained_generation = (retained.id(), retained.attempt());
     let incoming_generation = (run.id(), run.attempt());
     if retained_generation == incoming_generation {
-        if retained == run {
+        if retained == &run {
             return Ok(ChangeApplyDispositionV1::Duplicate);
         }
         return Err(RepoWatchWebhookApplyError::ConflictingImmutableFact(
@@ -651,8 +671,37 @@ fn apply_workflow_run(
     if incoming_generation < retained_generation {
         return Ok(ChangeApplyDispositionV1::Superseded);
     }
-    state.workflow_runs[index] = run.clone();
+    state.workflow_runs[index] = run;
     Ok(ChangeApplyDispositionV1::Applied)
+}
+
+/// Renames one delivered run to the workflow name canonical state already
+/// carries for that workflow identity.
+///
+/// Polling names a run from the workflows endpoint's current name, while a
+/// delivery carries the name the workflow held when it ran. The occurrence
+/// content identity hashes that name, so a rename between the two would
+/// otherwise split one occurrence into a webhook-only and a poll-only row.
+fn canonical_workflow_run(
+    state: &RepoWatchRepositoryStateInput,
+    run: &RepoWatchWorkflowRunObservation,
+) -> RepoWatchWorkflowRunObservation {
+    let canonical = state
+        .workflow_runs
+        .iter()
+        .find(|retained| retained.workflow_id() == run.workflow_id())
+        .map(RepoWatchWorkflowRunObservation::workflow);
+    match canonical {
+        Some(workflow) if workflow != run.workflow() => RepoWatchWorkflowRunObservation::new(
+            run.id(),
+            run.workflow_id(),
+            run.attempt(),
+            run.branch().clone(),
+            workflow.clone(),
+            run.conclusion(),
+        ),
+        Some(_) | None => run.clone(),
+    }
 }
 
 fn apply_branch_head(
@@ -2305,6 +2354,94 @@ mod tests {
         };
 
         assert_eq!(current.state().workflow_runs(), [expected]);
+    }
+
+    #[test]
+    fn delayed_older_check_run_generation_is_superseded() {
+        let previous = canonical_observation(CURRENT_HEAD);
+        let payload = format!(
+            r#"{{
+                "action":"completed",
+                "repository":{{"full_name":"{REPOSITORY}"}},
+                "check_run":{{
+                    "id":{RETAINED_CHECK_RUN},
+                    "head_sha":"{CURRENT_HEAD}",
+                    "completed_at":"2026-08-15T11:00:00Z",
+                    "name":"retained-check",
+                    "conclusion":"failure",
+                    "pull_requests":[{{
+                        "number":{PULL_REQUEST},
+                        "base":{{"repo":{{"full_name":"{REPOSITORY}"}}}}
+                    }}]
+                }}
+            }}"#
+        );
+        let patch = mapped_patch("check_run", Some("completed"), &payload);
+        let outcome = apply_repo_watch_observation_patch_v1(&previous, &patch)
+            .expect("a stale generation is a disposition, not an internal error");
+
+        assert_eq!(outcome, RepoWatchObservationApplyV1::Superseded);
+    }
+
+    #[test]
+    fn workflow_completion_for_a_deleted_branch_is_superseded() {
+        let previous = canonical_observation(CURRENT_HEAD);
+        let orphaned = RepoWatchWorkflowRunObservation::new(
+            object_id(DIFFERENT_WORKFLOW_RUN),
+            object_id(MAPPED_WORKFLOW),
+            RepoWatchWorkflowRunAttempt::new(
+                NonZeroU64::new(MAPPED_WORKFLOW_ATTEMPT)
+                    .expect("fixture workflow attempt is positive"),
+            ),
+            BranchName::try_new(String::from(DELETED_BRANCH)).expect("fixture branch is valid"),
+            WorkflowName::try_new(String::from("orphaned-workflow"))
+                .expect("fixture workflow name is valid"),
+            CheckConclusion::Success,
+        );
+        let patch = RepoWatchObservationPatchV1::new(
+            vec![RepoWatchObservationChangeV1::WorkflowRun { run: orphaned }],
+            Vec::new(),
+        );
+        let outcome = apply_repo_watch_observation_patch_v1(&previous, &patch)
+            .expect("a deleted branch is a disposition, not an internal error");
+
+        assert_eq!(outcome, RepoWatchObservationApplyV1::Superseded);
+    }
+
+    #[test]
+    fn renamed_workflow_completion_adopts_the_canonical_workflow_name() {
+        let previous = canonical_observation(CURRENT_HEAD);
+        let renamed = RepoWatchWorkflowRunObservation::new(
+            object_id(RETAINED_WORKFLOW_RUN),
+            object_id(RETAINED_WORKFLOW),
+            RepoWatchWorkflowRunAttempt::new(
+                NonZeroU64::new(NEWER_WORKFLOW_ATTEMPT)
+                    .expect("fixture workflow attempt is positive"),
+            ),
+            BranchName::try_new(String::from("main")).expect("fixture branch is valid"),
+            WorkflowName::try_new(String::from("renamed-workflow"))
+                .expect("fixture workflow name is valid"),
+            CheckConclusion::Failure,
+        );
+        let patch = RepoWatchObservationPatchV1::new(
+            vec![RepoWatchObservationChangeV1::WorkflowRun { run: renamed }],
+            Vec::new(),
+        );
+        let outcome = apply_repo_watch_observation_patch_v1(&previous, &patch)
+            .expect("a renamed workflow applies");
+
+        let RepoWatchObservationApplyV1::Applied(current) = outcome else {
+            panic!("a newer generation must apply directly")
+        };
+        let [applied] = current.state().workflow_runs() else {
+            panic!("the retained workflow identity must not be duplicated")
+        };
+        assert_eq!(
+            applied.workflow(),
+            previous.state().workflow_runs()[0].workflow()
+        );
+        assert_eq!(applied.attempt().get(), NEWER_WORKFLOW_ATTEMPT);
+        assert_eq!(applied.conclusion(), CheckConclusion::Failure);
     }
 
     #[test]
