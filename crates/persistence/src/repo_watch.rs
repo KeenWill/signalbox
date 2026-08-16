@@ -1,7 +1,7 @@
 //! Durable repository-watch cursor and event storage.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     error::Error,
     fmt,
     num::{NonZeroU16, NonZeroU32, NonZeroU64},
@@ -502,7 +502,14 @@ impl PostgresRepoWatchStore {
         .bind(Json(payload))
         .execute(&mut *transaction)
         .await?;
-        insert_events(&mut transaction, repository, generation, request.events()).await?;
+        let already_durable =
+            durable_occurrences(&mut transaction, repository, request.events(), None).await?;
+        let fresh = request
+            .events()
+            .iter()
+            .filter(|occurrence| is_new_occurrence(&already_durable, occurrence))
+            .collect::<Vec<_>>();
+        insert_events(&mut transaction, repository, generation, &fresh).await?;
         transaction.commit().await.map_err(|error| {
             if commit_failure_is_ambiguous(&error) {
                 RepoWatchStoreError::CommitAmbiguous(error)
@@ -643,19 +650,101 @@ async fn exact_replay(
     let stored =
         load_generation_events_in_transaction(transaction, repository, expected_replay_generation)
             .await?;
-    let exact_events = stored.len() == request.events().len()
-        && stored
-            .iter()
-            .zip(request.events())
-            .all(|(stored, requested)| {
-                stored.event == *requested.event()
-                    && stored.content_identity == requested.content_identity()
-            });
+    // A commit coalesces occurrences already durable when it runs, so the replayed
+    // generation holds the requested batch minus those. Comparing against the raw
+    // request would read a coalesced replay as a conflict.
+    let coalesced = durable_occurrences(
+        transaction,
+        repository,
+        request.events(),
+        Some(expected_replay_generation),
+    )
+    .await?;
+    let expected = request
+        .events()
+        .iter()
+        .filter(|occurrence| is_new_occurrence(&coalesced, occurrence))
+        .collect::<Vec<_>>();
+    let exact_events = stored.len() == expected.len()
+        && stored.iter().zip(expected).all(|(stored, requested)| {
+            stored.event == *requested.event()
+                && stored.content_identity == requested.content_identity()
+        });
     if exact_events {
         Ok(Some(replayed))
     } else {
         Ok(None)
     }
+}
+
+/// Whether this occurrence still has to be written.
+///
+/// An occurrence already durable under the same identity *and* the same content
+/// is the one that was recorded before, so writing it again would mint a second
+/// row for a single occurrence. A provider entity that leaves the observation
+/// and returns re-derives exactly that, and before this check the duplicate
+/// aborted the whole cursor-and-event transaction and stalled the repository.
+///
+/// An occurrence whose identity is durable under different content is not that
+/// occurrence. It stays in the batch and the durable unique constraint rejects
+/// it, because a content identity that does not identify its content is the
+/// failure this design exists to prevent.
+fn is_new_occurrence(
+    durable: &HashMap<RepoWatchEventContentIdentityV1, RepoWatchEvent>,
+    occurrence: &RepoWatchEventOccurrenceV1,
+) -> bool {
+    match durable.get(&occurrence.content_identity()) {
+        Some(stored) => !is_same_occurrence(stored, occurrence.event()),
+        None => true,
+    }
+}
+
+/// Whether two events state the same fact.
+///
+/// The random `RepoWatchEventId` is excluded, exactly as the content-identity
+/// digest excludes it: a re-derived occurrence carries a fresh candidate id, so
+/// comparing ids would call every re-derivation a different fact.
+fn is_same_occurrence(stored: &RepoWatchEvent, derived: &RepoWatchEvent) -> bool {
+    stored.repository() == derived.repository()
+        && stored.target() == derived.target()
+        && stored.kind() == derived.kind()
+}
+
+/// The already-durable occurrences among these, by content identity.
+///
+/// `before` bounds the search to generations earlier than the given one, which
+/// is how replay detection reconstructs the batch a past commit would have
+/// stored rather than reading a coalesced replay as a conflict.
+async fn durable_occurrences(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &RepositorySlug,
+    events: &[RepoWatchEventOccurrenceV1],
+    before: Option<RepoWatchCursorGeneration>,
+) -> Result<HashMap<RepoWatchEventContentIdentityV1, RepoWatchEvent>, RepoWatchStoreError> {
+    if events.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let requested = events
+        .iter()
+        .map(|occurrence| occurrence.content_identity().as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query_as::<_, EventRow>(EVENT_BY_CONTENT_IDENTITY_SQL)
+        .bind(repository.as_str())
+        .bind(EVENT_CONTENT_IDENTITY_VERSION_V1)
+        .bind(&requested)
+        .bind(before.map(generation_to_i64))
+        .fetch_all(&mut **transaction)
+        .await?;
+    let mut durable = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let bytes: [u8; 32] = row.content_identity.as_slice().try_into().map_err(|_| {
+            RepoWatchStoreError::from(RepoWatchPersistenceCorruption::InvalidEventContentIdentity)
+        })?;
+        let identity = RepoWatchEventContentIdentityV1::from_bytes(bytes);
+        let positioned = decode_positioned_event(repository, row)?;
+        durable.insert(identity, positioned.event);
+    }
+    Ok(durable)
 }
 
 fn validate_event_batch(
@@ -1425,7 +1514,7 @@ async fn insert_events(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
-    events: &[RepoWatchEventOccurrenceV1],
+    events: &[&RepoWatchEventOccurrenceV1],
 ) -> Result<(), RepoWatchStoreError> {
     for (index, occurrence) in events.iter().enumerate() {
         let ordinal =
@@ -1578,6 +1667,23 @@ const EVENT_GENERATION_SQL: &str = "SELECT event_id, repository, cursor_generati
    FROM repo_watch_event
   WHERE repository = $1 AND cursor_generation = $2
   ORDER BY event_ordinal";
+
+const EVENT_BY_CONTENT_IDENTITY_SQL: &str = "SELECT event_id, repository, cursor_generation,
+        event_ordinal, event_version, content_identity_version, content_identity, producer,
+        target_kind, event_kind,
+        pull_request_number, head_sha, head_repository, base_branch,
+        head_branch, title, body, labels, draft, author,
+        previous_sha, current_sha, mergeable_state, checks_outcome,
+        check_run_name, conclusion, workflow_branch, workflow_name,
+        review_reviewer, review_state, review_commit, thread_id,
+        label_name, advanced_branch, reaction_subject_kind,
+        reaction_subject_id, reaction_reactor, reaction_content,
+        reaction_change
+   FROM repo_watch_event
+  WHERE repository = $1
+    AND content_identity_version = $2
+    AND content_identity = ANY($3)
+    AND ($4::bigint IS NULL OR cursor_generation < $4)";
 
 const EVENT_BY_ID_SQL: &str = "SELECT event_id, repository, cursor_generation, event_ordinal,
         event_version, content_identity_version, content_identity, producer,
