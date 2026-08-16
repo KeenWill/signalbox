@@ -171,15 +171,13 @@ CREATE INDEX repo_watch_convergence_assessment_current_idx
     );
 
 CREATE TABLE repo_watch_pull_request_convergence_identity (
+    identity_id uuid PRIMARY KEY,
     repository text NOT NULL,
     cursor_generation bigint NOT NULL,
     pull_request_number numeric(20, 0) NOT NULL,
     assessment_id uuid NOT NULL,
     recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (
-        repository, cursor_generation, pull_request_number, assessment_id
-    ),
-    UNIQUE (assessment_id, cursor_generation),
+    UNIQUE (identity_id, assessment_id, cursor_generation),
     FOREIGN KEY (repository, cursor_generation)
         REFERENCES repo_watch_cursor(repository, generation)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -193,35 +191,36 @@ CREATE TABLE repo_watch_pull_request_convergence_identity (
 CREATE INDEX repo_watch_convergence_identity_current_idx
     ON repo_watch_pull_request_convergence_identity (
         repository, pull_request_number, cursor_generation DESC,
-        recorded_at DESC, assessment_id DESC
+        recorded_at DESC, identity_id DESC
     );
 
 CREATE TABLE repo_watch_convergence_cutoff (
     assessment_id uuid NOT NULL,
+    identity_id uuid NOT NULL,
     identity_assessment_id uuid NOT NULL,
     cursor_generation bigint NOT NULL,
     processed_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
-    PRIMARY KEY (assessment_id, cursor_generation),
+    PRIMARY KEY (assessment_id, identity_id),
     FOREIGN KEY (assessment_id)
         REFERENCES repo_watch_pull_request_convergence(assessment_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
-    FOREIGN KEY (identity_assessment_id, cursor_generation)
+    FOREIGN KEY (identity_id, identity_assessment_id, cursor_generation)
         REFERENCES repo_watch_pull_request_convergence_identity(
-            assessment_id, cursor_generation
+            identity_id, assessment_id, cursor_generation
         )
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 
 CREATE TABLE repo_watch_convergence_cutoff_goal (
     assessment_id uuid NOT NULL,
-    cursor_generation bigint NOT NULL,
+    identity_id uuid NOT NULL,
     session_id uuid NOT NULL,
     goal_command_id uuid NOT NULL,
-    PRIMARY KEY (assessment_id, cursor_generation, session_id),
+    PRIMARY KEY (assessment_id, identity_id, session_id),
     UNIQUE (goal_command_id),
-    FOREIGN KEY (assessment_id, cursor_generation)
+    FOREIGN KEY (assessment_id, identity_id)
         REFERENCES repo_watch_convergence_cutoff(
-            assessment_id, cursor_generation
+            assessment_id, identity_id
         )
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY (goal_command_id, session_id)
@@ -255,7 +254,7 @@ SELECT DISTINCT ON (identity.repository, identity.pull_request_number)
    AND convergence.base_revision = assessment.base_revision
  ORDER BY identity.repository, identity.pull_request_number,
           identity.cursor_generation DESC, identity.recorded_at DESC,
-          identity.assessment_id DESC;
+          identity.identity_id DESC;
 
 CREATE TRIGGER repo_watch_convergence_assessment_is_append_only
 BEFORE UPDATE OR DELETE ON repo_watch_pull_request_convergence_assessment

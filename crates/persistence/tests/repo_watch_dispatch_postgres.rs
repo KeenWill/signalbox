@@ -277,13 +277,27 @@ fn assessment_at_base(
     base_revision: &str,
     review_decision: RepoWatchReviewDecision,
 ) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    assessment_at_base_with_mergeability(
+        head,
+        base_revision,
+        MergeableState::Mergeable,
+        review_decision,
+    )
+}
+
+fn assessment_at_base_with_mergeability(
+    head: &str,
+    base_revision: &str,
+    mergeable_state: MergeableState,
+    review_decision: RepoWatchReviewDecision,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
     Ok(RepoWatchConvergenceAssessment::try_new(
         RepoWatchConvergenceAssessmentInput {
             number: PullRequestNumber::new(41_u64.try_into()?),
             head_sha: CommitSha::try_new(head.to_owned())?,
             base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
             base_revision: CommitSha::try_new(base_revision.to_owned())?,
-            mergeable_state: MergeableState::Mergeable,
+            mergeable_state,
             review_decision,
             unresolved_threads: Vec::new(),
             gating_check_count: 0,
@@ -960,6 +974,28 @@ async fn record_assessment_at_base(
             &fixture.repository,
             generation,
             &[assessment_at_base(head, base_revision, review_decision)?],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn record_conflicting_assessment_at_base(
+    fixture: &DispatchFixture,
+    generation: RepoWatchCursorGeneration,
+    head: &str,
+    base_revision: &str,
+    review_decision: RepoWatchReviewDecision,
+) -> Result<(), Box<dyn Error>> {
+    PostgresRepoWatchStore::new(fixture.pool.clone())
+        .record_convergence_assessments(
+            &fixture.repository,
+            generation,
+            &[assessment_at_base_with_mergeability(
+                head,
+                base_revision,
+                MergeableState::Conflicting,
+                review_decision,
+            )?],
         )
         .await?;
     Ok(())
@@ -1986,7 +2022,7 @@ async fn sealed_identity_return_reapplies_its_convergence_cutoff() -> Result<(),
         .await?
         .expect("the intervening cursor exists")
         .generation();
-    record_assessment_at_base(
+    record_conflicting_assessment_at_base(
         &fixture,
         second_generation,
         SECOND_HEAD,
@@ -2034,6 +2070,70 @@ async fn sealed_identity_return_reapplies_its_convergence_cutoff() -> Result<(),
     assert!(first_cutoff);
     assert!(restored_cutoff);
     assert_eq!(second_goal.current().state(), &GoalState::UserStopped);
+    assert_eq!(cutoff_count, 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn same_generation_green_return_reapplies_its_convergence_cutoff()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    record_merge_ready_head(&fixture, 0x54_680, FIRST_HEAD).await?;
+    let first_cutoff = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_681))
+        })
+        .await?;
+    let current = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("the sealed cursor exists");
+    record_assessment_at_base(
+        &fixture,
+        current.generation(),
+        FIRST_HEAD,
+        BASE_REVISION,
+        RepoWatchReviewDecision::ChangesRequested,
+    )
+    .await?;
+    record_assessment_at_base(
+        &fixture,
+        current.generation(),
+        FIRST_HEAD,
+        BASE_REVISION,
+        RepoWatchReviewDecision::Approved,
+    )
+    .await?;
+
+    let returned_cutoff = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_682))
+        })
+        .await?;
+    let transition_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_pull_request_convergence_identity",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let transition_generation_count: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT cursor_generation)
+           FROM repo_watch_pull_request_convergence_identity",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let cutoff_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_convergence_cutoff")
+            .fetch_one(&fixture.pool)
+            .await?;
+
+    assert!(first_cutoff);
+    assert!(returned_cutoff);
+    assert_eq!(transition_count, 3);
+    assert_eq!(transition_generation_count, 1);
     assert_eq!(cutoff_count, 2);
     Ok(())
 }

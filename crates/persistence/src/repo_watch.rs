@@ -1246,10 +1246,20 @@ async fn record_current_convergence_identity(
 ) -> Result<(), RepoWatchStoreError> {
     sqlx::query(
         "INSERT INTO repo_watch_pull_request_convergence_identity
-            (repository, cursor_generation, pull_request_number, assessment_id)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT DO NOTHING",
+            (identity_id, repository, cursor_generation,
+             pull_request_number, assessment_id)
+         SELECT $1, $2, $3, $4, $5
+          WHERE (
+                SELECT current.assessment_id
+                  FROM repo_watch_pull_request_convergence_identity AS current
+                 WHERE current.repository = $2
+                   AND current.pull_request_number = $4
+                 ORDER BY current.cursor_generation DESC, current.recorded_at DESC,
+                          current.identity_id DESC
+                 LIMIT 1
+          ) IS DISTINCT FROM $5",
     )
+    .bind(Uuid::now_v7())
     .bind(repository.as_str())
     .bind(generation_to_i64(cursor_generation))
     .bind(Decimal::from(pull_request_number.get()))

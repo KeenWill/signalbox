@@ -305,20 +305,21 @@ impl PostgresRepoWatchDispatchStore {
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, repository.as_str()).await?;
         let candidate = sqlx::query(
-            "SELECT convergence.assessment_id,
+            "SELECT convergence.assessment_id, current.identity_id,
                     current.assessment_id AS identity_assessment_id,
                     current.cursor_generation, convergence.pull_request_number
                FROM repo_watch_pull_request_convergence AS convergence
                JOIN LATERAL (
-                    SELECT identity.assessment_id, identity.cursor_generation,
-                           assessment.head_sha, assessment.base_revision
+                    SELECT identity.identity_id, identity.assessment_id,
+                           identity.cursor_generation, assessment.head_sha,
+                           assessment.base_revision
                       FROM repo_watch_pull_request_convergence_identity AS identity
                       JOIN repo_watch_pull_request_convergence_assessment AS assessment
                         ON assessment.assessment_id = identity.assessment_id
                      WHERE identity.repository = convergence.repository
                        AND identity.pull_request_number = convergence.pull_request_number
                      ORDER BY identity.cursor_generation DESC, identity.recorded_at DESC,
-                              identity.assessment_id DESC
+                              identity.identity_id DESC
                      LIMIT 1
                ) AS current ON current.head_sha = convergence.head_sha
                            AND current.base_revision = convergence.base_revision
@@ -327,7 +328,7 @@ impl PostgresRepoWatchDispatchStore {
                     SELECT 1
                       FROM repo_watch_convergence_cutoff AS cutoff
                      WHERE cutoff.assessment_id = convergence.assessment_id
-                       AND cutoff.cursor_generation = current.cursor_generation
+                       AND cutoff.identity_id = current.identity_id
                 )
               ORDER BY convergence.converged_at, convergence.assessment_id
               LIMIT 1",
@@ -340,15 +341,17 @@ impl PostgresRepoWatchDispatchStore {
             return Ok(false);
         };
         let assessment_id: Uuid = candidate.try_get("assessment_id")?;
+        let identity_id: Uuid = candidate.try_get("identity_id")?;
         let identity_assessment_id: Uuid = candidate.try_get("identity_assessment_id")?;
         let cursor_generation: i64 = candidate.try_get("cursor_generation")?;
         let pull_request_number: Decimal = candidate.try_get("pull_request_number")?;
         sqlx::query(
             "INSERT INTO repo_watch_convergence_cutoff
-                (assessment_id, identity_assessment_id, cursor_generation)
-             VALUES ($1, $2, $3)",
+                (assessment_id, identity_id, identity_assessment_id, cursor_generation)
+             VALUES ($1, $2, $3, $4)",
         )
         .bind(assessment_id)
+        .bind(identity_id)
         .bind(identity_assessment_id)
         .bind(cursor_generation)
         .execute(&mut *transaction)
@@ -383,11 +386,11 @@ impl PostgresRepoWatchDispatchStore {
                     if stopped {
                         sqlx::query(
                             "INSERT INTO repo_watch_convergence_cutoff_goal
-                                (assessment_id, cursor_generation, session_id, goal_command_id)
+                                (assessment_id, identity_id, session_id, goal_command_id)
                              VALUES ($1, $2, $3, $4)",
                         )
                         .bind(assessment_id)
-                        .bind(cursor_generation)
+                        .bind(identity_id)
                         .bind(session_id)
                         .bind(command.command_id().as_uuid())
                         .execute(&mut *savepoint)
@@ -475,15 +478,15 @@ impl PostgresRepoWatchDispatchStore {
                 "SELECT convergence.repository
                    FROM repo_watch_pull_request_convergence AS convergence
                    JOIN LATERAL (
-                        SELECT identity.cursor_generation, assessment.head_sha,
-                               assessment.base_revision
+                        SELECT identity.identity_id, identity.cursor_generation,
+                               assessment.head_sha, assessment.base_revision
                           FROM repo_watch_pull_request_convergence_identity AS identity
                           JOIN repo_watch_pull_request_convergence_assessment AS assessment
                             ON assessment.assessment_id = identity.assessment_id
                          WHERE identity.repository = convergence.repository
                            AND identity.pull_request_number = convergence.pull_request_number
                          ORDER BY identity.cursor_generation DESC, identity.recorded_at DESC,
-                                  identity.assessment_id DESC
+                                  identity.identity_id DESC
                          LIMIT 1
                    ) AS current ON current.head_sha = convergence.head_sha
                                AND current.base_revision = convergence.base_revision
@@ -491,7 +494,7 @@ impl PostgresRepoWatchDispatchStore {
                         SELECT 1
                           FROM repo_watch_convergence_cutoff AS cutoff
                          WHERE cutoff.assessment_id = convergence.assessment_id
-                           AND cutoff.cursor_generation = current.cursor_generation
+                           AND cutoff.identity_id = current.identity_id
                   )
                   ORDER BY convergence.repository, convergence.converged_at,
                            convergence.assessment_id
