@@ -21,14 +21,17 @@ ALTER TABLE repo_watch_dispatch_batch
 -- state. Comparing achievement against the originating event would therefore
 -- requeue a successor that already carried the newest head, forever.
 --
--- NULL means the batch delivered exactly its originating event. For a batch
--- admitted before this migration that is exact for a fresh batch and
--- deliberately conservative for an obligation successor, whose delivered state
--- this schema did not record: such a successor is read as stale and redispatched
--- once, rather than sealed against a state it may not have carried. The
--- reconstruction that would narrow this -- the newest event recorded before the
--- batch was admitted -- is not the accepted context either, so it trades a
--- bounded redelivery for a silent skip. This migration writes no data.
+-- Every batch admitted from here on records this, so NULL means exactly one
+-- thing: the batch was admitted before this column existed and its delivered
+-- state is unknown. Unknown never seals. Reading NULL as the originating event
+-- instead would silently skip work whenever a head returns to an earlier value
+-- -- a successor given B, originating from A, achieving after the head reverts
+-- to A, would compare A with A and seal without ever delivering it. The cost of
+-- refusing to seal is one redelivery per batch still in flight at the upgrade,
+-- which is bounded and self-correcting; the cost of guessing is silent loss.
+-- Reconstructing the value is not available: the newest event recorded before
+-- the batch was admitted is transaction-time state, not the accepted context.
+-- This migration therefore writes no data.
 ALTER TABLE repo_watch_dispatch_batch
     ADD COLUMN delivered_state_event_id uuid;
 
@@ -63,6 +66,7 @@ BEGIN
                 IS NOT DISTINCT FROM NEW.singleton_stack_root_pull_request_number
            AND obligation.settled_kind IS NULL
     ) THEN
+        NEW.delivered_state_event_id := NEW.event_id;
         RETURN NEW;
     END IF;
     SELECT (
@@ -209,9 +213,8 @@ BEGIN
            origin.event_id, origin.event_id, 1, batch.dispatch_id
       FROM repo_watch_dispatch_batch AS batch
       JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
-      JOIN repo_watch_event AS delivered
-        ON delivered.event_id
-            = coalesce(batch.delivered_state_event_id, batch.event_id)
+      LEFT JOIN repo_watch_event AS delivered
+        ON delivered.event_id = batch.delivered_state_event_id
      WHERE batch.dispatch_id = candidate_dispatch_id
        AND EXISTS (
             SELECT 1
@@ -222,21 +225,24 @@ BEGIN
        AND terminal_goal_kind IN ('blocked', 'achieved', 'user_stopped')
        -- A branch target carries no durable revision at all: its only event
        -- kind records a workflow conclusion, so achievement is its own seal.
-       -- A pull-request target seals only when the state this batch
-       -- delivered is still the pull request's latest durable head.
+       -- A pull-request target seals only when the state this batch delivered is
+       -- known and is still the pull request's latest durable head.
        AND NOT (
             terminal_goal_kind = 'achieved'
             AND (
                 origin.target_kind <> 'pull_request'
-                OR delivered.head_sha = (
-                    SELECT current_state.head_sha
-                      FROM repo_watch_event AS current_state
-                     WHERE current_state.repository = origin.repository
-                       AND current_state.pull_request_number
-                            = origin.pull_request_number
-                     ORDER BY current_state.cursor_generation DESC,
-                              current_state.event_ordinal DESC
-                     LIMIT 1
+                OR (
+                    batch.delivered_state_event_id IS NOT NULL
+                    AND delivered.head_sha = (
+                        SELECT current_state.head_sha
+                          FROM repo_watch_event AS current_state
+                         WHERE current_state.repository = origin.repository
+                           AND current_state.pull_request_number
+                                = origin.pull_request_number
+                         ORDER BY current_state.cursor_generation DESC,
+                                  current_state.event_ordinal DESC
+                         LIMIT 1
+                    )
                 )
             )
        )

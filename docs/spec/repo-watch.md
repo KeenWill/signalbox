@@ -510,30 +510,33 @@ terminations and matching events collapse into that one obligation without
 regressing its latest event. A batch delivers its originating event when
 admission dispatched that event, and the target's collapsed current state when
 admission settled an obligation by replaying a still-matching earlier event.
-Achievement is terminal exactly when that delivered state is still the pull
-request's latest durable head, so the successor that carried the newest head
-seals instead of owing another batch after every cooldown. A branch target
-records no durable revision, only a workflow conclusion, so achievement is its
-own seal there. A batch owes at most one requeue, at its own release, and the
-terminal event deciding it is the one ending the generation the dispatch
-commissioned; a later goal generation its session accepts terminates without
-reopening one, including while a sibling action still holds the batch.
-Termination takes the singleton advisory key that admission takes, and locks the
-rule activation row that recording a deactivation shares, so a match racing a
-termination joins its obligation and a racing deactivation cannot miss it.
-Termination does not take the repository key: it runs inside the transaction
-ending the goal, which holds that session row, and lifecycle-cutoff processing
-takes the repository key before waiting on the same row, so the reverse order
-would deadlock a goal pass against a cutoff attempt. The obligation becomes
-eligible only after release and the same cooldown that would suppress a fresh
-successor; cooldown suppression without an existing obligation does not create
-one. Eligibility settles the obligation and creates its one current-state batch
-atomically. Equal recovery cannot create a second session for the same admitted
-action or obligation. A session whose current goal is pursuing remains
-nonterminal for singleton ownership across the gap between a completed goal turn
-and its durably queued continuation. Goal blocking, achievement, or user stop
-rechecks release after pursuit ends. The append-only dispatch records identify
-the sessions responsible for the PR; no mutable assignment flag replaces them.
+Achievement is terminal exactly when that delivered state is known and is still
+the pull request's latest durable head, so the successor that carried the newest
+head seals instead of owing another batch after every cooldown. A batch admitted
+before the delivered state was recorded has none, and achievement cannot seal
+it: reading its originating event as the delivered state would seal without
+delivery whenever a head returns to an earlier value. A branch target records no
+durable revision, only a workflow conclusion, so achievement is its own seal
+there. A batch owes at most one requeue, at its own release, and the terminal
+event deciding it is the one ending the generation the dispatch commissioned; a
+later goal generation its session accepts terminates without reopening one,
+including while a sibling action still holds the batch. Termination takes the
+singleton advisory key that admission takes, and locks the rule activation row
+that recording a deactivation shares, so a match racing a termination joins its
+obligation and a racing deactivation cannot miss it. Termination does not take
+the repository key: it runs inside the transaction ending the goal, which holds
+that session row, and lifecycle-cutoff processing takes the repository key
+before waiting on the same row, so the reverse order would deadlock a goal pass
+against a cutoff attempt. The obligation becomes eligible only after release and
+the same cooldown that would suppress a fresh successor; cooldown suppression
+without an existing obligation does not create one. Eligibility settles the
+obligation and creates its one current-state batch atomically. Equal recovery
+cannot create a second session for the same admitted action or obligation. A
+session whose current goal is pursuing remains nonterminal for singleton
+ownership across the gap between a completed goal turn and its durably queued
+continuation. Goal blocking, achievement, or user stop rechecks release after
+pursuit ends. The append-only dispatch records identify the sessions responsible
+for the PR; no mutable assignment flag replaces them.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies

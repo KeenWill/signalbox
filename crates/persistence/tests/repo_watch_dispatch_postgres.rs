@@ -110,6 +110,7 @@ const SIBLING_ATTACH_COMMAND_ID: u128 = 0x5b_100;
 const SIBLING_STOP_COMMAND_ID: u128 = 0x5b_200;
 const SIBLING_GOAL_INPUT_ID: u128 = 0x5b_300;
 const SIBLING_GOAL_TURN_ID: u128 = 0x5b_400;
+const UNKNOWN_DELIVERED_REQUEST_ID: u128 = 0x5c_000;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -1458,6 +1459,45 @@ async fn restart_invalidated_dispatch_recovery_leaves_an_obligation() -> Result<
 
     assert_eq!(obligation.latest_event(), &fixture.event);
     assert_eq!(obligation.matched_event_count(), 1);
+    Ok(())
+}
+
+/// A batch admitted before the delivered state was recorded has none, and
+/// achievement must not seal from its originating event: a head that returns to
+/// an earlier value would then compare equal and seal without ever delivering
+/// the state the session was given.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_unknown_delivered_state_never_seals() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    sqlx::query(
+        "ALTER TABLE repo_watch_dispatch_batch
+             DISABLE TRIGGER repo_watch_dispatch_batch_is_append_only",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_batch
+            SET delivered_state_event_id = NULL
+          WHERE dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE repo_watch_dispatch_batch
+             ENABLE TRIGGER repo_watch_dispatch_batch_is_append_only",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    declare_dispatched_goal_achieved(&fixture, 0, UNKNOWN_DELIVERED_REQUEST_ID).await?;
+
+    assert_eq!(release_count(&fixture).await?, 1);
+    assert_eq!(
+        outstanding_obligation_count(&fixture.pool).await?,
+        1,
+        "the head is unchanged, so an originating-event fallback would have sealed"
+    );
     Ok(())
 }
 
