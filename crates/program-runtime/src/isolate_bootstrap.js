@@ -15,3 +15,8 @@ Object.defineProperty(globalThis, "Date", {
   writable: false,
   configurable: false,
 });
+Object.defineProperty(globalThis, "Intl", {
+  value: undefined,
+  writable: false,
+  configurable: false,
+});

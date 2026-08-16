@@ -5,7 +5,7 @@
 //! deliveries bypass that source and come only from the checked journal.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::BTreeMap,
     error::Error,
     fmt,
@@ -36,6 +36,7 @@ use tokio::sync::{mpsc, oneshot};
 pub const PROGRAM_SDK_V1_SPECIFIER: &str = "@signalbox/program-sdk/v1";
 
 const PROGRAM_SDK_INTERNAL_SPECIFIER: &str = "signalbox:program-sdk/v1";
+const PROGRAM_SDK_PRELOAD_SPECIFIER: &str = "signalbox:program/sdk-preload";
 const PROGRAM_MAIN_SPECIFIER: &str = "signalbox:program/main";
 
 deno_core::extension!(
@@ -186,6 +187,8 @@ pub enum ProgramHostProtocolError {
     DeliveryReceiverClosed,
     IsolateRequestChannelClosed,
     LiveRequestWasNotAppendedExactly,
+    JournalTailChanged,
+    JournalPositionExhausted,
     Stalled,
 }
 
@@ -201,6 +204,8 @@ impl fmt::Display for ProgramHostProtocolError {
             Self::LiveRequestWasNotAppendedExactly => {
                 "durable append changed the live request frame"
             }
+            Self::JournalTailChanged => "program journal tail changed during execution",
+            Self::JournalPositionExhausted => "journal position exhausted",
             Self::Stalled => "isolate is pending with no request the host can advance",
         };
         formatter.write_str(message)
@@ -243,7 +248,23 @@ impl ProgramHost {
         live_deliveries: &mut impl LiveDeliverySource,
     ) -> Result<ProgramExecutionOutcome, ProgramHostError> {
         let (request_sender, mut request_receiver) = mpsc::unbounded_channel();
-        let mut runtime = isolate(request_sender)?;
+        let (mut runtime, module_loader) = isolate(request_sender)?;
+        let sdk_specifier = ModuleSpecifier::parse(PROGRAM_SDK_PRELOAD_SPECIFIER)
+            .map_err(JsErrorBox::from_err)
+            .map_err(deno_core::error::CoreError::from)?;
+        module_loader.preload_admitted.set(true);
+        let sdk_module = runtime
+            .load_side_es_module_from_code(
+                &sdk_specifier,
+                format!("import {PROGRAM_SDK_V1_SPECIFIER:?};"),
+            )
+            .await?;
+        module_loader.preload_admitted.set(false);
+        let sdk_evaluation = runtime.mod_evaluate(sdk_module);
+        runtime
+            .run_event_loop(PollEventLoopOptions::default())
+            .await?;
+        sdk_evaluation.await?;
         let main_specifier = ModuleSpecifier::parse(PROGRAM_MAIN_SPECIFIER)
             .map_err(JsErrorBox::from_err)
             .map_err(deno_core::error::CoreError::from)?;
@@ -251,12 +272,16 @@ impl ProgramHost {
             .load_main_es_module_from_code(&main_specifier, artifact.source().to_owned())
             .await?;
         let mut evaluation = Box::pin(runtime.mod_evaluate(module));
-        let mut execution = ExecutionState::new(ReplayCursor::new(journal));
+        let durable_tail = journal
+            .entries()
+            .last()
+            .map_or(0, |entry| entry.position().as_u64());
+        let mut execution = ExecutionState::new(ReplayCursor::new(journal), durable_tail);
+        let mut completed_evaluation = None;
 
         loop {
             let runtime_status = poll_runtime_once(&mut runtime).await;
-            let evaluation_result =
-                poll_fn(|context| Poll::Ready(evaluation.as_mut().poll(context))).await;
+            poll_evaluation_once(&mut evaluation, &mut completed_evaluation).await;
             while let Ok(request) = request_receiver.try_recv() {
                 self.accept_request(run, &mut execution, request).await?;
             }
@@ -279,14 +304,14 @@ impl ProgramHost {
                     if had_outstanding {
                         continue;
                     }
-                    if let Poll::Ready(result) = evaluation_result {
+                    if let Some(result) = completed_evaluation.take() {
                         result?;
                         return Ok(ProgramExecutionOutcome::Completed);
                     }
                     true
                 }
                 ReplayInstruction::AwaitRequest => {
-                    if let Poll::Ready(result) = evaluation_result {
+                    if let Some(result) = completed_evaluation.take() {
                         result?;
                         return Err(ProgramHostProtocolError::Stalled.into());
                     }
@@ -296,8 +321,14 @@ impl ProgramHost {
 
             match runtime_status {
                 Poll::Ready(result) => {
+                    if completed_evaluation.is_none() {
+                        return Err(ProgramHostProtocolError::Stalled.into());
+                    }
                     result?;
-                    evaluation.as_mut().await?;
+                    let Some(result) = completed_evaluation.take() else {
+                        return Err(ProgramHostProtocolError::Stalled.into());
+                    };
+                    result?;
                     if at_live_tail {
                         return Ok(ProgramExecutionOutcome::Completed);
                     }
@@ -306,8 +337,18 @@ impl ProgramHost {
                 Poll::Pending => {
                     tokio::select! {
                         result = runtime.run_event_loop(PollEventLoopOptions::default()) => {
+                            poll_evaluation_once(
+                                &mut evaluation,
+                                &mut completed_evaluation,
+                            ).await;
+                            if completed_evaluation.is_none() {
+                                return Err(ProgramHostProtocolError::Stalled.into());
+                            }
                             result?;
-                            evaluation.as_mut().await?;
+                            let Some(result) = completed_evaluation.take() else {
+                                return Err(ProgramHostProtocolError::Stalled.into());
+                            };
+                            result?;
                             if at_live_tail {
                                 return Ok(ProgramExecutionOutcome::Completed);
                             }
@@ -338,11 +379,18 @@ impl ProgramHost {
             Ok(ReplayedRequest::Live) => {
                 let persisted = self
                     .journal
-                    .append_request(run, frame.scope(), frame.kind().clone())
-                    .await?;
+                    .append_request_if_tail(
+                        run,
+                        execution.durable_tail(),
+                        frame.scope(),
+                        frame.kind().clone(),
+                    )
+                    .await?
+                    .ok_or(ProgramHostProtocolError::JournalTailChanged)?;
                 if persisted != frame {
                     return Err(ProgramHostProtocolError::LiveRequestWasNotAppendedExactly.into());
                 }
+                execution.advance_durable_tail()?;
                 execution.insert_pending(persisted, request.reply)?;
             }
             Ok(ReplayedRequest::DeliveryPending) => {
@@ -379,8 +427,25 @@ impl ProgramHost {
         }
         let kind = live_deliveries.next_delivery(&outstanding).await?;
         execution.validate_delivery(&kind)?;
-        let delivery = self.journal.append_delivery(run, kind).await?;
+        let delivery = self
+            .journal
+            .append_delivery_if_tail(run, execution.durable_tail(), kind)
+            .await?
+            .ok_or(ProgramHostProtocolError::JournalTailChanged)?;
+        execution.advance_durable_tail()?;
         execution.apply_delivery(delivery).map_err(Into::into)
+    }
+}
+
+async fn poll_evaluation_once<F>(evaluation: &mut Pin<Box<F>>, completed: &mut Option<F::Output>)
+where
+    F: Future,
+{
+    if completed.is_none() {
+        let result = poll_fn(|context| Poll::Ready(evaluation.as_mut().poll(context))).await;
+        if let Poll::Ready(result) = result {
+            *completed = Some(result);
+        }
     }
 }
 
@@ -395,9 +460,12 @@ async fn poll_runtime_once(
 
 fn isolate(
     sender: mpsc::UnboundedSender<IsolateRequest>,
-) -> Result<JsRuntime, deno_core::error::CoreError> {
+) -> Result<(JsRuntime, Rc<ProgramModuleLoader>), deno_core::error::CoreError> {
+    let module_loader = Rc::new(ProgramModuleLoader {
+        preload_admitted: Cell::new(false),
+    });
     let runtime = JsRuntime::new(RuntimeOptions {
-        module_loader: Some(Rc::new(ProgramModuleLoader)),
+        module_loader: Some(module_loader.clone()),
         extensions: vec![signalbox_program_sdk_v1::init()],
         ..Default::default()
     });
@@ -405,7 +473,7 @@ fn isolate(
         .op_state()
         .borrow_mut()
         .put(IsolateRequestSender(sender));
-    Ok(runtime)
+    Ok((runtime, module_loader))
 }
 
 #[derive(Clone)]
@@ -482,17 +550,31 @@ struct PendingRequest {
 
 struct ExecutionState {
     cursor: ReplayCursor,
+    durable_tail: u64,
     next_request_ordinal: u64,
     pending: BTreeMap<RequestOrdinal, PendingRequest>,
 }
 
 impl ExecutionState {
-    fn new(cursor: ReplayCursor) -> Self {
+    fn new(cursor: ReplayCursor, durable_tail: u64) -> Self {
         Self {
             cursor,
+            durable_tail,
             next_request_ordinal: 1,
             pending: BTreeMap::new(),
         }
+    }
+
+    const fn durable_tail(&self) -> u64 {
+        self.durable_tail
+    }
+
+    fn advance_durable_tail(&mut self) -> Result<(), ProgramHostProtocolError> {
+        self.durable_tail = self
+            .durable_tail
+            .checked_add(1)
+            .ok_or(ProgramHostProtocolError::JournalPositionExhausted)?;
+        Ok(())
     }
 
     fn frame_for(
@@ -606,7 +688,9 @@ impl ExecutionState {
     }
 }
 
-struct ProgramModuleLoader;
+struct ProgramModuleLoader {
+    preload_admitted: Cell<bool>,
+}
 
 impl ModuleLoader for ProgramModuleLoader {
     fn resolve(
@@ -617,6 +701,10 @@ impl ModuleLoader for ProgramModuleLoader {
     ) -> ModuleResolveResponse {
         if matches!(kind, ResolutionKind::MainModule) && specifier == PROGRAM_MAIN_SPECIFIER {
             return ModuleSpecifier::parse(PROGRAM_MAIN_SPECIFIER).map_err(JsErrorBox::from_err);
+        }
+        if self.preload_admitted.get() && specifier == PROGRAM_SDK_PRELOAD_SPECIFIER {
+            return ModuleSpecifier::parse(PROGRAM_SDK_PRELOAD_SPECIFIER)
+                .map_err(JsErrorBox::from_err);
         }
         if specifier == PROGRAM_SDK_V1_SPECIFIER {
             return ModuleSpecifier::parse(PROGRAM_SDK_INTERNAL_SPECIFIER)
@@ -641,15 +729,19 @@ impl ModuleLoader for ProgramModuleLoader {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use deno_core::{ModuleLoader, ResolutionKind};
 
     use super::{PROGRAM_MAIN_SPECIFIER, PROGRAM_SDK_INTERNAL_SPECIFIER, ProgramModuleLoader};
 
     #[test]
     fn loader_rejects_a_relative_artifact_import() {
-        let error = ProgramModuleLoader
-            .resolve("./other.js", PROGRAM_MAIN_SPECIFIER, ResolutionKind::Import)
-            .expect_err("relative imports are outside the program artifact contract");
+        let error = ProgramModuleLoader {
+            preload_admitted: Cell::new(false),
+        }
+        .resolve("./other.js", PROGRAM_MAIN_SPECIFIER, ResolutionKind::Import)
+        .expect_err("relative imports are outside the program artifact contract");
 
         assert_eq!(
             error.to_string(),
@@ -659,13 +751,15 @@ mod tests {
 
     #[test]
     fn loader_maps_only_the_canonical_sdk_import() {
-        let resolved = ProgramModuleLoader
-            .resolve(
-                super::PROGRAM_SDK_V1_SPECIFIER,
-                PROGRAM_MAIN_SPECIFIER,
-                ResolutionKind::Import,
-            )
-            .expect("the canonical SDK import is admitted");
+        let resolved = ProgramModuleLoader {
+            preload_admitted: Cell::new(false),
+        }
+        .resolve(
+            super::PROGRAM_SDK_V1_SPECIFIER,
+            PROGRAM_MAIN_SPECIFIER,
+            ResolutionKind::Import,
+        )
+        .expect("the canonical SDK import is admitted");
 
         assert_eq!(resolved.as_str(), PROGRAM_SDK_INTERNAL_SPECIFIER);
     }

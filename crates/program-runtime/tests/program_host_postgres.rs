@@ -18,7 +18,7 @@ use signalbox_persistence::{
 };
 use signalbox_program_runtime::{
     LiveDeliveryFailure, LiveDeliverySource, PROGRAM_SDK_V1_SPECIFIER, ProgramArtifact,
-    ProgramExecutionOutcome, ProgramHost, ProgramHostError,
+    ProgramExecutionOutcome, ProgramHost, ProgramHostError, ProgramHostProtocolError,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -64,6 +64,10 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
 
 fn run_id() -> ProgramRunId {
     ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID))
+}
+
+fn distinct_run_id(offset: u128) -> ProgramRunId {
+    ProgramRunId::from_uuid(Uuid::from_u128(RUN_ID + offset))
 }
 
 fn payload(bytes: &'static [u8]) -> InlineFramePayload {
@@ -296,6 +300,152 @@ async fn inv068_isolate_divergence_persists_and_replays_the_nondeterminism_fault
         ProgramExecutionOutcome::Faulted(ProgramFault::Nondeterminism { expected, observed })
     );
     assert!(restarted_live_must_not_run.observed_outstanding.is_empty());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn isolate_closes_intl_and_the_raw_request_op_before_artifact_evaluation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = distinct_run_id(1);
+    repository.create_stream(run).await?;
+    let artifact = ProgramArtifact::new(
+        r#"
+globalThis.Intl === undefined || (() => { throw new Error("Intl reached the artifact"); })();
+globalThis.__signalboxProgramRequest === undefined || (() => { throw new Error("the raw request op reached the artifact"); })();
+"#,
+    );
+    let host = ProgramHost::new(repository);
+    let mut live_must_not_run = ScriptedDeliveries::new([]);
+
+    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+
+    assert_eq!(outcome, ProgramExecutionOutcome::Completed);
+    assert!(live_must_not_run.observed_outstanding.is_empty());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unresolved_top_level_await_returns_stalled_promptly() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = distinct_run_id(2);
+    repository.create_stream(run).await?;
+    let artifact = ProgramArtifact::new("await new Promise(() => {});");
+    let host = ProgramHost::new(repository);
+    let mut live_must_not_run = ScriptedDeliveries::new([]);
+
+    let failure = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        host.execute(run, &artifact, &mut live_must_not_run),
+    )
+    .await
+    .expect("a stalled artifact must return promptly")
+    .expect_err("an unresolved top-level await must stall");
+
+    assert!(
+        matches!(
+            failure,
+            ProgramHostError::Protocol(ProgramHostProtocolError::Stalled)
+        ),
+        "expected the typed stalled failure, got {failure:?}"
+    );
+    assert!(live_must_not_run.observed_outstanding.is_empty());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn completed_module_drains_an_unawaited_request_without_repolling_evaluation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = distinct_run_id(3);
+    repository.create_stream(run).await?;
+    let artifact = ProgramArtifact::new(format!(
+        r#"
+import {{ now }} from "{PROGRAM_SDK_V1_SPECIFIER}";
+now(new Uint8Array([{FIRST_LIVE_REQUEST_BYTE}]));
+"#
+    ));
+    let expected_request = request(1, RequestKind::Now(payload(&[FIRST_LIVE_REQUEST_BYTE])));
+    let mut live = ScriptedDeliveries::new([DeliveryKind::Answer {
+        resolves: expected_request.ordinal(),
+        payload: payload(&[FIRST_LIVE_ANSWER_BYTE]),
+    }]);
+    let host = ProgramHost::new(repository.clone());
+
+    let outcome = host.execute(run, &artifact, &mut live).await?;
+
+    assert_eq!(outcome, ProgramExecutionOutcome::Completed);
+    assert_eq!(live.observed_outstanding, vec![vec![expected_request]]);
+    let journal = repository
+        .load(run)
+        .await?
+        .expect("the created journal stream exists");
+    assert_eq!(journal.entries().len(), 2);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stale_loaded_tail_cannot_append_or_mutate_the_journal() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = distinct_run_id(4);
+    repository.create_stream(run).await?;
+    let winner = repository
+        .append_request_if_tail(
+            run,
+            0,
+            None,
+            RequestKind::Now(payload(&[FIRST_LIVE_REQUEST_BYTE])),
+        )
+        .await?
+        .expect("the current empty tail admits the first request");
+
+    let stale = repository
+        .append_request_if_tail(
+            run,
+            0,
+            None,
+            RequestKind::Random(payload(&[SECOND_LIVE_REQUEST_BYTE])),
+        )
+        .await?;
+    let stale_delivery = repository
+        .append_delivery_if_tail(
+            run,
+            0,
+            DeliveryKind::Answer {
+                resolves: winner.ordinal(),
+                payload: payload(&[FIRST_LIVE_ANSWER_BYTE]),
+            },
+        )
+        .await?;
+
+    assert_eq!(stale, None);
+    assert_eq!(stale_delivery, None);
+    let journal = repository
+        .load(run)
+        .await?
+        .expect("the created journal stream exists");
+    assert_eq!(journal.entries().len(), 1);
+    assert_eq!(journal.entries()[0].frame(), &JournalFrame::Request(winner));
 
     pool.close().await;
     drop(container);
