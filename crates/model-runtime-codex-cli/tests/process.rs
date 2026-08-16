@@ -2926,8 +2926,12 @@ async fn inherited_stdout_cannot_extend_process_cleanup_past_deadline() {
             .await
     });
 
-    tokio::task::yield_now().await;
-    wait_for_recorded_process_group_leader_exit(&process_group_path);
+    let readiness_path = process_group_path.clone();
+    tokio::task::spawn_blocking(move || {
+        wait_for_recorded_process_group_leader_exit(&readiness_path);
+    })
+    .await
+    .expect("the wall-clock readiness barrier completes");
     tokio::time::advance(exchange_timeout).await;
     let report = execution
         .await
