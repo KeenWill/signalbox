@@ -826,14 +826,20 @@ identity and a closed cause, and the drain itself emits an error-level record
 carrying the first such cause, whichever attempt performed it — a startup drain,
 a wake, a retry, or a full poll. A delivery that fails before its terminal
 disposition is recorded remains pending, and its successful page peers still
-reach terminal state; a delivery whose disposition is already durable when a
-later step fails — a targeted refresh the provider will not serve, say — is
-terminal and is not loaded again. The repository task schedules a new drain
-attempt after five seconds without waiting for a full poll, another delivery, or
-a restart. Consecutive failures double that delay to a five-minute ceiling and a
-success returns it to five seconds, so a delivery that cannot be projected costs
-bounded repeated work rather than a fixed five-second loop. A failed full poll
-schedules that retry only when none is already owed, an admission wake is
+reach terminal state: a targeted refresh the provider will not serve is one such
+failure, because that query runs before anything is recorded. A delivery whose
+disposition is already durable when a later step fails — the targeted commit, or
+the dispatch work that follows it — is terminal and is not loaded again. The
+repository task schedules a new drain attempt after five seconds without waiting
+for a full poll, another delivery, or a restart. Consecutive failures double
+that delay to a five-minute ceiling and a success returns it to five seconds, so
+a delivery that cannot be projected costs bounded repeated work rather than a
+fixed five-second loop. Only the drain advances that delay: an attempt whose
+drain succeeded and whose dispatch work then failed returns it to five seconds,
+and one that failed before reaching the drain arms a retry without advancing it,
+so unrelated dispatch failures cannot grow the delay, suppress admission wakes,
+or make polls omit their drain steps while projection is healthy. A failed full
+poll schedules that retry only when none is already owed, an admission wake is
 suppressed while one is, and a full poll omits both of its drain steps while one
 is, so neither a rapidly failing poll nor an authenticated replay stream can
 defer or bypass the backoff; a suppressed wake coalesces and is observed by the

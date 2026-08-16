@@ -430,6 +430,59 @@ impl WebhookDrainRetry {
     }
 }
 
+/// Which schedule ran a webhook attempt, reported as a field so its three
+/// callers share one set of records rather than three near-identical ones.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookAttemptTrigger {
+    Startup,
+    Wake,
+    Retry,
+}
+
+impl WebhookAttemptTrigger {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::Wake => "wake",
+            Self::Retry => "retry",
+        }
+    }
+}
+
+/// How one webhook-triggered attempt ended, with the drain's own outcome held
+/// apart from the cutoff and dispatch work around it.
+///
+/// The backoff measures the drain, so only a drain failure may advance it.
+/// Dispatch work that kept failing would otherwise grow the delay to its
+/// ceiling, suppress admission wakes, and make full polls omit their drain
+/// steps while projection itself was healthy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookAttemptOutcome {
+    /// Every step succeeded.
+    Completed,
+    /// The drain itself failed, so the backoff advances.
+    DrainFailed(RepositoryWatchAttemptError),
+    /// The drain succeeded and the dispatch work after it failed, so the
+    /// backoff is cleared: the drain is what it measures.
+    DrainedThenFailed(RepositoryWatchAttemptError),
+    /// A step before the drain failed, so the drain never ran. It has earned
+    /// neither a longer delay nor a clear, and a retry is armed only if none is
+    /// already owed.
+    FailedBeforeDrain(RepositoryWatchAttemptError),
+}
+
+impl WebhookAttemptOutcome {
+    /// The attempt's failure, whichever step produced it.
+    const fn failure(self) -> Option<RepositoryWatchAttemptError> {
+        match self {
+            Self::Completed => None,
+            Self::DrainFailed(error)
+            | Self::DrainedThenFailed(error)
+            | Self::FailedBeforeDrain(error) => Some(error),
+        }
+    }
+}
+
 /// Whether a full polling attempt performs its own webhook drain step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WebhookDrain {
@@ -719,28 +772,14 @@ impl RepositoryWatchTask {
         }
         let mut webhook_retry = WebhookDrainRetry::default();
         if self.webhook_work.is_some() {
-            let Some(result) = self.run_webhook_attempt_until_shutdown(&mut shutdown).await else {
+            let Some(outcome) = self.run_webhook_attempt_until_shutdown(&mut shutdown).await else {
                 return;
             };
-            match &result {
-                Ok(()) => {
-                    webhook_retry.update_after(&result);
-                    tracing::debug!(
-                        repository = %self.repository.as_str(),
-                        "repository-watch startup webhook backlog drained"
-                    );
-                }
-                Err(error) => {
-                    webhook_retry.update_after(&result);
-                    tracing::error!(
-                        repository = %self.repository.as_str(),
-                        cause_code = error.cause_code(),
-                        retry_seconds = webhook_retry.delay().as_secs(),
-                        "repository-watch startup webhook drain failed; retry scheduled"
-                    );
-                }
-            }
-            if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
+            if self.record_webhook_attempt(
+                WebhookAttemptTrigger::Startup,
+                outcome,
+                &mut webhook_retry,
+            ) {
                 return;
             }
         }
@@ -801,56 +840,30 @@ impl RepositoryWatchTask {
                     next_poll = next_cadence_deadline(cycle_started, self.interval, Instant::now());
                 }
                 RepositoryWatchWake::WebhookWork => {
-                    let Some(result) = self.run_webhook_attempt_until_shutdown(&mut shutdown).await
+                    let Some(outcome) =
+                        self.run_webhook_attempt_until_shutdown(&mut shutdown).await
                     else {
                         return;
                     };
-                    match &result {
-                        Ok(()) => {
-                            webhook_retry.update_after(&result);
-                            tracing::debug!(
-                                repository = %self.repository.as_str(),
-                                "repository-watch webhook work completed"
-                            );
-                        }
-                        Err(error) => {
-                            webhook_retry.update_after(&result);
-                            tracing::error!(
-                                repository = %self.repository.as_str(),
-                                cause_code = error.cause_code(),
-                                retry_seconds = webhook_retry.delay().as_secs(),
-                                "repository-watch webhook drain failed; retry scheduled"
-                            );
-                        }
-                    }
-                    if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
+                    if self.record_webhook_attempt(
+                        WebhookAttemptTrigger::Wake,
+                        outcome,
+                        &mut webhook_retry,
+                    ) {
                         return;
                     }
                 }
                 RepositoryWatchWake::WebhookRetry => {
-                    let Some(result) = self.run_webhook_attempt_until_shutdown(&mut shutdown).await
+                    let Some(outcome) =
+                        self.run_webhook_attempt_until_shutdown(&mut shutdown).await
                     else {
                         return;
                     };
-                    match &result {
-                        Ok(()) => {
-                            webhook_retry.update_after(&result);
-                            tracing::debug!(
-                                repository = %self.repository.as_str(),
-                                "repository-watch webhook retry drained durable work"
-                            );
-                        }
-                        Err(error) => {
-                            webhook_retry.update_after(&result);
-                            tracing::error!(
-                                repository = %self.repository.as_str(),
-                                cause_code = error.cause_code(),
-                                retry_seconds = webhook_retry.delay().as_secs(),
-                                "repository-watch webhook retry failed; another retry scheduled"
-                            );
-                        }
-                    }
-                    if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
+                    if self.record_webhook_attempt(
+                        WebhookAttemptTrigger::Retry,
+                        outcome,
+                        &mut webhook_retry,
+                    ) {
                         return;
                     }
                 }
@@ -861,8 +874,62 @@ impl RepositoryWatchTask {
     async fn run_webhook_attempt_until_shutdown(
         &mut self,
         shutdown: &mut watch::Receiver<bool>,
-    ) -> Option<Result<(), RepositoryWatchAttemptError>> {
+    ) -> Option<WebhookAttemptOutcome> {
         run_until_shutdown(shutdown, self.run_webhook_attempt()).await
+    }
+
+    /// Applies one attempt's outcome to the drain backoff and reports it.
+    ///
+    /// Answers whether the repository task must stop, which a permanent failure
+    /// requires whichever step produced it.
+    fn record_webhook_attempt(
+        &self,
+        trigger: WebhookAttemptTrigger,
+        outcome: WebhookAttemptOutcome,
+        webhook_retry: &mut WebhookDrainRetry,
+    ) -> bool {
+        match outcome {
+            WebhookAttemptOutcome::Completed => {
+                webhook_retry.update_after(&Ok(()));
+                tracing::debug!(
+                    repository = %self.repository.as_str(),
+                    trigger = trigger.as_str(),
+                    "repository-watch webhook attempt drained durable work"
+                );
+            }
+            WebhookAttemptOutcome::DrainFailed(error) => {
+                webhook_retry.update_after(&Err(error));
+                tracing::error!(
+                    repository = %self.repository.as_str(),
+                    trigger = trigger.as_str(),
+                    cause_code = error.cause_code(),
+                    retry_seconds = webhook_retry.delay().as_secs(),
+                    "repository-watch webhook drain failed; retry scheduled"
+                );
+            }
+            WebhookAttemptOutcome::DrainedThenFailed(error) => {
+                webhook_retry.update_after(&Ok(()));
+                tracing::error!(
+                    repository = %self.repository.as_str(),
+                    trigger = trigger.as_str(),
+                    cause_code = error.cause_code(),
+                    "repository-watch webhook attempt drained but its dispatch work failed"
+                );
+            }
+            WebhookAttemptOutcome::FailedBeforeDrain(error) => {
+                webhook_retry.ensure_scheduled();
+                tracing::error!(
+                    repository = %self.repository.as_str(),
+                    trigger = trigger.as_str(),
+                    cause_code = error.cause_code(),
+                    retry_seconds = webhook_retry.delay().as_secs(),
+                    "repository-watch webhook attempt failed before its drain; retry scheduled"
+                );
+            }
+        }
+        outcome
+            .failure()
+            .is_some_and(RepositoryWatchAttemptError::is_permanent)
     }
 
     /// One full polling attempt, draining durable webhook work as part of its
@@ -929,24 +996,37 @@ impl RepositoryWatchTask {
         result
     }
 
-    async fn run_webhook_attempt(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+    async fn run_webhook_attempt(&mut self) -> WebhookAttemptOutcome {
         self.poller.begin_attempt();
-        let result = async {
+        let outcome = async {
             if !self.rules_activated {
-                self.activate_rules().await?;
+                if let Err(error) = self.activate_rules().await {
+                    return WebhookAttemptOutcome::FailedBeforeDrain(error);
+                }
                 self.rules_activated = true;
             }
-            self.process_cutoffs().await?;
-            self.process_dispatches().await?;
-            self.process_webhook_deliveries().await?;
-            self.process_cutoffs().await?;
-            self.process_dispatches().await
+            if let Err(error) = self.process_cutoffs().await {
+                return WebhookAttemptOutcome::FailedBeforeDrain(error);
+            }
+            if let Err(error) = self.process_dispatches().await {
+                return WebhookAttemptOutcome::FailedBeforeDrain(error);
+            }
+            if let Err(error) = self.process_webhook_deliveries().await {
+                return WebhookAttemptOutcome::DrainFailed(error);
+            }
+            if let Err(error) = self.process_cutoffs().await {
+                return WebhookAttemptOutcome::DrainedThenFailed(error);
+            }
+            match self.process_dispatches().await {
+                Ok(()) => WebhookAttemptOutcome::Completed,
+                Err(error) => WebhookAttemptOutcome::DrainedThenFailed(error),
+            }
         }
         .await;
-        if result.is_err() {
+        if outcome.failure().is_some() {
             self.poller.invalidate_freshness();
         }
-        result
+        outcome
     }
 
     async fn process_webhook_deliveries(&mut self) -> Result<(), RepositoryWatchAttemptError> {
