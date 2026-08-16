@@ -347,7 +347,7 @@ typed system-instruction transport and capacity for the complete retained
 workspace-instruction region. The replacement checks this before committing the
 successor defaults epoch. Its single serialization boundary first locks the
 session's `session_scheduler` row, shared with turn activation, and then locks
-the admitted-set head, shared with `instructions.read`; all three paths use that
+the admitted-set head, shared with `instructions_read`; all three paths use that
 lock order. It resolves every possible target and validates the complete
 retained region while both locks remain held, then commits the successor epoch
 before releasing either lock. An admission or activation therefore occurs wholly

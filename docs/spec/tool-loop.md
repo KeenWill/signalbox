@@ -470,7 +470,7 @@ execution and continuation. For each next approved request:
    attempt.
 
 **Committed unimplemented functionality — instruction admission effect.** For a
-successful fresh `instructions.read`, the commit-result transaction also locks
+successful fresh `instructions_read`, the commit-result transaction also locks
 the session's admitted-set head and atomically appends the
 `InstructionAdmission` specified by
 [workspace instructions](workspace-instructions.md#durable-admission-transition)
@@ -626,7 +626,7 @@ every request in the batch is executed or denied, one continuation transaction:
 4. creates the next round's `Prepared` model call against that frontier.
 
 **Committed unimplemented functionality — instruction admission continuation.**
-When `instructions.read` is implemented, this transaction additionally folds the
+When `instructions_read` is implemented, this transaction additionally folds the
 batch's fresh durable successful instruction-admission rows in request order and
 creates exactly one successor turn-instruction manifest authenticated by the new
 `Prepared` model call. An idempotent replay receipt or an `already_admitted`

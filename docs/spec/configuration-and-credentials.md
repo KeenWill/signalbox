@@ -607,7 +607,7 @@ The provider-safe root reference is the identity a model may see, and it is
 therefore not derived from the path. A public unkeyed path hash is not
 provider-safe at all: a reader who guesses a conventional home or checkout
 directory can hash candidates and compare them against the reference exposed by
-`instructions.list` and every configured-root wrapper, recovering usernames and
+`instructions_list` and every configured-root wrapper, recovering usernames and
 repository layout the reference was supposed to withhold. It is therefore
 operator-assigned. The slice extends `[workspace_instructions]` so that an entry
 of `registered_roots` may be written as a table with exactly `path`, validated

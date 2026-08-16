@@ -315,10 +315,24 @@ selectors remain unresolved until the runner discovery protocol exists.
 
 The effective eligibility snapshot is immutable for one turn. The owning
 [activation transaction](turn-lifecycle-and-scheduling.md#the-activation-transaction)
-copies the exact ordered bundle-identity list effective under its session lock
-and records its versioned SHA-256 hash. Replacement serializes on the same lock
-and affects only later activations. A registered bundle absent from that
-snapshot cannot be enumerated, previewed, or admitted.
+copies the exact ordered eligibility list effective under its session lock and
+records its versioned SHA-256 hash. Replacement serializes on the same lock and
+affects only later activations. A registered bundle absent from that snapshot
+cannot be enumerated, previewed, or admitted.
+
+An eligibility entry is authority-qualified, not a bare identity. Each names one
+`InstructionBundleId` together with the authorizing root the session reaches it
+through — the `workspace` kind, or `configured` plus that root's provider-safe
+reference — and a replacement names that root alongside each identity. Identity
+alone would be ambiguous exactly where it matters: a bundle with aliases under
+several configured roots would leave catalog values, wrapper paths, scope
+comparisons, and projection order undetermined, and choosing arbitrarily can
+broaden an `AGENTS.md` document's scope and change rendered and manifest bytes.
+The root named must be one this bundle's registration actually records, as its
+primary root or as an alias, and must be one the naming session is authorized to
+use; anything else is the typed rejection eligibility replacement already
+defines. The activation snapshot copies the pairs, so a turn's rendering is
+determined by evidence frozen at activation rather than re-derived later.
 
 Until whole-bundle unload is implemented, a replacement command rejects removal
 of any currently admitted identity or any identity in the frozen eligibility
@@ -332,7 +346,7 @@ transition owns removal from both sets.
 
 Replacement also rejects adding or retaining a registered identity whose
 canonical source path is already represented in the session's admitted set by a
-different bundle identity. `instructions.read` repeats that guard while
+different bundle identity. `instructions_read` repeats that guard while
 serialized on the admitted-set head. A changed source may create new
 registration evidence, but contradictory versions of one source cannot become
 simultaneously admitted until unload can retire the old admission.
@@ -346,7 +360,7 @@ and frozen turn snapshot.
 
 ## Enumeration, preview, and admission
 
-Eligible inventory is progressively disclosed. `instructions.list` returns a
+Eligible inventory is progressively disclosed. `instructions_list` returns a
 cursor-paginated catalog with bundle identity, kind, display name, description
 when present, source byte length, source hash, provider-safe root reference, and
 root-relative source and scope paths. The display name is derived, never
@@ -398,7 +412,7 @@ stale-cursor failure.
 
 A catalog page carries repository-controlled strings too — `display_name`,
 `source`, `scope`, and `description` are all chosen by the repository — and
-`instructions.list` is an `Auto` tool whose result the ordinary projection
+`instructions_list` is an `Auto` tool whose result the ordinary projection
 carries into later calls. The same framing preview uses therefore applies here,
 for the same reason and with the same bytes: those members are emitted inside
 the delimited untrusted-data region of the result, under the fixed
@@ -409,7 +423,7 @@ members that cannot carry prose — `bundle_id`, `kind`, `source_bytes`,
 `source_sha256`, `root`, `root_id` — stay outside that region, so a reader can
 still address and order a page without parsing untrusted text.
 
-`instructions.preview` returns bounded structure — headings for a document and
+`instructions_preview` returns bounded structure — headings for a document and
 validated metadata plus headings for a skill — with full source byte length and
 an estimated model-token cost. It reads at most the registered source byte
 length plus one byte. EOF before the registered length, an extra byte, a changed
@@ -440,7 +454,7 @@ line remains fenced. EOF does not close an unmatched fence, so all later
 apparent headings remain excluded.
 
 Preview returns at most 128 heading records and at most 65,536 encoded result
-bytes using the compact canonical JSON rules of `instructions.list`. It stops
+bytes using the compact canonical JSON rules of `instructions_list`. It stops
 before the first record that would exceed either bound and reports the total
 heading count, returned count, and `headings_truncated`; the bounded source read
 still counts all headings deterministically. The token estimate is
@@ -470,7 +484,7 @@ part of the result the model-input contract preserves; an adapter that cannot
 carry it fails rather than presenting the fragments bare.
 
 The region is these exact bytes, and they are the same wherever this page calls
-for an untrusted-data region — `instructions.preview` and `instructions.list`
+for an untrusted-data region — `instructions_preview` and `instructions_list`
 alike, so one label is learned once and independently invented delimiters cannot
 weaken it. It opens with a line containing exactly
 `<signalbox_untrusted_repository_data>`, then a line stating that the JSON
@@ -512,7 +526,7 @@ optional frontmatter keys actually present, each a string. Truncation ends the
 region closes normally and the result stays parseable rather than being cut
 mid-object.
 
-`instructions.read` names one eligible bundle and requests deliberate admission.
+`instructions_read` names one eligible bundle and requests deliberate admission.
 The daemon re-reads and validates it under its registered root, compares the
 source hash with registration evidence, applies the per-bundle render budget,
 reads at most the registered source byte length plus one byte exactly as preview
@@ -542,7 +556,7 @@ a touched file, or present in a template. Version one admits only by the closed
 `model_requested` route. Path-triggered or template-eager routes need separate
 variants and triggering evidence.
 
-`instructions.read` declares the `AlwaysConfirm` permission default required of
+`instructions_read` declares the `AlwaysConfirm` permission default required of
 every entry in the owning
 [tool catalog](tool-loop.md#provider-bridge-and-daemon-catalog), together with
 the explicit `Delegated` approval posture. The pair is the point: an admission
@@ -590,7 +604,7 @@ unconditional rather than optional.
 
 Delegation is only meaningful if the judge can tell what it is approving, and
 `bundle_id` alone cannot tell it. The approval request for a delegated
-`instructions.read` therefore carries daemon-resolved bundle evidence beside the
+`instructions_read` therefore carries daemon-resolved bundle evidence beside the
 raw arguments: closed kind, provider-safe root reference, root-relative source
 path, the registered portable name and description for a skill, source byte
 length, and source hash. Every field is resolved by the daemon from registration
@@ -624,7 +638,7 @@ admit nothing.
 All three declare the crash classification `EffectFree`, so a daemon lost
 between authorization and result commit closes the attempt `KnownFailed` and
 fails the turn honestly rather than parking it in ambiguity recovery. List and
-preview are self-evidently free of effect. `instructions.read` is `EffectFree`
+preview are self-evidently free of effect. `instructions_read` is `EffectFree`
 for the reason its transition is written that way: its only durable effect is
 the `InstructionAdmission` appended inside the atomic commit-result transaction,
 so a crash before that commit provably left no admission, no receipt, and no
@@ -632,26 +646,42 @@ advanced head. Declaring it `ExternalEffect` would park a turn for recovery over
 an effect that cannot have happened. Re-reading a workspace file observes
 daemon-local state, exactly as `blob_read` does under the same classification.
 
+The three names use an underscore rather than a dot because the owning
+[`ToolRequest` name grammar](tool-loop.md#intra-turn-rounds-and-request-batches)
+admits only ASCII letters, digits, underscore, and hyphen. A dotted name could
+be advertised but never converted into the durable request the admission flow
+requires, so the family would be unusable at the first proposal. Widening that
+grammar for a naming preference would change an implemented constructor and
+every tool name's validity for no behavioral gain.
+
 Each tool advertises a closed JSON-object argument schema with no additional
 properties, and neither schema accepts a session identity — every request takes
 its session from the trusted tool-dispatch correlation.
 
-- `instructions.list` accepts one optional `cursor` string. Absent, enumeration
+- `instructions_list` accepts one optional `cursor` string. Absent, enumeration
   starts at ordinal zero. Present, it is the exact opaque token a previous page
   returned: the lowercase 64-character hexadecimal eligibility-snapshot hash, a
   single `:`, then the zero-based ordinal of the next item as a decimal integer
   with no leading zeroes and no sign. Any other shape is `InvalidArguments`; a
   well-formed cursor naming another snapshot is the typed stale-cursor failure,
-  which is a request outcome rather than an argument error. Its success shape is
-  fixed below, because the page boundary is a byte budget and a byte budget
-  cannot be evaluated against an unfixed shape.
-- `instructions.preview` requires exactly one `bundle_id`, the lowercase
+  which is a request outcome rather than an argument error. A cursor naming the
+  current snapshot is accepted only when its ordinal is at most `total`;
+  anything greater is that same stale-cursor failure. The bound is `total`
+  rather than `total - 1` so that the ordinal one past the last item — the
+  cursor a full final page legitimately returns — yields an empty page instead
+  of an error. Stating the range closes the third outcome a hand-edited ordinal
+  would otherwise have: with it, `total - first_ordinal - returned` cannot
+  underflow, and implementations cannot disagree between rejecting, returning an
+  empty page, and failing internally. Its success shape is fixed below, because
+  the page boundary is a byte budget and a byte budget cannot be evaluated
+  against an unfixed shape.
+- `instructions_preview` requires exactly one `bundle_id`, the lowercase
   hyphenated UUID of an eligible bundle. Success returns the bounded structure
   described above. A syntactically valid identity that is not eligible for this
   session is a typed not-eligible failure and exposes no source metadata, which
   is what keeps the tool from being an existence oracle for bundles the session
   may not see.
-- `instructions.read` requires exactly one `bundle_id` in that same form and
+- `instructions_read` requires exactly one `bundle_id` in that same form and
   accepts no budget field, since version one fixes the budget. Success is one of
   two receipt variants, tagged so a caller need not infer which occurred:
   `admitted` carries identity, source hash, rendered hash, rendered byte length,
@@ -690,40 +720,54 @@ result encoding above, never decimal strings. One JSON type for these fields is
 what keeps a result's encoded byte total, and therefore the fixed response
 budget, the same across implementations.
 
-For the same reason the `instructions.list` success value is one closed object,
+For the same reason the `instructions_list` success value is one closed object,
 not a field inventory. Its members are exactly `items`, `total`,
-`first_ordinal`, `returned`, and `next_cursor`, serialized under the compact
-canonical rules above with keys sorted by raw ASCII bytes. `items` is an array
-in canonical order. `total` is the snapshot's item count and `returned` the
-length of `items`, both JSON numbers; `first_ordinal` is the zero-based ordinal
-the page started at — the ordinal the request's cursor named, or zero when the
-cursor was absent. Defining it by the request rather than by the first returned
-item keeps it total: an empty page, which is what the default empty eligibility
-snapshot returns and therefore the most common initial state, reports the
-ordinal it started at with `returned` of zero rather than inventing a value for
-an item that does not exist. The returned ordinal range is those two numbers
-rather than a nested object or a pair, and the remaining count is
+`first_ordinal`, `returned`, `next_cursor`, and `untrusted`, serialized under
+the compact canonical rules above with keys sorted by raw ASCII bytes. `items`
+is an array in canonical order. `total` is the snapshot's item count and
+`returned` the length of `items`, both JSON numbers; `first_ordinal` is the
+zero-based ordinal the page started at — the ordinal the request's cursor named,
+or zero when the cursor was absent. Defining it by the request rather than by
+the first returned item keeps it total: an empty page, which is what the default
+empty eligibility snapshot returns and therefore the most common initial state,
+reports the ordinal it started at with `returned` of zero rather than inventing
+a value for an item that does not exist. The returned ordinal range is those two
+numbers rather than a nested object or a pair, and the remaining count is
 `total - first_ordinal - returned` rather than a sixth member, since a derivable
 value that is also transmitted is a value two implementations can disagree
 about. `next_cursor` is the token string, or JSON `null` when enumeration is
 complete — present and null, never omitted, so the object's key set never
 varies.
 
-Each element of `items` is one closed object whose members are exactly
-`bundle_id`, `kind`, `display_name`, `root`, `source`, `source_bytes`, and
-`source_sha256`, plus `scope` for an `agent_document`, plus `description` and
-`description_bytes` when a description is present, plus `root_id` for a
-`configured` root. `root` is the closed root kind. An optional member is omitted
-entirely when absent rather than emitted as null, which is the opposite rule
-from `next_cursor` and deliberate: a page's item objects vary in shape by kind
-and by what registration actually holds, while the page envelope must not. When
-a description was shortened, `description` is the shortened text and
-`description_bytes` its full byte length, which is how a reader tells truncation
-from a naturally short description without a third member.
+The trusted envelope and the untrusted strings are split by *level*, not
+duplicated: an item never carries a repository-controlled member directly, and
+the untrusted region never repeats a trusted one. Each element of `items` is one
+closed object whose members are exactly `bundle_id`, `kind`, `root`,
+`source_bytes`, and `source_sha256`, plus `root_id` when the authorizing root is
+`configured`. Every one of those is daemon-generated or a closed vocabulary, so
+a reader can address, order, and page a catalog without parsing untrusted text.
 
-Two implementations following this emit the same bytes for one snapshot, so the
-524,288-byte bound cuts a page at the same item and the next cursor names the
-same ordinal.
+The result's sixth top-level member is `untrusted`, the delimited region defined
+above. Its JSON object has one member, `items`, an array in the same canonical
+order as the trusted `items`. Each element is one closed object whose members
+are exactly `bundle_id` and `display_name`, plus `source`, plus `scope` for an
+`agent_document`, plus `description` and `description_bytes` when a description
+is present. Repeating `bundle_id` there is deliberate: it makes the
+correspondence checkable rather than positional, so a truncated or reordered
+region cannot silently attach one bundle's description to another's identity.
+
+An optional member is omitted entirely when absent rather than emitted as null,
+which is the opposite rule from `next_cursor` and deliberate: item objects vary
+in shape by kind and by what registration actually holds, while the page
+envelope must not. When a description was shortened, `description` is the
+shortened text and `description_bytes` its full byte length, which is how a
+reader tells truncation from a naturally short description without a third
+member.
+
+Two implementations following this emit the same bytes for one snapshot —
+including the region's fixed label and delimiters, which count against the bound
+like every other byte — so the 524,288-byte bound cuts a page at the same item
+and the next cursor names the same ordinal.
 
 **Committed unimplemented functionality — model-facing operations.** No present
 tool supplies list, preview, or read unless an implementing child explicitly
@@ -743,10 +787,10 @@ where it applies.
 
 **Committed unimplemented functionality.** This whole section is a compatibility
 constraint on the present slice, not a description of it: no present tool
-supplies `instructions.read`, and no present persistence surface stores an
+supplies `instructions_read`, and no present persistence surface stores an
 admitted-set head or an `InstructionAdmission`.
 
-Each `instructions.read` request has a replay-stable tool-request identity. The
+Each `instructions_read` request has a replay-stable tool-request identity. The
 owning
 [tool result-commit transaction](tool-loop.md#serialized-staged-execution)
 atomically commits its receipt-only result and, for a successful fresh read,
@@ -954,9 +998,15 @@ those bytes, and the wrapper field name must not be read as claiming otherwise;
 a later version changes the separator rather than the field. Because
 registration rejects a non-UTF-8 source, the framed bytes are always UTF-8.
 
-The eligibility hash is SHA-256 over `signalbox-instruction-eligibility-v1`
-followed by eligible bundle UUID bytes in ascending UUID-byte order. The empty
-hash is therefore the separator alone.
+The eligibility hash is SHA-256 over `signalbox-instruction-eligibility-v1`,
+then one record per eligible entry in ascending bundle-UUID-byte order. Each
+record is the bundle UUID, the length-framed authorizing-root kind, and, for
+`configured` only, that root's 32 raw provider-safe reference bytes. The
+authorizing root is hashed because it is part of what the entry authorizes: two
+snapshots naming the same bundles through different roots render different
+bytes, so they must not share an eligibility hash or a cursor. Entries are
+distinct by bundle identity, so ordering by UUID bytes is total. The empty hash
+is therefore the separator alone.
 
 The admitted-set hash is SHA-256 over `signalbox-instruction-admitted-set-v1`,
 an unsigned record count, then one record per effective admission in projection
@@ -989,7 +1039,7 @@ present slice, so every budget, preflight, and target check below constrains the
 implementing child rather than describing current behavior.
 
 Version one fixes every admission's per-bundle source-byte budget at 32,768
-bytes. `instructions.read` has no caller-supplied budget field. Rendering
+bytes. `instructions_read` has no caller-supplied budget field. Rendering
 preserves UTF-8 and emits the complete source or truncates to the unique longest
 UTF-8 prefix whose byte length does not exceed that fixed budget before applying
 the required content escaping and wrapper. It never borrows a shared pool whose
