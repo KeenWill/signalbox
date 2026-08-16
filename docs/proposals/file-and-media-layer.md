@@ -170,7 +170,9 @@ Detection follows one fixed algorithm:
 6. With no strong claim, a syntactically valid declared type may nominate its
    sole provider for structural validation. The declaration is not proof.
 7. With no declared candidate, a text provider may claim only after complete
-   streaming UTF-8 and control-policy validation.
+   streaming UTF-8 and control-policy validation. After successful validation,
+   compare the canonical text type with any syntactically valid declared type;
+   disagreement returns `DeclaredTypeMismatch` rather than a validated file.
 8. Validation failure after a recognized signature is `Malformed`, never a
    fallback to text or a weaker candidate.
 9. No successful candidate is ordinary `UnknownType`; the blob stays stored and
@@ -303,18 +305,17 @@ success JSON schema. Outcomes expose no content beyond admitted metadata.
 
 ### `file_read`
 
-Arguments are exactly
-`{ digest, part_selector, view, options, continuation }`. The permission default
-is `Auto` and the effect class is `ExternalEffect`, because a read can perform
-observable authenticated store reads and publish a generated artifact. On an
-initial request, `options` is the provider object and `continuation` is null. On
-a continuation request, `options` is null and `continuation` is the cursor from
-the preceding result; the cursor carries and authenticates the original
-normalized options and next semantic position. The executor repeats inspection;
-it never trusts model-supplied type or reader identity. The selected view must
-exist, the initial `options` must validate against its registered object schema,
-and a continuation must bind the same digest, selector, reader identity, and
-view.
+Arguments are exactly `{ digest, part_selector, view, options, continuation }`.
+The permission default is `Auto` and the effect class is `ExternalEffect`,
+because a read can perform observable authenticated store reads and publish a
+generated artifact. On an initial request, `options` is the provider object and
+`continuation` is null. On a continuation request, `options` is null and
+`continuation` is the cursor from the preceding result; the cursor carries and
+authenticates the original normalized options and next semantic position. The
+executor repeats inspection; it never trusts model-supplied type or reader
+identity. The selected view must exist, the initial `options` must validate
+against its registered object schema, and a continuation must bind the same
+digest, selector, reader identity, and view.
 
 - `Text` returns admitted UTF-8 with truncation and continuation facts.
 - `Structured` returns canonical compact JSON with the same facts.
@@ -326,9 +327,9 @@ view.
 Pagination uses a common opaque authenticated cursor binding digest, part
 selector, reader identity, view, normalized initial options, and position. It is
 at most 1,024 bytes and expires on restart; an expired cursor returns a typed
-invalid-continuation failure and the model may issue a new initial request rather
-than the executor guessing. Providers expose semantic positions such as page,
-row, section, frame, or time span, not parser offsets.
+invalid-continuation failure and the model may issue a new initial request
+rather than the executor guessing. Providers expose semantic positions such as
+page, row, section, frame, or time span, not parser offsets.
 
 Raw `blob_read` remains beside these tools as the unknown-format and diagnostic
 escape hatch. A typed reader never falls back to raw bytes for recognized
@@ -346,28 +347,36 @@ BlobReference {
   presentation: Image | Audio | File,
   source_digest: BlobDigest,
   reader: ReaderIdentity,
+  validation: ValidationEvidence,
 }
 ```
 
 `source_digest` is provenance for a derived view and equals `digest` for direct
-presentation. Filename, parser text, store, and object key are absent. The
-enclosing tool result keeps request correlation and order.
+presentation. `validation` is the content-silent evidence admitted before result
+commit and protected by durable-result integrity; because the digest fixes the
+validated bytes, preparation authenticates this evidence instead of rerunning a
+reader. Filename, parser text, store, and object key are absent. The enclosing
+tool result keeps request correlation and order.
 
 New output streams through generated-artifact ingest. Publication and
 verification precede registration; registration precedes result commit. Before
-committing any successful reference, the continuation transaction prospectively
-projects the complete rendered frontier and rejects the read if adding that
-reference would exceed the selected model call's reference-count or aggregate
-media ceiling. The rejection commits known-failure evidence but no reference, so
-every committed reference is admissible to its mandatory continuation call.
-Failure may leave an unreferenced orphan, never a dangling result. Equal output
-bytes converge by digest, and ambiguous publication cannot become tool success.
+processing or publication, the continuation transaction prospectively projects
+the complete rendered frontier and durably reserves one reference slot and the
+view's maximum presented bytes. It rejects the read before creating output when
+that reservation would exceed the selected model call's reference-count or
+aggregate media ceiling. Publication consumes no more than the reservation; the
+transaction releases unused bytes and commits the reference atomically. A later
+publication or commit failure may leave an unreferenced orphan, never a dangling
+result, but capacity rejection registers nothing. Thus every committed reference
+is admissible to its mandatory continuation call. Equal output bytes converge by
+digest, and ambiguous publication cannot become tool success.
 
 Rendering first emits a bounded textual stub. Preparation then:
 
 1. rejects unsupported image/audio/file presentation through typed
    modality-unsupported failure before send authorization;
-2. live-verifies a replica and revalidates canonical type;
+2. live-verifies a replica against the durable digest and authenticates the
+   persisted canonical type and validation evidence without rerunning a reader;
 3. maps missing, corrupt, unavailable, malformed, or oversized bytes to typed
    preparation outcomes without provider traffic; and
 4. materializes only the bounded form required by the selected provider.
