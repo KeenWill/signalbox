@@ -2327,44 +2327,100 @@ mod tests {
         );
     }
 
-    /// The inventory is pinned as a literal, and every edge of the successor
-    /// chain is checked against its predecessor one assertion at a time.
+    /// Every edge of the successor chain is checked against its predecessor
+    /// one assertion at a time, from a head this also pins.
     ///
     /// Straight-line for the same reason the event-kind inventory beside it
-    /// is: each edge stays independently attributable, and the literal pins
-    /// order, membership, and count at once — adding a field fails here until
-    /// the claim is revisited, which is the point. Order is load-bearing
-    /// because it is the order stored fingerprints are compared in.
+    /// is: each edge stays independently attributable, so a broken link names
+    /// itself instead of surfacing as one loop iteration, and a chain edited
+    /// into a cycle fails an assertion rather than hanging the test. Naming
+    /// every field in both directions pins order, membership, and count at
+    /// once — adding a field fails here until the claim is revisited, which is
+    /// the point. Order is load-bearing because it is the order stored
+    /// fingerprints are compared in.
     #[test]
     fn every_identity_field_is_linked_into_the_inventory() {
-        let mut inventory = Vec::new();
-        let mut field = Some(RepoWatchRuleIdentityField::first());
-        while let Some(current) = field {
-            inventory.push(current);
-            field = current.next();
-        }
+        assert_eq!(
+            RepoWatchRuleIdentityField::first(),
+            RepoWatchRuleIdentityField::MatcherEventKinds
+        );
 
         assert_eq!(
-            inventory,
-            vec![
-                RepoWatchRuleIdentityField::MatcherEventKinds,
-                RepoWatchRuleIdentityField::MatcherRepository,
-                RepoWatchRuleIdentityField::MatcherBaseBranch,
-                RepoWatchRuleIdentityField::MatcherHeadBranchRegex,
-                RepoWatchRuleIdentityField::MatcherTitleRegex,
-                RepoWatchRuleIdentityField::MatcherBodyRegex,
-                RepoWatchRuleIdentityField::MatcherLabelsAnyOf,
-                RepoWatchRuleIdentityField::MatcherLabelsAllOf,
-                RepoWatchRuleIdentityField::MatcherLabelsNoneOf,
-                RepoWatchRuleIdentityField::MatcherDraft,
-                RepoWatchRuleIdentityField::MatcherAuthor,
-                RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf,
-                RepoWatchRuleIdentityField::MatcherConclusionAnyOf,
-                RepoWatchRuleIdentityField::Actions,
-                RepoWatchRuleIdentityField::SingletonPer,
-                RepoWatchRuleIdentityField::CooldownSeconds,
-            ]
+            RepoWatchRuleIdentityField::MatcherEventKinds.next(),
+            Some(RepoWatchRuleIdentityField::MatcherRepository)
         );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherRepository.next(),
+            Some(RepoWatchRuleIdentityField::MatcherBaseBranch)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherBaseBranch.next(),
+            Some(RepoWatchRuleIdentityField::MatcherHeadBranchRegex)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherHeadBranchRegex.next(),
+            Some(RepoWatchRuleIdentityField::MatcherTitleRegex)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherTitleRegex.next(),
+            Some(RepoWatchRuleIdentityField::MatcherBodyRegex)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherBodyRegex.next(),
+            Some(RepoWatchRuleIdentityField::MatcherLabelsAnyOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherLabelsAnyOf.next(),
+            Some(RepoWatchRuleIdentityField::MatcherLabelsAllOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherLabelsAllOf.next(),
+            Some(RepoWatchRuleIdentityField::MatcherLabelsNoneOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherLabelsNoneOf.next(),
+            Some(RepoWatchRuleIdentityField::MatcherDraft)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherDraft.next(),
+            Some(RepoWatchRuleIdentityField::MatcherAuthor)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherAuthor.next(),
+            Some(RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf.next(),
+            Some(RepoWatchRuleIdentityField::MatcherConclusionAnyOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherConclusionAnyOf.next(),
+            Some(RepoWatchRuleIdentityField::Actions)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::Actions.next(),
+            Some(RepoWatchRuleIdentityField::SingletonPer)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::SingletonPer.next(),
+            Some(RepoWatchRuleIdentityField::CooldownSeconds)
+        );
+
+        assert_eq!(RepoWatchRuleIdentityField::CooldownSeconds.next(), None);
 
         assert_eq!(
             RepoWatchRuleIdentityField::MatcherEventKinds.inventory_predecessor(),
