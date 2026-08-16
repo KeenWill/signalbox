@@ -1194,8 +1194,16 @@ impl PostgresModelCallRepository {
                 // adapter's proof that the failed request was never accepted.
                 // Without it the call closes terminally rather than
                 // substituting a member behind an effect that may have landed.
+                // A stop already requested on this attempt forbids the reissue
+                // outright: the successor would reload an attempt the domain
+                // admits only while running.
+                let stop_requested = matches!(
+                    execution.current_attempt().state(),
+                    signalbox_domain::CurrentTurnAttemptState::StopRequested { .. }
+                );
                 let substituting = action == CredentialPoolRuntimeAction::SwitchNow
-                    && observation.non_acceptance_proven();
+                    && observation.non_acceptance_proven()
+                    && !stop_requested;
                 if substituting {
                     let current_reference = current_reference.as_deref().ok_or(
                         ModelCallRepositoryError::InvalidTransition(
@@ -1229,10 +1237,15 @@ impl PostgresModelCallRepository {
                         .iter()
                         .any(|member| !excluded.contains(member.credential_reference()))
                     {
+                        let failed_members = policy
+                            .members()
+                            .iter()
+                            .filter(|member| excluded.contains(member.credential_reference()))
+                            .count();
                         let backoff = availability_retry_backoff(
                             cause,
                             retry_after,
-                            excluded.len(),
+                            failed_members,
                             observation.call(),
                         );
                         let successor = execution
@@ -3815,24 +3828,19 @@ fn select_terminal_identity_candidates(
                 ))
             }
         }
+        // A pending stop is handled inside the availability branch rather
+        // than by downgrading here. Converting to `Exact` closed the turn
+        // correctly but skipped the frozen policy entirely, so a racing stop
+        // silently dropped a configured switch_next_turn, avoid_new_sessions,
+        // or quarantine and left the failed credential selectable. The branch
+        // suppresses only successor creation, which is what the stop forbids.
         ModelCallTerminalIdentityCandidates::Availability {
             failed,
             successor_attempt,
-        } => {
-            if matches!(
-                execution.current_attempt().state(),
-                signalbox_domain::CurrentTurnAttemptState::StopRequested { .. }
-            ) {
-                ModelCallTerminalIdentityCandidates::Exact(ModelCallTerminalIdentities::Failed(
-                    failed,
-                ))
-            } else {
-                ModelCallTerminalIdentityCandidates::Availability {
-                    failed,
-                    successor_attempt,
-                }
-            }
-        }
+        } => ModelCallTerminalIdentityCandidates::Availability {
+            failed,
+            successor_attempt,
+        },
     }
 }
 
@@ -5316,13 +5324,13 @@ async fn load_durable_pool_exclusions(
     turn: TurnId,
     policy: &CredentialPoolRuntimePolicy,
 ) -> Result<DurablePoolExclusions, ModelCallRepositoryError> {
-    let mut locked = policy
+    let members = policy
         .members()
         .iter()
         .map(CredentialPoolRuntimeMember::credential_reference)
-        .collect::<Vec<_>>();
+        .collect::<HashSet<_>>();
+    let mut locked = members.iter().copied().collect::<Vec<_>>();
     locked.sort_unstable();
-    locked.dedup();
     for reference in locked {
         lock_credential_pool_action_head(connection, reference).await?;
     }
@@ -5381,7 +5389,11 @@ async fn load_durable_pool_exclusions(
                 .into());
             }
         };
-        if applies {
+        // A global quarantine can name a profile this pool never ranked.
+        // Selection would ignore it, but the successor backoff is derived from
+        // the size of this set, so an unrelated quarantine elsewhere must not
+        // push the first rotation onto a later exponential tier.
+        if applies && members.contains(reference.as_str()) {
             excluded.insert(reference);
             if action_kind == "switch_next_turn" {
                 pending_consumed_actions.push(action_id);

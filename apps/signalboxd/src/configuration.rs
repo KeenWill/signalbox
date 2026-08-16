@@ -565,6 +565,13 @@ pub struct HubModelConfiguration {
     model_settings_lower_layers: HashMap<DirectModelSelection, ModelSettingsLowerLayers>,
     billing_rates: HashMap<ResolvedProviderTarget, ModelBillingRates>,
     target_adapters: HashMap<ResolvedProviderTarget, ModelAdapter>,
+    /// Pool name per target that can serve a call, selectable or serving-only.
+    ///
+    /// Selection keys on the target that actually serves the call, so a fast
+    /// alternate target must be indexed here under its mapped family's pool;
+    /// deriving this from selectable routes alone left those targets with no
+    /// policy at all.
+    target_credential_pools: HashMap<ResolvedProviderTarget, Arc<str>>,
     provider_model_adapters: HashMap<String, ModelAdapter>,
     session_credential_pin: SessionCredentialPin,
     fallback_credential_profile: Arc<str>,
@@ -918,6 +925,7 @@ impl HubModelConfiguration {
         let mut routes = HashMap::with_capacity(models.len());
         let mut target_billing_rates = HashMap::with_capacity(models.len());
         let mut target_adapters = HashMap::with_capacity(models.len());
+        let mut target_credential_pools = HashMap::with_capacity(models.len());
         let mut target_model_families = HashMap::with_capacity(models.len());
         let mut target_fast_targets = HashMap::new();
         let mut target_provider_models = HashMap::with_capacity(models.len());
@@ -1037,6 +1045,12 @@ impl HubModelConfiguration {
             {
                 return Err(HubModelConfigurationError::ConflictingTarget);
             }
+            if let Some(previous) =
+                target_credential_pools.insert(target, Arc::clone(&mapping.credential_pool))
+                && previous != mapping.credential_pool
+            {
+                return Err(HubModelConfigurationError::ConflictingTarget);
+            }
             if let Some(fast_target) = fast_target {
                 target_fast_targets.insert(target, fast_target);
             }
@@ -1125,6 +1139,7 @@ impl HubModelConfiguration {
                 target_provider_models.insert(target, provider_model.clone());
                 target_adapters.insert(target, mapping.adapter);
                 target_model_families.insert(target, Arc::clone(&model_family));
+                target_credential_pools.insert(target, Arc::clone(&mapping.credential_pool));
                 if let Some(previous) =
                     provider_model_adapters.insert(provider_model.clone(), mapping.adapter)
                     && previous != mapping.adapter
@@ -1215,6 +1230,7 @@ impl HubModelConfiguration {
             model_settings_lower_layers,
             billing_rates,
             target_adapters,
+            target_credential_pools,
             provider_model_adapters,
             session_credential_pin,
             fallback_credential_profile,
@@ -1353,10 +1369,10 @@ impl HubModelConfiguration {
 
     /// Projects admitted pool policy into the persistence-owned runtime form.
     pub fn credential_pool_runtime_catalog(&self) -> CredentialPoolRuntimeCatalog {
-        self.routes
-            .values()
-            .filter_map(|route| {
-                let pool = self.credential_pools.get(route.credential_pool())?;
+        self.target_credential_pools
+            .iter()
+            .filter_map(|(target, pool_name)| {
+                let pool = self.credential_pools.get(pool_name)?;
                 let mut members = pool.members().to_vec();
                 members.sort_by_key(|member| member.priority());
                 let members = members
@@ -1366,7 +1382,7 @@ impl HubModelConfiguration {
                     })
                     .collect::<Vec<_>>();
                 Some((
-                    route.target(),
+                    *target,
                     CredentialPoolRuntimePolicy::new(
                         pool.name(),
                         members,

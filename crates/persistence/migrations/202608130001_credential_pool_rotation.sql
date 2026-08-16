@@ -447,8 +447,21 @@ BEGIN
                         AND lifecycle.current_attempt_id = call.turn_attempt_id
                     )
                     OR (
-                        call.state_kind IN ('in_flight', 'cancellation_requested')
+                        call.state_kind = 'in_flight'
                         AND attempt.state_kind = 'running'
+                        AND lifecycle.state_kind = 'active'
+                        AND lifecycle.active_phase_kind = 'running'
+                        AND lifecycle.current_attempt_id = call.turn_attempt_id
+                    )
+                    -- An interrupt on a rotated in-flight call moves the call
+                    -- to cancellation_requested and its attempt to
+                    -- stop_requested together, exactly as the pre-pool
+                    -- validator admits. Requiring a still-running attempt here
+                    -- rejected the submit-input transaction, so a provider call
+                    -- made by a substituted credential could not be cancelled.
+                    OR (
+                        call.state_kind = 'cancellation_requested'
+                        AND attempt.state_kind IN ('running', 'stop_requested')
                         AND lifecycle.state_kind = 'active'
                         AND lifecycle.active_phase_kind = 'running'
                         AND lifecycle.current_attempt_id = call.turn_attempt_id

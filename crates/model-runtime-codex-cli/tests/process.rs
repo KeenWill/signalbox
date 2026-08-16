@@ -2072,6 +2072,34 @@ async fn a_turn_failed_echo_after_a_stream_error_keeps_the_typed_provider_error(
     assert_eq!(result.spawns, 1);
 }
 
+/// A stream-level `error` that the process never echoes as `turn.failed`
+/// classifies the cause but proves nothing about acceptance.
+///
+/// The substitution contract admits the Codex proof only on the exact,
+/// noncontradictory `turn.failed` closure. A truncated stream, or an exit after
+/// a lone `error` event, may still follow a request the provider accepted, so
+/// reporting the proof here would let credential-pool rotation reissue the turn
+/// under a second account and duplicate billed work.
+#[tokio::test]
+async fn a_stream_error_without_its_turn_failed_echo_proves_no_non_acceptance() {
+    let result = execute_scenario(
+        "error_without_turn_failed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let error = provider_error(&result.evidence);
+
+    assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
+    assert!(!error.non_acceptance_proven);
+    assert_eq!(
+        error.native.message.as_deref(),
+        Some(fixtures::STREAM_ERROR_MESSAGE)
+    );
+    assert_eq!(result.spawns, 1);
+}
+
 /// A trailer that contradicts the recorded stream-level error — here a
 /// `turn.completed` claiming success — still fails closed instead of being
 /// absorbed as lifecycle closure.
