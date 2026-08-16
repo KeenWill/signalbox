@@ -102,6 +102,9 @@ const WEBHOOK_PENDING_PAGE_SIZE: NonZeroU16 =
 // out the full poll that performs it, so a sustained stream re-arms its own wake
 // instead of holding the worker across poll deadlines.
 const WEBHOOK_DRAIN_PAGE_LIMIT: usize = 2;
+// One row is enough to answer whether anything is still pending.
+const WEBHOOK_PRESENCE_PAGE_SIZE: NonZeroU16 =
+    NonZeroU16::new(1).expect("webhook presence page size is positive");
 
 const REVIEW_THREADS_QUERY: &str = r#"
 query RepositoryWatchReviewThreads(
@@ -319,7 +322,7 @@ struct RepositoryWatchTask {
     webhook_work: Option<mpsc::Receiver<()>>,
     webhook_nudge: Option<mpsc::Sender<()>>,
     webhook_shadow: Option<WebhookShadowBaseline>,
-    webhook_pending_drained: bool,
+    webhook_shadow_superseded: bool,
     rules_activated: bool,
 }
 
@@ -377,7 +380,7 @@ impl RepositoryWatchTask {
             webhook_work,
             webhook_nudge,
             webhook_shadow: None,
-            webhook_pending_drained: true,
+            webhook_shadow_superseded: false,
             rules_activated: false,
         })
     }
@@ -578,7 +581,12 @@ impl RepositoryWatchTask {
                 .load_pending(&self.repository, page_size)
                 .await
                 .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-            self.webhook_pending_drained = deliveries.is_empty();
+            if deliveries.is_empty() {
+                // The queue this drain was carrying the shadow for is empty, so
+                // a poll that had to leave the shadow in place can now hand it
+                // the cursor it committed.
+                self.replace_superseded_webhook_shadow();
+            }
             let mut progressed = false;
             for delivery in &deliveries {
                 if deferred.contains(&delivery.key()) {
@@ -614,7 +622,6 @@ impl RepositoryWatchTask {
             if pages >= WEBHOOK_DRAIN_PAGE_LIMIT {
                 // More may remain behind this page, so the shadow this drain
                 // advanced still speaks for deliveries the next one will read.
-                self.webhook_pending_drained = false;
                 self.request_webhook_drain_continuation();
                 break;
             }
@@ -622,6 +629,29 @@ impl RepositoryWatchTask {
         match first_failure {
             Some(error) => Err(error),
             None => Ok(()),
+        }
+    }
+
+    /// Whether this repository has any delivery still awaiting a disposition.
+    async fn webhook_pending_is_empty(&self) -> Result<bool, RepositoryWatchAttemptError> {
+        let page_size = RepoWatchWebhookPendingPageSize::try_new(WEBHOOK_PRESENCE_PAGE_SIZE)
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        self.webhook_store
+            .load_pending(&self.repository, page_size)
+            .await
+            .map(|deliveries| deliveries.is_empty())
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)
+    }
+
+    /// Hands the shadow baseline over to a poll that had to leave it in place.
+    ///
+    /// A poll retains the shadow while deliveries admitted before it are still
+    /// pending. Once they have drained, its cursor is the newer complete
+    /// reconciliation and the next delivery reloads from it.
+    fn replace_superseded_webhook_shadow(&mut self) {
+        if self.webhook_shadow_superseded {
+            self.webhook_shadow = None;
+            self.webhook_shadow_superseded = false;
         }
     }
 
@@ -1120,11 +1150,15 @@ impl RepositoryWatchTask {
                 // A full poll is the complete reconciliation sweep, so the
                 // cursor it commits authoritatively replaces everything the
                 // webhook stream had accumulated in memory — but only once
-                // nothing admitted before it is still waiting. A delivery left
-                // pending by a bounded drain would otherwise apply to state
+                // nothing is still waiting. The queue is read here, after the
+                // commit, so a delivery admitted while this poll was fetching
+                // is seen too; one left pending would otherwise apply to state
                 // this cursor already contains and record nothing.
-                if self.webhook_pending_drained {
+                if self.webhook_pending_is_empty().await? {
                     self.webhook_shadow = None;
+                    self.webhook_shadow_superseded = false;
+                } else {
+                    self.webhook_shadow_superseded = true;
                 }
                 Ok(())
             }

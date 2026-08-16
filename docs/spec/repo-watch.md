@@ -828,27 +828,35 @@ durable, so a failure between deriving and recording leaves the accumulated
 shadow exactly as it was.
 
 Only a full poll replaces that baseline, because only a full poll is the
-complete reconciliation sweep. A targeted query reconciles just the pull
-requests it names, so its commit is left to the cursor and the shadow is kept;
-the accepted cost is that what a targeted query learns reaches the shadow at the
-next full poll rather than immediately. Pending deliveries are drained before a
-full poll as well as after it, so a poll that observes the same transition as an
-already-admitted delivery cannot advance the cursor past it and leave the
-delivery applying to state that already contains it. A delivery's targeted
-provider queries run before anything is recorded, so a transient provider
-failure leaves it pending and retryable rather than terminal with a query that
-never ran; its terminal disposition is then recorded before the resulting cursor
-commit, so a failure between those two cannot make a retry re-derive projections
-against a cursor that has already moved past them. On daemon restart the
-baseline is re-seeded from the durable cursor, which is the same complete
-reconciliation a full poll performs. The divergence a re-seeding leaves is
-accepted rather than removed: a delivery projected against a freshly seeded
-baseline records `cross_drain_shadow_gap` on its projections, so the gap is
-explained in the parity view instead of being carried by a durable shadow
-cursor. `repo_watch_webhook_projection` records each resulting version-one
-content identity and event kind, and the cause of any divergence the producing
-delivery already knows, while `repo_watch_webhook_disposition` atomically
-records projected, duplicate-state, superseded, ignored, or quarantined terminal
+complete reconciliation sweep, and only once nothing is still pending. The queue
+is read after the poll commits, so a delivery admitted while that poll was
+fetching counts too; a delivery still waiting would otherwise apply to state the
+cursor already contains and record nothing. A poll that has to leave the
+baseline in place hands it over as soon as the queue drains, rather than letting
+the pre-poll state stand until the next interval. A targeted query reconciles
+just the pull requests it names, so its commit is left to the cursor and the
+shadow is kept; the accepted cost is that what a targeted query learns reaches
+the shadow at the next full poll rather than immediately. Pending deliveries are
+drained before a full poll as well as after it. That drain failing is reported
+and not propagated: acceleration is not allowed to cancel the reconciliation
+sweep, so one delivery whose targeted request keeps failing cannot abort every
+scheduled poll. A poll that observes the same transition as an already-admitted
+delivery cannot advance the cursor past it and leave the delivery applying to
+state that already contains it. A delivery's targeted provider queries run
+before anything is recorded, so a transient provider failure leaves it pending
+and retryable rather than terminal with a query that never ran; its terminal
+disposition is then recorded before the resulting cursor commit, so a failure
+between those two cannot make a retry re-derive projections against a cursor
+that has already moved past them. On daemon restart the baseline is re-seeded
+from the durable cursor, which is the same complete reconciliation a full poll
+performs. The divergence a re-seeding leaves is accepted rather than removed: a
+delivery projected against a freshly seeded baseline records
+`cross_drain_shadow_gap` on its projections, so the gap is explained in the
+parity view instead of being carried by a durable shadow cursor.
+`repo_watch_webhook_projection` records each resulting version-one content
+identity and event kind, and the cause of any divergence the producing delivery
+already knows, while `repo_watch_webhook_disposition` atomically records
+projected, duplicate-state, superseded, ignored, or quarantined terminal
 disposition. Shadow mode reserves no committed disposition and no resulting
 cursor generation: the schema refuses both, so the durable shape a later write
 mode would need is left to the ruling that authorizes it. The
