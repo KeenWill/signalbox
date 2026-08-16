@@ -8,7 +8,13 @@ This page records a decision for review, not implemented behavior. It changes no
 page under [`docs/spec/`](../spec/). If accepted, its implementation stack must
 update the owning specification pages as behavior becomes true, add public API
 shapes to [`docs/domain-spine.md`](../domain-spine.md), and put enforced
-invariants in INV-tagged tests.
+invariants in INV-tagged tests. The missing owning records are explicit:
+`AttachmentKind::Audio` belongs in the domain spine and blob-storage attachment
+contract; attachment `part_selector` belongs in the blob-storage rendered-stub
+contract; durable `BlobReference` results, media admission, and preparation
+belong in the tool-loop contract; and later client-facing paged file-media
+messages belong in the process-protocol contract. None is recorded as
+implemented by this proposal.
 
 The immutable blob catalog, attachment stubs, bounded raw reads,
 preparation-time attachment verification, and model input-modality catalog are
@@ -154,21 +160,32 @@ strength = Strong | StructuralCandidate | DeclaredCandidate
 Detection follows one fixed algorithm:
 
 1. Verify source digest and length through ordinary replica traversal.
-2. Run relevant probes in isolation under their range and byte budgets.
-3. Partition probe results by canonical media type and owner. A
-   `RecognizedMalformed` claim conflicts with any candidate for another type or
-   owner and returns `AmbiguousType`; multiple malformed claims for the same
-   type and owner collapse to that type's deterministic registered reason code.
+2. Run relevant probes in isolation under both their provider limits and the
+   request-wide probe-count, concurrency, memory, CPU, wall-time, range, and
+   source-byte budgets below. Exceeding any request-wide budget is
+   `ProcessorFailed { reason_code: probe_budget_exceeded }`; an inspection never
+   schedules additional probes after that boundary.
+3. Partition non-`NoMatch` results by canonical media type and exact
+   `ReaderIdentity`. Claims for different types or reader identities conflict
+   and return `AmbiguousType`, including two `RecognizedMalformed` claims for
+   the same type from different readers and a strong claim accompanied by a
+   structural or declared candidate for another type or reader. Multiple
+   malformed claims for the same type and reader collapse to that reader's
+   deterministic registered reason code.
 4. With no conflicting claim, any `RecognizedMalformed` result returns
    `Malformed` immediately. It never falls back to a candidate, declared type,
    or text.
-5. Validate the sole strong candidate, or return `AmbiguousType` for
-   incompatible strong claims. Registration order never breaks a tie. After
-   successful validation, compare its canonical type with the syntactically
-   valid declared type; disagreement returns `DeclaredTypeMismatch` rather than
-   a validated file.
+5. After step 3, all remaining strong claims necessarily name one canonical type
+   and exact `ReaderIdentity`; collapse duplicate claims to that reader and
+   validate it once. If no unique identity remains, return `AmbiguousType`;
+   registration and probe order never break a tie. After successful validation,
+   compare its canonical type with the syntactically valid declared type;
+   disagreement returns `DeclaredTypeMismatch` rather than a validated file.
 6. With no strong claim, a syntactically valid declared type may nominate its
-   sole provider for structural validation. The declaration is not proof.
+   sole provider for structural validation. The declaration is not proof. A
+   failed declared-candidate validation returns `UnknownType` and does not fall
+   back to text or a weaker candidate; only authenticated malformed evidence
+   returns `Malformed`.
 7. With no declared candidate, a text provider may claim only after complete
    streaming UTF-8 and control-policy validation. After successful validation,
    compare the canonical text type with any syntactically valid declared type;
@@ -178,10 +195,10 @@ Detection follows one fixed algorithm:
 9. No successful candidate is ordinary `UnknownType`; the blob stays stored and
    raw-readable.
 
-Polyglots are admitted only when every strong claim resolves to the same type
-and owner. A container provider owns distinctions within its own family. Probe
-order is unsigned-ASCII provider/reader order for deterministic work and
-telemetry, never precedence.
+Polyglots are admitted only when every non-`NoMatch` claim resolves to the same
+type and exact `ReaderIdentity`. A container provider owns distinctions within
+its own family. Probe order is unsigned-ASCII provider/reader order for
+deterministic work and telemetry, never precedence.
 
 Version one has no durable classification cache. Immutable tool results already
 preserve what a model saw. A later tool request may use a newer reader revision,
@@ -258,9 +275,13 @@ when the provider uses existing output kinds.
 ## Processor isolation
 
 All adapter probes and parsers run outside signalboxd. A fresh worker receives
-only a read-only capability for one digest and a write-only bounded result
-channel: no database, store locator, credential, daemon socket, network, ambient
-environment, arbitrary host path, or unrelated descriptor.
+only a read-only capability for one digest, a write-only bounded control-result
+channel, and, for an image, audio, or file view, a separate write-only bounded
+streaming binary channel into generated-artifact ingest: no database, store
+locator, credential, daemon socket, network, ambient environment, arbitrary host
+path, or unrelated descriptor. The binary channel admits at most the selected
+view's declared presentation-byte ceiling, computes length and digest while
+streaming, and is never interpreted as a control frame.
 
 The broker checks every range against source length, the provider declaration,
 cumulative source bytes, range count, and cancellation before store I/O. The
@@ -268,10 +289,13 @@ supervisor enforces finite resident memory, CPU, wall time, descendants,
 descriptors, and output. Worker pooling is deferred so compromise cannot cross
 requests.
 
-A result is length-delimited and accepted only after clean worker exit. EOF,
-crash, signal, timeout, malformed or extra frame, and any limit breach discard
-it. Stderr is bounded, scrubbed diagnostic material and never model-visible.
-Parser messages collapse to registered reason codes.
+A control result is length-delimited and accepted only after clean worker exit.
+Binary output is likewise committed to ingest only after a valid terminal
+control frame, exact declared length and digest agreement, and clean worker
+exit. EOF, crash, signal, timeout, malformed or extra frame, disagreement, and
+any channel limit breach discard the control result and staged binary output.
+Stderr is bounded, scrubbed diagnostic material and never model-visible. Parser
+messages collapse to registered reason codes.
 
 The selected sandbox must prove process/address-space separation, no network or
 ambient credentials, whole-descendant termination, exact one-digest authority,
@@ -359,16 +383,22 @@ reader. Filename, parser text, store, and object key are absent. The enclosing
 tool result keeps request correlation and order.
 
 New output streams through generated-artifact ingest. Publication and
-verification precede registration; registration precedes result commit. Before
-processing or publication, the continuation transaction prospectively projects
-the complete rendered frontier and durably reserves one reference slot and the
-view's maximum presented bytes. It rejects the read before creating output when
-that reservation would exceed the selected model call's reference-count or
-aggregate media ceiling. Publication consumes no more than the reservation; the
-transaction releases unused bytes and commits the reference atomically. A later
-publication or commit failure may leave an unreferenced orphan, never a dangling
-result, but capacity rejection registers nothing. Thus every committed reference
-is admissible to its mandatory continuation call. Equal output bytes converge by
+verification precede registration; registration precedes result commit. After
+authorization and before processor or store I/O, a separate short pre-execution
+transaction prospectively projects the complete rendered frontier and durably
+reserves one reference slot and the view's maximum presented bytes for this
+request. It rejects the read before creating output when the reservation would
+exceed the selected model call's reference-count or aggregate media ceiling,
+then ends before any worker or store I/O begins. Publication consumes no more
+than the durable reservation. A short completion transaction atomically
+registers the verified blob, consumes the reservation, releases unused bytes,
+and commits the reference; a known-failure completion transaction releases the
+reservation without registering a blob. Crash recovery converts an unfinished
+reservation to the request's durable failure and releases it before that request
+can be retried. A publication or completion failure may leave an unreferenced
+orphan, never a dangling result, but capacity rejection registers nothing. Thus
+every committed reference is admissible to its mandatory continuation call, and
+no transaction spans processor or store I/O. Equal output bytes converge by
 digest, and ambiguous publication cannot become tool success.
 
 Rendering first emits a bounded textual stub. Preparation then:
@@ -394,21 +424,24 @@ Every limit is a rejection boundary, not a preallocation target. Checked
 arithmetic governs byte, pixel, sample, node, and expansion products. Readers
 may lower but never raise these process ceilings:
 
-| Resource                              | Ceiling                |
-| ------------------------------------- | ---------------------- |
-| Probe prefix and suffix               | 65,536 each            |
-| Probe ranges / cumulative bytes       | 16 / 262,144           |
-| Processor frame / text-or-JSON body   | 1,048,576 / 786,432    |
-| Structured depth / nodes              | 64 / 100,000           |
-| Observed container entries            | 10,000                 |
-| Image axis / decoded pixels           | 8,192 / 16,777,216     |
-| Presented image bytes                 | 8,388,608              |
-| Audio channels / sample rate          | 8 / 192,000 Hz         |
-| Audio clip duration / presented bytes | 60 s / 8,388,608       |
-| Presented general-file bytes          | 8,388,608              |
-| References / aggregate media per call | 16 / 33,554,432 bytes  |
-| Worker memory / CPU / wall time       | 512 MiB / 60 s / 120 s |
-| Worker descendants                    | 0                      |
+| Resource                                | Ceiling                |
+| --------------------------------------- | ---------------------- |
+| Probe prefix and suffix                 | 65,536 each            |
+| Per-probe ranges / cumulative bytes     | 16 / 262,144           |
+| Probes / concurrent workers per inspect | 32 / 2                 |
+| Aggregate probe ranges / source bytes   | 64 / 1,048,576         |
+| Aggregate probe memory / CPU / wall     | 1 GiB / 120 s / 120 s  |
+| Control frame / text-or-JSON body       | 1,048,576 / 786,432    |
+| Structured depth / nodes                | 64 / 100,000           |
+| Observed container entries              | 10,000                 |
+| Image axis / decoded pixels             | 8,192 / 16,777,216     |
+| Presented image bytes                   | 8,388,608              |
+| Audio channels / sample rate            | 8 / 192,000 Hz         |
+| Audio clip duration / presented bytes   | 60 s / 8,388,608       |
+| Presented general-file bytes            | 8,388,608              |
+| References / aggregate media per call   | 16 / 33,554,432 bytes  |
+| Worker memory / CPU / wall time         | 512 MiB / 60 s / 120 s |
+| Worker descendants                      | 0                      |
 
 A stored blob may remain multi-gigabyte. A compatible reader streams it under a
 finite cumulative source-work limit; a whole-decode view may return
@@ -478,17 +511,21 @@ fixtures. Broad or native dependencies remain ordinary owner gates.
 
 One shared suite proves every provider and isolation implementation:
 
-- finite declarations, enforced range/output bounds, and deterministic valid
-  detection;
+- finite declarations, enforced per-provider and request-wide range, worker,
+  time, memory, and output bounds, and deterministic valid detection;
 - unknown, malformed, truncated, ambiguous, mismatch, and bomb fixtures fail as
   specified, independent of registration order;
+- fixtures cover malformed claims from different readers, a strong claim with a
+  conflicting weaker claim, duplicate compatible strong claims, and failed
+  declared-candidate validation;
 - crash, cancellation, timeout, memory/output kill, or framing defect produces
   no partial success;
 - workers lack network, credentials, database, path, and second-digest access;
 - text/JSON boundaries remain valid, and expansion/pixel/sample limits stop at
   the named value;
-- derived publication failure commits no reference, while a later failure leaves
-  at most an orphan and equal output deduplicates;
+- binary presentation can reach its declared ceiling without entering the
+  control frame; derived publication failure commits no reference, while a later
+  failure leaves at most an orphan and equal output deduplicates;
 - durable replay does not rerun parsing or recharge the turn; and
 - preparation rejects missing, corrupt, malformed, oversized, and
   modality-unsupported references before send authorization.
