@@ -53,9 +53,16 @@ The session-metadata last-writer actor inventory, its native and terminal-client
 projections, and the totality of the daemon projection that produces it are
 verified against this PR (`fix/review-read-snapshot-permit`).
 
-The blob lifecycle messages and multipart content arrays below are the
-foundation proposal from PR #553 (`agent/blob-storage-foundation`) and become
-verified with its implementing child stack.
+The blob upload lifecycle messages below are verified against this implementing
+change (`agent/blob-storage-upload`). The blob read messages are verified
+against this implementing change (`agent/blob-storage-read-wire`). Multipart
+content arrays remain the foundation proposal from PR #553
+(`agent/blob-storage-foundation`) and become verified with their implementing
+child.
+
+The terminal blob-upload command and its bounded, open-once source handling are
+verified against this implementing change
+(`agent/blob-storage-upload-terminal`).
 
 The coherent review-orchestration snapshot's single-transaction construction,
 the pool capacity it draws, and the writer independence that follows from both
@@ -325,6 +332,7 @@ that variant.
 | `list_model_aliases`                    | none                                                                                                                                                                                                                                                                                                          | Read the deployment's complete configured alias-to-direct-selection catalog.                                                                                                                                                                                                                                                                                                    |
 | `list_model_capabilities`               | none                                                                                                                                                                                                                                                                                                          | Read the deployment's complete configured per-direct-selection settings-capability catalog.                                                                                                                                                                                                                                                                                     |
 | `compact_session`                       | `command_id` and `session_id` (canonical UUID strings), `through_position` (positive canonical decimal string or null)                                                                                                                                                                                        | Append a dedicated-call summary through the exact requested safe position, or through the latest safe boundary for null, without deleting or rewriting transcript history.                                                                                                                                                                                                      |
+| `cancel_program_run`                    | `command_id` and `run_id` (canonical UUID strings)                                                                                                                                                                                                                                                            | Terminally cancel the exact named program run without overwriting an existing terminal outcome.                                                                                                                                                                                                                                                                                 |
 | `read_runner_status` (proposed)         | `page_size` (canonical decimal string) and `after` (runner-evidence cursor object or null)                                                                                                                                                                                                                    | Read the active and optional pending runner registrations, connection/loss state, advertised availability, retained operation failures, and startup workspace-leak reports, with one bounded evidence page.                                                                                                                                                                     |
 | `replace_lost_runner` (proposed)        | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string), and `replacement` (target object)                                                                                                                                                  | Replace the exact current lost placement with a different live runner, atomically activate one pending replacement enrollment, or — for a registration-triggered loss, where it is the only version-one recovery — re-enroll the same runner against its current connection; pinned loss provisions a new workspace boundary, while pre-pin loss returns to unpinned selection. |
 | `abandon_lost_runner` (proposed)        | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string)                                                                                                                                                                                     | Terminalize the exact lost placement only after the existing turn-control algebra has left no active turn; queued work remains and later sees only daemon-executable tools.                                                                                                                                                                                                     |
@@ -976,12 +984,12 @@ request, or blob-upload transport request — `create_session`,
 `create_session_from_template`, `create_session_from_imported_frontier`,
 `submit_input`, `reconcile_turn`, `stop_turn`, `decide_tool_request`,
 `replace_session_metadata`, `replace_session_defaults`, `compact_session`,
-`update_session_placement`, `import_conversation`, `begin_conversation_import`,
-`append_conversation_import`, `commit_conversation_import`,
-`abort_conversation_import`, `begin_blob_upload`, `append_blob_upload`,
-`commit_blob_upload`, `abort_blob_upload`, `spawn_session`, `await_session`,
-`send_session_message`, `replace_lost_runner`, `abandon_lost_runner`, or
-`promote_pending_runner` — produces exactly one of:
+`cancel_program_run`, `update_session_placement`, `import_conversation`,
+`begin_conversation_import`, `append_conversation_import`,
+`commit_conversation_import`, `abort_conversation_import`, `begin_blob_upload`,
+`append_blob_upload`, `commit_blob_upload`, `abort_blob_upload`,
+`spawn_session`, `await_session`, `send_session_message`, `replace_lost_runner`,
+`abandon_lost_runner`, or `promote_pending_runner` — produces exactly one of:
 
 - `session_created` with `session_id` and the complete installed
   `model_settings` snapshot;
@@ -1013,6 +1021,17 @@ request, or blob-upload transport request — `create_session`,
   `summary_entry_id`, and complete `result_frontier_id`; an equal replay returns
   these original values before resolving configuration needed only for a fresh
   call;
+- `program_run_cancellation_receipt` with the request's `command_id` and
+  `run_id`, plus exactly one closed `outcome` object:
+  `{ "kind": "applied", "terminal_state": "cancelled", "result": null }`;
+  `{ "kind": "not_found" }`; or
+  `{ "kind": "already_terminal", "terminal_state": <standing terminal state>, "result": <standing terminal result> }`;
+  under the command-identity claim protocol in
+  [identity and commands](identity-and-commands.md), an identical
+  `cancel_program_run` request bearing the same `command_id` is a replay and
+  returns the originally stored receipt even if the run's standing state later
+  changes; reuse of that `command_id` with a different `run_id` or other payload
+  is conflicting reuse and is rejected as such;
 - `conversation_import_inserted` with `imported_conversation_id`;
 - `conversation_import_already_imported` with `imported_conversation_id`;
 - `conversation_import_begun` with the admitted `declared_size_bytes`;
@@ -1021,7 +1040,7 @@ request, or blob-upload transport request — `create_session`,
 - `blob_upload_begun` with the `expected_digest` and admitted
   `expected_length_bytes`;
 - `blob_upload_already_present` with `digest` and `byte_length`;
-- `blob_upload_appended` with the exact `assembled_size_bytes`;
+- `blob_upload_appended` with the exact `assembled_length_bytes`;
 - `blob_upload_committed` with the verified `digest` and `byte_length`;
 - `blob_upload_aborted` with no additional member;
 - `session_spawned` with `tool_request_id`, `child_session_id`, and the exact
@@ -1573,12 +1592,12 @@ or
 All byte counts use canonical decimal strings and both digest fields use the
 canonical blob spelling. The range detail also represents checked-add overflow.
 The request type identifies which append, commit, abort, or read operation
-failed, so state details carry no duplicate operation discriminator. Begin
-checks its declared-length range before connection state and routed-store
-lookup. Append checks cumulative size after state; commit checks state, then
-actual length, then digest. Read checks requested length, catalog existence, and
-then checked range. Each request reports only the first applicable failure in
-that order.
+failed, so state details carry no duplicate operation discriminator. With blob
+storage enabled, Begin checks active connection state before its declared-length
+range and routed-store lookup. Append checks cumulative size after state; commit
+checks state, then actual length, then digest. Read checks requested length,
+catalog existence, and then checked range. Each request reports only the first
+applicable failure in that order.
 
 Conversation-import evidence carries no source bytes, text, paths, identifiers
 taken from source, or parser excerpts; blob evidence carries no blob bytes,
@@ -2323,6 +2342,23 @@ content is deduplicated by source-qualified semantic-entry identity while
 transition-only events remain visible instead of being suppressed by a newer
 side snapshot.
 
+## Program-run cancellation
+
+**Committed unimplemented functionality.** No present wire surface names program
+runs. Protocol version `1` adds the `cancel_program_run` request and
+`program_run_cancellation_receipt` server message cataloged above; both carry
+the required top-level version `1`, and a later incompatible shape requires a
+new process-protocol version under the ordinary version rules. The request names
+canonical UUID `run_id` and durable canonical UUID `command_id`. Its receipt
+answers from a closed outcome vocabulary: applied (the run is now terminally
+cancelled), `not_found` (no such run), or `already_terminal` naming the standing
+terminal state and result the command found. The run-state semantics — that a
+cancel never overwrites a terminal outcome and that an applied cancel is
+journaled and replayed — are owned by the substrate page; this contract owns the
+message pair, its versioned encoding, and the closed receipt algebra, which
+client and daemon must implement together in the release that makes runs
+nameable on the wire.
+
 ## Terminal client
 
 The `signalbox` binary uses the single admitted version. Single-session metadata
@@ -2659,10 +2695,11 @@ then sends the exact text.
 buffer to determine its digest and length, rewinds the same descriptor, and uses
 begin, bounded appends, and commit on one connection. It validates every
 cumulative acknowledgement and the final identity; an already-present receipt
-sends no append. `blob metadata` prints only digest, byte length, and replica
-count. `blob read` makes one bounded exact-range request, validates its digest,
-offset, and decoded length, then writes only those bytes to the named output.
-Local paths never cross the wire or appear in daemon logs.
+revalidates the same descriptor before sending no append. `blob metadata` prints
+only digest, byte length, and replica count. `blob read` makes one bounded
+exact-range request, validates its digest, offset, and decoded length, then
+writes only those bytes to the named output. Local paths never cross the wire or
+appear in daemon logs.
 
 **Implemented behavior.** The `goal` verbs expose only commission, inspection,
 resume, stop, and supersession. Mutations print a generated command identity

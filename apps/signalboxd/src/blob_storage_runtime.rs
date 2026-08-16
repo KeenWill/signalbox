@@ -17,12 +17,14 @@ use signalbox_persistence::blob::{
     BlobCatalogRepository, BlobCatalogRepositoryError, BlobStoreBindingRecord,
 };
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::{BlobStorageClass, BlobStorageConfiguration};
 
 /// Configured stores, semantic write routes, and private upload staging.
 pub struct BlobStoreRegistry {
     stores: BTreeMap<BlobStoreName, Arc<dyn BlobStore>>,
+    namespace_ids: BTreeMap<BlobStoreName, Uuid>,
     routes: BTreeMap<BlobStorageClass, BlobStoreName>,
     staging: FilesystemBlobStaging,
     max_blob_bytes: u64,
@@ -45,6 +47,24 @@ impl BlobStoreRegistry {
         configuration: Option<&BlobStorageConfiguration>,
         pool: PgPool,
     ) -> Result<Option<Self>, BlobStoreRegistryError> {
+        Self::initialize_with_locality_policy(configuration, pool, true).await
+    }
+
+    /// Initializes a composed conformance fixture without relying on the test
+    /// host's backing-device classification.
+    #[cfg(feature = "test-support")]
+    pub async fn initialize_for_conformance(
+        configuration: Option<&BlobStorageConfiguration>,
+        pool: PgPool,
+    ) -> Result<Option<Self>, BlobStoreRegistryError> {
+        Self::initialize_with_locality_policy(configuration, pool, false).await
+    }
+
+    async fn initialize_with_locality_policy(
+        configuration: Option<&BlobStorageConfiguration>,
+        pool: PgPool,
+        require_local_backing: bool,
+    ) -> Result<Option<Self>, BlobStoreRegistryError> {
         let repository = BlobCatalogRepository::new(pool);
         let recorded = repository.recorded_store_bindings().await?;
         let Some(configuration) = configuration else {
@@ -61,8 +81,10 @@ impl BlobStoreRegistry {
             return Err(BlobStoreRegistryError::UnsupportedStoreKind);
         }
 
-        let staging_root =
-            OpenedFilesystemBlobRoot::open(configuration.staging_directory().to_path_buf())?;
+        let staging_root = open_blob_root(
+            configuration.staging_directory().to_path_buf(),
+            require_local_backing,
+        )?;
         let mut opened_stores = Vec::new();
         for (name, configured) in configuration.stores() {
             let root = configured
@@ -73,7 +95,7 @@ impl BlobStoreRegistry {
             } else {
                 NamespaceBindingState::New
             };
-            let opened = OpenedFilesystemBlobRoot::open(root.to_path_buf())?;
+            let opened = open_blob_root(root.to_path_buf(), require_local_backing)?;
             opened_stores.push((name.clone(), configured.namespace_id(), state, opened));
         }
         let staging_identity = OpenedNamespace::from(staging_root.identity());
@@ -84,8 +106,10 @@ impl BlobStoreRegistry {
         validate_physical_namespaces(&staging_identity, &identities)?;
 
         let mut stores = BTreeMap::<BlobStoreName, Arc<dyn BlobStore>>::new();
+        let mut namespace_ids = BTreeMap::new();
         for (name, namespace_id, state, opened) in opened_stores {
             let (store, _) = FilesystemBlobStore::from_opened_bound(opened, namespace_id, state)?;
+            namespace_ids.insert(name.clone(), namespace_id);
             stores.insert(name, Arc::new(store));
         }
 
@@ -114,6 +138,7 @@ impl BlobStoreRegistry {
         .collect();
         Ok(Some(Self {
             stores,
+            namespace_ids,
             routes,
             staging,
             max_blob_bytes: configuration.max_blob_bytes(),
@@ -124,6 +149,11 @@ impl BlobStoreRegistry {
     pub fn routed_store(&self, class: BlobStorageClass) -> (&BlobStoreName, Arc<dyn BlobStore>) {
         let name = &self.routes[&class];
         (name, self.stores[name].clone())
+    }
+
+    /// Returns the durable namespace identity bound to one configured store.
+    pub fn namespace_id(&self, name: &BlobStoreName) -> Uuid {
+        self.namespace_ids[name]
     }
 
     /// Resolves one already-recorded durable store identity.
@@ -142,7 +172,7 @@ impl BlobStoreRegistry {
     }
 
     /// Removes proven upload spools and makes a successful sweep final.
-    pub fn sweep_staging(&mut self) -> io::Result<()> {
+    pub fn sweep_staging(&self) -> io::Result<()> {
         let result = self.staging.sweep();
         if result.is_ok() {
             self.staging.disarm_sweep_on_drop();
@@ -151,9 +181,24 @@ impl BlobStoreRegistry {
     }
 
     /// Prevents staging cleanup after the database singleton guard is lost.
-    pub const fn disarm_staging_sweep(&mut self) {
+    pub fn disarm_staging_sweep(&self) {
         self.staging.disarm_sweep_on_drop();
     }
+}
+
+fn open_blob_root(
+    root: PathBuf,
+    require_local_backing: bool,
+) -> Result<OpenedFilesystemBlobRoot, FilesystemBlobStoreConstructionError> {
+    if require_local_backing {
+        return OpenedFilesystemBlobRoot::open(root);
+    }
+    #[cfg(feature = "test-support")]
+    {
+        OpenedFilesystemBlobRoot::open_without_locality_check_for_test(root)
+    }
+    #[cfg(not(feature = "test-support"))]
+    unreachable!("production initialization always requires local backing")
 }
 
 #[derive(Clone, Debug)]

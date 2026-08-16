@@ -6,12 +6,15 @@ state, user commands, model declarations, scheduler continuation, process wire,
 and terminal-client verbs. The domain and persistence surface was verified
 through PR #384 (`agent/goal-mode-runtime`). The scheduling, model-tool,
 process, and terminal surfaces were verified through PR #384
-(`agent/goal-mode-runtime`). Dispatch-composed commissions, the generation a
-turn's authority resolves to, and the binding of an already-accepted turn to a
-generation are verified against this PR (`agent/commission-binding`). This
-bottom specification diff owns both stack slices. Identity and durable-command
-mechanics remain owned by [identity and commands](identity-and-commands.md),
-turn execution by
+(`agent/goal-mode-runtime`). Dispatch-composed commissions and the generation a
+turn's authority resolves to were verified through PR #562
+(`agent/dispatch-session-goals`). The binding of an already-accepted turn to a
+generation was verified through PR #578 (`agent/commission-binding`). Resolving
+that authority again when a consumer commits is verified against this PR
+(`agent/judge-completion-recheck`). Repository-watch-composed stops are verified
+against this PR (`agent/daemon-ops-overnight`). This bottom specification diff
+owns both stack slices. Identity and durable-command mechanics remain owned by
+[identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
 by [tool loop](tool-loop.md), and framing by
 [process protocol](process-protocol.md). INV-048 is the lifecycle enforcement
@@ -94,10 +97,31 @@ already has a goal — and no generation states anything about them, so inferrin
 one from the lineage's shape would let a goal attached after the turn already
 existed supply authority it never covered.
 
-**Implemented behavior.** That resolution decides what a consumer reads, not
-what it commits. A consumer that reads the authority, performs work, and commits
-a decision afterwards holds the statement as it stood at the read: a generation
-closed in between is not seen by the commit.
+**Implemented behavior.** The delegated tool-approval judge is the one consumer
+that binds its read to its commit. It resolves the statement again when it
+commits, under the lock the commit takes, and compares it against the one it
+read. Equal statements commit the decision. A statement that resolved before and
+resolves to nothing now belongs to a generation that closed, whether it was
+stopped, achieved, or replaced by a supersession — a replacement closes the
+generation the decision was formed under rather than restating it, so it too
+resolves to nothing. That escalates to a human rather than committing a decision
+formed under authority no longer in force. A judge that read no statement
+decided without one, so a generation attached since withdraws nothing and leaves
+that decision alone: the comparison pins withdrawal, not novelty.
+
+**Implemented behavior.** The commit-time resolution is not the reading
+resolution. Reading binds a recorded generation exactly, so a supersession while
+a turn is parked cannot broaden what the consumer is shown. Committing asks
+whether the authority the decision was formed under is still in force, so a
+recorded generation supplies its statement only while it remains open. A
+resolution that bound the generation exactly at commit time would compare a
+statement against itself and find withdrawn authority intact.
+
+**Committed unimplemented functionality.** No consumer other than the approval
+judge resolves the authority it read a second time when it commits. Such a
+consumer commits under the statement as it stood at its read. A future consumer
+binding its own read to its own commit follows the escalation rule above rather
+than choosing again.
 
 **Implemented behavior.** A model may declare only `blocked` or `achieved`
 through the session-scoped goal declaration tool. The declaration has no
@@ -122,9 +146,12 @@ source turn and cannot be constructed from a model declaration.
 **Implemented behavior.** Stop and supersede are explicit user authority. Stop
 yields `user_stopped`, distinct from model-declared achievement and blocking;
 supersede is admitted only while the current generation is pursuing or blocked.
-Resume is admitted only while blocked, and its optional guidance becomes the
-next turn's input. Existing steer behavior is unchanged and remains the only
-mid-pursuit guidance path.
+Repository watch may compose that same durable parent-only stop solely to
+withdraw a generation-one commission it created when the target pull request
+closes or merges. It cannot stop descendants or a later user-authored
+generation. Resume is admitted only while blocked, and its optional guidance
+becomes the next turn's input. Existing steer behavior is unchanged and remains
+the only mid-pursuit guidance path.
 
 ## Scheduler continuation
 
@@ -260,18 +287,25 @@ goal priority or more than one concurrent goal per session. Future extension
 must preserve immutable statements, full lineage, and the version-one rule that
 at most one generation is pursuing or blocked.
 
-**Committed unimplemented functionality.** No present goal-mode surface rechecks
-a generation's state when a consumer commits a decision it read that generation
-for. A consumer holding a statement across a long operation can commit after the
-generation closed. Future work binding the read to the commit must do so without
-making goal state part of a durable judge binding that deliberately excludes it.
-What such a consumer should then do is an
-[open question](../open-questions.md#goal-mode).
+**Committed unimplemented functionality.** No present judge record carries both
+what the provider recommended and what the repository committed. Escalating a
+completion whose authority was withdrawn overwrites the provider's answer with
+the escalation, so the record retains only the second. A replay can therefore
+prove that a substitution was legitimate — the authority is still withdrawn, and
+a closed generation cannot reopen — but not which recommendation was
+substituted, so a retry offering a different recommendation from the one first
+offered is admitted as an exact replay. The structural answer is for the record
+to carry both, after which a replay compares the offered value against the
+stored offered value and needs no such proof. The same loss admits the mirror
+case: a provider's own escalation, committed while the authority was open and
+followed by a withdrawal, is indistinguishable from a substituted one, so a
+retry offering an approval or a denial is admitted there too. Until then the
+exposure is latent rather than live: no caller retries a completion with a
+recommendation other than the one it first offered, because the only
+uncertain-commit path fails an in-flight judge as ambiguous instead of
+re-entering completion.
 
 ## Open edges
 
-**Deferred or undecided work.** One goal-mode open question is recorded by this
-version-one contract: what a consumer does when the generation it read closes
-before it commits the decision it read that generation for. Binding the read to
-the commit is committed unimplemented functionality above; the behaviour that
-binding should then take is [undecided](../open-questions.md#goal-mode).
+**Deferred or undecided work.** No goal-mode open question is recorded by this
+version-one contract.

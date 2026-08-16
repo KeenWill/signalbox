@@ -56,6 +56,8 @@ pub struct ApprovalJudgeEvalVerdict {
     pub recommendation: DelegateApprovalRecommendation,
     /// Exact rationale emitted with the recommendation.
     pub rationale: String,
+    /// Concrete model identity reported by the provider, when observable.
+    pub provider_reported_model: Option<String>,
     /// Provider-reported usage, so callers can apply the same configured
     /// usage limits the daemon applies before accepting a verdict.
     pub usage: TokenUsage,
@@ -155,6 +157,7 @@ pub async fn judge_eval_case(
     Ok(ApprovalJudgeEvalVerdict {
         recommendation: result.recommendation,
         rationale: result.rationale.into_string(),
+        provider_reported_model: result.reported_model.map(|model| model.as_str().to_owned()),
         usage: result.usage,
     })
 }
@@ -180,7 +183,7 @@ fn eval_tool_request(
             admission_failure: format!("{error:?}"),
         })?;
     Ok(ToolRequestReconstitutionInput::new(
-        ToolRequestId::from_uuid(uuid::Uuid::from_u128(identity)),
+        ToolRequestId::from_uuid(production_shaped_uuid(identity)),
         SessionId::from_uuid(uuid::Uuid::from_u128(fnv1a_128(b"approval-judge-eval"))),
         TurnId::from_uuid(uuid::Uuid::from_u128(identity ^ TURN_IDENTITY_SALT)),
         ModelCallId::from_uuid(uuid::Uuid::from_u128(
@@ -192,6 +195,15 @@ fn eval_tool_request(
     )
     .with_approval_posture(ToolApprovalPosture::Delegated)
     .into_request())
+}
+
+/// Retains deterministic hash material while matching the RFC variant and
+/// version bits of the UUIDv7 request identities emitted by production.
+fn production_shaped_uuid(identity: u128) -> uuid::Uuid {
+    let mut bytes = identity.to_be_bytes();
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
 }
 
 fn eval_session_context(
@@ -292,6 +304,15 @@ mod tests {
         let first = render_eval_case(&case()).expect("fixture case renders");
         let second = render_eval_case(&case()).expect("fixture case renders");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn rendered_request_identity_has_production_uuid_shape() {
+        let request = eval_tool_request(&case()).expect("fixture case is admitted");
+        let identity = request.id().into_uuid();
+
+        assert_eq!(identity.get_version_num(), 7);
+        assert_eq!(identity.get_variant(), uuid::Variant::RFC4122);
     }
 
     #[test]

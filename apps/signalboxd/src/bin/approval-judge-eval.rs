@@ -10,7 +10,11 @@
 //! `--help` for the option reference.
 
 use std::{
-    collections::BTreeMap, collections::BTreeSet, env, fs, path::PathBuf, process::ExitCode,
+    collections::BTreeMap,
+    collections::BTreeSet,
+    env, fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
 };
 
 use serde::Deserialize;
@@ -24,12 +28,12 @@ use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 use signalbox_persistence::approval_judge_eval::{
-    APPROVAL_JUDGE_EVAL_SCORING_SEMANTICS_VERSION, ApprovalJudgeEvalCallRecord,
+    ApprovalJudgeEvalCallRecord,
     ApprovalJudgeEvalRunId, ApprovalJudgeEvalRunRecord, record_eval_run, verify_recording_schema,
 };
 use signalboxd::{
-    DaemonToolCatalog, DaemonToolComposition, FileCredentialAccess, HubModelConfiguration,
-    ModelAdapter,
+    CredentialDelivery, DaemonToolCatalog, DaemonToolComposition, FileCredentialAccess,
+    HubModelConfiguration, ModelAdapter,
     approval_judge_eval::{
         ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, ApprovalJudgeEvalVerdict, judge_eval_case,
         judge_system_prompt, render_eval_case,
@@ -38,10 +42,12 @@ use signalboxd::{
     provider_reported_usage, usage_limits,
 };
 
-const HELP: &str =
-    "approval-judge-eval: replay a labeled corpus through the deployed approval judge.
+fn help_text() -> String {
+    format!(
+        "approval-judge-eval: replay a labeled corpus through the deployed approval judge.
 
 Every call spends real provider quota against the configuration's [approval_judge] model.
+One run is limited to {MAX_PAID_CALLS} total paid calls after filter and limit selection.
 
 Usage:
   approval-judge-eval --config <daemon-config.toml> --cases <cases.jsonl> [options]
@@ -59,7 +65,13 @@ Options:
                     Like --database-url, but read the URL from the named
                     environment variable, keeping a password-bearing URL out of
                     the process argument vector and shell history.
-  --help            Print this reference and exit without spending quota.";
+  --help            Print this reference and exit without spending quota."
+    )
+}
+
+/// Hard per-invocation ceiling on provider traffic from the Cartesian product
+/// of selected cases and repeats.
+const MAX_PAID_CALLS: usize = 1_000;
 
 /// Bumped whenever the majority, tie, or stability algorithms change, so
 /// before/after scorecards with identical replay metadata still declare
@@ -237,6 +249,20 @@ fn recommendation_label(recommendation: DelegateApprovalRecommendation) -> &'sta
     }
 }
 
+fn paid_call_count(selected_cases: usize, repeats: usize) -> Result<usize, String> {
+    let paid_calls = selected_cases.checked_mul(repeats).ok_or_else(|| {
+        format!(
+            "selected case count multiplied by --repeats exceeds the {MAX_PAID_CALLS}-call safety ceiling"
+        )
+    })?;
+    if paid_calls > MAX_PAID_CALLS {
+        return Err(format!(
+            "selected {selected_cases} cases x{repeats} repeats requests {paid_calls} paid calls; maximum is {MAX_PAID_CALLS}"
+        ));
+    }
+    Ok(paid_calls)
+}
+
 #[derive(Default)]
 struct CategoryScore {
     cases: usize,
@@ -250,6 +276,84 @@ struct CategoryScore {
     observed_escalation_majorities: usize,
     missed_escalations: usize,
     excess_escalations: usize,
+}
+
+struct ScorecardMetadata {
+    judge_selection: String,
+    provider_model: String,
+    corpus_digest: String,
+    contract_digest: String,
+    rendered_digest: String,
+    repeats: usize,
+    speculative_tools: Vec<String>,
+}
+
+fn render_scorecard(
+    metadata: ScorecardMetadata,
+    scores: &BTreeMap<CaseCategory, CategoryScore>,
+    case_reports: Vec<serde_json::Value>,
+) -> Result<String, String> {
+    let categories = scores
+        .iter()
+        .map(|(category, score)| {
+            serde_json::json!({
+                "category": category.as_str(),
+                "cases": score.cases,
+                "correct_majorities": score.correct_majorities,
+                "unstable_cases": score.unstable_cases,
+                "stability_unmeasured_cases": score.stability_unmeasured_cases,
+                "partial_cases": score.partial_cases,
+                "unmeasured_cases": score.unmeasured_cases,
+                "failed_calls": score.failed_calls,
+            })
+        })
+        .collect::<Vec<_>>();
+    let escalation = serde_json::json!({
+        "expected_cases": scores.values().map(|score| score.expected_escalations).sum::<usize>(),
+        "observed_majorities": scores
+            .values()
+            .map(|score| score.observed_escalation_majorities)
+            .sum::<usize>(),
+        "missed": scores.values().map(|score| score.missed_escalations).sum::<usize>(),
+        "excess": scores.values().map(|score| score.excess_escalations).sum::<usize>(),
+    });
+    let scorecard = serde_json::json!({
+        "judge_selection": metadata.judge_selection,
+        "provider_model": metadata.provider_model,
+        "corpus_digest": metadata.corpus_digest,
+        "contract_digest": metadata.contract_digest,
+        "rendered_digest": metadata.rendered_digest,
+        "repeats": metadata.repeats,
+        "speculative_tools": metadata.speculative_tools,
+        "total_cases": scores.values().map(|score| score.cases).sum::<usize>(),
+        "correct_majorities": scores
+            .values()
+            .map(|score| score.correct_majorities)
+            .sum::<usize>(),
+        "unstable_cases": scores
+            .values()
+            .map(|score| score.unstable_cases)
+            .sum::<usize>(),
+        "stability_unmeasured_cases": scores
+            .values()
+            .map(|score| score.stability_unmeasured_cases)
+            .sum::<usize>(),
+        "partial_cases": scores
+            .values()
+            .map(|score| score.partial_cases)
+            .sum::<usize>(),
+        "unmeasured_cases": scores
+            .values()
+            .map(|score| score.unmeasured_cases)
+            .sum::<usize>(),
+        "failed_calls": scores.values().map(|score| score.failed_calls).sum::<usize>(),
+        "escalation_calibration": escalation,
+        "scoring_semantics_version": SCORING_SEMANTICS_VERSION,
+        "categories": categories,
+        "cases": case_reports,
+    });
+    serde_json::to_string_pretty(&scorecard)
+        .map_err(|error| format!("scorecard rendering failed: {error}"))
 }
 
 /// Stable FNV-1a digest, so two scorecards are comparable exactly when the
@@ -266,11 +370,21 @@ fn stable_digest(bytes: &[u8]) -> String {
     format!("fnv1a128:{hash:032x}")
 }
 
+fn credential_delivery_identity(
+    delivery: &CredentialDelivery,
+) -> (&'static str, Option<&Path>, Option<&str>) {
+    (
+        delivery.key(),
+        delivery.path().map(PathBuf::as_path),
+        delivery.env_key(),
+    )
+}
+
 fn main() -> ExitCode {
     let options = match parse_arguments() {
         Ok(ParsedArguments::Run(options)) => options,
         Ok(ParsedArguments::Help) => {
-            println!("{HELP}");
+            println!("{}", help_text());
             return ExitCode::SUCCESS;
         }
         Err(message) => {
@@ -328,6 +442,11 @@ async fn run(options: RunOptions) -> Result<(), String> {
     let route = configuration
         .resolve_direct_model(selection)
         .ok_or_else(|| String::from("approval_judge selection has no configured route"))?;
+    let credential_profile = configuration
+        .credential_profile(route.credential_profile())
+        .ok_or_else(|| String::from("resolved route has no configured credential profile"))?;
+    let (credential_delivery, credential_file, credential_env_key) =
+        credential_delivery_identity(credential_profile.delivery());
     // CLI-family adapters accept exactly the credential reference they were
     // constructed with, so the binding must carry the route's profile verbatim.
     let binding = ApprovalJudgeEvalBinding {
@@ -481,6 +600,7 @@ async fn run(options: RunOptions) -> Result<(), String> {
     if cases.is_empty() {
         return Err(String::from("no corpus cases selected"));
     }
+    paid_call_count(cases.len(), options.repeats)?;
     // Every selected case must render before the first paid call, so an
     // inadmissible line late in the corpus cannot masquerade as a provider
     // failure after quota is already spent.
@@ -508,20 +628,23 @@ async fn run(options: RunOptions) -> Result<(), String> {
     // The contract digest covers everything the operation sends or enforces
     // beyond the payloads: the system prompt, the structured-output schema,
     // the resolved model's configured output and context bounds, and the
-    // credential profile name selected for the call. The profile is not a
-    // secret — `route.credential_profile()` names which configured
-    // credential the call uses, not its contents — but it does select which
-    // provider account or CLI credential `binding.credential_reference`
-    // carries into the actual call, so two configurations that differ only
-    // in that profile must not be presented as replay-compatible.
+    // credential profile and delivery selected for the call. These values are
+    // non-secret configuration references — profile name, delivery mode, file
+    // path, and environment key — but they determine how the provider account
+    // reaches the adapter, so changing any of them must change the fingerprint.
     let operation_contract = format!(
-        "{}\u{0}{}\u{0}adapter={:?}\u{0}max_output_tokens={}\u{0}context_window_tokens={}\u{0}credential_profile={}",
+        "{}\u{0}{}\u{0}adapter={:?}\u{0}max_output_tokens={}\u{0}context_window_tokens={}\u{0}credential_profile={}\u{0}credential_delivery={}\u{0}credential_file={}\u{0}credential_env_key={}",
         judge_system_prompt(),
         approval_judge_output_contract_text(),
         route.adapter(),
         definition_max_output_tokens,
         definition_context_window_tokens,
         route.credential_profile(),
+        credential_delivery,
+        credential_file
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        credential_env_key.unwrap_or_default(),
     );
     let operation_contract = match route.adapter() {
         ModelAdapter::ClaudeCli => {
@@ -712,65 +835,27 @@ async fn run(options: RunOptions) -> Result<(), String> {
             "repeats": verdicts.iter().map(|verdict| serde_json::json!({
                 "recommendation": recommendation_label(verdict.recommendation),
                 "rationale": verdict.rationale,
+                "provider_reported_model": verdict.provider_reported_model,
             })).collect::<Vec<_>>(),
             "notes": case.notes,
         }));
     }
 
-    let categories = scores
-        .iter()
-        .map(|(category, score)| {
-            serde_json::json!({
-                "category": category.as_str(),
-                "cases": score.cases,
-                "correct_majorities": score.correct_majorities,
-                "unstable_cases": score.unstable_cases,
-                "stability_unmeasured_cases": score.stability_unmeasured_cases,
-                "partial_cases": score.partial_cases,
-                "unmeasured_cases": score.unmeasured_cases,
-                "failed_calls": score.failed_calls,
-            })
-        })
-        .collect::<Vec<_>>();
-    let total_cases: usize = scores.values().map(|score| score.cases).sum();
-    let total_stability_unmeasured: usize = scores
-        .values()
-        .map(|score| score.stability_unmeasured_cases)
-        .sum();
-    let escalation = serde_json::json!({
-        "expected_cases": scores.values().map(|score| score.expected_escalations).sum::<usize>(),
-        "observed_majorities": scores
-            .values()
-            .map(|score| score.observed_escalation_majorities)
-            .sum::<usize>(),
-        "missed": scores.values().map(|score| score.missed_escalations).sum::<usize>(),
-        "excess": scores.values().map(|score| score.excess_escalations).sum::<usize>(),
-    });
-    let total_correct: usize = scores.values().map(|score| score.correct_majorities).sum();
-    let total_unstable: usize = scores.values().map(|score| score.unstable_cases).sum();
-    let total_unmeasured: usize = scores.values().map(|score| score.unmeasured_cases).sum();
-    let total_partial: usize = scores.values().map(|score| score.partial_cases).sum();
-    let scorecard = serde_json::json!({
-        "judge_selection": selection.into_uuid().to_string(),
-        "provider_model": provider_model.as_str(),
-        "corpus_digest": digest.as_str(),
-        "contract_digest": contract_digest.as_str(),
-        "rendered_digest": rendered_digest.as_str(),
-        "repeats": options.repeats,
-        "speculative_tools": speculative_tools,
-        "total_cases": total_cases,
-        "correct_majorities": total_correct,
-        "unstable_cases": total_unstable,
-        "stability_unmeasured_cases": total_stability_unmeasured,
-        "partial_cases": total_partial,
-        "unmeasured_cases": total_unmeasured,
-        "escalation_calibration": escalation,
-        "scoring_semantics_version": APPROVAL_JUDGE_EVAL_SCORING_SEMANTICS_VERSION,
-        "categories": categories,
-        "cases": case_reports,
-    });
-    let rendered = serde_json::to_string_pretty(&scorecard)
-        .map_err(|error| format!("scorecard rendering failed: {error}"))?;
+    let rendered = render_scorecard(
+        ScorecardMetadata {
+            judge_selection: selection.into_uuid().to_string(),
+            provider_model: provider_model.clone(),
+            corpus_digest: digest.clone(),
+            contract_digest: contract_digest.clone(),
+            rendered_digest: rendered_digest.clone(),
+            repeats: options.repeats,
+            speculative_tools,
+        },
+        &scores,
+        case_reports,
+    )?;
+    let scorecard = serde_json::from_str(&rendered)
+        .map_err(|error| format!("scorecard parsing failed: {error}"))?;
     println!("{rendered}");
     // Recording follows the print, so a database failure can cost only the
     // stored copy and never the primary stdout artifact.
@@ -803,4 +888,24 @@ async fn run(options: RunOptions) -> Result<(), String> {
         eprintln!("recorded eval run {run_identity}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_PAID_CALLS, paid_call_count};
+
+    #[test]
+    fn paid_call_count_accepts_the_safety_ceiling() {
+        assert_eq!(paid_call_count(MAX_PAID_CALLS, 1), Ok(MAX_PAID_CALLS));
+    }
+
+    #[test]
+    fn paid_call_count_rejects_one_call_above_the_safety_ceiling() {
+        assert!(paid_call_count(MAX_PAID_CALLS + 1, 1).is_err());
+    }
+
+    #[test]
+    fn paid_call_count_rejects_arithmetic_overflow() {
+        assert!(paid_call_count(usize::MAX, 2).is_err());
+    }
 }

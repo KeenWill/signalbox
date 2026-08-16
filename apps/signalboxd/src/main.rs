@@ -27,7 +27,7 @@ use signalbox_application::{
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
-use signalbox_domain::{SessionId, TurnId};
+use signalbox_domain::{DurableCommandId, SessionId, TurnId};
 use signalbox_model_provider_runtime::{
     ApprovalJudgeModel, ContextCompactionModel, RuntimeApprovalJudgeModel,
     RuntimeContextCompactionModel, RuntimeModelCallProvider,
@@ -754,7 +754,7 @@ async fn await_while_guarded<T>(
 
 async fn disarm_staging_sweep_unless_guarded(
     database: &mut FencedHubDatabase,
-    registry: &mut Option<BlobStoreRegistry>,
+    registry: &mut Option<Arc<BlobStoreRegistry>>,
 ) {
     if database.check_guard().await.is_err()
         && let Some(registry) = registry.as_mut()
@@ -1348,7 +1348,7 @@ async fn run_hub(
         let _ = database.close().await;
         return Ok(ShutdownOutcome::GuardLost);
     }
-    let mut blob_store_registry = match await_while_guarded(
+    let blob_store_registry = match await_while_guarded(
         &mut database,
         BlobStoreRegistry::initialize(model_configuration.blob_storage(), pool.clone()),
     )
@@ -1368,6 +1368,7 @@ async fn run_hub(
             return Ok(ShutdownOutcome::GuardLost);
         }
     };
+    let mut blob_store_registry = blob_store_registry.map(Arc::new);
 
     let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
         Ok(service) => service,
@@ -1400,7 +1401,7 @@ async fn run_hub(
             return Err(failure);
         }
         GuardedAwait::GuardLost => {
-            if let Some(registry) = blob_store_registry.as_mut() {
+            if let Some(registry) = blob_store_registry.as_ref() {
                 registry.disarm_staging_sweep();
             }
             drop(blob_store_registry);
@@ -1453,19 +1454,20 @@ async fn run_hub(
         pool.clone(),
         model_configuration.session_credential_pin(),
     );
-    match await_while_guarded(
-        &mut database,
-        repository_watch_store.deactivate_unconfigured_repositories(&configured_repositories),
-    )
-    .await
-    {
+    let repository_watch_reconciliation = async {
+        repository_watch_store
+            .deactivate_unconfigured_repositories(&configured_repositories)
+            .await?;
+        repository_watch_store
+            .process_pending_lifecycle_cutoffs(|| DurableCommandId::from_uuid(uuid::Uuid::now_v7()))
+            .await
+    };
+    match await_while_guarded(&mut database, repository_watch_reconciliation).await {
         GuardedAwait::Completed(Ok(())) => {}
         GuardedAwait::Completed(Err(_)) => {
             let failure = erase_startup_cause(
                 RuntimePhase::StartupScan,
-                SanitizedStartupCause::Static(
-                    "repository_watch_configuration_reconciliation_failed",
-                ),
+                SanitizedStartupCause::Static("repository_watch_startup_reconciliation_failed"),
             );
             let _ = listener.cleanup();
             let _ = runner_listener.cleanup();
@@ -1477,7 +1479,7 @@ async fn run_hub(
         GuardedAwait::GuardLost => {
             let _ = listener.cleanup();
             let _ = runner_listener.cleanup();
-            if let Some(registry) = blob_store_registry.as_mut() {
+            if let Some(registry) = blob_store_registry.as_ref() {
                 registry.disarm_staging_sweep();
             }
             drop(blob_store_registry);
@@ -1526,6 +1528,10 @@ async fn run_hub(
     .with_context_compaction_model(Arc::clone(&context_compaction_model));
     let process_runtime = match prometheus_runtime.as_ref() {
         Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
+        None => process_runtime,
+    };
+    let process_runtime = match blob_store_registry {
+        Some(ref registry) => process_runtime.with_blob_store_registry(Arc::clone(registry)),
         None => process_runtime,
     };
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
@@ -1696,14 +1702,14 @@ async fn run_hub(
         outcome = ShutdownOutcome::GuardLost;
     }
     if outcome == ShutdownOutcome::GuardLost {
-        if let Some(registry) = blob_store_registry.as_mut() {
+        if let Some(registry) = blob_store_registry.as_ref() {
             registry.disarm_staging_sweep();
         }
         drop(blob_store_registry);
         let _ = database.close().await;
     } else {
         let close_pool = should_close_pool(&Ok(outcome));
-        if let Some(registry) = blob_store_registry.as_mut()
+        if let Some(registry) = blob_store_registry.as_ref()
             && registry.sweep_staging().is_err()
         {
             let failure_class = OperatorFailureClass::Infrastructure {

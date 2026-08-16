@@ -62,6 +62,8 @@ owned by a sibling page is linked, never restated.
 - [Credential availability](credential-availability.md)
 - [Process protocol](process-protocol.md)
 - [Repository watch and event dispatch](repo-watch.md)
+- [Program substrate](program-substrate.md)
+- [Evaluation system](eval-system.md)
 
 ## ADR mapping
 
