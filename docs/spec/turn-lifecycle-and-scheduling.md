@@ -419,9 +419,9 @@ the sweep (INV-007).
   model-originated `blob_read` uses the same slot handoff after it acquires the
   blob contract's non-waiting direct-read permit: its physical attempt remains
   in flight during store traversal, and it reacquires a slot before committing
-  correlated result evidence or crash-loss classification. At most the
-  configured scheduler-pass bound (16 by default) of direct reads can wait at
-  that reacquisition point.
+  correlated result evidence or crash-loss classification. The independent
+  direct-read admission budget remains fixed, so at most 16 direct reads can
+  wait at that reacquisition point regardless of the scheduler-pass override.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. This recovers a goal disposition when the
