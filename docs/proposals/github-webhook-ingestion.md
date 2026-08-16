@@ -93,10 +93,9 @@ sequence. The resulting per-stream frontiers advance atomically with the cursor
 and event batch. Both producers reading the same stream frontier derive the same
 next sequences; a later equal transition therefore has a different identity,
 while a racing webhook and poll do not. Same-stream multi-event fixtures are a
-required prerequisite.
-Provider keys distinguish independent immutable facts. Both transports must
-possess the same occurrence members or request a targeted refresh rather than
-invent them.
+required prerequisite. Provider keys distinguish independent immutable facts.
+Both transports must possess the same occurrence members or request a targeted
+refresh rather than invent them.
 
 `RepoWatchEventId` remains the UUID reference used by dispatch and audit rows. A
 candidate UUID is retained only by the row that wins content-identity insertion.
@@ -104,11 +103,10 @@ A unique `(content_identity_version, content_identity)` constraint, not the
 UUID, deduplicates producers. The poller and webhook worker both call the same
 identity function; neither has a transport-specific fallback. This prerequisite
 is a behavior and schema change for the implementation stack, not a claim about
-the current tree.
-`PostgresRepoWatchStore::exact_replay` and event-batch equality likewise compare
-content identity version, content identity, ordering position, and the other
-stable event fields; candidate `RepoWatchEventId` values are excluded because a
-replay allocates new candidates.
+the current tree. `PostgresRepoWatchStore::exact_replay` and event-batch
+equality likewise compare content identity version, content identity, ordering
+position, and the other stable event fields; candidate `RepoWatchEventId` values
+are excluded because a replay allocates new candidates.
 
 ## Existing pipeline seam
 
@@ -249,11 +247,11 @@ dispatch happen asynchronously, outside GitHub's ten-second response window.
 
 `(hook_id, delivery_id)` is the delivery replay key. The selected repository is
 stored as conflict-checked data rather than as part of that key, so reuse across
-repositories remains detectable. GitHub retains the GUID on explicit
-redelivery. An equal duplicate returns `202` without a second queue item. The
-same key with different repository, event, optional action, or body digest
-retains the first record, rejects the request, and raises a metadata-only
-security signal. Fixtures cover each conflicting field.
+repositories remains detectable. GitHub retains the GUID on explicit redelivery.
+An equal duplicate returns `202` without a second queue item. The same key with
+different repository, event, optional action, or body digest retains the first
+record, rejects the request, and raises a metadata-only security signal.
+Fixtures cover each conflicting field.
 
 Delivery GUID tombstones and body digests remain permanent. Exact bodies remain
 until terminal processing and for seven days, then an operational sweep may
