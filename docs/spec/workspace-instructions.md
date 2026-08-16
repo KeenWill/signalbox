@@ -306,12 +306,24 @@ projection. Activation fails that turn closed with a typed finding naming the
 bundle and the absent root, rather than rendering content from a directory the
 configuration no longer authorizes or silently continuing without it. Recovering
 such a session needs unload, which is why removal of a still-admitted authority
-is an operator action with a visible consequence rather than a quiet one. It may
-name a workspace-root bundle only when the target session has a complete
-discovery snapshot that used its fixed workspace binding as the workspace root
-and linked that exact registered identity as a candidate. A canonical-path match
-without that session-correlated discovery link is not authority. A mismatch is a
-typed rejection and exposes no source metadata to the target session.
+is an operator action with a visible consequence rather than a quiet one.
+
+Activation is not the only entry point, so it cannot be the only checkpoint. A
+session whose turn was already active when the daemon stopped can be retained
+unchanged by startup recovery — a prepared call retried, an approval wait still
+parked — and no activation transaction runs for it, leaving its frozen snapshot
+authorizing a root the configuration has since dropped. Startup recovery
+therefore applies the same revalidation to every retained active turn's frozen
+snapshot before scheduling resumes, with the same two outcomes: entries whose
+root is gone are dropped with typed findings, and a retained turn holding an
+admitted entry whose root is gone fails closed. A turn that resumes has been
+revalidated, so no enumeration, preview, or already-approved read can reach a
+removed root's path afterwards. It may name a workspace-root bundle only when
+the target session has a complete discovery snapshot that used its fixed
+workspace binding as the workspace root and linked that exact registered
+identity as a candidate. A canonical-path match without that session-correlated
+discovery link is not authority. A mismatch is a typed rejection and exposes no
+source metadata to the target session.
 
 Before a session carrying selectors can activate its first turn, the daemon
 resolves its configured-root selectors and, when a workspace selector is
@@ -636,12 +648,17 @@ resolves a request's approval before creating and executing the attempt, so a
 `bundle_id` outside the session's eligibility snapshot would otherwise reach
 judge preparation with no evidence to build from — leaving an implementation to
 expose metadata for a bundle the session may not see, or to invent an
-evidence-free judge request. Neither is acceptable, so the preflight that
-precedes approval rejects such a request outright: it closes as the typed
-`not_eligible` failure with no approval state, no judge call, and no metadata in
-the result. A judge is asked only about bundles the session is already
-authorized to admit, which is also what lets the evidence block below be
-unconditional rather than optional.
+evidence-free judge request. Neither is acceptable, so this is the family's
+declared
+[pre-approval admissibility check](tool-loop.md#intra-turn-rounds-and-request-batches):
+the owning preflight failure transaction mints the attempt and commits it
+terminal with the typed `not_eligible` reason before approval, creating no
+approval state, no judge call, and no metadata in the result. That is a durable
+resolution rather than a request left in limbo — the attempt row is where this
+page already says the typed reason lives, and the batch continues in proposal
+order rather than parking behind it. A judge is asked only about bundles the
+session is already authorized to admit, which is also what lets the evidence
+block below be unconditional rather than optional.
 
 Delegation is only meaningful if the judge can tell what it is approving, and
 `bundle_id` alone cannot tell it. The approval request for a delegated
@@ -723,13 +740,25 @@ its session from the trusted tool-dispatch correlation.
   is what keeps the tool from being an existence oracle for bundles the session
   may not see.
 - `instructions_read` requires exactly one `bundle_id` in that same form and
-  accepts no budget field, since version one fixes the budget. Success is one of
-  two receipt variants, tagged so a caller need not infer which occurred:
-  `admitted` carries identity, source hash, rendered hash, rendered byte length,
-  truncation evidence, and durable admission identity; `already_admitted`
-  carries the same evidence for the existing admission it names. Not-eligible,
-  stale-source, aggregate-exhaustion, and target-capability failures are typed
-  request outcomes, each naming its closed reason and none of them partial.
+  accepts no budget field, since version one fixes the budget. Its success shape
+  is closed below, like the other two. Not-eligible, stale-source,
+  aggregate-exhaustion, and target-capability failures are typed request
+  outcomes, each naming its closed reason and none of them partial.
+
+The admission receipt is one closed object whose members are exactly `outcome`,
+`bundle_id`, `admission_id`, `source_sha256`, `rendered_sha256`,
+`rendered_bytes`, and `truncated`, plus `truncation_boundary` only when
+`truncated` is true. `outcome` is the tag, spelled exactly `admitted` or
+`already_admitted`, so a caller reads the variant rather than guessing it from
+which members are present. Both variants carry the same member set, because
+`already_admitted` reports the existing admission's evidence rather than a
+reduced form of it — the difference is what happened, not what is known.
+`truncated` is a JSON boolean present either way so the key set varies only with
+it, and `truncation_boundary` is the byte boundary as a JSON number, omitted
+when there was no truncation rather than emitted as null. Identities are
+lowercase hyphenated UUIDs, hashes lowercase hexadecimal, and byte counts JSON
+numbers, matching every other result on this page. The receipt carries no
+repository-controlled string, so it needs no untrusted region.
 
 These reasons are durable typed evidence first and provider-visible bytes
 second, and the two are not the same surface. The tool attempt stores its closed
@@ -1068,10 +1097,13 @@ Rendered bundle records follow in projection order. Each is bundle UUID,
 length-framed kind, length-framed canonical source path, length-framed
 authorizing-root kind, length-framed root-relative source label, 32-byte source
 hash, 32-byte rendered hash, rendered byte length, length-framed admission
-route, then one byte `0` for no truncation or byte `1` plus the truncation
-boundary as an unsigned length. Fixed-width identities and digests plus length
-framing make the representation uniquely decodable. The empty turn-start vector
-ends immediately after literal `turn_start`.
+route, then the octet `0x00` for no truncation or the octet `0x01` plus the
+truncation boundary as an unsigned length. Fixed-width identities and digests
+plus length framing make the representation uniquely decodable. Those two
+discriminants are numeric octets, not the UTF-8 bytes `0x30` and `0x31` that
+would spell the digits; both readings decode uniquely but hash differently, so
+stating the octet is what keeps a stored manifest valid across implementations.
+The empty turn-start vector ends immediately after literal `turn_start`.
 
 ## Budgets and rendered content
 

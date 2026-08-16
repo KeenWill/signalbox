@@ -117,6 +117,24 @@ Execution does not begin until the batch has no undecided approval. The next
 model round does not begin until every request has one durable logical
 resolution: executed, denied, or closed by turn end.
 
+**Committed unimplemented functionality — pre-approval admissibility.** A family
+may declare that a request is inadmissible on evidence available before any
+approval decision, and the instruction family declares one: a bundle outside the
+session's eligibility snapshot, specified by
+[workspace instructions](workspace-instructions.md#enumeration-preview-and-admission).
+Such a request resolves before approval through the preflight failure
+transaction, which mints its attempt and commits it terminal `KnownFailed` with
+the typed reason in the same transaction, creating no approval state, no judge
+call, and no executor work. The resolution is `executed` with a failure result —
+the attempt row is where the typed reason already lives, so this needs no fourth
+resolution kind and no result shape the projection does not already carry. A
+request resolved this way is not undecided, so the batch is not parked behind it
+and proposal order continues at the next request. Why this rather than deciding
+approval first: a delegated decision needs evidence the daemon can only build
+for a bundle the session may see, so asking a judge about an inadmissible
+request would mean either exposing metadata the session is not entitled to or
+sending an evidence-free prompt. No present family declares such a check.
+
 ## Approval policy and decision sources
 
 Every request has an approval state separate from its execution state. The
