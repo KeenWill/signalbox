@@ -354,7 +354,11 @@ Representation rules, all enforced in the schema:
   propagation adapter installs only loss transitions under those authorities;
   replacement and abandonment remain **committed unimplemented functionality**
   for their dedicated orchestration transactions. Direct snapshot storage cannot
-  stand in for any of those transactions.
+  stand in for any of those transactions. `RunnerReplacementTestProjection` and
+  `store_runner_replacement_projection_for_test` are compiled only with
+  `postgres-integration` for integration-test round trips; they are not
+  production authority-bearing adapters. The generic production placement
+  writer rejects `runner_replaced`.
 - Migration `202608110005` records the connection-loss epoch observed when each
   placement selects a known enrollment and carries that baseline through later
   loss or abandonment records. The value is derived while holding scheduler,
