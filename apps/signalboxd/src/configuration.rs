@@ -1873,11 +1873,21 @@ fn parse_repository_watch_webhook_configuration(
     }))
 }
 
+/// Whether the configured path names exactly one literal request path.
+///
+/// Configuration promises one exact path, but `Router::route` reads its argument
+/// as a route pattern: Axum 0.8 treats `{name}` and `{*name}` as captures that
+/// match many paths, and it panics on the legacy `:name` and `*name` forms. Both
+/// are rejected here rather than at listener start.
 fn valid_repository_watch_webhook_path(path: &str) -> bool {
     path.starts_with('/')
         && path.bytes().all(|byte| byte.is_ascii_graphic())
         && !path.contains(['?', '#'])
+        && !path.contains(REPOSITORY_WATCH_WEBHOOK_ROUTE_METACHARACTERS)
 }
+
+/// Characters Axum reads as routing syntax rather than as literal path bytes.
+const REPOSITORY_WATCH_WEBHOOK_ROUTE_METACHARACTERS: [char; 4] = ['*', ':', '{', '}'];
 
 fn parse_repository_watch_rules(
     table: &Table,
@@ -3722,6 +3732,9 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const WATCH_WEBHOOK_PATH: &str = "/";
     const RELATIVE_WATCH_WEBHOOK_PATH: &str = "github/webhooks";
     const QUERY_WATCH_WEBHOOK_PATH: &str = "/github/webhooks?mode=shadow";
+    const CAPTURE_WATCH_WEBHOOK_PATH: &str = "/github/{delivery}";
+    const LEGACY_CAPTURE_WATCH_WEBHOOK_PATH: &str = "/github/:delivery";
+    const WILDCARD_WATCH_WEBHOOK_PATH: &str = "/github/*rest";
     const WATCH_INTERVAL_SECONDS: u64 = 90;
     const SECOND_WATCH_INTERVAL_SECONDS: u64 = 120;
     const SIGNAL_REVIEWER: &str = "signal-reviewer";
@@ -4518,6 +4531,26 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             HubModelConfiguration::parse(&configured).err(),
             Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
         );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_route_capture_syntax_in_local_path() {
+        for candidate in [
+            CAPTURE_WATCH_WEBHOOK_PATH,
+            LEGACY_CAPTURE_WATCH_WEBHOOK_PATH,
+            WILDCARD_WATCH_WEBHOOK_PATH,
+        ] {
+            let configured = configuration_with_repository_watch_webhook().replace(
+                &format!("path = \"{WATCH_WEBHOOK_PATH}\""),
+                &format!("path = \"{candidate}\""),
+            );
+
+            assert_eq!(
+                HubModelConfiguration::parse(&configured).err(),
+                Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration),
+                "{candidate} is routing syntax, not one literal request path"
+            );
+        }
     }
 
     #[test]

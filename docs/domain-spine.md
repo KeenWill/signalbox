@@ -7105,9 +7105,33 @@ pub enum RepoWatchPullRequestHeadGuardV1 {
     Expected(CommitSha),
 }
 
+pub struct RepoWatchWebhookPullRequestContextV1Input {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub head_repository: Option<RepositorySlug>,
+    pub base_branch: BranchName,
+    pub head_branch: BranchName,
+    pub title: PullRequestTitle,
+    pub body: PullRequestBody,
+    pub labels: Vec<LabelName>,
+    pub draft: bool,
+    pub author: Option<RepoWatchAuthorLogin>,
+}
+
+pub struct RepoWatchWebhookPullRequestContextV1 { /* private */ }
+impl RepoWatchWebhookPullRequestContextV1 {
+    pub fn new(input: RepoWatchWebhookPullRequestContextV1Input) -> Self;
+    pub fn delivered(&self) -> Option<PullRequestEventContext>;
+    pub fn with_retained_head_repository(
+        &self,
+        retained: &RepositorySlug,
+    ) -> PullRequestEventContext;
+    // accessors: number(), head_sha(), head_repository()
+}
+
 pub enum RepoWatchObservationChangeV1 {
     PullRequestContext {
-        context: PullRequestEventContext,
+        context: RepoWatchWebhookPullRequestContextV1,
         lifecycle: Option<RepoWatchPullRequestLifecycle>,
         head_guard: RepoWatchPullRequestHeadGuardV1,
         missing: RepoWatchPullRequestMissingPolicyV1,
@@ -10524,7 +10548,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
 | application: repo_watch                            | 38 (incl. 4 traits)   |
-| application: repo_watch_webhook                    | 15 (+2 free fn)       |
+| application: repo_watch_webhook                    | 17 (+2 free fn)       |
 | application: review_orchestration                  | 37 (incl. 2 traits)   |
 | application: review_workflow                       | 9 (incl. 2 traits)    |
 | application: session_metadata                      | 12 (incl. 4 traits)   |
@@ -10535,4 +10559,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **269 (+3 free fn)**  |
+| **signalbox-application total**                    | **271 (+3 free fn)**  |
