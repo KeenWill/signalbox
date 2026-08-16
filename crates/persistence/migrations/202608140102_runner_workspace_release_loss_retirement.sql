@@ -140,7 +140,8 @@ BEGIN
      WHERE session_id = NEW.session_id;
     SELECT * INTO enrollment
       FROM runner_enrollment
-     WHERE enrollment_id = NEW.enrollment_id;
+     WHERE enrollment_id = NEW.enrollment_id
+       FOR SHARE;
     SELECT * INTO connection_head
       FROM runner_connection_authority_head
      WHERE enrollment_id = NEW.enrollment_id;
