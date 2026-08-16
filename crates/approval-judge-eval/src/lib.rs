@@ -204,6 +204,14 @@ pub async fn score_corpus(
     if corpus.cases.is_empty() {
         return Err(ScoreError::EmptyCorpus);
     }
+    let mut case_ids = HashSet::with_capacity(corpus.cases.len());
+    for case in &corpus.cases {
+        if !case_ids.insert(case.id.as_str()) {
+            return Err(ScoreError::DuplicateCaseId {
+                id: case.id.clone(),
+            });
+        }
+    }
 
     let eval_cases = corpus.cases.iter().map(eval_case).collect::<Vec<_>>();
     for (case, eval_case) in corpus.cases.iter().zip(&eval_cases) {
@@ -366,6 +374,11 @@ pub enum ScoreError {
     },
     /// The corpus contains no evaluation cases.
     EmptyCorpus,
+    /// More than one case uses the same stable logical identity.
+    DuplicateCaseId {
+        /// Repeated case identity.
+        id: String,
+    },
     /// One case failed admission or replay.
     Case {
         /// Logical identity of the failed case.
@@ -381,6 +394,7 @@ impl ScoreError {
     pub fn case_id(&self) -> Option<&str> {
         match self {
             Self::UnsupportedFormatVersion { .. } | Self::EmptyCorpus => None,
+            Self::DuplicateCaseId { id } => Some(id),
             Self::Case { case_id, .. } => Some(case_id),
         }
     }
@@ -394,6 +408,9 @@ impl fmt::Display for ScoreError {
                 "corpus format version {observed} is unsupported; expected {CORPUS_FORMAT_VERSION}"
             ),
             Self::EmptyCorpus => write!(formatter, "corpus contains no cases"),
+            Self::DuplicateCaseId { id } => {
+                write!(formatter, "corpus case id {id} appears more than once")
+            }
             Self::Case { case_id, source } => write!(
                 formatter,
                 "approval-judge replay failed for case {case_id}: {source}"
@@ -405,7 +422,9 @@ impl fmt::Display for ScoreError {
 impl Error for ScoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::UnsupportedFormatVersion { .. } | Self::EmptyCorpus => None,
+            Self::UnsupportedFormatVersion { .. }
+            | Self::EmptyCorpus
+            | Self::DuplicateCaseId { .. } => None,
             Self::Case { source, .. } => Some(source.as_ref()),
         }
     }
@@ -632,6 +651,22 @@ mod tests {
             .expect_err("the scoring boundary rejects an empty corpus");
 
         assert!(error.to_string().contains("no cases"));
+    }
+
+    #[tokio::test]
+    async fn scoring_rejects_directly_constructed_duplicate_case_ids() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let duplicate_id = corpus.cases[0].id.clone();
+        corpus.cases[1].id = duplicate_id.clone();
+        let (model, binding) = fixture_model([]);
+
+        let error = score_corpus(&model, &binding, &corpus)
+            .await
+            .expect_err("the scoring boundary rejects duplicate case ids");
+
+        assert!(error.to_string().contains(&duplicate_id));
+        assert!(error.to_string().contains("appears more than once"));
     }
 
     #[tokio::test]
