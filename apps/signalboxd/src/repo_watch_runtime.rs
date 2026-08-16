@@ -384,6 +384,15 @@ impl WebhookDrainRetry {
         self.deadline.is_some()
     }
 
+    /// What a full polling attempt should do about its own drain step.
+    const fn poll_drain(&self) -> WebhookDrain {
+        if self.is_backing_off() {
+            WebhookDrain::Deferred
+        } else {
+            WebhookDrain::Run
+        }
+    }
+
     /// Schedules a retry only when none is already owed.
     ///
     /// A failed full poll may never have reached the drain, so it must not
@@ -414,6 +423,16 @@ impl WebhookDrainRetry {
             None => std::future::pending().await,
         }
     }
+}
+
+/// Whether a full polling attempt performs its own webhook drain step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookDrain {
+    /// No retry is owed, so this attempt drains durable pending deliveries.
+    Run,
+    /// A retry already owes that drain. Running it here would repeat at the
+    /// poll cadence exactly the work the backoff exists to space out.
+    Deferred,
 }
 
 /// What a repository task's next wake asks it to do.
@@ -737,9 +756,9 @@ impl RepositoryWatchTask {
                 RepositoryWatchWake::Continue => {}
                 RepositoryWatchWake::Poll => {
                     let cycle_started = Instant::now();
-                    let drained = !webhook_retry.is_backing_off();
+                    let drain = webhook_retry.poll_drain();
                     let Some(result) =
-                        run_until_shutdown(&mut shutdown, self.run_attempt(drained)).await
+                        run_until_shutdown(&mut shutdown, self.run_attempt(drain)).await
                     else {
                         // A cancelled full poll may own spawned PR fetches.
                         self.poller.drain_fetches().await;
@@ -748,7 +767,7 @@ impl RepositoryWatchTask {
                     let metrics = self.poller.attempt_metrics();
                     match &result {
                         Ok(()) => {
-                            if drained {
+                            if drain == WebhookDrain::Run {
                                 webhook_retry.update_after(&result);
                             }
                             tracing::debug!(
@@ -849,7 +868,7 @@ impl RepositoryWatchTask {
     /// exists to space out. The owed retry performs it instead.
     async fn run_attempt(
         &mut self,
-        drain_webhooks: bool,
+        drain: WebhookDrain,
     ) -> Result<(), RepositoryWatchAttemptError> {
         self.poller.begin_attempt();
         let result = async {
@@ -860,7 +879,7 @@ impl RepositoryWatchTask {
             self.process_cutoffs().await?;
             self.process_dispatches().await?;
             self.poll_and_commit().await?;
-            if drain_webhooks {
+            if drain == WebhookDrain::Run {
                 self.process_webhook_deliveries().await?;
             }
             self.process_cutoffs().await?;
@@ -944,7 +963,19 @@ impl RepositoryWatchTask {
             }
         }
         match first_failure {
-            Some(error) => Err(error),
+            // Emitted here rather than by the caller because all three callers
+            // — startup, wake, and retry — reach the drain through this one
+            // function, and a full poll's own failure record is a warning about
+            // polling. An error-only sink would otherwise learn nothing about a
+            // drain that failed inside a poll.
+            Some(error) => {
+                tracing::error!(
+                    repository = %self.repository.as_str(),
+                    cause_code = error.cause_code(),
+                    "repository-watch webhook drain page retained a failed delivery"
+                );
+                Err(error)
+            }
             None => Ok(()),
         }
     }
@@ -3963,7 +3994,7 @@ mod tests {
         RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
         RepositoryWatchWake, ResourceKey, ReviewState, TargetedPullRequest, Url,
         UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY, WEBHOOK_DRAIN_RETRY_MAX_DELAY,
-        WebhookDrainRetry, WorkflowName, WorkflowResponse, derive_repo_watch_events,
+        WebhookDrain, WebhookDrainRetry, WorkflowName, WorkflowResponse, derive_repo_watch_events,
         dispatch_context_json, inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
         normalize_checks_outcome, normalize_pull_request_context, object_id,
         owed_dispatch_context_json_parts, rule_activation_error, run_until_shutdown,
@@ -3986,6 +4017,7 @@ mod tests {
         repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
         repo_watch_webhook::{
             PostgresRepoWatchWebhookStore, RepoWatchWebhookAdmission, RepoWatchWebhookDeliveryKey,
+            RepoWatchWebhookDisposition,
         },
         scheduler::PostgresEligibilitySweep,
     };
@@ -4295,116 +4327,14 @@ mod tests {
         })
     }
 
-    async fn install_first_projection_rejection(pool: &PgPool) -> Result<(), Box<dyn Error>> {
-        let first_delivery = Uuid::from_u128(FIRST_WEBHOOK_DELIVERY);
-        sqlx::query("CREATE TABLE fixture_rejected_webhook (delivery_id uuid PRIMARY KEY)")
-            .execute(pool)
-            .await?;
-        sqlx::query("INSERT INTO fixture_rejected_webhook (delivery_id) VALUES ($1)")
-            .bind(first_delivery)
-            .execute(pool)
-            .await?;
-        sqlx::query(
-            "CREATE FUNCTION reject_first_webhook_projection()
-             RETURNS trigger
-             LANGUAGE plpgsql
-             AS $$
-             BEGIN
-                 IF EXISTS (
-                     SELECT 1
-                       FROM fixture_rejected_webhook
-                      WHERE delivery_id = NEW.delivery_id
-                 ) THEN
-                     RAISE EXCEPTION 'fixture rejects the first projection';
-                 END IF;
-                 RETURN NEW;
-             END
-             $$",
-        )
-        .execute(pool)
-        .await?;
-        sqlx::query(
-            "CREATE TRIGGER reject_first_webhook_projection
-             BEFORE INSERT ON repo_watch_webhook_projection
-             FOR EACH ROW
-             EXECUTE FUNCTION reject_first_webhook_projection()",
-        )
-        .execute(pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn remove_first_projection_rejection(pool: &PgPool) -> Result<(), Box<dyn Error>> {
-        sqlx::query(
-            "DROP TRIGGER reject_first_webhook_projection ON repo_watch_webhook_projection",
-        )
-        .execute(pool)
-        .await?;
-        sqlx::query("DROP FUNCTION reject_first_webhook_projection()")
-            .execute(pool)
-            .await?;
-        sqlx::query("DROP TABLE fixture_rejected_webhook")
-            .execute(pool)
-            .await?;
-        Ok(())
-    }
-
-    async fn install_first_projection_wedge(pool: &PgPool) -> Result<(), Box<dyn Error>> {
-        let first_delivery = Uuid::from_u128(FIRST_WEBHOOK_DELIVERY);
-        sqlx::query("CREATE TABLE fixture_wedged_webhook (delivery_id uuid PRIMARY KEY)")
-            .execute(pool)
-            .await?;
-        sqlx::query("INSERT INTO fixture_wedged_webhook (delivery_id) VALUES ($1)")
-            .bind(first_delivery)
-            .execute(pool)
-            .await?;
-        let function = format!(
-            "CREATE FUNCTION wedge_first_webhook_projection()
-             RETURNS trigger
-             LANGUAGE plpgsql
-             AS $$
-             BEGIN
-                 IF EXISTS (
-                     SELECT 1
-                       FROM fixture_wedged_webhook
-                      WHERE delivery_id = NEW.delivery_id
-                 ) THEN
-                     PERFORM pg_advisory_xact_lock({WEBHOOK_PROJECTION_ADVISORY_LOCK});
-                 END IF;
-                 RETURN NEW;
-             END
-             $$"
-        );
-        // The only interpolated value is the code-owned integer above; no
-        // provider, deployment, or test input contributes SQL text.
-        sqlx::query(sqlx::AssertSqlSafe(function))
-            .execute(pool)
-            .await?;
-        sqlx::query(
-            "CREATE TRIGGER wedge_first_webhook_projection
-             BEFORE INSERT ON repo_watch_webhook_projection
-             FOR EACH ROW
-             EXECUTE FUNCTION wedge_first_webhook_projection()",
-        )
-        .execute(pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn wait_for_webhook_projection_wedge(pool: &PgPool) {
+    async fn wait_for_webhook_projection_wedge(store: &PostgresRepoWatchWebhookStore) {
         let wait = async {
             loop {
-                let waiting: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (
-                        SELECT 1
-                          FROM pg_stat_activity
-                         WHERE wait_event = 'advisory'
-                     )",
-                )
-                .fetch_one(pool)
-                .await
-                .expect("fixture can inspect PostgreSQL wait state");
-                if waiting {
+                if store
+                    .projection_wedge_is_reached()
+                    .await
+                    .expect("the fixture can inspect the wedge")
+                {
                     return;
                 }
                 sleep(Duration::from_millis(10)).await;
@@ -4449,36 +4379,11 @@ mod tests {
         }
     }
 
-    async fn webhook_disposition(
-        pool: &PgPool,
-        key: RepoWatchWebhookDeliveryKey,
-    ) -> Result<Option<(String, Option<String>)>, sqlx::Error> {
-        sqlx::query_as(
-            "SELECT disposition, outcome_code
-               FROM repo_watch_webhook_disposition
-              WHERE hook_id = $1 AND delivery_id = $2",
-        )
-        .bind(rust_decimal::Decimal::from(key.hook_id().get()))
-        .bind(key.delivery_id())
-        .fetch_optional(pool)
-        .await
-    }
-
     async fn webhook_disposition_exists(
-        pool: &PgPool,
+        store: &PostgresRepoWatchWebhookStore,
         key: RepoWatchWebhookDeliveryKey,
-    ) -> Result<bool, sqlx::Error> {
-        sqlx::query_scalar(
-            "SELECT EXISTS (
-                SELECT 1
-                  FROM repo_watch_webhook_disposition
-                 WHERE hook_id = $1 AND delivery_id = $2
-             )",
-        )
-        .bind(rust_decimal::Decimal::from(key.hook_id().get()))
-        .bind(key.delivery_id())
-        .fetch_one(pool)
-        .await
+    ) -> Result<bool, Box<dyn Error>> {
+        Ok(store.load_disposition(key).await?.is_some())
     }
 
     fn pulls_with_one() -> String {
@@ -6150,6 +6055,7 @@ mod tests {
     #[tokio::test]
     async fn a_notification_that_is_not_shutdown_resumes_supervised_work() {
         let (shutdown, mut shutdown_receiver) = watch::channel(false);
+        const COMPLETION: u8 = 7;
         let (completion, completed) = tokio::sync::oneshot::channel::<u8>();
         // Pending before the wait begins, so the notification is delivered
         // while the work is still outstanding.
@@ -6159,7 +6065,7 @@ mod tests {
         let signal = tokio::spawn(async move {
             tokio::task::yield_now().await;
             completion
-                .send(7)
+                .send(COMPLETION)
                 .expect("the fixture still awaits the supervised work");
         });
 
@@ -6169,29 +6075,47 @@ mod tests {
         .await;
 
         signal.await.expect("the fixture signal completes");
-        assert_eq!(outcome, Some(7));
+        assert_eq!(outcome, Some(COMPLETION));
         drop(shutdown);
     }
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn one_projection_error_does_not_halt_the_page_and_the_retry_drains_it()
-    -> Result<(), Box<dyn Error>> {
+    async fn one_projection_error_does_not_halt_its_page() -> Result<(), Box<dyn Error>> {
         let (_container, pool) = migrated_postgres().await?;
         let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
         let first = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
         let second = submitted_review_admission(SECOND_WEBHOOK_DELIVERY, SECOND_WEBHOOK_REVIEW)?;
         webhook_store.admit(&first).await?;
         webhook_store.admit(&second).await?;
-        install_first_projection_rejection(&pool).await?;
+        webhook_store
+            .inject_projection_rejection(first.key())
+            .await?;
         let mut fixture = webhook_task(&pool).await?;
 
-        let first_attempt = fixture.task.process_webhook_deliveries().await;
+        let attempt = fixture.task.process_webhook_deliveries().await;
 
-        assert_eq!(first_attempt, Err(RepositoryWatchAttemptError::Persistence));
-        assert!(!webhook_disposition_exists(&pool, first.key()).await?);
-        assert!(webhook_disposition_exists(&pool, second.key()).await?);
-        remove_first_projection_rejection(&pool).await?;
+        assert_eq!(attempt, Err(RepositoryWatchAttemptError::Persistence));
+        assert!(!webhook_disposition_exists(&webhook_store, first.key()).await?);
+        assert!(webhook_disposition_exists(&webhook_store, second.key()).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_retry_drains_the_delivery_a_projection_error_retained() -> Result<(), Box<dyn Error>>
+    {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let retained = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&retained).await?;
+        let rejection = webhook_store
+            .inject_projection_rejection(retained.key())
+            .await?;
+        let mut fixture = webhook_task(&pool).await?;
+        let failed = fixture.task.process_webhook_deliveries().await;
+        assert_eq!(failed, Err(RepositoryWatchAttemptError::Persistence));
+        rejection.restore().await?;
 
         fixture
             .task
@@ -6199,7 +6123,7 @@ mod tests {
             .await
             .expect("the scheduled retry drains the retained delivery");
 
-        assert!(webhook_disposition_exists(&pool, first.key()).await?);
+        assert!(webhook_disposition_exists(&webhook_store, retained.key()).await?);
         Ok(())
     }
 
@@ -6212,7 +6136,9 @@ mod tests {
         let first = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
         let second = submitted_review_admission(SECOND_WEBHOOK_DELIVERY, SECOND_WEBHOOK_REVIEW)?;
         webhook_store.admit(&first).await?;
-        install_first_projection_wedge(&pool).await?;
+        webhook_store
+            .inject_projection_wedge(first.key(), WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .await?;
         let mut blocker = pool.acquire().await?;
         sqlx::query("SELECT pg_advisory_lock($1)")
             .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
@@ -6221,7 +6147,7 @@ mod tests {
         let fixture = webhook_task(&pool).await?;
         let mut task = fixture.task;
         let drain = tokio::spawn(async move { task.process_webhook_deliveries().await });
-        wait_for_webhook_projection_wedge(&pool).await;
+        wait_for_webhook_projection_wedge(&webhook_store).await;
 
         webhook_store.admit(&second).await?;
         let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
@@ -6233,8 +6159,8 @@ mod tests {
             .expect("the concurrent task run drains both deliveries");
 
         assert!(unlocked, "the fixture releases its deliberate drain wedge");
-        assert!(webhook_disposition_exists(&pool, first.key()).await?);
-        assert!(webhook_disposition_exists(&pool, second.key()).await?);
+        assert!(webhook_disposition_exists(&webhook_store, first.key()).await?);
+        assert!(webhook_disposition_exists(&webhook_store, second.key()).await?);
         Ok(())
     }
 
@@ -6254,13 +6180,13 @@ mod tests {
 
         fixture
             .task
-            .run_attempt(false)
+            .run_attempt(WebhookDrain::Deferred)
             .await
             .expect("the polling attempt itself succeeds");
 
         deferring.finish().await;
         assert!(
-            !webhook_disposition_exists(&pool, admission.key()).await?,
+            !webhook_disposition_exists(&webhook_store, admission.key()).await?,
             "a poll must leave a pending delivery to the retry that owes it"
         );
 
@@ -6269,12 +6195,12 @@ mod tests {
 
         owed_nothing
             .task
-            .run_attempt(true)
+            .run_attempt(WebhookDrain::Run)
             .await
             .expect("the polling attempt drains when no retry is owed");
 
         draining.finish().await;
-        assert!(webhook_disposition_exists(&pool, admission.key()).await?);
+        assert!(webhook_disposition_exists(&webhook_store, admission.key()).await?);
         Ok(())
     }
 
@@ -6301,10 +6227,15 @@ mod tests {
 
         server.finish().await;
         assert_eq!(attempt, Err(RepositoryWatchAttemptError::Rejected));
+        let recorded = webhook_store
+            .load_disposition(admission.key())
+            .await?
+            .expect("the delivery reached a terminal disposition");
         assert_eq!(
-            webhook_disposition(&pool, admission.key()).await?,
-            Some(("projected".to_owned(), None))
+            recorded.disposition(),
+            RepoWatchWebhookDisposition::Projected
         );
+        assert_eq!(recorded.outcome_code(), None);
 
         // The scripted server is exhausted, so a second request would fail to
         // connect; the retry succeeding proves it issued none.

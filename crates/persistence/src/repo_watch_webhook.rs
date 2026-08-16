@@ -173,6 +173,51 @@ pub enum RepoWatchWebhookAdmissionOutcome {
     Conflict,
 }
 
+/// One recorded terminal disposition, read back as stored.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordedRepoWatchWebhookDisposition {
+    disposition: RepoWatchWebhookDisposition,
+    outcome_code: Option<String>,
+}
+
+#[cfg(feature = "test-support")]
+impl RecordedRepoWatchWebhookDisposition {
+    pub const fn disposition(&self) -> RepoWatchWebhookDisposition {
+        self.disposition
+    }
+
+    pub fn outcome_code(&self) -> Option<&str> {
+        self.outcome_code.as_deref()
+    }
+}
+
+/// A projection fault a composed drain test installed, and can lift again.
+#[cfg(feature = "test-support")]
+pub struct RepoWatchWebhookProjectionFault {
+    pool: PgPool,
+}
+
+#[cfg(feature = "test-support")]
+impl RepoWatchWebhookProjectionFault {
+    /// Restores projection inserts after the failure assertion.
+    pub async fn restore(self) -> Result<(), RepoWatchWebhookStoreError> {
+        sqlx::query(
+            "DROP TRIGGER reject_repo_watch_webhook_projection
+                   ON repo_watch_webhook_projection",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("DROP FUNCTION reject_repo_watch_webhook_projection()")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DROP TABLE repo_watch_webhook_projection_rejected")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+}
+
 /// One bounded pending-delivery page size.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchWebhookPendingPageSize(NonZeroU16);
@@ -366,6 +411,7 @@ pub enum RepoWatchWebhookStorageCorruption {
     InvalidReceiptSequence,
     InvalidRepository,
     InvalidBodyDigest,
+    InvalidDisposition,
 }
 
 impl fmt::Display for RepoWatchWebhookStorageCorruption {
@@ -375,6 +421,7 @@ impl fmt::Display for RepoWatchWebhookStorageCorruption {
             Self::InvalidReceiptSequence => "invalid stored webhook receipt sequence",
             Self::InvalidRepository => "invalid stored webhook repository",
             Self::InvalidBodyDigest => "invalid stored webhook body digest",
+            Self::InvalidDisposition => "invalid stored webhook terminal disposition",
         })
     }
 }
@@ -557,6 +604,157 @@ impl PostgresRepoWatchWebhookStore {
         .fetch_optional(&self.pool)
         .await?;
         row.map(decode_pending_receipt).transpose()
+    }
+
+    /// The terminal disposition recorded for one delivery, if any.
+    ///
+    /// Composed daemon tests assert against the disposition a drain reached,
+    /// and this crate owns the table and its stored spellings, so they read it
+    /// as the closed enum rather than as text to compare against a literal.
+    #[cfg(feature = "test-support")]
+    pub async fn load_disposition(
+        &self,
+        key: RepoWatchWebhookDeliveryKey,
+    ) -> Result<Option<RecordedRepoWatchWebhookDisposition>, RepoWatchWebhookStoreError> {
+        let row = sqlx::query_as::<_, (String, Option<String>, Option<i64>)>(
+            "SELECT disposition, outcome_code, resulting_cursor_generation
+               FROM repo_watch_webhook_disposition
+              WHERE hook_id = $1 AND delivery_id = $2",
+        )
+        .bind(Decimal::from(key.hook_id.get()))
+        .bind(key.delivery_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((disposition, outcome_code, generation)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(RecordedRepoWatchWebhookDisposition {
+            disposition: decode_disposition(&disposition, generation)?,
+            outcome_code,
+        }))
+    }
+
+    /// Fails every projection insert for `delivery`, for a composed drain test.
+    ///
+    /// The fault is a trigger rather than a dropped table because a drain page
+    /// has to keep reaching the store for its other deliveries: what is being
+    /// exercised is one delivery failing while its page peers succeed.
+    #[cfg(feature = "test-support")]
+    pub async fn inject_projection_rejection(
+        &self,
+        delivery: RepoWatchWebhookDeliveryKey,
+    ) -> Result<RepoWatchWebhookProjectionFault, RepoWatchWebhookStoreError> {
+        sqlx::query(
+            "CREATE TABLE repo_watch_webhook_projection_rejected (
+                delivery_id uuid PRIMARY KEY
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("INSERT INTO repo_watch_webhook_projection_rejected (delivery_id) VALUES ($1)")
+            .bind(delivery.delivery_id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "CREATE FUNCTION reject_repo_watch_webhook_projection()
+             RETURNS trigger
+             LANGUAGE plpgsql
+             AS $$
+             BEGIN
+                 IF EXISTS (
+                     SELECT 1
+                       FROM repo_watch_webhook_projection_rejected
+                      WHERE delivery_id = NEW.delivery_id
+                 ) THEN
+                     RAISE EXCEPTION 'fixture rejects this webhook projection';
+                 END IF;
+                 RETURN NEW;
+             END
+             $$",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TRIGGER reject_repo_watch_webhook_projection
+             BEFORE INSERT ON repo_watch_webhook_projection
+             FOR EACH ROW
+             EXECUTE FUNCTION reject_repo_watch_webhook_projection()",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(RepoWatchWebhookProjectionFault {
+            pool: self.pool.clone(),
+        })
+    }
+
+    /// Holds every projection insert for `delivery` on `advisory_lock`.
+    ///
+    /// A test takes that lock first, so the drain reaches the insert and stops
+    /// there until the test releases it. Left in place for the container's
+    /// lifetime: the wedge ends when the lock does.
+    #[cfg(feature = "test-support")]
+    pub async fn inject_projection_wedge(
+        &self,
+        delivery: RepoWatchWebhookDeliveryKey,
+        advisory_lock: i64,
+    ) -> Result<(), RepoWatchWebhookStoreError> {
+        sqlx::query(
+            "CREATE TABLE repo_watch_webhook_projection_wedged (
+                delivery_id uuid PRIMARY KEY
+             )",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query("INSERT INTO repo_watch_webhook_projection_wedged (delivery_id) VALUES ($1)")
+            .bind(delivery.delivery_id)
+            .execute(&self.pool)
+            .await?;
+        // The only interpolated value is the caller's own integer; no provider,
+        // deployment, or test input contributes SQL text.
+        let function = format!(
+            "CREATE FUNCTION wedge_repo_watch_webhook_projection()
+             RETURNS trigger
+             LANGUAGE plpgsql
+             AS $$
+             BEGIN
+                 IF EXISTS (
+                     SELECT 1
+                       FROM repo_watch_webhook_projection_wedged
+                      WHERE delivery_id = NEW.delivery_id
+                 ) THEN
+                     PERFORM pg_advisory_xact_lock({advisory_lock});
+                 END IF;
+                 RETURN NEW;
+             END
+             $$"
+        );
+        sqlx::query(sqlx::AssertSqlSafe(function))
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "CREATE TRIGGER wedge_repo_watch_webhook_projection
+             BEFORE INSERT ON repo_watch_webhook_projection
+             FOR EACH ROW
+             EXECUTE FUNCTION wedge_repo_watch_webhook_projection()",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Whether some session is waiting on an advisory lock.
+    ///
+    /// A test that injected a wedge waits for this before acting on the drain
+    /// being held, so the assertion does not race the drain reaching it.
+    #[cfg(feature = "test-support")]
+    pub async fn projection_wedge_is_reached(&self) -> Result<bool, RepoWatchWebhookStoreError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                SELECT 1 FROM pg_stat_activity WHERE wait_event = 'advisory'
+             )",
+        )
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     pub async fn record_terminal(
@@ -835,6 +1033,29 @@ impl EncodedProjection {
                 occurrence_key: None,
             },
         }
+    }
+}
+
+/// The inverse of [`encode_disposition`], including its generation pairing.
+///
+/// A disposition and a resulting generation are stored as two columns whose
+/// admissible combinations the encoder fixes, so decoding them together is what
+/// rejects a pair no encoder could have produced.
+#[cfg(feature = "test-support")]
+fn decode_disposition(
+    disposition: &str,
+    generation: Option<i64>,
+) -> Result<RepoWatchWebhookDisposition, RepoWatchWebhookStorageCorruption> {
+    match (disposition, generation) {
+        ("projected", None) => Ok(RepoWatchWebhookDisposition::Projected),
+        ("committed", Some(generation)) => RepoWatchCursorGeneration::try_from_stored(generation)
+            .map(RepoWatchWebhookDisposition::Committed)
+            .map_err(|_| RepoWatchWebhookStorageCorruption::InvalidDisposition),
+        ("duplicate_state", None) => Ok(RepoWatchWebhookDisposition::DuplicateState),
+        ("superseded", None) => Ok(RepoWatchWebhookDisposition::Superseded),
+        ("ignored", None) => Ok(RepoWatchWebhookDisposition::Ignored),
+        ("quarantined", None) => Ok(RepoWatchWebhookDisposition::Quarantined),
+        _ => Err(RepoWatchWebhookStorageCorruption::InvalidDisposition),
     }
 }
 
