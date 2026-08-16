@@ -90,6 +90,8 @@ impl PrivateWorkspaceRequest {
 pub enum RunnerWorkspaceError {
     /// A descriptor-relative filesystem operation failed.
     Io(io::Error),
+    /// The private-root request names an unsupported sandbox profile.
+    UnsupportedSandboxProfile,
     /// Existing workspace facts conflict with the requested placement.
     ManifestConflict,
     /// The protected manifest document is malformed or has the wrong identity.
@@ -104,6 +106,9 @@ impl fmt::Display for RunnerWorkspaceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Io(_) => "runner workspace storage failed",
+            Self::UnsupportedSandboxProfile => {
+                "runner private workspace requires the restricted sandbox profile"
+            }
             Self::ManifestConflict => "runner workspace manifest conflicts with the request",
             Self::CorruptManifest => "runner workspace manifest is corrupt",
             Self::ManifestTooLarge => "runner workspace manifest exceeds its byte bound",
@@ -116,7 +121,10 @@ impl Error for RunnerWorkspaceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(source) | Self::CommitAmbiguous(source) => Some(source),
-            Self::ManifestConflict | Self::CorruptManifest | Self::ManifestTooLarge => None,
+            Self::UnsupportedSandboxProfile
+            | Self::ManifestConflict
+            | Self::CorruptManifest
+            | Self::ManifestTooLarge => None,
         }
     }
 }
@@ -137,6 +145,9 @@ impl RunnerWorkspaceStore {
         &self,
         request: &PrivateWorkspaceRequest,
     ) -> Result<ReadyManifest, RunnerWorkspaceError> {
+        if request.sandbox_profile() != SandboxProfile::WorkspaceRestricted {
+            return Err(RunnerWorkspaceError::UnsupportedSandboxProfile);
+        }
         let sessions = open_or_create_directory(&self.root, SESSIONS_DIRECTORY)?;
         let session_name = request.session().to_string();
         let session = open_or_create_directory(&sessions, &session_name)?;
@@ -313,7 +324,7 @@ fn read_manifest(directory: &File) -> Result<WorkspaceManifest, RunnerWorkspaceE
     let descriptor = openat(
         directory,
         MANIFEST_FILE,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map_err(rustix_io)?;
@@ -382,9 +393,7 @@ fn write_manifest(
         let _ = unlinkat(directory, temporary_name.as_str(), AtFlags::empty());
         return Err(rustix_io(error));
     }
-    directory
-        .sync_all()
-        .map_err(RunnerWorkspaceError::CommitAmbiguous)
+    directory.sync_all().map_err(RunnerWorkspaceError::Io)
 }
 
 fn rustix_io(error: rustix::io::Errno) -> RunnerWorkspaceError {
@@ -403,13 +412,14 @@ mod tests {
 
     use crate::RunnerStateRoot;
 
-    use super::{DOCUMENT_MODE, MANIFEST_FILE, PrivateWorkspaceRequest, RunnerWorkspaceError};
+    use super::{MANIFEST_FILE, PrivateWorkspaceRequest, RunnerWorkspaceError};
 
     const SESSION: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e1;
     const RUNNER: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e2;
     const OTHER_RUNNER: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e3;
     const PLACEMENT_REVISION: u64 = 3;
     const OPEN_DIRECTORY_MODE: u32 = 0o750;
+    const EXPECTED_DOCUMENT_MODE: u32 = 0o600;
     const EXPECTED_RELATIVE_PATH: &str = "sessions/018f6f10-0000-7000-8000-0000000000e1/3/work";
 
     fn fixture_root() -> (TempDir, RunnerStateRoot) {
@@ -463,7 +473,30 @@ mod tests {
         assert!(prepared.manifest.credential_profile.is_none());
         assert!(prepared.manifest.recovery.is_none());
         assert!(placement.join("work").is_dir());
-        assert_eq!(manifest_mode, DOCUMENT_MODE);
+        assert_eq!(manifest_mode, EXPECTED_DOCUMENT_MODE);
+    }
+
+    #[test]
+    fn private_root_rejects_ambient_profile_before_creating_storage() {
+        let (parent, state) = fixture_root();
+        let ambient = PrivateWorkspaceRequest::new(
+            CanonicalUuid::from_uuid(Uuid::from_u128(SESSION)),
+            PositiveU64::try_new(PLACEMENT_REVISION)
+                .expect("the fixture placement revision is positive"),
+            CanonicalUuid::from_uuid(Uuid::from_u128(RUNNER)),
+            SandboxProfile::Ambient,
+        );
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_private_root(&ambient)
+            .expect_err("an ambient private workspace is not admissible");
+
+        assert!(matches!(
+            failure,
+            RunnerWorkspaceError::UnsupportedSandboxProfile
+        ));
+        assert!(!parent.path().join("runner-state").join("sessions").exists());
     }
 
     #[test]

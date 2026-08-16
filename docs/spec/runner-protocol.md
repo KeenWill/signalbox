@@ -1945,6 +1945,11 @@ persistence transaction implements that staging port.
 authorization, receipt consumption into replacement terminalization, and a
 runner filesystem producer for the initial ready frame remain absent.
 
+**Committed unimplemented functionality.** The repository provisioning, clone,
+and cleanup contract in the following paragraphs remains absent. No present
+runner surface provides it; future implementations must remain compatible with
+these constraints.
+
 `WorkspaceRequirement::RepositoryWorktree` is satisfiable only when the selected
 validated registration advertises `WorkspaceCapability::WorktreePerSession` and
 the repository key resolves in checked runner configuration to a credential-free
@@ -2041,6 +2046,11 @@ admission will advance the protected manifest to `active`; an accepted release
 will advance it to `releasing` before the trash rename; and deletion will be
 represented by absence rather than a fifth lifecycle token. No present
 filesystem adapter supplies those later transitions.
+
+**Committed unimplemented functionality.** The guarded Git invocation contract
+in the following paragraphs remains absent. No present runner surface provides
+repository Git execution; future implementations must preserve these
+constraints.
 
 Every Git invocation, in provisioning and in every Git tool alike, runs with its
 effective configuration forced by the runner rather than validated after the
@@ -2147,6 +2157,11 @@ all because `.git` sits inside the writable root; moving it outside the model's
 reach is the structural answer that would retire the class instead of
 enumerating it, and it is recorded as a design question under
 [tool safety](../open-questions.md#tool-safety) rather than settled here.
+
+**Committed unimplemented functionality.** The release, deletion, and startup
+reconciliation contract in the remaining paragraphs of this section remains
+absent. No present runner filesystem adapter or startup scanner provides it;
+future implementations must preserve these constraints.
 
 A daemon release is accepted only for an exact retired placement revision —
 either superseded by replacement or terminal `RunnerAbandoned` — after no live
