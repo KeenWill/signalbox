@@ -13,7 +13,7 @@ describe fixtures, not runtime safety. A module written ``#[cfg(test)] mod
 tests;`` is test-only across the separate file it names, whether that file is
 found by Rust's directory rule or named outright by a ``#[path]`` attribute.
 The whole attribute run is read, so an intervening attribute and a compound
-``cfg(all(test, unix))`` both still count; ``cfg(any(test, ...))`` and
+``cfg(all(test, not(windows)))`` both still count; ``cfg(any(test, ...))`` and
 ``cfg(not(test))`` do not, because those modules also compile without ``test``
 and their constants really are production.
 
@@ -128,8 +128,6 @@ ATTRIBUTED_MODULE = re.compile(
     re.MULTILINE,
 )
 CFG_ATTRIBUTE = re.compile(r"#\s*\[\s*cfg\s*\((?P<predicate>[^\]]*)\)\s*\]")
-TEST_CONFIGURATION = re.compile(r"\btest\b")
-OPTIONAL_CONFIGURATION = re.compile(r"\b(?:any|not)\s*\(")
 PATH_ATTRIBUTE = re.compile(r"#\s*\[\s*path\s*=\s*\"(?P<path>[^\"]+)\"\s*\]")
 MODULE_ROOTS = frozenset({"lib.rs", "main.rs", "mod.rs"})
 
@@ -226,22 +224,50 @@ def matching_brace(code: str, opening: int) -> int:
     return len(code)
 
 
-def requires_test(attributes: str) -> bool:
-    """Report whether an attribute run compiles only under `cfg(test)`.
+def split_configurations(predicate: str) -> list[str]:
+    """Split one `cfg` predicate list on its top-level commas."""
+    members = []
+    depth = 0
+    start = 0
+    for position, character in enumerate(predicate):
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        elif character == "," and depth == 0:
+            members.append(predicate[start:position])
+            start = position + 1
+    members.append(predicate[start:])
+    return members
 
-    `cfg(test)` qualifies and so does a compound `cfg(all(test, unix))`, since
-    neither builds without `test`. `cfg(any(test, ...))` and `cfg(not(test))`
-    do not: those modules also compile in a production build, so their
-    constants gate. Predicates are read rather than evaluated, which is why
-    `any` and `not` disqualify the whole predicate instead of being resolved.
+
+def configuration_requires_test(predicate: str) -> bool:
+    """Report whether a `cfg` predicate holds only when `test` is set.
+
+    Bare `test` does, and so does an `all(...)` with a member that does, which
+    covers `all(test, not(windows))`. `any(...)` does not, because the module
+    also builds when another member holds, and `not(...)` never does. The
+    predicate is read structurally rather than evaluated, so an unrecognised
+    form counts as buildable without `test` and leaves its constants gating —
+    the safe direction for a blocking check.
     """
-    for match in CFG_ATTRIBUTE.finditer(attributes):
-        predicate = match.group("predicate")
-        if TEST_CONFIGURATION.search(predicate) and not OPTIONAL_CONFIGURATION.search(
-            predicate
-        ):
-            return True
+    predicate = predicate.strip()
+    if predicate == "test":
+        return True
+    if predicate.startswith("all(") and predicate.endswith(")"):
+        return any(
+            configuration_requires_test(member)
+            for member in split_configurations(predicate[len("all(") : -1])
+        )
     return False
+
+
+def requires_test(attributes: str) -> bool:
+    """Report whether an attribute run compiles only under `cfg(test)`."""
+    return any(
+        configuration_requires_test(match.group("predicate"))
+        for match in CFG_ATTRIBUTE.finditer(attributes)
+    )
 
 
 def test_ranges(code: str) -> list[tuple[int, int]]:

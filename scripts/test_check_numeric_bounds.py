@@ -215,6 +215,18 @@ class NumericBoundCheckerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("1 test-only", result.stdout)
 
+    def test_negated_member_of_a_test_module_configuration_does_not_gate(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "#[cfg(all(test, not(windows)))]\n"
+            "mod tests {\n"
+            "    const MAX_FIXTURE_BYTES: usize = 4;\n"
+            "}\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
     def test_optionally_configured_test_module_bound_still_gates(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
