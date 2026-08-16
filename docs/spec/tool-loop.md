@@ -282,6 +282,26 @@ semantics with no mid-call races: a prepared call's override inventory is part
 of that call's immutable input, and an override recorded after the call is
 checkpointed takes effect at the next prepared call, never at that one.
 
+Only a still-effective override is frozen, and two things retire one: the
+consuming `UserOverride` approval that names it, and an approval of the
+identical command recorded by any other authority after the denial — the judge
+approving a re-proposal it once denied, a user decision after escalation, or a
+policy approval. The second is what keeps the boundary below from leaking. The
+call that first carries a denial cannot hold that denial's override, so its
+re-proposal is decided without one, and an override left standing after that
+decision would pre-approve a repeat of a command the session has already let
+through. Ordering here is structural rather than clocked, because none of these
+append-only records carries a timestamp. Across turns the order is the
+acceptance position of the input that opened each turn; inside a turn each model
+call owns one turn attempt and attempts chain through their predecessor, so a
+proposal counts as later when its turn was accepted after the denial's or its
+attempt continues the denied proposal's. Both are needed, because the
+re-proposal an override exists for is normally made in the denial's own turn.
+The scope is required rather than decorative — the same command is routinely
+approved and executed earlier in a session, long before a later proposal of it
+is denied, and an unscoped rule would retire most overrides at the instant they
+were recorded.
+
 The continuation that first carries a denial to the model is therefore out of
 reach by design, and this is the boundary of the feature rather than a gap in
 it. That continuation is checkpointed by the same transaction that projects the

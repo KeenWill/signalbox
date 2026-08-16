@@ -1058,3 +1058,10 @@ BEGIN
     RETURN NEW;
 END;
 $function$;
+
+-- Freezing an override asks whether the session has already let the denied
+-- command through since the denial, which looks the session's requests up by
+-- tool name. Without this index that question degrades to a scan of every tool
+-- request ever proposed, on the path that checkpoints every model call.
+CREATE INDEX tool_request_session_tool_name_idx
+    ON tool_request (session_id, tool_name);

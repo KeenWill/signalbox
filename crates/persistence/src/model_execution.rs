@@ -4768,27 +4768,106 @@ async fn load_call_credential_reference(
     Ok(ModelCallCredentialReference::new(reference))
 }
 
-/// Freezes the session's recorded, not-yet-consumed user overrides for one newly
+/// Freezes the session's recorded, still-effective user overrides for one newly
 /// checkpointed model call.
 ///
-/// An override is consumed when a `tool_approval_decision` row names it, so
-/// the anti-join is the one-shot boundary.
+/// Two things retire a recorded override. The first is the consuming
+/// `user_override` decision that names it through its UNIQUE column — the
+/// durable one-shot boundary. The second is an approval of the identical
+/// command recorded by any other authority after the denial: the judge
+/// approving the re-proposal it previously denied, a user decision after
+/// escalation, or a policy approval. Retiring on the second matters because the
+/// first call after a denial can never carry that denial's override (it is
+/// checkpointed by the transaction that materializes the denied result), so its
+/// re-proposal is decided without the override; leaving the override standing
+/// would let a later call pre-approve a repeat of a side-effecting command the
+/// session has already let through once.
+///
+/// "After the denial" is a structural ordering, not a clock — none of these
+/// append-only tables carries one. Across turns it is `acceptance_position`,
+/// the per-session position of the input that opened each turn. Within the
+/// denial's own turn it is the attempt chain: each tool round continues into a
+/// fresh `turn_attempt` through `continued_from_attempt_id`, so walking that
+/// chain forward from the attempt that produced the denied proposal names the
+/// later proposals of the same turn. Both are needed — the re-proposal this
+/// override exists for is normally made in the denial's own turn, while a
+/// later turn's proposal is ordered only by acceptance.
+///
+/// That scoping is load-bearing rather than decoration. The same command is
+/// routinely approved and executed earlier in a session, long before a later
+/// proposal of it is denied; retiring on an approval anywhere in the session
+/// would retire most overrides at the instant they were recorded and leave the
+/// command with nothing to authorize.
 async fn freeze_recorded_user_overrides(
     connection: &mut PgConnection,
     session: SessionId,
     call: ModelCallId,
 ) -> Result<(), ModelCallRepositoryError> {
     sqlx::query(
-        "INSERT INTO model_call_user_override
+        "WITH RECURSIVE effective AS (
+            SELECT recorded.denied_request_id,
+                   denied_turn.acceptance_position AS denied_turn_position,
+                   producing.turn_attempt_id AS denied_attempt_id,
+                   denied.tool_name, denied.arguments_kind, denied.arguments_text
+              FROM tool_approval_user_override AS recorded
+              JOIN tool_request AS denied
+                ON denied.request_id = recorded.denied_request_id
+              JOIN turn_lifecycle AS denied_turn
+                ON denied_turn.turn_id = denied.turn_id
+              JOIN model_call AS producing
+                ON producing.model_call_id = denied.producing_model_call_id
+             WHERE recorded.session_id = $1
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM tool_approval_decision AS consumed
+                    WHERE consumed.override_denied_request_id
+                          = recorded.denied_request_id
+               )
+         ),
+         -- The attempts the denial's own turn ran after the denied proposal's.
+         later_attempt AS (
+            SELECT effective.denied_request_id, successor.turn_attempt_id
+              FROM effective
+              JOIN turn_attempt AS successor
+                ON successor.continued_from_attempt_id
+                   = effective.denied_attempt_id
+             UNION
+            SELECT walked.denied_request_id, successor.turn_attempt_id
+              FROM later_attempt AS walked
+              JOIN turn_attempt AS successor
+                ON successor.continued_from_attempt_id = walked.turn_attempt_id
+         )
+         INSERT INTO model_call_user_override
             (model_call_id, denied_request_id)
-         SELECT $2, recorded.denied_request_id
-           FROM tool_approval_user_override AS recorded
-          WHERE recorded.session_id = $1
-            AND NOT EXISTS (
-                SELECT 1
-                  FROM tool_approval_decision AS consumed
-                 WHERE consumed.override_denied_request_id = recorded.denied_request_id
-            )",
+         SELECT $2, effective.denied_request_id
+           FROM effective
+          WHERE NOT EXISTS (
+              SELECT 1
+                FROM tool_request AS matching
+                JOIN tool_approval_decision AS decision
+                  ON decision.request_id = matching.request_id
+                 AND decision.decision_kind = 'approve'
+                JOIN turn_lifecycle AS matching_turn
+                  ON matching_turn.turn_id = matching.turn_id
+                JOIN model_call AS proposing
+                  ON proposing.model_call_id = matching.producing_model_call_id
+               WHERE matching.session_id = $1
+                 AND matching.tool_name = effective.tool_name
+                 AND matching.arguments_kind = effective.arguments_kind
+                 AND matching.arguments_text = effective.arguments_text
+                 AND (
+                     matching_turn.acceptance_position
+                         > effective.denied_turn_position
+                     OR EXISTS (
+                         SELECT 1
+                           FROM later_attempt
+                          WHERE later_attempt.denied_request_id
+                                = effective.denied_request_id
+                            AND later_attempt.turn_attempt_id
+                                = proposing.turn_attempt_id
+                     )
+                 )
+          )",
     )
     .bind(session_id_to_uuid(session))
     .bind(call.into_uuid())
