@@ -21,7 +21,7 @@ const MAX_CURSOR_BYTES: usize = 1_024;
 pub struct FileMediaRegistry {
     providers: Vec<FileMediaProviderDeclaration>,
     readers: BTreeMap<ReaderIdentity, ReaderDeclaration>,
-    media_owners: BTreeMap<CanonicalMediaType, ReaderIdentity>,
+    media_readers: BTreeMap<CanonicalMediaType, ReaderIdentity>,
     streaming_text_reader: Option<ReaderIdentity>,
     ceilings: FileMediaCeilings,
 }
@@ -60,7 +60,7 @@ impl FileMediaRegistry {
         }
 
         let mut readers = BTreeMap::new();
-        let mut media_owners = BTreeMap::new();
+        let mut media_readers = BTreeMap::new();
         let mut streaming_text_reader = None;
         for provider in &providers {
             if provider.readers().len() > MAX_READERS_PER_PROVIDER {
@@ -73,11 +73,11 @@ impl FileMediaRegistry {
                     return Err(FileMediaRegistryConstructionError::DuplicateReader);
                 }
                 for media_type in reader.media_types() {
-                    if media_owners
+                    if media_readers
                         .insert(media_type.clone(), identity.clone())
                         .is_some()
                     {
-                        return Err(FileMediaRegistryConstructionError::DuplicateMediaOwner);
+                        return Err(FileMediaRegistryConstructionError::DuplicateMediaTypeClaim);
                     }
                 }
                 if reader.streaming_text_fallback() == StreamingTextFallback::Enabled {
@@ -94,7 +94,7 @@ impl FileMediaRegistry {
         Ok(Self {
             providers,
             readers,
-            media_owners,
+            media_readers,
             streaming_text_reader,
             ceilings,
         })
@@ -105,7 +105,7 @@ impl FileMediaRegistry {
         Self {
             providers: Vec::new(),
             readers: BTreeMap::new(),
-            media_owners: BTreeMap::new(),
+            media_readers: BTreeMap::new(),
             streaming_text_reader: None,
             ceilings: FileMediaCeilings::version_one(),
         }
@@ -217,7 +217,7 @@ impl FileMediaRegistry {
         }
 
         if let Ok(declared) = request.source.declared_media_type().canonical_essence()
-            && let Some(reader) = self.media_owners.get(&declared)
+            && let Some(reader) = self.media_readers.get(&declared)
         {
             return self
                 .validate_candidate(
@@ -854,15 +854,15 @@ pub enum FileMediaRegistryConstructionError {
     DuplicateProvider,
     /// Reader identity was duplicated.
     DuplicateReader,
-    /// Exact media-type ownership was duplicated.
-    DuplicateMediaOwner,
+    /// An exact media type was claimed by several readers.
+    DuplicateMediaTypeClaim,
     /// One reader repeated a media type, view name, or reason code.
     DuplicateReaderMember,
     /// Probe bounds were zero, contradictory, or excessive.
     ProbeBounds,
     /// View bounds were absent, contradictory, or excessive.
     ViewBounds,
-    /// Text fallback ownership was absent or ambiguous.
+    /// Text fallback registration was absent or ambiguous.
     TextFallback,
 }
 
@@ -874,7 +874,7 @@ impl fmt::Display for FileMediaRegistryConstructionError {
             Self::IsolationUnavailable => "file media isolation is unavailable",
             Self::DuplicateProvider => "file media provider identity is duplicated",
             Self::DuplicateReader => "file media reader identity is duplicated",
-            Self::DuplicateMediaOwner => "file media type has several static owners",
+            Self::DuplicateMediaTypeClaim => "file media type has several registered readers",
             Self::DuplicateReaderMember => "file media reader member is duplicated",
             Self::ProbeBounds => "file media probe bounds are invalid",
             Self::ViewBounds => "file media view bounds are invalid",

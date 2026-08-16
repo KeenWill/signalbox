@@ -46,13 +46,13 @@ The daemon-side registry stores checked declarations and calls only
 `FileMediaProcessor`; it never invokes adapter code in its own process.
 
 Registry construction sorts unsigned-ASCII provider/reader identities and
-rejects duplicate providers or readers, duplicate exact media-type owners,
+rejects duplicate providers or readers, duplicate exact media-type claims,
 duplicate per-reader types, views, or reason codes, absent or excessive probe
 and output bounds, contradictory image bounds, ambiguous streaming-text
 fallback, unavailable isolation when any provider is present, and any effective
 ceiling above the compiled version-one value. An empty registry is valid.
 Configuration can therefore disable providers or lower bounds but cannot add an
-owner, alias, executable, or precedence rule.
+media-type mapping, alias, executable, or precedence rule.
 
 An adapter author supplies one provider declaration with exact owned canonical
 types, probe budget, view schemas and resource envelopes, registered sanitized
@@ -75,10 +75,10 @@ their sole type and reader and require strong-signature validation. With no
 strong claim, a sole compatible structural candidate receives structural
 validation. This ordering is the simplest interpretation of the accepted
 design's otherwise unplaced `StructuralCandidate` strength. With neither, a
-syntactically canonical declaration may nominate its exact owner for independent
-structural validation. Finally, the sole registered text fallback may claim only
-through complete streaming validation. No successful path returns an ordinary
-declaration as evidence.
+syntactically canonical declaration may nominate its exact reader for
+independent structural validation. Finally, the sole registered text fallback
+may claim only through complete streaming validation. No successful path returns
+an ordinary declaration as evidence.
 
 A recognized-malformed probe is terminal; incompatible recognized types are
 ambiguous. Strong or structural validation cannot quietly return no-match and
@@ -123,7 +123,7 @@ the executor, bridge, or daemon.
 ## Processor and durable media boundary
 
 The raw processor enums deliberately carry strings and JSON text rather than
-checked registry values. Oversized, malformed, injection-shaped, cross-owner,
+checked registry values. Oversized, malformed, injection-shaped, cross-reader,
 unregistered-reason, wrong-output-kind, contradictory continuation, and
 excessively nested responses collapse to sanitized processor failure without
 partial success (INV-065). Detection uses generated synthetic bytes and

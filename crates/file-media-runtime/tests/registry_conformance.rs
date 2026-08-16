@@ -416,7 +416,7 @@ fn inv065_contradictory_processor_continuation_is_sanitized_to_failure() {
 }
 
 #[test]
-fn duplicate_static_media_ownership_is_rejected() {
+fn duplicate_static_media_claim_is_rejected() {
     let first_provider = provider_declaration("first", SYNTHETIC_MEDIA_TYPE);
     let second_provider = provider_declaration("second", SYNTHETIC_MEDIA_TYPE);
 
@@ -447,7 +447,7 @@ fn provider_declaration(name: &str, owned_media_type: &str) -> FileMediaProvider
 }
 
 #[test]
-fn distinct_static_media_ownership_is_admitted() {
+fn distinct_static_media_claims_are_admitted() {
     let first_provider = provider_declaration("first", SYNTHETIC_MEDIA_TYPE);
     let second_provider = provider_declaration("second", OTHER_SYNTHETIC_MEDIA_TYPE);
 
@@ -456,7 +456,7 @@ fn distinct_static_media_ownership_is_admitted() {
         FileMediaCeilings::version_one(),
         ProcessorIsolation::Available,
     )
-    .expect("distinct ownership is conflict-free");
+    .expect("distinct media claims are conflict-free");
 
     assert_eq!(registry.providers()[0].provider().as_str(), "first");
     assert_eq!(registry.providers()[1].provider().as_str(), "second");
