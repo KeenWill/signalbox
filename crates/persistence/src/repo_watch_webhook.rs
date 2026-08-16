@@ -21,11 +21,16 @@ use sqlx::{
 use crate::{
     commit_failure_is_ambiguous,
     mapping::{positive_u64_from_numeric, repo_watch_event_kind_to_str},
-    repo_watch::RepoWatchCursorGeneration,
 };
 
 const CONTENT_IDENTITY_VERSION_V1: i16 = 1;
 const MAX_PENDING_PAGE_SIZE: u16 = 100;
+/// What one pending page may hold in exact payload bytes at once.
+///
+/// The page count alone admits one hundred near-limit bodies, and the startup
+/// drain reads this same durable page, so an accumulated backlog would
+/// otherwise be able to restart the daemon out of memory repeatedly.
+pub const MAX_PENDING_PAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_WEBHOOK_NAME_BYTES: usize = 64;
 const MAX_OUTCOME_CODE_BYTES: usize = 64;
 
@@ -285,7 +290,6 @@ impl RepoWatchWebhookProjection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchWebhookDisposition {
     Projected,
-    Committed(RepoWatchCursorGeneration),
     DuplicateState,
     Superseded,
     Ignored,
@@ -476,12 +480,19 @@ impl PostgresRepoWatchWebhookStore {
         }
     }
 
+    /// Loads pending deliveries in receipt order, bounded by both the page size
+    /// and the bytes the page may retain.
+    ///
+    /// Bodies are read one at a time against the page's own snapshot rather than
+    /// materialized together, because a page of near-limit payloads would
+    /// otherwise retain far more than admission itself is allowed to hold.
     pub async fn load_pending(
         &self,
         repository: &RepositorySlug,
         page_size: RepoWatchWebhookPendingPageSize,
     ) -> Result<Vec<PendingRepoWatchWebhookDelivery>, RepoWatchWebhookStoreError> {
-        let rows = sqlx::query_as::<_, PendingRow>(
+        let mut transaction = self.pool.begin().await?;
+        let headers = sqlx::query_as::<_, PendingHeaderRow>(
             "SELECT delivery.hook_id,
                     delivery.delivery_id,
                     delivery.repository,
@@ -489,8 +500,7 @@ impl PostgresRepoWatchWebhookStore {
                     delivery.action_name,
                     delivery.body_digest,
                     delivery.receipt_sequence,
-                    delivery.received_at,
-                    payload.body
+                    delivery.received_at
                FROM repo_watch_webhook_delivery AS delivery
                JOIN repo_watch_webhook_payload AS payload
                  ON payload.hook_id = delivery.hook_id
@@ -505,9 +515,35 @@ impl PostgresRepoWatchWebhookStore {
         )
         .bind(repository.as_str())
         .bind(i64::from(page_size.get()))
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await?;
-        rows.into_iter().map(decode_pending).collect()
+        let mut deliveries = Vec::with_capacity(headers.len());
+        let mut retained_bytes = 0_usize;
+        for header in headers {
+            // The oldest delivery is always read, so one body at the admission
+            // ceiling still drains instead of wedging the queue head.
+            if !deliveries.is_empty() && retained_bytes >= MAX_PENDING_PAGE_BYTES {
+                break;
+            }
+            let hook_id = header.hook_id;
+            let delivery_id = header.delivery_id;
+            let body = sqlx::query_scalar::<_, Vec<u8>>(
+                "SELECT body
+                   FROM repo_watch_webhook_payload
+                  WHERE hook_id = $1 AND delivery_id = $2",
+            )
+            .bind(hook_id)
+            .bind(delivery_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let Some(body) = body else {
+                continue;
+            };
+            retained_bytes = retained_bytes.saturating_add(body.len());
+            deliveries.push(decode_pending(header, body)?);
+        }
+        transaction.commit().await?;
+        Ok(deliveries)
     }
 
     pub async fn record_terminal(
@@ -541,18 +577,15 @@ impl PostgresRepoWatchWebhookStore {
             return Ok(RepoWatchWebhookTerminalOutcome::AlreadyTerminal);
         }
         insert_projections(&mut transaction, key, request.projections()).await?;
-        let (disposition, generation) = encode_disposition(request.disposition());
         sqlx::query(
             "INSERT INTO repo_watch_webhook_disposition (
-                hook_id, delivery_id, disposition, outcome_code,
-                resulting_cursor_generation
-             ) VALUES ($1, $2, $3, $4, $5)",
+                hook_id, delivery_id, disposition, outcome_code
+             ) VALUES ($1, $2, $3, $4)",
         )
         .bind(Decimal::from(key.hook_id.get()))
         .bind(key.delivery_id)
-        .bind(disposition)
+        .bind(encode_disposition(request.disposition()))
         .bind(request.outcome_code())
-        .bind(generation)
         .execute(&mut *transaction)
         .await?;
         commit(transaction).await?;
@@ -596,7 +629,7 @@ struct ConflictRow {
 }
 
 #[derive(sqlx::FromRow)]
-struct PendingRow {
+struct PendingHeaderRow {
     hook_id: Decimal,
     delivery_id: Uuid,
     repository: String,
@@ -605,7 +638,6 @@ struct PendingRow {
     body_digest: Vec<u8>,
     receipt_sequence: i64,
     received_at: OffsetDateTime,
-    body: Vec<u8>,
 }
 
 async fn load_conflict_row(
@@ -638,7 +670,8 @@ fn decode_receipt(row: ReceiptRow) -> Result<RepoWatchWebhookReceipt, RepoWatchW
 }
 
 fn decode_pending(
-    row: PendingRow,
+    row: PendingHeaderRow,
+    body: Vec<u8>,
 ) -> Result<PendingRepoWatchWebhookDelivery, RepoWatchWebhookStoreError> {
     let hook_id = positive_u64_from_numeric(row.hook_id)
         .ok()
@@ -662,7 +695,7 @@ fn decode_pending(
         action_name: row.action_name,
         body_digest,
         receipt,
-        body: row.body.into_boxed_slice(),
+        body: body.into_boxed_slice(),
     })
 }
 
@@ -764,18 +797,13 @@ impl EncodedProjection {
     }
 }
 
-const fn encode_disposition(
-    disposition: RepoWatchWebhookDisposition,
-) -> (&'static str, Option<i64>) {
+const fn encode_disposition(disposition: RepoWatchWebhookDisposition) -> &'static str {
     match disposition {
-        RepoWatchWebhookDisposition::Projected => ("projected", None),
-        RepoWatchWebhookDisposition::Committed(generation) => {
-            ("committed", Some(generation.get() as i64))
-        }
-        RepoWatchWebhookDisposition::DuplicateState => ("duplicate_state", None),
-        RepoWatchWebhookDisposition::Superseded => ("superseded", None),
-        RepoWatchWebhookDisposition::Ignored => ("ignored", None),
-        RepoWatchWebhookDisposition::Quarantined => ("quarantined", None),
+        RepoWatchWebhookDisposition::Projected => "projected",
+        RepoWatchWebhookDisposition::DuplicateState => "duplicate_state",
+        RepoWatchWebhookDisposition::Superseded => "superseded",
+        RepoWatchWebhookDisposition::Ignored => "ignored",
+        RepoWatchWebhookDisposition::Quarantined => "quarantined",
     }
 }
 
