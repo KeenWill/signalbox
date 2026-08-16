@@ -23,8 +23,8 @@ source check was re-verified against this PR
 (`agent/daemon-runner-health-events`).
 
 The runner-recovery turn-phase representation and read boundary were verified
-against this PR (`agent/runner-awaiting-recovery-persistence`).
-The recorded-migration immutability rule was verified against this PR
+against this PR (`agent/runner-awaiting-recovery-persistence`). The
+recorded-migration immutability rule was verified against this PR
 (`agent/mechanical-cleanup-batch`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
