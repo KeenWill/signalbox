@@ -284,6 +284,7 @@ fn validate_blob_store(value: &str) -> Result<(), ManifestError> {
 fn portable_relative_path(value: &str) -> Result<PathBuf, ManifestError> {
     let path = Path::new(value);
     if value.is_empty()
+        || value.contains('\\')
         || path.is_absolute()
         || path
             .components()
