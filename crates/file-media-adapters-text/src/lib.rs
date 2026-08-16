@@ -115,6 +115,7 @@ pub fn text_family_declaration()
             "nul_byte",
             "malformed_json",
             "source_too_large",
+            "depth_limit_exceeded",
         ],
         StreamingTextFallback::Disabled,
     )?;

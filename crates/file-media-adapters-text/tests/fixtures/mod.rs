@@ -18,6 +18,14 @@ pub(crate) fn truncated_json() -> Vec<u8> {
     br#"{"name":"fixture""#.to_vec()
 }
 
+pub(crate) fn pretty_json_document() -> Vec<u8> {
+    b"{\n  \"name\": \"fixture\",\n  \"values\": [1, 2, 3]\n}\n".to_vec()
+}
+
+pub(crate) fn json_beyond_structured_depth() -> Vec<u8> {
+    format!("{}0{}", "[".repeat(64), "]".repeat(64)).into_bytes()
+}
+
 pub(crate) fn csv_table() -> Vec<u8> {
     b"name,value\nalpha,1\nbeta,2\n".to_vec()
 }
@@ -31,6 +39,14 @@ pub(crate) fn csv_table_value() -> serde_json::Value {
 
 pub(crate) fn truncated_csv() -> Vec<u8> {
     b"name,value\nalpha,\"unterminated\n".to_vec()
+}
+
+pub(crate) fn csv_with_quotes_inside_unquoted_field() -> Vec<u8> {
+    b"h1,h2\nab\"cd\"ef,x\n".to_vec()
+}
+
+pub(crate) fn prose_with_comma_and_newline() -> Vec<u8> {
+    b"Hello, world\nnext line".to_vec()
 }
 
 pub(crate) fn row_bomb_csv() -> Vec<u8> {

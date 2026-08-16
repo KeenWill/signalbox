@@ -6,6 +6,8 @@ use signalbox_file_media_runtime::{
 
 use crate::{JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, options_are_empty, source};
 
+const MAX_STRUCTURED_DEPTH: u32 = 64;
+
 pub(crate) async fn probe(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
@@ -67,6 +69,11 @@ pub(crate) async fn read(
     let text = source::checked_utf8(bytes).map_err(|_| ProcessorFailure::Failed)?;
     let value: serde_json::Value =
         serde_json::from_str(&text).map_err(|_| ProcessorFailure::Failed)?;
+    if json_depth(&value, 1) > MAX_STRUCTURED_DEPTH {
+        return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+            limit_kind: String::from("depth_limit_exceeded"),
+        });
+    }
     let body_json = serde_json::to_string(&value).map_err(|_| ProcessorFailure::Failed)?;
     if body_json.len() > MAX_TEXT_FAMILY_BYTES as usize {
         return Ok(ProcessorReadOutput::OutputUnitTooLarge);
@@ -76,6 +83,25 @@ pub(crate) async fn read(
         truncated: false,
         cursor: None,
     })
+}
+
+fn json_depth(value: &serde_json::Value, depth: u32) -> u32 {
+    match value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| json_depth(value, depth.saturating_add(1)))
+            .max()
+            .unwrap_or(depth),
+        serde_json::Value::Object(values) => values
+            .values()
+            .map(|value| json_depth(value, depth.saturating_add(1)))
+            .max()
+            .unwrap_or(depth),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => depth,
+    }
 }
 
 fn malformed(reason: &str) -> ProcessorValidationOutput {

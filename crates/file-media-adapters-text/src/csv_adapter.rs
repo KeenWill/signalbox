@@ -16,7 +16,7 @@ pub(crate) async fn probe(
     let prefix = source::read_probe_prefix(source, cancellation).await?;
     let candidate = std::str::from_utf8(&prefix)
         .ok()
-        .is_some_and(|text| text.contains(',') && text.contains(['\n', '\r']));
+        .is_some_and(has_record_structure);
     if candidate {
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(CSV_MEDIA_TYPE),
@@ -93,7 +93,7 @@ struct CsvTable {
 }
 
 fn parse_table(text: &str) -> Result<CsvTable, &'static str> {
-    if !quotes_are_closed(text) {
+    if !quotes_are_well_formed(text) {
         return Err("malformed_csv");
     }
     let mut reader = csv::ReaderBuilder::new()
@@ -125,20 +125,57 @@ fn parse_table(text: &str) -> Result<CsvTable, &'static str> {
     Ok(CsvTable { headers, rows })
 }
 
-fn quotes_are_closed(text: &str) -> bool {
-    let mut quoted = false;
+fn has_record_structure(text: &str) -> bool {
+    if !quotes_are_well_formed(text) {
+        return false;
+    }
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(false)
+        .from_reader(text.as_bytes());
+    let mut records = reader.records();
+    let Some(Ok(first)) = records.next() else {
+        return false;
+    };
+    if first.len() < 2 {
+        return false;
+    }
+    let Some(Ok(second)) = records.next() else {
+        return false;
+    };
+    second.len() == first.len()
+}
+
+#[derive(Clone, Copy)]
+enum QuoteState {
+    FieldStart,
+    Unquoted,
+    Quoted,
+    AfterQuote,
+}
+
+fn quotes_are_well_formed(text: &str) -> bool {
+    let mut state = QuoteState::FieldStart;
     let mut bytes = text.bytes().peekable();
     while let Some(byte) = bytes.next() {
-        if byte != b'"' {
-            continue;
-        }
-        if quoted && bytes.peek() == Some(&b'"') {
-            let _ = bytes.next();
-        } else {
-            quoted = !quoted;
-        }
+        state = match (state, byte) {
+            (QuoteState::FieldStart, b'"') => QuoteState::Quoted,
+            (QuoteState::FieldStart, b',' | b'\r' | b'\n') => QuoteState::FieldStart,
+            (QuoteState::FieldStart, _) => QuoteState::Unquoted,
+            (QuoteState::Unquoted, b'"') => return false,
+            (QuoteState::Unquoted, b',' | b'\r' | b'\n') => QuoteState::FieldStart,
+            (QuoteState::Unquoted, _) => QuoteState::Unquoted,
+            (QuoteState::Quoted, b'"') if bytes.peek() == Some(&b'"') => {
+                let _ = bytes.next();
+                QuoteState::Quoted
+            }
+            (QuoteState::Quoted, b'"') => QuoteState::AfterQuote,
+            (QuoteState::Quoted, _) => QuoteState::Quoted,
+            (QuoteState::AfterQuote, b',' | b'\r' | b'\n') => QuoteState::FieldStart,
+            (QuoteState::AfterQuote, _) => return false,
+        };
     }
-    !quoted
+    !matches!(state, QuoteState::Quoted)
 }
 
 fn malformed(reason: &str) -> ProcessorValidationOutput {
