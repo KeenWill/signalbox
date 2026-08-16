@@ -209,6 +209,7 @@ pub struct PostgresToolLoopRepository {
     continuation_targets: Option<signalbox_domain::ModelTargetCatalog>,
     continuation_credential: Option<ModelCallCredentialReference>,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
+    credential_pools: crate::model_execution::CredentialPoolRuntimeCatalog,
     cache_inclusive_input_targets: HashSet<signalbox_domain::ResolvedProviderTarget>,
 }
 
@@ -220,6 +221,7 @@ impl PostgresToolLoopRepository {
             continuation_targets: None,
             continuation_credential: None,
             credential_families: None,
+            credential_pools: Default::default(),
             cache_inclusive_input_targets: HashSet::new(),
         }
     }
@@ -236,6 +238,7 @@ impl PostgresToolLoopRepository {
             continuation_targets: Some(targets),
             continuation_credential: Some(credential_reference),
             credential_families: None,
+            credential_pools: Default::default(),
             cache_inclusive_input_targets: HashSet::new(),
         }
     }
@@ -254,6 +257,15 @@ impl PostgresToolLoopRepository {
         credential_families: Option<crate::ModelCredentialFamilyCatalog>,
     ) -> Self {
         self.credential_families = credential_families;
+        self
+    }
+
+    /// Enables pool selection for every same-turn continuation call.
+    pub fn with_credential_pools(
+        mut self,
+        credential_pools: crate::model_execution::CredentialPoolRuntimeCatalog,
+    ) -> Self {
+        self.credential_pools = credential_pools;
         self
     }
 
@@ -999,6 +1011,7 @@ impl PostgresToolLoopRepository {
                 &mut transaction,
                 prepared,
                 credential_reference,
+                None,
                 self.cache_inclusive_input_targets
                     .contains(&prepared.call().target()),
             )
@@ -1137,6 +1150,7 @@ impl PostgresToolLoopRepository {
                 targets,
                 credential_reference,
                 self.credential_families.as_ref(),
+                &self.credential_pools,
                 &self.cache_inclusive_input_targets,
                 &projection,
                 identities.call(),
