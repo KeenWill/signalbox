@@ -78,7 +78,7 @@ const CONTENTS_OBJECT_ACCEPT: &str = "application/vnd.github.object+json";
 const BLOB_RAW_ACCEPT: &str = "application/vnd.github.raw+json";
 // numeric-bound: tunable - controls retained CI job-log detail
 const MAX_JOB_LOG_BYTES: usize = 64 * 1024;
-// numeric-bound: ceiling - protects redirect parsing from oversized locations
+// numeric-bound: tunable - the redirect location length this client accepts
 const MAX_REDIRECT_URL_BYTES: usize = 8 * 1024;
 const PAGE_SIZE: &str = "100";
 // numeric-bound: not-a-bound - 100 per page across GitHub's 3,000-file exposure
