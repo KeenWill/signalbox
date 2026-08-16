@@ -159,18 +159,21 @@ def numeric_aliases(code: str) -> frozenset[str]:
 
     A local alias is a silent bypass otherwise: `type ByteCount = usize;` makes
     a bound's declared type unrecognizable to a closed pattern. Chains settle by
-    repetition. An alias imported from another crate stays unresolved, which is
-    a stated limit rather than a claim.
+    repetition. Two modules may declare one alias name differently, so every
+    target is kept and any numeric one admits the name — the direction that
+    inventories a bound rather than losing it. An alias imported from another
+    crate stays unresolved, which is a stated limit rather than a claim.
     """
-    declared = {
-        match.group("name"): match.group("target").strip()
-        for match in ALIAS_DECLARATION.finditer(code)
-    }
+    declared: dict[str, set[str]] = {}
+    for match in ALIAS_DECLARATION.finditer(code):
+        declared.setdefault(match.group("name"), set()).add(match.group("target").strip())
     aliases: frozenset[str] = frozenset()
     while True:
         recognized = re.compile(rf"^{numeric_type_pattern(aliases)}$")
         found = frozenset(
-            name for name, target in declared.items() if recognized.match(target)
+            name
+            for name, targets in declared.items()
+            if any(recognized.match(target) for target in targets)
         )
         if found <= aliases:
             return aliases
@@ -194,6 +197,7 @@ DERIVED_DECLARATION = re.compile(
     r"^\s*// numeric-bound: derived (?P<kind>ceiling|tunable) from "
     r"(?P<source>[A-Z][A-Z0-9_]*)\s*$"
 )
+DECLARATION_SITE = re.compile(r"\bconst\s+$")
 REFERENCED_BOUND = re.compile(
     r"(?<![\w:])(?P<qualifier>(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)(?P<name>[A-Z][A-Z0-9_]*)\b"
 )
@@ -207,6 +211,10 @@ TEST_GATED_ITEM = re.compile(
     r"(?P<attributes>(?:#\s*\[[^\]]*\]\s*)+)(?:[^;{}]*?)\{", re.MULTILINE
 )
 CFG_ATTRIBUTE = re.compile(r"#\s*\[\s*cfg\s*\((?P<predicate>[^\]]*)\)\s*\]")
+TEST_ATTRIBUTE = re.compile(r"#\s*\[\s*test\s*\]")
+# An attribute run ending exactly where the item begins. Matched against the
+# blanked source so it spans rustfmt-wrapped attributes without a line walk.
+TRAILING_ATTRIBUTES = re.compile(r"(?:#\s*\[[^\]]*\]\s*)*$")
 PATH_ATTRIBUTE = re.compile(r"#\s*\[\s*path\s*=\s*\"(?P<path>[^\"]+)\"\s*\]")
 CRATE_ROOTS = frozenset({"lib.rs", "main.rs"})
 
@@ -352,7 +360,13 @@ def configuration_requires_test(predicate: str) -> bool:
 
 
 def requires_test(attributes: str) -> bool:
-    """Report whether an attribute run compiles only under `cfg(test)`."""
+    """Report whether an attribute run compiles only in a test build.
+
+    A bare `#[test]` counts alongside `cfg(test)`: rustc excludes the function
+    it marks from an ordinary build just as firmly.
+    """
+    if TEST_ATTRIBUTE.search(attributes) is not None:
+        return True
     return any(
         configuration_requires_test(match.group("predicate"))
         for match in CFG_ATTRIBUTE.finditer(attributes)
@@ -455,6 +469,26 @@ def declared_modules(
     return found
 
 
+def is_crate_root(path: Path) -> bool:
+    """Report whether Cargo compiles ``path`` as a target root.
+
+    That is `<package>/src/lib.rs` and `src/main.rs`, plus the automatic binary
+    roots `src/bin/tool.rs` and `src/bin/tool/main.rs`. Matching the basename
+    alone would seed a `tests/main.rs` deep inside a test tree as its own
+    ungated root and pull that whole subtree back out of test-only.
+    """
+    parent = path.parent
+    if path.name in CRATE_ROOTS and parent.name == "src":
+        return True
+    if path.suffix == ".rs" and parent.name == "bin" and parent.parent.name == "src":
+        return True
+    return (
+        path.name == "main.rs"
+        and parent.parent.name == "bin"
+        and parent.parent.parent.name == "src"
+    )
+
+
 def test_only_sources(sources: dict[Path, str], blanked: dict[Path, str]) -> set[Path]:
     """Report every source Rust reaches only through a `#[cfg(test)]` module.
 
@@ -465,14 +499,7 @@ def test_only_sources(sources: dict[Path, str], blanked: dict[Path, str]) -> set
     it.
     """
     reached: dict[bool, set[Path]] = {True: set(), False: set()}
-    # A crate root is `<package>/src/lib.rs` or `<package>/src/main.rs`. Matching
-    # the basename alone would seed a `tests/main.rs` deep inside a test tree as
-    # its own ungated root and take that whole subtree back out of test-only.
-    frontier = [
-        (path, path.parent, False)
-        for path in sources
-        if path.name in CRATE_ROOTS and path.parent.name == "src"
-    ]
+    frontier = [(path, path.parent, False) for path in sources if is_crate_root(path)]
     while frontier:
         path, directory, gated = frontier.pop()
         if path not in sources or path in reached[gated]:
@@ -502,19 +529,16 @@ def initializer_end(code: str, start: int) -> int:
     return len(code)
 
 
-def preceding_attributes(lines: list[str], line: int) -> str:
-    """Join the attribute lines standing immediately above ``line``.
+def preceding_attributes(code: str, offset: int) -> str:
+    """Report the attribute run standing immediately before ``offset``.
 
-    Read from raw source, where a line beginning `#[` is an attribute and a
-    commented-out one begins `//` and is not collected. This is what makes an
-    item-level `#[cfg(test)] const ...` test-only without a module around it.
+    Taken as one span of the blanked source rather than whole lines, so a
+    rustfmt-wrapped `#[cfg(all(\n    test,\n    unix,\n))]` is read entire. A
+    commented-out attribute was blanked to spaces and cannot match. This is what
+    makes an item-level `#[cfg(test)] const ...` test-only with no module
+    around it.
     """
-    collected = []
-    index = line - 2
-    while index >= 0 and lines[index].lstrip().startswith("#["):
-        collected.append(lines[index].strip())
-        index -= 1
-    return "\n".join(collected)
+    return TRAILING_ATTRIBUTES.search(code, 0, offset).group()
 
 
 def imported_names(path: Path, code: str, blocks: list[tuple[int, int]]) -> list[Import]:
@@ -598,7 +622,7 @@ def inventory(root: Path) -> tuple[list[Bound], list[Import]]:
                     annotation=annotation,
                     test_only=external
                     or in_ranges(match.start(), ranges)
-                    or requires_test(preceding_attributes(lines, line)),
+                    or requires_test(preceding_attributes(code, match.start())),
                 )
             )
     return bounds, imports
@@ -690,7 +714,11 @@ def validate(bounds: list[Bound], imports: list[Import]) -> list[str]:
         # Every occurrence is resolved, not just the first: an initializer may
         # both declare the source in a nested block and read it outside that
         # block, where the name means something else entirely.
-        reads = list(re.finditer(bare, bound.initializer))
+        reads = [
+            read
+            for read in re.finditer(bare, bound.initializer)
+            if DECLARATION_SITE.search(bound.initializer[: read.start()]) is None
+        ]
         if source in seen or not reads:
             return False
         owners = [

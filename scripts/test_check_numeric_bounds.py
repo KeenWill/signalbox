@@ -375,6 +375,67 @@ class NumericBoundCheckerTests(unittest.TestCase):
         self.assertIn("MAX_TOTAL_BYTES", result.stdout)
         self.assertIn("invalid derived declaration", result.stdout)
 
+    def test_built_in_test_function_bound_is_inventoried_without_gating(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "#[test]\nfn fixture() {\n    const MAX_FIXTURE_BYTES: usize = 4;\n}\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
+    def test_wrapped_test_configuration_is_inventoried_without_gating(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "#[cfg(all(\n    test,\n    unix,\n))]\nconst MAX_FIXTURE_BYTES: usize = 4;\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
+    def test_binary_root_test_module_bound_is_inventoried_without_gating(self) -> None:
+        result = run_checker_tree(
+            {
+                Path("crates/application/src/bin/tool/main.rs"): "#[cfg(test)]\nmod tests;\n",
+                Path("crates/application/src/bin/tool/tests.rs"): (
+                    "const MAX_FIXTURE_BYTES: usize = 4;\n"
+                ),
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 test-only", result.stdout)
+
+    def test_derived_escape_fails_without_a_value_use_of_the_source(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "// numeric-bound: derived ceiling from MAX_BASE\n"
+            "const MAX_TOTAL_BYTES: usize = {\n"
+            "    // numeric-bound: ceiling - protects against oversized text\n"
+            "    const MAX_BASE: usize = 1024;\n"
+            "    7\n"
+            "};\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_TOTAL_BYTES", result.stdout)
+        self.assertIn("invalid derived declaration", result.stdout)
+
+    def test_alias_declared_twice_still_inventories_the_bound(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "mod first {\n"
+            "    type Count = usize;\n"
+            "    const MAX_INPUT_BYTES: Count = 1024;\n"
+            "}\n"
+            "mod second {\n"
+            "    type Count = bool;\n"
+            "}\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("MAX_INPUT_BYTES", result.stdout)
+
     def test_item_level_test_configuration_is_inventoried_without_gating(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
