@@ -442,18 +442,32 @@ a touched file, or present in a template. Version one admits only by the closed
 `model_requested` route. Path-triggered or template-eager routes need separate
 variants and triggering evidence.
 
-`instructions.read` declares the `Confirm` permission default required of every
-entry in the owning
-[tool catalog](tool-loop.md#provider-bridge-and-daemon-catalog) and declares no
-approval-posture override, so a configured `Auto` or `Delegated` posture
-resolves it exactly as it resolves any other `Confirm` tool. `Confirm` rather
-than `Auto`: eligibility authorizes which bundles a session may admit, not that
-the model may spend the admission itself, and admission durably places
-repository-controlled bytes in every later projection. `Confirm` rather than
-`AlwaysConfirm`: the eligibility allow-list already bounds what can be reached
-and the region is delivered under the subordinate-authority preamble, so this is
-not the class of effect for which automation must be refused outright. List and
-preview declare `Auto`; both are bounded reads that admit nothing.
+`instructions.read` declares the `AlwaysConfirm` permission default required of
+every entry in the owning
+[tool catalog](tool-loop.md#provider-bridge-and-daemon-catalog), together with
+the explicit `Delegated` approval posture. The pair is the point: an admission
+is decided by the approval judge against the session's commissioned brief, not
+by prompting a person. The
+[approval policy](tool-loop.md#approval-policy-and-decision-sources) already
+gives that combination the exact meaning this needs — an explicit `Delegated`
+posture is authoritative and parks the request for a judge, and it is the one
+posture that satisfies an `AlwaysConfirm` declaration, because a judge is not a
+blanket but a distinct decider that can still deny the request or escalate it to
+the user. The resulting decision is recorded as `Delegate`, naming the exact
+model call that made it and retaining the judge rationale.
+
+`AlwaysConfirm` rather than `Auto` or `Confirm` is what makes the posture load
+bearing rather than decorative. Eligibility authorizes which bundles a session
+may admit, not that the model may spend an admission, and admission durably
+places repository-controlled bytes in every later projection; `AlwaysConfirm`
+means no frozen dangerous blanket and no sandbox-profile default can silently
+approve that. It also fails closed rather than open on misconfiguration: a
+deployment that clears the posture leaves the request undecided for a person,
+where `Auto` alone would have approved it unattended. No path reaches a user
+prompt while the declared posture is in force.
+
+List and preview declare `Auto` with no posture; both are bounded reads that
+admit nothing.
 
 All three declare the crash classification `EffectFree`, so a daemon lost
 between authorization and result commit closes the attempt `KnownFailed` and
@@ -501,15 +515,16 @@ and counts are canonical decimal strings, matching the surrounding catalog.
 **Committed unimplemented functionality — model-facing operations.** No present
 tool supplies list, preview, or read unless an implementing child explicitly
 advances this section's verified reference, and no present registry entry
-carries the permission defaults just stated. Unloading is not implemented in the
-first slice. The same holds for everything the rest of this page builds on those
-operations: the durable admission transition, the projection and its region
-bytes, the render budgets, and the per-turn manifest's admission-bearing rows
-are all committed unimplemented functionality, recorded because they constrain
-what the present slice may do, and no present persistence or runtime surface
-provides them. The one exception is the turn-start manifest with an empty
-eligibility and admitted set, which the first slice does insert; each section
-below says so where it applies.
+carries the permission defaults, approval posture, argument schemas, or crash
+classifications just stated. Unloading is not implemented in the first slice.
+The same holds for everything the rest of this page builds on those operations:
+the durable admission transition, the projection and its region bytes, the
+render budgets, and the per-turn manifest's admission-bearing rows are all
+committed unimplemented functionality, recorded because they constrain what the
+present slice may do, and no present persistence or runtime surface provides
+them. The one exception is the turn-start manifest with an empty eligibility and
+admitted set, which the first slice does insert; each section below says so
+where it applies.
 
 ## Durable admission transition
 
