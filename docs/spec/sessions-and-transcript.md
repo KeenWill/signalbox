@@ -345,13 +345,14 @@ nonempty admitted set rejects its proposed model selection unless every target
 the current configuration can select from that direct selection or alias has a
 typed system-instruction transport and capacity for the complete retained
 workspace-instruction region. The replacement checks this before committing the
-successor defaults epoch. Its single serialization boundary first locks the
-session's `session_scheduler` row, shared with turn activation, and then locks
-the admitted-set head, shared with `instructions_read`; all three paths use that
-lock order. It resolves every possible target and validates the complete
-retained region while both locks remain held, then commits the successor epoch
-before releasing either lock. An admission or activation therefore occurs wholly
-before or after replacement and cannot invalidate evidence replacement checked.
+successor defaults epoch. What this page requires is the atomicity, not a lock
+recipe: the replacement must resolve every possible target and validate the
+complete retained region under the same serialization it commits the successor
+epoch under, so an admission or activation occurs wholly before or after it and
+cannot invalidate the evidence it checked. Which rows that serialization takes,
+in what order, and in which mode belong to the
+[persistence lock protocol](persistence-protocol.md#lock-protocol), which owns
+that inventory for every transaction and is the only place it is stated.
 Rejection is typed and leaves the current defaults and admitted set unchanged.
 No present replacement path performs this check because no present surface
 admits a bundle. The owning

@@ -619,7 +619,20 @@ duplicate across roots, and one equal to any root's
 `ConfiguredInstructionRootId`, which would reintroduce the derivation it exists
 to avoid. Randomness is not verifiable, so those rejections catch the
 distinguishable mistakes and the grammar states the requirement plainly for the
-rest. No present parser admits the table form; the bare-string form above is
+rest.
+
+Those checks compare values within one configuration, which is not enough on its
+own: the same path restarted with a different reference keeps its path-derived
+`ConfiguredInstructionRootId` while durable registrations and their alias
+records still hold the old reference, so reuse would either leave two aliases
+for one selector identity or silently swap the value that determines catalog
+order, wrapper bytes, eligibility hashes, and scopes. The daemon therefore
+persists the association from each root's `ConfiguredInstructionRootId` to its
+provider-safe reference, and startup rejects a configuration presenting a known
+root with a different reference before discovery or registration reuse runs. A
+reference is stable for the life of a root's stored evidence; changing one means
+retiring that root's registrations, not editing a value the durable rows already
+name. No present parser admits the table form; the bare-string form above is
 what this build accepts, and a root without a reference cannot become
 provider-visible.
 
