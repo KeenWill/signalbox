@@ -1687,18 +1687,19 @@ mod tests {
         let first = page.admit(slice::from_ref(&refresh));
         let repeat = page.admit(slice::from_ref(&refresh));
 
-        assert_eq!(first, vec![hydration(pull_request_number())]);
+        assert_eq!(first, vec![refresh]);
         assert!(repeat.is_empty());
     }
 
     #[test]
     fn one_delivery_page_hydrates_each_pull_request_it_names() {
+        let other_refresh = hydration(other_pull_request_number());
         let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
         page.admit(&[hydration(pull_request_number())]);
 
-        let other = page.admit(&[hydration(other_pull_request_number())]);
+        let admitted = page.admit(slice::from_ref(&other_refresh));
 
-        assert_eq!(other, vec![hydration(other_pull_request_number())]);
+        assert_eq!(admitted, vec![other_refresh]);
     }
 
     #[test]
@@ -1706,33 +1707,22 @@ mod tests {
         let pull_request = pull_request_number();
         let expected_head =
             CommitSha::try_new(String::from(CURRENT_HEAD)).expect("fixture SHA is valid");
-        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
-        page.admit(&[hydration(pull_request)]);
-
-        let guarded = page.admit(&[
+        let guarded_refreshes = [
             RepoWatchTargetedRefreshV1::Mergeability {
                 pull_request,
                 expected_head: expected_head.clone(),
             },
             RepoWatchTargetedRefreshV1::CheckRollup {
                 pull_request,
-                expected_head: expected_head.clone(),
+                expected_head,
             },
-        ]);
+        ];
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        page.admit(&[hydration(pull_request)]);
 
-        assert_eq!(
-            guarded,
-            vec![
-                RepoWatchTargetedRefreshV1::Mergeability {
-                    pull_request,
-                    expected_head: expected_head.clone(),
-                },
-                RepoWatchTargetedRefreshV1::CheckRollup {
-                    pull_request,
-                    expected_head,
-                },
-            ]
-        );
+        let admitted = page.admit(&guarded_refreshes);
+
+        assert_eq!(admitted, guarded_refreshes.to_vec());
     }
 
     #[test]
@@ -1744,7 +1734,7 @@ mod tests {
 
         let admitted = next.admit(slice::from_ref(&refresh));
 
-        assert_eq!(admitted, vec![hydration(pull_request_number())]);
+        assert_eq!(admitted, vec![refresh]);
     }
 
     #[test]
