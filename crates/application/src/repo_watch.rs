@@ -45,6 +45,8 @@ const REPO_WATCH_EVENT_CONTENT_IDENTITY_DOMAIN_V1: &[u8] =
     b"signalbox/repo-watch/event-content-identity/v1";
 const REPO_WATCH_EVENT_STREAM_IDENTITY_DOMAIN_V1: &[u8] =
     b"signalbox/repo-watch/event-stream-identity/v1";
+const REPO_WATCH_EVENT_IDENTIFIED_CONTENT_DOMAIN_V1: &[u8] =
+    b"signalbox/repo-watch/event-identified-content/v1";
 /// Largest number of recurring occurrence streams one repository's frontier may
 /// carry.
 ///
@@ -1727,12 +1729,45 @@ fn repo_watch_event_stream_identity_v1(key: RepoWatchEventStreamKeyV1<'_>) -> [u
     hash.finish()
 }
 
+/// Whether two events state the same identified fact.
+///
+/// This is exactly the equivalence the content identity induces: both are
+/// computed from `hash_identified_content`, so a caller comparing occurrences
+/// cannot disagree with the identities they carry. Members the identity
+/// deliberately excludes are excluded here too — the random `RepoWatchEventId`,
+/// and a workflow's mutable display name.
+///
+/// Storage needs this to recognize a restated occurrence. Comparing whole
+/// events instead would call a renamed workflow's reappearing run a different
+/// fact while its identity said otherwise, and the durable unique constraint
+/// would then abort the commit.
+pub fn repo_watch_events_state_the_same_fact(
+    left: &RepoWatchEvent,
+    right: &RepoWatchEvent,
+) -> bool {
+    repo_watch_event_identified_content_v1(left) == repo_watch_event_identified_content_v1(right)
+}
+
+fn repo_watch_event_identified_content_v1(event: &RepoWatchEvent) -> [u8; 32] {
+    let mut hash = RepoWatchIdentityHasher::new(REPO_WATCH_EVENT_IDENTIFIED_CONTENT_DOMAIN_V1);
+    hash_identified_content(&mut hash, event);
+    hash.finish()
+}
+
 fn repo_watch_event_content_identity_v1(
     event: &RepoWatchEvent,
     stream_identity: [u8; 32],
     sequence: NonZeroU64,
 ) -> RepoWatchEventContentIdentityV1 {
     let mut hash = RepoWatchIdentityHasher::new(REPO_WATCH_EVENT_CONTENT_IDENTITY_DOMAIN_V1);
+    hash_identified_content(&mut hash, event);
+    hash.frame(&stream_identity);
+    hash.u64(sequence.get());
+    RepoWatchEventContentIdentityV1::from_bytes(hash.finish())
+}
+
+/// Frames every member of an event that identifies the fact it states.
+fn hash_identified_content(hash: &mut RepoWatchIdentityHasher, event: &RepoWatchEvent) {
     hash.text(event.repository().as_str());
     hash.u64(1);
     match event.target() {
@@ -1760,10 +1795,7 @@ fn repo_watch_event_content_identity_v1(
         }
         RepoWatchEventTarget::Branch => hash.text("branch"),
     }
-    hash_event_kind(&mut hash, event.kind());
-    hash.frame(&stream_identity);
-    hash.u64(sequence.get());
-    RepoWatchEventContentIdentityV1::from_bytes(hash.finish())
+    hash_event_kind(hash, event.kind());
 }
 
 fn hash_event_kind(hash: &mut RepoWatchIdentityHasher, kind: &RepoWatchEventKindV1) {
@@ -3778,6 +3810,71 @@ mod tests {
         );
         // The rename is still visible to rules through the event payload.
         assert_ne!(recorded[0].event().kind(), returned[0].event().kind());
+        Ok(())
+    }
+
+    /// Storage coalesces on this equivalence, so it has to agree with the
+    /// identity: a renamed workflow's reappearing run restates its identity and
+    /// must therefore state the same fact, while a different conclusion is a
+    /// different fact under both.
+    #[test]
+    fn stating_the_same_fact_agrees_with_the_content_identity() -> Result<(), Box<dyn Error>> {
+        let absent = observation(Vec::new(), Vec::new(), Vec::new(), Vec::new())?;
+        let named = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let renamed = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                RENAMED_WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let failed = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                WORKFLOW_NAME,
+                CheckConclusion::Failure,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let first = derive_occurrences(Some(&absent), &named, &mut frontier, 1)?;
+        let after_rename = derive_occurrences(Some(&absent), &renamed, &mut frontier, 10)?;
+        let after_failure = derive_occurrences(Some(&absent), &failed, &mut frontier, 20)?;
+
+        assert!(repo_watch_events_state_the_same_fact(
+            first[0].event(),
+            after_rename[0].event()
+        ));
+        assert_eq!(
+            first[0].content_identity(),
+            after_rename[0].content_identity()
+        );
+        assert!(!repo_watch_events_state_the_same_fact(
+            first[0].event(),
+            after_failure[0].event()
+        ));
+        assert_ne!(
+            first[0].content_identity(),
+            after_failure[0].content_identity()
+        );
         Ok(())
     }
 

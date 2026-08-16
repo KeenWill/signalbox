@@ -17,7 +17,7 @@ use signalbox_application::{
     RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPullRequestState,
     RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
     RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchThreadObservation,
-    RepoWatchWorkflowRunObservation,
+    RepoWatchWorkflowRunObservation, repo_watch_events_state_the_same_fact,
 };
 use signalbox_domain::{
     BranchName, CheckRunName, CommitSha, GitHubObjectId, LabelName, PullRequestBody,
@@ -701,13 +701,14 @@ fn is_new_occurrence(
 
 /// Whether two events state the same fact.
 ///
-/// The random `RepoWatchEventId` is excluded, exactly as the content-identity
-/// digest excludes it: a re-derived occurrence carries a fresh candidate id, so
-/// comparing ids would call every re-derivation a different fact.
+/// Delegated to the application crate, which derives this equivalence from the
+/// same members the content identity is computed over. Comparing whole events
+/// here instead would let storage disagree with the identity it is coalescing
+/// on — a workflow renamed while its run was out of the observation restates
+/// its identity but not its display name, and the disagreement would abort the
+/// commit on the durable unique constraint.
 fn is_same_occurrence(stored: &RepoWatchEvent, derived: &RepoWatchEvent) -> bool {
-    stored.repository() == derived.repository()
-        && stored.target() == derived.target()
-        && stored.kind() == derived.kind()
+    repo_watch_events_state_the_same_fact(stored, derived)
 }
 
 /// The already-durable occurrences among these, by content identity.
