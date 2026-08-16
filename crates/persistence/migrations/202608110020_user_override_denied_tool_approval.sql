@@ -1,15 +1,15 @@
 -- A user may override one exact judge denial. The override is a durable
--- user-global command that arms a one-shot pre-approval in the denied
+-- user-global command that records a one-shot pre-approval in the denied
 -- request's session: the next proposal of the exact denied command — same
 -- tool name, same normalized arguments — is approved under `user_override`
--- provenance instead of parking for the judge again. Arming requires a
+-- provenance instead of parking for the judge again. Recording requires a
 -- terminal delegate denial (the decision row is a delegate deny and its
 -- denied-result entry is materialized), the command's session must own the
 -- request, and each denial admits at most one override ever. Consumption is
--- once ever per armed override: the consuming decision row names the denied
+-- once ever per recorded override: the consuming decision row names the denied
 -- request through a UNIQUE column, so a second identical proposal parks for
 -- the judge again. The full audit chain — judge denial, override command,
--- armed row, consuming approval — stays queryable from any link.
+-- recorded row, consuming approval — stays queryable from any link.
 
 -- The rebuilt constraints must carry every kind and version supported
 -- immediately before this migration; `202608100001` is the predecessor that
@@ -50,7 +50,7 @@ ALTER TABLE durable_command
 
 -- The typed record family for the override command. The session is part of
 -- the canonical payload — unlike `decide_tool_request`, where the session is
--- only a routing precondition — because the armed override is a
+-- only a routing precondition — because the recorded override is a
 -- session-scoped standing fact consumed by a later proposal. `request_id`
 -- carries no foreign key: a recorded `request_not_found` rejection names a
 -- request no row ever had.
@@ -94,11 +94,11 @@ CREATE TRIGGER override_denied_tool_request_command_is_append_only
 BEFORE UPDATE OR DELETE ON override_denied_tool_request_command
 FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 
--- One armed, not-yet-consumed override per delegate-denied request. The
+-- One recorded, not-yet-consumed override per delegate-denied request. The
 -- composite request foreign key pins the override to the request's owning
 -- session; the judge-call foreign key pins the exact denial being
 -- overridden; the deferred command foreign key ties the row to its applied
--- command inside the arming transaction.
+-- command inside the override transaction.
 CREATE TABLE tool_approval_user_override (
     denied_request_id uuid PRIMARY KEY,
     session_id uuid NOT NULL,
@@ -131,8 +131,8 @@ FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 CREATE INDEX tool_approval_user_override_session_request_idx
     ON tool_approval_user_override (session_id, denied_request_id);
 
--- The armed override inventory is part of a Prepared call's immutable input.
--- Recording only the denial identity is sufficient because the armed row and
+-- The recorded override inventory is part of a Prepared call's immutable input.
+-- Recording only the denial identity is sufficient because the recorded row and
 -- denied request are themselves append-only authority records.
 CREATE TABLE model_call_user_override (
     model_call_id uuid NOT NULL,
@@ -143,7 +143,7 @@ CREATE TABLE model_call_user_override (
         FOREIGN KEY (model_call_id)
         REFERENCES model_call (model_call_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
-    CONSTRAINT model_call_user_override_armed_fk
+    CONSTRAINT model_call_user_override_recorded_fk
         FOREIGN KEY (denied_request_id)
         REFERENCES tool_approval_user_override (denied_request_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
@@ -153,13 +153,13 @@ CREATE TRIGGER model_call_user_override_is_append_only
 BEFORE UPDATE OR DELETE ON model_call_user_override
 FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 
--- Arming authority: the named denial must be a terminal delegate denial by
+-- Override authority: the named denial must be a terminal delegate denial by
 -- the exact judge call the row records, and the row must correlate with its
 -- applied command. The denied-result entry requirement is what makes the
 -- denial terminal: a delegate denial mid-round has a decision row but no
 -- materialized `tool_denied` result yet, and overriding it would race the
 -- round that is still resolving.
-CREATE FUNCTION require_user_override_arming_authority()
+CREATE FUNCTION require_user_override_authority()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -188,7 +188,7 @@ BEGIN
        AND command.request_id = NEW.denied_request_id
        AND command.session_id = NEW.session_id;
     IF matched <> 1 THEN
-        RAISE EXCEPTION 'user override lacks its applied arming command'
+        RAISE EXCEPTION 'user override lacks its applied override command'
             USING ERRCODE = '23514',
                   CONSTRAINT =
                       'tool_approval_user_override_requires_applied_command';
@@ -197,28 +197,28 @@ BEGIN
 END;
 $$;
 
-CREATE CONSTRAINT TRIGGER user_override_requires_arming_authority
+CREATE CONSTRAINT TRIGGER user_override_requires_authority
 AFTER INSERT ON tool_approval_user_override
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
-EXECUTE FUNCTION require_user_override_arming_authority();
+EXECUTE FUNCTION require_user_override_authority();
 
--- The reverse correlation: an applied override command arms exactly one
--- override, and a rejected one arms none.
+-- The reverse correlation: an applied override command records exactly one
+-- override, and a rejected one records none.
 CREATE FUNCTION require_override_command_effect()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    armed_count bigint;
+    override_count bigint;
 BEGIN
-    SELECT count(*) INTO armed_count
+    SELECT count(*) INTO override_count
       FROM tool_approval_user_override
      WHERE command_id = NEW.command_id;
-    IF (NEW.result_kind = 'applied' AND armed_count <> 1)
-       OR (NEW.result_kind = 'rejected' AND armed_count <> 0)
+    IF (NEW.result_kind = 'applied' AND override_count <> 1)
+       OR (NEW.result_kind = 'rejected' AND override_count <> 0)
     THEN
-        RAISE EXCEPTION 'override command lacks its exact armed effect'
+        RAISE EXCEPTION 'override command lacks its exact recorded effect'
             USING ERRCODE = '23514',
                   CONSTRAINT =
                       'override_denied_tool_request_command_requires_effect';
@@ -235,7 +235,7 @@ EXECUTE FUNCTION require_override_command_effect();
 
 -- Consumption: the approving decision row names the denied request it
 -- consumed. The UNIQUE constraint is the durable one-shot boundary — a
--- second consuming row for the same armed override cannot exist under any
+-- second consuming row for the same recorded override cannot exist under any
 -- interleaving.
 ALTER TABLE tool_approval_decision
     ADD COLUMN override_denied_request_id uuid,
@@ -333,7 +333,7 @@ $$;
 -- Adds the `user_override` branch to the decision-authority gate; supersedes
 -- the version from 202608110001_user_role_storage_vocabulary.sql. A consuming
 -- approval is admitted only for a request frozen `delegated` — the posture
--- the judge would otherwise decide — and only while an armed override exists
+-- the judge would otherwise decide — and only while a recorded override exists
 -- in the request's own session.
 CREATE OR REPLACE FUNCTION require_tool_approval_decision_authority()
 RETURNS trigger
@@ -372,25 +372,25 @@ BEGIN
     IF NEW.decision_source = 'user_override' THEN
         SELECT count(*) INTO matched
           FROM tool_request AS request
-          JOIN tool_approval_user_override AS armed
-            ON armed.denied_request_id = NEW.override_denied_request_id
+          JOIN tool_approval_user_override AS recorded
+            ON recorded.denied_request_id = NEW.override_denied_request_id
           JOIN model_call_user_override AS frozen
             ON frozen.model_call_id = request.producing_model_call_id
-           AND frozen.denied_request_id = armed.denied_request_id
+           AND frozen.denied_request_id = recorded.denied_request_id
           JOIN tool_request AS denied_request
-            ON denied_request.request_id = armed.denied_request_id
+            ON denied_request.request_id = recorded.denied_request_id
          WHERE request.request_id = NEW.request_id
            AND request.approval_posture = 'delegated'
-           AND armed.session_id = request.session_id
+           AND recorded.session_id = request.session_id
            AND denied_request.tool_name = request.tool_name
            AND denied_request.arguments_kind = request.arguments_kind
            AND denied_request.arguments_text = request.arguments_text;
         IF matched <> 1 THEN
             RAISE EXCEPTION
-                'user override consumption lacks an armed override for a delegated request'
+                'user override consumption lacks a recorded override for a delegated request'
                 USING ERRCODE = '23514',
                       CONSTRAINT =
-                          'tool_approval_user_override_requires_armed_override';
+                          'tool_approval_user_override_requires_recorded_override';
         END IF;
         RETURN NULL;
     END IF;
@@ -467,7 +467,7 @@ $$;
 -- exact transaction, and a lifecycle either parked on the round's earliest
 -- undecided request or running on the prepared continuation attempt. The
 -- one-explicit-event-per-transaction gate of the user/delegate branch does
--- not apply: one proposing transaction may consume several armed overrides,
+-- not apply: one proposing transaction may consume several recorded overrides,
 -- each with its own event.
 CREATE OR REPLACE FUNCTION require_explicit_tool_approval_effect()
 RETURNS trigger
@@ -652,3 +652,409 @@ BEGIN
     RETURN NULL;
 END;
 $$;
+
+-- Admits the consumed override as user confirmation at the runner authority
+-- layers; supersedes the versions from
+-- 202608110001_user_role_storage_vocabulary.sql. A recorded override is the
+-- user pre-approving one exact command before the session proposes it, which
+-- is the same per-request user agency a `decide_tool_request` command carries
+-- after the fact. Without this widening an override-approved request is
+-- approvable but undispatchable: every runner lease for a session-policy
+-- tool/profile pair or a profileless `confirm` declaration would fail closed.
+-- The frozen session blanket keeps its existing treatment in both functions
+-- — admitted here, rejected for wire-approved placement — because it is
+-- standing automation rather than a decision about this request. Both bodies
+-- are otherwise the verbatim predecessors.
+CREATE OR REPLACE FUNCTION guard_runner_lease_generation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    placement runner_session_placement_record%ROWTYPE;
+    enrollment_state text;
+    attempted_tool text;
+    attempted_effect text;
+    attempted_state text;
+    attempted_request uuid;
+    current_registration_revision numeric;
+    current_registration_runner uuid;
+    registered_effect text;
+    registered_permission text;
+    bound_lease uuid;
+    bound_request_lease uuid;
+    prior runner_lease_generation%ROWTYPE;
+    prior_state text;
+    prior_request uuid;
+    grant_state text;
+BEGIN
+    SELECT record.* INTO placement
+      FROM runner_current_session_placement AS current_placement
+      JOIN runner_session_placement_record AS record
+        ON record.session_id = current_placement.session_id
+       AND record.event_ordinal = current_placement.event_ordinal
+     WHERE current_placement.session_id = NEW.session_id
+       FOR SHARE OF current_placement;
+    SELECT state_kind INTO enrollment_state
+      FROM runner_enrollment
+     WHERE enrollment_id = NEW.registration_enrollment_id
+       FOR SHARE;
+    SELECT request.tool_name, attempt.effect_class, attempt.state_kind,
+           attempt.request_id
+      INTO attempted_tool, attempted_effect, attempted_state, attempted_request
+      FROM tool_attempt AS attempt
+      JOIN tool_request AS request
+        ON request.request_id = attempt.request_id
+     WHERE attempt.attempt_id = NEW.attempt_id
+       AND attempt.session_id = NEW.session_id
+       FOR UPDATE OF attempt;
+    SELECT current_registration.registration_revision,
+           registration.runner_id,
+           registered.effect_class,
+           registered.permission_kind
+      INTO current_registration_revision,
+           current_registration_runner,
+           registered_effect,
+           registered_permission
+      FROM runner_current_registration AS current_registration
+      JOIN runner_registration AS registration
+        ON registration.enrollment_id =
+            current_registration.enrollment_id
+       AND registration.registration_revision =
+            current_registration.registration_revision
+      JOIN runner_registration_tool AS registered
+        ON registered.enrollment_id =
+            current_registration.enrollment_id
+       AND registered.registration_revision =
+            current_registration.registration_revision
+     WHERE current_registration.enrollment_id =
+            NEW.registration_enrollment_id
+       AND registered.tool_name = NEW.tool_name
+       FOR SHARE OF current_registration;
+    IF NEW.credential_grant_revision IS NOT NULL THEN
+        SELECT event_kind INTO grant_state
+          FROM runner_current_credential_grant_audit
+         WHERE session_id = NEW.session_id
+           AND lineage_origin_event_ordinal =
+                NEW.credential_grant_lineage_origin_ordinal
+           AND runner_id = NEW.runner_id
+           AND grant_revision = NEW.credential_grant_revision
+         FOR SHARE;
+    END IF;
+    INSERT INTO runner_tool_request_lease_binding
+        (request_id, lease_id)
+    VALUES (attempted_request, NEW.lease_id)
+    ON CONFLICT (request_id) DO NOTHING;
+    SELECT lease_id INTO bound_request_lease
+      FROM runner_tool_request_lease_binding
+     WHERE request_id = attempted_request;
+    INSERT INTO runner_physical_attempt_lease_binding
+        (attempt_id, lease_id)
+    VALUES (NEW.attempt_id, NEW.lease_id)
+    ON CONFLICT (attempt_id) DO NOTHING;
+    SELECT lease_id INTO bound_lease
+      FROM runner_physical_attempt_lease_binding
+     WHERE attempt_id = NEW.attempt_id;
+    IF registered_effect IS NULL
+       OR attempted_request IS NULL
+       OR bound_request_lease IS DISTINCT FROM NEW.lease_id
+       OR bound_lease IS DISTINCT FROM NEW.lease_id
+       OR placement.state_kind IS DISTINCT FROM 'pinned'
+       OR placement.event_ordinal IS DISTINCT FROM
+            NEW.placement_event_ordinal
+       OR placement.pinned_runner_id IS DISTINCT FROM NEW.runner_id
+       OR placement.registration_enrollment_id IS DISTINCT FROM
+            NEW.registration_enrollment_id
+       OR placement.registration_revision IS DISTINCT FROM
+            NEW.registration_revision
+       OR placement.pinned_credential_profile_name IS DISTINCT FROM
+            NEW.credential_profile_name
+       OR (
+            NEW.credential_profile_name IS NOT NULL
+            AND (
+                placement.credential_grant_lineage_origin_ordinal IS DISTINCT FROM
+                    NEW.credential_grant_lineage_origin_ordinal
+                OR placement.credential_grant_revision IS DISTINCT FROM
+                    NEW.credential_grant_revision
+            )
+       )
+       OR (
+            NEW.credential_profile_name IS NULL
+            AND NEW.credential_grant_revision IS NOT NULL
+       )
+       OR current_registration_runner IS DISTINCT FROM NEW.runner_id
+       OR (
+            placement.selector_kind = 'identity'
+            AND placement.selector_runner_id IS DISTINCT FROM
+                current_registration_runner
+       )
+       OR (
+            placement.selector_kind = 'capability_class'
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM runner_registration_class
+                 WHERE enrollment_id =
+                    NEW.registration_enrollment_id
+                   AND registration_revision =
+                    current_registration_revision
+                   AND capability_class =
+                    placement.selector_capability_class
+            )
+       )
+       OR EXISTS (
+            SELECT 1
+              FROM runner_session_placement_tool AS required
+             WHERE required.session_id = placement.session_id
+               AND required.event_ordinal = placement.event_ordinal
+               AND required.runner_required
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM runner_registration_tool AS available
+                     WHERE available.enrollment_id =
+                        NEW.registration_enrollment_id
+                       AND available.registration_revision =
+                        current_registration_revision
+                       AND available.tool_name = required.tool_name
+               )
+       )
+       OR (
+            placement.pinned_credential_profile_name IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM runner_registration_profile
+                 WHERE enrollment_id =
+                    NEW.registration_enrollment_id
+                   AND registration_revision =
+                    current_registration_revision
+                   AND credential_profile_name =
+                    placement.pinned_credential_profile_name
+            )
+       )
+       OR (
+            placement.workspace_requirement_kind =
+                'repository_worktree'
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM runner_registration_workspace
+                 WHERE enrollment_id =
+                    NEW.registration_enrollment_id
+                   AND registration_revision =
+                    current_registration_revision
+                   AND workspace_kind = 'worktree_per_session'
+            )
+       )
+       OR enrollment_state IS DISTINCT FROM 'active'
+       OR attempted_tool IS DISTINCT FROM NEW.tool_name
+       OR attempted_state IS DISTINCT FROM 'in_flight'
+       OR registered_effect IS DISTINCT FROM NEW.effect_class
+       OR (
+            NEW.effect_class = 'pure'
+            AND attempted_effect <> 'effect_free'
+       )
+       OR (
+            NEW.effect_class IN ('idempotent', 'side_effecting')
+            AND attempted_effect <> 'external_effect'
+       )
+    THEN
+        RAISE EXCEPTION 'runner lease offer is not canonically authorized'
+            USING ERRCODE = '23514';
+    END IF;
+    -- A session-policy tool/profile pair requires confirmation: only a
+    -- user-command decision, a consumed one-shot user override, or the frozen
+    -- session blanket may approve the request this lease dispatches. The
+    -- override is the user confirming that exact command in advance, so it
+    -- confirms the pair exactly as a user command does. Policy-auto provenance
+    -- would bypass the confirmation the pair posture records.
+    IF NEW.credential_approval_kind = 'session_policy'
+       AND NOT EXISTS (
+            SELECT 1
+              FROM tool_approval_decision AS approval
+             WHERE approval.request_id = attempted_request
+               AND approval.decision_kind = 'approve'
+               AND approval.decision_source
+                    IN ('user_command', 'session_blanket', 'user_override')
+       )
+    THEN
+        RAISE EXCEPTION
+            'session-policy lease admission requires confirmed approval provenance'
+            USING ERRCODE = '23514';
+    END IF;
+    -- A profileless Confirm declaration accepts only a user-command
+    -- decision, a consumed one-shot user override, or the frozen session
+    -- blanket. The override is the user confirming that exact command in
+    -- advance. Policy-auto provenance would bypass the confirmation the
+    -- daemon-authoritative declaration records.
+    IF NEW.credential_profile_name IS NULL
+       AND registered_permission = 'confirm'
+       AND NOT EXISTS (
+            SELECT 1
+              FROM tool_approval_decision AS approval
+             WHERE approval.request_id = attempted_request
+               AND approval.decision_kind = 'approve'
+               AND approval.decision_source
+                    IN ('user_command', 'session_blanket', 'user_override')
+       )
+    THEN
+        RAISE EXCEPTION
+            'profileless confirm lease admission requires confirmed approval provenance'
+            USING ERRCODE = '23514';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+          FROM runner_lease_generation AS previous
+          JOIN runner_current_lease_event AS current_event
+            ON current_event.lease_id = previous.lease_id
+           AND current_event.generation = previous.generation
+          JOIN runner_lease_event AS event
+            ON event.lease_id = current_event.lease_id
+           AND event.generation = current_event.generation
+           AND event.event_ordinal = current_event.event_ordinal
+         WHERE previous.lease_id = NEW.lease_id
+           AND previous.generation < NEW.generation
+           AND previous.attempt_id = NEW.attempt_id
+           AND event.state_kind IN ('lost_execution_possible', 'lost_claimed', 'completed')
+    ) THEN
+        RAISE EXCEPTION 'claimed physical attempt cannot be reused'
+            USING ERRCODE = '23514';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+          FROM runner_lease_generation AS existing
+         WHERE existing.attempt_id = NEW.attempt_id
+           AND existing.lease_id <> NEW.lease_id
+    ) THEN
+        RAISE EXCEPTION 'physical attempt is already bound to another lease'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.credential_grant_revision IS NOT NULL
+       AND grant_state NOT IN ('issued', 'replaced')
+    THEN
+        RAISE EXCEPTION 'revoked credential grant cannot authorize a lease'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.generation > 1 THEN
+        SELECT * INTO prior
+          FROM runner_lease_generation
+         WHERE lease_id = NEW.lease_id
+           AND generation = NEW.predecessor_generation;
+        SELECT event.state_kind INTO prior_state
+          FROM runner_current_lease_event AS current_event
+          JOIN runner_lease_event AS event
+            ON event.lease_id = current_event.lease_id
+           AND event.generation = current_event.generation
+           AND event.event_ordinal = current_event.event_ordinal
+         WHERE current_event.lease_id = NEW.lease_id
+           AND current_event.generation = NEW.predecessor_generation;
+        SELECT attempt.request_id INTO prior_request
+          FROM tool_attempt AS attempt
+         WHERE attempt.attempt_id = prior.attempt_id;
+        IF NOT FOUND
+           OR prior_state IS NULL
+           OR prior_state NOT IN ('lost_unclaimed', 'lost_execution_possible', 'lost_claimed')
+           OR ROW(
+                prior.session_id,
+                prior.runner_id,
+                prior.tool_name,
+                prior.effect_class,
+                prior.credential_profile_name,
+                prior.credential_grant_lineage_origin_ordinal,
+                prior.credential_grant_revision,
+                prior.credential_approval_kind
+           ) IS DISTINCT FROM ROW(
+                NEW.session_id,
+                NEW.runner_id,
+                NEW.tool_name,
+                NEW.effect_class,
+                NEW.credential_profile_name,
+                NEW.credential_grant_lineage_origin_ordinal,
+                NEW.credential_grant_revision,
+                NEW.credential_approval_kind
+           )
+           OR (
+                prior_state = 'lost_unclaimed'
+                AND prior.attempt_id <> NEW.attempt_id
+           )
+           OR (
+                prior_state IN ('lost_execution_possible', 'lost_claimed')
+                AND (
+                    prior.effect_class = 'side_effecting'
+                    OR prior.attempt_id = NEW.attempt_id
+                    OR prior_request IS DISTINCT FROM attempted_request
+                    OR NOT EXISTS (
+                        SELECT 1
+                          FROM runner_claimed_retry_attempt_authority AS authority
+                         WHERE authority.source_lease_id = prior.lease_id
+                           AND authority.source_generation = prior.generation
+                           AND authority.replacement_attempt_id = NEW.attempt_id
+                    )
+                )
+           )
+        THEN
+            RAISE EXCEPTION 'runner lease retry violates durable effect law'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- The wire guard mirrors the domain's authorized-attempt check, so it admits
+-- the same two confirming sources. Each admitted source is excluded with its
+-- own `IS DISTINCT FROM` rather than one `NOT IN` list because the approval
+-- join is outer: a request with no approval row yields a null provenance, and
+-- `NOT IN` would evaluate null there and admit the lease.
+CREATE OR REPLACE FUNCTION guard_runner_wire_lease_approval()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    effective_approval text;
+    decision_source text;
+BEGIN
+    SELECT
+        CASE
+            WHEN override_record.permission_kind = 'auto'
+                THEN 'automatic'
+            WHEN override_record.permission_kind = 'confirm'
+                THEN 'session_policy'
+            WHEN placement.requested_sandbox_profile = 'workspace_restricted'
+                THEN 'automatic'
+            WHEN registered.effect_class = 'pure'
+                THEN 'automatic'
+            ELSE 'session_policy'
+        END,
+        approval.decision_source
+      INTO effective_approval, decision_source
+      FROM runner_session_placement_record AS placement
+      JOIN runner_registration_tool AS registered
+        ON registered.enrollment_id = placement.registration_enrollment_id
+       AND registered.registration_revision = placement.registration_revision
+       AND registered.tool_name = NEW.tool_name
+      JOIN tool_attempt AS attempt
+        ON attempt.attempt_id = NEW.attempt_id
+      LEFT JOIN runner_session_placement_permission_override AS override_record
+        ON override_record.session_id = placement.session_id
+       AND override_record.event_ordinal = placement.event_ordinal
+       AND override_record.tool_name = NEW.tool_name
+      LEFT JOIN tool_approval_decision AS approval
+        ON approval.request_id = attempt.request_id
+       AND approval.decision_kind = 'approve'
+     WHERE placement.session_id = NEW.session_id
+       AND placement.event_ordinal = NEW.placement_event_ordinal;
+    IF NOT FOUND
+       OR decision_source = 'session_blanket'
+       OR (
+            effective_approval = 'session_policy'
+            AND decision_source IS DISTINCT FROM 'user_command'
+            AND decision_source IS DISTINCT FROM 'user_override'
+       )
+       OR (
+            NEW.credential_profile_name IS NOT NULL
+            AND NEW.credential_approval_kind IS DISTINCT FROM effective_approval
+       )
+    THEN
+        RAISE EXCEPTION 'runner lease approval is not placement-authorized'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$function$;

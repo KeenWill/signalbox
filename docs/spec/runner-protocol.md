@@ -1437,7 +1437,9 @@ of immutable grant audit evidence is rejected. Lease insertion joins the current
 unrevoked grant and exact tool/profile pair atomically with dispatch
 authorization. Durable admission requires provenance matching that stored
 placement-policy result: `Automatic` requires policy-derived automatic approval,
-and `SessionPolicy` requires an exact user confirmation. The daemon-local
+and `SessionPolicy` requires an exact user confirmation: either the applied user
+command that decided the request, or the one-shot user override the request
+consumed, which is that same confirmation exercised in advance. The daemon-local
 dangerous blanket is never accepted for runner insertion, including a direct
 lease-row insert (INV-035, INV-045).
 

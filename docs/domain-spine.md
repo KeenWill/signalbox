@@ -4889,8 +4889,8 @@ pub struct PreparedDecideToolRequest { /* private */ }
 pub struct DecideToolRequestPreparationError { /* private */ }
 // accessors: command(), provided_request(), into_parts()
 
-pub struct ArmedUserOverride { /* private */ }
-impl ArmedUserOverride {
+pub struct RecordedUserOverride { /* private */ }
+impl RecordedUserOverride {
     pub const fn new(
         command: DurableCommandId,
         session: SessionId,
@@ -4921,7 +4921,7 @@ impl OverrideDeniedToolRequest {
     ) -> Result<PreparedOverrideDeniedToolRequest, OverrideDeniedToolRequestPreparationError>;
     pub fn reconstitute_applied(
         self,
-        armed: ArmedUserOverride,
+        recorded: RecordedUserOverride,
     ) -> Result<PreparedOverrideDeniedToolRequest, OverrideDeniedToolRequestPreparationError>;
     pub const fn prepare_request_not_found(self) -> PreparedOverrideDeniedToolRequest;
     pub const fn prepare_request_not_in_session(self) -> PreparedOverrideDeniedToolRequest;
@@ -4937,7 +4937,7 @@ pub enum OverrideDeniedToolRequestResult {
     Rejected(OverrideDeniedToolRequestRejectedResult),
 }
 pub struct OverrideDeniedToolRequestAppliedResult { /* private */ }
-// accessor: armed()
+// accessor: recorded()
 pub enum OverrideDeniedToolRequestRejectedResult {
     RequestNotFound { denied_request: ToolRequestId },
     RequestNotInSession {
@@ -6390,7 +6390,7 @@ pub enum PrepareModelCallOutcome {
         request: Box<PreparedModelCallRequest>,
         credential_reference: ModelCallCredentialReference,
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
-        armed_user_overrides: Box<[ArmedUserOverride]>,
+        recorded_user_overrides: Box<[RecordedUserOverride]>,
         system_prompt: Option<SessionSystemPrompt>,
         tool_entries: Box<[ResolvedToolConversationEntry]>,
     },
@@ -6457,10 +6457,7 @@ pub trait AuthorizeModelCallTransaction {
 
 pub enum AuthorizeModelCallOutcome {
     NoSend,
-    Authorized {
-        call: Box<AuthorizedModelCall>,
-        armed_user_overrides: Box<[ArmedUserOverride]>,
-    },
+    Authorized(Box<AuthorizedModelCall>),
 }
 
 pub enum ModelCallAuthorizationReread {

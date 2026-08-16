@@ -3270,9 +3270,7 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
         panic!("the bound child's first model call must checkpoint");
     };
     assert_eq!(checkpointed, call);
-    let AuthorizeModelCallOutcome::Authorized {
-        call: authorized, ..
-    } = model_calls
+    let AuthorizeModelCallOutcome::Authorized(authorized) = model_calls
         .authorize_send(session(bound_child), call)
         .await?
     else {
@@ -4038,9 +4036,8 @@ async fn s18_inv005_inv032_delegated_turn_reclassifies_its_pending_steering()
         panic!("the delegated child's first model call must checkpoint");
     };
     assert_eq!(checkpointed, call);
-    let AuthorizeModelCallOutcome::Authorized {
-        call: authorized, ..
-    } = model_calls.authorize_send(session(child), call).await?
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        model_calls.authorize_send(session(child), call).await?
     else {
         panic!("the prepared delegated call must authorize");
     };

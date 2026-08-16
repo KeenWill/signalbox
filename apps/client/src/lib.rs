@@ -4115,12 +4115,6 @@ async fn decide(
             output.tool_request_decided(tool_request_id, &decision)?;
             Ok(())
         }
-        ServerMessage::ToolDenialOverridden {
-            tool_request_id: overridden_request,
-        } if overridden_request == tool_request_id && decision == ToolDecision::Approve {} => {
-            output.tool_request_decided(tool_request_id, &decision)?;
-            Ok(())
-        }
         ServerMessage::Error {
             code,
             message,
@@ -9985,6 +9979,54 @@ mod tests {
         .await;
         assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
         server.await??;
+        Ok(())
+    }
+
+    /// INV-033: `decide` accepts only its own receipt. A `tool_denial_overridden`
+    /// receipt names a distinct command — it proves a one-shot override was
+    /// recorded for a future re-proposal, never that this pending request was
+    /// decided — so naming the same request cannot make it stand in for one.
+    #[tokio::test]
+    async fn inv033_decide_rejects_a_denial_override_receipt() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let tool_request_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let server = tokio::spawn(async move {
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            let response = ServerFrame::try_new_for_version(
+                request.version(),
+                request.request_id(),
+                ServerMessage::ToolDenialOverridden { tool_request_id },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        let mut client = ProcessClient::new(socket);
+        let result = decide(
+            &mut client,
+            &mut output,
+            session_id,
+            tool_request_id,
+            Some(CommandId::try_from_uuid(Uuid::from_u128(4))?),
+            ToolDecision::Approve {},
+        )
+        .await;
+        assert!(matches!(result, Err(ClientError::AmbiguousMutation)));
+        server.await??;
+        assert_eq!(String::from_utf8(stdout)?, "");
         Ok(())
     }
 

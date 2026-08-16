@@ -3595,11 +3595,11 @@ pub enum ClientRequest {
         /// Exact closed approval decision.
         decision: ToolDecision,
     },
-    /// Arm one one-shot user override of a delegate-denied tool request.
+    /// Record one one-shot user override of a delegate-denied tool request.
     OverrideDeniedToolRequest {
         /// Durable mutation identity.
         command_id: CommandId,
-        /// Session the override arms; part of the canonical payload.
+        /// Session the override covers; part of the canonical payload.
         session_id: CanonicalUuid,
         /// Exact delegate-denied logical tool request.
         tool_request_id: CanonicalUuid,
@@ -4267,7 +4267,7 @@ pub enum RejectionDetail {
         /// Tool request whose denial is still resolving.
         tool_request_id: CanonicalUuid,
     },
-    /// An override is already armed for the named delegate denial.
+    /// An override is already recorded for the named delegate denial.
     ToolDenialAlreadyOverridden {
         /// Already-overridden tool request.
         tool_request_id: CanonicalUuid,
@@ -6157,7 +6157,7 @@ pub enum ToolApprovalEventDecider {
     UserOverride {
         /// Exact durable override-command provenance.
         command_id: CanonicalUuid,
-        /// The delegate-denied request whose armed override was consumed.
+        /// The delegate-denied request whose recorded override was consumed.
         overridden_tool_request_id: CanonicalUuid,
     },
 }
@@ -7180,7 +7180,7 @@ pub enum ServerMessage {
         /// Exact recorded decision.
         decision: ToolDecision,
     },
-    /// One recorded armed-override receipt.
+    /// One recorded recorded-override receipt.
     ///
     /// The receipt mirrors the recorded applied result exactly; an equal
     /// command replay returns this same projection.
@@ -13479,12 +13479,12 @@ mod tests {
             request(4)?,
             ServerMessage::Error {
                 code: ErrorCode::Rejected,
-                message: String::from("an override is already armed for the denial"),
+                message: String::from("an override is already recorded for the denial"),
                 detail: ErrorDetail::rejected(RejectionDetail::ToolDenialAlreadyOverridden {
                     tool_request_id: uuid(7),
                 }),
             },
-            r#"{"type":"error","code":"rejected","message":"an override is already armed for the denial","detail":{"type":"tool_denial_already_overridden","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
+            r#"{"type":"error","code":"rejected","message":"an override is already recorded for the denial","detail":{"type":"tool_denial_already_overridden","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
         )
     }
 

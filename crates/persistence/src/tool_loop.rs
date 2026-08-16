@@ -601,13 +601,13 @@ impl PostgresToolLoopRepository {
         }
     }
 
-    /// Atomically arms one replay-idempotent user override of a delegate
+    /// Atomically records one replay-idempotent user override of a delegate
     /// denial.
     ///
     /// The transaction claims the command, locks the denied request's owning
     /// session, evaluates the domain verification predicate against durable
     /// evidence, and records the receipt; an applied command additionally
-    /// inserts the single armed override row the next matching proposal may
+    /// inserts the single recorded override row the next matching proposal may
     /// consume.
     pub async fn override_denied(
         &self,
@@ -687,36 +687,17 @@ impl PostgresToolLoopRepository {
                             )
                         })?;
                     if let OverrideDeniedToolRequestResult::Applied(applied) = prepared.result() {
-                        let armed = applied.armed();
+                        let recorded = applied.recorded();
                         sqlx::query(
                             "INSERT INTO tool_approval_user_override
                                 (denied_request_id, session_id, command_id,
                                  judge_model_call_id)
                              VALUES ($1, $2, $3, $4)",
                         )
-                        .bind(tool_request_id_to_uuid(armed.denied_request()))
-                        .bind(session_id_to_uuid(armed.session()))
-                        .bind(durable_command_id_to_uuid(armed.command()))
-                        .bind(armed.judge_call().into_uuid())
-                        .execute(&mut *transaction)
-                        .await?;
-                        sqlx::query(
-                            "INSERT INTO model_call_user_override
-                                (model_call_id, denied_request_id)
-                             SELECT call.model_call_id, $2
-                               FROM turn_lifecycle AS lifecycle
-                               JOIN model_call AS call
-                                 ON call.turn_attempt_id = lifecycle.current_attempt_id
-                                AND call.turn_id = lifecycle.turn_id
-                                AND call.session_id = lifecycle.session_id
-                                AND call.state_kind = 'prepared'
-                              WHERE lifecycle.session_id = $1
-                                AND lifecycle.state_kind = 'active'
-                                AND lifecycle.active_phase_kind = 'running'
-                             ON CONFLICT DO NOTHING",
-                        )
-                        .bind(session_id_to_uuid(armed.session()))
-                        .bind(tool_request_id_to_uuid(armed.denied_request()))
+                        .bind(tool_request_id_to_uuid(recorded.denied_request()))
+                        .bind(session_id_to_uuid(recorded.session()))
+                        .bind(durable_command_id_to_uuid(recorded.command()))
+                        .bind(recorded.judge_call().into_uuid())
                         .execute(&mut *transaction)
                         .await?;
                     }
@@ -2233,12 +2214,12 @@ async fn load_approvals(
                 approval.delegate_model_selection_id,
                 approval.delegate_model_call_id, approval.rationale,
                 approval.override_denied_request_id,
-                armed.command_id AS override_command_id
+                recorded.command_id AS override_command_id
            FROM tool_approval_decision AS approval
            JOIN tool_request AS request
              ON request.request_id = approval.request_id
-           LEFT JOIN tool_approval_user_override AS armed
-             ON armed.denied_request_id = approval.override_denied_request_id
+           LEFT JOIN tool_approval_user_override AS recorded
+             ON recorded.denied_request_id = approval.override_denied_request_id
           WHERE request.producing_model_call_id = $1
           ORDER BY request.request_ordinal",
     )
@@ -2707,10 +2688,10 @@ pub(crate) async fn load_approvals_by_request(
                 approval.denial_reason, approval.user_command_id,
                 approval.delegate_model_selection_id, approval.delegate_model_call_id,
                 approval.rationale, approval.override_denied_request_id,
-                armed.command_id AS override_command_id
+                recorded.command_id AS override_command_id
            FROM tool_approval_decision AS approval
-           LEFT JOIN tool_approval_user_override AS armed
-             ON armed.denied_request_id = approval.override_denied_request_id
+           LEFT JOIN tool_approval_user_override AS recorded
+             ON recorded.denied_request_id = approval.override_denied_request_id
           WHERE approval.request_id = ANY($1)",
     )
     .bind(&request_uuids)
@@ -3408,11 +3389,11 @@ async fn load_override_receipt(
     let rejection: Option<String> = row.try_get("rejection_kind")?;
     let prepared = match (result_kind.as_str(), rejection.as_deref()) {
         ("applied", None) => {
-            let armed = load_armed_override(connection, denied_request)
+            let recorded = load_recorded_override(connection, denied_request)
                 .await?
                 .ok_or(ToolLoopCorruption::Missing("applied override row"))?;
             command
-                .reconstitute_applied(armed)
+                .reconstitute_applied(recorded)
                 .map_err(|_| ToolLoopCorruption::Inconsistent("applied override receipt"))?
         }
         ("rejected", Some("request_not_found")) => command.prepare_request_not_found(),
@@ -3425,19 +3406,19 @@ async fn load_override_receipt(
     Ok(Some(prepared))
 }
 
-/// Loads one complete armed override row with the denied request's matching
+/// Loads one complete recorded override row with the denied request's matching
 /// command shape.
-async fn load_armed_override(
+async fn load_recorded_override(
     connection: &mut PgConnection,
     denied_request: ToolRequestId,
-) -> Result<Option<signalbox_domain::ArmedUserOverride>, ToolLoopRepositoryError> {
+) -> Result<Option<signalbox_domain::RecordedUserOverride>, ToolLoopRepositoryError> {
     let row = sqlx::query(
-        "SELECT armed.command_id, armed.session_id, armed.judge_model_call_id,
+        "SELECT recorded.command_id, recorded.session_id, recorded.judge_model_call_id,
                 request.tool_name, request.arguments_kind, request.arguments_text
-           FROM tool_approval_user_override AS armed
+           FROM tool_approval_user_override AS recorded
            JOIN tool_request AS request
-             ON request.request_id = armed.denied_request_id
-          WHERE armed.denied_request_id = $1",
+             ON request.request_id = recorded.denied_request_id
+          WHERE recorded.denied_request_id = $1",
     )
     .bind(tool_request_id_to_uuid(denied_request))
     .fetch_optional(&mut *connection)
@@ -3446,12 +3427,12 @@ async fn load_armed_override(
         return Ok(None);
     };
     let command = durable_command_id_from_uuid(required(&row, "command_id")?)
-        .map_err(|_| ToolLoopCorruption::Inconsistent("armed override command identity"))?;
+        .map_err(|_| ToolLoopCorruption::Inconsistent("recorded override command identity"))?;
     let session = session_id_from_uuid(required(&row, "session_id")?);
     let judge_call =
         signalbox_domain::ModelCallId::from_uuid(required(&row, "judge_model_call_id")?);
     let tool = ToolName::try_new(required(&row, "tool_name")?)
-        .map_err(|_| ToolLoopCorruption::Inconsistent("armed override tool name"))?;
+        .map_err(|_| ToolLoopCorruption::Inconsistent("recorded override tool name"))?;
     let arguments_kind = match required::<String>(&row, "arguments_kind")?.as_str() {
         "json" => ToolArgumentsKind::Json,
         "undecodable" => ToolArgumentsKind::Undecodable,
@@ -3465,8 +3446,8 @@ async fn load_armed_override(
     };
     let arguments =
         NormalizedToolArguments::try_from_stored(arguments_kind, required(&row, "arguments_text")?)
-            .map_err(|_| ToolLoopCorruption::Inconsistent("armed override arguments"))?;
-    Ok(Some(signalbox_domain::ArmedUserOverride::new(
+            .map_err(|_| ToolLoopCorruption::Inconsistent("recorded override arguments"))?;
+    Ok(Some(signalbox_domain::RecordedUserOverride::new(
         command,
         session,
         denied_request,
@@ -3523,7 +3504,7 @@ async fn load_terminal_request_resolution(
     }
 }
 
-/// Loads the command that already armed an override for the request, if any.
+/// Loads the command that already recorded an override for the request, if any.
 async fn load_existing_override_command(
     connection: &mut PgConnection,
     request: ToolRequestId,
@@ -3539,7 +3520,7 @@ async fn load_existing_override_command(
     command
         .map(|value| {
             durable_command_id_from_uuid(value).map_err(|_| {
-                ToolLoopCorruption::Inconsistent("armed override command identity").into()
+                ToolLoopCorruption::Inconsistent("recorded override command identity").into()
             })
         })
         .transpose()

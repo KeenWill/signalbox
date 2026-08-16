@@ -317,7 +317,7 @@ pub use submit_input::{
     SubmitInputTurnOriginAppliedResult, SubmitInputTurnOriginReconstitutionInput,
 };
 pub use tool::{
-    ArmedUserOverride, AssistantResponsePart, DangerousToolAutoApproval, DecideToolRequest,
+    AssistantResponsePart, DangerousToolAutoApproval, DecideToolRequest,
     DecideToolRequestAppliedResult, DecideToolRequestConstructionError,
     DecideToolRequestPreparationError, DecideToolRequestRejectedResult, DecideToolRequestResult,
     DelegateApprovalRecommendation, DelegateToolApproval, DelegateToolApprovalError,
@@ -325,14 +325,14 @@ pub use tool::{
     OverrideDeniedToolRequestAppliedResult, OverrideDeniedToolRequestConstructionError,
     OverrideDeniedToolRequestPreparationError, OverrideDeniedToolRequestRejectedResult,
     OverrideDeniedToolRequestResult, PreparedDecideToolRequest, PreparedOverrideDeniedToolRequest,
-    ToolApprovalDecider, ToolApprovalDecision, ToolApprovalPosture, ToolApprovalResolution,
-    ToolApprovalResolutionReconstitutionError, ToolApprovalResolutionReconstitutionInput,
-    ToolArgumentsError, ToolArgumentsFailure, ToolArgumentsKind, ToolCallProposal,
-    ToolDecisionRationale, ToolDecisionRationaleError, ToolDecisionSource, ToolDenialReason,
-    ToolDenialReasonError, ToolDenialReasonFailure, ToolEffectClass, ToolName, ToolNameError,
-    ToolNameFailure, ToolPermissionDefault, ToolRequest, ToolRequestOrdinal,
-    ToolRequestReconstitutionInput, ToolRequestResolution, ToolResultContent, ToolResultText,
-    ToolResultTextError, ToolResultTextFailure, ToolUsingAssistantResponse,
+    RecordedUserOverride, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalPosture,
+    ToolApprovalResolution, ToolApprovalResolutionReconstitutionError,
+    ToolApprovalResolutionReconstitutionInput, ToolArgumentsError, ToolArgumentsFailure,
+    ToolArgumentsKind, ToolCallProposal, ToolDecisionRationale, ToolDecisionRationaleError,
+    ToolDecisionSource, ToolDenialReason, ToolDenialReasonError, ToolDenialReasonFailure,
+    ToolEffectClass, ToolName, ToolNameError, ToolNameFailure, ToolPermissionDefault, ToolRequest,
+    ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolRequestResolution, ToolResultContent,
+    ToolResultText, ToolResultTextError, ToolResultTextFailure, ToolUsingAssistantResponse,
     ToolUsingAssistantResponseError,
 };
 pub use tool_attempt::{

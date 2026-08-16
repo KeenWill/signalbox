@@ -11172,7 +11172,7 @@ fn wire_tool_decision(
     }
 }
 
-/// Arms one user override of a delegate denial through the canonical
+/// Records one user override of a delegate denial through the canonical
 /// override command.
 ///
 /// A claimed command identity reaches the durable replay boundary
@@ -11214,7 +11214,7 @@ where
                     version,
                     request_id,
                     ServerMessage::ToolDenialOverridden {
-                        tool_request_id: wire_uuid(applied.armed().denied_request().into_uuid()),
+                        tool_request_id: wire_uuid(applied.recorded().denied_request().into_uuid()),
                     },
                 )
                 .await

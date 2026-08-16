@@ -564,7 +564,7 @@ impl PostgresModelCallRepository {
                         .await?;
                         let tool_entries =
                             load_tool_conversation_entries(&mut transaction, &request).await?;
-                        let armed_user_overrides =
+                        let recorded_user_overrides =
                             load_call_user_overrides(&mut transaction, session, current_call_id)
                                 .await?;
                         Ok((
@@ -573,7 +573,7 @@ impl PostgresModelCallRepository {
                                 request: Box::new(request),
                                 credential_reference,
                                 dangerous_tool_auto_approval,
-                                armed_user_overrides,
+                                recorded_user_overrides,
                                 system_prompt,
                                 tool_entries,
                             },
@@ -746,15 +746,10 @@ impl PostgresModelCallRepository {
             let authorized = execution.authorize_send().map_err(|_| {
                 ModelCallCorruption::Inconsistent("checked Prepared call could not authorize send")
             })?;
-            let armed_user_overrides =
-                load_call_user_overrides(&mut transaction, session, call).await?;
             persist_authorization(&mut transaction, &authorized).await?;
             Ok((
                 true,
-                AuthorizeModelCallOutcome::Authorized {
-                    call: Box::new(authorized),
-                    armed_user_overrides,
-                },
+                AuthorizeModelCallOutcome::Authorized(Box::new(authorized)),
             ))
         }
         .await;
@@ -4585,7 +4580,7 @@ pub(crate) async fn insert_prepared_call(
     .bind(input_includes_cache_tokens)
     .execute(&mut *connection)
     .await?;
-    freeze_armed_user_overrides(connection, prepared.session(), call.id()).await?;
+    freeze_recorded_user_overrides(connection, prepared.session(), call.id()).await?;
     outbox::append(
         connection,
         OutboxEvent::ModelCallTransition {
@@ -4773,12 +4768,12 @@ async fn load_call_credential_reference(
     Ok(ModelCallCredentialReference::new(reference))
 }
 
-/// Freezes the session's armed, not-yet-consumed user overrides for one newly
+/// Freezes the session's recorded, not-yet-consumed user overrides for one newly
 /// checkpointed model call.
 ///
 /// An override is consumed when a `tool_approval_decision` row names it, so
 /// the anti-join is the one-shot boundary.
-async fn freeze_armed_user_overrides(
+async fn freeze_recorded_user_overrides(
     connection: &mut PgConnection,
     session: SessionId,
     call: ModelCallId,
@@ -4786,13 +4781,13 @@ async fn freeze_armed_user_overrides(
     sqlx::query(
         "INSERT INTO model_call_user_override
             (model_call_id, denied_request_id)
-         SELECT $2, armed.denied_request_id
-           FROM tool_approval_user_override AS armed
-          WHERE armed.session_id = $1
+         SELECT $2, recorded.denied_request_id
+           FROM tool_approval_user_override AS recorded
+          WHERE recorded.session_id = $1
             AND NOT EXISTS (
                 SELECT 1
                   FROM tool_approval_decision AS consumed
-                 WHERE consumed.override_denied_request_id = armed.denied_request_id
+                 WHERE consumed.override_denied_request_id = recorded.denied_request_id
             )",
     )
     .bind(session_id_to_uuid(session))
@@ -4802,26 +4797,24 @@ async fn freeze_armed_user_overrides(
     Ok(())
 }
 
-/// Reloads exactly the override inventory frozen before this call is sent.
-/// Checkpointing records overrides already armed, while the arming transaction
-/// may add a newly terminal denial's override to the current unsent prepared
-/// call. Consumption after authorization cannot change this inventory.
+/// Reloads exactly the override inventory frozen when this call was
+/// checkpointed, irrespective of overrides recorded or consumed afterward.
 async fn load_call_user_overrides(
     connection: &mut PgConnection,
     session: SessionId,
     call: ModelCallId,
-) -> Result<Box<[signalbox_domain::ArmedUserOverride]>, ModelCallRepositoryError> {
+) -> Result<Box<[signalbox_domain::RecordedUserOverride]>, ModelCallRepositoryError> {
     let rows = sqlx::query(
-        "SELECT armed.command_id, armed.denied_request_id, armed.judge_model_call_id,
+        "SELECT recorded.command_id, recorded.denied_request_id, recorded.judge_model_call_id,
                 request.tool_name, request.arguments_kind, request.arguments_text
            FROM model_call_user_override AS frozen
-           JOIN tool_approval_user_override AS armed
-             ON armed.denied_request_id = frozen.denied_request_id
+           JOIN tool_approval_user_override AS recorded
+             ON recorded.denied_request_id = frozen.denied_request_id
            JOIN tool_request AS request
-             ON request.request_id = armed.denied_request_id
-          WHERE armed.session_id = $1
+             ON request.request_id = recorded.denied_request_id
+          WHERE recorded.session_id = $1
             AND frozen.model_call_id = $2
-          ORDER BY armed.denied_request_id",
+          ORDER BY recorded.denied_request_id",
     )
     .bind(session_id_to_uuid(session))
     .bind(call.into_uuid())
@@ -4833,24 +4826,25 @@ async fn load_call_user_overrides(
             let denied_request: Uuid = row.try_get("denied_request_id")?;
             let judge_call: Uuid = row.try_get("judge_model_call_id")?;
             let tool = signalbox_domain::ToolName::try_new(row.try_get("tool_name")?)
-                .map_err(|_| ModelCallCorruption::Inconsistent("armed override tool name"))?;
+                .map_err(|_| ModelCallCorruption::Inconsistent("recorded override tool name"))?;
             let arguments_kind = match row.try_get::<String, _>("arguments_kind")?.as_str() {
                 "json" => signalbox_domain::ToolArgumentsKind::Json,
                 "undecodable" => signalbox_domain::ToolArgumentsKind::Undecodable,
                 _ => {
-                    return Err(
-                        ModelCallCorruption::Inconsistent("armed override arguments kind").into(),
-                    );
+                    return Err(ModelCallCorruption::Inconsistent(
+                        "recorded override arguments kind",
+                    )
+                    .into());
                 }
             };
             let arguments = signalbox_domain::NormalizedToolArguments::try_from_stored(
                 arguments_kind,
                 row.try_get("arguments_text")?,
             )
-            .map_err(|_| ModelCallCorruption::Inconsistent("armed override arguments"))?;
-            Ok(signalbox_domain::ArmedUserOverride::new(
+            .map_err(|_| ModelCallCorruption::Inconsistent("recorded override arguments"))?;
+            Ok(signalbox_domain::RecordedUserOverride::new(
                 durable_command_id_from_uuid(command)
-                    .map_err(|_| ModelCallCorruption::Inconsistent("armed override command"))?,
+                    .map_err(|_| ModelCallCorruption::Inconsistent("recorded override command"))?,
                 session,
                 signalbox_domain::ToolRequestId::from_uuid(denied_request),
                 ModelCallId::from_uuid(judge_call),

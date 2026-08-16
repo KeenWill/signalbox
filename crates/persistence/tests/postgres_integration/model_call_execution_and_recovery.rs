@@ -173,9 +173,8 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         ModelCallAuthorizationReread::Prepared
     );
 
-    let AuthorizeModelCallOutcome::Authorized {
-        call: authorized, ..
-    } = repository.authorize_send(session, call).await?
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        repository.authorize_send(session, call).await?
     else {
         panic!("the exact Prepared call must authorize")
     };
@@ -1700,9 +1699,8 @@ async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pend
         panic!("the exact Prepared fixture checkpoints")
     };
     assert_eq!(checkpointed, call);
-    let AuthorizeModelCallOutcome::Authorized {
-        call: authorized, ..
-    } = calls.authorize_send(session, call).await?
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        calls.authorize_send(session, call).await?
     else {
         panic!("the exact Prepared call must authorize")
     };

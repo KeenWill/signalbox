@@ -570,7 +570,7 @@ pub enum ToolDecisionSource {
     SessionOverride,
     /// A checked delegate-model decision.
     Delegate,
-    /// A user-armed one-shot override of a delegate denial supplied approval
+    /// A user-recorded one-shot override of a delegate denial supplied approval
     /// when the session re-proposed the denied command.
     UserOverride,
 }
@@ -607,7 +607,7 @@ pub enum ToolApprovalDecider {
     UserOverride {
         /// Exact override-command provenance.
         command: DurableCommandId,
-        /// The delegate-denied request whose armed override was consumed.
+        /// The delegate-denied request whose recorded override was consumed.
         denied_request: ToolRequestId,
     },
 }
@@ -1251,12 +1251,12 @@ pub enum InitialToolApproval {
     PolicyAuto,
     /// Record automatic approval from the frozen dangerous blanket.
     SessionBlanket,
-    /// Record approval consumed from a user-armed override of one exact
+    /// Record approval consumed from a user-recorded override of one exact
     /// delegate denial instead of parking for the judge again.
     UserOverride {
         /// The applied durable override command.
         command: DurableCommandId,
-        /// The delegate-denied request whose armed override this proposal
+        /// The delegate-denied request whose recorded override this proposal
         /// consumes.
         denied_request: ToolRequestId,
     },
@@ -1520,15 +1520,15 @@ impl DecideToolRequestPreparationError {
     }
 }
 
-/// One armed, not-yet-consumed user override of a delegate denial.
+/// One recorded, not-yet-consumed user override of a delegate denial.
 ///
 /// The override pre-approves exactly one future proposal in the owning
 /// session: the first one whose tool name and normalized arguments equal the
 /// denied request's. It links the denied request, the judge call that denied
-/// it, and the user command that armed the override, so the full audit chain
+/// it, and the user command that recorded the override, so the full audit chain
 /// stays queryable from any of the three.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ArmedUserOverride {
+pub struct RecordedUserOverride {
     command: DurableCommandId,
     session: SessionId,
     denied_request: ToolRequestId,
@@ -1537,8 +1537,8 @@ pub struct ArmedUserOverride {
     arguments: NormalizedToolArguments,
 }
 
-impl ArmedUserOverride {
-    /// Supplies all typed stored facts of one armed override.
+impl RecordedUserOverride {
+    /// Supplies all typed stored facts of one recorded override.
     pub const fn new(
         command: DurableCommandId,
         session: SessionId,
@@ -1596,11 +1596,11 @@ impl ArmedUserOverride {
 
 /// The canonical user command overriding one delegate-denied tool request.
 ///
-/// Applying the command arms one one-shot pre-approval in the named session:
+/// Applying the command records one one-shot pre-approval in the named session:
 /// the next proposal of the exact denied command is approved under
 /// user-override provenance instead of parking for the judge again. Unlike
 /// [`DecideToolRequest`], the session is part of the canonical payload,
-/// because the armed override is a session-scoped standing fact consumed by a
+/// because the recorded override is a session-scoped standing fact consumed by a
 /// later proposal rather than a decision on an already-parked request.
 #[derive(Clone, Debug)]
 pub struct OverrideDeniedToolRequest {
@@ -1632,7 +1632,7 @@ impl OverrideDeniedToolRequest {
         self.command_id
     }
 
-    /// Returns the session the override arms.
+    /// Returns the session the override covers.
     pub const fn session(&self) -> SessionId {
         self.session
     }
@@ -1645,7 +1645,7 @@ impl OverrideDeniedToolRequest {
     /// Verifies the named request admits a user override and prepares the
     /// terminal typed result.
     ///
-    /// This is the override verification predicate. Arming requires every
+    /// This is the override verification predicate. Recording requires every
     /// conjunct, each with its own typed rejection:
     ///
     /// - the recorded approval is a delegate denial, so a user denial, any
@@ -1653,8 +1653,8 @@ impl OverrideDeniedToolRequest {
     /// - the denial is terminal — its denied-result entry is materialized —
     ///   so a denial whose round is still resolving cannot be overridden;
     /// - the request belongs to the command's session, so an override can
-    ///   never arm a pre-approval in another session; and
-    /// - no override is already armed for the request, so each denial admits
+    ///   never pre-approve a proposal in another session; and
+    /// - no override is already recorded for the request, so each denial admits
     ///   at most one override ever.
     pub fn prepare(
         self,
@@ -1684,7 +1684,7 @@ impl OverrideDeniedToolRequest {
         // Delegate-denied: the decision is a denial and its decider is the
         // judge. The sealed resolution producers make a delegate decider
         // equivalent to the delegate source, so the decider is the checked
-        // fact and also supplies the judge call the armed override links.
+        // fact and also supplies the judge call the recorded override links.
         let judge_call = match approval {
             Some(approval) if matches!(approval.decision(), ToolApprovalDecision::Deny { .. }) => {
                 match approval.decider() {
@@ -1710,7 +1710,7 @@ impl OverrideDeniedToolRequest {
         if existing_override_command.is_some() {
             return Ok(self.prepare_already_overridden());
         }
-        let armed = ArmedUserOverride::new(
+        let recorded = RecordedUserOverride::new(
             self.command_id,
             self.session,
             self.denied_request,
@@ -1721,22 +1721,22 @@ impl OverrideDeniedToolRequest {
         Ok(PreparedOverrideDeniedToolRequest {
             command: self,
             result: OverrideDeniedToolRequestResult::Applied(
-                OverrideDeniedToolRequestAppliedResult { armed },
+                OverrideDeniedToolRequestAppliedResult { recorded },
             ),
         })
     }
 
-    /// Restores the exact recorded applied receipt from its durable armed
+    /// Restores the exact recorded applied receipt from its durable recorded
     /// row, rejecting a row that does not correlate with this command.
     pub fn reconstitute_applied(
         self,
-        armed: ArmedUserOverride,
+        recorded: RecordedUserOverride,
     ) -> Result<PreparedOverrideDeniedToolRequest, OverrideDeniedToolRequestPreparationError> {
-        if armed.command() != self.command_id
-            || armed.session() != self.session
-            || armed.denied_request() != self.denied_request
+        if recorded.command() != self.command_id
+            || recorded.session() != self.session
+            || recorded.denied_request() != self.denied_request
         {
-            let provided_request = armed.denied_request();
+            let provided_request = recorded.denied_request();
             return Err(OverrideDeniedToolRequestPreparationError {
                 command: self,
                 provided_request,
@@ -1745,7 +1745,7 @@ impl OverrideDeniedToolRequest {
         Ok(PreparedOverrideDeniedToolRequest {
             command: self,
             result: OverrideDeniedToolRequestResult::Applied(
-                OverrideDeniedToolRequestAppliedResult { armed },
+                OverrideDeniedToolRequestAppliedResult { recorded },
             ),
         })
     }
@@ -1841,22 +1841,22 @@ impl OverrideDeniedToolRequestConstructionError {
 /// Terminal typed result for one override command.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum OverrideDeniedToolRequestResult {
-    /// The override was armed.
+    /// The override was recorded.
     Applied(OverrideDeniedToolRequestAppliedResult),
     /// Authoritative current state rejected the command.
     Rejected(OverrideDeniedToolRequestRejectedResult),
 }
 
-/// The armed override and its complete linked provenance.
+/// The recorded override and its complete linked provenance.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct OverrideDeniedToolRequestAppliedResult {
-    armed: ArmedUserOverride,
+    recorded: RecordedUserOverride,
 }
 
 impl OverrideDeniedToolRequestAppliedResult {
-    /// Borrows the exact armed override.
-    pub const fn armed(&self) -> &ArmedUserOverride {
-        &self.armed
+    /// Borrows the exact recorded override.
+    pub const fn recorded(&self) -> &RecordedUserOverride {
+        &self.recorded
     }
 }
 
@@ -1885,7 +1885,7 @@ pub enum OverrideDeniedToolRequestRejectedResult {
         /// The request whose denial is still resolving.
         denied_request: ToolRequestId,
     },
-    /// An override is already armed for this denial.
+    /// An override is already recorded for this denial.
     AlreadyOverridden {
         /// The already-overridden request.
         denied_request: ToolRequestId,
@@ -2650,7 +2650,7 @@ mod tests {
     /// judge model and call seeds derive from it, decorrelated per testing
     /// rule 4.
     const DENIED_REQUEST_SEED: u128 = 70;
-    /// The seed of the fixture override command arming that denial.
+    /// The seed of the fixture override command overriding that denial.
     const OVERRIDE_COMMAND_SEED: u128 = 71;
 
     /// One request frozen `Delegated` in the canonical fixture session.
@@ -2701,11 +2701,11 @@ mod tests {
         .expect("the fixture command identity is admitted")
     }
 
-    /// The override verification predicate arms exactly the denied command:
-    /// every conjunct holds, and the armed override links the command, the
+    /// The override verification predicate records exactly the denied command:
+    /// every conjunct holds, and the recorded override links the command, the
     /// session, the denied request, and the denying judge call.
     #[test]
-    fn override_prepare_arms_the_exact_denied_command() {
+    fn override_prepare_records_the_exact_denied_command() {
         let request = delegated_request(DENIED_REQUEST_SEED);
         let denial = delegate_denial(&request);
         let prepared = override_command()
@@ -2722,25 +2722,25 @@ mod tests {
         let OverrideDeniedToolRequestResult::Applied(applied) = prepared.result() else {
             panic!("a terminal delegate denial admits the override");
         };
-        let armed = applied.armed();
+        let recorded = applied.recorded();
         let Some(ToolApprovalDecider::Delegate {
             call: denying_call, ..
         }) = denial.decider()
         else {
             panic!("the fixture denial carries delegate provenance");
         };
-        assert_eq!(armed.command(), prepared.command().command_id());
-        assert_eq!(armed.session(), request.session());
-        assert_eq!(armed.denied_request(), request.id());
-        assert_eq!(armed.judge_call(), *denying_call);
-        assert_eq!(armed.tool(), request.name());
-        assert_eq!(armed.arguments(), request.arguments());
+        assert_eq!(recorded.command(), prepared.command().command_id());
+        assert_eq!(recorded.session(), request.session());
+        assert_eq!(recorded.denied_request(), request.id());
+        assert_eq!(recorded.judge_call(), *denying_call);
+        assert_eq!(recorded.tool(), request.name());
+        assert_eq!(recorded.arguments(), request.arguments());
     }
 
-    /// An armed override matches only the exact denied command: equal tool
+    /// An recorded override matches only the exact denied command: equal tool
     /// name and equal normalized arguments.
     #[test]
-    fn armed_override_matches_only_the_exact_denied_command() {
+    fn recorded_override_matches_only_the_exact_denied_command() {
         let request = delegated_request(DENIED_REQUEST_SEED);
         let denial = delegate_denial(&request);
         let prepared = override_command()
@@ -2756,7 +2756,7 @@ mod tests {
         let OverrideDeniedToolRequestResult::Applied(applied) = prepared.result() else {
             panic!("a terminal delegate denial admits the override");
         };
-        let armed = applied.armed();
+        let recorded = applied.recorded();
 
         let same_command =
             ToolCallProposal::new(request.name().clone(), request.arguments().clone());
@@ -2769,9 +2769,9 @@ mod tests {
             ToolName::try_new(String::from("another_tool")).expect("fixture name is valid"),
             request.arguments().clone(),
         );
-        assert!(armed.matches_proposal(&same_command));
-        assert!(!armed.matches_proposal(&other_arguments));
-        assert!(!armed.matches_proposal(&other_tool));
+        assert!(recorded.matches_proposal(&same_command));
+        assert!(!recorded.matches_proposal(&other_arguments));
+        assert!(!recorded.matches_proposal(&other_tool));
     }
 
     /// Predicate conjunct: the request must belong to the command's session.
@@ -2992,15 +2992,15 @@ mod tests {
         assert_eq!(error.command(), &override_command());
     }
 
-    /// The recorded applied receipt restores from its durable armed row and
+    /// The recorded applied receipt restores from its durable recorded row and
     /// rejects a row that does not correlate with the command.
     #[test]
     fn override_reconstitute_applied_restores_the_recorded_receipt() {
-        const FOREIGN_ARMED_REQUEST_SEED: u128 = 4;
+        const FOREIGN_OVERRIDE_REQUEST_SEED: u128 = 4;
         const FIXTURE_JUDGE_CALL_SEED: u128 = 930;
 
         let request = delegated_request(DENIED_REQUEST_SEED);
-        let armed = ArmedUserOverride::new(
+        let recorded = RecordedUserOverride::new(
             command_id(OVERRIDE_COMMAND_SEED),
             request.session(),
             request.id(),
@@ -3009,27 +3009,27 @@ mod tests {
             request.arguments().clone(),
         );
         let restored = override_command()
-            .reconstitute_applied(armed.clone())
-            .expect("the correlated armed row restores the applied receipt");
+            .reconstitute_applied(recorded.clone())
+            .expect("the correlated recorded row restores the applied receipt");
         let OverrideDeniedToolRequestResult::Applied(applied) = restored.result() else {
-            panic!("the armed row restores an applied result");
+            panic!("the recorded row restores an applied result");
         };
-        assert_eq!(applied.armed(), &armed);
+        assert_eq!(applied.recorded(), &recorded);
 
-        let foreign = ArmedUserOverride::new(
+        let foreign = RecordedUserOverride::new(
             command_id(OVERRIDE_COMMAND_SEED),
             request.session(),
-            tool_request_id(FOREIGN_ARMED_REQUEST_SEED),
+            tool_request_id(FOREIGN_OVERRIDE_REQUEST_SEED),
             model_call_id(FIXTURE_JUDGE_CALL_SEED),
             request.name().clone(),
             request.arguments().clone(),
         );
         let error = override_command()
             .reconstitute_applied(foreign)
-            .expect_err("an uncorrelated armed row must fail closed");
+            .expect_err("an uncorrelated recorded row must fail closed");
         assert_eq!(
             error.provided_request(),
-            tool_request_id(FOREIGN_ARMED_REQUEST_SEED)
+            tool_request_id(FOREIGN_OVERRIDE_REQUEST_SEED)
         );
     }
 
@@ -3085,7 +3085,7 @@ mod tests {
     }
 
     /// A consumed user override records approval under override provenance:
-    /// the override source, the arming command, and the overridden denial.
+    /// the override source, the override command, and the overridden denial.
     #[test]
     fn user_override_initial_approval_records_override_provenance() {
         const CONSUMING_REQUEST_SEED: u128 = 73;

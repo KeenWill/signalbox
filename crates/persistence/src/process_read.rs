@@ -1854,7 +1854,7 @@ impl ProcessReadRepository {
                 transcript_approval.rationale AS transcript_decision_rationale,
                 transcript_approval.override_denied_request_id
                     AS transcript_override_denied_request_id,
-                transcript_armed.command_id AS transcript_override_command_id
+                transcript_override.command_id AS transcript_override_command_id
                FROM UNNEST($1::numeric[], $2::uuid[], $3::uuid[])
                     WITH ORDINALITY AS selected(
                         member_position,
@@ -1883,8 +1883,8 @@ impl ProcessReadRepository {
                 )
                LEFT JOIN tool_approval_decision AS transcript_approval
                  ON transcript_approval.request_id = transcript_request.request_id
-               LEFT JOIN tool_approval_user_override AS transcript_armed
-                 ON transcript_armed.denied_request_id =
+               LEFT JOIN tool_approval_user_override AS transcript_override
+                 ON transcript_override.denied_request_id =
                     transcript_approval.override_denied_request_id
                LEFT JOIN imported_transcript_entry AS imported
                  ON imported.imported_conversation_id =
@@ -4191,7 +4191,7 @@ async fn open_transcript_entry_cursor(
             transcript_approval.rationale AS transcript_decision_rationale,
             transcript_approval.override_denied_request_id
                 AS transcript_override_denied_request_id,
-            transcript_armed.command_id AS transcript_override_command_id
+            transcript_override.command_id AS transcript_override_command_id
            FROM (
                 SELECT
                     resolved.*,
@@ -4219,8 +4219,8 @@ async fn open_transcript_entry_cursor(
             )
            LEFT JOIN tool_approval_decision AS transcript_approval
              ON transcript_approval.request_id = transcript_request.request_id
-           LEFT JOIN tool_approval_user_override AS transcript_armed
-             ON transcript_armed.denied_request_id =
+           LEFT JOIN tool_approval_user_override AS transcript_override
+             ON transcript_override.denied_request_id =
                 transcript_approval.override_denied_request_id
            LEFT JOIN imported_transcript_entry AS imported
              ON imported.imported_conversation_id =

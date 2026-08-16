@@ -17,17 +17,17 @@ use std::{
 const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 32;
 
 use signalbox_domain::{
-    AcceptedInputId, AmbiguousModelCallTurnIdentities, ArmedUserOverride, AssistantResponsePart,
-    AssistantText, AuthorizedModelCall, CompletedModelCallIdentities, ContextCompactionRange,
-    ContextFrontierId, ContextFrontierProjection, ContextFrontierProjectionFailure,
+    AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
+    AuthorizedModelCall, CompletedModelCallIdentities, ContextCompactionRange, ContextFrontierId,
+    ContextFrontierProjection, ContextFrontierProjectionFailure,
     CorrelatedModelCallTerminalObservation, DangerousToolAutoApproval, DelegationContent,
     DelegationMessageId, DelegationOutcome, DelegationWaitMode, DirectModelSelection,
     FailedModelCallTurn, FailedModelCallTurnIdentities, ImportedSourceAttestation, ImportedSpeaker,
     ImportedText, ImportedTranscriptContent, ImportedTranscriptEntryId, InitialToolApproval,
     ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
     ModelCallTerminalOutcome, PhysicalCancellationModelCallTurnIdentities,
-    PreparedModelCallRequest, RefusedModelCallTurnIdentities, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef,
+    PreparedModelCallRequest, RecordedUserOverride, RefusedModelCallTurnIdentities,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef,
     SessionConfigurationDefaultsVersion, SessionId, SessionSystemPrompt,
     StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
     StoppedToolRoundModelCallIdentities, ToolApprovalDecision, ToolAttemptEnd, ToolDenialReason,
@@ -651,9 +651,9 @@ pub enum PrepareModelCallOutcome {
         credential_reference: ModelCallCredentialReference,
         /// Frozen dangerous blanket posture for initial request decisions.
         dangerous_tool_auto_approval: DangerousToolAutoApproval,
-        /// Armed, not-yet-consumed user overrides of delegate denials, frozen
+        /// Recorded, not-yet-consumed user overrides of delegate denials, frozen
         /// for this call in the same transaction as the blanket posture.
-        armed_user_overrides: Box<[ArmedUserOverride]>,
+        recorded_user_overrides: Box<[RecordedUserOverride]>,
         /// Exact optional session system prompt on the turn's frozen epoch.
         system_prompt: Option<SessionSystemPrompt>,
         /// Exact durable authority for every tool-related frontier entry.
@@ -757,14 +757,8 @@ pub trait AuthorizeModelCallTransaction {
 pub enum AuthorizeModelCallOutcome {
     /// The exact prepared authority is stale or has stopped; no send may begin.
     NoSend,
-    /// The exact prepared call committed `InFlight` and may enter its provider
-    /// with the override inventory atomically reloaded at authorization.
-    Authorized {
-        /// Exact authority for the physical provider send.
-        call: Box<AuthorizedModelCall>,
-        /// Overrides frozen into the call before its send transition.
-        armed_user_overrides: Box<[ArmedUserOverride]>,
-    },
+    /// The exact prepared call committed `InFlight` and may enter its provider.
+    Authorized(Box<AuthorizedModelCall>),
 }
 
 /// Authoritative state after an ambiguous send-authorization commit.
@@ -1525,7 +1519,7 @@ where
                     request,
                     credential_reference,
                     dangerous_tool_auto_approval,
-                    armed_user_overrides: _,
+                    recorded_user_overrides,
                     system_prompt,
                     tool_entries,
                 }) => {
@@ -1533,6 +1527,7 @@ where
                         request,
                         credential_reference,
                         dangerous_tool_auto_approval,
+                        recorded_user_overrides,
                         system_prompt,
                         tool_entries,
                     );
@@ -1559,6 +1554,7 @@ where
             prepared,
             credential_reference,
             dangerous_tool_auto_approval,
+            recorded_user_overrides,
             system_prompt,
             tool_entries,
         ) = prepared;
@@ -1597,81 +1593,75 @@ where
         };
 
         let permit = self.gate.acquire(attempt).await;
-        let (authorized, armed_user_overrides) =
-            match self.authorization.authorize(session, call).await {
-                Ok(AuthorizeModelCallOutcome::NoSend) => {
-                    drop(capability);
-                    drop(permit);
-                    return Ok(ModelCallExecutionOutcome::NoWork);
-                }
-                Ok(AuthorizeModelCallOutcome::Authorized {
-                    call: authorized,
-                    armed_user_overrides,
-                }) => (*authorized, armed_user_overrides),
-                Err(error)
-                    if matches!(
-                        error.operator_failure_class(),
-                        OperatorFailureClass::Infrastructure {
-                            commit_ambiguous: true
-                        }
-                    ) =>
+        let authorized = match self.authorization.authorize(session, call).await {
+            Ok(AuthorizeModelCallOutcome::NoSend) => {
+                drop(capability);
+                drop(permit);
+                return Ok(ModelCallExecutionOutcome::NoWork);
+            }
+            Ok(AuthorizeModelCallOutcome::Authorized(authorized)) => *authorized,
+            Err(error)
+                if matches!(
+                    error.operator_failure_class(),
+                    OperatorFailureClass::Infrastructure {
+                        commit_ambiguous: true
+                    }
+                ) =>
+            {
+                match self
+                    .authorization
+                    .reread_after_ambiguous_commit(session, &prepared_request)
+                    .await
                 {
-                    match self
-                        .authorization
-                        .reread_after_ambiguous_commit(session, &prepared_request)
-                        .await
-                    {
-                        Ok(ModelCallAuthorizationReread::Prepared) => {
-                            drop(capability);
-                            drop(permit);
-                            return Err(ModelCallExecutionError::Authorization(error));
-                        }
-                        Ok(ModelCallAuthorizationReread::InFlight(authorized)) => {
-                            drop(capability);
-                            drop(permit);
-                            let non_consumption = authorized
-                                .observation_correlation()
-                                .bind_terminal_observation(
-                                    ModelCallTerminalObservation::KnownFailed,
-                                );
-                            return self
-                                .commit_terminal_observation(session, non_consumption, Box::new([]))
-                                .await;
-                        }
-                        Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
-                            drop(capability);
-                            drop(permit);
-                            let cancellation = stopped
-                                .observation_correlation()
-                                .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
-                            return self
-                                .commit_terminal_observation(session, cancellation, Box::new([]))
-                                .await;
-                        }
-                        Ok(ModelCallAuthorizationReread::Cancelled) => {
-                            drop(capability);
-                            drop(permit);
-                            return Ok(ModelCallExecutionOutcome::NoWork);
-                        }
-                        Err(reread_error) => {
-                            drop(capability);
-                            drop(permit);
-                            self.retained_state = Some(RetainedModelCallExecutionState {
+                    Ok(ModelCallAuthorizationReread::Prepared) => {
+                        drop(capability);
+                        drop(permit);
+                        return Err(ModelCallExecutionError::Authorization(error));
+                    }
+                    Ok(ModelCallAuthorizationReread::InFlight(authorized)) => {
+                        drop(capability);
+                        drop(permit);
+                        let non_consumption = authorized
+                            .observation_correlation()
+                            .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
+                        return self
+                            .commit_terminal_observation(session, non_consumption, Box::new([]))
+                            .await;
+                    }
+                    Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
+                        drop(capability);
+                        drop(permit);
+                        let cancellation = stopped
+                            .observation_correlation()
+                            .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
+                        return self
+                            .commit_terminal_observation(session, cancellation, Box::new([]))
+                            .await;
+                    }
+                    Ok(ModelCallAuthorizationReread::Cancelled) => {
+                        drop(capability);
+                        drop(permit);
+                        return Ok(ModelCallExecutionOutcome::NoWork);
+                    }
+                    Err(reread_error) => {
+                        drop(capability);
+                        drop(permit);
+                        self.retained_state = Some(RetainedModelCallExecutionState {
                             state:
                                 RetainedModelCallExecutionStateKind::AuthorizationNonConsumption {
                                     session,
                                     prepared: Box::new(prepared_request),
                                 },
                         });
-                            return Err(ModelCallExecutionError::AuthorizationReread {
-                                authorization_error: error,
-                                reread_error,
-                            });
-                        }
+                        return Err(ModelCallExecutionError::AuthorizationReread {
+                            authorization_error: error,
+                            reread_error,
+                        });
                     }
                 }
-                Err(error) => return Err(ModelCallExecutionError::Authorization(error)),
-            };
+            }
+            Err(error) => return Err(ModelCallExecutionError::Authorization(error)),
+        };
         let acceptance_possible = move || drop(permit);
         let invocation_cancellation = self.authorization.cancellation_signal(session, call);
         let observation = self
@@ -1689,7 +1679,7 @@ where
             observation.observation(),
             dangerous_tool_auto_approval,
             &advertised_tools,
-            &armed_user_overrides,
+            &recorded_user_overrides,
         );
         self.commit_terminal_observation(session, observation, tool_approvals)
             .await
@@ -1917,12 +1907,12 @@ where
         ModelCallTerminalIdentityCandidates::Exact(exact)
     }
 
-    /// Selects one initial approval per proposal, consuming armed user
+    /// Selects one initial approval per proposal, consuming recorded user
     /// overrides.
     ///
-    /// An armed override substitutes for the judge only where the judge would
+    /// An recorded override substitutes for the judge only where the judge would
     /// otherwise decide: the base selection must be `Delegated`, and the
-    /// proposal must re-propose the exact denied command. Each armed override
+    /// proposal must re-propose the exact denied command. Each recorded override
     /// is consumed at most once per response — a second identical proposal
     /// parks for the judge again — mirroring the one-shot uniqueness the
     /// decision table enforces durably.
@@ -1931,13 +1921,13 @@ where
         observation: &ModelCallTerminalObservation,
         posture: DangerousToolAutoApproval,
         advertised_tools: &[ToolDefinition],
-        armed_user_overrides: &[ArmedUserOverride],
+        recorded_user_overrides: &[RecordedUserOverride],
     ) -> Box<[InitialToolApproval]> {
         let ModelCallTerminalObservation::CompletedWithTools { response } = observation else {
             return Box::new([]);
         };
-        let mut remaining_overrides: Vec<&ArmedUserOverride> =
-            armed_user_overrides.iter().collect();
+        let mut remaining_overrides: Vec<&RecordedUserOverride> =
+            recorded_user_overrides.iter().collect();
         response
             .parts()
             .iter()
@@ -1953,13 +1943,13 @@ where
                     }
                     let matched = remaining_overrides
                         .iter()
-                        .position(|armed| armed.matches_proposal(proposal));
+                        .position(|recorded| recorded.matches_proposal(proposal));
                     Some(match matched {
                         Some(index) => {
-                            let armed = remaining_overrides.remove(index);
+                            let recorded = remaining_overrides.remove(index);
                             InitialToolApproval::UserOverride {
-                                command: armed.command(),
-                                denied_request: armed.denied_request(),
+                                command: recorded.command(),
+                                denied_request: recorded.denied_request(),
                             }
                         }
                         None => base,
@@ -2491,7 +2481,7 @@ mod tests {
             request: Box::new(request),
             credential_reference: credential_reference(),
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
-            armed_user_overrides: Box::new([]),
+            recorded_user_overrides: Box::new([]),
             system_prompt: None,
             tool_entries: Box::new([]),
         }
@@ -2507,7 +2497,7 @@ mod tests {
             request: Box::new(request),
             credential_reference: credential_reference(),
             dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
-            armed_user_overrides: Box::new([]),
+            recorded_user_overrides: Box::new([]),
             system_prompt: None,
             tool_entries,
         }
@@ -3405,10 +3395,7 @@ mod tests {
             self.outcomes
                 .pop_front()
                 .expect("one fake authorization outcome")
-                .map(|authorized| AuthorizeModelCallOutcome::Authorized {
-                    call: Box::new(authorized),
-                    armed_user_overrides: Box::new([]),
-                })
+                .map(|authorized| AuthorizeModelCallOutcome::Authorized(Box::new(authorized)))
         }
 
         async fn reread_after_ambiguous_commit(
@@ -3740,23 +3727,23 @@ mod tests {
         );
     }
 
-    /// The seeds of the canonical armed-override fixture; arbitrary — they
-    /// only need to exist as one recorded arming.
-    const ARMED_COMMAND_SEED: u128 = 81;
-    const ARMED_DENIED_REQUEST_SEED: u128 = 82;
-    const ARMED_JUDGE_CALL_SEED: u128 = 83;
+    /// The seeds of the canonical recorded-override fixture; arbitrary — they
+    /// only need to exist as one recorded override.
+    const OVERRIDE_COMMAND_SEED: u128 = 81;
+    const OVERRIDE_DENIED_REQUEST_SEED: u128 = 82;
+    const OVERRIDE_JUDGE_CALL_SEED: u128 = 83;
 
-    /// One armed override of a denied `guarded` proposal with `{}` arguments
+    /// One recorded override of a denied `guarded` proposal with `{}` arguments
     /// in the canonical fixture session.
-    fn armed_guarded_override() -> signalbox_domain::ArmedUserOverride {
-        signalbox_domain::ArmedUserOverride::new(
+    fn recorded_guarded_override() -> signalbox_domain::RecordedUserOverride {
+        signalbox_domain::RecordedUserOverride::new(
             identity(
-                ARMED_COMMAND_SEED,
+                OVERRIDE_COMMAND_SEED,
                 signalbox_domain::DurableCommandId::from_uuid,
             ),
             identity(1, SessionId::from_uuid),
-            identity(ARMED_DENIED_REQUEST_SEED, ToolRequestId::from_uuid),
-            identity(ARMED_JUDGE_CALL_SEED, ModelCallId::from_uuid),
+            identity(OVERRIDE_DENIED_REQUEST_SEED, ToolRequestId::from_uuid),
+            identity(OVERRIDE_JUDGE_CALL_SEED, ModelCallId::from_uuid),
             signalbox_domain::ToolName::try_new(String::from("guarded"))
                 .expect("fixture tool name is valid"),
             signalbox_domain::NormalizedToolArguments::try_from_provider_text(String::from("{}"))
@@ -3790,7 +3777,7 @@ mod tests {
     fn guarded_tool_approvals(
         posture: signalbox_domain::ToolApprovalPosture,
         parts: Vec<AssistantResponsePart>,
-        armed: &[signalbox_domain::ArmedUserOverride],
+        recorded: &[signalbox_domain::RecordedUserOverride],
     ) -> Box<[InitialToolApproval]> {
         let schema =
             crate::ToolInputSchema::try_new(String::from(r#"{"properties":{},"type":"object"}"#))
@@ -3827,69 +3814,69 @@ mod tests {
             &completed_with_tools(parts),
             DangerousToolAutoApproval::Disabled,
             &advertised_tools,
-            armed,
+            recorded,
         )
     }
 
-    /// S10 / INV-020: an armed override substitutes for the judge only on the
+    /// S10 / INV-020: a recorded override substitutes for the judge only on the
     /// exact denied command — a proposal with other arguments still parks for
-    /// the judge — and the selected approval carries the arming command and
+    /// the judge — and the selected approval carries the override command and
     /// the overridden denial.
     #[test]
-    fn s10_inv020_armed_override_substitutes_for_the_judge_on_the_exact_command() {
-        let armed = armed_guarded_override();
+    fn s10_inv020_recorded_override_substitutes_for_the_judge_on_the_exact_command() {
+        let recorded = recorded_guarded_override();
         let approvals = guarded_tool_approvals(
             signalbox_domain::ToolApprovalPosture::Delegated,
             vec![
                 guarded_proposal("{}"),
                 guarded_proposal(r#"{"timezone":"UTC"}"#),
             ],
-            std::slice::from_ref(&armed),
+            std::slice::from_ref(&recorded),
         );
 
         assert_eq!(
             approvals.as_ref(),
             [
                 InitialToolApproval::UserOverride {
-                    command: armed.command(),
-                    denied_request: armed.denied_request(),
+                    command: recorded.command(),
+                    denied_request: recorded.denied_request(),
                 },
                 InitialToolApproval::Delegated,
             ]
         );
     }
 
-    /// S10 / INV-020: one armed override pre-approves at most one proposal
+    /// S10 / INV-020: one recorded override pre-approves at most one proposal
     /// per response; a second identical proposal parks for the judge again.
     #[test]
-    fn s10_inv020_armed_override_is_consumed_at_most_once_per_response() {
-        let armed = armed_guarded_override();
+    fn s10_inv020_recorded_override_is_consumed_at_most_once_per_response() {
+        let recorded = recorded_guarded_override();
         let approvals = guarded_tool_approvals(
             signalbox_domain::ToolApprovalPosture::Delegated,
             vec![guarded_proposal("{}"), guarded_proposal("{}")],
-            std::slice::from_ref(&armed),
+            std::slice::from_ref(&recorded),
         );
 
         assert_eq!(
             approvals.as_ref(),
             [
                 InitialToolApproval::UserOverride {
-                    command: armed.command(),
-                    denied_request: armed.denied_request(),
+                    command: recorded.command(),
+                    denied_request: recorded.denied_request(),
                 },
                 InitialToolApproval::Delegated,
             ]
         );
     }
 
-    /// S10 / INV-020: an armed override substitutes only where the judge
+    /// S10 / INV-020: a recorded override substitutes only where the judge
     /// would decide; a human-frozen selection is never overridden.
     #[test]
-    fn s10_inv020_armed_override_never_bypasses_a_human_selection() {
+    fn s10_inv020_recorded_override_never_bypasses_a_human_selection() {
         let approvals = guarded_tool_approvals(
             signalbox_domain::ToolApprovalPosture::Human,
             vec![guarded_proposal("{}")],
-            &[armed_guarded_override()],
+            &[recorded_guarded_override()],
         );
 
         assert_eq!(approvals.as_ref(), [InitialToolApproval::Human]);
@@ -4883,7 +4870,7 @@ mod tests {
                     request: Box::new(request.clone()),
                     credential_reference: credential_reference(),
                     dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
-                    armed_user_overrides: Box::new([]),
+                    recorded_user_overrides: Box::new([]),
                     system_prompt: Some(prompt.clone()),
                     tool_entries: Box::new([]),
                 })]

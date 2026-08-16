@@ -22,9 +22,9 @@ The `AlwaysConfirm` interaction with an explicitly configured approval posture �
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
 
-The user override of a delegate denial — its arming command, the armed one-shot
-pre-approval, and the `UserOverride` decision source — is verified against this
-PR (`agent/user-override-denials`).
+The user override of a delegate denial — its override command, the recorded
+one-shot pre-approval, and the `UserOverride` decision source — is verified
+against this PR (`agent/user-override-denials`).
 
 The change-request-scoped thread mutation contracts and their pre-dispatch
 ownership confirmation are verified through this PR (`agent/thread-ownership`).
@@ -129,13 +129,13 @@ implemented decision sources are:
 - `SessionOverride` — an exact runner-placement tool override supplied automatic
   approval;
 - `Delegate` — an authority-checked approval-judge call decided the request; and
-- `UserOverride` — a user-armed one-shot override of a delegate denial supplied
-  approval when the session re-proposed the denied command.
+- `UserOverride` — a user-recorded one-shot override of a delegate denial
+  supplied approval when the session re-proposed the denied command.
 
 A delegated decision names the exact direct model selection and dedicated model
 call that made it, and retains the judge rationale as nonempty text of at most
 4,096 bytes. A user decision instead names its exact durable command. A consumed
-user override names its arming durable command and the exact delegate-denied
+user override names its override durable command and the exact delegate-denied
 request it overrides — user agency exercised in advance through that command.
 Automatic policy has no decider or rationale. Neither automated path can claim
 user agency (INV-020).
@@ -263,38 +263,48 @@ denial is terminal (INV-027), and the session naturally re-proposes after a
 denial because the denial reason reaches the model at the continuation boundary.
 The canonical `OverrideDeniedToolRequest` command — user-global
 `DurableCommandId`, the owning `SessionId`, and the exact denied
-`ToolRequestId`; equality excludes only the command identifier — arms one
-one-shot pre-approval for that re-proposal. Arming verifies every conjunct of
+`ToolRequestId`; equality excludes only the command identifier — records one
+one-shot pre-approval for that re-proposal. Recording verifies every conjunct of
 the override predicate against durable evidence, each with its own recorded
 rejection: the recorded approval is a delegate denial (a user denial or any
 approval admits no override), the denial is terminal (its denied-result entry is
 materialized, so a denial whose round is still resolving cannot be overridden),
-the request belongs to the command's session, and no override is already armed
-for it — each denial admits at most one override ever. The session is part of
-the canonical payload, unlike `decide_tool_request`, because the armed override
-is a session-scoped standing fact consumed by a later proposal. An applied
-command durably links the denied request, its denying judge call, and the arming
-command.
+the request belongs to the command's session, and no override is already
+recorded for it — each denial admits at most one override ever. The session is
+part of the canonical payload, unlike `decide_tool_request`, because the
+recorded override is a session-scoped standing fact consumed by a later
+proposal. An applied command durably links the denied request, its denying judge
+call, and the override command.
 
-Armed overrides are frozen into each model call before send, alongside the
-dangerous blanket posture, so consumption has blanket-frozen semantics with no
-mid-call races. Checkpointing freezes overrides already armed; when a denial
-becomes terminal by checkpointing its continuation immediately before the user
-can arm the override, the arming transaction adds it to that current unsent
-prepared call. An override armed after a call is sent takes effect at the next
-prepared call. When the completing call proposes a command whose initial
-selection would park for the judge (`Delegated`) and an unconsumed armed
-override matches the exact denied command — equal tool name and equal normalized
-arguments — the proposal records an immediate `UserOverride` approval at
-proposal time instead of parking. Each armed override is consumed at most once
-per response in proposal order, and once ever durably: the consuming decision
-row names the overridden denial through a UNIQUE column, so a second identical
-proposal parks for the judge again. The override substitutes only for the judge:
-a `Human`, `AlwaysConfirm`, or automatic selection is never overridden, and the
-consuming request still freezes the `Delegated` posture. Consumption emits the
-same ordered `ToolApprovalDecided` event as other explicit decisions, carrying
-the override provenance, so the full audit chain — judge denial, override
-command, consuming approval — stays queryable end to end.
+Recorded overrides are frozen into each prepared model call in the same
+transaction as the dangerous blanket posture, so consumption has blanket-frozen
+semantics with no mid-call races: a prepared call's override inventory is part
+of that call's immutable input, and an override recorded after the call is
+checkpointed takes effect at the next prepared call, never at that one.
+
+The continuation that first carries a denial to the model is therefore out of
+reach by design, and this is the boundary of the feature rather than a gap in
+it. That continuation is checkpointed by the same transaction that projects the
+denied result, so at the instant its override inventory freezes no override for
+the denial can exist — the user has not yet been shown the denial to disagree
+with. The user overrides it, the model re-proposes on the following call, and
+that call's frozen inventory carries the override. The accepted cost is one
+extra round; the gain is that a prepared call's approval inputs are fixed at
+checkpoint and no concurrent command can race them.
+
+When the completing call proposes a command whose initial selection would park
+for the judge (`Delegated`) and an unconsumed recorded override matches the
+exact denied command — equal tool name and equal normalized arguments — the
+proposal records an immediate `UserOverride` approval at proposal time instead
+of parking. Each recorded override is consumed at most once per response in
+proposal order, and once ever durably: the consuming decision row names the
+overridden denial through a UNIQUE column, so a second identical proposal parks
+for the judge again. The override substitutes only for the judge: a `Human`,
+`AlwaysConfirm`, or automatic selection is never overridden, and the consuming
+request still freezes the `Delegated` posture. Consumption emits the same
+ordered `ToolApprovalDecided` event as other explicit decisions, carrying the
+override provenance, so the full audit chain — judge denial, override command,
+consuming approval — stays queryable end to end.
 
 ## Registry, placement, and effect metadata
 
@@ -1266,8 +1276,8 @@ reconstructing provider history in frontier order; it performs no per-entry
 database round trips while holding the scheduler lock.
 
 `DecideToolRequest` joins the user-global durable-command registry as its own
-typed record family, and `OverrideDeniedToolRequest` likewise; the armed
-override row, its arming and consumption triggers, and the UNIQUE consumption
+typed record family, and `OverrideDeniedToolRequest` likewise; the recorded
+override row, its recording and consumption triggers, and the UNIQUE consumption
 column are owned by
 [persistence protocol](persistence-protocol.md#relational-representation).
 Adding the dangerous posture originally advanced each defaults-bearing command

@@ -98,7 +98,7 @@ pub trait DecideToolRequestTransaction {
         NextAttempt: FnMut() -> TurnAttemptId + Send;
 }
 
-/// Transaction arming one replay-safe user override of a delegate denial.
+/// Transaction recording one replay-safe user override of a delegate denial.
 pub trait OverrideDeniedToolRequestTransaction {
     /// Adapter-specific classified failure.
     type Error: ClassifyOperatorFailure;
