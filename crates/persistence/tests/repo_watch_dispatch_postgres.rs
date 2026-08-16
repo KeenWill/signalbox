@@ -14,22 +14,23 @@ use signalbox_application::{
     RepoWatchTemplateResolver, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
 };
 use signalbox_domain::{
-    BranchName, CheckConclusion, CommitSha, DangerousToolAutoApproval, DescendantTerminationScope,
-    DirectModelSelection, DurableCommandId, GitHubObjectId, GoalCommandResult, GoalModelProvenance,
-    GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction,
-    GoalUserCommand, MergeableState, ModelSelectionRequest, PullRequestBody,
-    PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
-    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId,
-    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchMatcherV1,
-    RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
-    RepoWatchRuleId, RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt, RepositorySlug,
-    SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
-    SessionTemplateName, SessionTemplateProvenance, ToolRequestId, TurnId, UserContent,
-    WorkflowName,
+    AcceptedInputId, BranchName, CheckConclusion, CommitSha, DangerousToolAutoApproval,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId, GitHubObjectId,
+    GoalCommandResult, GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance,
+    GoalState, GoalStatement, GoalUserAction, GoalUserCommand, MergeableState,
+    ModelSelectionRequest, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
+    PullRequestNumber, PullRequestTitle, RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent,
+    RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
+    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt,
+    RepositorySlug, SessionConfigurationDefaults, SessionId, SessionSystemPrompt,
+    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance, ToolRequestId,
+    TurnId, UserContent, WorkflowName,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
+    goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
@@ -95,6 +96,11 @@ const STOPPED_TERMINAL_OPENED_EVENT_ID: u128 = 0x59_000;
 const STOPPED_TERMINAL_MERGED_EVENT_ID: u128 = 0x59_100;
 const STOPPED_TERMINAL_STOP_COMMAND_ID: u128 = 0x59_200;
 const TERMINATION_RACE_STOP_COMMAND_ID: u128 = 0x59_300;
+const SUCCESSOR_GOAL_ATTACH_COMMAND_ID: u128 = 0x59_400;
+const SUCCESSOR_GOAL_STOP_COMMAND_ID: u128 = 0x59_500;
+const RELEASED_ACHIEVEMENT_REQUEST_ID: u128 = 0x59_600;
+const SUCCESSOR_GOAL_INPUT_ID: u128 = 0x59_700;
+const SUCCESSOR_GOAL_TURN_ID: u128 = 0x59_800;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -1500,6 +1506,41 @@ async fn achievement_after_a_head_change_requeues_once_and_then_seals() -> Resul
         0,
         "the successor already carried the current head, so its achievement seals"
     );
+    Ok(())
+}
+
+/// A released batch has already accounted for its dispatched work. Its session
+/// may afterwards accept an unrelated successor goal, whose own termination
+/// reaches the release trigger through the same action link; owing a requeue for
+/// that generation would redispatch an event that already converged.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_successor_goal_on_a_released_dispatch_owes_nothing() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    declare_dispatched_goal_achieved(&fixture, 0, RELEASED_ACHIEVEMENT_REQUEST_ID).await?;
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(SUCCESSOR_GOAL_ATTACH_COMMAND_ID)),
+                    session,
+                    GoalUserAction::Attach(GoalStatement::try_new(String::from(
+                        "an unrelated successor goal for this session",
+                    ))?),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(SUCCESSOR_GOAL_INPUT_ID)),
+                    TurnId::from_uuid(Uuid::from_u128(SUCCESSOR_GOAL_TURN_ID)),
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+    withdraw_dispatched_goal(&fixture.pool, session, SUCCESSOR_GOAL_STOP_COMMAND_ID).await?;
+
+    assert_eq!(release_count(&fixture).await?, 1);
+    assert_eq!(outstanding_obligation_count(&fixture.pool).await?, 0);
     Ok(())
 }
 

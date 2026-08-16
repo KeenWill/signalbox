@@ -99,15 +99,17 @@ AS $$
     );
 $$;
 
-CREATE OR REPLACE FUNCTION repo_watch_release_completed_dispatch_batches_for_turn(
-    completed_turn_id uuid,
+-- Owes one requeue for a terminating dispatch, or nothing when its delivered
+-- state already converged. Separated from release so that the upgrade pass over
+-- already-released batches replays exactly this predicate rather than a copy.
+CREATE FUNCTION repo_watch_owe_dispatch_requeue(
+    candidate_dispatch_id uuid,
     completed_session_id uuid
 )
 RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    candidate_dispatch_id uuid;
     candidate_repository text;
     candidate_rule_id text;
     candidate_rule_version bigint;
@@ -121,144 +123,173 @@ BEGIN
      ORDER BY current_goal.event_ordinal DESC
      LIMIT 1;
 
+    SELECT origin.repository, batch.rule_id, batch.rule_version,
+           repo_watch_dispatch_singleton_lock_key(
+                batch.rule_id,
+                batch.rule_version,
+                batch.singleton_scope,
+                batch.singleton_repository,
+                batch.singleton_pull_request_number,
+                batch.singleton_stack_root_pull_request_number
+           )
+      INTO candidate_repository, candidate_rule_id, candidate_rule_version,
+           candidate_singleton_key
+      FROM repo_watch_dispatch_batch AS batch
+      JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
+     WHERE batch.dispatch_id = candidate_dispatch_id;
+
+    -- Termination runs inside the transaction that ends the goal, which
+    -- already holds that session's row. Lifecycle-cutoff processing takes
+    -- the repository advisory key and then waits for the same session row,
+    -- so taking the repository key here would invert that order and deadlock
+    -- a goal pass against a cutoff attempt. Termination therefore takes only
+    -- keys no repository-key holder waits behind a session row for.
+    --
+    -- Fresh evaluation and obligation admission take the singleton key, so a
+    -- match racing this termination waits and then joins the obligation
+    -- through its settle-guarded update, rather than aborting on the
+    -- active-singleton index. Deactivation is serialized by row: inserting
+    -- into repo_watch_rule_deactivation takes a key-share lock on the
+    -- activation row this locks exclusively, so the two cannot both pass
+    -- their checks against a snapshot predating the other's row.
+    PERFORM pg_advisory_xact_lock(hashtextextended(candidate_singleton_key, 0));
+
+    PERFORM 1
+      FROM repo_watch_rule_activation AS activation
+     WHERE activation.repository = candidate_repository
+       AND activation.rule_id = candidate_rule_id
+       AND activation.rule_version = candidate_rule_version
+       FOR UPDATE;
+
+    -- A terminal session leaves the current dispatch state owed unless it
+    -- achieved against state that is still current. The active-singleton
+    -- index collapses sibling terminations and preserves any later matching
+    -- event already recorded by ordinary evaluation.
+    INSERT INTO repo_watch_dispatch_obligation
+        (obligation_id, repository, rule_id, rule_version,
+         singleton_scope, singleton_repository, singleton_pull_request_number,
+         singleton_stack_root_pull_request_number, first_repository,
+         first_event_id, latest_event_id, matched_event_count,
+         blocking_dispatch_id)
+    SELECT gen_random_uuid(), origin.repository, batch.rule_id,
+           batch.rule_version, batch.singleton_scope,
+           batch.singleton_repository, batch.singleton_pull_request_number,
+           batch.singleton_stack_root_pull_request_number, origin.repository,
+           origin.event_id, origin.event_id, 1, batch.dispatch_id
+      FROM repo_watch_dispatch_batch AS batch
+      JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
+      JOIN repo_watch_event AS delivered
+        ON delivered.event_id
+            = coalesce(batch.delivered_state_event_id, batch.event_id)
+     WHERE batch.dispatch_id = candidate_dispatch_id
+       AND EXISTS (
+            SELECT 1
+              FROM repo_watch_dispatch_action AS action
+             WHERE action.dispatch_id = batch.dispatch_id
+               AND action.session_id = completed_session_id
+       )
+       AND terminal_goal_kind IN ('blocked', 'achieved', 'user_stopped')
+       -- A branch target carries no durable revision at all: its only event
+       -- kind records a workflow conclusion, so achievement is its own seal.
+       -- A pull-request target seals only when the state this batch
+       -- delivered is still the pull request's latest durable head.
+       AND NOT (
+            terminal_goal_kind = 'achieved'
+            AND (
+                origin.target_kind <> 'pull_request'
+                OR delivered.head_sha = (
+                    SELECT current_state.head_sha
+                      FROM repo_watch_event AS current_state
+                     WHERE current_state.repository = origin.repository
+                       AND current_state.pull_request_number
+                            = origin.pull_request_number
+                     ORDER BY current_state.cursor_generation DESC,
+                              current_state.event_ordinal DESC
+                     LIMIT 1
+                )
+            )
+       )
+       AND NOT EXISTS (
+            SELECT 1
+              FROM repo_watch_rule_deactivation AS deactivation
+             WHERE deactivation.repository = origin.repository
+               AND deactivation.rule_id = batch.rule_id
+               AND deactivation.rule_version = batch.rule_version
+       )
+       -- A later close or merge makes outstanding work stale. The cutoff
+       -- event itself is the fact a rule may match, not work invalidated by
+       -- that fact, so a dispatch of the latest cutoff keeps its requeue.
+       AND (
+            origin.target_kind <> 'pull_request'
+            OR EXISTS (
+                SELECT 1
+                  FROM (
+                        SELECT lifecycle.event_id, lifecycle.event_kind
+                          FROM repo_watch_event AS lifecycle
+                         WHERE lifecycle.repository = origin.repository
+                           AND lifecycle.pull_request_number
+                                = origin.pull_request_number
+                           AND lifecycle.event_kind IN (
+                                'pull_request_opened',
+                                'pull_request_closed',
+                                'pull_request_merged'
+                           )
+                         ORDER BY lifecycle.cursor_generation DESC,
+                                  lifecycle.event_ordinal DESC
+                         LIMIT 1
+                  ) AS latest_lifecycle
+                 WHERE latest_lifecycle.event_kind = 'pull_request_opened'
+                    OR latest_lifecycle.event_id = origin.event_id
+            )
+       )
+    -- Only an active obligation on this singleton may absorb a termination.
+    -- A bare conflict clause would also swallow an identifier collision with
+    -- an already settled obligation and silently drop the requeue.
+    ON CONFLICT (rule_id, rule_version, singleton_scope, singleton_repository,
+                 singleton_pull_request_number,
+                 singleton_stack_root_pull_request_number)
+        WHERE settled_kind IS NULL
+    DO NOTHING;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION repo_watch_release_completed_dispatch_batches_for_turn(
+    completed_turn_id uuid,
+    completed_session_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    candidate_dispatch_id uuid;
+BEGIN
     FOR candidate_dispatch_id IN
         SELECT DISTINCT action.dispatch_id
           FROM repo_watch_dispatch_action AS action
          WHERE action.session_id = completed_session_id
          ORDER BY action.dispatch_id
     LOOP
-        SELECT origin.repository, batch.rule_id, batch.rule_version,
-               repo_watch_dispatch_singleton_lock_key(
-                    batch.rule_id,
-                    batch.rule_version,
-                    batch.singleton_scope,
-                    batch.singleton_repository,
-                    batch.singleton_pull_request_number,
-                    batch.singleton_stack_root_pull_request_number
-               )
-          INTO candidate_repository, candidate_rule_id, candidate_rule_version,
-               candidate_singleton_key
-          FROM repo_watch_dispatch_batch AS batch
-          JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
-         WHERE batch.dispatch_id = candidate_dispatch_id;
-
-        -- Termination runs inside the transaction that ends the goal, which
-        -- already holds that session's row. Lifecycle-cutoff processing takes
-        -- the repository advisory key and then waits for the same session row,
-        -- so taking the repository key here would invert that order and deadlock
-        -- a goal pass against a cutoff attempt. Termination therefore takes only
-        -- keys no repository-key holder waits behind a session row for.
-        --
-        -- Fresh evaluation and obligation admission take the singleton key, so a
-        -- match racing this termination waits and then joins the obligation
-        -- through its settle-guarded update, rather than aborting on the
-        -- active-singleton index. Deactivation is serialized by row: inserting
-        -- into repo_watch_rule_deactivation takes a key-share lock on the
-        -- activation row this locks exclusively, so the two cannot both pass
-        -- their checks against a snapshot predating the other's row.
-        PERFORM pg_advisory_xact_lock(hashtextextended(candidate_singleton_key, 0));
-
-        PERFORM 1
-          FROM repo_watch_rule_activation AS activation
-         WHERE activation.repository = candidate_repository
-           AND activation.rule_id = candidate_rule_id
-           AND activation.rule_version = candidate_rule_version
-           FOR UPDATE;
+        -- A released batch has already accounted for its dispatched work. The
+        -- session may afterwards accept an unrelated successor goal, whose own
+        -- termination reaches this trigger through the same action link; owing a
+        -- requeue for it would redispatch a repository-watch event that already
+        -- converged. The release below is written after this call, so a batch
+        -- releasing now is still unreleased here.
+        IF NOT EXISTS (
+            SELECT 1
+              FROM repo_watch_dispatch_release AS released
+             WHERE released.dispatch_id = candidate_dispatch_id
+        ) THEN
+            PERFORM repo_watch_owe_dispatch_requeue(
+                candidate_dispatch_id,
+                completed_session_id
+            );
+        END IF;
 
         PERFORM 1
           FROM repo_watch_dispatch_batch AS locked_batch
          WHERE locked_batch.dispatch_id = candidate_dispatch_id
            FOR UPDATE;
-
-        -- A terminal session leaves the current dispatch state owed unless it
-        -- achieved against state that is still current. The active-singleton
-        -- index collapses sibling terminations and preserves any later matching
-        -- event already recorded by ordinary evaluation.
-        INSERT INTO repo_watch_dispatch_obligation
-            (obligation_id, repository, rule_id, rule_version,
-             singleton_scope, singleton_repository, singleton_pull_request_number,
-             singleton_stack_root_pull_request_number, first_repository,
-             first_event_id, latest_event_id, matched_event_count,
-             blocking_dispatch_id)
-        SELECT gen_random_uuid(), origin.repository, batch.rule_id,
-               batch.rule_version, batch.singleton_scope,
-               batch.singleton_repository, batch.singleton_pull_request_number,
-               batch.singleton_stack_root_pull_request_number, origin.repository,
-               origin.event_id, origin.event_id, 1, batch.dispatch_id
-          FROM repo_watch_dispatch_batch AS batch
-          JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
-          JOIN repo_watch_event AS delivered
-            ON delivered.event_id
-                = coalesce(batch.delivered_state_event_id, batch.event_id)
-         WHERE batch.dispatch_id = candidate_dispatch_id
-           AND EXISTS (
-                SELECT 1
-                  FROM repo_watch_dispatch_action AS action
-                 WHERE action.dispatch_id = batch.dispatch_id
-                   AND action.session_id = completed_session_id
-           )
-           AND terminal_goal_kind IN ('blocked', 'achieved', 'user_stopped')
-           -- A branch target carries no durable revision at all: its only event
-           -- kind records a workflow conclusion, so achievement is its own seal.
-           -- A pull-request target seals only when the state this batch
-           -- delivered is still the pull request's latest durable head.
-           AND NOT (
-                terminal_goal_kind = 'achieved'
-                AND (
-                    origin.target_kind <> 'pull_request'
-                    OR delivered.head_sha = (
-                        SELECT current_state.head_sha
-                          FROM repo_watch_event AS current_state
-                         WHERE current_state.repository = origin.repository
-                           AND current_state.pull_request_number
-                                = origin.pull_request_number
-                         ORDER BY current_state.cursor_generation DESC,
-                                  current_state.event_ordinal DESC
-                         LIMIT 1
-                    )
-                )
-           )
-           AND NOT EXISTS (
-                SELECT 1
-                  FROM repo_watch_rule_deactivation AS deactivation
-                 WHERE deactivation.repository = origin.repository
-                   AND deactivation.rule_id = batch.rule_id
-                   AND deactivation.rule_version = batch.rule_version
-           )
-           -- A later close or merge makes outstanding work stale. The cutoff
-           -- event itself is the fact a rule may match, not work invalidated by
-           -- that fact, so a dispatch of the latest cutoff keeps its requeue.
-           AND (
-                origin.target_kind <> 'pull_request'
-                OR EXISTS (
-                    SELECT 1
-                      FROM (
-                            SELECT lifecycle.event_id, lifecycle.event_kind
-                              FROM repo_watch_event AS lifecycle
-                             WHERE lifecycle.repository = origin.repository
-                               AND lifecycle.pull_request_number
-                                    = origin.pull_request_number
-                               AND lifecycle.event_kind IN (
-                                    'pull_request_opened',
-                                    'pull_request_closed',
-                                    'pull_request_merged'
-                               )
-                             ORDER BY lifecycle.cursor_generation DESC,
-                                      lifecycle.event_ordinal DESC
-                             LIMIT 1
-                      ) AS latest_lifecycle
-                     WHERE latest_lifecycle.event_kind = 'pull_request_opened'
-                        OR latest_lifecycle.event_id = origin.event_id
-                )
-           )
-        -- Only an active obligation on this singleton may absorb a termination.
-        -- A bare conflict clause would also swallow an identifier collision with
-        -- an already settled obligation and silently drop the requeue.
-        ON CONFLICT (rule_id, rule_version, singleton_scope, singleton_repository,
-                     singleton_pull_request_number,
-                     singleton_stack_root_pull_request_number)
-            WHERE settled_kind IS NULL
-        DO NOTHING;
 
         INSERT INTO repo_watch_dispatch_release (dispatch_id, released_at)
         SELECT batch.dispatch_id, clock_timestamp()
@@ -323,24 +354,33 @@ $$;
 -- terminal goal event does not fire its trigger again. A dispatch that released
 -- non-converged under the superseded behavior — including the held batches
 -- 202608140100_repo_watch_dispatch_release.sql released in its own data pass —
--- would otherwise lose exactly the work this migration exists to retain. Replay
--- the corrected predicate over every already-released batch. The release insert
--- is idempotent, and the active-singleton index bounds the result to one
--- obligation per singleton.
+-- would otherwise lose exactly the work this migration retains.
+--
+-- Only historically blocked and user-stopped releases are replayed. A historical
+-- achievement converged against the head that was current at its own
+-- termination boundary, which this migration cannot reconstruct; comparing it
+-- against migration-time state would requeue automation that already succeeded.
 DO $$
 DECLARE
-    released_session_id uuid;
+    released_dispatch record;
 BEGIN
-    FOR released_session_id IN
-        SELECT DISTINCT action.session_id
+    FOR released_dispatch IN
+        SELECT DISTINCT action.dispatch_id, action.session_id
           FROM repo_watch_dispatch_action AS action
           JOIN repo_watch_dispatch_release AS released
             ON released.dispatch_id = action.dispatch_id
-         ORDER BY action.session_id
+         WHERE (
+                SELECT current_goal.event_kind
+                  FROM goal_event AS current_goal
+                 WHERE current_goal.session_id = action.session_id
+                 ORDER BY current_goal.event_ordinal DESC
+                 LIMIT 1
+         ) IN ('blocked', 'user_stopped')
+         ORDER BY action.dispatch_id, action.session_id
     LOOP
-        PERFORM repo_watch_release_completed_dispatch_batches_for_turn(
-            NULL::uuid,
-            released_session_id
+        PERFORM repo_watch_owe_dispatch_requeue(
+            released_dispatch.dispatch_id,
+            released_dispatch.session_id
         );
     END LOOP;
 END;
