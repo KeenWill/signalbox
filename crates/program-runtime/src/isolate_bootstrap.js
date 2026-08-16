@@ -20,3 +20,13 @@ Object.defineProperty(globalThis, "Intl", {
   writable: false,
   configurable: false,
 });
+Object.defineProperty(globalThis, "WeakRef", {
+  value: undefined,
+  writable: false,
+  configurable: false,
+});
+Object.defineProperty(globalThis, "FinalizationRegistry", {
+  value: undefined,
+  writable: false,
+  configurable: false,
+});

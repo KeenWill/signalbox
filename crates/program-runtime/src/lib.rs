@@ -396,7 +396,11 @@ impl ProgramHost {
             Ok(ReplayedRequest::DeliveryPending) => {
                 return Err(ProgramHostProtocolError::DeliveryPending.into());
             }
-            Err(divergence) => return Err(self.persist_divergence(divergence).await?),
+            Err(divergence) => {
+                return Err(self
+                    .persist_divergence(divergence, execution.durable_tail())
+                    .await?);
+            }
         }
         Ok(())
     }
@@ -404,10 +408,15 @@ impl ProgramHost {
     async fn persist_divergence(
         &self,
         divergence: NondeterminismError,
+        durable_tail: u64,
     ) -> Result<ProgramHostError, ProgramHostError> {
         let expected = Box::new(divergence.expected().clone());
         let observed = Box::new(divergence.observed().clone());
-        let fault = self.journal.append_nondeterminism_fault(divergence).await?;
+        let fault = self
+            .journal
+            .append_nondeterminism_fault_if_tail(divergence, durable_tail)
+            .await?
+            .ok_or(ProgramHostProtocolError::JournalTailChanged)?;
         Ok(ProgramHostError::Nondeterminism {
             expected,
             observed,

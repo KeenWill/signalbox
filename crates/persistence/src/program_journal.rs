@@ -322,6 +322,34 @@ impl ProgramJournalRepository {
         Ok(frame)
     }
 
+    /// Persists a replay divergence only when the caller's loaded tail is current.
+    pub async fn append_nondeterminism_fault_if_tail(
+        &self,
+        failure: NondeterminismError,
+        expected_last_position: u64,
+    ) -> Result<Option<DeliveryFrame>, ProgramJournalRepositoryError> {
+        let run = failure.run();
+        let mut transaction = self.pool.begin().await?;
+        let sequence = lock_sequence(&mut transaction, run).await?;
+        if sequence.last_position != expected_last_position {
+            return Ok(None);
+        }
+        let position = next_position(sequence.last_position)?;
+        let ordinal = next_delivery_ordinal(sequence.last_delivery)?;
+        let frame = DeliveryFrame::new(ordinal, DeliveryKind::Fault(failure.into_fault()));
+        insert_delivery(&mut transaction, run, position, &frame).await?;
+        advance_sequence(
+            &mut transaction,
+            run,
+            position.as_u64(),
+            sequence.last_request,
+            ordinal.as_u64(),
+        )
+        .await?;
+        commit(transaction).await?;
+        Ok(Some(frame))
+    }
+
     /// Loads and fail-closed reconstitutes a run's complete journal.
     pub async fn load(
         &self,

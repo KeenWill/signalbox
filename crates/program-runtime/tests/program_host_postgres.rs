@@ -9,8 +9,8 @@
 use std::{collections::VecDeque, error::Error, future::Future, pin::Pin};
 
 use signalbox_domain::{
-    DeliveryKind, InlineFramePayload, JournalFrame, ProgramFault, ProgramRunId, RequestFrame,
-    RequestKind, RequestOrdinal,
+    DeliveryKind, InlineFramePayload, JournalFrame, ProgramFault, ProgramRunId, ReplayCursor,
+    RequestFrame, RequestKind, RequestOrdinal,
 };
 use signalbox_persistence::{
     disposable_test_container_labels, local_test_connection_options, migrate,
@@ -317,6 +317,8 @@ async fn isolate_closes_intl_and_the_raw_request_op_before_artifact_evaluation()
     let artifact = ProgramArtifact::new(
         r#"
 globalThis.Intl === undefined || (() => { throw new Error("Intl reached the artifact"); })();
+globalThis.WeakRef === undefined || (() => { throw new Error("WeakRef reached the artifact"); })();
+globalThis.FinalizationRegistry === undefined || (() => { throw new Error("FinalizationRegistry reached the artifact"); })();
 globalThis.__signalboxProgramRequest === undefined || (() => { throw new Error("the raw request op reached the artifact"); })();
 "#,
     );
@@ -437,9 +439,24 @@ async fn stale_loaded_tail_cannot_append_or_mutate_the_journal() -> Result<(), B
             },
         )
         .await?;
+    let loaded = repository
+        .load(run)
+        .await?
+        .expect("the created journal stream exists");
+    let mut replay = ReplayCursor::new(loaded);
+    let divergence = replay
+        .submit_request(request(
+            1,
+            RequestKind::Random(payload(&[SECOND_LIVE_REQUEST_BYTE])),
+        ))
+        .expect_err("the different request kind must diverge");
+    let stale_fault = repository
+        .append_nondeterminism_fault_if_tail(divergence, 0)
+        .await?;
 
     assert_eq!(stale, None);
     assert_eq!(stale_delivery, None);
+    assert_eq!(stale_fault, None);
     let journal = repository
         .load(run)
         .await?
