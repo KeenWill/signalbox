@@ -177,10 +177,23 @@ batch. It serializes competing commits, appends the cursor and every event
 together, rolls back the whole batch on failure, reports a stale generation as
 conflict, and recognizes only an exact candidate-and-occurrence replay. An
 unchanged candidate with no events does not advance the cursor; an unchanged
-candidate carrying events is rejected. The relational event table admits an
-event row only in the database transaction that inserts its referenced cursor
-generation, preventing later maintenance or future writers from changing an
-already-committed batch.
+candidate carrying events is rejected.
+
+A commit coalesces an occurrence whose content identity is already durable for
+that repository under the same content, writing the cursor without a second row
+for it. A provider entity that leaves the observation and returns re-derives
+exactly that occurrence, with a fresh candidate identity but an equal content
+identity, and without coalescing the duplicate would abort the whole
+cursor-and-event transaction and leave the cursor at the entity-absent
+generation, so every later poll would repeat the same failure. Content equality
+excludes the random event identity, exactly as the digest does. An occurrence
+whose content identity is durable under different content is not coalesced: it
+is written, and the durable unique constraint rejects it. Replay detection
+compares against the batch the replayed generation would have stored, so a
+coalesced commit is still recognized as its own replay. The relational event
+table admits an event row only in the database transaction that inserts its
+referenced cursor generation, preventing later maintenance or future writers
+from changing an already-committed batch.
 
 **Implemented behavior.** `RepoWatchEventContentIdentityV1` is the exact shared
 content identity for a normalized event occurrence. It is a 32-byte SHA-256
@@ -217,17 +230,22 @@ repository.
 
 **Implemented behavior.** The content-identity migration rewrites every durable
 cursor to storage version two with an empty occurrence frontier, then all later
-poll commits carry and advance that frontier. Existing event rows cannot be
-reconstructed as the content occurrences the differ would emit, because their
-durable shape lacks every provider identity the differ uses and the frontier
-reset discards the sequence state their identities derive from. Dispatch rows
-reference those events under `ON DELETE RESTRICT`, so the migration carries them
-rather than discarding them: it assigns each a version-one identity under a hash
-domain reserved for the migration itself and disjoint from the differ's, so a
-carried row can never claim an identity a producer would also derive, and never
-matches one. Exactly one content-identity version is readable afterwards. The
-durable constraint and the decoder both admit version one alone, so no earlier
-event shape survives for a reader to accept.
+poll commits carry and advance that frontier. Event rows recorded before it
+cannot be reconstructed as the content occurrences the differ would emit,
+because their durable shape lacks every provider identity the differ uses and
+the frontier reset discards the sequence state their identities derive from.
+Dispatch rows reference those events under `ON DELETE RESTRICT`, so they are
+carried rather than discarded, and their identity is derived under a hash domain
+reserved for the migration itself and disjoint from the differ's: a carried row
+can never claim an identity a producer would also derive, and never matches one.
+
+The carry completes across two migrations, because the first was applied before
+its shape was settled and an applied migration is immutable. `202608150001`
+marked those rows content-identity version zero and admitted both versions;
+`202608170003` moves them to version one and narrows the durable constraint to
+version one alone. Exactly one content-identity version is readable once both
+have run. The durable constraint and the decoder admit version one alone, so no
+earlier event shape survives for a reader to accept.
 
 **Implemented behavior.** A pure differ compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities
