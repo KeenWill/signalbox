@@ -69,9 +69,9 @@ body, JSON tree, continuation, and bound before admitting it.
 
 ## Implemented adapter coverage
 
-| Family                 | Exact types                                                                    | Views     | Decoder and enforced exclusions                                                                                                                                                                                                                                                       |
-| ---------------------- | ------------------------------------------------------------------------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Archives / compression | `application/zip`, `application/x-tar`, `application/gzip`, `application/zstd` | `entries` | `zip` 8 (stored/Deflate; otherwise `unsupported_compression_method`), `tar` 0.4, `flate2` 1 (`zlib-rs`), `zstd` 0.13, only in `signalbox-file-media-archives-worker`; excludes extraction, execution, links, special TAR entries, recursion, passwords, and payload interpretation    |
+| Family                 | Exact types                                                                    | Views     | Decoder and enforced exclusions                                                                                                                                                                                                                                                    |
+| ---------------------- | ------------------------------------------------------------------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Archives / compression | `application/zip`, `application/x-tar`, `application/gzip`, `application/zstd` | `entries` | `zip` 8 (stored/Deflate; otherwise `unsupported_compression_method`), `tar` 0.4, `flate2` 1 (`zlib-rs`), `zstd` 0.13, only in `signalbox-file-media-archives-worker`; excludes extraction, execution, links, special TAR entries, recursion, passwords, and payload interpretation |
 
 ## Detection and validation
 
