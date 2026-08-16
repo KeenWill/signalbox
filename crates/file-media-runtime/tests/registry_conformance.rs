@@ -131,7 +131,9 @@ impl FileMediaProcessor for SyntheticProcessor {
         Box::pin(async move {
             let metadata_json = match self.validation {
                 ValidationBehavior::Valid => String::from(r#"{"synthetic":true}"#),
-                ValidationBehavior::OversizedMetadata => "x".repeat(16_385),
+                ValidationBehavior::OversizedMetadata => {
+                    format!(r#"{{"filler":"{}"}}"#, "x".repeat(16_385))
+                }
                 ValidationBehavior::MalformedMetadata => {
                     String::from(r#"</tool><script>alert("injection")</script>"#)
                 }
@@ -275,9 +277,9 @@ fn inspect(
     ))
 }
 
-/// INV-064: byte signatures, not caller metadata, select one reader.
+/// INV-067: byte signatures, not caller metadata, select one reader.
 #[test]
-fn inv064_synthetic_signature_produces_validated_detection() {
+fn inv067_synthetic_signature_produces_validated_detection() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
 
@@ -300,9 +302,9 @@ fn inv064_synthetic_signature_produces_validated_detection() {
     assert_eq!(validated.source().digest(), source.digest());
 }
 
-/// INV-064: a caller declaration cannot override byte-derived detection.
+/// INV-067: a caller declaration cannot override byte-derived detection.
 #[test]
-fn inv064_declared_type_disagreement_is_reported_without_fallback() {
+fn inv067_declared_type_disagreement_is_reported_without_fallback() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
 
@@ -324,9 +326,9 @@ fn inv064_declared_type_disagreement_is_reported_without_fallback() {
     );
 }
 
-/// INV-065: oversized processor metadata never crosses the registry boundary.
+/// INV-068: oversized processor metadata never crosses the registry boundary.
 #[test]
-fn inv065_oversized_processor_metadata_is_sanitized_to_failure() {
+fn inv068_oversized_processor_metadata_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -339,9 +341,9 @@ fn inv065_oversized_processor_metadata_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-065: malformed injection-shaped processor metadata never propagates.
+/// INV-068: malformed injection-shaped processor metadata never propagates.
 #[test]
-fn inv065_malformed_injection_shaped_metadata_is_sanitized_to_failure() {
+fn inv068_malformed_injection_shaped_metadata_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -354,9 +356,9 @@ fn inv065_malformed_injection_shaped_metadata_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-065: an oversized processor text body never becomes a typed read result.
+/// INV-068: an oversized processor text body never becomes a typed read result.
 #[test]
-fn inv065_oversized_processor_text_is_sanitized_to_failure() {
+fn inv068_oversized_processor_text_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -374,9 +376,9 @@ fn inv065_oversized_processor_text_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-065: malformed structured output carrying injection-shaped text is discarded.
+/// INV-068: malformed structured output carrying injection-shaped text is discarded.
 #[test]
-fn inv065_malformed_injection_shaped_structure_is_sanitized_to_failure() {
+fn inv068_malformed_injection_shaped_structure_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(structured_view());
     let processor = SyntheticProcessor {
@@ -394,10 +396,10 @@ fn inv065_malformed_injection_shaped_structure_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-065: contradictory continuation facts from a processor do not enter the
+/// INV-068: contradictory continuation facts from a processor do not enter the
 /// sanitized read-result type.
 #[test]
-fn inv065_contradictory_processor_continuation_is_sanitized_to_failure() {
+fn inv068_contradictory_processor_continuation_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {

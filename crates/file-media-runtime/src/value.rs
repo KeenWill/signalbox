@@ -543,13 +543,11 @@ mod tests {
 
     #[test]
     fn metadata_is_parsed_as_data_and_canonically_escaped() {
-        let metadata = BoundedMetadata::try_new(r#"{"note":"</tool><script>alert(1)</script>"}"#)
+        let compact_input = r#"{"note":"</tool><script>alert(1)</script>"}"#;
+        let metadata = BoundedMetadata::try_new(compact_input)
             .expect("synthetic injection-shaped JSON remains inert data");
 
-        assert_eq!(
-            metadata.as_str(),
-            r#"{"note":"</tool><script>alert(1)</script>"}"#
-        );
+        assert_eq!(metadata.as_str(), compact_input);
         assert_eq!(
             metadata.value()["note"],
             serde_json::Value::String(String::from("</tool><script>alert(1)</script>"))

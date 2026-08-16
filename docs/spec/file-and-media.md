@@ -51,7 +51,7 @@ duplicate per-reader types, views, or reason codes, absent or excessive probe
 and output bounds, contradictory image bounds, ambiguous streaming-text
 fallback, unavailable isolation when any provider is present, and any effective
 ceiling above the compiled version-one value. An empty registry is valid.
-Configuration can therefore disable providers or lower bounds but cannot add an
+Configuration can therefore disable providers or lower bounds but cannot add a
 media-type mapping, alias, executable, or precedence rule.
 
 An adapter author supplies one provider declaration with exact owned canonical
@@ -126,8 +126,8 @@ The raw processor enums deliberately carry strings and JSON text rather than
 checked registry values. Oversized, malformed, injection-shaped, cross-reader,
 unregistered-reason, wrong-output-kind, contradictory continuation, and
 excessively nested responses collapse to sanitized processor failure without
-partial success (INV-065). Detection uses generated synthetic bytes and
-byte-derived evidence independent of caller declaration (INV-064).
+partial success (INV-068). Detection uses generated synthetic bytes and
+byte-derived evidence independent of caller declaration (INV-067).
 
 **Committed unimplemented functionality.** The daemon-supervised fresh local
 worker, sandbox launch, source-read broker, framing, process resource
