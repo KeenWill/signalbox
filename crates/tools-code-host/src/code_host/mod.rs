@@ -1743,6 +1743,11 @@ mod tests {
         let schema = <CodeHostUrl as schemars::JsonSchema>::json_schema(
             &mut schemars::SchemaGenerator::default(),
         );
+        let mut schema = schema.to_value();
+        schema
+            .as_object_mut()
+            .expect("URL schema is an object")
+            .sort_keys();
 
         expect_test::expect![[r#"
             {
@@ -1751,7 +1756,7 @@ mod tests {
               "pattern": "^https://[^/@\\u0000-\\u0020\\u007F-\\u009F]+(?:[/?#]|$)",
               "type": "string"
             }"#]]
-        .assert_eq(&format!("{:#}", schema.to_value()));
+        .assert_eq(&format!("{schema:#}"));
     }
 
     /// Summary arguments decode into a checked repository and positive number.

@@ -7155,6 +7155,10 @@ finally:
             .expect("MCP initialization result is an object")
             .remove("capabilities")
             .expect("MCP initialization advertises capabilities");
+        initialized["result"]
+            .as_object_mut()
+            .expect("MCP initialization result is an object")
+            .sort_keys();
 
         expect![[r#"
             {

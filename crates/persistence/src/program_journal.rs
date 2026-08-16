@@ -205,6 +205,35 @@ impl ProgramJournalRepository {
         Ok(frame)
     }
 
+    /// Appends one request only when the caller's loaded tail is still current.
+    pub async fn append_request_if_tail(
+        &self,
+        run: ProgramRunId,
+        expected_last_position: u64,
+        scope: Option<ScopeOrdinal>,
+        kind: RequestKind,
+    ) -> Result<Option<RequestFrame>, ProgramJournalRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let sequence = lock_sequence(&mut transaction, run).await?;
+        if sequence.last_position != expected_last_position {
+            return Ok(None);
+        }
+        let position = next_position(sequence.last_position)?;
+        let ordinal = next_request_ordinal(sequence.last_request)?;
+        let frame = RequestFrame::new(ordinal, scope, kind);
+        insert_request(&mut transaction, run, position, &frame).await?;
+        advance_sequence(
+            &mut transaction,
+            run,
+            position.as_u64(),
+            ordinal.as_u64(),
+            sequence.last_delivery,
+        )
+        .await?;
+        commit(transaction).await?;
+        Ok(Some(frame))
+    }
+
     /// Appends one host delivery and allocates its durable delivery order.
     pub async fn append_delivery(
         &self,
@@ -215,6 +244,43 @@ impl ProgramJournalRepository {
         let frame = Self::append_delivery_in_transaction(&mut transaction, run, kind).await?;
         commit(transaction).await?;
         Ok(frame)
+    }
+
+    /// Appends one delivery only when the caller's loaded tail is still current.
+    pub async fn append_delivery_if_tail(
+        &self,
+        run: ProgramRunId,
+        expected_last_position: u64,
+        kind: DeliveryKind,
+    ) -> Result<Option<DeliveryFrame>, ProgramJournalRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let sequence = lock_sequence(&mut transaction, run).await?;
+        if sequence.last_position != expected_last_position {
+            return Ok(None);
+        }
+        if matches!(
+            kind,
+            DeliveryKind::Fault(ProgramFault::Nondeterminism { .. })
+        ) {
+            return Err(ProgramJournalCorruption::Inconsistent(
+                "nondeterminism fault without replay failure",
+            )
+            .into());
+        }
+        let position = next_position(sequence.last_position)?;
+        let ordinal = next_delivery_ordinal(sequence.last_delivery)?;
+        let frame = DeliveryFrame::new(ordinal, kind);
+        insert_delivery(&mut transaction, run, position, &frame).await?;
+        advance_sequence(
+            &mut transaction,
+            run,
+            position.as_u64(),
+            sequence.last_request,
+            ordinal.as_u64(),
+        )
+        .await?;
+        commit(transaction).await?;
+        Ok(Some(frame))
     }
 
     /// Appends a delivery inside the transaction that owns its consequence.
@@ -254,6 +320,34 @@ impl ProgramJournalRepository {
         .await?;
         commit(transaction).await?;
         Ok(frame)
+    }
+
+    /// Persists a replay divergence only when the caller's loaded tail is current.
+    pub async fn append_nondeterminism_fault_if_tail(
+        &self,
+        failure: NondeterminismError,
+        expected_last_position: u64,
+    ) -> Result<Option<DeliveryFrame>, ProgramJournalRepositoryError> {
+        let run = failure.run();
+        let mut transaction = self.pool.begin().await?;
+        let sequence = lock_sequence(&mut transaction, run).await?;
+        if sequence.last_position != expected_last_position {
+            return Ok(None);
+        }
+        let position = next_position(sequence.last_position)?;
+        let ordinal = next_delivery_ordinal(sequence.last_delivery)?;
+        let frame = DeliveryFrame::new(ordinal, DeliveryKind::Fault(failure.into_fault()));
+        insert_delivery(&mut transaction, run, position, &frame).await?;
+        advance_sequence(
+            &mut transaction,
+            run,
+            position.as_u64(),
+            sequence.last_request,
+            ordinal.as_u64(),
+        )
+        .await?;
+        commit(transaction).await?;
+        Ok(Some(frame))
     }
 
     /// Loads and fail-closed reconstitutes a run's complete journal.

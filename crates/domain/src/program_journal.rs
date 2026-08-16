@@ -362,6 +362,22 @@ pub struct ProgramJournal {
 }
 
 impl ProgramJournal {
+    /// The recorded terminal outcome, if this run already ended.
+    ///
+    /// A `run_cancel` or `fault` resolves no request and ends the attempt that
+    /// recorded it, so every later frame is behind an outcome that is already
+    /// durable. The first such delivery is therefore the run's outcome, and it
+    /// is knowable from the journal alone — a resumed run cannot produce a
+    /// different one, whatever its artifact does or whether it loads at all.
+    pub fn terminal_delivery(&self) -> Option<&DeliveryFrame> {
+        self.entries.iter().find_map(|entry| match entry.frame() {
+            JournalFrame::Delivery(delivery) if delivery.kind().resolves().is_none() => {
+                Some(delivery)
+            }
+            JournalFrame::Delivery(_) | JournalFrame::Request(_) => None,
+        })
+    }
+
     /// Validates all three contiguous orders and resolution correlations.
     pub fn try_new(
         run: ProgramRunId,
@@ -517,8 +533,10 @@ impl Error for NondeterminismError {}
 ///
 /// The future isolate host must alternate `next_instruction` with executor
 /// request emission. Recorded deliveries are applied one at a time in journal
-/// order, which gives the host a quiescence point after every delivery. Once
-/// `Live` is returned the cursor never consults history again.
+/// order, which gives the host a quiescence point after every delivery. A
+/// journal that already records a terminal outcome never reaches this seam:
+/// [`ProgramJournal::terminal_delivery`] answers it without replay. Once `Live`
+/// is returned the cursor never consults history again.
 #[derive(Clone, Debug)]
 pub struct ReplayCursor {
     run: ProgramRunId,
@@ -631,6 +649,13 @@ mod tests {
         )
     }
 
+    fn run_cancel(ordinal: u64, payload: &[u8]) -> DeliveryFrame {
+        DeliveryFrame::new(
+            DeliveryOrdinal::try_from_u64(ordinal).expect("fixture ordinal is positive"),
+            DeliveryKind::RunCancel(InlineFramePayload::new(payload)),
+        )
+    }
+
     fn entry(position: u64, frame: JournalFrame) -> JournalEntry {
         JournalEntry::new(
             JournalPosition::try_from_u64(position).expect("fixture position is positive"),
@@ -695,6 +720,54 @@ mod tests {
         );
         assert_eq!(replay.next_instruction(), ReplayInstruction::Live);
         assert_eq!(replay.submit_request(live), Ok(ReplayedRequest::Live));
+    }
+
+    #[test]
+    fn a_journal_opening_with_a_run_cancel_reports_it_as_the_terminal_outcome() {
+        let run_cancel = run_cancel(1, b"cancelled");
+        let ended = journal(vec![entry(1, JournalFrame::Delivery(run_cancel.clone()))]);
+
+        assert_eq!(ended.terminal_delivery(), Some(&run_cancel));
+    }
+
+    #[test]
+    fn a_terminal_delivery_behind_earlier_frames_is_still_the_terminal_outcome() {
+        let recorded_request = request(1, b"recorded");
+        let recorded_answer = delivery(1, 1, b"recorded-answer");
+        let run_cancel = run_cancel(2, b"cancelled");
+        let ended = journal(vec![
+            entry(1, JournalFrame::Request(recorded_request)),
+            entry(2, JournalFrame::Delivery(recorded_answer)),
+            entry(3, JournalFrame::Delivery(run_cancel.clone())),
+        ]);
+
+        assert_eq!(ended.terminal_delivery(), Some(&run_cancel));
+    }
+
+    #[test]
+    fn the_first_terminal_delivery_wins_over_frames_recorded_behind_it() {
+        let recorded_request = request(1, b"recorded");
+        let first_cancel = run_cancel(1, b"first");
+        let later_cancel = run_cancel(2, b"later");
+        let ended = journal(vec![
+            entry(1, JournalFrame::Request(recorded_request)),
+            entry(2, JournalFrame::Delivery(first_cancel.clone())),
+            entry(3, JournalFrame::Delivery(later_cancel)),
+        ]);
+
+        assert_eq!(ended.terminal_delivery(), Some(&first_cancel));
+    }
+
+    #[test]
+    fn a_journal_of_resolving_deliveries_records_no_terminal_outcome() {
+        let recorded_request = request(1, b"recorded");
+        let recorded_answer = delivery(1, 1, b"recorded-answer");
+        let running = journal(vec![
+            entry(1, JournalFrame::Request(recorded_request)),
+            entry(2, JournalFrame::Delivery(recorded_answer)),
+        ]);
+
+        assert_eq!(running.terminal_delivery(), None);
     }
 
     /// INV-061: a replay mismatch is a typed failure carrying both frames.

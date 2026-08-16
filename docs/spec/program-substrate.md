@@ -6,10 +6,12 @@ and repository-watch reactions through a journaled effect protocol. The entire
 surface below was committed ahead of code as Stage 0 of the substrate build,
 verified against PR #580 (`agent/program-substrate-spec`). The durable journal
 and executor-facing replay seam are verified against this PR
-(`agent/program-substrate-journal`); each remaining committed-unimplemented
-paragraph records the compatibility constraint it imposes on present surfaces.
-Model execution remains owned by [model-call execution](model-call-execution.md)
-and the [model-runtime substrate](runtime-substrate.md), sessions and turns by
+(`agent/program-substrate-journal`), and the isolate host is verified against
+this PR (`agent/program-substrate-isolate-host`); each remaining
+committed-unimplemented paragraph records the compatibility constraint it
+imposes on present surfaces. Model execution remains owned by
+[model-call execution](model-call-execution.md) and the
+[model-runtime substrate](runtime-substrate.md), sessions and turns by
 [sessions and the transcript](sessions-and-transcript.md) and
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), goals by
 [goal mode](goal-mode.md), tool dispatch by [tool loop](tool-loop.md), event
@@ -20,36 +22,45 @@ ingress by [repository watch](repo-watch.md), evaluation semantics by the
 
 ## Programs and registration
 
-**Committed unimplemented functionality.** No present surface registers or
-executes programs. A program is one TypeScript module whose imports resolve only
-to the versioned in-repo SDK package; any other import — including relative
-files — is a registration error, so the stripped artifact is complete and
-executable with no bundler, no module graph, and no filesystem in the isolate.
-The SDK's canonical bare-module specifier is
-`@signalbox/program-sdk/v<version>`, where `<version>` is a positive canonical
-decimal integer with no leading zero; the first frame-contract release admits
-exactly `@signalbox/program-sdk/v1`. Before loading an artifact, the host
-registers a synthetic module under that exact specifier which exports only the
-frame-producing SDK surface for the run's recorded SDK version. Registration
-rejects every other specifier, including an unversioned `@signalbox/program-sdk`
-name; type stripping preserves the canonical import, and isolate loading
-resolves it only to this host-supplied module, never through a filesystem or
-ambient module loader. Why: a single-module contract keeps artifact identity one
-digest over one file's bytes; multi-module programs are a future
-registration-format decision, not a present admission. Registration stores the
-exact TypeScript source, the stripped JavaScript artifact, a digest of each, the
-SDK version, the frame-contract version, and an explicit capability grant list,
-as immutable rows keyed by unique program name and revision. Each digest is
-SHA-256 in lowercase hexadecimal over an exact preimage: for the artifact, the
-stripped JavaScript bytes; for the source, the module's UTF-8 bytes. Both
-registration paths and every later verifier compute identity from these
-preimages alone, so two correct implementations cannot disagree about what a
-program is. Execution uses only the stripped artifact; the TypeScript source is
-retained for reading and re-verification. This constrains present schema
-planning: program identity is `(name, revision)` plus content digests, and
-nothing may treat a mutable location — a repository path, a branch, a file — as
-what a program *is*. Why: digest identity is what lets an in-flight run keep
-meaning the code it started with.
+**Implemented behavior.** The program-runtime crate executes one already
+stripped JavaScript module and resolves only the canonical frame-contract-v1 SDK
+specifier below. Its loader rejects every other static or dynamic import,
+including relative files, and has no filesystem or network source. It maps the
+canonical specifier to a host-supplied synthetic module. The current execution
+surface exports `now`, `random`, `sleep`, and `awaitEvent`; each accepts exact
+bytes and produces one typed request at the Rust boundary. Registration owns the
+complete SDK surface and artifact admission described next.
+
+**Committed unimplemented functionality.** No present surface registers
+programs. A program is one TypeScript module whose imports resolve only to the
+versioned in-repo SDK package; any other import — including relative files — is
+a registration error, so the stripped artifact is complete and executable with
+no bundler, no module graph, and no filesystem in the isolate. The SDK's
+canonical bare-module specifier is `@signalbox/program-sdk/v<version>`, where
+`<version>` is a positive canonical decimal integer with no leading zero; the
+first frame-contract release admits exactly `@signalbox/program-sdk/v1`. Before
+loading an artifact, the host registers a synthetic module under that exact
+specifier which exports only the frame-producing SDK surface for the run's
+recorded SDK version. Registration rejects every other specifier, including an
+unversioned `@signalbox/program-sdk` name; type stripping preserves the
+canonical import, and isolate loading resolves it only to this host-supplied
+module, never through a filesystem or ambient module loader. Why: a
+single-module contract keeps artifact identity one digest over one file's bytes;
+multi-module programs are a future registration-format decision, not a present
+admission. Registration stores the exact TypeScript source, the stripped
+JavaScript artifact, a digest of each, the SDK version, the frame-contract
+version, and an explicit capability grant list, as immutable rows keyed by
+unique program name and revision. Each digest is SHA-256 in lowercase
+hexadecimal over an exact preimage: for the artifact, the stripped JavaScript
+bytes; for the source, the module's UTF-8 bytes. Both registration paths and
+every later verifier compute identity from these preimages alone, so two correct
+implementations cannot disagree about what a program is. Execution uses only the
+stripped artifact; the TypeScript source is retained for reading and
+re-verification. This constrains present schema planning: program identity is
+`(name, revision)` plus content digests, and nothing may treat a mutable
+location — a repository path, a branch, a file — as what a program *is*. Why:
+digest identity is what lets an in-flight run keep meaning the code it started
+with.
 
 **Committed unimplemented functionality.** No present surface pins program
 revisions to runs. Every run records the exact program registration it executes
@@ -107,35 +118,51 @@ program-initiated registrations can mint a capability its root was never granted
 
 ## Execution, journal, and replay
 
-**Committed unimplemented functionality.** No present surface executes program
-artifacts. Programs run one at a time per run inside an embedded
-JavaScript-engine isolate with no ambient filesystem, network, environment, wall
-clock, or unvirtualized randomness; the only door out of the isolate is the
-frame protocol below. The engine is the pinned `deno_core` crate family; the
-standalone repository is archived and the deno monorepo is its source of truth,
-so the pin is by crate version with upgrades taken deliberately. Every run
-records the engine version it started under. At creation it also records the
-selected isolate heap ceiling and per-live-turn execution budget. The execution
-budget is deterministic engine work metering, not elapsed wall time: host
-queueing, daemon downtime, journal I/O, and time awaiting an effect do not
-consume it, while replay consumes and checks the same budget at the same
-execution points. Exhaustion produces the journaled `memory` or `timeout` fault
-under the recorded limits regardless of later configuration, host load, or
-machine speed. External operations use capability-specific deadlines whose
-expiry is an ordinary journaled answer. No engine runtime is retained across
-upgrades — per the pre-alpha rule in `AGENTS.md`, keeping superseded engines
-resident would be compatibility machinery for deployments that do not exist — so
-a run that wakes under a newer engine replays under it, protected by the
-fault-not-diverge rule below. Replay under a different engine may compare
-requests only while journaled twins remain; if it reaches the journal tail
-without an earlier mismatch, the host journals a `nondeterminism` fault whose
-payload names both engine versions and does not permit that run to emit a new
-live request or terminal result. Thus an engine-semantics change surfaces as a
-fault even when its first observable difference would occur after the prior
-journal tail, never as silent divergence. A native engine failure is accepted as
-a daemon failure while every registered program is the operator's own. Why: the
-isolate's closure is what makes deterministic replay a structural property
-instead of an authoring discipline.
+**Implemented behavior.** The program-runtime crate runs one module per
+execution attempt in a fresh embedded `deno_core` isolate, pinned exactly by
+crate version. The isolate exposes no filesystem, network, environment, module
+source, wall clock, or unvirtualized randomness. Before artifact evaluation the
+host removes the engine's `Date`, `Temporal`, `Math.random`, `Intl`, `WeakRef`,
+`FinalizationRegistry`, `SharedArrayBuffer`, `Atomics`, `WebAssembly`, and
+`Deno.core` globals, along with the Intl-backed prototype methods that outlive
+`Intl` itself — `toLocaleString`, `localeCompare`, and the locale-aware case
+mappings. Each removal closes a path the others leave open: `Temporal` is a
+second ambient clock reached without `Date`; the prototype methods return
+results that follow the host's default locale and ICU data, which two hosts
+running the same run need not share; and the shared buffer, its atomics, and
+`WebAssembly` together close the waiting primitives, since `Atomics.wait` blocks
+the isolate thread, `Atomics.waitAsync` settles on a wall clock, and
+`new WebAssembly.Memory({shared: true})` yields a shared buffer whose
+`memory.atomic.wait32` blocks even when the `SharedArrayBuffer` global is gone.
+Its only admitted asynchronous operation is the closed request op behind the
+synthetic SDK module. A caller supplies the stripped artifact and an existing
+run journal; no isolate is retained between attempts.
+
+**Committed unimplemented functionality.** No admitted run-creation surface
+invokes the host yet. The standalone `deno_core` repository is archived and the
+deno monorepo is its source of truth, so the pin is by crate version with
+upgrades taken deliberately. Every admitted run records the engine version it
+started under. At creation it also records the selected isolate heap ceiling and
+per-live-turn execution budget. The execution budget is deterministic engine
+work metering, not elapsed wall time: host queueing, daemon downtime, journal
+I/O, and time awaiting an effect do not consume it, while replay consumes and
+checks the same budget at the same execution points. Exhaustion produces the
+journaled `memory` or `timeout` fault under the recorded limits regardless of
+later configuration, host load, or machine speed. External operations use
+capability-specific deadlines whose expiry is an ordinary journaled answer. No
+engine runtime is retained across upgrades — per the pre-alpha rule in
+`AGENTS.md`, keeping superseded engines resident would be compatibility
+machinery for deployments that do not exist — so a run that wakes under a newer
+engine replays under it, protected by the fault-not-diverge rule below. Replay
+under a different engine may compare requests only while journaled twins remain;
+if it reaches the journal tail without an earlier mismatch, the host journals a
+`nondeterminism` fault whose payload names both engine versions and does not
+permit that run to emit a new live request or terminal result. Thus an
+engine-semantics change surfaces as a fault even when its first observable
+difference would occur after the prior journal tail, never as silent divergence.
+A native engine failure is accepted as a daemon failure while every registered
+program is the operator's own. Why: the isolate's closure is what makes
+deterministic replay a structural property instead of an authoring discipline.
 
 **Implemented behavior.** The persistence crate provides one append-only frame
 journal per program-run identity. Every nondeterministic act crosses the typed
@@ -180,11 +207,14 @@ inline byte strings; the relational row keeps payload carriage separate from the
 closed frame discriminators so a later digest column can offload new payloads
 without rewriting existing inline rows.
 
-**Committed unimplemented functionality.** No present executor applies scope
-cancellation, terminal-request admission, capability rejection, or run
-terminalization. The typed journal can represent those frames, and the database
-retains their closed discriminators, but the producing transitions remain with
-the executor and capability slices that can enforce them.
+**Committed unimplemented functionality.** The current host emits only the four
+primitive answerable requests named above. No present executor applies generic
+effects, scope cancellation, terminal-request admission, capability rejection,
+or run terminalization. The typed journal can represent those frames, and the
+database retains their closed discriminators, but the producing transitions
+remain with the registration, executor, and capability slices that can enforce
+them. Module fulfillment is only an execution-attempt observation; it does not
+terminalize the durable run.
 
 **Committed unimplemented functionality.** No present surface synchronizes
 journal rows with effects, and the synchronization guarantee differs by effect
@@ -214,20 +244,46 @@ that differs from its journaled twin returns a typed nondeterminism failure
 carrying both complete frames, which the persistence adapter can append as a
 closed `fault` delivery; divergence is never silent and never a panic. The seam
 yields at most one recorded delivery per step, committing the future isolate
-host to drain its microtask queue to quiescence between deliveries. Concurrent
+host to drain its microtask queue to quiescence between deliveries. A journal
+that already records a terminal delivery never reaches that seam: because such a
+delivery resolves no request and ends the attempt that recorded it, the first
+one is the run's outcome and the journal names it without replay. Concurrent
 outstanding requests are permitted — the journaled delivery order is what makes
 promise interleaving identical across live execution and replay. Virtualized
 time advances only at journaled points, and each randomness draw is journaled.
 Why: recording the delivery order is the one discipline that buys unrestricted
 intra-program concurrency without restricting the language.
 
+**Implemented behavior.** The program-runtime host applies that cursor to a real
+JavaScript isolate. It assigns each request ordinal at the Rust boundary,
+compares the complete request before taking live action, and persists a typed
+nondeterminism fault on mismatch. A matching replay delivery is applied to its
+named promise without consulting the live-delivery source. After each individual
+delivery the host polls the engine to a microtask quiescence point before it
+observes another request or applies another delivery. A recorded `run_cancel` or
+`fault` anywhere in the loaded journal is resolved before any of that: the host
+reads the recorded outcome and returns it before it creates an isolate, so an
+attempt cannot displace an outcome already durable — not by requesting
+immediately, not by blocking, and not by failing to compile at all. At the
+durable tail it appends the request and the caller-supplied delivery through the
+repository's conditional methods, each compare-and-append conditioned on the
+tail this attempt loaded: a concurrent attempt that has already advanced that
+tail makes the append insert nothing, and this attempt fails with a changed-tail
+protocol error rather than extending a journal it no longer describes. It then
+continues through the same promise-resolution path. The delivery-source seam
+receives only the currently outstanding durable request frames; it is the
+boundary later capability executors implement. A module that throws is an
+isolate failure carrying the engine's own message, never a completion: the
+engine reports the exception through its event loop while the module's
+evaluation future still fulfills, so the host reads the engine result first.
+
 The implemented journal anchor truthfully pins only frame-contract version one.
 It is not yet a complete run aggregate. Registration identity, artifact digest,
 SDK and engine versions, capability grants, heap and execution budgets, frame
 bound, and payload ceiling remain absent until their owning registration,
-isolate, and configuration producers can supply and enforce them. A later slice
-extends the run aggregate and correlates the journal anchor to it rather than
-backfilling guessed values.
+run-admission, and configuration producers can supply and enforce them. A later
+slice extends the run aggregate and correlates the journal anchor to it rather
+than backfilling guessed values.
 
 **Committed unimplemented functionality.** No present surface bounds journal
 growth. A long-lived program does not accumulate one unbounded journal:
