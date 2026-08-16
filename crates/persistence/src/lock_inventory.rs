@@ -24,6 +24,12 @@ pub(crate) const fn ordered_session_pair(
     }
 }
 
+pub(crate) const PROGRAM_JOURNAL_SEQUENCE: &str = "SELECT
+        last_position, last_request_ordinal, last_delivery_ordinal
+   FROM program_run_journal_sequence_state
+  WHERE run_id = $1
+  FOR UPDATE";
+
 pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION: &str =
     "SELECT latest_event_id, settled_kind, settled_dispatch_id
        FROM repo_watch_dispatch_obligation
