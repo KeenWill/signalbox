@@ -744,7 +744,7 @@ impl RepositoryWatchTask {
                                 .map(targeted_query_projection)
                                 .collect::<Result<Vec<_>, _>>()?,
                         );
-                        let admitted = page.admit(&refreshes);
+                        let unissued = page.unissued(&refreshes);
                         shadow.observation = observation;
                         *baseline = Some(shadow);
                         // The disposition is durable before the targeted poll's
@@ -759,13 +759,17 @@ impl RepositoryWatchTask {
                             None,
                         )
                         .await?;
-                        if admitted.is_empty() {
+                        if unissued.is_empty() {
                             // The page already issued this hydration, so no
                             // cursor mutation follows and the in-memory shadow
                             // stays the newer baseline for the next delivery.
                             return Ok(());
                         }
-                        self.targeted_refresh_and_commit(&admitted).await?;
+                        self.targeted_refresh_and_commit(&unissued).await?;
+                        // Recorded only now: a refresh that failed above left
+                        // this delivery deferred, so the page's next delivery
+                        // for the same pull request has to reissue it.
+                        page.record_issued(&unissued);
                         self.process_dispatches().await?;
                         // The committed cursor now supersedes the in-memory
                         // shadow, which the next delivery reloads from it.

@@ -7384,7 +7384,8 @@ pub enum RepoWatchTargetedRefreshV1 {
 pub struct RepoWatchTargetedRefreshCoalescerV1 { /* private */ }
 impl RepoWatchTargetedRefreshCoalescerV1 {
     pub fn for_delivery_page() -> Self;
-    pub fn admit(&mut self, refreshes: &[RepoWatchTargetedRefreshV1]) -> Vec<RepoWatchTargetedRefreshV1>;
+    pub fn unissued(&self, refreshes: &[RepoWatchTargetedRefreshV1]) -> Vec<RepoWatchTargetedRefreshV1>;
+    pub fn record_issued(&mut self, refreshes: &[RepoWatchTargetedRefreshV1]);
 }
 
 pub struct RepoWatchObservationPatchV1 { /* private */ }

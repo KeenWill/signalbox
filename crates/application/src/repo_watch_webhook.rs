@@ -289,6 +289,13 @@ pub enum RepoWatchTargetedRefreshV1 {
 /// intact. The scope is one page and never a whole drain: a later page may hold
 /// deliveries admitted after this page's hydration ran, reporting state that
 /// hydration cannot have observed.
+///
+/// Asking and recording are separate because only a hydration that reached the
+/// provider makes a later one redundant. A delivery's terminal disposition is
+/// durable before its refresh runs, so a refresh that then fails leaves nothing
+/// to retry it but the page's remaining deliveries; recording the ask rather
+/// than the success would let one transient failure drop the whole page's
+/// hydration and leave the state to the next complete poll.
 #[derive(Debug)]
 pub struct RepoWatchTargetedRefreshCoalescerV1 {
     hydrated: BTreeSet<PullRequestNumber>,
@@ -303,15 +310,15 @@ impl RepoWatchTargetedRefreshCoalescerV1 {
     }
 
     /// Retains the refreshes this page has not already issued.
-    pub fn admit(
-        &mut self,
+    pub fn unissued(
+        &self,
         refreshes: &[RepoWatchTargetedRefreshV1],
     ) -> Vec<RepoWatchTargetedRefreshV1> {
         refreshes
             .iter()
             .filter(|refresh| match refresh {
                 RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request } => {
-                    self.hydrated.insert(*pull_request)
+                    !self.hydrated.contains(pull_request)
                 }
                 RepoWatchTargetedRefreshV1::Mergeability { .. }
                 | RepoWatchTargetedRefreshV1::CheckRollup { .. }
@@ -319,6 +326,19 @@ impl RepoWatchTargetedRefreshCoalescerV1 {
             })
             .cloned()
             .collect()
+    }
+
+    /// Records the refreshes this page has now issued against the provider.
+    pub fn record_issued(&mut self, refreshes: &[RepoWatchTargetedRefreshV1]) {
+        self.hydrated
+            .extend(refreshes.iter().filter_map(|refresh| match refresh {
+                RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request } => {
+                    Some(*pull_request)
+                }
+                RepoWatchTargetedRefreshV1::Mergeability { .. }
+                | RepoWatchTargetedRefreshV1::CheckRollup { .. }
+                | RepoWatchTargetedRefreshV1::CheckRollupForCommit { .. } => None,
+            }));
     }
 }
 
@@ -1832,8 +1852,9 @@ mod tests {
         let refresh = hydration(pull_request_number());
         let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
 
-        let first = page.admit(slice::from_ref(&refresh));
-        let repeat = page.admit(slice::from_ref(&refresh));
+        let first = page.unissued(slice::from_ref(&refresh));
+        page.record_issued(&first);
+        let repeat = page.unissued(slice::from_ref(&refresh));
 
         assert_eq!(first, vec![refresh]);
         assert!(repeat.is_empty());
@@ -1843,11 +1864,11 @@ mod tests {
     fn one_delivery_page_hydrates_each_pull_request_it_names() {
         let other_refresh = hydration(other_pull_request_number());
         let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
-        page.admit(&[hydration(pull_request_number())]);
+        page.record_issued(&[hydration(pull_request_number())]);
 
-        let admitted = page.admit(slice::from_ref(&other_refresh));
+        let unissued = page.unissued(slice::from_ref(&other_refresh));
 
-        assert_eq!(admitted, vec![other_refresh]);
+        assert_eq!(unissued, vec![other_refresh]);
     }
 
     #[test]
@@ -1866,23 +1887,36 @@ mod tests {
             },
         ];
         let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
-        page.admit(&[hydration(pull_request)]);
+        page.record_issued(&[hydration(pull_request)]);
 
-        let admitted = page.admit(&guarded_refreshes);
+        let unissued = page.unissued(&guarded_refreshes);
 
-        assert_eq!(admitted, guarded_refreshes.to_vec());
+        assert_eq!(unissued, guarded_refreshes.to_vec());
     }
 
     #[test]
     fn a_later_delivery_page_hydrates_again() {
         let refresh = hydration(pull_request_number());
         let mut drained = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
-        drained.admit(slice::from_ref(&refresh));
-        let mut next = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        drained.record_issued(slice::from_ref(&refresh));
+        let next = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
 
-        let admitted = next.admit(slice::from_ref(&refresh));
+        let unissued = next.unissued(slice::from_ref(&refresh));
 
-        assert_eq!(admitted, vec![refresh]);
+        assert_eq!(unissued, vec![refresh]);
+    }
+
+    #[test]
+    fn a_hydration_that_never_reached_the_provider_stays_unissued() {
+        let refresh = hydration(pull_request_number());
+        let page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        // The delivery asked, its refresh failed, and nothing was recorded.
+        let asked = page.unissued(slice::from_ref(&refresh));
+
+        let reissued = page.unissued(slice::from_ref(&refresh));
+
+        assert_eq!(asked, vec![refresh.clone()]);
+        assert_eq!(reissued, vec![refresh]);
     }
 
     #[test]
