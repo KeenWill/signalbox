@@ -1323,6 +1323,7 @@ async fn migrated_unconnected_later_lease_fixture(
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(pool).await?;
+    install_pre_loss_identity_compatibility_function(pool).await?;
     let (store, expected_enrollment, registration, pin) = prepared_pin_fixture_with_authorization(
         pool,
         authorized,
@@ -1428,6 +1429,36 @@ async fn install_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<()
     )
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn install_pre_loss_identity_compatibility_function(
+    pool: &PgPool,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "CREATE FUNCTION lock_runner_loss_identity(checked_runner uuid)
+         RETURNS void
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             PERFORM pg_advisory_xact_lock(
+                 hashtextextended(
+                     'signalbox.runner-loss-identity.' || checked_runner::text,
+                     0
+                 )
+             );
+         END;
+         $$;",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn drop_pre_loss_identity_compatibility_function(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("DROP FUNCTION lock_runner_loss_identity(uuid)")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -3692,6 +3723,7 @@ async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(&pool).await?;
+    install_pre_loss_identity_compatibility_function(&pool).await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -3814,6 +3846,7 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
     MIGRATOR
         .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
         .await?;
+    install_pre_loss_identity_compatibility_function(&pool).await?;
     let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
@@ -3824,6 +3857,7 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
         connection.epoch(),
     )
     .await?;
+    drop_pre_loss_identity_compatibility_function(&pool).await?;
     let refusal = migrate(&pool)
         .await
         .expect_err("legacy placement history has no exact loss baseline");
@@ -3884,6 +3918,7 @@ async fn s32_inv044_runner_loss_cursor_migration_preserves_pending_placement()
     MIGRATOR
         .run_to(PRE_RUNNER_LOSS_CURSOR_MIGRATION, &pool)
         .await?;
+    install_pre_loss_identity_compatibility_function(&pool).await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -3902,6 +3937,7 @@ async fn s32_inv044_runner_loss_cursor_migration_preserves_pending_placement()
         connection.epoch(),
     )
     .await?;
+    drop_pre_loss_identity_compatibility_function(&pool).await?;
     migrate(&pool).await?;
     let loss = store
         .load_current_connection_loss(expected_enrollment.enrollment())
@@ -5007,6 +5043,7 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(&pool).await?;
+    install_pre_loss_identity_compatibility_function(&pool).await?;
     let (store, _, registration, pin) = prepared_pin_fixture_with_authorization(
         &pool,
         authorized,
@@ -5017,6 +5054,7 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
     .await?;
     store.store_pin(&pin, &registration).await?;
     drop_pre_loss_fence_compatibility_tables(&pool).await?;
+    drop_pre_loss_identity_compatibility_function(&pool).await?;
     let refusal = migrate(&pool)
         .await
         .expect_err("an outstanding legacy offer has no reconstructible issue baseline");
