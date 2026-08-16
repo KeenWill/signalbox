@@ -409,7 +409,7 @@ target_id = "c74d2c41-8c70-4537-ab5d-7bbeac25562a"
 model_family = "anthropic"
 provider_model = "claude-fable-5"
 max_output_tokens = 8192
-context_window_tokens = 200000
+context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 service_tiers = ["auto", "standard_only"]
 # Rates are decimal USD strings per million tokens. Declare the complete
@@ -427,7 +427,7 @@ target_id = "cce0f90e-8420-4894-8850-eaf262e7c82a"
 model_family = "anthropic"
 provider_model = "claude-opus-5"
 max_output_tokens = 8192
-context_window_tokens = 200000
+context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 fast_mode = "request_control"
 service_tiers = ["auto", "standard_only"]
@@ -439,7 +439,7 @@ target_id = "ef1a6d7b-07dd-47ab-ac9b-321c8baa9b14"
 model_family = "anthropic"
 provider_model = "claude-opus-4-8"
 max_output_tokens = 8192
-context_window_tokens = 200000
+context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 fast_mode = "request_control"
 service_tiers = ["auto", "standard_only"]
@@ -451,7 +451,7 @@ target_id = "06e3f786-fb7d-4d03-842f-38091a01f094"
 model_family = "anthropic"
 provider_model = "claude-opus-4-7"
 max_output_tokens = 8192
-context_window_tokens = 200000
+context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 service_tiers = ["auto", "standard_only"]
 
@@ -462,7 +462,7 @@ target_id = "ff1c508a-f0a8-4a60-bc41-8cb956486bc6"
 model_family = "anthropic"
 provider_model = "claude-opus-4-6"
 max_output_tokens = 8192
-context_window_tokens = 200000
+context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "max"]
 service_tiers = ["auto", "standard_only"]
 
@@ -473,7 +473,7 @@ target_id = "86a42a25-e050-4d38-b45b-fb3a13ae72f9"
 model_family = "anthropic"
 provider_model = "claude-sonnet-5"
 max_output_tokens = 8192
-context_window_tokens = 200000
+context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 service_tiers = ["auto", "standard_only"]
 
@@ -484,7 +484,7 @@ target_id = "c1bd20ea-c5f4-407a-922f-206d6f3e02be"
 model_family = "anthropic"
 provider_model = "claude-sonnet-4-6"
 max_output_tokens = 8192
-context_window_tokens = 200000
+context_window_tokens = 1000000
 reasoning_levels = ["low", "medium", "high", "max"]
 service_tiers = ["auto", "standard_only"]
 
@@ -645,6 +645,19 @@ service_tiers = ["auto", "standard_only"]
 # reasoning_levels = ["none", "low", "medium", "high"]
 # fast_mode = "request_control"
 # service_tiers = ["auto", "default", "flex", "fast"]
+
+# [[models]]
+# # Hard cap: 128000. The model page confirms reasoning support without
+# # enumerating levels, so this row declares the three baseline family levels.
+# # The pricing page does not list this model under the fast tier.
+# selection_id = "68c17f28-dba5-4d02-a3ed-d7336d160136"
+# target_id = "3fa4c948-3df3-4002-8429-73f2550807e9"
+# model_family = "openai"
+# provider_model = "gpt-5-nano"
+# max_output_tokens = 8192
+# context_window_tokens = 400000
+# reasoning_levels = ["low", "medium", "high"]
+# service_tiers = ["auto", "default", "flex"]
 
 # [[models]]
 # # A model with no reasoning control, so the row declares no levels. Hard
