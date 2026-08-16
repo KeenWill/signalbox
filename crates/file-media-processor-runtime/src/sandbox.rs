@@ -28,7 +28,7 @@ use tokio::{
 };
 
 use crate::{
-    broker::{BrokerError, RangeBroker, read_frame, write_frame},
+    broker::{BrokerError, RangeBroker, read_frame_with_limit, write_frame_with_limit},
     protocol::{DaemonFrame, Invocation, WireReadEnvelope, WireSource, WorkerFrame, encode_bytes},
 };
 
@@ -215,6 +215,7 @@ impl SandboxedFileMediaProcessor {
                 invocation,
                 expected,
                 source,
+                self.ceilings.frame_bytes(),
             );
             tokio::pin!(session);
             let deadline = Instant::now() + Duration::from_secs(self.ceilings.wall_seconds());
@@ -235,8 +236,12 @@ impl SandboxedFileMediaProcessor {
         if outcome.is_err() {
             running.terminate().await;
         }
-        finish_diagnostics(&mut stderr_task).await;
-        outcome
+        let diagnostics = finish_diagnostics(&mut stderr_task).await;
+        match (outcome, diagnostics) {
+            (Ok(output), Ok(())) => Ok(output),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(())) => Err(ProcessorFailure::Protocol),
+        }
     }
 
     async fn spawn(&self, worker: &Path, probe: bool) -> Result<RunningWorker, ProcessorFailure> {
@@ -377,6 +382,7 @@ async fn run_session(
     invocation: Invocation,
     expected: ExpectedOutput,
     source: &dyn VerifiedBlobSource,
+    frame_bytes: usize,
 ) -> Result<CompletedOutput, ProcessorFailure> {
     let envelope = invocation.envelope();
     let source_length = invocation
@@ -384,20 +390,25 @@ async fn run_session(
         .byte_length()
         .map_err(|_| ProcessorFailure::Protocol)?
         .get();
-    write_frame(
+    write_frame_with_limit(
         &mut stdin,
         &DaemonFrame::Invocation {
             invocation: Box::new(invocation),
         },
+        frame_bytes,
     )
     .await
     .map_err(|_| ProcessorFailure::Protocol)?;
-    let mut broker = RangeBroker::new(source_length, envelope);
+    let maximum_range_bytes =
+        u64::try_from(frame_bytes / 2).map_err(|_| ProcessorFailure::Protocol)?;
+    let mut broker = RangeBroker::new(source_length, envelope, maximum_range_bytes);
     let completed = loop {
-        let frame: WorkerFrame = read_frame(&mut stdout).await.map_err(|error| match error {
-            BrokerError::Eof => ProcessorFailure::Failed,
-            BrokerError::Frame | BrokerError::Range => ProcessorFailure::Protocol,
-        })?;
+        let frame: WorkerFrame = read_frame_with_limit(&mut stdout, frame_bytes)
+            .await
+            .map_err(|error| match error {
+                BrokerError::Eof => ProcessorFailure::Failed,
+                BrokerError::Frame | BrokerError::Range => ProcessorFailure::Protocol,
+            })?;
         match frame {
             WorkerFrame::ReadRange { offset, length } => {
                 let length = broker
@@ -412,11 +423,12 @@ async fn run_session(
                 {
                     return Err(ProcessorFailure::Protocol);
                 }
-                write_frame(
+                write_frame_with_limit(
                     &mut stdin,
                     &DaemonFrame::RangeBytes {
                         bytes_base64: encode_bytes(&bytes),
                     },
+                    frame_bytes,
                 )
                 .await
                 .map_err(|_| ProcessorFailure::Protocol)?;
@@ -504,12 +516,16 @@ async fn read_and_discard_diagnostics(
     }
 }
 
-async fn finish_diagnostics(task: &mut JoinHandle<Result<Vec<u8>, std::io::Error>>) {
-    if tokio::time::timeout(CLEANUP_TIMEOUT, &mut *task)
-        .await
-        .is_err()
-    {
-        task.abort();
+async fn finish_diagnostics(
+    task: &mut JoinHandle<Result<Vec<u8>, std::io::Error>>,
+) -> Result<(), ()> {
+    match tokio::time::timeout(CLEANUP_TIMEOUT, &mut *task).await {
+        Ok(Ok(Ok(_))) => Ok(()),
+        Ok(Ok(Err(_))) | Ok(Err(_)) => Err(()),
+        Err(_) => {
+            task.abort();
+            Err(())
+        }
     }
 }
 

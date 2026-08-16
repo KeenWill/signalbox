@@ -1,10 +1,11 @@
 # File and media interpretation
 
-The first provider-neutral core is verified against PR #898
-(`agent/file-media-core`). It includes the type model, declaration and registry
-checks, detection and validation algorithm, untrusted processor-response
-boundary, stable agent tool contracts, and visibility-authorizing application
-bridge.
+The provider-neutral core is verified against PR #898 (`agent/file-media-core`),
+with its isolated processor implementation verified against stacked PR #900
+(`agent/file-media-worker`). It includes the type model, declaration and
+registry checks, detection and validation algorithm, untrusted
+processor-response boundary, stable agent tool contracts, visibility-authorizing
+application bridge, and fresh daemon-supervised worker runtime.
 
 This page owns typed interpretation above immutable blob bytes. Blob identity,
 catalog placement, replica verification, raw reads, attachment visibility, and
@@ -129,13 +130,86 @@ excessively nested responses collapse to sanitized processor failure without
 partial success (INV-065). Detection uses generated synthetic bytes and
 byte-derived evidence independent of caller declaration (INV-064).
 
-**Committed unimplemented functionality.** The daemon-supervised fresh local
-worker, sandbox launch, source-read broker, framing, process resource
-enforcement, and durable media-reference result path land in the implementing
-child slice. No present production `FileMediaProcessor` implementation executes
-an adapter. The compatibility constraint is that every adapter remains an
-untrusted black box executed across this raw boundary; native decoder libraries
-do not weaken sanitization or containment.
+`signalbox-file-media-processor-runtime` implements `FileMediaProcessor` with
+one fresh local process for every probe, validation, or read. A provider maps to
+one checked absolute worker executable. The executable builds a `WorkerCatalog`
+from its compiled `FileMediaProvider` implementations and calls `serve_one`; the
+daemon registers the same declaration through `WorkerBinding`. An exact profile
+probe must return `ProcessorIsolation::Available` before the corresponding
+nonempty registry is constructed.
+
+On Linux the processor launches the exact worker through bubblewrap. It unshares
+every supported namespace, explicitly unshares and then disables further user
+namespaces, drops every capability, clears the environment, creates private
+`/proc`, `/dev`, `/tmp`, and `/run`, and mounts only the exact worker plus the
+host's dynamic-runtime library trees read-only. It exposes no source path,
+catalog, database, daemon socket, configuration, credential, home directory, or
+network namespace. An architecture-checked seccomp filter returns `ENOSYS` for
+`clone3`, permits fallback `clone` only with `CLONE_THREAD`, and denies process
+creation. Decoder threads remain available while worker descendants stay zero.
+
+Before releasing a dedicated startup gate, the daemon applies hard
+address-space, CPU, and descriptor limits to the sandbox process and all
+inherited worker threads. Address space is the conservative enforceable reading
+of the accepted memory ceiling on an unprivileged Linux host: it can reject an
+allocation before resident use reaches the same value and cannot admit more
+resident memory. The daemon independently owns the wall deadline and kills the
+isolated process group on timeout or authoritative cancellation. Bounded stderr
+is drained and discarded; it is never parser evidence, telemetry content, or
+model-visible output.
+
+The worker receives one digest and positive length, then requests exact byte
+ranges over length-delimited standard I/O. The daemon checks every request for
+positive checked arithmetic, source length, per-frame size, access posture,
+range count, cumulative source work, and cancellation before calling
+`VerifiedBlobSource`. Probe and validation share the reader's declared probe
+envelope. A typed read uses its selected view's streaming or random-access
+envelope. Streaming access is monotonic; no range can exceed half the effective
+frame ceiling, so encoded source replies remain bounded.
+
+A worker result is eligible for the existing durable tool-result commit path
+only after one matching final frame, exact EOF with no trailing byte, successful
+worker exit, and complete bounded stderr drain. EOF before a final frame, crash,
+signal, timeout, cancellation, malformed or oversized framing, extra output,
+source failure, or limit excess discards the whole result. Thus the isolation
+slice can leave neither a partial durable result nor parser output that bypasses
+the registry sanitizer (INV-066 through INV-071). Authoritative cancellation
+terminates the in-flight worker and admits no result (INV-073).
+
+The version-one compiled ceilings are:
+
+| Resource                              | Maximum                |
+| ------------------------------------- | ---------------------- |
+| Probe prefix and suffix               | 65,536 bytes each      |
+| Probe ranges / cumulative bytes       | 16 / 262,144           |
+| Processor frame / text-or-JSON body   | 1,048,576 / 786,432    |
+| Structured depth / nodes              | 64 / 100,000           |
+| Observed container entries            | 10,000                 |
+| Image axis / decoded pixels           | 8,192 / 16,777,216     |
+| Presented image bytes                 | 8,388,608              |
+| Audio channels / sample rate          | 8 / 192,000 Hz         |
+| Audio duration / presented bytes      | 60 s / 8,388,608       |
+| Presented general-file bytes          | 8,388,608              |
+| References / aggregate media per call | 16 / 33,554,432 bytes  |
+| Worker address space / CPU / wall     | 512 MiB / 60 s / 120 s |
+| Worker descriptors / retained stderr  | 32 / 16,384 bytes      |
+| Worker descendants                    | 0                      |
+
+`FileMediaCeilings` and `FileMediaProcessCeilings` admit only positive effective
+values at or below these compiled maxima; descendants are fixed at zero
+(INV-072). A stored source may be larger. A streaming view must request it in
+bounded frames under its finite declared source-work envelope; a whole-decode
+view may reject it without changing the blob.
+
+**Committed unimplemented functionality.** No worker is composed into
+`signalboxd` because no format adapter or concrete rendered-frontier resolver is
+present. No image, audio, or general-file producer exists, so this slice adds no
+rich `BlobReference` result arm: the accepted design forbids that arm until one
+producer-to-provider path proves publication, registration, preparation, and
+failure behavior. When such an adapter lands, generated bytes must publish and
+verify before catalog registration, and registration must precede durable result
+commit; a failed path may leave an unreferenced orphan but never a dangling
+result.
 
 No classification cache exists. Earlier durable tool results preserve what a
 model saw while a later request may use a newer immutable reader revision. OCR

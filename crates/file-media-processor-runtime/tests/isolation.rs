@@ -1,17 +1,27 @@
 #![cfg(target_os = "linux")]
 
-use std::{error::Error, num::NonZeroU64, path::PathBuf, str::FromStr};
+use std::{
+    error::Error,
+    num::NonZeroU64,
+    path::PathBuf,
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use signalbox_file_media_processor_runtime::{SandboxedFileMediaProcessor, WorkerBinding};
 use signalbox_file_media_runtime::{
-    AttachmentKind, CanonicalJsonObjectSchema, CanonicalMediaType, DeclaredMediaType, FileDigest,
-    FileMediaCeilings, FileMediaFailure, FileMediaProcessCeilings, FileMediaProcessor,
-    FileMediaProviderDeclaration, FileMediaRegistry, FileReaderName, FileReaderProviderName,
-    FileReaderRevision, FileUse, InspectionRequest, NeverCancelled, ProbeDeclaration,
-    ProbeStrength, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput, ReadAccessPattern,
-    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
-    ReaderIdentity, ReasonCode, SourceReadError, SourceReadFuture, StreamingTextFallback,
-    VerifiedBlobSource,
+    AttachmentKind, CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType,
+    DeclaredMediaType, FileDigest, FileMediaCeilings, FileMediaFailure, FileMediaProcessCeilings,
+    FileMediaProcessor, FileMediaProviderDeclaration, FileMediaRegistry, FileReaderName,
+    FileReaderProviderName, FileReaderRevision, FileUse, InspectionRequest, NeverCancelled,
+    ProbeDeclaration, ProbeStrength, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
+    ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
+    ReaderDeclarationInput, ReaderIdentity, ReasonCode, SourceReadError, SourceReadFuture,
+    StreamingTextFallback, VerifiedBlobSource,
 };
 
 struct BytesSource(Vec<u8>);
@@ -78,6 +88,12 @@ async fn inv071_hostile_worker_output_never_propagates() -> Result<(), Box<dyn E
     hostile_worker_output_scenario().await
 }
 
+/// INV-073: authoritative cancellation terminates in-flight worker processing.
+#[tokio::test]
+async fn inv073_authoritative_cancellation_terminates_the_worker() -> Result<(), Box<dyn Error>> {
+    worker_cancellation_scenario().await
+}
+
 async fn real_worker_profile_scenario() -> Result<(), Box<dyn Error>> {
     let Some((processor, _)) = available_processor(FileMediaProcessCeilings::version_one()).await?
     else {
@@ -117,8 +133,9 @@ async fn worker_crash_scenario() -> Result<(), Box<dyn Error>> {
 }
 
 async fn worker_timeout_scenario() -> Result<(), Box<dyn Error>> {
-    let ceilings = FileMediaProcessCeilings::try_lower(512 * 1024 * 1024, 60, 1, 32, 16_384)
-        .ok_or("lowered test ceilings must be valid")?;
+    let ceilings =
+        FileMediaProcessCeilings::try_lower(1_048_576, 512 * 1024 * 1024, 60, 1, 32, 16_384)
+            .ok_or("lowered test ceilings must be valid")?;
     let Some((processor, reader)) = available_processor(ceilings).await? else {
         return Ok(());
     };
@@ -167,6 +184,26 @@ async fn hostile_worker_output_scenario() -> Result<(), Box<dyn Error>> {
         .inspect(&processor, request, &source, &NeverCancelled)
         .await;
     assert_eq!(output, Err(FileMediaFailure::ProcessorFailed));
+    Ok(())
+}
+
+async fn worker_cancellation_scenario() -> Result<(), Box<dyn Error>> {
+    let Some((processor, reader)) =
+        available_processor(FileMediaProcessCeilings::version_one()).await?
+    else {
+        return Ok(());
+    };
+    let cancellation = Arc::new(TestCancellation::default());
+    let trigger = Arc::clone(&cancellation);
+    let cancellation_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        trigger.cancelled.store(true, Ordering::Release);
+    });
+    let output = processor
+        .probe(&reader, &BytesSource(vec![b'T']), cancellation.as_ref())
+        .await;
+    cancellation_task.await?;
+    assert_eq!(output, Err(ProcessorFailure::Cancelled));
     Ok(())
 }
 
@@ -238,4 +275,15 @@ fn declaration() -> Result<(FileMediaProviderDeclaration, ReaderIdentity), Box<d
 
 fn processor_declarations() -> Result<Vec<FileMediaProviderDeclaration>, Box<dyn Error>> {
     Ok(vec![declaration()?.0])
+}
+
+#[derive(Default)]
+struct TestCancellation {
+    cancelled: AtomicBool,
+}
+
+impl CancellationSignal for TestCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
 }

@@ -161,6 +161,7 @@ impl FileMediaCeilings {
 /// Daemon-supervised process limits, all lowerable from compiled maxima.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileMediaProcessCeilings {
+    frame_bytes: usize,
     memory_bytes: u64,
     cpu_seconds: u64,
     wall_seconds: u64,
@@ -172,6 +173,7 @@ impl FileMediaProcessCeilings {
     /// Returns the compiled version-one process ceiling set.
     pub const fn version_one() -> Self {
         Self {
+            frame_bytes: MAX_PROCESSOR_FRAME_BYTES,
             memory_bytes: MAX_WORKER_MEMORY_BYTES,
             cpu_seconds: MAX_WORKER_CPU_SECONDS,
             wall_seconds: MAX_WORKER_WALL_SECONDS,
@@ -182,6 +184,7 @@ impl FileMediaProcessCeilings {
 
     /// Constructs an effective set only when every value is positive and lowerable.
     pub const fn try_lower(
+        frame_bytes: usize,
         memory_bytes: u64,
         cpu_seconds: u64,
         wall_seconds: u64,
@@ -189,6 +192,7 @@ impl FileMediaProcessCeilings {
         stderr_bytes: usize,
     ) -> Option<Self> {
         let candidate = Self {
+            frame_bytes,
             memory_bytes,
             cpu_seconds,
             wall_seconds,
@@ -204,7 +208,9 @@ impl FileMediaProcessCeilings {
 
     /// Returns whether every candidate value is positive and no greater.
     pub const fn admits(self, candidate: Self) -> bool {
-        candidate.memory_bytes > 0
+        candidate.frame_bytes > 0
+            && candidate.frame_bytes <= self.frame_bytes
+            && candidate.memory_bytes > 0
             && candidate.memory_bytes <= self.memory_bytes
             && candidate.cpu_seconds > 0
             && candidate.cpu_seconds <= self.cpu_seconds
@@ -214,6 +220,11 @@ impl FileMediaProcessCeilings {
             && candidate.file_descriptors <= self.file_descriptors
             && candidate.stderr_bytes > 0
             && candidate.stderr_bytes <= self.stderr_bytes
+    }
+
+    /// Returns the maximum length-delimited frame bytes.
+    pub const fn frame_bytes(self) -> usize {
+        self.frame_bytes
     }
 
     /// Returns the address-space byte limit applied before worker startup.
@@ -251,5 +262,40 @@ impl Default for FileMediaProcessCeilings {
 impl Default for FileMediaCeilings {
     fn default() -> Self {
         Self::version_one()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        FileMediaCeilings, FileMediaProcessCeilings, MAX_AGGREGATE_MEDIA_BYTES_PER_CALL,
+        MAX_MEDIA_REFERENCES_PER_CALL, MAX_PROCESSOR_FRAME_BYTES, MAX_WORKER_CPU_SECONDS,
+        MAX_WORKER_FILE_DESCRIPTORS, MAX_WORKER_MEMORY_BYTES, MAX_WORKER_STDERR_BYTES,
+        MAX_WORKER_WALL_SECONDS,
+    };
+
+    /// INV-072: deployment configuration can lower but never raise a compiled ceiling.
+    #[test]
+    fn inv072_file_media_ceiling_overrides_are_lowerable_only() {
+        let media = FileMediaCeilings::version_one();
+        assert_eq!(
+            media.media_references_per_call,
+            MAX_MEDIA_REFERENCES_PER_CALL
+        );
+        assert_eq!(
+            media.aggregate_media_bytes_per_call,
+            MAX_AGGREGATE_MEDIA_BYTES_PER_CALL
+        );
+        assert_eq!(
+            FileMediaProcessCeilings::try_lower(
+                MAX_PROCESSOR_FRAME_BYTES,
+                MAX_WORKER_MEMORY_BYTES,
+                MAX_WORKER_CPU_SECONDS + 1,
+                MAX_WORKER_WALL_SECONDS,
+                MAX_WORKER_FILE_DESCRIPTORS,
+                MAX_WORKER_STDERR_BYTES,
+            ),
+            None
+        );
     }
 }
