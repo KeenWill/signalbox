@@ -2135,6 +2135,69 @@ mod tests {
     }
 
     #[test]
+    fn a_later_delivery_applies_against_the_earlier_one_in_the_same_drain() {
+        let empty = RepoWatchObservation::new(
+            Vec::new(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())
+                .expect("empty repository state is canonical"),
+        );
+        let opened = mapped_patch(
+            "pull_request",
+            Some("opened"),
+            &pull_request_payload("opened", ""),
+        );
+        let RepoWatchObservationApplyV1::NeedsTargetedRefresh { observation, .. } =
+            apply_repo_watch_observation_patch_v1(&empty, &opened)
+                .expect("the opened delivery applies its delivered context")
+        else {
+            panic!("an opened PR must still request hydration")
+        };
+        let labeled = mapped_patch(
+            "pull_request",
+            Some("labeled"),
+            &pull_request_payload("labeled", "").replace(
+                r#""labels":[{"name":"ready"}]"#,
+                r#""labels":[{"name":"ready"},{"name":"urgent"}]"#,
+            ),
+        );
+
+        let outcome = apply_repo_watch_observation_patch_v1(&observation, &labeled)
+            .expect("the later delivery applies against the earlier observation");
+
+        let RepoWatchObservationApplyV1::Applied(current) = outcome else {
+            panic!("a label added after the opening must project")
+        };
+        let [applied] = current.state().pull_requests() else {
+            panic!("the opened pull request must remain")
+        };
+        assert_eq!(applied.context().labels().len(), 2);
+    }
+
+    #[test]
+    fn a_later_delivery_reaches_no_baseline_once_the_earlier_one_is_discarded() {
+        let empty = RepoWatchObservation::new(
+            Vec::new(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())
+                .expect("empty repository state is canonical"),
+        );
+        let labeled = mapped_patch(
+            "pull_request",
+            Some("labeled"),
+            &pull_request_payload("labeled", ""),
+        );
+
+        let outcome = apply_repo_watch_observation_patch_v1(&empty, &labeled)
+            .expect("a missing baseline is a disposition, not an internal error");
+
+        // What discarding the earlier delivery's observation would cost: the
+        // later delivery projects nothing and only asks for hydration.
+        let RepoWatchObservationApplyV1::NeedsTargetedRefresh { observation, .. } = outcome else {
+            panic!("a labeled delivery without a baseline must await hydration")
+        };
+        assert!(observation.state().pull_requests().is_empty());
+    }
+
+    #[test]
     fn missing_closed_pull_request_stays_refresh_only() {
         let previous = RepoWatchObservation::new(
             Vec::new(),

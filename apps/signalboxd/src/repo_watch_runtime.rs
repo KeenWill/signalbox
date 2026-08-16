@@ -573,25 +573,33 @@ impl RepositoryWatchTask {
         let mut deferred: HashSet<RepoWatchWebhookDeliveryKey> = HashSet::new();
         let mut first_failure: Option<RepositoryWatchAttemptError> = None;
         let mut pages = 0_usize;
+        // Every receipt this drain has visited, so a deferred head cannot be
+        // reloaded ahead of what follows it. A page bounded by bytes can hold
+        // nothing but that head, which would otherwise leave every later
+        // receipt permanently unreachable.
+        let mut after_receipt: Option<NonZeroU64> = None;
         loop {
             let deliveries = self
                 .webhook_store
-                .load_pending(&self.repository, page_size)
+                .load_pending(&self.repository, page_size, after_receipt)
                 .await
                 .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
             if deliveries.is_empty() {
-                // The queue this drain was carrying the shadow for is empty, so
-                // a poll that left the shadow in place hands it over now. There
-                // is no await between the observation and the replacement.
-                self.replace_superseded_webhook_shadow();
+                if deferred.is_empty() {
+                    // Nothing is pending at all, so a poll that left the shadow
+                    // in place hands it over now. There is no await between the
+                    // observation and the replacement.
+                    self.replace_superseded_webhook_shadow();
+                }
+                break;
             }
-            let mut progressed = false;
             for delivery in &deliveries {
+                after_receipt = Some(delivery.receipt().sequence());
                 if deferred.contains(&delivery.key()) {
                     continue;
                 }
                 match self.process_webhook_delivery(delivery).await {
-                    Ok(()) => progressed = true,
+                    Ok(()) => {}
                     Err(error) => {
                         // A delivery whose targeted refresh cannot succeed stays
                         // the oldest pending row, so failing the whole drain on
@@ -614,9 +622,6 @@ impl RepositoryWatchTask {
                 }
             }
             pages += 1;
-            if !progressed {
-                break;
-            }
             if pages >= WEBHOOK_DRAIN_PAGE_LIMIT {
                 // More may remain behind this page, so the shadow this drain
                 // advanced still speaks for deliveries the next one will read.
@@ -800,17 +805,23 @@ impl RepositoryWatchTask {
                             &observation,
                             cause,
                         )?;
-                        projections.extend(
-                            refreshes
-                                .iter()
-                                .map(targeted_query_projection)
-                                .collect::<Result<Vec<_>, _>>()?,
-                        );
                         // The provider query runs before anything is recorded, so
                         // a transient fetch failure leaves this delivery pending
                         // and retryable instead of terminal with a targeted query
                         // that never happened.
                         let prepared = self.prepare_targeted_refresh(&refreshes).await?;
+                        // Only refreshes actually sent are recorded, so a
+                        // branch-only delivery naming no pull request cannot
+                        // claim a query the poller never issued.
+                        projections.extend(
+                            prepared
+                                .as_ref()
+                                .map(|prepared| prepared.queried.as_slice())
+                                .unwrap_or_default()
+                                .iter()
+                                .map(targeted_query_projection)
+                                .collect::<Result<Vec<_>, _>>()?,
+                        );
                         // Its disposition is then durable before the cursor
                         // mutation becomes externally visible, so a failure
                         // between the two reproduces this disposition rather than
@@ -893,6 +904,13 @@ impl RepositoryWatchTask {
         if targets.is_empty() {
             return Ok(None);
         }
+        // A refresh naming no pull request the cursor carries is never sent, so
+        // it must not be recorded as a query that happened.
+        let queried = refreshes
+            .iter()
+            .filter(|refresh| refresh_reaches_a_target(refresh, &targets))
+            .cloned()
+            .collect::<Vec<_>>();
         let mut event_identity_frontier = cursor.candidate().event_identity_frontier().clone();
         let observation = self
             .poller
@@ -913,6 +931,7 @@ impl RepositoryWatchTask {
                 event_identity_frontier,
             ),
             events,
+            queried,
         }))
     }
 
@@ -1164,6 +1183,8 @@ struct PreparedTargetedRefresh {
     generation: RepoWatchCursorGeneration,
     candidate: RepoWatchCursorCandidate,
     events: Vec<RepoWatchEventOccurrenceV1>,
+    /// The requested refreshes a provider request was actually issued for.
+    queried: Vec<RepoWatchTargetedRefreshV1>,
 }
 
 /// What one webhook drain has already projected, carried across the batch.
@@ -1298,6 +1319,23 @@ fn targeted_pull_requests(
         }
     }
     Ok(targets.into_values().collect())
+}
+
+/// Whether one requested refresh names a pull request the poller will fetch.
+fn refresh_reaches_a_target(
+    refresh: &RepoWatchTargetedRefreshV1,
+    targets: &[TargetedPullRequest],
+) -> bool {
+    match refresh {
+        RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request }
+        | RepoWatchTargetedRefreshV1::Mergeability { pull_request, .. }
+        | RepoWatchTargetedRefreshV1::CheckRollup { pull_request, .. } => {
+            targets.iter().any(|target| target.number == *pull_request)
+        }
+        RepoWatchTargetedRefreshV1::CheckRollupForCommit { head } => targets
+            .iter()
+            .any(|target| target.expected_head.as_ref() == Some(head)),
+    }
 }
 
 fn insert_targeted_pull_request(
