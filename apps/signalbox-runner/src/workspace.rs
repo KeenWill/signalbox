@@ -200,6 +200,7 @@ fn create_private_workspace(
     request: &PrivateWorkspaceRequest,
     execution_path: &Path,
 ) -> Result<ReadyManifest, RunnerWorkspaceError> {
+    let execution_directory = represented_execution_directory(execution_path)?;
     let manifest_id = CanonicalUuid::from_uuid(Uuid::now_v7());
     let staging_name = format!(".{placement_name}-{manifest_id}.staging");
     mkdirat(
@@ -235,8 +236,16 @@ fn create_private_workspace(
     session
         .sync_all()
         .map_err(RunnerWorkspaceError::CommitAmbiguous)?;
-    let placement = open_directory(session, placement_name).map_err(RunnerWorkspaceError::Io)?;
-    read_ready_private_workspace(&placement, request, execution_path)
+    let placement =
+        open_directory(session, placement_name).map_err(RunnerWorkspaceError::CommitAmbiguous)?;
+    let published = read_ready_private_workspace(&placement, request, execution_path)
+        .map_err(commit_ambiguous_after_publication)?;
+    if published.execution_directory != execution_directory {
+        return Err(commit_ambiguous_after_publication(
+            RunnerWorkspaceError::ManifestConflict,
+        ));
+    }
+    Ok(published)
 }
 
 fn private_manifest(
@@ -297,6 +306,27 @@ fn checked_execution_directory(
         .to_str()
         .ok_or(RunnerWorkspaceError::CorruptManifest)?;
     WorkingDirectory::try_new(text.to_owned()).map_err(|_| RunnerWorkspaceError::CorruptManifest)
+}
+
+fn represented_execution_directory(path: &Path) -> Result<WorkingDirectory, RunnerWorkspaceError> {
+    let text = path.to_str().ok_or(RunnerWorkspaceError::CorruptManifest)?;
+    WorkingDirectory::try_new(text.to_owned()).map_err(|_| RunnerWorkspaceError::CorruptManifest)
+}
+
+fn commit_ambiguous_after_publication(error: RunnerWorkspaceError) -> RunnerWorkspaceError {
+    let source = match error {
+        RunnerWorkspaceError::Io(source) | RunnerWorkspaceError::CommitAmbiguous(source) => source,
+        RunnerWorkspaceError::ManifestConflict => {
+            io::Error::other("published workspace path no longer names its directory")
+        }
+        RunnerWorkspaceError::CorruptManifest => {
+            io::Error::other("published workspace readback is corrupt")
+        }
+        RunnerWorkspaceError::ManifestTooLarge => {
+            io::Error::other("published workspace manifest exceeds its byte bound")
+        }
+    };
+    RunnerWorkspaceError::CommitAmbiguous(source)
 }
 
 fn open_private_placement(
@@ -805,6 +835,28 @@ mod tests {
             .expect("the durable private workspace replays");
 
         assert_eq!(replay, first);
+    }
+
+    #[test]
+    fn private_root_namespace_loss_after_open_is_commit_ambiguous() {
+        let (parent, state) = fixture_root();
+        let original_root = parent.path().join("runner-state");
+        let moved_root = parent.path().join("moved-runner-state");
+        fs::rename(&original_root, &moved_root)
+            .expect("the opened runner root is moved before publication");
+
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_private_root(&request(RUNNER))
+            .expect_err("post-commit namespace loss is not a definite failure");
+        let published = moved_root
+            .join("sessions")
+            .join(request(RUNNER).session().to_string())
+            .join(PLACEMENT_REVISION.to_string());
+
+        assert!(matches!(failure, RunnerWorkspaceError::CommitAmbiguous(_)));
+        assert!(published.is_dir());
     }
 
     #[test]

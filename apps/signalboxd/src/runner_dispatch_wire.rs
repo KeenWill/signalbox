@@ -80,7 +80,7 @@ impl RunnerDispatchWireAdapter {
             credential_profile,
             grant_revision,
             normalized_arguments: wire_arguments(lease.arguments())?,
-            result_bounds: ResultBounds::version_one(),
+            result_bounds: ResultBounds::version_two(),
         }))
     }
 
@@ -502,7 +502,7 @@ mod tests {
                 credential_profile: None,
                 grant_revision: None,
                 normalized_arguments: wire_arguments(),
-                result_bounds: ResultBounds::version_one(),
+                result_bounds: ResultBounds::version_two(),
             })
         );
         assert_eq!(
@@ -569,7 +569,7 @@ mod tests {
                         .expect("the fixture grant revision is positive"),
                 ),
                 normalized_arguments: wire_arguments(),
-                result_bounds: ResultBounds::version_one(),
+                result_bounds: ResultBounds::version_two(),
             })
         );
     }

@@ -489,7 +489,7 @@ positive page. Repeating a shared correlation in an acknowledgement means
 repeating that complete record.
 
 A lease offer's result bounds record has exactly `success_text_bytes` and
-`failure_detail_bytes`, both unsigned integers. Version one requires 1,048,576
+`failure_detail_bytes`, both unsigned integers. Version two requires 1,048,576
 and 4,096 respectively: a runner rejects any other pair rather than negotiating
 bounds. Its terminal result envelope is the closed union:
 
@@ -2005,7 +2005,11 @@ persistence transaction implements that staging port.
 **Committed unimplemented functionality.** Dispatch of the provisioning
 authorization, receipt consumption into replacement terminalization, and a
 repository-workspace filesystem producer for the initial ready frame remain
-absent.
+absent. The future repository producer will open the published execution
+directory, authenticate its identity against the canonical absolute path below
+the locked root, and carry that path beside the manifest and manifest digest in
+`workspace_ready`; no present repository-workspace surface provides that
+behavior.
 
 `WorkspaceRequirement::RepositoryWorktree` is satisfiable only when the selected
 validated registration advertises `WorkspaceCapability::WorktreePerSession` and
@@ -2051,12 +2055,10 @@ directory, performs the clone through the restricted profile and, when the
 placement selected one, the granted credential profile, writes a versioned
 `0600` non-secret manifest in the non-mounted placement parent, fsyncs the
 manifest and containing directories, and atomically renames the prepared
-placement directory before returning `ProvisionedWorkspace`. The runner opens
-the published execution directory, authenticates its directory identity against
-the canonical absolute path below the locked root, and carries that path beside
-the manifest and manifest digest in `workspace_ready`; the daemon never derives
-it from the relative manifest path. Exact replay returns the matching ready
-receipt; conflicting facts, including another execution directory, fail closed.
+placement directory before returning `ProvisionedWorkspace`. The daemon never
+derives an execution directory from the relative manifest path. Exact replay
+returns the matching ready receipt; conflicting facts, including another
+execution directory, fail closed.
 A clone of an empty repository is an ordinary success, not a failure and not a
 reason to remove the destination: the receipt and manifest record an unborn HEAD
 naming the branch the repository's first commit will be born on, and publication

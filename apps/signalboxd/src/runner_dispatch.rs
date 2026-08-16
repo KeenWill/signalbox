@@ -596,7 +596,7 @@ mod tests {
             credential_profile: None,
             grant_revision: None,
             normalized_arguments: arguments_value(),
-            result_bounds: ResultBounds::version_one(),
+            result_bounds: ResultBounds::version_two(),
         })
     }
 

@@ -2266,7 +2266,7 @@ mod tests {
             credential_profile: None,
             grant_revision: None,
             normalized_arguments: serde_json::json!({ "program": "true" }),
-            result_bounds: ResultBounds::version_one(),
+            result_bounds: ResultBounds::version_two(),
         }
     }
 

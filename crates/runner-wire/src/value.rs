@@ -414,9 +414,9 @@ pub enum ExecutionErrorKind {
     CrashLost,
 }
 
-/// Version-one fixed successful result UTF-8 bound.
+/// Version-two fixed successful result UTF-8 bound.
 pub const SUCCESS_TEXT_BYTES: u64 = 1_048_576;
-/// Version-one fixed known-failure detail UTF-8 bound.
+/// Version-two fixed known-failure detail UTF-8 bound.
 pub const FAILURE_DETAIL_BYTES: u64 = 4_096;
 
 /// Exact fixed result bounds carried by every lease offer.
@@ -431,7 +431,7 @@ pub struct ResultBounds {
 
 impl ResultBounds {
     /// Returns the only admitted version-two pair.
-    pub const fn version_one() -> Self {
+    pub const fn version_two() -> Self {
         Self {
             success_text_bytes: SUCCESS_TEXT_BYTES,
             failure_detail_bytes: FAILURE_DETAIL_BYTES,
