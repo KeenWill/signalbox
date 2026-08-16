@@ -4083,7 +4083,21 @@ async fn require_live_execution_with_targets(
         }
         None => None,
     };
-    let current_snapshot = call_snapshot.as_ref().or(continuation_snapshot.as_ref());
+    let successor_snapshot = if availability_successor && call_snapshot.is_none() {
+        load_availability_predecessor_snapshot(
+            connection,
+            requested_session,
+            current_attempt.id(),
+            starting_snapshot.frontier().snapshot(),
+        )
+        .await?
+    } else {
+        None
+    };
+    let current_snapshot = call_snapshot
+        .as_ref()
+        .or(continuation_snapshot.as_ref())
+        .or(successor_snapshot.as_ref());
     let frontier_references = current_snapshot.as_ref().map_or_else(
         || starting_snapshot.ordered_entries().collect::<Vec<_>>(),
         |snapshot| snapshot.ordered_entries().to_vec(),
@@ -4155,8 +4169,8 @@ async fn require_live_execution_with_targets(
     }
     if let Some(call_snapshot) = call_snapshot {
         input = input.with_call_snapshot(call_snapshot);
-    } else if let Some(continuation_snapshot) = continuation_snapshot {
-        input = input.with_continuation_snapshot(continuation_snapshot);
+    } else if let Some(snapshot) = continuation_snapshot.or(successor_snapshot) {
+        input = input.with_continuation_snapshot(snapshot);
     }
     input.reconstitute().map_err(|error| {
         let (_, failure) = error.into_parts();
@@ -4719,6 +4733,44 @@ async fn load_tool_result_correlations(
             )
         })
         .collect())
+}
+
+/// Restores the frontier an availability predecessor was prepared against.
+///
+/// A successor attempt owns no call yet, and its predecessor is terminal, so
+/// the live call set omits it and reconstitution would fall back to the turn's
+/// starting snapshot. A `switch_now` after a tool continuation would then
+/// prepare the replacement without the assistant tool use or its results, and a
+/// predecessor that consumed steering would reconstitute without the durable
+/// consumed-steering rows the frontier holds.
+///
+/// A predecessor prepared against the turn's own starting frontier adds
+/// nothing, so that case keeps the ordinary starting-snapshot path.
+async fn load_availability_predecessor_snapshot(
+    connection: &mut PgConnection,
+    session: SessionId,
+    attempt: TurnAttemptId,
+    starting_frontier: signalbox_domain::ContextFrontierId,
+) -> Result<Option<ResolvedContextFrontierReconstitutionInput>, ModelCallRepositoryError> {
+    let frontier: Option<Uuid> = sqlx::query_scalar(
+        "SELECT predecessor.context_frontier_id
+           FROM credential_pool_availability_successor AS successor
+           JOIN model_call AS predecessor
+             ON predecessor.model_call_id = successor.predecessor_model_call_id
+          WHERE successor.successor_turn_attempt_id = $1",
+    )
+    .bind(attempt.into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(frontier) = frontier.map(signalbox_domain::ContextFrontierId::from_uuid) else {
+        return Ok(None);
+    };
+    if frontier == starting_frontier {
+        return Ok(None);
+    }
+    load_call_snapshot(connection, session, frontier)
+        .await
+        .map(Some)
 }
 
 async fn load_call_snapshot(
