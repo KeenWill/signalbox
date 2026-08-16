@@ -4,7 +4,9 @@
 GitHub pull requests moving. It reads GitHub directly with `gh api graphql`,
 decides from that snapshot whether each pull request has converged, and invokes
 operator-supplied commands when an unconverged pull request has no active work.
-It has no Signalbox daemon, service, or database integration and uses only the
+Only pull requests whose head repository is the configured repository are
+eligible; matching branch names from forks are never tracked or dispatched. It
+has no Signalbox daemon, service, or database integration and uses only the
 Python 3 standard library.
 
 The script writes one JSON log record for every decision. By default those
@@ -62,13 +64,14 @@ passed to operator commands. No other name is excluded.
 reported but is not an extra convergence condition: the commissioned predicate
 names only threads, checks, and conflicts.
 
-The initial lightweight query retrieves 100 open pull-request identities at a
-time and filters head branches locally with Python's case-sensitive
-shell-pattern matching. Matching and previously tracked open pull requests are
-then fetched in batches of 20, including their first 100 review threads and
-first 100 check contexts. Additional thread or check pages use dynamically
-aliased GraphQL fields, up to 20 continuations in one request. The script makes
-no REST requests. Previously watched node IDs are folded into the listing call
+The initial lightweight query retrieves 100 open pull-request identities and
+their head repositories at a time. It requires the head repository to equal the
+configured repository, then filters head branches locally with Python's
+case-sensitive shell-pattern matching. Matching and previously tracked open pull
+requests are then fetched in batches of 20, including their first 100 review
+threads and first 100 check contexts. Additional thread or check pages use
+dynamically aliased GraphQL fields, up to 20 continuations in one request. The
+script makes no REST requests. Previously watched node IDs are folded into the listing call
 so merged and closed pull requests can be recorded once and then omitted from
 future queries.
 
@@ -89,9 +92,10 @@ The active-work command runs only for an unconverged pull request outside its
 cool-off. Exit status 0 means active, 1 means inactive, and any other status is
 an error that prevents dispatch. The dispatch command runs only after an
 inactive result. Immediately before dispatch, the state file records a cool-off
-fence. A definite start failure or nonzero exit removes that fence; a timeout
-keeps it because dispatch may have happened. This prevents an ambiguous command
-outcome or later tick failure from causing an immediate duplicate dispatch. Both
+fence. A definite start failure removes that fence. Every outcome after the
+child starts, including a nonzero exit or timeout, keeps it because dispatch may
+have happened. This prevents an ambiguous command outcome or later tick failure
+from causing an immediate duplicate dispatch. Both
 commands are run directly, without a shell, and receive two appended positional
 arguments:
 
@@ -104,8 +108,9 @@ Commands must therefore accept those final two arguments. Shell pipelines and
 redirection belong in an operator-owned wrapper script, not in the configured
 command. Standard output or error from a failing command, and standard output
 from a successful dispatch, is truncated to 512 characters and attached to the
-decision log. The configurable command timeout is an operational bound that
-protects tick latency; its default is 60 seconds.
+decision log. The configurable command timeout bounds both GitHub GraphQL and
+operator-command subprocesses to protect tick latency; its default is 60
+seconds.
 
 An unconverged observation starts `unconverged_since`. An inactive result starts
 `idle_since`; active work or a successful dispatch clears it after the

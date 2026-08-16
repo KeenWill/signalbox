@@ -8,6 +8,7 @@ import dataclasses
 import datetime as dt
 import fnmatch
 import json
+import math
 import os
 from pathlib import Path
 import shlex
@@ -31,6 +32,7 @@ query($owner: String!, $name: String!, $after: String, $tracked: [ID!]!) {
         id
         number
         headRefName
+        headRepository { nameWithOwner }
       }
       pageInfo { hasNextPage endCursor }
     }
@@ -48,12 +50,15 @@ query($ids: [ID!]!) {
       id
       number
       state
+      mergedAt
+      closedAt
       title
       url
       isDraft
       baseRefName
       headRefName
       headRefOid
+      headRepository { nameWithOwner }
       mergeable
       reviewThreads(first: 100) {
         nodes { isResolved }
@@ -139,18 +144,24 @@ class JsonLogger:
 
 
 class GitHubGraphQL:
-    def __init__(self, repository: str) -> None:
+    def __init__(self, repository: str, timeout_seconds: float) -> None:
         self.owner, self.name = split_repository(repository)
+        self.repository = repository
+        self.timeout_seconds = timeout_seconds
 
     def execute(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
         request = json.dumps({"query": query, "variables": variables})
-        completed = subprocess.run(
-            ["gh", "api", "graphql", "--input", "-"],
-            input=request,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                ["gh", "api", "graphql", "--input", "-"],
+                input=request,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=self.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("gh GraphQL request timed out") from error
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
             raise RuntimeError(f"gh GraphQL request failed: {detail}")
@@ -195,16 +206,21 @@ class GitHubGraphQL:
             node["id"]
             for node in open_pull_requests
             if node["id"] in tracked_ids
-            or fnmatch.fnmatchcase(node.get("headRefName") or "", head_pattern)
+            or (
+                head_repository(node) == self.repository
+                and fnmatch.fnmatchcase(node.get("headRefName") or "", head_pattern)
+            )
         ]
         pull_requests: list[dict[str, Any]] = []
         for detail_batch in chunks(detail_ids, DETAIL_BATCH_SIZE):
             data = self.execute(PULL_REQUEST_DETAILS_QUERY, {"ids": list(detail_batch)})
-            pull_requests.extend(
-                normalize_pull_request(node)
-                for node in data["nodes"]
-                if node is not None
-            )
+            for node in data["nodes"]:
+                if node is None:
+                    continue
+                if node["state"] != "OPEN":
+                    tracked.append(node)
+                    continue
+                pull_requests.append(normalize_pull_request(node))
         self._finish_paginated_connections(pull_requests)
         return pull_requests, tracked
 
@@ -246,6 +262,11 @@ def split_repository(repository: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
+def head_repository(node: dict[str, Any]) -> str | None:
+    repository = node.get("headRepository")
+    return repository.get("nameWithOwner") if isinstance(repository, dict) else None
+
+
 def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
     commit_nodes = node["commits"]["nodes"]
     commit = commit_nodes[0]["commit"] if commit_nodes else None
@@ -262,6 +283,7 @@ def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
         "base_ref": node["baseRefName"],
         "head_ref": node["headRefName"],
         "head_oid": node["headRefOid"],
+        "head_repository": head_repository(node),
         "mergeable": node["mergeable"],
         "checked_head_oid": commit["oid"] if commit else None,
         "review_threads": list(threads["nodes"]),
@@ -498,15 +520,15 @@ def parse_command(value: Any, name: str) -> tuple[str, ...]:
 
 def positive_number(value: Any, name: str) -> float:
     number = float(value)
-    if number <= 0:
-        raise ValueError(f"{name} must be greater than zero")
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(f"{name} must be a finite number greater than zero")
     return number
 
 
 def nonnegative_number(value: Any, name: str) -> float:
     number = float(value)
-    if number < 0:
-        raise ValueError(f"{name} must not be negative")
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f"{name} must be a finite nonnegative number")
     return number
 
 
@@ -519,8 +541,10 @@ def load_state(path: Path, repository: str) -> dict[str, Any]:
         }
     with path.open(encoding="utf-8") as stream:
         state = json.load(stream)
-    valid_shape = state.get("version") == STATE_VERSION and isinstance(
-        state.get("pull_requests"), dict
+    valid_shape = (
+        isinstance(state, dict)
+        and state.get("version") == STATE_VERSION
+        and isinstance(state.get("pull_requests"), dict)
     )
     if not valid_shape:
         raise ValueError(f"unsupported or malformed state file: {path}")
@@ -725,10 +749,9 @@ def process_pull_request(
                 decision = Decision("dispatched", "operator-command-accepted-dispatch")
                 clear_idle_after_log = True
             else:
-                record["last_dispatched_at"] = previous_dispatch
-                save_state(config.state_file, state)
                 decision = Decision(
-                    "skipped", f"dispatch-command-exited:{dispatch_result.returncode}"
+                    "skipped",
+                    f"dispatch-command-exited:{dispatch_result.returncode}-cool-off-retained",
                 )
     log_record = decision_record(config, pull_request, computed, record, decision, now)
     if detail:
@@ -820,13 +843,16 @@ def run_tick(config: Config, logger: JsonLogger) -> list[dict[str, Any]]:
         if record.get("node_id") and not record.get("terminal_state")
     ]
     tracked_node_ids = [record["node_id"] for record in active_records]
-    pull_requests, tracked = GitHubGraphQL(config.repository).snapshot(
-        tracked_node_ids, config.head_pattern
-    )
+    pull_requests, tracked = GitHubGraphQL(
+        config.repository, config.command_timeout_seconds
+    ).snapshot(tracked_node_ids, config.head_pattern)
     now = time.time()
     summaries = record_terminal_pull_requests(config, logger, state, tracked, now)
     for pull_request in pull_requests:
-        watched = fnmatch.fnmatchcase(pull_request["head_ref"], config.head_pattern)
+        authorized = pull_request["head_repository"] == config.repository
+        watched = authorized and fnmatch.fnmatchcase(
+            pull_request["head_ref"], config.head_pattern
+        )
         if watched:
             summaries.append(process_pull_request(config, logger, state, pull_request, now))
             continue
@@ -844,7 +870,11 @@ def run_tick(config: Config, logger: JsonLogger) -> list[dict[str, Any]]:
                     "head_ref": pull_request["head_ref"],
                     "head_oid": pull_request["head_oid"],
                     "decision": "skipped",
-                    "reason": "head-branch-no-longer-matches-pattern",
+                    "reason": (
+                        "head-source-repository-not-authorized"
+                        if not authorized
+                        else "head-branch-no-longer-matches-pattern"
+                    ),
                     "convergence_reasons": [],
                     "unconverged_since": (
                         utc_timestamp(unconverged_since)
@@ -864,7 +894,11 @@ def run_tick(config: Config, logger: JsonLogger) -> list[dict[str, Any]]:
                 {
                     "pull_request": pull_request["number"],
                     "decision": "skipped",
-                    "reason": "head-branch-no-longer-matches-pattern",
+                    "reason": (
+                        "head-source-repository-not-authorized"
+                        if not authorized
+                        else "head-branch-no-longer-matches-pattern"
+                    ),
                     "idle_for_seconds": duration_since(idle_since, now),
                 }
             )
