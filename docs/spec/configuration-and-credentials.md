@@ -2247,13 +2247,20 @@ Selector-bearing bundles use content-digest version three. It retains the
 version-two frames below except that its first frame is
 `signalbox/session-template/content-digest/v3`; after the model-settings digest
 it writes the selector count as eight unsigned big-endian bytes, then each
-canonical selector record. A record frames the root spelling; for `configured`
-only, the 32 raw configured-root digest bytes; the exact source-path bytes; the
-kind spelling; and the 32 raw expected source-hash bytes. Thus templates that
-differ only in selectors have different provenance. Generated review templates
-carry the empty sequence. No present parser admits `instruction_selectors`, no
-resolved bundle retains it, and the implemented version-two digest and stable
-vector below remain unchanged until that child lands.
+canonical selector record. Every variable-length field in a record is
+length-framed, and the fixed-width ones are written raw, so the record is
+uniquely decodable and two implementations cannot hash one selector differently.
+In order: the length-framed root spelling; for `configured` only, the 32 raw
+configured-root digest bytes; the length-framed exact source-path bytes; the
+length-framed kind spelling; and the 32 raw expected source-hash bytes. A length
+frame is eight unsigned big-endian bytes followed by exactly that many bytes,
+matching the selector count above and the frames version two already uses; raw
+concatenation is not an admissible reading of any of the three variable-length
+fields. Thus templates that differ only in selectors have different provenance.
+Generated review templates carry the empty sequence. No present parser admits
+`instruction_selectors`, no resolved bundle retains it, and the implemented
+version-two digest and stable vector below remain unchanged until that child
+lands.
 
 An inline prompt is the exact TOML string value. A prompt-file reference is
 either a relative path resolved from the template document's parent directory,
