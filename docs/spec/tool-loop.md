@@ -830,13 +830,19 @@ exactly `unknown_tool`, `invalid_arguments`, `execution_failed`,
 `result_too_large`, `crash_lost`, `denied`, or `closed_by_turn_end`. Execution
 failures select their stored error kind and detail, denial selects `denied` and
 its reason, and terminal closure selects `closed_by_turn_end` with null detail.
-OpenAI carries that JSON as ordinary tool-message content because its wire shape
-has no failure flag; Anthropic also receives the provider-neutral failure flag.
-Malformed proposal arguments remain exact after preparation-time credential
-scrubbing on the durable request but replay as the exact provider-neutral JSON
-object `{"signalbox_invalid_arguments":true}`, allowing the paired typed error
-result to reach either provider without pretending the placeholder is durable
-evidence.
+`K` stays closed as written; a family whose failures do not fit it maps into it
+rather than extending it, and may fix `D` to its own closed token vocabulary so
+the projection stays machine-readable. **Committed unimplemented
+functionality.** The instruction family is the one such mapping so far, fixed by
+[workspace instructions](workspace-instructions.md#enumeration-preview-and-admission):
+its four admission failures select `execution_failed` with `D` set to exactly
+one closed reason token and no other text. OpenAI carries that JSON as ordinary
+tool-message content because its wire shape has no failure flag; Anthropic also
+receives the provider-neutral failure flag. Malformed proposal arguments remain
+exact after preparation-time credential scrubbing on the durable request but
+replay as the exact provider-neutral JSON object
+`{"signalbox_invalid_arguments":true}`, allowing the paired typed error result
+to reach either provider without pretending the placeholder is durable evidence.
 
 The first compiled tool is `current_time`:
 
