@@ -221,7 +221,12 @@ completion generation; reviews name their provider review identity; workflow
 facts name branch, workflow identity, run identity, and attempt. The normalized
 review observation has no submitted-time member, so version one assumes the
 provider review identity alone uniquely identifies that immutable submission.
-The random `RepoWatchEventId` is deliberately excluded from the digest.
+The random `RepoWatchEventId` is deliberately excluded from the digest, and so
+is the workflow display name: it is rule-visible payload rather than an
+identifying member, the differ suppresses a re-observed run attempt on members
+the stream identity already names, and a provider can rename a workflow under
+all of them, so hashing the name would mint a new identity for a run that leaves
+the observation and returns after a rename.
 
 **Implemented behavior.** A later equal fact on a recurring stream advances its
 sequence and therefore has a different content identity. Equal normalized facts

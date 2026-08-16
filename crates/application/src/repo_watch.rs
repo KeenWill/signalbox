@@ -1786,13 +1786,22 @@ fn hash_event_kind(hash: &mut RepoWatchIdentityHasher, kind: &RepoWatchEventKind
             hash.text(name.as_str());
             hash.text(check_conclusion_discriminator(*conclusion));
         }
+        // The workflow display name is deliberately excluded. It is
+        // rule-visible payload, not an identifying member: the differ
+        // suppresses a re-observed run attempt by branch, workflow identity,
+        // run identity, and attempt, every one of which the stream identity
+        // already names, and a provider can rename a workflow under all of
+        // them. Hashing the name would mint a new identity for a run that
+        // leaves the observation and returns after a rename, and commit
+        // coalescing could no longer recognize the occurrence already durable
+        // for it. Runs sharing a display name stay distinct through the
+        // workflow identity in the stream.
         RepoWatchEventKindV1::BranchWorkflowRunCompleted {
             branch,
-            workflow,
+            workflow: _,
             conclusion,
         } => {
             hash.text(branch.as_str());
-            hash.text(workflow.as_str());
             hash.text(check_conclusion_discriminator(*conclusion));
         }
         RepoWatchEventKindV1::ReviewSubmitted {
@@ -3718,6 +3727,57 @@ mod tests {
         let events = derive(Some(&previous), &current)?;
 
         assert!(events.is_empty());
+        Ok(())
+    }
+
+    /// A completed run that leaves the observation and returns after its
+    /// workflow is renamed is the same run: provider identities and attempt are
+    /// unchanged, and the differ already suppresses re-emission on exactly those
+    /// members. Its content identity has to survive the rename, or commit
+    /// coalescing cannot recognize the occurrence already durable for it and the
+    /// run is recorded and dispatched a second time.
+    #[test]
+    fn renamed_workflow_run_reappearance_restates_its_content_identity()
+    -> Result<(), Box<dyn Error>> {
+        let absent = observation(Vec::new(), Vec::new(), Vec::new(), Vec::new())?;
+        let named = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let renamed = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                RENAMED_WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let recorded = derive_occurrences(Some(&absent), &named, &mut frontier, 1)?;
+        // The branch is deleted and recreated, and the workflow is renamed
+        // while the run is out of the observation.
+        let returned = derive_occurrences(Some(&absent), &renamed, &mut frontier, 10)?;
+
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(returned.len(), 1);
+        assert_eq!(
+            recorded[0].content_identity(),
+            returned[0].content_identity(),
+            "a renamed workflow's reappearing run must restate its identity"
+        );
+        // The rename is still visible to rules through the event payload.
+        assert_ne!(recorded[0].event().kind(), returned[0].event().kind());
         Ok(())
     }
 
