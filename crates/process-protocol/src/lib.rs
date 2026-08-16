@@ -81,10 +81,11 @@ pub const MAX_BLOB_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 /// Maximum decoded bytes returned by one direct blob-range request.
 pub const MAX_BLOB_READ_BYTES: usize = MAX_FRAME_BYTES / 2;
 
-/// Maximum concurrent process-protocol snapshot readers.
+/// Tunable effective ceiling for concurrent process-protocol snapshot readers.
 ///
-/// The daemon additionally reserves pool connections outside snapshot work;
-/// this protocol-owned ceiling prevents a larger pool from expanding snapshot
+/// This operational admission bound is not a hard safety ceiling. The daemon
+/// additionally reserves pool connections outside snapshot work; this
+/// protocol-owned ceiling prevents a larger pool from expanding snapshot
 /// admission beyond the implemented contract.
 pub const MAX_CONCURRENT_SNAPSHOT_READERS: usize = 8;
 
