@@ -68,6 +68,13 @@ impl VideoFixture {
         )
     }
 
+    pub fn durationless_webm() -> Self {
+        Self::new(
+            FixtureKind::Webm,
+            webm_bytes_with_duration(None, ContentProtection::Clear),
+        )
+    }
+
     pub fn truncated_mp4() -> Self {
         let mut bytes = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
         bytes.pop();
@@ -186,10 +193,52 @@ impl VideoFixture {
             &[0x15, 0x49, 0xa9, 0x66],
             &[scale.clone(), scale, duration].concat(),
         );
+        let track_entry = webm_track_entry(ContentProtection::Clear);
+        let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn mp4_with_iso6_brand() -> Self {
+        let mut bytes = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
+        bytes[8..12].copy_from_slice(b"iso6");
+        Self::new(FixtureKind::Mp4, bytes)
+    }
+
+    pub fn fragmented_mp4_with_movie_extends_duration() -> Self {
+        let mut movie_header = vec![0_u8; 100];
+        movie_header[12..16].copy_from_slice(&MP4_TIMESCALE.to_be_bytes());
+        let mut handler = vec![0_u8; 24];
+        handler[8..12].copy_from_slice(b"vide");
+        let media = mp4_box(*b"mdia", &mp4_box(*b"hdlr", &handler));
+        let track = mp4_box(*b"trak", &media);
+        let mut fragment_duration = vec![0_u8; 8];
+        fragment_duration[4..8].copy_from_slice(&MP4_DURATION_UNITS.to_be_bytes());
+        let movie_extends = mp4_box(*b"mvex", &mp4_box(*b"mehd", &fragment_duration));
+        let movie = mp4_box(
+            *b"moov",
+            &[mp4_box(*b"mvhd", &movie_header), track, movie_extends].concat(),
+        );
+        Self::new(FixtureKind::Mp4, [ftyp(), movie].concat())
+    }
+
+    pub fn webm_track_missing_number_and_codec() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
         let track_type = ebml_element(&[0x83], &[1]);
         let track_entry = ebml_element(&[0xae], &track_type);
         let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
         let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn webm_with_unknown_sized_final_cluster() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let tracks = ebml_element(
+            &[0x16, 0x54, 0xae, 0x6b],
+            &webm_track_entry(ContentProtection::Clear),
+        );
+        let cluster = [vec![0x1f, 0x43, 0xb6, 0x75, 0xff], vec![0xec, 0x80]].concat();
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks, cluster].concat());
         Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
     }
 
@@ -272,10 +321,29 @@ fn mp4_box(box_type: [u8; 4], payload: &[u8]) -> Vec<u8> {
 }
 
 fn webm_bytes(duration: f64, protection: ContentProtection) -> Vec<u8> {
+    webm_bytes_with_duration(Some(duration), protection)
+}
+
+fn webm_bytes_with_duration(duration: Option<f64>, protection: ContentProtection) -> Vec<u8> {
+    let info = webm_info(duration);
+    let track_entry = webm_track_entry(protection);
+    let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
+    let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
+    [ebml_header(), segment].concat()
+}
+
+fn webm_info(duration: Option<f64>) -> Vec<u8> {
     let scale = ebml_element(&[0x2a, 0xd7, 0xb1], &[0x0f, 0x42, 0x40]);
-    let duration = ebml_element(&[0x44, 0x89], &duration.to_bits().to_be_bytes());
-    let info = ebml_element(&[0x15, 0x49, 0xa9, 0x66], &[scale, duration].concat());
+    let duration = duration
+        .map(|duration| ebml_element(&[0x44, 0x89], &duration.to_bits().to_be_bytes()))
+        .unwrap_or_default();
+    ebml_element(&[0x15, 0x49, 0xa9, 0x66], &[scale, duration].concat())
+}
+
+fn webm_track_entry(protection: ContentProtection) -> Vec<u8> {
+    let track_number = ebml_element(&[0xd7], &[1]);
     let track_type = ebml_element(&[0x83], &[1]);
+    let codec_id = ebml_element(&[0x86], b"V_VP9");
     let encryption = match protection {
         ContentProtection::Clear => Vec::new(),
         ContentProtection::Encrypted => {
@@ -284,10 +352,10 @@ fn webm_bytes(duration: f64, protection: ContentProtection) -> Vec<u8> {
             ebml_element(&[0x6d, 0x80], &content_encoding)
         }
     };
-    let track_entry = ebml_element(&[0xae], &[track_type, encryption].concat());
-    let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
-    let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
-    [ebml_header(), segment].concat()
+    ebml_element(
+        &[0xae],
+        &[track_number, track_type, codec_id, encryption].concat(),
+    )
 }
 
 fn ebml_header() -> Vec<u8> {

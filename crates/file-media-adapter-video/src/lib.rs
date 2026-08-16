@@ -36,6 +36,8 @@ const MP4_HDLR: [u8; 4] = *b"hdlr";
 const MP4_MINF: [u8; 4] = *b"minf";
 const MP4_STBL: [u8; 4] = *b"stbl";
 const MP4_STSD: [u8; 4] = *b"stsd";
+const MP4_MVEX: [u8; 4] = *b"mvex";
+const MP4_MEHD: [u8; 4] = *b"mehd";
 
 const EBML_HEADER: u64 = 0x1a45dfa3;
 const EBML_HEADER_BYTES: [u8; 4] = [0x1a, 0x45, 0xdf, 0xa3];
@@ -46,7 +48,10 @@ const EBML_TIMECODE_SCALE: u64 = 0x2ad7b1;
 const EBML_DURATION: u64 = 0x4489;
 const EBML_TRACKS: u64 = 0x1654ae6b;
 const EBML_TRACK_ENTRY: u64 = 0xae;
+const EBML_TRACK_NUMBER: u64 = 0xd7;
 const EBML_TRACK_TYPE: u64 = 0x83;
+const EBML_CODEC_ID: u64 = 0x86;
+const EBML_CLUSTER: u64 = 0x1f43b675;
 const EBML_CONTENT_ENCODINGS: u64 = 0x6d80;
 const EBML_CONTENT_ENCODING: u64 = 0x6240;
 const EBML_CONTENT_ENCRYPTION: u64 = 0x5035;
@@ -131,7 +136,7 @@ impl FileMediaProvider for VideoProvider {
         Box::pin(async move {
             let kind = require_reader(reader)?;
             require_active(cancellation)?;
-            if request.file.detected_media_type().as_str() != kind.media_type() {
+            if request.detected_media_type.as_str() != kind.media_type() {
                 return Err(ProcessorFailure::Protocol);
             }
             if !empty_options(&request.options) {
@@ -309,7 +314,7 @@ fn ebml_header_has_webm_doc_type(bytes: &[u8]) -> bool {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VideoMetadata {
-    duration_milliseconds: u64,
+    duration_milliseconds: Option<u64>,
     video_tracks: u64,
     profile: String,
 }
@@ -351,6 +356,7 @@ enum Mp4Scope {
     Media,
     MediaInformation,
     SampleTable,
+    MovieExtends,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -376,7 +382,10 @@ struct Mp4State {
     nodes: usize,
     movie_seen: bool,
     brand: Option<String>,
-    duration_milliseconds: Option<u64>,
+    movie_timescale: Option<u64>,
+    movie_duration: Option<u64>,
+    fragment_duration: Option<u64>,
+    fragmented: bool,
     video_tracks: u64,
 }
 
@@ -387,12 +396,23 @@ fn parse_mp4(bytes: &[u8], source_complete: bool) -> Result<VideoMetadata, Video
     let mut state = Mp4State::default();
     parse_mp4_boxes(bytes, 0, Mp4Scope::Root, !source_complete, &mut state)?;
     let profile = state.brand.ok_or(VideoIssue::Malformed)?;
-    let duration_milliseconds = state.duration_milliseconds.ok_or(VideoIssue::Malformed)?;
+    let timescale = state.movie_timescale.ok_or(VideoIssue::Malformed)?;
+    let duration = if state.fragmented && state.movie_duration == Some(0) {
+        state.fragment_duration.ok_or(VideoIssue::Malformed)?
+    } else {
+        state.movie_duration.ok_or(VideoIssue::Malformed)?
+    };
+    let duration_milliseconds = u128::from(duration)
+        .checked_mul(1000)
+        .ok_or(VideoIssue::Structure)?
+        / u128::from(timescale);
+    let duration_milliseconds =
+        u64::try_from(duration_milliseconds).map_err(|_| VideoIssue::Structure)?;
     if !state.movie_seen || state.video_tracks == 0 {
         return Err(VideoIssue::Malformed);
     }
     Ok(VideoMetadata {
-        duration_milliseconds,
+        duration_milliseconds: Some(duration_milliseconds),
         video_tracks: state.video_tracks,
         profile,
     })
@@ -463,6 +483,14 @@ fn parse_mp4_boxes(
                 parse_mp4_boxes(payload, depth + 1, Mp4Scope::SampleTable, false, state)?;
             }
             MP4_STSD if scope == Mp4Scope::SampleTable => parse_stsd(payload, state)?,
+            MP4_MVEX if scope == Mp4Scope::Movie => {
+                if state.fragmented {
+                    return Err(VideoIssue::Malformed);
+                }
+                state.fragmented = true;
+                parse_mp4_boxes(payload, depth + 1, Mp4Scope::MovieExtends, false, state)?;
+            }
+            MP4_MEHD if scope == Mp4Scope::MovieExtends => parse_mehd(payload, state)?,
             _ => {}
         }
         cursor = cursor.checked_add(consumed).ok_or(VideoIssue::Structure)?;
@@ -560,11 +588,31 @@ fn parse_ftyp(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
 }
 
 fn supported_mp4_brand(brand: &[u8]) -> bool {
-    matches!(brand, b"isom" | b"iso2" | b"mp41" | b"mp42" | b"avc1")
+    matches!(
+        brand,
+        b"isom"
+            | b"iso2"
+            | b"iso3"
+            | b"iso4"
+            | b"iso5"
+            | b"iso6"
+            | b"iso7"
+            | b"iso8"
+            | b"iso9"
+            | b"mp41"
+            | b"mp42"
+            | b"avc1"
+            | b"dash"
+            | b"M4V "
+            | b"M4VH"
+            | b"M4VP"
+            | b"F4V "
+            | b"F4P "
+    )
 }
 
 fn parse_mvhd(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
-    if state.duration_milliseconds.is_some() {
+    if state.movie_timescale.is_some() || state.movie_duration.is_some() {
         return Err(VideoIssue::Malformed);
     }
     let version = *payload.first().ok_or(VideoIssue::Malformed)?;
@@ -594,12 +642,25 @@ fn parse_mvhd(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
     if timescale == 0 {
         return Err(VideoIssue::Malformed);
     }
-    let milliseconds = u128::from(duration)
-        .checked_mul(1000)
-        .ok_or(VideoIssue::Structure)?
-        / u128::from(timescale);
-    state.duration_milliseconds =
-        Some(u64::try_from(milliseconds).map_err(|_| VideoIssue::Structure)?);
+    state.movie_timescale = Some(timescale);
+    state.movie_duration = Some(duration);
+    Ok(())
+}
+
+fn parse_mehd(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
+    if state.fragment_duration.is_some() {
+        return Err(VideoIssue::Malformed);
+    }
+    let version = *payload.first().ok_or(VideoIssue::Malformed)?;
+    let duration = match version {
+        0 if payload.len() >= 8 => u64::from(read_u32(payload, 4)?),
+        1 if payload.len() >= 12 => read_u64(payload, 4)?,
+        _ => return Err(VideoIssue::Malformed),
+    };
+    if duration == 0 {
+        return Err(VideoIssue::Malformed);
+    }
+    state.fragment_duration = Some(duration);
     Ok(())
 }
 
@@ -711,13 +772,18 @@ fn parse_webm(bytes: &[u8], source_complete: bool) -> Result<VideoMetadata, Vide
     {
         return Err(VideoIssue::Malformed);
     }
-    let duration = state.duration.ok_or(VideoIssue::Malformed)?;
-    let milliseconds = duration * state.timecode_scale as f64 / 1_000_000.0;
-    if !milliseconds.is_finite() || milliseconds < 0.0 || milliseconds > u64::MAX as f64 {
-        return Err(VideoIssue::Malformed);
-    }
+    let duration_milliseconds = state
+        .duration
+        .map(|duration| duration * state.timecode_scale as f64 / 1_000_000.0)
+        .map(|milliseconds| {
+            if !milliseconds.is_finite() || milliseconds < 0.0 || milliseconds > u64::MAX as f64 {
+                return Err(VideoIssue::Malformed);
+            }
+            Ok(milliseconds.round() as u64)
+        })
+        .transpose()?;
     Ok(VideoMetadata {
-        duration_milliseconds: milliseconds.round() as u64,
+        duration_milliseconds,
         video_tracks: state.video_tracks,
         profile: String::from("webm"),
     })
@@ -735,6 +801,9 @@ fn parse_ebml_scope(
     }
     let mut cursor = 0_usize;
     let mut video_track = VideoTrackPresence::Absent;
+    let mut track_number_seen = false;
+    let mut track_type_seen = false;
+    let mut codec_id_seen = false;
     while cursor < bytes.len() {
         let (id, id_bytes, _) = read_ebml_vint(bytes, cursor, EbmlVintKind::Identifier, 4)?;
         let size_offset = cursor.checked_add(id_bytes).ok_or(VideoIssue::Structure)?;
@@ -744,7 +813,7 @@ fn parse_ebml_scope(
             .checked_add(size_bytes)
             .ok_or(VideoIssue::Structure)?;
         let declared_payload_end = if unknown {
-            if id != EBML_SEGMENT {
+            if id != EBML_SEGMENT && !(id == EBML_CLUSTER && scope == EbmlScope::Segment) {
                 return Err(VideoIssue::Malformed);
             }
             bytes.len()
@@ -840,7 +909,23 @@ fn parse_ebml_scope(
             }
             (EBML_DURATION, EbmlScope::Info) => parse_ebml_duration(payload, state)?,
             (EBML_TRACK_TYPE, EbmlScope::TrackEntry) => {
+                if track_type_seen {
+                    return Err(VideoIssue::Malformed);
+                }
+                track_type_seen = true;
                 video_track.include(parse_ebml_track_type(payload)?);
+            }
+            (EBML_TRACK_NUMBER, EbmlScope::TrackEntry) => {
+                if track_number_seen || parse_ebml_uint(payload)? == 0 {
+                    return Err(VideoIssue::Malformed);
+                }
+                track_number_seen = true;
+            }
+            (EBML_CODEC_ID, EbmlScope::TrackEntry) => {
+                if codec_id_seen || payload.is_empty() || !payload.is_ascii() {
+                    return Err(VideoIssue::Malformed);
+                }
+                codec_id_seen = true;
             }
             _ => {}
         }
@@ -848,6 +933,10 @@ fn parse_ebml_scope(
         if unknown {
             break;
         }
+    }
+    if scope == EbmlScope::TrackEntry && (!track_number_seen || !track_type_seen || !codec_id_seen)
+    {
+        return Err(VideoIssue::Malformed);
     }
     Ok(video_track)
 }

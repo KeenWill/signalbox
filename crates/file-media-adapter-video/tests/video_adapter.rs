@@ -270,6 +270,54 @@ async fn duplicate_webm_timestamp_scale_is_malformed() -> Result<(), Box<dyn Err
 }
 
 #[tokio::test]
+async fn iso6_mp4_brand_validates() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_iso6_brand().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn webm_track_without_mandatory_fields_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_track_missing_number_and_codec(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn durationless_webm_validates_with_unavailable_duration() -> Result<(), Box<dyn Error>> {
+    let fixture = VideoFixture::durationless_webm();
+    let (inspection, body) = inspect_and_read_metadata(fixture).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert_eq!(body["duration_milliseconds"], serde_json::Value::Null);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_sized_final_webm_cluster_is_permitted() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::webm_with_unknown_sized_final_cluster().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn fragmented_mp4_uses_movie_extends_duration() -> Result<(), Box<dyn Error>> {
+    let fixture = VideoFixture::fragmented_mp4_with_movie_extends_duration();
+    let expected_duration = fixture.expected_duration_milliseconds();
+    let (inspection, body) = inspect_and_read_metadata(fixture).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert_eq!(body["duration_milliseconds"], expected_duration);
+    Ok(())
+}
+
+#[tokio::test]
 async fn hostile_view_arguments_are_typed_and_content_silent() -> Result<(), Box<dyn Error>> {
     let source = VideoFixture::ordinary_mp4().into_source()?;
     let result = read(
