@@ -201,6 +201,7 @@ impl StreamDecoder {
                     exchange: self.exchange.clone(),
                     reported_model: self.reported_model.clone(),
                     kind,
+                    non_acceptance_proven: false,
                     native,
                     usage: self.usage,
                 },
@@ -809,6 +810,7 @@ mod tests {
         ExchangeFacts {
             provider_request_id: Some(ProviderRequestId::new("req_1")),
             http_status: Some(200),
+            retry_after: None,
         }
     }
 
@@ -1419,6 +1421,7 @@ mod tests {
             panic!("a definitive error record outranks weaker post-usage protocol loss");
         };
         assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
+        assert!(!error.non_acceptance_proven);
         assert_eq!(error.usage.input_tokens, Some(25));
         assert_eq!(error.usage.output_tokens, Some(7));
     }
