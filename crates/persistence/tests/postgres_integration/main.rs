@@ -15,6 +15,7 @@ mod approval_decisions;
 mod delegated_result_rereads;
 mod delegation_schema;
 mod delegation_transactions;
+mod hub_fence;
 mod model_call_execution_and_recovery;
 mod model_call_usage_and_interrupts;
 mod model_credentials_and_tool_batches;

@@ -16,12 +16,13 @@ pub const HUB_FENCE_MIGRATION_VERSION: i64 = 202607230001;
 
 const HUB_FENCE_NAMESPACE: u64 = 1_396_852_273;
 
-// Tunable effective ceiling: the daemon admits up to sixteen scheduler passes
-// concurrently, while the process listener, runner, repository watch, outbox,
-// and guard checks also need database progress. Thirty-two sessions provide
-// that headroom beyond SQLx's ten-connection default without defining a safety
-// boundary.
-const FENCED_POOL_MAX_CONNECTIONS: u32 = 32;
+/// Tunable effective ceiling for physical sessions in the fenced daemon pool.
+///
+/// This is operational headroom rather than a hard safety boundary: the daemon
+/// admits up to sixteen scheduler passes concurrently while the process
+/// listener, runner, repository watch, outbox, and guard checks also require
+/// database progress.
+pub const FENCED_POOL_MAX_CONNECTIONS: u32 = 32;
 
 /// One positive durable hub-pool generation.
 ///
