@@ -647,37 +647,51 @@ fn session_uuids(fixture: &DispatchFixture) -> Vec<Uuid> {
         .collect()
 }
 
-fn reused_rule_identity(error: &RepoWatchDispatchRepositoryError) -> bool {
-    matches!(
-        error,
-        RepoWatchDispatchRepositoryError::ReusedRuleIdentity { .. }
-    )
+/// Closed classification of one rule-admission refusal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuleAdmissionRefusal {
+    ReusedIdentity,
+    ChangedField(RepoWatchRuleIdentityField),
+    RegressedVersion {
+        configured: RepoWatchRuleVersion,
+        latest: RepoWatchRuleVersion,
+    },
+    StorageCorruption,
+    NotAnAdmissionRefusal,
 }
 
-fn changed_rule_field(
-    error: &RepoWatchDispatchRepositoryError,
-) -> Option<RepoWatchRuleIdentityField> {
+/// Classifies a reconciliation failure for the assertions below.
+///
+/// One exhaustive accessor rather than a wildcard per assertion: a repository
+/// error variant added later forces a classification decision here instead of
+/// silently reading as "not the refusal under test" at every call site.
+fn admission_refusal(error: &RepoWatchDispatchRepositoryError) -> RuleAdmissionRefusal {
     match error {
-        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { field, .. } => Some(*field),
-        _ => None,
-    }
-}
-
-fn regressed_rule_version(
-    error: &RepoWatchDispatchRepositoryError,
-) -> Option<(RepoWatchRuleVersion, RepoWatchRuleVersion)> {
-    match error {
+        RepoWatchDispatchRepositoryError::ReusedRuleIdentity { .. } => {
+            RuleAdmissionRefusal::ReusedIdentity
+        }
+        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { field, .. } => {
+            RuleAdmissionRefusal::ChangedField(*field)
+        }
         RepoWatchDispatchRepositoryError::RegressedRuleVersion {
             rule_version,
             latest_version,
             ..
-        } => Some((*rule_version, *latest_version)),
-        _ => None,
+        } => RuleAdmissionRefusal::RegressedVersion {
+            configured: *rule_version,
+            latest: *latest_version,
+        },
+        RepoWatchDispatchRepositoryError::Corruption(_) => RuleAdmissionRefusal::StorageCorruption,
+        RepoWatchDispatchRepositoryError::Database(_)
+        | RepoWatchDispatchRepositoryError::CommitAmbiguous(_)
+        | RepoWatchDispatchRepositoryError::EventStore(_)
+        | RepoWatchDispatchRepositoryError::SessionCreation(_)
+        | RepoWatchDispatchRepositoryError::InitialInput(_)
+        | RepoWatchDispatchRepositoryError::GoalCommission(_)
+        | RepoWatchDispatchRepositoryError::GoalCutoff(_) => {
+            RuleAdmissionRefusal::NotAnAdmissionRefusal
+        }
     }
-}
-
-fn storage_corruption(error: &RepoWatchDispatchRepositoryError) -> bool {
-    matches!(error, RepoWatchDispatchRepositoryError::Corruption(_))
 }
 
 /// Removes the fixture rule's stored fingerprints to stage a corrupt shape.
@@ -2653,7 +2667,10 @@ async fn retired_rule_identity_cannot_resume_from_its_old_activation() -> Result
         .await
         .expect_err("retired rule identity must not reactivate");
 
-    assert!(reused_rule_identity(&error));
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ReusedIdentity
+    );
     Ok(())
 }
 
@@ -2672,7 +2689,10 @@ async fn removed_repository_deactivates_its_rule_identities() -> Result<(), Box<
         .await
         .expect_err("a rule from a removed repository must be retired");
 
-    assert!(reused_rule_identity(&error));
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ReusedIdentity
+    );
     Ok(())
 }
 
@@ -2715,8 +2735,8 @@ async fn active_rule_identity_names_the_matcher_field_changed_without_a_version_
         .expect_err("active rule semantics require a new identity");
 
     assert_eq!(
-        changed_rule_field(&error),
-        Some(RepoWatchRuleIdentityField::MatcherEventKinds)
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ChangedField(RepoWatchRuleIdentityField::MatcherEventKinds)
     );
     Ok(())
 }
@@ -2734,7 +2754,10 @@ async fn active_activation_without_field_fingerprints_is_storage_corruption()
         .await
         .expect_err("an active activation without fingerprints is not a tolerated shape");
 
-    assert!(storage_corruption(&error));
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::StorageCorruption
+    );
     Ok(())
 }
 
@@ -2751,7 +2774,10 @@ async fn retiring_a_removed_repository_validates_its_field_fingerprints()
         .await
         .expect_err("a removed repository is retired against a validated stored shape");
 
-    assert!(storage_corruption(&error));
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::StorageCorruption
+    );
     let deactivated: bool = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1
@@ -2780,7 +2806,10 @@ async fn retiring_an_omitted_rule_validates_its_field_fingerprints() -> Result<(
         .await
         .expect_err("an omitted rule is retired against a validated stored shape");
 
-    assert!(storage_corruption(&error));
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::StorageCorruption
+    );
     let deactivated: bool = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1
@@ -2846,13 +2875,13 @@ async fn a_revision_below_the_highest_recorded_revision_is_refused() -> Result<(
         .expect_err("a revision below the highest recorded revision is not a replacement");
 
     assert_eq!(
-        regressed_rule_version(&error),
-        Some((
-            RepoWatchRuleVersion::V1,
-            RepoWatchRuleVersion::new(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::RegressedVersion {
+            configured: RepoWatchRuleVersion::V1,
+            latest: RepoWatchRuleVersion::new(
                 NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("recorded version is positive")
             )
-        ))
+        }
     );
     Ok(())
 }
@@ -2885,7 +2914,10 @@ async fn a_refused_repository_leaves_every_other_repository_unmutated() -> Resul
         .await
         .expect_err("the second repository retired the configured identity");
 
-    assert!(reused_rule_identity(&error));
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ReusedIdentity
+    );
     let revisions: Vec<(i64, bool)> = sqlx::query_as(
         "SELECT activation.rule_version, deactivation.rule_id IS NOT NULL AS deactivated
            FROM repo_watch_rule_activation AS activation

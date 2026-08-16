@@ -616,9 +616,13 @@ activation, deactivation, evaluations, dispatches, and sessions remain joined by
 the same rule ID and their original revisions, while only later events are
 eligible for the replacement. A deactivated `(rule ID, revision)` pair cannot be
 configured again, and a revision below the highest revision ever recorded for
-that rule ID is refused, so only a higher revision replaces the active rule. A
-fresh rule ID remains an admitted replacement path, but a revision bump is the
-ordinary way to preserve stable identity and history.
+that rule ID in that repository is refused, so only a higher revision replaces
+the active rule. Rule identity is per repository throughout: activation,
+deactivation, fingerprints, and evaluation are keyed by repository, so the same
+rule ID first configured in a newly watched repository starts its own lineage at
+any revision instead of inheriting another repository's history. A fresh rule ID
+remains an admitted replacement path, but a revision bump is the ordinary way to
+preserve stable identity and history.
 
 **Committed unimplemented functionality.** The structured-rule dispatch surface
 converges onto the program substrate by replacing each rule with a subscription
