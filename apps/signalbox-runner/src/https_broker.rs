@@ -611,12 +611,16 @@ mod tests {
     }
 
     #[test]
-    fn direct_ip_and_non_public_resolution_classes_fail_closed() {
+    fn direct_ip_connect_authority_fails_closed() {
         assert!(!canonical_dns_name("127.0.0.1"));
         assert!(matches!(
             parse_connect_request(&connect_request("127.0.0.1")),
             Err(HttpsBrokerError::InvalidConnect)
         ));
+    }
+
+    #[test]
+    fn non_public_resolution_classes_fail_closed() {
         assert!(!is_public(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
         assert!(!is_public(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
         assert!(!is_public(IpAddr::V6(Ipv6Addr::LOCALHOST)));
@@ -686,12 +690,21 @@ mod tests {
         let request = connect_request("github.com");
         let hello = client_hello("github.com");
         let expected_hello = hello.clone();
+        let hello_length = expected_hello.len();
+        let expected_connect_response = b"HTTP/1.1 200 Connection Established\r\n\r\n".to_vec();
+        let connect_response_length = expected_connect_response.len();
+        let client_payload = b"client payload".to_vec();
+        let expected_client_payload = client_payload.clone();
+        let client_payload_length = expected_client_payload.len();
+        let upstream_reply = b"upstream reply".to_vec();
+        let expected_upstream_reply = upstream_reply.clone();
+        let upstream_reply_length = expected_upstream_reply.len();
         let client_task = async move {
             client
                 .write_all(&request)
                 .await
                 .expect("the CONNECT request writes");
-            let mut response = vec![0_u8; 39];
+            let mut response = vec![0_u8; connect_response_length];
             client
                 .read_exact(&mut response)
                 .await
@@ -701,10 +714,10 @@ mod tests {
                 .await
                 .expect("the ClientHello writes");
             client
-                .write_all(b"client payload")
+                .write_all(&client_payload)
                 .await
                 .expect("the tunneled payload writes");
-            let mut reply = vec![0_u8; 14];
+            let mut reply = vec![0_u8; upstream_reply_length];
             client
                 .read_exact(&mut reply)
                 .await
@@ -713,18 +726,18 @@ mod tests {
             (response, reply)
         };
         let upstream_task = async move {
-            let mut observed_hello = vec![0_u8; expected_hello.len()];
+            let mut observed_hello = vec![0_u8; hello_length];
             upstream
                 .read_exact(&mut observed_hello)
                 .await
                 .expect("the admitted ClientHello reaches upstream");
-            let mut payload = vec![0_u8; 14];
+            let mut payload = vec![0_u8; client_payload_length];
             upstream
                 .read_exact(&mut payload)
                 .await
                 .expect("the tunneled payload reaches upstream");
             upstream
-                .write_all(b"upstream reply")
+                .write_all(&upstream_reply)
                 .await
                 .expect("the upstream reply writes");
             upstream.shutdown().await.expect("the upstream closes");
@@ -738,10 +751,10 @@ mod tests {
             .expect("the destination fixture is available")
             .clone();
 
-        assert_eq!(response, b"HTTP/1.1 200 Connection Established\r\n\r\n");
-        assert_eq!(reply, b"upstream reply");
-        assert_eq!(observed_hello, client_hello("github.com"));
-        assert_eq!(payload, b"client payload");
+        assert_eq!(response, expected_connect_response);
+        assert_eq!(reply, expected_upstream_reply);
+        assert_eq!(observed_hello, expected_hello);
+        assert_eq!(payload, expected_client_payload);
         assert!(tunneled.is_ok());
         assert_eq!(
             observed_destinations,
