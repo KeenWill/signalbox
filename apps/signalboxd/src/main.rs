@@ -478,14 +478,16 @@ fn repository_watch_rule_configuration_error(
                 rule_version.get()
             ),
         }),
-        RepoWatchDispatchRepositoryError::UnfingerprintedChangedRuleIdentity {
+        RepoWatchDispatchRepositoryError::RegressedRuleVersion {
             rule_id,
             rule_version,
+            latest_version,
         } => Some(HubModelConfigurationError::InvalidRepositoryWatchRule {
             rule: rule_id.as_str().to_owned(),
             reason: format!(
-                "field `version` must be incremented from {} because its legacy activation has no field fingerprints",
-                rule_version.get()
+                "field `version` value {} is below recorded version {}; increment it instead",
+                rule_version.get(),
+                latest_version.get()
             ),
         }),
         RepoWatchDispatchRepositoryError::ReusedRuleIdentity {
@@ -1412,18 +1414,12 @@ async fn run_hub(
         pool.clone(),
         model_configuration.session_credential_pin(),
     );
-    let repository_watch_rule_admission = async {
-        if let Some(configuration) = model_configuration.repository_watch() {
-            for repository in &configured_repositories {
-                repository_watch_store
-                    .reconcile_rules(repository, configuration.rules())
-                    .await?;
-            }
-        }
-        repository_watch_store
-            .deactivate_unconfigured_repositories(&configured_repositories)
-            .await
+    let configured_rules = match model_configuration.repository_watch() {
+        Some(configuration) => configuration.rules(),
+        None => &[],
     };
+    let repository_watch_rule_admission = repository_watch_store
+        .reconcile_configured_rules(&configured_repositories, configured_rules);
     match await_while_guarded(&mut database, repository_watch_rule_admission).await {
         GuardedAwait::Completed(Ok(())) => {}
         GuardedAwait::Completed(Err(error)) => {

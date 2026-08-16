@@ -557,21 +557,27 @@ redispatches an evaluated fact nor treats pre-activation history as a new live
 signal. An obligation is a separate collapsed delivery identity, not a request
 to reevaluate its occupied facts. Reconciliation records an append-only
 deactivation when a configured identity or its repository disappears. Guarded
-daemon startup reconciles the complete repository set before any watch task
-starts, including the empty set when the repository-watch section is absent; the
-absent section still starts no watch runtime or polling task. Configuration
-reconciliation and evaluation are serialized per repository: an evaluation
-already committed may replay, but an already-loaded event cannot create a
-dispatch after deactivation commits. Activation stores a digest of the complete
-versioned matcher, ordered action list, singleton scope, and cooldown, plus
-content-free fingerprints labeled with the exact configuration fields they
+daemon startup reconciles the complete repository set in one transaction before
+any watch task starts, including the empty set when the repository-watch section
+is absent; the absent section still starts no watch runtime or polling task. A
+refusal for any configured repository leaves no deactivation and no activation
+behind, so a configuration that never started consumes no revision and restoring
+the previous configuration is admitted rather than refused as reuse.
+Configuration reconciliation and evaluation are serialized per repository: an
+evaluation already committed may replay, but an already-loaded event cannot
+create a dispatch after deactivation commits. Activation stores a digest of the
+complete versioned matcher, ordered action list, singleton scope, and cooldown,
+plus content-free fingerprints labeled with the exact configuration fields they
 represent. Changing any of those semantics while retaining the same rule ID and
 revision fails in the Configuration phase before either local socket binds. The
 diagnostic names the rule and changed field and directs the operator to
 increment `version`; it never first appears as a repository-task runtime death.
-An unchanged digest-only activation created before field fingerprints existed
-gains them during guarded startup; a deployment upgrades with its active rules
-unchanged, or uses a revision bump on that first upgraded boot.
+An activation recorded before field fingerprints existed cannot produce them
+from its aggregate digest, so the one-time migration introducing fingerprints
+retires every such activation. No active activation lacks fingerprints and the
+daemon carries no path for that shape; a missing fingerprint under an active
+activation is storage corruption. The operator increments `version` once on that
+first upgraded boot.
 
 **Implemented behavior.** A higher revision under the same rule ID is a
 replacement. Reconciliation appends deactivation of the active old revision and
@@ -579,8 +585,10 @@ activation of the configured new revision after the current event tail. The old
 activation, deactivation, evaluations, dispatches, and sessions remain joined by
 the same rule ID and their original revisions, while only later events are
 eligible for the replacement. A deactivated `(rule ID, revision)` pair cannot be
-configured again. A fresh rule ID remains an admitted replacement path, but a
-revision bump is the ordinary way to preserve stable identity and history.
+configured again, and a revision below the highest revision ever recorded for
+that rule ID is refused, so only a higher revision replaces the active rule. A
+fresh rule ID remains an admitted replacement path, but a revision bump is the
+ordinary way to preserve stable identity and history.
 
 **Committed unimplemented functionality.** The structured-rule dispatch surface
 converges onto the program substrate by replacing each rule with a subscription

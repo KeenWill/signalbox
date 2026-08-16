@@ -48,3 +48,19 @@ ALTER TABLE repo_watch_dispatch_obligation
     DROP CONSTRAINT repo_watch_dispatch_obligation_rule_version_check,
     ADD CONSTRAINT repo_watch_dispatch_obligation_rule_version_check
         CHECK (rule_version > 0);
+
+-- The per-field digests of an activation recorded before this migration cannot
+-- be reconstructed from its aggregate rule digest, so this change invalidates
+-- every such activation. Retire them once here rather than carrying a
+-- fingerprint-absent shape in the daemon: the operator increments `version`
+-- once, and the new revision activates after the current event tail.
+INSERT INTO repo_watch_rule_deactivation (repository, rule_id, rule_version)
+SELECT activation.repository, activation.rule_id, activation.rule_version
+  FROM repo_watch_rule_activation AS activation
+ WHERE NOT EXISTS (
+       SELECT 1
+         FROM repo_watch_rule_deactivation AS deactivation
+        WHERE deactivation.repository = activation.repository
+          AND deactivation.rule_id = activation.rule_id
+          AND deactivation.rule_version = activation.rule_version
+ );

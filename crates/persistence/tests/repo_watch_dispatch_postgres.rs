@@ -48,6 +48,7 @@ const DATABASE_NAME: &str = "signalbox_repo_watch_dispatch";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const REPOSITORY: &str = "signalbox/repository";
+const SECOND_REPOSITORY: &str = "signalbox/second-repository";
 const HEAD_REPOSITORY: &str = "contributor/repository";
 const BASE_BRANCH: &str = "main";
 const HEAD_BRANCH: &str = "feature/repo-watch";
@@ -544,6 +545,23 @@ fn changed_rule_field(
         RepoWatchDispatchRepositoryError::ChangedRuleIdentity { field, .. } => Some(*field),
         _ => None,
     }
+}
+
+fn regressed_rule_version(
+    error: &RepoWatchDispatchRepositoryError,
+) -> Option<(RepoWatchRuleVersion, RepoWatchRuleVersion)> {
+    match error {
+        RepoWatchDispatchRepositoryError::RegressedRuleVersion {
+            rule_version,
+            latest_version,
+            ..
+        } => Some((*rule_version, *latest_version)),
+        _ => None,
+    }
+}
+
+fn storage_corruption(error: &RepoWatchDispatchRepositoryError) -> bool {
+    matches!(error, RepoWatchDispatchRepositoryError::Corruption(_))
 }
 
 fn outcome_is_dispatched(outcome: &RepoWatchRuleEvaluationOutcome) -> bool {
@@ -1912,7 +1930,8 @@ async fn active_rule_identity_names_the_matcher_field_changed_without_a_version_
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn unchanged_legacy_activation_gains_field_fingerprints() -> Result<(), Box<dyn Error>> {
+async fn active_activation_without_field_fingerprints_is_storage_corruption()
+-> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture().await?;
     sqlx::query(
         "ALTER TABLE repo_watch_rule_field_fingerprint
@@ -1936,22 +1955,118 @@ async fn unchanged_legacy_activation_gains_field_fingerprints() -> Result<(), Bo
     .execute(&fixture.pool)
     .await?;
 
-    fixture
+    let error = fixture
         .store
         .reconcile_rules(&fixture.repository, std::slice::from_ref(&fixture.rule))
+        .await
+        .expect_err("an active activation without fingerprints is not a tolerated shape");
+
+    assert!(storage_corruption(&error));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn every_active_activation_carries_its_field_fingerprints() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let retired: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM repo_watch_rule_activation AS activation
+              WHERE NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_rule_field_fingerprint AS fingerprint
+                     WHERE fingerprint.repository = activation.repository
+                       AND fingerprint.rule_id = activation.rule_id
+                       AND fingerprint.rule_version = activation.rule_version
+              )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_rule_deactivation AS deactivation
+                     WHERE deactivation.repository = activation.repository
+                       AND deactivation.rule_id = activation.rule_id
+                       AND deactivation.rule_version = activation.rule_version
+              )
+         )",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(!retired);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_revision_below_the_highest_recorded_revision_is_refused() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(rule_at_version(RepoWatchRuleVersion::new(
+        NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("recorded version is positive"),
+    ))?)
+    .await?;
+
+    let error = fixture
+        .store
+        .reconcile_rules(
+            &fixture.repository,
+            std::slice::from_ref(&rule_at_version(RepoWatchRuleVersion::V1)?),
+        )
+        .await
+        .expect_err("a revision below the highest recorded revision is not a replacement");
+
+    assert_eq!(
+        regressed_rule_version(&error),
+        Some((
+            RepoWatchRuleVersion::V1,
+            RepoWatchRuleVersion::new(
+                NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("recorded version is positive")
+            )
+        ))
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_refused_repository_leaves_every_other_repository_unmutated() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture().await?;
+    let second_repository = RepositorySlug::try_new(SECOND_REPOSITORY.to_owned())?;
+    let replacement_version = RepoWatchRuleVersion::new(
+        NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
+    );
+    let replacement = rule_at_version(replacement_version)?;
+    fixture
+        .store
+        .reconcile_rules(&second_repository, std::slice::from_ref(&replacement))
+        .await?;
+    fixture
+        .store
+        .reconcile_rules(&second_repository, &[])
         .await?;
 
-    let fingerprint_bytes: Option<i32> = sqlx::query_scalar(
-        "SELECT octet_length(rule_field_digests)
-           FROM repo_watch_rule_field_fingerprint
-          WHERE repository = $1 AND rule_id = $2 AND rule_version = $3",
+    let error = fixture
+        .store
+        .reconcile_configured_rules(
+            &[fixture.repository.clone(), second_repository.clone()],
+            std::slice::from_ref(&replacement),
+        )
+        .await
+        .expect_err("the second repository retired the configured identity");
+
+    assert!(reused_rule_identity(&error));
+    let revisions: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT activation.rule_version, deactivation.rule_id IS NOT NULL AS deactivated
+           FROM repo_watch_rule_activation AS activation
+           LEFT JOIN repo_watch_rule_deactivation AS deactivation
+             USING (repository, rule_id, rule_version)
+          WHERE activation.repository = $1 AND activation.rule_id = $2
+          ORDER BY activation.rule_version",
     )
     .bind(fixture.repository.as_str())
     .bind(fixture.rule.id().as_str())
-    .bind(i64::try_from(fixture.rule.version().get())?)
-    .fetch_one(&fixture.pool)
+    .fetch_all(&fixture.pool)
     .await?;
-    assert_eq!(fingerprint_bytes, Some(512));
+    assert_eq!(revisions, [(1, false)]);
     Ok(())
 }
 

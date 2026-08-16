@@ -957,6 +957,7 @@ enum RepositoryWatchAttemptError {
     Persistence,
     RetiredRuleIdentity,
     ChangedRuleIdentity,
+    RegressedRuleVersion,
 }
 
 impl RepositoryWatchAttemptError {
@@ -977,11 +978,15 @@ impl RepositoryWatchAttemptError {
             Self::Persistence => "repository_watch_persistence_failed",
             Self::RetiredRuleIdentity => "repository_watch_rule_identity_retired",
             Self::ChangedRuleIdentity => "repository_watch_rule_identity_changed",
+            Self::RegressedRuleVersion => "repository_watch_rule_version_regressed",
         }
     }
 
     const fn is_permanent(self) -> bool {
-        matches!(self, Self::RetiredRuleIdentity | Self::ChangedRuleIdentity)
+        matches!(
+            self,
+            Self::RetiredRuleIdentity | Self::ChangedRuleIdentity | Self::RegressedRuleVersion
+        )
     }
 }
 
@@ -990,9 +995,11 @@ fn rule_activation_error(error: RepoWatchDispatchRepositoryError) -> RepositoryW
         RepoWatchDispatchRepositoryError::ReusedRuleIdentity { .. } => {
             RepositoryWatchAttemptError::RetiredRuleIdentity
         }
-        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { .. }
-        | RepoWatchDispatchRepositoryError::UnfingerprintedChangedRuleIdentity { .. } => {
+        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { .. } => {
             RepositoryWatchAttemptError::ChangedRuleIdentity
+        }
+        RepoWatchDispatchRepositoryError::RegressedRuleVersion { .. } => {
+            RepositoryWatchAttemptError::RegressedRuleVersion
         }
         _ => RepositoryWatchAttemptError::Persistence,
     }
@@ -4548,6 +4555,23 @@ mod tests {
         });
 
         assert_eq!(error, RepositoryWatchAttemptError::ChangedRuleIdentity);
+        assert!(error.is_permanent());
+    }
+
+    #[test]
+    fn regressed_rule_version_terminates_repository_attempts() {
+        let rule_id = RepoWatchRuleId::try_new(String::from("regressed-rule"))
+            .expect("fixture rule ID is valid");
+        let latest_version = RepoWatchRuleVersion::new(
+            NonZeroU64::new(2).expect("recorded fixture version is positive"),
+        );
+        let error = rule_activation_error(RepoWatchDispatchRepositoryError::RegressedRuleVersion {
+            rule_id,
+            rule_version: RepoWatchRuleVersion::V1,
+            latest_version,
+        });
+
+        assert_eq!(error, RepositoryWatchAttemptError::RegressedRuleVersion);
         assert!(error.is_permanent());
     }
 
