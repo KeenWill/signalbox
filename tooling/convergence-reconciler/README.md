@@ -37,24 +37,31 @@ and tries again at the next interval.
 The default state location follows `XDG_STATE_HOME`, falling back to the current
 user's standard local state directory. Set `state_file` explicitly when a
 service manager provides a persistent runtime directory. Writes use a temporary
-file and atomic replacement.
+file, atomic replacement, and synchronization of both the file and its parent
+directory before a dispatch child can start.
 
 ## Convergence predicate
 
-An open, watched pull request is converged exactly when all four facts hold on
+An open, watched pull request is converged exactly when all five facts hold on
 one GraphQL snapshot:
 
-1. Every review thread is resolved.
-2. A completed quiet review exists for the current head OID.
-3. Every gating check on the commit whose OID equals the current head OID is
-   green.
+1. Every review thread is resolved and has an in-thread reply from the pull
+   request author.
+2. A trusted repository member explicitly requested Codex review naming the
+   current head OID, and `chatgpt-codex-connector` subsequently completed a
+   comment-free review of that exact head.
+3. A check rollup exists on the commit whose OID equals the current head OID,
+   and every gating check is green.
 4. GitHub reports the pull request `MERGEABLE` against its current base.
+5. The current head contains every commit in the current base branch.
 
 A completed check run is green when its conclusion is `SUCCESS`, `NEUTRAL`, or
 `SKIPPED`; a commit status is green only when it is `SUCCESS`. Queued, pending,
 in-progress, cancelled, timed-out, stale, action-required, and failed results
-block convergence. An absent set of gating checks is green. A mismatched commit
-OID blocks convergence even when every returned check is successful.
+block convergence. A missing, pending, or failed check rollup blocks
+convergence; an existing successful rollup with no gating contexts is green. A
+mismatched commit OID blocks convergence even when every returned check is
+successful.
 
 Check names ending with the exact, case-sensitive suffix `(report only)` are
 non-gating. The case-insensitive names `CodeRabbit`, `codecov/project`,
@@ -71,11 +78,12 @@ their head repositories at a time. It requires the head repository to equal the
 configured repository, then filters head branches locally with Python's
 case-sensitive shell-pattern matching. Matching and previously tracked open pull
 requests are then fetched in batches of 20, including their first 100 review
-threads and first 100 check contexts. Additional thread or check pages use
-dynamically aliased GraphQL fields, up to 20 continuations in one request. The
-script makes no REST requests. Previously watched node IDs are folded into the listing call
-so merged and closed pull requests can be recorded once and then omitted from
-future queries.
+threads and first 100 check contexts. Each current base/head OID pair is also
+compared so a cleanly mergeable but stale head cannot converge. Additional
+thread or check pages use dynamically aliased GraphQL fields, up to 20
+continuations in one request. The script makes no REST requests. Previously
+watched node IDs are folded into the listing call so merged and closed pull
+requests can be recorded once and then omitted from future queries.
 
 ## Decision flow
 

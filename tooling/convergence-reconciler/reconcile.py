@@ -55,17 +55,30 @@ query($ids: [ID!]!) {
       title
       url
       isDraft
+      author { login }
       baseRefName
+      baseRefOid
       headRefName
       headRefOid
       headRepository { nameWithOwner }
       mergeable
       reviewThreads(first: 100) {
-        nodes { isResolved }
+        nodes {
+          isResolved
+          comments(first: 100) {
+            totalCount
+            nodes { author { login } }
+          }
+        }
         pageInfo { hasNextPage endCursor }
+      }
+      comments(last: 100) {
+        nodes { author { login } authorAssociation body createdAt }
       }
       reviews(last: 100) {
         nodes {
+          author { login }
+          submittedAt
           commit { oid }
           comments(first: 1) { totalCount }
         }
@@ -75,6 +88,7 @@ query($ids: [ID!]!) {
           commit {
             oid
             statusCheckRollup {
+              state
               contexts(first: 100) {
                 nodes {
                   __typename
@@ -102,6 +116,10 @@ query($tracked: [ID!]!) {
 
 GREEN_CHECK_RUN_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
 GREEN_STATUS_CONTEXT_STATES = frozenset({"SUCCESS"})
+CODEX_REVIEWER_LOGIN = "chatgpt-codex-connector"
+TRUSTED_REVIEW_REQUEST_ASSOCIATIONS = frozenset(
+    {"OWNER", "MEMBER", "COLLABORATOR"}
+)
 NON_GATING_CHECK_NAMES = frozenset(
     {
         "coderabbit",
@@ -235,8 +253,41 @@ class GitHubGraphQL:
                     tracked.append(node)
                     continue
                 pull_requests.append(normalize_pull_request(node))
+        self._load_base_ancestry(pull_requests)
         self._finish_paginated_connections(pull_requests)
         return pull_requests, tracked
+
+    def _load_base_ancestry(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        for offset in range(0, len(pull_requests), DETAIL_BATCH_SIZE):
+            batch = pull_requests[offset : offset + DETAIL_BATCH_SIZE]
+            declarations = ["$owner: String!", "$name: String!"]
+            selections: list[str] = []
+            variables: dict[str, Any] = {
+                "owner": self.owner,
+                "name": self.name,
+            }
+            for index, pull_request in enumerate(batch):
+                variable = f"basehead{index}"
+                declarations.append(f"${variable}: String!")
+                variables[variable] = (
+                    f"{pull_request['base_oid']}...{pull_request['head_oid']}"
+                )
+                selections.append(
+                    f"item{index}: comparison(basehead: ${variable}) {{ behindBy }}"
+                )
+            query = (
+                f"query({', '.join(declarations)}) {{ "
+                f"repository(owner: $owner, name: $name) "
+                f"{{ {' '.join(selections)} }} }}"
+            )
+            repository = self.execute(query, variables)["repository"]
+            for index, pull_request in enumerate(batch):
+                comparison = repository[f"item{index}"]
+                pull_request["base_commits_not_in_head"] = (
+                    comparison["behindBy"] if comparison is not None else None
+                )
 
     def _finish_paginated_connections(self, pull_requests: list[dict[str, Any]]) -> None:
         pending: list[PaginationTask] = []
@@ -255,7 +306,12 @@ class GitHubGraphQL:
             for index, task in enumerate(batch):
                 page = pagination_page(data[f"item{index}"], task.kind)
                 if task.kind == "threads":
-                    task.pull_request["review_threads"].extend(page["nodes"])
+                    task.pull_request["review_threads"].extend(
+                        normalize_review_threads(
+                            page["nodes"],
+                            task.pull_request["author_login"],
+                        )
+                    )
                 else:
                     task.pull_request["checks"].extend(page["nodes"])
                 if page["pageInfo"]["hasNextPage"]:
@@ -285,12 +341,59 @@ def same_repository(left: str | None, right: str) -> bool:
     return left is not None and left.casefold() == right.casefold()
 
 
+def author_login(node: dict[str, Any]) -> str | None:
+    author = node.get("author")
+    return author.get("login") if isinstance(author, dict) else None
+
+
+def is_codex_review_request(comment: dict[str, Any], head_oid: str) -> bool:
+    body = comment.get("body") or ""
+    requests_review = any(
+        line.strip().casefold().startswith("@codex review")
+        for line in body.splitlines()
+    )
+    return (
+        comment.get("authorAssociation")
+        in TRUSTED_REVIEW_REQUEST_ASSOCIATIONS
+        and requests_review
+        and head_oid.casefold() in body.casefold()
+    )
+
+
+def normalize_review_threads(
+    threads: Sequence[dict[str, Any]], pull_request_author: str | None
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for thread in threads:
+        comments = thread["comments"]["nodes"]
+        dispositioned = any(
+            pull_request_author is not None
+            and author_login(comment) is not None
+            and author_login(comment).casefold() == pull_request_author.casefold()
+            for comment in comments[1:]
+        )
+        normalized.append(
+            {
+                "isResolved": thread["isResolved"],
+                "isDispositioned": dispositioned,
+            }
+        )
+    return normalized
+
+
 def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
     commit_nodes = node["commits"]["nodes"]
     commit = commit_nodes[0]["commit"] if commit_nodes else None
     rollup = commit.get("statusCheckRollup") if commit else None
     contexts = rollup["contexts"] if rollup else {"nodes": [], "pageInfo": empty_page_info()}
     threads = node["reviewThreads"]
+    pull_request_author = author_login(node)
+    review_request_times = [
+        comment["createdAt"]
+        for comment in node["comments"]["nodes"]
+        if is_codex_review_request(comment, node["headRefOid"])
+    ]
+    latest_review_request = max(review_request_times, default=None)
     return {
         "node_id": node["id"],
         "number": node["number"],
@@ -298,18 +401,30 @@ def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
         "title": node["title"],
         "url": node["url"],
         "is_draft": node["isDraft"],
+        "author_login": pull_request_author,
         "base_ref": node["baseRefName"],
+        "base_oid": node["baseRefOid"],
         "head_ref": node["headRefName"],
         "head_oid": node["headRefOid"],
         "head_repository": head_repository(node),
         "mergeable": node["mergeable"],
         "checked_head_oid": commit["oid"] if commit else None,
-        "review_threads": list(threads["nodes"]),
+        "review_threads": normalize_review_threads(
+            threads["nodes"], pull_request_author
+        ),
         "quiet_review_head_oids": [
             review["commit"]["oid"]
             for review in node["reviews"]["nodes"]
-            if review.get("commit") and review["comments"]["totalCount"] == 0
+            if review.get("commit")
+            and author_login(review) is not None
+            and author_login(review).casefold()
+            == CODEX_REVIEWER_LOGIN.casefold()
+            and latest_review_request is not None
+            and review.get("submittedAt") is not None
+            and review["submittedAt"] >= latest_review_request
+            and review["comments"]["totalCount"] == 0
         ],
+        "check_rollup_state": rollup.get("state") if rollup else None,
         "checks": list(contexts["nodes"]),
         "_thread_page": threads["pageInfo"],
         "_check_page": contexts["pageInfo"],
@@ -331,7 +446,9 @@ def pagination_query(tasks: Sequence[PaginationTask]) -> tuple[str, dict[str, An
         if task.kind == "threads":
             connection = (
                 f"reviewThreads(first: 100, after: $after{index}) {{ "
-                "nodes { isResolved } pageInfo { hasNextPage endCursor } }"
+                "nodes { isResolved comments(first: 100) { totalCount "
+                "nodes { author { login } } } } "
+                "pageInfo { hasNextPage endCursor } }"
             )
         else:
             connection = (
@@ -388,15 +505,31 @@ def evaluate_convergence(pull_request: dict[str, Any]) -> dict[str, Any]:
     unresolved_threads = sum(
         1 for thread in pull_request["review_threads"] if not thread["isResolved"]
     )
+    undispositioned_threads = sum(
+        1
+        for thread in pull_request["review_threads"]
+        if not thread["isDispositioned"]
+    )
     gating_checks = [check for check in pull_request["checks"] if not is_non_gating_check(check)]
     non_gating_checks = [check for check in pull_request["checks"] if is_non_gating_check(check)]
     reasons: list[str] = []
     if unresolved_threads:
         reasons.append(f"unresolved-review-threads:{unresolved_threads}")
+    if undispositioned_threads:
+        reasons.append(
+            f"undispositioned-review-threads:{undispositioned_threads}"
+        )
     if pull_request["head_oid"] not in pull_request["quiet_review_head_oids"]:
         reasons.append("quiet-review-not-completed-for-current-head")
     if pull_request["checked_head_oid"] != pull_request["head_oid"]:
         reasons.append("checks-not-for-current-head")
+    if pull_request["check_rollup_state"] is None:
+        reasons.append("check-rollup-missing")
+    elif pull_request["check_rollup_state"] != "SUCCESS":
+        reasons.append(
+            "check-rollup-not-green:"
+            f"{str(pull_request['check_rollup_state']).lower()}"
+        )
     for check in gating_checks:
         if not check_is_green(check):
             reasons.append(f"check-not-green:{check_name(check)}:{check_observed_state(check)}")
@@ -404,11 +537,24 @@ def evaluate_convergence(pull_request: dict[str, Any]) -> dict[str, Any]:
         reasons.append("base-conflict")
     elif pull_request["mergeable"] != "MERGEABLE":
         reasons.append(f"mergeability-{str(pull_request['mergeable']).lower()}")
+    if pull_request["base_commits_not_in_head"] is None:
+        reasons.append("base-ancestry-unknown")
+    elif pull_request["base_commits_not_in_head"]:
+        reasons.append(
+            "base-commits-not-in-head:"
+            f"{pull_request['base_commits_not_in_head']}"
+        )
     return {
         "converged": not reasons,
         "reasons": reasons,
         "unresolved_review_threads": unresolved_threads,
-        "checks_green": all(check_is_green(check) for check in gating_checks),
+        "undispositioned_review_threads": undispositioned_threads,
+        "check_rollup_state": pull_request["check_rollup_state"],
+        "base_commits_not_in_head": pull_request["base_commits_not_in_head"],
+        "checks_green": (
+            pull_request["check_rollup_state"] == "SUCCESS"
+            and all(check_is_green(check) for check in gating_checks)
+        ),
         "gating_checks": [
             {"name": check_name(check), "state": check_observed_state(check)}
             for check in gating_checks
@@ -588,6 +734,11 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary_name, path)
+        directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
     except BaseException:
         try:
             os.unlink(temporary_name)

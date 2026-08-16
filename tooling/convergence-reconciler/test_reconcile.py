@@ -16,20 +16,26 @@ from reconcile import (
     choose_decision,
     evaluate_convergence,
     load_state,
+    normalize_pull_request,
     nonnegative_number,
     positive_number,
     process_pull_request,
+    save_state,
 )
 
 
 class ConvergencePredicateTests(unittest.TestCase):
     def test_green_checks_resolved_threads_and_mergeable_base_converge(self) -> None:
         pull_request = {
+            "base_commits_not_in_head": 0,
             "checked_head_oid": "head-green",
+            "check_rollup_state": "SUCCESS",
             "head_oid": "head-green",
             "mergeable": "MERGEABLE",
             "quiet_review_head_oids": ["head-green"],
-            "review_threads": [{"isResolved": True}],
+            "review_threads": [
+                {"isResolved": True, "isDispositioned": True}
+            ],
             "checks": [
                 {
                     "__typename": "CheckRun",
@@ -69,12 +75,16 @@ class ConvergencePredicateTests(unittest.TestCase):
 
     def test_unresolved_review_thread_blocks_convergence(self) -> None:
         pull_request = {
+            "base_commits_not_in_head": 0,
             "checked_head_oid": "head-thread",
+            "check_rollup_state": "SUCCESS",
             "checks": [],
             "head_oid": "head-thread",
             "mergeable": "MERGEABLE",
             "quiet_review_head_oids": ["head-thread"],
-            "review_threads": [{"isResolved": False}],
+            "review_threads": [
+                {"isResolved": False, "isDispositioned": True}
+            ],
         }
 
         computed = evaluate_convergence(pull_request)
@@ -84,7 +94,9 @@ class ConvergencePredicateTests(unittest.TestCase):
 
     def test_pending_gating_check_blocks_convergence(self) -> None:
         pull_request = {
+            "base_commits_not_in_head": 0,
             "checked_head_oid": "head-pending",
+            "check_rollup_state": "PENDING",
             "head_oid": "head-pending",
             "mergeable": "MERGEABLE",
             "quiet_review_head_oids": ["head-pending"],
@@ -104,12 +116,37 @@ class ConvergencePredicateTests(unittest.TestCase):
         self.assertFalse(computed["converged"])
         self.assertEqual(
             computed["reasons"],
-            ["check-not-green:required test:IN_PROGRESS"],
+            [
+                "check-rollup-not-green:pending",
+                "check-not-green:required test:IN_PROGRESS",
+            ],
+        )
+
+    def test_pending_empty_check_rollup_blocks_convergence(self) -> None:
+        pull_request = {
+            "base_commits_not_in_head": 0,
+            "checked_head_oid": "head-checks",
+            "check_rollup_state": "PENDING",
+            "checks": [],
+            "head_oid": "head-checks",
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["head-checks"],
+            "review_threads": [],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertFalse(computed["converged"])
+        self.assertEqual(
+            computed["reasons"],
+            ["check-rollup-not-green:pending"],
         )
 
     def test_check_snapshot_for_an_older_head_blocks_convergence(self) -> None:
         pull_request = {
+            "base_commits_not_in_head": 0,
             "checked_head_oid": "older-head",
+            "check_rollup_state": "SUCCESS",
             "checks": [],
             "head_oid": "current-head",
             "mergeable": "MERGEABLE",
@@ -124,7 +161,9 @@ class ConvergencePredicateTests(unittest.TestCase):
 
     def test_base_conflict_blocks_convergence(self) -> None:
         pull_request = {
+            "base_commits_not_in_head": 0,
             "checked_head_oid": "head-conflict",
+            "check_rollup_state": "SUCCESS",
             "checks": [],
             "head_oid": "head-conflict",
             "mergeable": "CONFLICTING",
@@ -139,7 +178,9 @@ class ConvergencePredicateTests(unittest.TestCase):
 
     def test_unknown_mergeability_blocks_convergence(self) -> None:
         pull_request = {
+            "base_commits_not_in_head": 0,
             "checked_head_oid": "head-unknown",
+            "check_rollup_state": "SUCCESS",
             "checks": [],
             "head_oid": "head-unknown",
             "mergeable": "UNKNOWN",
@@ -154,7 +195,9 @@ class ConvergencePredicateTests(unittest.TestCase):
 
     def test_missing_quiet_review_for_current_head_blocks_convergence(self) -> None:
         pull_request = {
+            "base_commits_not_in_head": 0,
             "checked_head_oid": "current-head",
+            "check_rollup_state": "SUCCESS",
             "checks": [],
             "head_oid": "current-head",
             "mergeable": "MERGEABLE",
@@ -168,6 +211,65 @@ class ConvergencePredicateTests(unittest.TestCase):
         self.assertEqual(
             computed["reasons"],
             ["quiet-review-not-completed-for-current-head"],
+        )
+
+    def test_resolved_thread_without_author_reply_blocks_convergence(self) -> None:
+        pull_request = {
+            "base_commits_not_in_head": 0,
+            "checked_head_oid": "head-thread",
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "head_oid": "head-thread",
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["head-thread"],
+            "review_threads": [
+                {"isResolved": True, "isDispositioned": False}
+            ],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertFalse(computed["converged"])
+        self.assertEqual(
+            computed["reasons"],
+            ["undispositioned-review-threads:1"],
+        )
+
+    def test_missing_check_rollup_blocks_convergence(self) -> None:
+        pull_request = {
+            "base_commits_not_in_head": 0,
+            "checked_head_oid": "head-checks",
+            "check_rollup_state": None,
+            "checks": [],
+            "head_oid": "head-checks",
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["head-checks"],
+            "review_threads": [],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertFalse(computed["converged"])
+        self.assertEqual(computed["reasons"], ["check-rollup-missing"])
+
+    def test_current_base_commit_missing_from_head_blocks_convergence(self) -> None:
+        pull_request = {
+            "base_commits_not_in_head": 2,
+            "checked_head_oid": "head-base",
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "head_oid": "head-base",
+            "mergeable": "MERGEABLE",
+            "quiet_review_head_oids": ["head-base"],
+            "review_threads": [],
+        }
+
+        computed = evaluate_convergence(pull_request)
+
+        self.assertFalse(computed["converged"])
+        self.assertEqual(
+            computed["reasons"],
+            ["base-commits-not-in-head:2"],
         )
 
 
@@ -275,6 +377,79 @@ class InputValidationTests(unittest.TestCase):
 
 
 class GitHubGraphQLTests(unittest.TestCase):
+    def test_quiet_review_requires_trusted_exact_head_codex_request(self) -> None:
+        node = {
+            "id": "node",
+            "number": 17,
+            "state": "OPEN",
+            "title": "title",
+            "url": "https://example.invalid/pull/17",
+            "isDraft": False,
+            "author": {"login": "owner"},
+            "baseRefName": "main",
+            "baseRefOid": "base",
+            "headRefName": "agent/work",
+            "headRefOid": "head-authenticated",
+            "headRepository": {"nameWithOwner": "OWNER/REPOSITORY"},
+            "mergeable": "MERGEABLE",
+            "reviewThreads": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
+            "comments": {
+                "nodes": [
+                    {
+                        "author": {"login": "owner"},
+                        "authorAssociation": "OWNER",
+                        "body": "@codex review\nExact head head-authenticated",
+                        "createdAt": "2026-08-16T10:00:00Z",
+                    }
+                ]
+            },
+            "reviews": {
+                "nodes": [
+                    {
+                        "author": {"login": "chatgpt-codex-connector"},
+                        "submittedAt": "2026-08-16T10:01:00Z",
+                        "commit": {"oid": "head-authenticated"},
+                        "comments": {"totalCount": 0},
+                    },
+                    {
+                        "author": {"login": "human-reviewer"},
+                        "submittedAt": "2026-08-16T10:02:00Z",
+                        "commit": {"oid": "unrelated-head"},
+                        "comments": {"totalCount": 0},
+                    },
+                ]
+            },
+            "commits": {
+                "nodes": [
+                    {
+                        "commit": {
+                            "oid": "head-authenticated",
+                            "statusCheckRollup": {
+                                "state": "SUCCESS",
+                                "contexts": {
+                                    "nodes": [],
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                },
+                            },
+                        }
+                    }
+                ]
+            },
+        }
+
+        pull_request = normalize_pull_request(node)
+
+        self.assertEqual(
+            pull_request["quiet_review_head_oids"],
+            ["head-authenticated"],
+        )
+
     def test_graphql_subprocess_timeout_uses_tick_failure_path(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         timeout = subprocess.TimeoutExpired(["gh"], 12)
@@ -380,6 +555,19 @@ class GitHubGraphQLTests(unittest.TestCase):
 
 
 class DispatchFenceTests(unittest.TestCase):
+    def test_state_save_fsyncs_file_and_parent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "state.json"
+            state = {
+                "version": 1,
+                "repository": "OWNER/REPOSITORY",
+                "pull_requests": {},
+            }
+            with mock.patch("reconcile.os.fsync") as fsync:
+                save_state(state_file, state)
+
+        self.assertEqual(fsync.call_count, 2)
+
     def test_nonzero_dispatch_exit_retains_cool_off_fence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_file = Path(directory) / "state.json"
@@ -403,6 +591,7 @@ class DispatchFenceTests(unittest.TestCase):
                 "pull_requests": {},
             }
             pull_request = {
+                "base_commits_not_in_head": 0,
                 "node_id": "node",
                 "number": 17,
                 "title": "title",
@@ -412,9 +601,12 @@ class DispatchFenceTests(unittest.TestCase):
                 "head_ref": "agent/work",
                 "head_oid": "head",
                 "checked_head_oid": "head",
+                "check_rollup_state": "SUCCESS",
                 "mergeable": "MERGEABLE",
                 "quiet_review_head_oids": ["head"],
-                "review_threads": [{"isResolved": False}],
+                "review_threads": [
+                    {"isResolved": False, "isDispositioned": True}
+                ],
                 "checks": [],
             }
             inactive = subprocess.CompletedProcess(["active"], 1, "", "")
