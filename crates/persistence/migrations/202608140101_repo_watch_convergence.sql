@@ -136,6 +136,9 @@ CREATE TABLE repo_watch_pull_request_convergence_assessment (
     UNIQUE (
         assessment_id, repository, pull_request_number, head_sha,
         base_revision, verdict_kind
+    ),
+    UNIQUE (
+        assessment_id, repository, pull_request_number
     )
 );
 
@@ -167,22 +170,58 @@ CREATE INDEX repo_watch_convergence_assessment_current_idx
         repository, pull_request_number, recorded_at DESC, assessment_id DESC
     );
 
+CREATE TABLE repo_watch_pull_request_convergence_identity (
+    identity_id uuid PRIMARY KEY,
+    repository text NOT NULL,
+    cursor_generation bigint NOT NULL,
+    pull_request_number numeric(20, 0) NOT NULL,
+    assessment_id uuid NOT NULL,
+    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (identity_id, assessment_id, cursor_generation),
+    FOREIGN KEY (repository, cursor_generation)
+        REFERENCES repo_watch_cursor(repository, generation)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY (assessment_id, repository, pull_request_number)
+        REFERENCES repo_watch_pull_request_convergence_assessment(
+            assessment_id, repository, pull_request_number
+        )
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
+
+CREATE INDEX repo_watch_convergence_identity_current_idx
+    ON repo_watch_pull_request_convergence_identity (
+        repository, pull_request_number, cursor_generation DESC,
+        recorded_at DESC, identity_id DESC
+    );
+
 CREATE TABLE repo_watch_convergence_cutoff (
-    assessment_id uuid PRIMARY KEY,
+    assessment_id uuid NOT NULL,
+    identity_id uuid NOT NULL,
+    identity_assessment_id uuid NOT NULL,
+    cursor_generation bigint NOT NULL,
     processed_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
+    PRIMARY KEY (assessment_id, identity_id),
     FOREIGN KEY (assessment_id)
         REFERENCES repo_watch_pull_request_convergence(assessment_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY (identity_id, identity_assessment_id, cursor_generation)
+        REFERENCES repo_watch_pull_request_convergence_identity(
+            identity_id, assessment_id, cursor_generation
+        )
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 
 CREATE TABLE repo_watch_convergence_cutoff_goal (
     assessment_id uuid NOT NULL,
+    identity_id uuid NOT NULL,
     session_id uuid NOT NULL,
     goal_command_id uuid NOT NULL,
-    PRIMARY KEY (assessment_id, session_id),
+    PRIMARY KEY (assessment_id, identity_id, session_id),
     UNIQUE (goal_command_id),
-    FOREIGN KEY (assessment_id)
-        REFERENCES repo_watch_convergence_cutoff(assessment_id)
+    FOREIGN KEY (assessment_id, identity_id)
+        REFERENCES repo_watch_convergence_cutoff(
+            assessment_id, identity_id
+        )
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY (goal_command_id, session_id)
         REFERENCES goal_command(command_id, session_id)
@@ -190,7 +229,7 @@ CREATE TABLE repo_watch_convergence_cutoff_goal (
 );
 
 CREATE VIEW repo_watch_current_pull_request_convergence AS
-SELECT DISTINCT ON (assessment.repository, assessment.pull_request_number)
+SELECT DISTINCT ON (identity.repository, identity.pull_request_number)
        assessment.repository,
        assessment.pull_request_number,
        assessment.head_sha,
@@ -205,17 +244,24 @@ SELECT DISTINCT ON (assessment.repository, assessment.pull_request_number)
        convergence.convergence_kind AS sealed_kind,
        convergence.converged_at,
        assessment.recorded_at
-  FROM repo_watch_pull_request_convergence_assessment AS assessment
+  FROM repo_watch_pull_request_convergence_identity AS identity
+  JOIN repo_watch_pull_request_convergence_assessment AS assessment
+    ON assessment.assessment_id = identity.assessment_id
   LEFT JOIN repo_watch_pull_request_convergence AS convergence
     ON convergence.repository = assessment.repository
    AND convergence.pull_request_number = assessment.pull_request_number
    AND convergence.head_sha = assessment.head_sha
    AND convergence.base_revision = assessment.base_revision
- ORDER BY assessment.repository, assessment.pull_request_number,
-          assessment.recorded_at DESC, assessment.assessment_id DESC;
+ ORDER BY identity.repository, identity.pull_request_number,
+          identity.cursor_generation DESC, identity.recorded_at DESC,
+          identity.identity_id DESC;
 
 CREATE TRIGGER repo_watch_convergence_assessment_is_append_only
 BEFORE UPDATE OR DELETE ON repo_watch_pull_request_convergence_assessment
+FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER repo_watch_convergence_identity_is_append_only
+BEFORE UPDATE OR DELETE ON repo_watch_pull_request_convergence_identity
 FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 
 CREATE TRIGGER repo_watch_pull_request_convergence_is_append_only
@@ -232,6 +278,10 @@ FOR EACH ROW EXECUTE FUNCTION reject_immutable_record_change();
 
 CREATE TRIGGER repo_watch_convergence_assessment_reject_truncate
 BEFORE TRUNCATE ON repo_watch_pull_request_convergence_assessment
+FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
+
+CREATE TRIGGER repo_watch_convergence_identity_reject_truncate
+BEFORE TRUNCATE ON repo_watch_pull_request_convergence_identity
 FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
 
 CREATE TRIGGER repo_watch_pull_request_convergence_reject_truncate

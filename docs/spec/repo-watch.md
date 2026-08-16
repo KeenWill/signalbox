@@ -26,20 +26,10 @@ against this PR (`agent/daemon-ops-overnight`). Runtime-relevance release,
 held-slot diagnostics, and terminal-target cutoff are also verified against this
 PR. The provider members the poller adopts as check-suite and check-run
 completion generations are verified against PR #541
-(`fix/check-run-updated-at`). Exact-head convergence assessment and cutoff are
-verified against this PR (`agent/dispatch-autonomy-convergence`).
-(`agent/repo-watch-dispatch`). The polling and differ behavior below, the goal a
-dispatch commissions with its session, the binding of the dispatched work turn
-to that goal's generation, and the occupied-refusal obligation and collapsed
-current-state delivery are verified against PR #812
-(`agent/repo-watch-dispatch-loop`). The request-envelope behavior is verified
-against PR #812 (`agent/daemon-ops-overnight`). The provider members the poller
-adopts as check-suite and check-run completion generations are verified against
-PR #541 (`fix/check-run-updated-at`). Runtime-relevance release, held-slot
-diagnostics, and terminal-target cutoff are verified against this PR
-(`agent/dispatch-autonomy`). Exact-head convergence assessment and cutoff are
-verified against this PR (`agent/dispatch-autonomy-convergence`). Conservative
-stale blocking-review dismissal is verified against this PR
+(`fix/check-run-updated-at`). Eager merge-forward dispatch is verified against
+this PR (`agent/eager-merge-forward`). Exact-head convergence assessment and
+cutoff are verified against this PR (`agent/dispatch-autonomy-convergence`).
+Conservative stale blocking-review dismissal is verified against this PR
 (`agent/dispatch-autonomy-review-clearance`).
 
 ## Configuration and credential boundary
@@ -565,27 +555,32 @@ the cursor generation or the poll fails without recording an assessment.
 **Implemented behavior.** A passing assessment for a pull request based on
 `main` is `merge_ready`. A passing assessment based on another branch is
 `internally_converged`, not merge-ready; both classifications end autonomous
-work on that exact head. Every assessment is append-only evidence, and
-`repo_watch_current_pull_request_convergence` exposes the latest evidence,
-derived verdict, and any exact-head seal. The first passing assessment also
-creates one monotonic seal for the repository, pull request, exact head SHA, and
-exact base revision. Later checks or reviews on the same sealed identity remain
-visible as newer assessment evidence but cannot reopen dispatch, so a session
-does not revisit threads it already resolved on that unchanged identity. A
-different head SHA or base revision has no inherited seal and is assessed and
-dispatched afresh; convergence therefore terminates unchanged-head review cycles
-without treating a new revision as already finished.
+work on that exact head. Every assessment is append-only evidence. An
+append-only cursor-generation identity advances the current projection when an
+A→B→A return reuses A's unchanged evidence, while an exact replay superseded by
+a later generation cannot append evidence or advance that identity.
+`repo_watch_current_pull_request_convergence` exposes the current identity's
+evidence, derived verdict, and any exact-head seal. The first passing assessment
+also creates one monotonic seal for the repository, pull request, exact head
+SHA, and exact base revision. Later checks or reviews on the same sealed
+identity remain visible as newer assessment evidence but cannot reopen dispatch,
+so a session does not revisit threads it already resolved on that unchanged
+identity. A different head SHA or base revision has no inherited seal and is
+assessed and dispatched afresh; convergence therefore terminates unchanged-head
+review cycles without treating a new revision as already finished.
 
 **Implemented behavior.** Repository watch records one convergence cutoff only
 when a seal's head and base revision are the latest assessed identity. Stale
 seals remain pending and become eligible if their identity becomes current
-again. The cutoff applies the ordinary parent-only stop to every generation-one
-goal repository watch commissioned for the pull request, with the same
-provenance limits as a lifecycle cutoff. Dispatch admission rechecks the seal
-under the repository lock: a stale match or collapsed obligation settles as
-`target_converged` only when its head is the latest assessed identity and that
-identity's head and base revision are sealed. An older identity cannot stop
-current work.
+again. Each transition that makes a sealed identity current records its own
+cutoff application, so work commissioned while another identity was current is
+also stopped when the sealed identity returns. The cutoff applies the ordinary
+parent-only stop to every generation-one goal repository watch commissioned for
+the pull request, with the same provenance limits as a lifecycle cutoff.
+Dispatch admission rechecks the seal under the repository lock: a stale match or
+collapsed obligation settles as `target_converged` only when its head is the
+latest assessed identity and that identity's head and base revision are sealed.
+An older identity cannot stop current work.
 
 **Implemented behavior.** `CHANGES_REQUESTED` gates merging, never dispatching:
 repository watch continues delivering matching findings while that aggregate
@@ -642,9 +637,10 @@ redispatches an evaluated fact nor treats pre-activation history as a new live
 signal. An obligation is a separate collapsed delivery identity, not a request
 to reevaluate its occupied facts. Reconciliation records an append-only
 deactivation when a configured identity or its repository disappears. Guarded
-daemon startup reconciles the complete repository set before any watch task
-starts, including the empty set when the repository-watch section is absent; the
-absent section still starts no watch runtime or polling task. Configuration
+daemon startup reconciles the complete repository set and drains both pending
+lifecycle cutoffs and eligible convergence cutoffs before any watch task starts,
+including the empty set when the repository-watch section is absent; the absent
+section still starts no watch runtime or polling task. Configuration
 reconciliation and evaluation are serialized per repository: an evaluation
 already committed may replay, but an already-loaded event cannot create a
 dispatch after deactivation commits. Activation stores a digest of the complete
@@ -675,14 +671,18 @@ singleton. After this transaction, the mapped rule is a subscription;
 subscription identity, delivery, continuation cursor inheritance, and
 cancellation follow the [program substrate](program-substrate.md).
 
-## First live rule
+## Live merge-forward rule
 
-**Foundation contract.** The first deployed rule is `merge-forward-on-conflict`.
-It matches `MergeableStateChanged` with
-`mergeable_state.any_of = ["conflicting"]`, uses pull-request singleton scope,
-and dispatches the merge-forward session template configured with the approved
-cheap model and pull-request context. The rule does not match transitions back
-to `mergeable` or `unknown`.
+**Foundation contract.** The live merge-forward rule is
+`merge-forward-on-base-advance`. It matches `BaseAdvanced` for pull requests
+whose head branch matches `^agent/.+$`, uses pull-request singleton scope, and
+dispatches the merge-forward session template configured with the approved cheap
+model and pull-request context. Because each `BaseAdvanced` fact targets an open
+pull request based on the branch that advanced, the rule dispatches for each
+immediate dependent when a stacked parent branch advances and for each matching
+main-based pull request when `main` advances. It does not wait for a workflow
+conclusion or a `MergeableStateChanged` conflict fact, and a parent's own
+`HeadChanged` fact does not dispatch the parent.
 
 ## Designed-for version-two poll-cache persistence
 

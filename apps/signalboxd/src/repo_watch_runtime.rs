@@ -142,6 +142,7 @@ query RepositoryWatchBlockingReviews(
   repository(owner: $namespace, name: $name) {
     pullRequest(number: $number) {
       headRefOid
+      baseRefOid
       reviewDecision
       latestOpinionatedReviews(first: 100, after: $after) {
         nodes {
@@ -168,14 +169,22 @@ mutation RepositoryWatchDismissReview($review: ID!, $message: String!) {
 "#;
 
 const REVIEW_CLEARANCE_STATE_QUERY: &str = r#"
-query RepositoryWatchReviewClearanceState($review: ID!) {
+query RepositoryWatchReviewClearanceState($review: ID!, $after: String) {
   node(id: $review) {
     ... on PullRequestReview {
       id
       state
-      author { login }
       commit { oid }
-      pullRequest { number headRefOid reviewDecision }
+      pullRequest {
+        number
+        state
+        headRefOid
+        reviewDecision
+        latestOpinionatedReviews(first: 100, after: $after) {
+          nodes { id }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
     }
   }
 }
@@ -658,7 +667,15 @@ impl RepositoryWatchTask {
                     .await
                     .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
                 for clearance in &planned_clearances {
-                    self.poller.dismiss_stale_review(clearance).await?;
+                    if self.poller.dismiss_stale_review(clearance).await?
+                        == StaleReviewDismissal::Ineligible
+                    {
+                        self.store
+                            .release_stale_review_clearance_claim(clearance.clearance_id())
+                            .await
+                            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+                        continue;
+                    }
                     self.store
                         .record_stale_review_clearance_outcome(
                             clearance.clearance_id(),
@@ -680,32 +697,48 @@ impl RepositoryWatchTask {
     async fn reconcile_pending_stale_review_clearances(
         &self,
     ) -> Result<(), RepositoryWatchAttemptError> {
-        let pending = self
-            .store
-            .load_pending_stale_review_clearances(&self.repository)
-            .await
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-        for clearance in &pending {
-            let StaleReviewClearanceObservation::Terminal {
-                outcome,
-                provider_state,
-            } = self
-                .poller
-                .observe_stale_review_clearance(clearance)
-                .await?
-            else {
-                continue;
-            };
-            self.store
-                .record_stale_review_clearance_outcome(
-                    clearance.clearance_id(),
-                    outcome,
-                    provider_state,
-                )
+        let mut after = None;
+        loop {
+            let pending = self
+                .store
+                .claim_pending_stale_review_clearances(&self.repository, after)
                 .await
                 .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+            if pending.is_empty() {
+                return Ok(());
+            }
+            after = pending.last().map(|clearance| clearance.clearance_id());
+            for clearance in &pending {
+                match self
+                    .poller
+                    .observe_stale_review_clearance(clearance)
+                    .await?
+                {
+                    StaleReviewClearanceObservation::StillBlocking => {
+                        self.store
+                            .release_stale_review_clearance_claim(clearance.clearance_id())
+                            .await
+                            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+                    }
+                    StaleReviewClearanceObservation::Terminal {
+                        outcome,
+                        provider_state,
+                    } => {
+                        self.store
+                            .record_stale_review_clearance_outcome(
+                                clearance.clearance_id(),
+                                outcome,
+                                provider_state,
+                            )
+                            .await
+                            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+                    }
+                }
+            }
+            if pending.len() < 128 {
+                return Ok(());
+            }
         }
-        Ok(())
     }
 }
 
@@ -1536,7 +1569,12 @@ impl GitHubRepositoryPoller {
         {
             let reviews = self.fetch_reviews(number, Some(previous.reviews())).await?;
             let convergence_evidence = self
-                .fetch_convergence_evidence(previous.context(), previous.mergeable_state())
+                .fetch_convergence_evidence(
+                    previous.context().number(),
+                    previous.context().head_sha(),
+                    previous.context().base_branch(),
+                    previous.mergeable_state(),
+                )
                 .await?;
             let threads = self.fetch_threads(number).await?;
             let reactions = self
@@ -1545,7 +1583,12 @@ impl GitHubRepositoryPoller {
             self.record_skipped_poll(number);
             let state = reuse_pull_request(previous, reviews, threads, reactions)?;
             let convergence = convergence_evidence.assess(&state)?;
-            let stale_review_clearances = self.fetch_stale_review_clearances(&convergence).await?;
+            let stale_review_clearances =
+                if state.lifecycle() == RepoWatchPullRequestLifecycle::Open {
+                    self.fetch_stale_review_clearances(&convergence).await?
+                } else {
+                    Vec::new()
+                };
             return Ok(FetchedPullRequest {
                 state,
                 settlement: PullRequestSettlement::Settled,
@@ -1682,7 +1725,12 @@ impl GitHubRepositoryPoller {
             )
             .await?;
         let convergence_evidence = self
-            .fetch_convergence_evidence(&context, mergeable_state)
+            .fetch_convergence_evidence(
+                context.number(),
+                context.head_sha(),
+                context.base_branch(),
+                mergeable_state,
+            )
             .await?;
         let threads = self.fetch_threads(number).await?;
         let reactions = self
@@ -1703,7 +1751,11 @@ impl GitHubRepositoryPoller {
         })
         .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
         let convergence = convergence_evidence.assess(&state)?;
-        let stale_review_clearances = self.fetch_stale_review_clearances(&convergence).await?;
+        let stale_review_clearances = if state.lifecycle() == RepoWatchPullRequestLifecycle::Open {
+            self.fetch_stale_review_clearances(&convergence).await?
+        } else {
+            Vec::new()
+        };
         Ok(FetchedPullRequest {
             state,
             settlement,
@@ -1936,7 +1988,9 @@ impl GitHubRepositoryPoller {
 
     async fn fetch_convergence_evidence(
         &self,
-        context: &PullRequestEventContext,
+        number: PullRequestNumber,
+        head_sha: &CommitSha,
+        base_branch: &BranchName,
         mergeable_state: MergeableState,
     ) -> Result<FetchedConvergenceEvidence, RepositoryWatchAttemptError> {
         let (namespace, name) = self
@@ -1944,8 +1998,8 @@ impl GitHubRepositoryPoller {
             .as_str()
             .split_once('/')
             .ok_or(RepositoryWatchAttemptError::Normalization)?;
-        let number = i64::try_from(context.number().get())
-            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        let number =
+            i64::try_from(number.get()).map_err(|_| RepositoryWatchAttemptError::Normalization)?;
         let mut after: Option<String> = None;
         let mut page = 1_u16;
         let mut gating_check_count = 0_u64;
@@ -1980,8 +2034,8 @@ impl GitHubRepositoryPoller {
                 .and_then(|repository| repository.pull_request)
                 .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
             let provider_mergeable_state = normalize_graphql_mergeable(&pull_request.mergeable)?;
-            if pull_request.head_ref_oid != context.head_sha().as_str()
-                || pull_request.base_ref_name != context.base_branch().as_str()
+            if pull_request.head_ref_oid != head_sha.as_str()
+                || pull_request.base_ref_name != base_branch.as_str()
                 || provider_mergeable_state != mergeable_state
             {
                 return Err(RepositoryWatchAttemptError::InvalidResponse);
@@ -2097,6 +2151,7 @@ impl GitHubRepositoryPoller {
                 .and_then(|repository| repository.pull_request)
                 .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
             if pull_request.head_ref_oid != assessment.head_sha().as_str()
+                || pull_request.base_ref_oid != assessment.base_revision().as_str()
                 || normalize_review_decision(pull_request.review_decision.as_deref())?
                     != RepoWatchReviewDecision::ChangesRequested
             {
@@ -2106,13 +2161,11 @@ impl GitHubRepositoryPoller {
                 if review.state != "CHANGES_REQUESTED" {
                     continue;
                 }
-                let reviewer = RepoWatchAuthorLogin::try_new(
-                    review
-                        .author
-                        .ok_or(RepositoryWatchAttemptError::InvalidResponse)?
-                        .login,
-                )
-                .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+                let Some(author) = review.author else {
+                    return Ok(Vec::new());
+                };
+                let reviewer = RepoWatchAuthorLogin::try_new(author.login)
+                    .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
                 let reviewed_head_sha = CommitSha::try_new(
                     review
                         .commit
@@ -2152,16 +2205,104 @@ impl GitHubRepositoryPoller {
     async fn dismiss_stale_review(
         &self,
         clearance: &RepoWatchPlannedStaleReviewClearance,
-    ) -> Result<(), RepositoryWatchAttemptError> {
-        self.dismiss_review_node(clearance.review_node_id(), clearance.dismissal_message())
-            .await
+    ) -> Result<StaleReviewDismissal, RepositoryWatchAttemptError> {
+        if !self.revalidate_stale_review_clearance(clearance).await? {
+            return Ok(StaleReviewDismissal::Ineligible);
+        }
+        self.dismiss_review_node(DismissReviewInput {
+            review_node_id: clearance.review_node_id(),
+            dismissal_message: clearance.dismissal_message(),
+        })
+        .await?;
+        Ok(StaleReviewDismissal::Dismissed)
+    }
+
+    async fn revalidate_stale_review_clearance(
+        &self,
+        clearance: &RepoWatchPlannedStaleReviewClearance,
+    ) -> Result<bool, RepositoryWatchAttemptError> {
+        let number_text = clearance.number().get().to_string();
+        let detail: PullResponse = self
+            .conditional_json(
+                "pull-clearance-revalidation",
+                Method::GET,
+                self.repository_url(&["pulls", &number_text], &[])?,
+                None,
+            )
+            .await?;
+        if detail.number != clearance.number().get()
+            || normalize_lifecycle(&detail)? != RepoWatchPullRequestLifecycle::Open
+        {
+            return Ok(false);
+        }
+        let head_sha = CommitSha::try_new(detail.head.sha.clone())
+            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        if &head_sha != clearance.current_head_sha() {
+            return Ok(false);
+        }
+        let base_branch = BranchName::try_new(detail.base.reference.clone())
+            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        if &base_branch != clearance.base_branch() {
+            return Ok(false);
+        }
+        let mergeable_state = match detail.mergeable {
+            Some(true) => MergeableState::Mergeable,
+            Some(false) => MergeableState::Conflicting,
+            None => MergeableState::Unknown,
+        };
+        let evidence = self
+            .fetch_convergence_evidence(
+                clearance.number(),
+                clearance.current_head_sha(),
+                clearance.base_branch(),
+                mergeable_state,
+            )
+            .await?;
+        if &evidence.base_revision != clearance.base_revision()
+            || evidence.review_decision != RepoWatchReviewDecision::ChangesRequested
+            || !evidence.non_green_gating_checks.is_empty()
+            || mergeable_state == MergeableState::Conflicting
+        {
+            return Ok(false);
+        }
+        let unresolved_threads = self
+            .fetch_threads(clearance.number().get())
+            .await?
+            .into_iter()
+            .filter(|thread| thread.state() == RepoWatchThreadState::Open)
+            .map(|thread| thread.thread().clone())
+            .collect::<Vec<_>>();
+        if !unresolved_threads.is_empty() {
+            return Ok(false);
+        }
+        let assessment =
+            RepoWatchConvergenceAssessment::try_new(RepoWatchConvergenceAssessmentInput {
+                number: clearance.number(),
+                head_sha: clearance.current_head_sha().clone(),
+                base_branch: clearance.base_branch().clone(),
+                base_revision: evidence.base_revision,
+                mergeable_state,
+                review_decision: evidence.review_decision,
+                unresolved_threads,
+                gating_check_count: evidence.gating_check_count,
+                non_green_gating_checks: evidence.non_green_gating_checks,
+            })
+            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        let candidates = self.fetch_stale_review_clearances(&assessment).await?;
+        Ok(candidates.iter().any(|candidate| {
+            candidate.review_node_id() == clearance.review_node_id()
+                && candidate.reviewed_head_sha() == clearance.reviewed_head_sha()
+        }))
     }
 
     async fn dismiss_review_node(
         &self,
-        review_node_id: &str,
-        dismissal_message: &str,
+        input: DismissReviewInput<'_>,
     ) -> Result<(), RepositoryWatchAttemptError> {
+        let DismissReviewInput {
+            review_node_id,
+            dismissal_message,
+        } = input;
         let body = serde_json::to_vec(&GraphQlRequest {
             query: DISMISS_REVIEW_MUTATION,
             variables: DismissReviewVariables {
@@ -2196,63 +2337,102 @@ impl GitHubRepositoryPoller {
         &self,
         clearance: &RepoWatchPlannedStaleReviewClearance,
     ) -> Result<StaleReviewClearanceObservation, RepositoryWatchAttemptError> {
-        let body = serde_json::to_vec(&GraphQlRequest {
-            query: REVIEW_CLEARANCE_STATE_QUERY,
-            variables: ReviewNodeVariables {
-                review: clearance.review_node_id(),
-            },
-        })
-        .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
-        let response: GraphQlEnvelope<ReviewClearanceStateData> = self
-            .conditional_json(
-                "review-clearance-state",
-                Method::POST,
-                self.graphql_url.clone(),
-                Some(body),
-            )
-            .await?;
-        if !response.errors.is_empty() {
-            return Err(RepositoryWatchAttemptError::Rejected);
+        let mut after: Option<String> = None;
+        let mut page = 1_u16;
+        loop {
+            let body = serde_json::to_vec(&GraphQlRequest {
+                query: REVIEW_CLEARANCE_STATE_QUERY,
+                variables: ReviewNodeVariables {
+                    review: clearance.review_node_id(),
+                    after: after.as_deref(),
+                },
+            })
+            .map_err(|_| RepositoryWatchAttemptError::InvalidResponse)?;
+            let response: GraphQlEnvelope<ReviewClearanceStateData> = self
+                .conditional_json(
+                    "review-clearance-state",
+                    Method::POST,
+                    self.graphql_url.clone(),
+                    Some(body),
+                )
+                .await?;
+            if !response.errors.is_empty() {
+                return Err(RepositoryWatchAttemptError::Rejected);
+            }
+            let review = response
+                .data
+                .and_then(|data| data.node)
+                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
+            let commit = review
+                .commit
+                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
+            if review.id != clearance.review_node_id()
+                || review.pull_request.number != clearance.number().get()
+                || commit.oid != clearance.reviewed_head_sha().as_str()
+            {
+                return Err(RepositoryWatchAttemptError::InvalidResponse);
+            }
+            let provider_state = normalize_observed_review_state(&review.state)?;
+            match review.pull_request.state.as_str() {
+                "OPEN" => {}
+                "CLOSED" | "MERGED" => {
+                    return Ok(StaleReviewClearanceObservation::Terminal {
+                        outcome: RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
+                        provider_state,
+                    });
+                }
+                _ => return Err(RepositoryWatchAttemptError::InvalidResponse),
+            }
+            if review.pull_request.head_ref_oid != clearance.current_head_sha().as_str() {
+                return Ok(StaleReviewClearanceObservation::Terminal {
+                    outcome: RepoWatchStaleReviewClearanceOutcome::Superseded,
+                    provider_state,
+                });
+            }
+            if provider_state == RepoWatchObservedReviewState::Dismissed {
+                return Ok(StaleReviewClearanceObservation::Terminal {
+                    outcome: RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed,
+                    provider_state,
+                });
+            }
+            if normalize_review_decision(review.pull_request.review_decision.as_deref())?
+                != RepoWatchReviewDecision::ChangesRequested
+            {
+                return Ok(StaleReviewClearanceObservation::Terminal {
+                    outcome: RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
+                    provider_state,
+                });
+            }
+            if review
+                .pull_request
+                .latest_opinionated_reviews
+                .nodes
+                .iter()
+                .any(|candidate| candidate.id == clearance.review_node_id())
+            {
+                return Ok(StaleReviewClearanceObservation::StillBlocking);
+            }
+            if !review
+                .pull_request
+                .latest_opinionated_reviews
+                .page_info
+                .has_next_page
+            {
+                return Ok(StaleReviewClearanceObservation::Terminal {
+                    outcome: RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
+                    provider_state,
+                });
+            }
+            after = review
+                .pull_request
+                .latest_opinionated_reviews
+                .page_info
+                .end_cursor;
+            if after.is_none() {
+                return Err(RepositoryWatchAttemptError::InvalidResponse);
+            }
+            page = next_page(page)?;
         }
-        let review = response
-            .data
-            .and_then(|data| data.node)
-            .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
-        let reviewer = review
-            .author
-            .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
-        let commit = review
-            .commit
-            .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
-        if review.id != clearance.review_node_id()
-            || review.pull_request.number != clearance.number().get()
-            || reviewer.login != clearance.reviewer().as_str()
-            || commit.oid != clearance.reviewed_head_sha().as_str()
-        {
-            return Err(RepositoryWatchAttemptError::InvalidResponse);
-        }
-        if review.pull_request.head_ref_oid != clearance.current_head_sha().as_str() {
-            return Ok(StaleReviewClearanceObservation::Terminal {
-                outcome: RepoWatchStaleReviewClearanceOutcome::Superseded,
-                provider_state: normalize_observed_review_state(&review.state)?,
-            });
-        }
-        let provider_state = normalize_observed_review_state(&review.state)?;
-        if provider_state == RepoWatchObservedReviewState::Dismissed {
-            return Ok(StaleReviewClearanceObservation::Terminal {
-                outcome: RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed,
-                provider_state,
-            });
-        }
-        if normalize_review_decision(review.pull_request.review_decision.as_deref())?
-            != RepoWatchReviewDecision::ChangesRequested
-        {
-            return Ok(StaleReviewClearanceObservation::Terminal {
-                outcome: RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
-                provider_state,
-            });
-        }
-        Ok(StaleReviewClearanceObservation::StillBlocking)
     }
 
     async fn fetch_reactions(
@@ -3434,9 +3614,15 @@ struct DismissReviewVariables<'a> {
     message: &'a str,
 }
 
+struct DismissReviewInput<'a> {
+    review_node_id: &'a str,
+    dismissal_message: &'a str,
+}
+
 #[derive(Serialize)]
 struct ReviewNodeVariables<'a> {
     review: &'a str,
+    after: Option<&'a str>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -3549,6 +3735,8 @@ struct BlockingReviewRepository {
 struct BlockingReviewPullRequest {
     #[serde(rename = "headRefOid")]
     head_ref_oid: String,
+    #[serde(rename = "baseRefOid")]
+    base_ref_oid: String,
     #[serde(rename = "reviewDecision")]
     review_decision: Option<String>,
     #[serde(rename = "latestOpinionatedReviews")]
@@ -3607,7 +3795,6 @@ struct ReviewClearanceStateData {
 struct ReviewClearanceState {
     id: String,
     state: String,
-    author: Option<BlockingReviewAuthor>,
     commit: Option<BlockingReviewCommit>,
     #[serde(rename = "pullRequest")]
     pull_request: ReviewClearancePullRequest,
@@ -3616,10 +3803,31 @@ struct ReviewClearanceState {
 #[derive(Clone, Deserialize)]
 struct ReviewClearancePullRequest {
     number: u64,
+    state: String,
     #[serde(rename = "headRefOid")]
     head_ref_oid: String,
     #[serde(rename = "reviewDecision")]
     review_decision: Option<String>,
+    #[serde(rename = "latestOpinionatedReviews")]
+    latest_opinionated_reviews: ReviewClearanceReviewConnection,
+}
+
+#[derive(Clone, Deserialize)]
+struct ReviewClearanceReviewConnection {
+    nodes: Vec<ReviewClearanceReviewNode>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+#[derive(Clone, Deserialize)]
+struct ReviewClearanceReviewNode {
+    id: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StaleReviewDismissal {
+    Dismissed,
+    Ineligible,
 }
 
 enum StaleReviewClearanceObservation {
@@ -3827,6 +4035,7 @@ mod tests {
     const EXPECTED_FEATURE_WORKFLOW_CONCLUSION: CheckConclusion = CheckConclusion::Failure;
     const EXPECTED_MAIN_WORKFLOW_CONCLUSION: CheckConclusion = CheckConclusion::Success;
     const PULL_NUMBER: u64 = 7;
+    const BASE_ADVANCE_EVENT_ID: u128 = 72;
     const HEAD_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const OWED_EVENT_HEAD_SHA: &str = "dddddddddddddddddddddddddddddddddddddddd";
     const OWED_MATCH_COUNT: u64 = 51;
@@ -3834,6 +4043,7 @@ mod tests {
     const BASE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const HEAD_REPOSITORY: &str = "fork/repository";
     const HEAD_BRANCH: &str = "feature/watch";
+    const AGENT_HEAD_BRANCH: &str = "agent/dependent";
     const BASE_BRANCH: &str = "main";
     const PULL_TITLE: &str = "Exercise repository watch";
     const PULL_BODY: &str = "Typed fixture body";
@@ -4240,6 +4450,7 @@ mod tests {
                 "repository": {
                     "pullRequest": {
                         "headRefOid": HEAD_SHA,
+                        "baseRefOid": BASE_SHA,
                         "reviewDecision": "CHANGES_REQUESTED",
                         "latestOpinionatedReviews": {
                             "nodes": [{
@@ -4260,12 +4471,12 @@ mod tests {
         .to_string()
     }
 
-    fn dismissed_review() -> String {
+    fn dismissed_review(review_node_id: &str) -> String {
         serde_json::json!({
             "data": {
                 "dismissPullRequestReview": {
                     "pullRequestReview": {
-                        "id": STALE_REVIEW_NODE_ID,
+                        "id": review_node_id,
                         "state": "DISMISSED"
                     }
                 }
@@ -5501,20 +5712,26 @@ mod tests {
 
     #[tokio::test]
     async fn dismissal_mutation_requires_the_expected_review_identity() {
+        const MISMATCHING_REVIEW_NODE_ID: &str = "PRR_mismatching_review_node";
         let response = ScriptedResponse::post(
             RequestTarget(String::from(THREADS_TARGET)),
-            ResponseBody(dismissed_review()),
+            ResponseBody(dismissed_review(MISMATCHING_REVIEW_NODE_ID)),
         )
         .matching_request_body(String::from("RepositoryWatchDismissReview"));
         let server = ScriptedServer::start(vec![response]).await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
 
-        fixture
+        let error = fixture
             .poller
-            .dismiss_review_node(STALE_REVIEW_NODE_ID, DISMISSAL_MESSAGE)
+            .dismiss_review_node(super::DismissReviewInput {
+                review_node_id: STALE_REVIEW_NODE_ID,
+                dismissal_message: DISMISSAL_MESSAGE,
+            })
             .await
-            .expect("GitHub confirms the exact review dismissal");
+            .expect_err("a response naming another review must fail closed");
         server.finish().await;
+
+        assert_eq!(error, RepositoryWatchAttemptError::InvalidResponse);
     }
 
     #[tokio::test]
@@ -7211,6 +7428,50 @@ mod tests {
         assert_eq!(encoded["event"]["target"]["head_branch"], HEAD_BRANCH);
         assert_eq!(encoded["event"]["kind"], "MergeableStateChanged");
         assert_eq!(encoded["event"]["payload"]["current"], "conflicting");
+    }
+
+    #[test]
+    fn base_advance_dispatch_context_targets_the_dependent_pull_request() {
+        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())
+            .expect("fixture repository is valid");
+        let base_branch =
+            BranchName::try_new(BASE_BRANCH.to_owned()).expect("fixture base branch is valid");
+        let context = PullRequestEventContext::new(PullRequestEventContextInput {
+            number: PullRequestNumber::new(
+                PULL_NUMBER
+                    .try_into()
+                    .expect("fixture pull-request number is positive"),
+            ),
+            head_sha: CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture SHA is valid"),
+            head_repository: repository.clone(),
+            base_branch: base_branch.clone(),
+            head_branch: BranchName::try_new(AGENT_HEAD_BRANCH.to_owned())
+                .expect("fixture head branch is valid"),
+            title: PullRequestTitle::try_new(PULL_TITLE.to_owned())
+                .expect("fixture title is valid"),
+            body: PullRequestBody::try_new(PULL_BODY.to_owned()).expect("fixture body is valid"),
+            labels: Vec::new(),
+            draft: false,
+            author: None,
+        });
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(uuid::Uuid::from_u128(BASE_ADVANCE_EVENT_ID)),
+            repository,
+            context,
+            RepoWatchEventKindV1::BaseAdvanced {
+                branch: base_branch,
+            },
+        )
+        .expect("fixture event is coherent");
+        let encoded: serde_json::Value =
+            serde_json::from_str(&dispatch_context_json(&event)).expect("dispatch context is JSON");
+
+        assert_eq!(encoded["type"], "pull_request");
+        assert_eq!(encoded["number"], PULL_NUMBER);
+        assert_eq!(encoded["event"]["target"]["base_branch"], BASE_BRANCH);
+        assert_eq!(encoded["event"]["target"]["head_branch"], AGENT_HEAD_BRANCH);
+        assert_eq!(encoded["event"]["kind"], "BaseAdvanced");
+        assert_eq!(encoded["event"]["payload"]["branch"], BASE_BRANCH);
     }
 
     #[tokio::test]

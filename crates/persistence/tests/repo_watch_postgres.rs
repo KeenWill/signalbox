@@ -16,7 +16,7 @@ use signalbox_application::{
     RepoWatchConvergenceAssessmentInput, RepoWatchEventIdGenerator, RepoWatchObservation,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
     RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewDecision,
-    derive_repo_watch_events,
+    RepoWatchThreadObservation, RepoWatchThreadState, derive_repo_watch_events,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
@@ -113,6 +113,13 @@ fn repository() -> Result<RepositorySlug, Box<dyn Error>> {
 }
 
 fn observation(head: Option<&str>) -> Result<RepoWatchObservation, Box<dyn Error>> {
+    observation_at_base(head, BASE_REVISION)
+}
+
+fn observation_at_base(
+    head: Option<&str>,
+    base_revision: &str,
+) -> Result<RepoWatchObservation, Box<dyn Error>> {
     let pull_requests = head.map(pull_request).transpose()?.into_iter().collect();
     Ok(RepoWatchObservation::new(
         Vec::new(),
@@ -121,13 +128,20 @@ fn observation(head: Option<&str>) -> Result<RepoWatchObservation, Box<dyn Error
             workflow_runs: Vec::new(),
             branch_heads: vec![RepoWatchBranchHead::new(
                 BranchName::try_new(BASE_BRANCH.to_owned())?,
-                CommitSha::try_new(BASE_REVISION.to_owned())?,
+                CommitSha::try_new(base_revision.to_owned())?,
             )],
         })?,
     ))
 }
 
 fn pull_request(head: &str) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
+    pull_request_with_threads(head, Vec::new())
+}
+
+fn pull_request_with_threads(
+    head: &str,
+    threads: Vec<RepoWatchThreadObservation>,
+) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
     Ok(RepoWatchPullRequestState::try_new(
         RepoWatchPullRequestStateInput {
             context: PullRequestEventContext::new(PullRequestEventContextInput {
@@ -160,10 +174,30 @@ fn pull_request(head: &str) -> Result<RepoWatchPullRequestState, Box<dyn Error>>
                 CheckConclusion::Success,
             )],
             reviews: Vec::new(),
-            threads: Vec::new(),
+            threads,
             reactions: Vec::new(),
         },
     )?)
+}
+
+fn candidate_with_open_thread(head: &str) -> Result<RepoWatchCursorCandidate, Box<dyn Error>> {
+    Ok(RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: vec![pull_request_with_threads(
+                head,
+                vec![RepoWatchThreadObservation::new(
+                    ReviewThreadId::try_new(REVIEW_THREAD.to_owned())?,
+                    RepoWatchThreadState::Open,
+                )],
+            )?],
+            workflow_runs: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                BranchName::try_new(BASE_BRANCH.to_owned())?,
+                CommitSha::try_new(BASE_REVISION.to_owned())?,
+            )],
+        })?,
+    )))
 }
 
 fn candidate(head: Option<&str>) -> Result<RepoWatchCursorCandidate, Box<dyn Error>> {
@@ -198,6 +232,7 @@ fn committed_generation(outcome: RepoWatchCommitOutcome) -> RepoWatchCursorGener
 
 struct CommittedFixture {
     _container: ContainerAsync<Postgres>,
+    pool: PgPool,
     repository: RepositorySlug,
     store: PostgresRepoWatchStore,
     second_candidate: RepoWatchCursorCandidate,
@@ -240,6 +275,7 @@ async fn committed_fixture() -> Result<CommittedFixture, Box<dyn Error>> {
     );
     Ok(CommittedFixture {
         _container: container,
+        pool,
         repository,
         store,
         second_candidate,
@@ -515,6 +551,101 @@ async fn cursor_events_assessment_and_seal_commit_atomically() -> Result<(), Box
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn assessment_threads_must_match_the_committed_cursor() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = candidate(None)?;
+    let baseline_generation = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, baseline.clone(), Vec::new()),
+            )
+            .await?,
+    );
+    let current = candidate_with_open_thread(INITIAL_HEAD)?;
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(baseline.observation()),
+        current.observation(),
+        &mut FixedEventIds::default(),
+    )?;
+
+    let failure = store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(Some(baseline_generation), current, events),
+            &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await;
+    let cursor = store
+        .load_cursor(&repository)
+        .await?
+        .expect("the baseline cursor remains present");
+    let assessment_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_assessment")
+            .fetch_one(&pool)
+            .await?;
+
+    assert!(matches!(
+        failure,
+        Err(RepoWatchStoreError::ConvergenceEvidenceMismatch)
+    ));
+    assert_eq!(cursor.generation(), baseline_generation);
+    assert_eq!(assessment_count, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn superseded_exact_replay_does_not_record_convergence_evidence() -> Result<(), Box<dyn Error>>
+{
+    let fixture = committed_fixture().await?;
+    let changed = candidate(Some(CHANGED_HEAD))?;
+    let changed_events = derive_repo_watch_events(
+        &fixture.repository,
+        Some(fixture.second_candidate.observation()),
+        changed.observation(),
+        &mut FixedEventIds(100),
+    )?;
+    fixture
+        .store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(Some(fixture.second_generation), changed, changed_events),
+        )
+        .await?;
+
+    let replay = fixture
+        .store
+        .commit_with_convergence(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(fixture.first_generation),
+                fixture.second_candidate.clone(),
+                fixture.events.clone(),
+            ),
+            &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let assessment_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_assessment")
+            .fetch_one(&fixture.pool)
+            .await?;
+    let identity_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_identity")
+            .fetch_one(&fixture.pool)
+            .await?;
+
+    assert_eq!(replayed_generation(replay), fixture.second_generation);
+    assert_eq!(assessment_count, 0);
+    assert_eq!(identity_count, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn evidence_replay_after_a_head_round_trip_uses_the_candidate_head()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
@@ -588,9 +719,98 @@ async fn evidence_replay_after_a_head_round_trip_uses_the_candidate_head()
     .bind(INITIAL_HEAD)
     .fetch_one(&pool)
     .await?;
+    let current_head: String =
+        sqlx::query_scalar("SELECT head_sha FROM repo_watch_current_pull_request_convergence")
+            .fetch_one(&pool)
+            .await?;
+    let identity_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_identity")
+            .fetch_one(&pool)
+            .await?;
 
     assert_eq!(assessment_count, 2);
     assert_eq!(first_head_assessment_count, 1);
+    assert_eq!(current_head, INITIAL_HEAD);
+    assert_eq!(identity_count, 3);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn evidence_replay_after_a_base_round_trip_uses_the_candidate_base()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let second_base = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let first =
+        RepoWatchCursorCandidate::new(observation_at_base(Some(INITIAL_HEAD), BASE_REVISION)?);
+    let second =
+        RepoWatchCursorCandidate::new(observation_at_base(Some(INITIAL_HEAD), second_base)?);
+    let first_generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(None, first.clone(), Vec::new()),
+                &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+            )
+            .await?,
+    );
+    let mut ids = FixedEventIds::default();
+    let second_events = derive_repo_watch_events(
+        &repository,
+        Some(first.observation()),
+        second.observation(),
+        &mut ids,
+    )?;
+    let second_generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(Some(first_generation), second.clone(), second_events),
+                &[merge_ready_assessment(INITIAL_HEAD, second_base)?],
+            )
+            .await?,
+    );
+    let restored_events = derive_repo_watch_events(
+        &repository,
+        Some(second.observation()),
+        first.observation(),
+        &mut ids,
+    )?;
+
+    store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(Some(second_generation), first, restored_events),
+            &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let assessment_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_assessment")
+            .fetch_one(&pool)
+            .await?;
+    let first_base_assessment_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_pull_request_convergence_assessment
+          WHERE base_revision = $1",
+    )
+    .bind(BASE_REVISION)
+    .fetch_one(&pool)
+    .await?;
+    let current_base: String =
+        sqlx::query_scalar("SELECT base_revision FROM repo_watch_current_pull_request_convergence")
+            .fetch_one(&pool)
+            .await?;
+    let identity_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_identity")
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(assessment_count, 2);
+    assert_eq!(first_base_assessment_count, 1);
+    assert_eq!(current_base, BASE_REVISION);
+    assert_eq!(identity_count, 3);
     Ok(())
 }
 

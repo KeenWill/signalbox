@@ -67,6 +67,18 @@ CREATE TABLE repo_watch_stale_review_clearance_result (
     )
 );
 
+-- A mutable, expiring delivery claim is separate from the append-only intent
+-- and result journals. It prevents concurrent watchers from issuing the same
+-- provider mutation while allowing recovery after a crashed claimant.
+CREATE TABLE repo_watch_stale_review_clearance_claim (
+    clearance_id uuid PRIMARY KEY,
+    claimed_until timestamptz NOT NULL,
+
+    FOREIGN KEY (clearance_id)
+        REFERENCES repo_watch_stale_review_clearance(clearance_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+);
+
 CREATE VIEW repo_watch_pending_stale_review_clearance AS
 SELECT clearance.repository,
        clearance.pull_request_number,
@@ -96,4 +108,8 @@ FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
 
 CREATE TRIGGER repo_watch_stale_review_clearance_result_reject_truncate
 BEFORE TRUNCATE ON repo_watch_stale_review_clearance_result
+FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
+
+CREATE TRIGGER repo_watch_stale_review_clearance_claim_reject_truncate
+BEFORE TRUNCATE ON repo_watch_stale_review_clearance_claim
 FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
