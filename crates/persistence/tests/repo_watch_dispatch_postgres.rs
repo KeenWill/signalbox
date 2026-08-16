@@ -564,6 +564,35 @@ fn storage_corruption(error: &RepoWatchDispatchRepositoryError) -> bool {
     matches!(error, RepoWatchDispatchRepositoryError::Corruption(_))
 }
 
+/// Removes the fixture rule's stored fingerprints to stage a corrupt shape.
+///
+/// The table is append-only in production, so the trigger is disabled only
+/// long enough to reach a state reconciliation must refuse.
+async fn remove_field_fingerprints(fixture: &DispatchFixture) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "ALTER TABLE repo_watch_rule_field_fingerprint
+         DISABLE TRIGGER repo_watch_rule_field_fingerprint_is_append_only",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM repo_watch_rule_field_fingerprint
+          WHERE repository = $1 AND rule_id = $2 AND rule_version = $3",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(fixture.rule.id().as_str())
+    .bind(i64::try_from(fixture.rule.version().get())?)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE repo_watch_rule_field_fingerprint
+         ENABLE TRIGGER repo_watch_rule_field_fingerprint_is_append_only",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    Ok(())
+}
+
 fn outcome_is_dispatched(outcome: &RepoWatchRuleEvaluationOutcome) -> bool {
     matches!(outcome, RepoWatchRuleEvaluationOutcome::Dispatched { .. })
 }
@@ -1933,27 +1962,7 @@ async fn active_rule_identity_names_the_matcher_field_changed_without_a_version_
 async fn active_activation_without_field_fingerprints_is_storage_corruption()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture().await?;
-    sqlx::query(
-        "ALTER TABLE repo_watch_rule_field_fingerprint
-         DISABLE TRIGGER repo_watch_rule_field_fingerprint_is_append_only",
-    )
-    .execute(&fixture.pool)
-    .await?;
-    sqlx::query(
-        "DELETE FROM repo_watch_rule_field_fingerprint
-          WHERE repository = $1 AND rule_id = $2 AND rule_version = $3",
-    )
-    .bind(fixture.repository.as_str())
-    .bind(fixture.rule.id().as_str())
-    .bind(i64::try_from(fixture.rule.version().get())?)
-    .execute(&fixture.pool)
-    .await?;
-    sqlx::query(
-        "ALTER TABLE repo_watch_rule_field_fingerprint
-         ENABLE TRIGGER repo_watch_rule_field_fingerprint_is_append_only",
-    )
-    .execute(&fixture.pool)
-    .await?;
+    remove_field_fingerprints(&fixture).await?;
 
     let error = fixture
         .store
@@ -1962,6 +1971,35 @@ async fn active_activation_without_field_fingerprints_is_storage_corruption()
         .expect_err("an active activation without fingerprints is not a tolerated shape");
 
     assert!(storage_corruption(&error));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retiring_an_omitted_rule_validates_its_field_fingerprints() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    remove_field_fingerprints(&fixture).await?;
+
+    let error = fixture
+        .store
+        .reconcile_rules(&fixture.repository, &[])
+        .await
+        .expect_err("an omitted rule is retired against a validated stored shape");
+
+    assert!(storage_corruption(&error));
+    let deactivated: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM repo_watch_rule_deactivation
+              WHERE repository = $1 AND rule_id = $2 AND rule_version = $3
+         )",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(fixture.rule.id().as_str())
+    .bind(i64::try_from(fixture.rule.version().get())?)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(!deactivated);
     Ok(())
 }
 

@@ -982,11 +982,30 @@ impl RepositoryWatchAttemptError {
         }
     }
 
+    /// Whether retrying the repository attempt can ever succeed.
+    ///
+    /// Enumerated rather than defaulted: a later variant that is permanent
+    /// would otherwise compile as transient and leave the task retrying it
+    /// forever.
     const fn is_permanent(self) -> bool {
-        matches!(
-            self,
-            Self::RetiredRuleIdentity | Self::ChangedRuleIdentity | Self::RegressedRuleVersion
-        )
+        match self {
+            Self::RetiredRuleIdentity | Self::ChangedRuleIdentity | Self::RegressedRuleVersion => {
+                true
+            }
+            Self::Credential
+            | Self::Request
+            | Self::Rejected
+            | Self::ResponseTooLarge
+            | Self::InvalidResponse
+            | Self::InvalidEntityTag
+            | Self::MissingCachedResource
+            | Self::ResourceLimit
+            | Self::Normalization
+            | Self::PullRequestFetchAbandoned
+            | Self::Differ
+            | Self::Dispatch
+            | Self::Persistence => false,
+        }
     }
 }
 
@@ -1001,7 +1020,16 @@ fn rule_activation_error(error: RepoWatchDispatchRepositoryError) -> RepositoryW
         RepoWatchDispatchRepositoryError::RegressedRuleVersion { .. } => {
             RepositoryWatchAttemptError::RegressedRuleVersion
         }
-        _ => RepositoryWatchAttemptError::Persistence,
+        RepoWatchDispatchRepositoryError::Database(_)
+        | RepoWatchDispatchRepositoryError::CommitAmbiguous(_)
+        | RepoWatchDispatchRepositoryError::EventStore(_)
+        | RepoWatchDispatchRepositoryError::SessionCreation(_)
+        | RepoWatchDispatchRepositoryError::InitialInput(_)
+        | RepoWatchDispatchRepositoryError::GoalCommission(_)
+        | RepoWatchDispatchRepositoryError::GoalCutoff(_)
+        | RepoWatchDispatchRepositoryError::Corruption(_) => {
+            RepositoryWatchAttemptError::Persistence
+        }
     }
 }
 

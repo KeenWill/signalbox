@@ -575,9 +575,11 @@ increment `version`; it never first appears as a repository-task runtime death.
 An activation recorded before field fingerprints existed cannot produce them
 from its aggregate digest, so the one-time migration introducing fingerprints
 retires every such activation. No active activation lacks fingerprints and the
-daemon carries no path for that shape; a missing fingerprint under an active
-activation is storage corruption. The operator increments `version` once on that
-first upgraded boot.
+daemon carries no path for that shape; a missing fingerprint under any
+non-deactivated activation is storage corruption, checked before reconciliation
+either compares that activation against configuration or retires it as
+unconfigured. The operator increments `version` once on that first upgraded
+boot.
 
 **Implemented behavior.** A higher revision under the same rule ID is a
 replacement. Reconciliation appends deactivation of the active old revision and

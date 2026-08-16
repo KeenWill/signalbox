@@ -1154,13 +1154,17 @@ async fn reconcile_repository_rules(
             continue;
         }
         let stored_digest: Vec<u8> = row.try_get("rule_digest")?;
-        let stored_field_digests: Option<Vec<u8>> = row.try_get("rule_field_digests")?;
+        // An activation the configured set omits is still retired against its
+        // stored shape, so this precedes the configured lookup. The column's
+        // length is a database CHECK, leaving absence as the only defect this
+        // read can observe.
+        let Some(stored_field_digests) = row.try_get::<Option<Vec<u8>>, _>("rule_field_digests")?
+        else {
+            return Err(RepoWatchDispatchRepositoryError::Corruption(
+                "active repository-watch rule activation has no field fingerprints",
+            ));
+        };
         if let Some(configured_rule) = configured.get(&identity) {
-            let Some(stored_field_digests) = stored_field_digests else {
-                return Err(RepoWatchDispatchRepositoryError::Corruption(
-                    "active repository-watch rule activation has no field fingerprints",
-                ));
-            };
             let changed_field = configured_rule.changed_field(&stored_field_digests)?;
             if stored_digest.as_slice() != configured_rule.content_digest.as_slice() {
                 let field = changed_field.ok_or(RepoWatchDispatchRepositoryError::Corruption(
