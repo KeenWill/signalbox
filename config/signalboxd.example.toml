@@ -18,7 +18,8 @@ version = 1
 
 # Omit this table for the fixed baseline of 16 concurrent per-session scheduler
 # passes. A smaller deployment override keeps provider and tool work bounded
-# when many durable sessions become eligible together.
+# when many durable sessions become eligible together. Zero keeps ingestion
+# and process services live while pausing authoritative session execution.
 # [scheduler]
 # max_in_flight_passes = 4
 
