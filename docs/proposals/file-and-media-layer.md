@@ -258,6 +258,11 @@ duplicate view names, non-object schemas, unsupported output kinds, absent or
 above-process limits, unbounded access/output, or unavailable isolation. Image
 views must bound dimensions, pixels, and bytes; audio views duration, samples,
 channels, and bytes; structured views nesting, nodes, strings, and bytes.
+Each provider has at most 64 views, and registry construction encodes the
+worst-case successful `file_inspect` projection, including provider metadata and
+all ordered view declarations and argument schemas. It rejects a declaration
+whose complete projection exceeds the 786,432-byte text-or-JSON body ceiling, so
+an admitted provider's views are always reachable through inspection.
 Every image, audio, or file view also declares the finite set of canonical media
 types it can emit. Each model adapter declares its accepted canonical media types
 per presentation kind. Before processing or reserving a reference, `file_read`
@@ -341,17 +346,21 @@ success JSON schema. Outcomes expose no content beyond admitted metadata.
 
 ### `file_read`
 
-Arguments are exactly `{ digest, part_selector, view, options, continuation }`.
+Arguments are exactly
+`{ digest, part_selector, reader, view, options, continuation }`. `reader` is the
+exact `ReaderIdentity` returned by `file_inspect`.
 The permission default is `Auto` and the effect class is `ExternalEffect`,
 because a read can perform observable authenticated store reads and publish a
 generated artifact. On an initial request, `options` is the provider object and
 `continuation` is null. On a continuation request, `options` is null and
 `continuation` is the cursor from the preceding result; the cursor carries and
 authenticates the original normalized options and next semantic position. The
-executor repeats inspection; it never trusts model-supplied type or reader
-identity. The selected view must exist, the initial `options` must validate
-against its registered object schema, and a continuation must bind the same
-digest, selector, reader identity, and view.
+executor repeats inspection; it never trusts model-supplied type evidence. The
+result must select the exact supplied reader identity and revision, or the
+initial request returns `ReaderRevisionUnavailable` instead of executing a view
+with changed semantics. The selected view must exist on that revision, the
+initial `options` must validate against its registered object schema, and a
+continuation must bind the same digest, selector, reader identity, and view.
 
 - `Text` returns admitted UTF-8 with truncation and continuation facts.
 - `Structured` returns canonical compact JSON with the same facts.
@@ -367,9 +376,14 @@ reader identity, view, normalized initial options, and position. Registry
 construction requires normalized options to fit 16,384 canonical JSON bytes and
 each provider's encoded semantic position to fit 4,096 bytes; creation rejects
 larger state before returning a truncated result. At most one live continuation
-entry exists per admitted result, and turn and restart expiry remove it. A
-missing or expired token returns typed invalid-continuation failure, and the
-model may issue a new initial request rather than the executor guessing.
+entry exists per admitted result, at most 1,024 entries and 20 MiB exist per
+turn, and at most 4,096 entries and 64 MiB exist process-wide. Admission reserves
+both entry and byte capacity before returning truncated success. It never evicts
+a live entry to admit another; exhausted capacity returns
+`ContinuationCapacityExceeded`. Turn terminalization and restart expire all of
+that turn's entries deterministically. A missing or expired token returns typed
+invalid-continuation failure, and the model may issue a new initial request
+rather than the executor guessing.
 Providers expose semantic positions such as page, row, section, frame, or time
 span, not parser offsets.
 
@@ -411,19 +425,17 @@ then ends before any worker or store I/O begins. Publication consumes no more
 than the durable reservation. A short completion transaction atomically
 registers the verified blob, consumes the reservation, releases unused bytes,
 and commits the reference; a known-failure completion transaction releases the
-reservation without registering a blob. Immediately before the first worker or
-store operation, the attempt durably crosses the owning tool loop's external-
-effect checkpoint. Recovery may convert a stranded reservation to known failure
-only when that checkpoint proves execution never began. After the checkpoint, a
-crash-lost attempt remains ambiguous and keeps its reservation through the
-existing reconciliation lifecycle; it cannot be retried, and reconciliation
-consumes or releases the reservation only when it establishes the terminal
-result. A publication or completion failure may leave an unreferenced orphan,
-never a dangling result, but capacity rejection registers nothing. Thus every
-committed reference is admissible to its mandatory continuation call, no
-transaction spans processor or store I/O, and crash recovery never erases an
-external effect. Equal output bytes converge by digest, and ambiguous
-publication cannot become tool success.
+reservation without registering a blob. Every crash-lost authorized
+`ExternalEffect` attempt remains ambiguous and keeps its reservation through the
+owning tool loop's existing reconciliation lifecycle; it cannot be retried, and
+reconciliation consumes or releases the reservation only when it establishes
+the terminal result. No new pre-effect checkpoint or tool-loop transition is
+introduced by this proposal. A publication or completion failure may leave an
+unreferenced orphan, never a dangling result, but capacity rejection registers
+nothing. Thus every committed reference is admissible to its mandatory
+continuation call, no transaction spans processor or store I/O, and crash
+recovery never erases an external effect. Equal output bytes converge by digest,
+and ambiguous publication cannot become tool success.
 
 Rendering first emits a bounded textual stub. Preparation then:
 
@@ -456,6 +468,7 @@ may lower but never raise these process ceilings:
 | Aggregate probe ranges / source bytes   | 64 / 1,048,576         |
 | Aggregate probe memory / CPU / wall     | 1 GiB / 120 s / 120 s  |
 | Control frame / text-or-JSON body       | 1,048,576 / 786,432    |
+| Views / complete inspection JSON        | 64 / 786,432 bytes     |
 | Structured depth / nodes                | 64 / 100,000           |
 | Observed container entries              | 10,000                 |
 | Image axis / decoded pixels             | 8,192 / 16,777,216     |
@@ -464,6 +477,8 @@ may lower but never raise these process ceilings:
 | Audio clip duration / presented bytes   | 60 s / 8,388,608       |
 | Presented general-file bytes            | 8,388,608              |
 | References / aggregate media per call   | 16 / 33,554,432 bytes  |
+| Continuations per turn / process        | 1,024 / 4,096          |
+| Continuation state per turn / process   | 20 MiB / 64 MiB        |
 | Worker memory / CPU / wall time         | 512 MiB / 60 s / 120 s |
 | Worker descendants                      | 0                      |
 
@@ -489,7 +504,9 @@ BlobNotVisible | BlobMissing | BlobCorrupt | BlobUnavailable
 | DeclaredTypeMismatch { declared, detected }
 | Malformed { media_type, reason_code }
 | EncryptedOrLocked { media_type }
-| UnsupportedView | InvalidViewArguments | InvalidContinuation
+| UnsupportedView | ModalityUnsupported { presentation, media_type }
+| InvalidViewArguments | InvalidContinuation
+| ContinuationCapacityExceeded | ReaderRevisionUnavailable
 | SourceTooLarge { maximum_bytes } | ExpansionLimitExceeded { limit_kind }
 | OutputUnitTooLarge | ProcessorUnavailable
 | ProcessorFailed { reason_code } | ProcessorTimedOut | Cancelled
@@ -569,10 +586,11 @@ normal review budget.
    supervision, `file_inspect`, and one small pure-Rust text/structure adapter.
 3. **Text and structure:** ruled document adapters, paged `file_read` results,
    and durable turn work accounting.
-4. **Images:** ruled adapters, pixel validation, region/fit views, generated
-   previews, and `BlobReference::Image`.
-5. **Provider image input:** neutral image message parts, target gates, and each
-   proven adapter projection.
+4. **Image groundwork:** ruled adapters, pixel validation, region/fit view
+   declarations, and conformance fixtures; this slice exposes no rich result.
+5. **Images and provider input:** generated previews, `BlobReference::Image`,
+   neutral image message parts, target gates, and each proven adapter projection
+   land together.
 6. **Audio:** attachment kind, ruled adapters, duration/sample checks, clip or
    waveform views, and audio projection only where supported.
 7. **General files:** native `BlobReference::File` only for adapters with an
