@@ -1,0 +1,878 @@
+use std::{collections::BTreeMap, error::Error, fmt, str::FromStr};
+
+use crate::{
+    BoundedMetadata, CanonicalMediaType, FileInspection, FileMediaCeilings, FileMediaFailure,
+    FileMediaProcessor, FileMediaProviderDeclaration, FileMediaProviderReadRequest,
+    FileMediaProviderValidationRequest, FileReadRequest, FileReadResult, InspectionRequest,
+    ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
+    ReadAccessPattern, ReadViewBounds, ReaderDeclaration, ReaderIdentity, ReasonCode,
+    StreamingTextFallback, ValidatedFile, ValidationEvidence, VerifiedBlobSource,
+};
+
+const MAX_REGISTRY_PROVIDERS: usize = 256;
+const MAX_READERS_PER_PROVIDER: usize = 256;
+const MAX_MEDIA_TYPES_PER_READER: usize = 256;
+const MAX_VIEWS_PER_READER: usize = 256;
+const MAX_REASON_CODES_PER_READER: usize = 256;
+const MAX_CURSOR_BYTES: usize = 1_024;
+
+/// Immutable process-lifetime registry snapshot.
+#[derive(Clone, Debug)]
+pub struct FileMediaRegistry {
+    providers: Vec<FileMediaProviderDeclaration>,
+    readers: BTreeMap<ReaderIdentity, ReaderDeclaration>,
+    media_owners: BTreeMap<CanonicalMediaType, ReaderIdentity>,
+    streaming_text_reader: Option<ReaderIdentity>,
+    ceilings: FileMediaCeilings,
+}
+
+impl FileMediaRegistry {
+    /// Builds one deterministic registry and rejects every static conflict.
+    pub fn try_new(
+        mut providers: Vec<FileMediaProviderDeclaration>,
+        ceilings: FileMediaCeilings,
+        isolation_available: bool,
+    ) -> Result<Self, FileMediaRegistryConstructionError> {
+        if !FileMediaCeilings::version_one().admits(ceilings) {
+            return Err(FileMediaRegistryConstructionError::Ceilings);
+        }
+        if providers.len() > MAX_REGISTRY_PROVIDERS {
+            return Err(FileMediaRegistryConstructionError::Inventory);
+        }
+        if !providers.is_empty() && !isolation_available {
+            return Err(FileMediaRegistryConstructionError::IsolationUnavailable);
+        }
+        providers.sort_by(|left, right| left.provider().cmp(right.provider()));
+        if providers
+            .windows(2)
+            .any(|pair| pair[0].provider() == pair[1].provider())
+        {
+            return Err(FileMediaRegistryConstructionError::DuplicateProvider);
+        }
+
+        let mut readers = BTreeMap::new();
+        let mut media_owners = BTreeMap::new();
+        let mut streaming_text_reader = None;
+        for provider in &providers {
+            if provider.readers().len() > MAX_READERS_PER_PROVIDER {
+                return Err(FileMediaRegistryConstructionError::Inventory);
+            }
+            for reader in provider.readers() {
+                validate_reader(reader, ceilings)?;
+                let identity = reader.identity().clone();
+                if readers.insert(identity.clone(), reader.clone()).is_some() {
+                    return Err(FileMediaRegistryConstructionError::DuplicateReader);
+                }
+                for media_type in reader.media_types() {
+                    if media_owners
+                        .insert(media_type.clone(), identity.clone())
+                        .is_some()
+                    {
+                        return Err(FileMediaRegistryConstructionError::DuplicateMediaOwner);
+                    }
+                }
+                if reader.streaming_text_fallback() == StreamingTextFallback::Enabled {
+                    let text_plain = CanonicalMediaType::from_str("text/plain")
+                        .map_err(|_| FileMediaRegistryConstructionError::TextFallback)?;
+                    if !reader.media_types().contains(&text_plain)
+                        || streaming_text_reader.replace(identity).is_some()
+                    {
+                        return Err(FileMediaRegistryConstructionError::TextFallback);
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            providers,
+            readers,
+            media_owners,
+            streaming_text_reader,
+            ceilings,
+        })
+    }
+
+    /// Constructs the valid empty registry used before adapters are compiled.
+    pub fn empty() -> Self {
+        Self {
+            providers: Vec::new(),
+            readers: BTreeMap::new(),
+            media_owners: BTreeMap::new(),
+            streaming_text_reader: None,
+            ceilings: FileMediaCeilings::version_one(),
+        }
+    }
+
+    /// Borrows canonically ordered provider declarations.
+    pub fn providers(&self) -> &[FileMediaProviderDeclaration] {
+        &self.providers
+    }
+
+    /// Returns the effective lowerable-only ceiling set.
+    pub const fn ceilings(&self) -> FileMediaCeilings {
+        self.ceilings
+    }
+
+    /// Detects and validates exact bytes without consulting registration order.
+    pub async fn inspect(
+        &self,
+        processor: &dyn FileMediaProcessor,
+        request: InspectionRequest,
+        source: &dyn VerifiedBlobSource,
+        cancellation: &dyn crate::CancellationSignal,
+    ) -> Result<FileInspection, FileMediaFailure> {
+        if cancellation.is_cancelled() {
+            return Err(FileMediaFailure::Cancelled);
+        }
+        if source.digest() != request.source.digest()
+            || source.byte_length() != request.source.byte_length()
+        {
+            return Err(FileMediaFailure::ProcessorFailed);
+        }
+        if self.readers.is_empty() {
+            return Ok(FileInspection::Unknown {
+                source: request.source,
+            });
+        }
+
+        let mut candidates = Vec::new();
+        let mut malformed = Vec::new();
+        for reader in self.readers.values() {
+            let raw = processor
+                .probe(reader.identity(), source, cancellation)
+                .await?;
+            match sanitize_probe(reader, raw)? {
+                SanitizedProbe::NoMatch => {}
+                SanitizedProbe::Candidate(candidate) => candidates.push(candidate),
+                SanitizedProbe::Malformed {
+                    media_type,
+                    reason_code,
+                } => {
+                    malformed.push((media_type, reason_code));
+                }
+            }
+        }
+        if !malformed.is_empty() {
+            malformed.sort();
+            malformed.dedup();
+            let distinct = distinct_media_types(malformed.iter().map(|(kind, _)| kind.clone()));
+            if distinct.len() > 1 {
+                return Ok(FileInspection::Ambiguous {
+                    source: request.source,
+                    media_types: distinct,
+                });
+            }
+            let Some((media_type, reason_code)) = malformed.into_iter().next() else {
+                return Err(FileMediaFailure::ProcessorFailed);
+            };
+            return Ok(FileInspection::Malformed {
+                source: request.source,
+                media_type,
+                reason_code,
+            });
+        }
+
+        let strong = candidates
+            .iter()
+            .filter(|candidate| candidate.strength == ProbeStrength::Strong)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !strong.is_empty() {
+            return self
+                .resolve_candidates(
+                    processor,
+                    request,
+                    source,
+                    cancellation,
+                    strong,
+                    ValidationEvidence::StrongSignature,
+                )
+                .await;
+        }
+
+        let structural = candidates
+            .iter()
+            .filter(|candidate| candidate.strength == ProbeStrength::StructuralCandidate)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !structural.is_empty() {
+            return self
+                .resolve_candidates(
+                    processor,
+                    request,
+                    source,
+                    cancellation,
+                    structural,
+                    ValidationEvidence::StructuralValidation,
+                )
+                .await;
+        }
+
+        if let Ok(declared) = request.source.declared_media_type().canonical_essence()
+            && let Some(reader) = self.media_owners.get(&declared)
+        {
+            return self
+                .validate_candidate(
+                    processor,
+                    request,
+                    source,
+                    cancellation,
+                    Candidate {
+                        reader: reader.clone(),
+                        media_type: declared,
+                        strength: ProbeStrength::DeclaredCandidate,
+                    },
+                    ValidationEvidence::DeclaredCandidateStructurallyValidated,
+                )
+                .await;
+        }
+
+        if let Some(reader) = self.streaming_text_reader.as_ref() {
+            let declaration = self
+                .readers
+                .get(reader)
+                .ok_or(FileMediaFailure::ProcessorFailed)?;
+            let text_plain = CanonicalMediaType::from_str("text/plain")
+                .map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            return self
+                .validate_candidate(
+                    processor,
+                    request,
+                    source,
+                    cancellation,
+                    Candidate {
+                        reader: declaration.identity().clone(),
+                        media_type: text_plain,
+                        strength: ProbeStrength::DeclaredCandidate,
+                    },
+                    ValidationEvidence::StreamingTextValidation,
+                )
+                .await;
+        }
+
+        Ok(FileInspection::Unknown {
+            source: request.source,
+        })
+    }
+
+    async fn resolve_candidates(
+        &self,
+        processor: &dyn FileMediaProcessor,
+        request: InspectionRequest,
+        source: &dyn VerifiedBlobSource,
+        cancellation: &dyn crate::CancellationSignal,
+        mut candidates: Vec<Candidate>,
+        evidence: ValidationEvidence,
+    ) -> Result<FileInspection, FileMediaFailure> {
+        candidates.sort();
+        candidates.dedup();
+        let media_types = distinct_media_types(
+            candidates
+                .iter()
+                .map(|candidate| candidate.media_type.clone()),
+        );
+        let readers = candidates
+            .iter()
+            .map(|candidate| candidate.reader.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        if media_types.len() != 1 || readers.len() != 1 {
+            return Ok(FileInspection::Ambiguous {
+                source: request.source,
+                media_types,
+            });
+        }
+        let Some(candidate) = candidates.into_iter().next() else {
+            return Err(FileMediaFailure::ProcessorFailed);
+        };
+        self.validate_candidate(
+            processor,
+            request,
+            source,
+            cancellation,
+            candidate,
+            evidence,
+        )
+        .await
+    }
+
+    async fn validate_candidate(
+        &self,
+        processor: &dyn FileMediaProcessor,
+        request: InspectionRequest,
+        source: &dyn VerifiedBlobSource,
+        cancellation: &dyn crate::CancellationSignal,
+        candidate: Candidate,
+        evidence: ValidationEvidence,
+    ) -> Result<FileInspection, FileMediaFailure> {
+        let reader = self
+            .readers
+            .get(&candidate.reader)
+            .ok_or(FileMediaFailure::ProcessorFailed)?;
+        let raw = processor
+            .validate(
+                reader.identity(),
+                FileMediaProviderValidationRequest {
+                    source: request.source.clone(),
+                    media_type: candidate.media_type.clone(),
+                    evidence,
+                },
+                source,
+                cancellation,
+            )
+            .await?;
+        match sanitize_validation(reader, &candidate.media_type, evidence, raw)? {
+            SanitizedValidation::Validated { metadata } => {
+                if let Ok(declared) = request.source.declared_media_type().canonical_essence()
+                    && declared != candidate.media_type
+                {
+                    return Ok(FileInspection::DeclaredMismatch {
+                        source: request.source,
+                        declared,
+                        detected: candidate.media_type,
+                    });
+                }
+                Ok(FileInspection::Validated(ValidatedFile::new(
+                    request.source,
+                    candidate.media_type,
+                    candidate.reader,
+                    evidence,
+                    metadata,
+                    reader.views().to_vec(),
+                )))
+            }
+            SanitizedValidation::Malformed { reason_code } => Ok(FileInspection::Malformed {
+                source: request.source,
+                media_type: candidate.media_type,
+                reason_code,
+            }),
+            SanitizedValidation::EncryptedOrLocked => Ok(FileInspection::EncryptedOrLocked {
+                source: request.source,
+                media_type: candidate.media_type,
+            }),
+            SanitizedValidation::NoMatch
+                if evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated
+                    || evidence == ValidationEvidence::StreamingTextValidation =>
+            {
+                Ok(FileInspection::Unknown {
+                    source: request.source,
+                })
+            }
+            SanitizedValidation::NoMatch => Err(FileMediaFailure::ProcessorFailed),
+        }
+    }
+
+    /// Repeats inspection, selects one declared view, and sanitizes all output.
+    pub async fn read(
+        &self,
+        processor: &dyn FileMediaProcessor,
+        request: FileReadRequest,
+        source: &dyn VerifiedBlobSource,
+        cancellation: &dyn crate::CancellationSignal,
+    ) -> Result<FileReadResult, FileMediaFailure> {
+        if !request.options.is_object() {
+            return Err(FileMediaFailure::InvalidViewArguments);
+        }
+        let inspection = self
+            .inspect(processor, request.inspection.clone(), source, cancellation)
+            .await?;
+        let validated = match inspection {
+            FileInspection::Validated(validated) => validated,
+            FileInspection::Unknown { .. } => return Err(FileMediaFailure::UnknownType),
+            FileInspection::Malformed {
+                media_type,
+                reason_code,
+                ..
+            } => {
+                return Err(FileMediaFailure::Malformed {
+                    media_type,
+                    reason_code,
+                });
+            }
+            FileInspection::Ambiguous { .. } => return Err(FileMediaFailure::AmbiguousType),
+            FileInspection::DeclaredMismatch {
+                declared, detected, ..
+            } => {
+                return Err(FileMediaFailure::DeclaredTypeMismatch { declared, detected });
+            }
+            FileInspection::EncryptedOrLocked { media_type, .. } => {
+                return Err(FileMediaFailure::EncryptedOrLocked { media_type });
+            }
+        };
+        let view = validated
+            .views()
+            .iter()
+            .find(|view| view.name() == &request.view)
+            .ok_or(FileMediaFailure::UnsupportedView)?;
+        let reader = self
+            .readers
+            .get(validated.reader())
+            .ok_or(FileMediaFailure::ProcessorFailed)?;
+        let raw = processor
+            .read(
+                validated.reader(),
+                FileMediaProviderReadRequest {
+                    file: validated.clone(),
+                    view: request.view,
+                    options: request.options,
+                },
+                source,
+                cancellation,
+            )
+            .await?;
+        sanitize_read(reader, view, self.ceilings, raw)
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct Candidate {
+    reader: ReaderIdentity,
+    media_type: CanonicalMediaType,
+    strength: ProbeStrength,
+}
+
+enum SanitizedProbe {
+    NoMatch,
+    Candidate(Candidate),
+    Malformed {
+        media_type: CanonicalMediaType,
+        reason_code: ReasonCode,
+    },
+}
+
+fn sanitize_probe(
+    reader: &ReaderDeclaration,
+    raw: ProcessorProbeOutput,
+) -> Result<SanitizedProbe, FileMediaFailure> {
+    match raw {
+        ProcessorProbeOutput::NoMatch => Ok(SanitizedProbe::NoMatch),
+        ProcessorProbeOutput::Candidate {
+            media_type,
+            strength,
+        } => {
+            let media_type = CanonicalMediaType::from_str(&media_type)
+                .map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            if !reader.media_types().contains(&media_type)
+                || strength == ProbeStrength::DeclaredCandidate
+            {
+                return Err(FileMediaFailure::ProcessorFailed);
+            }
+            Ok(SanitizedProbe::Candidate(Candidate {
+                reader: reader.identity().clone(),
+                media_type,
+                strength,
+            }))
+        }
+        ProcessorProbeOutput::RecognizedMalformed {
+            media_type,
+            reason_code,
+        } => {
+            let media_type = CanonicalMediaType::from_str(&media_type)
+                .map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            let reason_code = registered_reason(reader, &reason_code)?;
+            if !reader.media_types().contains(&media_type) {
+                return Err(FileMediaFailure::ProcessorFailed);
+            }
+            Ok(SanitizedProbe::Malformed {
+                media_type,
+                reason_code,
+            })
+        }
+    }
+}
+
+enum SanitizedValidation {
+    Validated { metadata: BoundedMetadata },
+    Malformed { reason_code: ReasonCode },
+    EncryptedOrLocked,
+    NoMatch,
+}
+
+fn sanitize_validation(
+    reader: &ReaderDeclaration,
+    selected_media_type: &CanonicalMediaType,
+    selected_evidence: ValidationEvidence,
+    raw: ProcessorValidationOutput,
+) -> Result<SanitizedValidation, FileMediaFailure> {
+    match raw {
+        ProcessorValidationOutput::Validated {
+            media_type,
+            evidence,
+            metadata_json,
+        } => {
+            let media_type = CanonicalMediaType::from_str(&media_type)
+                .map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            if &media_type != selected_media_type || evidence != selected_evidence {
+                return Err(FileMediaFailure::ProcessorFailed);
+            }
+            let metadata = BoundedMetadata::try_new(&metadata_json)
+                .map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            Ok(SanitizedValidation::Validated { metadata })
+        }
+        ProcessorValidationOutput::Malformed {
+            media_type,
+            reason_code,
+        } => {
+            let media_type = CanonicalMediaType::from_str(&media_type)
+                .map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            if &media_type != selected_media_type {
+                return Err(FileMediaFailure::ProcessorFailed);
+            }
+            Ok(SanitizedValidation::Malformed {
+                reason_code: registered_reason(reader, &reason_code)?,
+            })
+        }
+        ProcessorValidationOutput::EncryptedOrLocked { media_type } => {
+            let media_type = CanonicalMediaType::from_str(&media_type)
+                .map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            if &media_type != selected_media_type {
+                return Err(FileMediaFailure::ProcessorFailed);
+            }
+            Ok(SanitizedValidation::EncryptedOrLocked)
+        }
+        ProcessorValidationOutput::NoMatch => Ok(SanitizedValidation::NoMatch),
+    }
+}
+
+fn sanitize_read(
+    reader: &ReaderDeclaration,
+    view: &crate::ReadViewDeclaration,
+    ceilings: FileMediaCeilings,
+    raw: ProcessorReadOutput,
+) -> Result<FileReadResult, FileMediaFailure> {
+    match raw {
+        ProcessorReadOutput::Text {
+            body,
+            truncated,
+            cursor,
+        } => {
+            let ReadViewBounds::Text { output_bytes, .. } = view.bounds() else {
+                return Err(FileMediaFailure::ProcessorFailed);
+            };
+            if body.len() > output_bytes
+                || body.len() > ceilings.text_or_json_bytes
+                || body.contains('\0')
+                || !valid_cursor(truncated, cursor.as_deref())
+            {
+                return Err(FileMediaFailure::ProcessorFailed);
+            }
+            Ok(FileReadResult::Text {
+                body,
+                truncated,
+                cursor,
+            })
+        }
+        ProcessorReadOutput::Structured {
+            body_json,
+            truncated,
+            cursor,
+        } => {
+            let ReadViewBounds::Structured {
+                output_bytes,
+                depth,
+                nodes,
+                string_bytes,
+                ..
+            } = view.bounds()
+            else {
+                return Err(FileMediaFailure::ProcessorFailed);
+            };
+            if body_json.len() > output_bytes
+                || body_json.len() > ceilings.text_or_json_bytes
+                || body_json.contains('\0')
+                || !valid_cursor(truncated, cursor.as_deref())
+            {
+                return Err(FileMediaFailure::ProcessorFailed);
+            }
+            let body: serde_json::Value =
+                serde_json::from_str(&body_json).map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            let mut observed = ObservedJson::default();
+            observe_json(&body, 1, &mut observed)?;
+            if observed.depth > depth
+                || observed.depth > ceilings.structured_depth
+                || observed.nodes > nodes
+                || observed.nodes > ceilings.structured_nodes
+                || observed.string_bytes > string_bytes
+            {
+                return Err(FileMediaFailure::ProcessorFailed);
+            }
+            Ok(FileReadResult::Structured {
+                body,
+                truncated,
+                cursor,
+            })
+        }
+        ProcessorReadOutput::InvalidViewArguments => Err(FileMediaFailure::InvalidViewArguments),
+        ProcessorReadOutput::UnsupportedView => Err(FileMediaFailure::UnsupportedView),
+        ProcessorReadOutput::SourceTooLarge { maximum_bytes } => {
+            if maximum_bytes == 0 || maximum_bytes > view.bounds().source_bytes() {
+                return Err(FileMediaFailure::ProcessorFailed);
+            }
+            Err(FileMediaFailure::SourceTooLarge { maximum_bytes })
+        }
+        ProcessorReadOutput::ExpansionLimitExceeded { limit_kind } => {
+            Err(FileMediaFailure::ExpansionLimitExceeded {
+                limit_kind: registered_reason(reader, &limit_kind)?,
+            })
+        }
+        ProcessorReadOutput::OutputUnitTooLarge => Err(FileMediaFailure::OutputUnitTooLarge),
+    }
+}
+
+#[derive(Default)]
+struct ObservedJson {
+    depth: u32,
+    nodes: u64,
+    string_bytes: usize,
+}
+
+fn observe_json(
+    value: &serde_json::Value,
+    depth: u32,
+    observed: &mut ObservedJson,
+) -> Result<(), FileMediaFailure> {
+    observed.depth = observed.depth.max(depth);
+    observed.nodes = observed
+        .nodes
+        .checked_add(1)
+        .ok_or(FileMediaFailure::ProcessorFailed)?;
+    match value {
+        serde_json::Value::String(value) => {
+            observed.string_bytes = observed
+                .string_bytes
+                .checked_add(value.len())
+                .ok_or(FileMediaFailure::ProcessorFailed)?;
+        }
+        serde_json::Value::Array(values) => {
+            let next = depth
+                .checked_add(1)
+                .ok_or(FileMediaFailure::ProcessorFailed)?;
+            for value in values {
+                observe_json(value, next, observed)?;
+            }
+        }
+        serde_json::Value::Object(values) => {
+            let next = depth
+                .checked_add(1)
+                .ok_or(FileMediaFailure::ProcessorFailed)?;
+            for (name, value) in values {
+                observed.string_bytes = observed
+                    .string_bytes
+                    .checked_add(name.len())
+                    .ok_or(FileMediaFailure::ProcessorFailed)?;
+                observe_json(value, next, observed)?;
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+    Ok(())
+}
+
+fn valid_cursor(truncated: bool, cursor: Option<&str>) -> bool {
+    match (truncated, cursor) {
+        (false, None) => true,
+        (true, Some(cursor)) => {
+            !cursor.is_empty()
+                && cursor.len() <= MAX_CURSOR_BYTES
+                && !cursor.contains('\0')
+                && !cursor.chars().any(char::is_control)
+        }
+        (false, Some(_)) | (true, None) => false,
+    }
+}
+
+fn registered_reason(
+    reader: &ReaderDeclaration,
+    raw: &str,
+) -> Result<ReasonCode, FileMediaFailure> {
+    let reason = ReasonCode::try_new(raw).map_err(|_| FileMediaFailure::ProcessorFailed)?;
+    if reader.reason_codes().contains(&reason) {
+        Ok(reason)
+    } else {
+        Err(FileMediaFailure::ProcessorFailed)
+    }
+}
+
+fn distinct_media_types(
+    values: impl IntoIterator<Item = CanonicalMediaType>,
+) -> Vec<CanonicalMediaType> {
+    values
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn validate_reader(
+    reader: &ReaderDeclaration,
+    ceilings: FileMediaCeilings,
+) -> Result<(), FileMediaRegistryConstructionError> {
+    if reader.media_types().len() > MAX_MEDIA_TYPES_PER_READER
+        || reader.views().len() > MAX_VIEWS_PER_READER
+        || reader.reason_codes().len() > MAX_REASON_CODES_PER_READER
+    {
+        return Err(FileMediaRegistryConstructionError::Inventory);
+    }
+    if has_duplicates(reader.media_types())
+        || has_duplicates(reader.reason_codes())
+        || has_duplicate_view_names(reader)
+    {
+        return Err(FileMediaRegistryConstructionError::DuplicateReaderMember);
+    }
+    let probe = reader.probe();
+    if probe.prefix_bytes() > ceilings.probe_prefix_bytes
+        || probe.suffix_bytes() > ceilings.probe_suffix_bytes
+        || probe.range_count() > ceilings.probe_ranges
+        || probe.cumulative_bytes() == 0
+        || probe.cumulative_bytes() > ceilings.probe_cumulative_bytes
+        || probe
+            .prefix_bytes()
+            .checked_add(probe.suffix_bytes())
+            .is_none_or(|minimum| minimum > probe.cumulative_bytes())
+    {
+        return Err(FileMediaRegistryConstructionError::ProbeBounds);
+    }
+    for view in reader.views() {
+        validate_view(view.access(), view.bounds(), ceilings)?;
+    }
+    Ok(())
+}
+
+fn has_duplicates<Value: Ord + Clone>(values: &[Value]) -> bool {
+    values
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        != values.len()
+}
+
+fn has_duplicate_view_names(reader: &ReaderDeclaration) -> bool {
+    reader
+        .views()
+        .iter()
+        .map(|view| view.name().clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        != reader.views().len()
+}
+
+fn validate_view(
+    access: ReadAccessPattern,
+    bounds: ReadViewBounds,
+    ceilings: FileMediaCeilings,
+) -> Result<(), FileMediaRegistryConstructionError> {
+    if matches!(
+        access,
+        ReadAccessPattern::RandomAccess { maximum_ranges: 0 }
+    ) || bounds.source_bytes() == 0
+    {
+        return Err(FileMediaRegistryConstructionError::ViewBounds);
+    }
+    let valid = match bounds {
+        ReadViewBounds::Text { output_bytes, .. } => {
+            output_bytes > 0 && output_bytes <= ceilings.text_or_json_bytes
+        }
+        ReadViewBounds::Structured {
+            output_bytes,
+            depth,
+            nodes,
+            string_bytes,
+            ..
+        } => {
+            output_bytes > 0
+                && output_bytes <= ceilings.text_or_json_bytes
+                && depth > 0
+                && depth <= ceilings.structured_depth
+                && nodes > 0
+                && nodes <= ceilings.structured_nodes
+                && string_bytes > 0
+                && string_bytes <= output_bytes
+        }
+        ReadViewBounds::Image {
+            width,
+            height,
+            pixels,
+            output_bytes,
+            ..
+        } => {
+            width > 0
+                && width <= ceilings.image_axis
+                && height > 0
+                && height <= ceilings.image_axis
+                && pixels > 0
+                && pixels <= ceilings.decoded_image_pixels
+                && u64::from(width)
+                    .checked_mul(u64::from(height))
+                    .is_some_and(|area| area >= pixels)
+                && output_bytes > 0
+                && output_bytes <= ceilings.presented_image_bytes
+        }
+        ReadViewBounds::Audio {
+            channels,
+            sample_rate_hz,
+            duration_seconds,
+            output_bytes,
+            ..
+        } => {
+            channels > 0
+                && channels <= ceilings.audio_channels
+                && sample_rate_hz > 0
+                && sample_rate_hz <= ceilings.audio_sample_rate_hz
+                && duration_seconds > 0
+                && duration_seconds <= ceilings.audio_clip_seconds
+                && output_bytes > 0
+                && output_bytes <= ceilings.presented_audio_bytes
+        }
+        ReadViewBounds::File { output_bytes, .. } => {
+            output_bytes > 0 && output_bytes <= ceilings.presented_file_bytes
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(FileMediaRegistryConstructionError::ViewBounds)
+    }
+}
+
+/// Closed static registry construction failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileMediaRegistryConstructionError {
+    /// Configured ceilings did not lower the compiled set.
+    Ceilings,
+    /// A finite inventory exceeded its compiled count.
+    Inventory,
+    /// Providers were declared without available strong isolation.
+    IsolationUnavailable,
+    /// Provider identity was duplicated.
+    DuplicateProvider,
+    /// Reader identity was duplicated.
+    DuplicateReader,
+    /// Exact media-type ownership was duplicated.
+    DuplicateMediaOwner,
+    /// One reader repeated a media type, view name, or reason code.
+    DuplicateReaderMember,
+    /// Probe bounds were zero, contradictory, or excessive.
+    ProbeBounds,
+    /// View bounds were absent, contradictory, or excessive.
+    ViewBounds,
+    /// Text fallback ownership was absent or ambiguous.
+    TextFallback,
+}
+
+impl fmt::Display for FileMediaRegistryConstructionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Ceilings => "file media ceilings may only lower compiled limits",
+            Self::Inventory => "file media registry inventory exceeds a compiled bound",
+            Self::IsolationUnavailable => "file media isolation is unavailable",
+            Self::DuplicateProvider => "file media provider identity is duplicated",
+            Self::DuplicateReader => "file media reader identity is duplicated",
+            Self::DuplicateMediaOwner => "file media type has several static owners",
+            Self::DuplicateReaderMember => "file media reader member is duplicated",
+            Self::ProbeBounds => "file media probe bounds are invalid",
+            Self::ViewBounds => "file media view bounds are invalid",
+            Self::TextFallback => "file media text fallback is invalid",
+        })
+    }
+}
+
+impl Error for FileMediaRegistryConstructionError {}
