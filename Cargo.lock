@@ -3647,6 +3647,8 @@ dependencies = [
  "expect-test",
  "git2",
  "hmac",
+ "hyper",
+ "hyper-util",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

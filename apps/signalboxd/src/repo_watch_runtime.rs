@@ -54,8 +54,8 @@ use signalbox_persistence::repo_watch_dispatch::{
 use signalbox_persistence::repo_watch_dispatch_obligation::RepoWatchDispatchObligation;
 use signalbox_persistence::repo_watch_webhook::{
     PendingRepoWatchWebhookDelivery, PostgresRepoWatchWebhookStore, RepoWatchWebhookDeliveryKey,
-    RepoWatchWebhookDisposition, RepoWatchWebhookPendingPageSize, RepoWatchWebhookProjection,
-    RepoWatchWebhookTargetedQuery, RepoWatchWebhookTerminalRequest,
+    RepoWatchWebhookDisposition, RepoWatchWebhookParityCauseV1, RepoWatchWebhookPendingPageSize,
+    RepoWatchWebhookProjection, RepoWatchWebhookTargetedQuery, RepoWatchWebhookTerminalRequest,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -608,9 +608,13 @@ impl RepositoryWatchTask {
 
     /// Seeds the shadow baseline from the durable cursor when the repository
     /// task does not already carry one.
-    async fn seed_webhook_shadow(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+    ///
+    /// Reports whether it had to, because a delivery projected against a
+    /// freshly seeded baseline is the accepted cross-drain gap and carries that
+    /// cause on its projections.
+    async fn seed_webhook_shadow(&mut self) -> Result<bool, RepositoryWatchAttemptError> {
         if self.webhook_shadow.is_some() {
-            return Ok(());
+            return Ok(false);
         }
         let cursor = self
             .store
@@ -619,7 +623,7 @@ impl RepositoryWatchTask {
             .map_err(|_| RepositoryWatchAttemptError::Persistence)?
             .ok_or(RepositoryWatchAttemptError::Persistence)?;
         self.webhook_shadow = Some(WebhookShadowBaseline::from_cursor(&cursor));
-        Ok(())
+        Ok(true)
     }
 
     /// Re-arms this repository's own webhook wake so a bounded drain resumes
@@ -687,7 +691,10 @@ impl RepositoryWatchTask {
                 .await
             }
             RepoWatchWebhookMappingV1::Patch(patch) => {
-                self.seed_webhook_shadow().await?;
+                let cause = self
+                    .seed_webhook_shadow()
+                    .await?
+                    .then_some(RepoWatchWebhookParityCauseV1::CrossDrainShadowGap);
                 let Some(shadow) = self.webhook_shadow.as_ref() else {
                     return Err(RepositoryWatchAttemptError::Persistence);
                 };
@@ -725,8 +732,12 @@ impl RepositoryWatchTask {
                         .await
                     }
                     RepoWatchObservationApplyV1::Applied(observation) => {
-                        let (projections, identity_frontier) =
-                            shadow_event_projections(&self.repository, shadow, &observation)?;
+                        let (projections, identity_frontier) = shadow_event_projections(
+                            &self.repository,
+                            shadow,
+                            &observation,
+                            cause,
+                        )?;
                         self.record_webhook_terminal(
                             pending,
                             projections,
@@ -747,8 +758,12 @@ impl RepositoryWatchTask {
                         observation,
                         refreshes,
                     } => {
-                        let (mut projections, identity_frontier) =
-                            shadow_event_projections(&self.repository, shadow, &observation)?;
+                        let (mut projections, identity_frontier) = shadow_event_projections(
+                            &self.repository,
+                            shadow,
+                            &observation,
+                            cause,
+                        )?;
                         projections.extend(
                             refreshes
                                 .iter()
@@ -1112,6 +1127,7 @@ fn shadow_event_projections(
     repository: &RepositorySlug,
     baseline: &WebhookShadowBaseline,
     observation: &RepoWatchObservation,
+    cause: Option<RepoWatchWebhookParityCauseV1>,
 ) -> Result<
     (
         Vec<RepoWatchWebhookProjection>,
@@ -1135,6 +1151,7 @@ fn shadow_event_projections(
             content_identity,
             occurrence.event().kind().name(),
             content_identity.as_bytes().to_vec(),
+            cause,
         )
         .map_err(|_| RepositoryWatchAttemptError::Persistence)
     })

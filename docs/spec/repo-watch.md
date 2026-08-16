@@ -733,11 +733,20 @@ therefore releases its concurrency slot and memory reservation instead of
 holding both. The received buffer is released before the delivery is persisted,
 so what the budget accounts for is what is actually held across that wait.
 
+The receiver bounds request heads as well as bodies. One request may carry at
+most 64 header fields and 32 KiB of aggregate header bytes counted across every
+name and value, and a head that exceeds either is refused with `431` before any
+credential is read or any body is collected. Below the router, the connection
+itself refuses a head that does not fit a 64 KiB read buffer, which is the
+memory bound on a head that is still arriving. All are hard safety ceilings.
+
 Nothing the handler bounds begins until whole request headers arrive, so two
-bounds sit before it: the listener holds at most 256 connections at once, and it
-retires any connection whose read makes no progress for 15 seconds. The
-connection budget is what bounds a peer that keeps dripping bytes, since each
-byte received restarts that deadline.
+further bounds sit before it: the listener holds at most 256 connections at
+once, taken at accept time before any router or handler work, and it retires any
+connection whose read makes no progress for 15 seconds. The connection budget is
+what bounds a peer that keeps dripping bytes, since each byte received restarts
+that deadline. The daemon serves HTTP/1 directly for this reason: the head
+ceilings sit on the connection builder, below any router.
 
 Each hook admits at most 3,000 deliveries in each 60-second window, charged only
 once a delivery has proved the shared secret. Nothing is charged before
@@ -799,16 +808,27 @@ never ran; its terminal disposition is then recorded before the resulting cursor
 commit, so a failure between those two cannot make a retry re-derive projections
 against a cursor that has already moved past them. On daemon restart the
 baseline is re-seeded from the durable cursor, which is the same complete
-reconciliation a full poll performs. `repo_watch_webhook_projection` records
-each resulting version-one content identity and event kind, while
-`repo_watch_webhook_disposition` atomically records projected, duplicate-state,
-superseded, ignored, or quarantined terminal disposition. Shadow mode reserves
-no committed disposition and no resulting cursor generation: the schema refuses
-both, so the durable shape a later write mode would need is left to the ruling
-that authorizes it. The `repo_watch_webhook_parity` view joins those identities
-to version-one poll-produced `repo_watch_event` rows since that repository's
-first shadow receipt and reports `matched`, `webhook_only`, `poll_only`, or
-`not_directly_mapped`. Event projections intentionally carry no uniqueness
+reconciliation a full poll performs. The divergence a re-seeding leaves is
+accepted rather than removed: a delivery projected against a freshly seeded
+baseline records `cross_drain_shadow_gap` on its projections, so the gap is
+explained in the parity view instead of being carried by a durable shadow
+cursor. `repo_watch_webhook_projection` records each resulting version-one
+content identity and event kind, and the cause of any divergence the producing
+delivery already knows, while `repo_watch_webhook_disposition` atomically
+records projected, duplicate-state, superseded, ignored, or quarantined terminal
+disposition. Shadow mode reserves no committed disposition and no resulting
+cursor generation: the schema refuses both, so the durable shape a later write
+mode would need is left to the ruling that authorizes it. The
+`repo_watch_webhook_parity` view joins those identities to version-one
+poll-produced `repo_watch_event` rows since that repository's first shadow
+receipt and reports `matched`, `webhook_only`, `poll_only`, or
+`not_directly_mapped`, each divergent row alongside a `cause` drawn from one
+closed vocabulary: `compressed_transition`, `context_drift`, `poll_only_family`,
+and `cross_drain_shadow_gap`. A delivery records the cause it knows beside its
+own projection; `poll_only_family` is derived instead, because the event
+families polling produces and webhooks are not designed to reproduce —
+mergeability changes, aggregate check rollups, and reaction changes — have no
+delivery to carry it. Event projections intentionally carry no uniqueness
 constraint because separate deliveries may represent one content occurrence.
 Terminal exact payload bytes remain for seven days, after which maintenance may
 delete only the payload; delivery tombstones, digests, projections, and
@@ -854,6 +874,15 @@ the slow complete reconciliation sweep and remains authoritative for missed
 deliveries, reactions, and every provider fact outside the mapped set. Poll
 frequency does not drop in shadow mode; any later write mode or slower cadence
 requires a separately reviewed ruling after parity over a real workday.
+
+**Committed unimplemented functionality.** The rollout gate is no *unexplained*
+divergence, not no divergence: it is zero `repo_watch_webhook_parity` rows whose
+status is `webhook_only` or `poll_only` and whose cause is null, measured over a
+real workday. Divergence that names a closed cause is understood and does not
+hold the gate. Reaching zero uncaused rows is the remaining rollout work, since
+the runtime today records `cross_drain_shadow_gap` and derives
+`poll_only_family`, while `compressed_transition` and `context_drift` are
+available to record and not yet emitted.
 
 ## Open edges
 

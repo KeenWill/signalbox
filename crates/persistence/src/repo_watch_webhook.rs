@@ -258,6 +258,33 @@ pub enum RepoWatchWebhookTargetedQuery {
     CheckRollup(CommitSha),
 }
 
+/// Closed reasons a shadow projection may not match a poll-produced event.
+///
+/// The rollout gate is no unexplained divergence, so every webhook-only or
+/// poll-only parity row must name one of these.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchWebhookParityCauseV1 {
+    /// Polling observed one state where the delivery stream saw several.
+    CompressedTransition,
+    /// A hashed context field differed between the two sources.
+    ContextDrift,
+    /// An event family polling produces and webhooks are not designed to.
+    PollOnlyFamily,
+    /// The shadow baseline was re-seeded between the two occurrences.
+    CrossDrainShadowGap,
+}
+
+impl RepoWatchWebhookParityCauseV1 {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::CompressedTransition => "compressed_transition",
+            Self::ContextDrift => "context_drift",
+            Self::PollOnlyFamily => "poll_only_family",
+            Self::CrossDrainShadowGap => "cross_drain_shadow_gap",
+        }
+    }
+}
+
 /// One shadow projection derived from an admitted delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchWebhookProjection {
@@ -265,15 +292,19 @@ pub enum RepoWatchWebhookProjection {
         content_identity: RepoWatchEventContentIdentityV1,
         event_kind: RepoWatchEventKindNameV1,
         occurrence_key: Box<[u8]>,
+        cause: Option<RepoWatchWebhookParityCauseV1>,
     },
     TargetedQuery(RepoWatchWebhookTargetedQuery),
 }
 
 impl RepoWatchWebhookProjection {
+    /// One projected occurrence, with the reason it may not match if the
+    /// producing delivery already knows one.
     pub fn event(
         content_identity: RepoWatchEventContentIdentityV1,
         event_kind: RepoWatchEventKindNameV1,
         occurrence_key: Vec<u8>,
+        cause: Option<RepoWatchWebhookParityCauseV1>,
     ) -> Result<Self, RepoWatchWebhookRequestError> {
         if occurrence_key.is_empty() {
             return Err(RepoWatchWebhookRequestError::EmptyOccurrenceKey);
@@ -282,6 +313,7 @@ impl RepoWatchWebhookProjection {
             content_identity,
             event_kind,
             occurrence_key: occurrence_key.into_boxed_slice(),
+            cause,
         })
     }
 }
@@ -715,8 +747,9 @@ async fn insert_projections(
             "INSERT INTO repo_watch_webhook_projection (
                 hook_id, delivery_id, projection_ordinal, projection_kind,
                 content_identity_version, content_identity, event_kind,
-                targeted_query_kind, targeted_query_key, occurrence_key
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                targeted_query_kind, targeted_query_key, occurrence_key,
+                cause_code
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(Decimal::from(key.hook_id.get()))
         .bind(key.delivery_id)
@@ -728,6 +761,7 @@ async fn insert_projections(
         .bind(encoded.targeted_query_kind)
         .bind(encoded.targeted_query_key)
         .bind(encoded.occurrence_key)
+        .bind(encoded.cause_code)
         .execute(&mut **transaction)
         .await?;
     }
@@ -742,6 +776,7 @@ struct EncodedProjection {
     targeted_query_kind: Option<&'static str>,
     targeted_query_key: Option<String>,
     occurrence_key: Option<Vec<u8>>,
+    cause_code: Option<&'static str>,
 }
 
 impl EncodedProjection {
@@ -751,6 +786,7 @@ impl EncodedProjection {
                 content_identity,
                 event_kind,
                 occurrence_key,
+                cause,
             } => Self {
                 projection_kind: "event",
                 content_identity_version: Some(CONTENT_IDENTITY_VERSION_V1),
@@ -759,6 +795,7 @@ impl EncodedProjection {
                 targeted_query_kind: None,
                 targeted_query_key: None,
                 occurrence_key: Some(occurrence_key.to_vec()),
+                cause_code: cause.map(RepoWatchWebhookParityCauseV1::code),
             },
             RepoWatchWebhookProjection::TargetedQuery(
                 RepoWatchWebhookTargetedQuery::PullRequestHydration(number),
@@ -770,6 +807,7 @@ impl EncodedProjection {
                 targeted_query_kind: Some("pull_request_hydration"),
                 targeted_query_key: Some(number.get().to_string()),
                 occurrence_key: None,
+                cause_code: None,
             },
             RepoWatchWebhookProjection::TargetedQuery(
                 RepoWatchWebhookTargetedQuery::Mergeability(number),
@@ -781,6 +819,7 @@ impl EncodedProjection {
                 targeted_query_kind: Some("mergeability"),
                 targeted_query_key: Some(number.get().to_string()),
                 occurrence_key: None,
+                cause_code: None,
             },
             RepoWatchWebhookProjection::TargetedQuery(
                 RepoWatchWebhookTargetedQuery::CheckRollup(head),
@@ -792,6 +831,7 @@ impl EncodedProjection {
                 targeted_query_kind: Some("check_rollup"),
                 targeted_query_key: Some(head.as_str().to_owned()),
                 occurrence_key: None,
+                cause_code: None,
             },
         }
     }
