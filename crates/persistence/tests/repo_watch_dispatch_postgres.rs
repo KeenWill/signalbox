@@ -1965,6 +1965,65 @@ async fn stale_review_clearance_records_intent_before_terminal_audit() -> Result
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn stale_base_review_clearance_is_rejected_before_forge_mutation()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool);
+    let observation = pull_request_observation(
+        context(FIRST_HEAD)?,
+        RepoWatchPullRequestLifecycle::Open,
+        MergeableState::Mergeable,
+    )?;
+    let committed = store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                None,
+                RepoWatchCursorCandidate::new(observation),
+                vec![identified_event(opened_event(0x54_515, FIRST_HEAD)?)],
+            ),
+        )
+        .await?;
+    let RepoWatchCommitOutcome::Committed(cursor) = committed else {
+        panic!("fixture's first cursor write commits");
+    };
+    let assessment = assessment_at_base(
+        FIRST_HEAD,
+        ADVANCED_BASE_REVISION,
+        RepoWatchReviewDecision::ChangesRequested,
+    )?;
+    store
+        .record_convergence_assessments(
+            &repository,
+            cursor.generation(),
+            std::slice::from_ref(&assessment),
+        )
+        .await?;
+    let candidate = RepoWatchStaleReviewClearanceCandidate::try_new(
+        &assessment,
+        STALE_REVIEW_NODE_ID.to_owned(),
+        RepoWatchAuthorLogin::try_new(STALE_REVIEWER.to_owned())?,
+        CommitSha::try_new(INITIAL_HEAD.to_owned())?,
+    )?;
+
+    let result = store
+        .plan_stale_review_clearances(
+            &repository,
+            cursor.generation(),
+            std::slice::from_ref(&candidate),
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(signalbox_persistence::repo_watch::RepoWatchStoreError::StaleReviewClearanceMismatch)
+    ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn stale_cutoff_waits_until_its_sealed_identity_is_current_again()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
@@ -2080,6 +2139,37 @@ async fn base_advance_requires_a_fresh_seal_for_cutoff_and_admission() -> Result
         sealed_bases,
         vec![BASE_REVISION.to_owned(), ADVANCED_BASE_REVISION.to_owned()]
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stale_base_assessment_cannot_cut_off_or_suppress_base_advance_work()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let (loaded, stale_observation) = load_second_conflict(&fixture).await?;
+    record_merge_ready_head(&fixture, 0x54_710, SECOND_HEAD).await?;
+    commit_mergeable_head_at_base(&fixture, 0x54_711, SECOND_HEAD, ADVANCED_BASE_REVISION).await?;
+
+    let cutoff = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_712))
+        })
+        .await?;
+    let admission =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                loaded,
+                &fixture.rule,
+                &stale_observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+
+    assert!(!cutoff);
+    assert_eq!(admission, RepoWatchRuleEvaluationOutcome::Occupied);
     Ok(())
 }
 

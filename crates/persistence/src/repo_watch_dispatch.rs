@@ -366,7 +366,8 @@ impl PostgresRepoWatchDispatchStore {
                 AND EXISTS (
                     SELECT 1
                       FROM (
-                            SELECT assessment.head_sha, assessment.base_revision
+                            SELECT assessment.head_sha, assessment.base_branch,
+                                   assessment.base_revision
                               FROM repo_watch_pull_request_convergence_assessment AS assessment
                              WHERE assessment.repository = convergence.repository
                                AND assessment.pull_request_number =
@@ -377,6 +378,23 @@ impl PostgresRepoWatchDispatchStore {
                            ) AS current
                      WHERE current.head_sha = convergence.head_sha
                        AND current.base_revision = convergence.base_revision
+                       AND EXISTS (
+                            SELECT 1
+                              FROM (
+                                    SELECT cursor.cursor_payload
+                                      FROM repo_watch_cursor AS cursor
+                                     WHERE cursor.repository =
+                                           convergence.repository
+                                     ORDER BY cursor.generation DESC
+                                     LIMIT 1
+                                   ) AS latest_cursor
+                              CROSS JOIN LATERAL jsonb_array_elements(
+                                  latest_cursor.cursor_payload -> 'state' ->
+                                  'branch_heads'
+                              ) AS branch_head
+                             WHERE branch_head ->> 'branch' = current.base_branch
+                               AND branch_head ->> 'head' = current.base_revision
+                       )
                 )
               ORDER BY convergence.converged_at, convergence.assessment_id
               LIMIT 1",
@@ -1517,7 +1535,8 @@ async fn event_target_is_converged(
         "SELECT EXISTS (
             SELECT 1
               FROM (
-                    SELECT assessment.head_sha, assessment.base_revision
+                    SELECT assessment.head_sha, assessment.base_branch,
+                           assessment.base_revision
                       FROM repo_watch_pull_request_convergence_assessment AS assessment
                      WHERE assessment.repository = $1
                        AND assessment.pull_request_number = $2
@@ -1530,11 +1549,28 @@ async fn event_target_is_converged(
                AND convergence.head_sha = current.head_sha
                AND convergence.base_revision = current.base_revision
              WHERE current.head_sha = $3
+               AND current.base_branch = $4
+               AND EXISTS (
+                    SELECT 1
+                      FROM (
+                            SELECT cursor.cursor_payload
+                              FROM repo_watch_cursor AS cursor
+                             WHERE cursor.repository = $1
+                             ORDER BY cursor.generation DESC
+                             LIMIT 1
+                           ) AS latest_cursor
+                      CROSS JOIN LATERAL jsonb_array_elements(
+                          latest_cursor.cursor_payload -> 'state' -> 'branch_heads'
+                      ) AS branch_head
+                     WHERE branch_head ->> 'branch' = current.base_branch
+                       AND branch_head ->> 'head' = current.base_revision
+               )
         )",
     )
     .bind(event.repository().as_str())
     .bind(Decimal::from(context.number().get()))
     .bind(context.head_sha().as_str())
+    .bind(context.base_branch().as_str())
     .fetch_one(&mut **transaction)
     .await?)
 }

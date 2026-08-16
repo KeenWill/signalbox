@@ -830,11 +830,17 @@ impl PostgresRepoWatchStore {
                     && pull_request.context().base_branch() == assessment.base_branch()
                     && pull_request.mergeable_state() == assessment.mergeable_state()
             });
-            let base_revision_matches = state.branch_heads().iter().any(|branch_head| {
-                branch_head.branch() == assessment.base_branch()
-                    && branch_head.head() == assessment.base_revision()
-            });
-            if !pull_request_matches || !base_revision_matches {
+            // GitHub's pull-request `baseRefOid` is the exact base revision
+            // associated with that pull request. It can remain behind the
+            // current branch ref until the pull request is merged forward.
+            // The cursor must still contain the named base branch, but current
+            // convergence is decided at admission and cutoff time by comparing
+            // this assessed revision with that branch's latest cursor head.
+            let base_branch_matches = state
+                .branch_heads()
+                .iter()
+                .any(|branch_head| branch_head.branch() == assessment.base_branch());
+            if !pull_request_matches || !base_branch_matches {
                 return Err(RepoWatchStoreError::ConvergenceEvidenceMismatch);
             }
         }
@@ -975,9 +981,9 @@ impl PostgresRepoWatchStore {
             let (assessment_id, base_revision) = sqlx::query_as::<_, (Uuid, String)>(
                 "SELECT assessment_id, base_revision
                    FROM (
-                         SELECT assessment_id, head_sha, base_revision, review_decision,
-                                unresolved_threads, non_green_gating_checks,
-                                mergeable_state, verdict_kind
+                         SELECT assessment_id, head_sha, base_branch, base_revision,
+                                review_decision, unresolved_threads,
+                                non_green_gating_checks, mergeable_state, verdict_kind
                            FROM repo_watch_pull_request_convergence_assessment
                           WHERE repository = $1
                             AND pull_request_number = $2
@@ -989,11 +995,23 @@ impl PostgresRepoWatchStore {
                     AND cardinality(current.unresolved_threads) = 0
                     AND cardinality(current.non_green_gating_checks) = 0
                     AND current.mergeable_state <> 'conflicting'
-                    AND current.verdict_kind = 'not_converged'",
+                    AND current.verdict_kind = 'not_converged'
+                    AND EXISTS (
+                        SELECT 1
+                          FROM repo_watch_cursor AS cursor
+                          CROSS JOIN LATERAL jsonb_array_elements(
+                              cursor.cursor_payload -> 'state' -> 'branch_heads'
+                          ) AS branch_head
+                         WHERE cursor.repository = $1
+                           AND cursor.generation = $4
+                           AND branch_head ->> 'branch' = current.base_branch
+                           AND branch_head ->> 'head' = current.base_revision
+                    )",
             )
             .bind(repository.as_str())
             .bind(Decimal::from(candidate.number().get()))
             .bind(candidate.current_head_sha().as_str())
+            .bind(generation_to_i64(cursor_generation))
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or(RepoWatchStoreError::StaleReviewClearanceMismatch)?;

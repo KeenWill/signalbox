@@ -26,17 +26,19 @@ against this PR (`agent/daemon-ops-overnight`). Runtime-relevance release,
 held-slot diagnostics, terminal-target cutoff, continuous unconverged-target
 delivery, and the exact-head mergeability projection are also verified against
 this PR. Exact-head convergence assessment and cutoff are verified against
-`agent/dispatch-autonomy-convergence`. Conservative stale blocking-review
-dismissal is verified against this PR
-(`agent/dispatch-autonomy-review-clearance`). The provider members the poller
-adopts as check-suite and check-run completion generations are verified against
-PR #541 (`fix/check-run-updated-at`). The source-independent event occurrence
-identity, its durable frontier, and the one-time storage migration are verified
-this PR (`agent/repo-watch-content-identity`). The authenticated webhook intake,
-shadow projection, parity view, and targeted refresh behavior are verified
-against this PR (`agent/repo-watch-webhook-receiver`). Webhook-primary commits,
-including their atomic delivery disposition, slow complete reconciliation, and
-webhook preemption of that reconciliation are verified against PR #854
+`agent/dispatch-autonomy-convergence`; provider-associated stale-base evidence
+and the current-base cutoff, admission, and dismissal guards are verified
+against this PR. Conservative stale blocking-review dismissal is verified
+against this PR (`agent/dispatch-autonomy-review-clearance`). The provider
+members the poller adopts as check-suite and check-run completion generations
+are verified against PR #541 (`fix/check-run-updated-at`). The
+source-independent event occurrence identity, its durable frontier, and the
+one-time storage migration are verified this PR
+(`agent/repo-watch-content-identity`). The authenticated webhook intake, shadow
+projection, parity view, and targeted refresh behavior are verified against this
+PR (`agent/repo-watch-webhook-receiver`). Webhook-primary commits, including
+their atomic delivery disposition, slow complete reconciliation, and webhook
+preemption of that reconciliation are verified against PR #854
 (`agent/daemon-ops-overnight`). Webhook drain liveness and stall reporting are
 also verified against this PR. Eager merge-forward dispatch is verified against
 PR #886 (`agent/eager-merge-forward`).
@@ -617,23 +619,26 @@ later cutoffs remain eligible for processing.
 
 **Implemented behavior.** Every completed poll atomically commits its cursor,
 events, and durable convergence evidence for each pull request at the exact head
-and base revision in that cursor. Evidence identical to that identity's latest
-assessment is an idempotent replay; changed evidence appends a new assessment.
-The assessment follows the repository's operational status rule: every review
-thread must be resolved, without filtering by author or outdated state; every
-gating check on the exact current commit must be green; mergeability must not be
-`conflicting`; and the aggregate review decision must not be
-`changes_requested`. Check runs are green only when completed with `success`,
-`skipped`, or `neutral`, and status contexts are green only at `success`.
-Pending, incomplete, missing-conclusion, and other terminal results are not
-green. Check names containing `report only` or `CodeRabbit`, compared
-case-insensitively, are non-gating. The GraphQL check-rollup and review-thread
-connections are read through every bounded page. The head, check, and
-aggregate-review evidence is read before the thread inventory, matching the
-operational reference's ordering so a review thread opened between those reads
-cannot be hidden by an earlier thread snapshot. The rollup's commit, head, and
-base evidence must agree with the pull-request projection and cursor generation
-or the poll fails without recording an assessment. The exact-head GraphQL
+and provider-associated base revision observed for that pull request. GitHub may
+retain that base revision behind the named branch's current head until the pull
+request is merged forward; this records stale evidence without treating it as
+current convergence. Evidence identical to that identity's latest assessment is
+an idempotent replay; changed evidence appends a new assessment. The assessment
+follows the repository's operational status rule: every review thread must be
+resolved, without filtering by author or outdated state; every gating check on
+the exact current commit must be green; mergeability must not be `conflicting`;
+and the aggregate review decision must not be `changes_requested`. Check runs
+are green only when completed with `success`, `skipped`, or `neutral`, and
+status contexts are green only at `success`. Pending, incomplete,
+missing-conclusion, and other terminal results are not green. Check names
+containing `report only` or `CodeRabbit`, compared case-insensitively, are
+non-gating. The GraphQL check-rollup and review-thread connections are read
+through every bounded page. The head, check, and aggregate-review evidence is
+read before the thread inventory, matching the operational reference's ordering
+so a review thread opened between those reads cannot be hidden by an earlier
+thread snapshot. The rollup's commit and head evidence must agree with the
+pull-request projection, and its named base branch must exist in the cursor, or
+the poll fails without recording an assessment. The exact-head GraphQL
 mergeability member supplies both the pull-request projection and assessment,
 preventing a separately timed REST mergeability calculation from invalidating
 otherwise coherent evidence.
@@ -653,14 +658,16 @@ dispatched afresh; convergence therefore terminates unchanged-head review cycles
 without treating a new revision as already finished.
 
 **Implemented behavior.** Repository watch records one convergence cutoff only
-when a seal's head and base revision are the latest assessed identity. Stale
-seals remain pending and become eligible if their identity becomes current
-again. The cutoff applies the ordinary parent-only stop to every generation-one
-goal repository watch commissioned for the pull request, with the same
-provenance limits as a lifecycle cutoff. Dispatch admission rechecks the seal
-under the repository lock: a stale match or collapsed obligation settles as
-`target_converged` only when its head is the latest assessed identity and that
-identity's head and base revision are sealed. An older identity cannot stop
+when a seal's head and base revision are the latest assessed identity and that
+base revision is still the latest cursor head for the assessment's named base
+branch. Stale seals remain pending and become eligible if their identity becomes
+current again. The cutoff applies the ordinary parent-only stop to every
+generation-one goal repository watch commissioned for the pull request, with the
+same provenance limits as a lifecycle cutoff. Dispatch admission rechecks the
+seal and current base-branch head under the repository lock: a stale match or
+collapsed obligation settles as `target_converged` only when its head is the
+latest assessed identity, that identity's head and base revision are sealed, and
+its base revision remains the current branch head. An older identity cannot stop
 current work.
 
 **Implemented behavior.** `CHANGES_REQUESTED` gates merging, never dispatching:
@@ -668,15 +675,15 @@ repository watch continues delivering matching findings while that aggregate
 decision remains. It may dismiss a blocking review only when GitHub reports it
 among the pull request's latest opinionated `CHANGES_REQUESTED` reviews and its
 associated commit differs from the exact current head. The current convergence
-evidence must otherwise pass: zero unresolved threads, zero non-green gating
-checks, and nonconflicting mergeability. Every effective blocking review must
-target a superseded head; one current-head blocker prevents every dismissal for
-that assessment. A current-head review is never dismissed automatically. Why: a
-new review is live judgment, while a stale aggregate decision whose complete
-thread inventory is resolved is forge state that alone prevents an otherwise
-finished head from converging. The following ordinary poll observes the
-dismissal and may then seal convergence; dismissal itself does not stop
-dispatch.
+evidence must otherwise pass and name the current cursor head for its base
+branch: zero unresolved threads, zero non-green gating checks, and
+nonconflicting mergeability. Every effective blocking review must target a
+superseded head; one current-head blocker prevents every dismissal for that
+assessment. A current-head review is never dismissed automatically. Why: a new
+review is live judgment, while a stale aggregate decision whose complete thread
+inventory is resolved is forge state that alone prevents an otherwise finished
+head from converging. The following ordinary poll observes the dismissal and may
+then seal convergence; dismissal itself does not stop dispatch.
 
 **Implemented behavior.** Before sending GitHub's review-dismissal mutation, the
 daemon appends a unique intent naming the assessment, repository, pull request,

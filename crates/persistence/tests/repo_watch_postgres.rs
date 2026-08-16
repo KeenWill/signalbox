@@ -51,6 +51,7 @@ const HEAD_BRANCH: &str = "feature/repo-watch";
 const INITIAL_HEAD: &str = "1111111111111111111111111111111111111111";
 const CHANGED_HEAD: &str = "2222222222222222222222222222222222222222";
 const BASE_REVISION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const STALE_BASE_REVISION: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const TITLE: &str = "Persist repository-watch facts";
 const BODY: &str = "A complete fixture pull request body.";
 const AUTHOR: &str = "fixture-author";
@@ -551,8 +552,8 @@ async fn unchanged_candidate_without_events_does_not_advance() -> Result<(), Box
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn convergence_mismatch_rolls_back_cursor_events_and_evidence() -> Result<(), Box<dyn Error>>
-{
+async fn convergence_identity_mismatch_rolls_back_cursor_events_and_evidence()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let repository = repository()?;
     let store = PostgresRepoWatchStore::new(pool.clone());
@@ -578,13 +579,11 @@ async fn convergence_mismatch_rolls_back_cursor_events_and_evidence() -> Result<
         current_observation,
         current_frontier,
     );
-    let mismatched_base = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
     let failure = store
         .commit_with_convergence(
             &repository,
             RepoWatchCommitRequest::new(Some(first_generation), current, events),
-            &[merge_ready_assessment(INITIAL_HEAD, mismatched_base)?],
+            &[merge_ready_assessment(CHANGED_HEAD, BASE_REVISION)?],
         )
         .await;
     let cursor = store
@@ -615,6 +614,55 @@ async fn convergence_mismatch_rolls_back_cursor_events_and_evidence() -> Result<
     assert_eq!(event_count, 0);
     assert_eq!(assessment_count, 0);
     assert_eq!(seal_count, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn provider_associated_stale_base_revision_commits_with_cursor_evidence()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = candidate(None)?;
+    let first_generation = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, baseline.clone(), Vec::new()),
+            )
+            .await?,
+    );
+    let current_observation = observation(Some(INITIAL_HEAD))?;
+    let mut current_frontier = baseline.event_identity_frontier().clone();
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(baseline.observation()),
+        &current_observation,
+        &mut current_frontier,
+        &mut FixedEventIds::default(),
+    )?;
+    let current = RepoWatchCursorCandidate::with_event_identity_frontier(
+        current_observation,
+        current_frontier,
+    );
+
+    let outcome = store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(Some(first_generation), current, events),
+            &[merge_ready_assessment(INITIAL_HEAD, STALE_BASE_REVISION)?],
+        )
+        .await?;
+    let assessment_base: String = sqlx::query_scalar(
+        "SELECT base_revision
+           FROM repo_watch_pull_request_convergence_assessment",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(matches!(outcome, RepoWatchCommitOutcome::Committed(_)));
+    assert_eq!(assessment_base, STALE_BASE_REVISION);
     Ok(())
 }
 

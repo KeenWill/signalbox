@@ -2216,6 +2216,24 @@ struct FetchedPullRequests {
     stale_review_clearances: Vec<RepoWatchStaleReviewClearanceCandidate>,
 }
 
+fn retain_current_base_stale_review_clearances(
+    branch_heads: &[RepoWatchBranchHead],
+    pull_requests: &mut FetchedPullRequests,
+) {
+    let convergence = &pull_requests.convergence;
+    pull_requests.stale_review_clearances.retain(|candidate| {
+        convergence
+            .iter()
+            .find(|assessment| assessment.number() == candidate.number())
+            .is_some_and(|assessment| {
+                branch_heads.iter().any(|branch_head| {
+                    branch_head.branch() == assessment.base_branch()
+                        && branch_head.head() == assessment.base_revision()
+                })
+            })
+    });
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PullRequestSettlement {
     Settled,
@@ -2379,10 +2397,11 @@ impl GitHubRepositoryPoller {
                 }
             }
         }
-        let pull_requests = self
+        let mut pull_requests = self
             .fetch_pull_requests(pull_numbers, &listed, previous, cursor_generation)
             .await?;
         let branch_heads = self.fetch_branch_heads().await?;
+        retain_current_base_stale_review_clearances(&branch_heads, &mut pull_requests);
         let workflows = self.fetch_workflows().await?;
         let mut workflow_runs = Vec::new();
         let previous_workflow_runs = previous
@@ -4847,26 +4866,26 @@ mod tests {
     };
 
     use super::{
-        CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
-        GraphQlEnvelope, ListedPullRequest, MAX_CACHED_WIRE_BYTES,
+        CheckConclusion, ChecksOutcome, EntityTag, FetchedPullRequests, FileCredentialAccess,
+        GitHubRepositoryPoller, GraphQlEnvelope, ListedPullRequest, MAX_CACHED_WIRE_BYTES,
         MAX_CONCURRENT_PULL_REQUEST_FETCHES, MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS,
         MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollAttemptWait, PollCache,
         PollCycleTiming, PullRequestSettlement, PullResponse, ReactionContent,
         RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchConvergenceAssessment,
         RepoWatchConvergenceAssessmentInput, RepoWatchCursorGeneration, RepoWatchObservation,
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewDecision,
-        RepoWatchReviewObservation, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
-        RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
-        RepositoryWatchChildExit, RepositoryWatchRuntimeConstructionError,
-        RepositoryWatchRuntimeError, RepositoryWatchTask, ResourceKey, ReviewState,
-        StaleReviewClearanceProviderResult, TargetedPullRequest, Url,
+        RepoWatchReviewObservation, RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadState,
+        RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation, RepositorySlug,
+        RepositoryWatchAttemptError, RepositoryWatchChildExit,
+        RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
+        ResourceKey, ReviewState, StaleReviewClearanceProviderResult, TargetedPullRequest, Url,
         UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY, WebhookDrainRetry,
         WorkflowName, WorkflowResponse, await_poll_or_interrupt, derive_repo_watch_events,
         dispatch_context_json, initial_poll_delay, inspect_webhook_drain,
         isolate_stale_review_clearance_provider_result, normalize_checks_outcome,
         normalize_pull_request_context, object_id, owed_dispatch_context_json_parts,
-        reject_graphql_errors, remaining_interval, rule_activation_error,
-        supervise_repository_tasks, targeted_pull_requests,
+        reject_graphql_errors, remaining_interval, retain_current_base_stale_review_clearances,
+        rule_activation_error, supervise_repository_tasks, targeted_pull_requests,
     };
     use signalbox_application::{
         InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
@@ -6923,6 +6942,34 @@ mod tests {
         server.finish().await;
 
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn stale_base_revision_withdraws_review_clearance_candidate() {
+        let assessment = review_only_blocked_assessment();
+        let candidate = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            String::from(STALE_REVIEW_NODE_ID),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))
+                .expect("fixture reviewer is canonical"),
+            CommitSha::try_new(String::from(STALE_REVIEW_HEAD_SHA))
+                .expect("fixture review head is canonical"),
+        )
+        .expect("fixture review is stale");
+        let mut fetched = FetchedPullRequests {
+            states: Vec::new(),
+            convergence: vec![assessment],
+            stale_review_clearances: vec![candidate],
+        };
+        let advanced_base = RepoWatchBranchHead::new(
+            BranchName::try_new(String::from(BASE_BRANCH)).expect("fixture branch is canonical"),
+            CommitSha::try_new(String::from(CHANGED_LISTED_HEAD_SHA))
+                .expect("fixture advanced base is canonical"),
+        );
+
+        retain_current_base_stale_review_clearances(&[advanced_base], &mut fetched);
+
+        assert!(fetched.stale_review_clearances.is_empty());
     }
 
     #[tokio::test]
