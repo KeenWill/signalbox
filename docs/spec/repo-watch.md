@@ -709,13 +709,29 @@ one delivery fails. Each failure is logged at error level with the delivery
 identity and a closed cause; failed deliveries remain pending while successful
 page peers reach terminal state. The repository task schedules a new drain
 attempt after five seconds without waiting for a full poll, another delivery, or
-a restart. The retry repeats after further failures. An independent
-per-repository observer checks durable pending work every thirty seconds; once
-the oldest delivery has remained undispositioned for one minute it emits an
-error-level stall signal with the repository, delivery identity, receipt
-sequence, pending age, and closed stall cause. Because the observer is not the
-serialized drain task, a task wedged in polling, projection, disposition, or
-dispatch cannot silence that signal.
+a restart. Consecutive failures double that delay to a five-minute ceiling and a
+success returns it to five seconds, so a delivery that cannot be projected costs
+bounded repeated work rather than a fixed five-second loop. An overdue retry is
+taken ahead of an overdue poll, and a full poll that outlasts its own interval
+schedules the next one a whole interval from completion; without both, a poll
+deadline that is always already elapsed would win every scheduling decision and
+starve durable webhook work for as long as polling kept failing. A targeted
+refresh the provider answers with `404` is terminal for that delivery, which is
+quarantined with its exact body retained: no later attempt could succeed, and a
+page of such deliveries is reloaded ahead of every newer one, so retrying them
+would leave newer work unprojected. The accepted cost is that a credential which
+has lost repository access is answered the same way, so an access outage
+outlasting the drain quarantines pending deliveries for inspection and replay
+rather than retrying them, while full polling fails loudly against the same
+credential throughout. An independent per-repository observer checks durable
+pending work every thirty seconds, reading delivery identity and receipt time
+only and never the admitted body; once the oldest delivery has remained
+undispositioned for one minute it emits an error-level stall signal with the
+repository, delivery identity, receipt sequence, pending age, and closed stall
+cause. Because the observer is not the serialized drain task, a task wedged in
+polling, projection, disposition, or dispatch cannot silence that signal, and
+the observer's own inspection is cancelled by shutdown so an unresponsive
+database cannot hold daemon termination.
 
 **Implemented behavior.** Shadow mode never inserts a webhook-produced row into
 `repo_watch_event` and never mutates the cursor from a payload-derived patch.

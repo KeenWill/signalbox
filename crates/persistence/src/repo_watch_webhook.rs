@@ -215,6 +215,23 @@ pub struct PendingRepoWatchWebhookDelivery {
     body: Box<[u8]>,
 }
 
+/// One pending delivery's identity and receipt, carrying no payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PendingRepoWatchWebhookReceipt {
+    key: RepoWatchWebhookDeliveryKey,
+    receipt: RepoWatchWebhookReceipt,
+}
+
+impl PendingRepoWatchWebhookReceipt {
+    pub const fn key(&self) -> RepoWatchWebhookDeliveryKey {
+        self.key
+    }
+
+    pub const fn receipt(&self) -> RepoWatchWebhookReceipt {
+        self.receipt
+    }
+}
+
 impl PendingRepoWatchWebhookDelivery {
     pub const fn key(&self) -> RepoWatchWebhookDeliveryKey {
         self.key
@@ -510,6 +527,38 @@ impl PostgresRepoWatchWebhookStore {
         rows.into_iter().map(decode_pending).collect()
     }
 
+    /// The oldest undispositioned delivery's identity and receipt, without its
+    /// payload.
+    ///
+    /// The drain monitor runs on a fixed cadence for every webhook repository
+    /// and reports only identity and pending age, so it must not transfer the
+    /// admitted bodies a pending page carries. This query therefore never joins
+    /// `repo_watch_webhook_payload`, and it answers for a delivery whose body
+    /// has already been purged.
+    pub async fn load_oldest_pending_receipt(
+        &self,
+        repository: &RepositorySlug,
+    ) -> Result<Option<PendingRepoWatchWebhookReceipt>, RepoWatchWebhookStoreError> {
+        let row = sqlx::query_as::<_, PendingReceiptRow>(
+            "SELECT delivery.hook_id,
+                    delivery.delivery_id,
+                    delivery.receipt_sequence,
+                    delivery.received_at
+               FROM repo_watch_webhook_delivery AS delivery
+               LEFT JOIN repo_watch_webhook_disposition AS disposition
+                 ON disposition.hook_id = delivery.hook_id
+                AND disposition.delivery_id = delivery.delivery_id
+              WHERE delivery.repository = $1
+                AND disposition.delivery_id IS NULL
+              ORDER BY delivery.receipt_sequence
+              LIMIT 1",
+        )
+        .bind(repository.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(decode_pending_receipt).transpose()
+    }
+
     pub async fn record_terminal(
         &self,
         key: RepoWatchWebhookDeliveryKey,
@@ -596,6 +645,14 @@ struct ConflictRow {
 }
 
 #[derive(sqlx::FromRow)]
+struct PendingReceiptRow {
+    hook_id: Decimal,
+    delivery_id: Uuid,
+    receipt_sequence: i64,
+    received_at: OffsetDateTime,
+}
+
+#[derive(sqlx::FromRow)]
 struct PendingRow {
     hook_id: Decimal,
     delivery_id: Uuid,
@@ -634,6 +691,23 @@ fn decode_receipt(row: ReceiptRow) -> Result<RepoWatchWebhookReceipt, RepoWatchW
     Ok(RepoWatchWebhookReceipt {
         sequence,
         received_at,
+    })
+}
+
+fn decode_pending_receipt(
+    row: PendingReceiptRow,
+) -> Result<PendingRepoWatchWebhookReceipt, RepoWatchWebhookStoreError> {
+    let hook_id = positive_u64_from_numeric(row.hook_id)
+        .ok()
+        .and_then(NonZeroU64::new)
+        .ok_or(RepoWatchWebhookStorageCorruption::InvalidHookId)?;
+    let receipt = decode_receipt(ReceiptRow {
+        receipt_sequence: row.receipt_sequence,
+        received_at: row.received_at,
+    })?;
+    Ok(PendingRepoWatchWebhookReceipt {
+        key: RepoWatchWebhookDeliveryKey::new(hook_id, row.delivery_id),
+        receipt,
     })
 }
 
