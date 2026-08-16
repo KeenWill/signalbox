@@ -38,7 +38,17 @@ use crate::{
 /// deployment configuration through [`ReconciliationSweepInterval::try_new`].
 const BASELINE_RECONCILIATION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 const BASELINE_NUDGE_BUFFER_CAPACITY: usize = 1_024;
-const BASELINE_MAX_IN_FLIGHT_PASSES: usize = 16;
+
+/// Hard safety ceiling for concurrent authoritative scheduler passes.
+///
+/// This bounds simultaneous provider, tool, and database pressure. Deployment
+/// configuration may lower or pause admission but cannot raise this ceiling.
+const SCHEDULER_PASS_ADMISSION_HARD_CEILING: usize = 16;
+
+/// Returns the hard safety ceiling for concurrent authoritative passes.
+pub const fn scheduler_pass_admission_hard_ceiling() -> usize {
+    SCHEDULER_PASS_ADMISSION_HARD_CEILING
+}
 
 /// A validated nonzero reconciliation-sweep interval.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -626,7 +636,7 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
         Self {
             work_source,
             pass,
-            max_in_flight_passes: BASELINE_MAX_IN_FLIGHT_PASSES,
+            max_in_flight_passes: SCHEDULER_PASS_ADMISSION_HARD_CEILING,
         }
     }
 

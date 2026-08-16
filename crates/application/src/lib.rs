@@ -110,6 +110,7 @@ pub use scheduler::{
     GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityNudge,
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
+    scheduler_pass_admission_hard_ceiling,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{

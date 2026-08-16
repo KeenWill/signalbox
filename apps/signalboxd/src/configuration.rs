@@ -11,6 +11,7 @@ use std::{
 };
 
 use rust_decimal::Decimal;
+use signalbox_application::scheduler_pass_admission_hard_ceiling;
 use signalbox_domain::{
     AnthropicServiceTier, BranchName, CheckConclusion, CodexCliServiceTier, DirectModelSelection,
     FastMode, FastModeOverlay, FastModeSupport, FrozenAliasDefinition, LabelName, MergeableState,
@@ -82,11 +83,6 @@ pub const CLAUDE_CLI_CREDENTIAL_REFERENCE: &str = "claude-subscription-primary";
 const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
 const MAX_REPOSITORY_WATCH_RULES: usize = 128;
 const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
-// Configuration may lower or pause the application's established 16-pass
-// admission ceiling, but it cannot raise the provider, tool, and database
-// pressure that the scheduler baseline already bounds.
-const MAX_SCHEDULER_IN_FLIGHT_PASSES: usize = 16;
-
 /// One provider-availability cause a pool trigger can react to.
 ///
 /// Only these three carry proof that the request was not accepted, so only they
@@ -2417,7 +2413,7 @@ fn parse_scheduler_max_in_flight_passes(
         .get("max_in_flight_passes")
         .and_then(Item::as_integer)
         .and_then(|value| usize::try_from(value).ok())
-        .filter(|value| *value <= MAX_SCHEDULER_IN_FLIGHT_PASSES)
+        .filter(|value| *value <= scheduler_pass_admission_hard_ceiling())
         .ok_or(HubModelConfigurationError::InvalidSchedulerConfiguration)?;
     Ok(Some(limit))
 }
@@ -3518,10 +3514,10 @@ mod tests {
     use super::{
         ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
         FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError,
-        MAX_COMPACTION_PROMPT_UTF8_BYTES, MAX_SCHEDULER_IN_FLIGHT_PASSES,
-        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage, UnknownSessionModel,
-        absolute_search_entries, credential_bytes, resolved_mcp_bridge_reference,
-        validate_alias_count, validate_model_count,
+        MAX_COMPACTION_PROMPT_UTF8_BYTES, MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter,
+        ModelCallInputUsage, UnknownSessionModel, absolute_search_entries, credential_bytes,
+        resolved_mcp_bridge_reference, scheduler_pass_admission_hard_ceiling, validate_alias_count,
+        validate_model_count,
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
@@ -4606,7 +4602,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
 
     #[test]
     fn scheduler_pass_limit_accepts_a_bounded_override() {
-        let configured_limit = MAX_SCHEDULER_IN_FLIGHT_PASSES;
+        let configured_limit = scheduler_pass_admission_hard_ceiling();
         let configured = CONFIGURATION.replace(
             "[compaction]",
             &format!("[scheduler]\nmax_in_flight_passes = {configured_limit}\n\n[compaction]"),
