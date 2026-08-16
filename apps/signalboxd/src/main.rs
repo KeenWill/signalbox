@@ -2084,6 +2084,7 @@ mod tests {
         time::Duration,
     };
 
+    use expect_test::expect;
     use signalbox_application::{
         ClassifyOperatorFailure, EligibilityPass, EligibilityWorkSource, OperatorFailureClass,
         SchedulerLoop,
@@ -2140,10 +2141,10 @@ mod tests {
         let configuration_error = repository_watch_rule_configuration_error(&error)
             .expect("changed rule identity is a configuration error");
 
-        assert_eq!(
-            configuration_error.to_string(),
+        expect![[
             "model configuration contains invalid repository-watch rule `merge-forward-on-conflict`: field `matcher.mergeable_state.any_of` differs from active version 1; increment field `version`"
-        );
+        ]]
+        .assert_eq(&configuration_error.to_string());
     }
 
     thread_local! {

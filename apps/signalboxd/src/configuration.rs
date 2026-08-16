@@ -4220,9 +4220,14 @@ selection_id = "10000000-0000-4000-8000-000000000001"
 
     #[test]
     fn repository_watch_accepts_a_positive_rule_revision() {
+        let revision =
+            RepoWatchRuleVersion::new(NonZeroU64::new(2).expect("configured revision is positive"));
         let configured = configuration_with_repository_watch_rule().replace(
-            &format!("id = \"{WATCH_RULE_ID}\"\nversion = 1"),
-            &format!("id = \"{WATCH_RULE_ID}\"\nversion = 2"),
+            &format!(
+                "id = \"{WATCH_RULE_ID}\"\nversion = {}",
+                RepoWatchRuleVersion::V1.get()
+            ),
+            &format!("id = \"{WATCH_RULE_ID}\"\nversion = {}", revision.get()),
         );
         let configured = HubModelConfiguration::parse(&configured)
             .expect("repository-watch revision fixture is valid");
@@ -4230,8 +4235,6 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             .repository_watch()
             .expect("fixture configures repository watch")
             .rules()[0];
-        let revision =
-            RepoWatchRuleVersion::new(NonZeroU64::new(2).expect("configured revision is positive"));
 
         assert_eq!(rule.id().as_str(), WATCH_RULE_ID);
         assert_eq!(rule.version(), revision);
