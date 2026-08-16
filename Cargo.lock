@@ -3272,6 +3272,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-file-media-processor-runtime"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "rustix",
+ "serde",
+ "serde_json",
+ "signalbox-file-media-runtime",
+ "tokio",
+]
+
+[[package]]
 name = "signalbox-file-media-provider-runtime"
 version = "0.0.0"
 dependencies = [

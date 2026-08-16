@@ -34,6 +34,22 @@ pub const MAX_AUDIO_CLIP_SECONDS: u32 = 60;
 pub const MAX_PRESENTED_AUDIO_BYTES: u64 = 8_388_608;
 /// Maximum presented general-file bytes.
 pub const MAX_PRESENTED_FILE_BYTES: u64 = 8_388_608;
+/// Maximum durable media references emitted by one model call.
+pub const MAX_MEDIA_REFERENCES_PER_CALL: u16 = 16;
+/// Maximum aggregate referenced media bytes emitted by one model call.
+pub const MAX_AGGREGATE_MEDIA_BYTES_PER_CALL: u64 = 33_554_432;
+/// Maximum isolated worker address-space bytes.
+pub const MAX_WORKER_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
+/// Maximum isolated worker CPU seconds.
+pub const MAX_WORKER_CPU_SECONDS: u64 = 60;
+/// Maximum isolated worker wall-clock seconds.
+pub const MAX_WORKER_WALL_SECONDS: u64 = 120;
+/// Maximum isolated worker descendants. Threads remain permitted.
+pub const MAX_WORKER_DESCENDANTS: u32 = 0;
+/// Maximum file descriptors available to an isolated worker.
+pub const MAX_WORKER_FILE_DESCRIPTORS: u64 = 32;
+/// Maximum retained diagnostic bytes from an isolated worker.
+pub const MAX_WORKER_STDERR_BYTES: usize = 16_384;
 
 /// Process-wide ceilings against which every declaration is checked.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,6 +86,10 @@ pub struct FileMediaCeilings {
     pub presented_audio_bytes: u64,
     /// Maximum presented general-file bytes.
     pub presented_file_bytes: u64,
+    /// Maximum durable media references per model call.
+    pub media_references_per_call: u16,
+    /// Maximum aggregate referenced media bytes per model call.
+    pub aggregate_media_bytes_per_call: u64,
 }
 
 impl FileMediaCeilings {
@@ -92,6 +112,8 @@ impl FileMediaCeilings {
             audio_clip_seconds: MAX_AUDIO_CLIP_SECONDS,
             presented_audio_bytes: MAX_PRESENTED_AUDIO_BYTES,
             presented_file_bytes: MAX_PRESENTED_FILE_BYTES,
+            media_references_per_call: MAX_MEDIA_REFERENCES_PER_CALL,
+            aggregate_media_bytes_per_call: MAX_AGGREGATE_MEDIA_BYTES_PER_CALL,
         }
     }
 
@@ -129,6 +151,100 @@ impl FileMediaCeilings {
             && candidate.presented_audio_bytes <= self.presented_audio_bytes
             && candidate.presented_file_bytes > 0
             && candidate.presented_file_bytes <= self.presented_file_bytes
+            && candidate.media_references_per_call > 0
+            && candidate.media_references_per_call <= self.media_references_per_call
+            && candidate.aggregate_media_bytes_per_call > 0
+            && candidate.aggregate_media_bytes_per_call <= self.aggregate_media_bytes_per_call
+    }
+}
+
+/// Daemon-supervised process limits, all lowerable from compiled maxima.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileMediaProcessCeilings {
+    memory_bytes: u64,
+    cpu_seconds: u64,
+    wall_seconds: u64,
+    file_descriptors: u64,
+    stderr_bytes: usize,
+}
+
+impl FileMediaProcessCeilings {
+    /// Returns the compiled version-one process ceiling set.
+    pub const fn version_one() -> Self {
+        Self {
+            memory_bytes: MAX_WORKER_MEMORY_BYTES,
+            cpu_seconds: MAX_WORKER_CPU_SECONDS,
+            wall_seconds: MAX_WORKER_WALL_SECONDS,
+            file_descriptors: MAX_WORKER_FILE_DESCRIPTORS,
+            stderr_bytes: MAX_WORKER_STDERR_BYTES,
+        }
+    }
+
+    /// Constructs an effective set only when every value is positive and lowerable.
+    pub const fn try_lower(
+        memory_bytes: u64,
+        cpu_seconds: u64,
+        wall_seconds: u64,
+        file_descriptors: u64,
+        stderr_bytes: usize,
+    ) -> Option<Self> {
+        let candidate = Self {
+            memory_bytes,
+            cpu_seconds,
+            wall_seconds,
+            file_descriptors,
+            stderr_bytes,
+        };
+        if Self::version_one().admits(candidate) {
+            Some(candidate)
+        } else {
+            None
+        }
+    }
+
+    /// Returns whether every candidate value is positive and no greater.
+    pub const fn admits(self, candidate: Self) -> bool {
+        candidate.memory_bytes > 0
+            && candidate.memory_bytes <= self.memory_bytes
+            && candidate.cpu_seconds > 0
+            && candidate.cpu_seconds <= self.cpu_seconds
+            && candidate.wall_seconds > 0
+            && candidate.wall_seconds <= self.wall_seconds
+            && candidate.file_descriptors >= 3
+            && candidate.file_descriptors <= self.file_descriptors
+            && candidate.stderr_bytes > 0
+            && candidate.stderr_bytes <= self.stderr_bytes
+    }
+
+    /// Returns the address-space byte limit applied before worker startup.
+    pub const fn memory_bytes(self) -> u64 {
+        self.memory_bytes
+    }
+
+    /// Returns the CPU-second limit applied before worker startup.
+    pub const fn cpu_seconds(self) -> u64 {
+        self.cpu_seconds
+    }
+
+    /// Returns the daemon wall-clock deadline.
+    pub const fn wall_seconds(self) -> u64 {
+        self.wall_seconds
+    }
+
+    /// Returns the descriptor limit applied before worker startup.
+    pub const fn file_descriptors(self) -> u64 {
+        self.file_descriptors
+    }
+
+    /// Returns the retained, never-model-visible diagnostic byte limit.
+    pub const fn stderr_bytes(self) -> usize {
+        self.stderr_bytes
+    }
+}
+
+impl Default for FileMediaProcessCeilings {
+    fn default() -> Self {
+        Self::version_one()
     }
 }
 

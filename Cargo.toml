@@ -14,6 +14,7 @@ members = [
     "crates/expect-table",
     "crates/file-media-runtime",
     "crates/file-media-provider-runtime",
+    "crates/file-media-processor-runtime",
     "crates/model-runtime",
     "crates/model-runtime-anthropic",
     "crates/model-runtime-claude-cli",

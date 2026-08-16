@@ -1,0 +1,40 @@
+[package]
+name = "signalbox-file-media-processor-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+test-worker = []
+
+[[bin]]
+name = "signalbox-file-media-synthetic-worker"
+path = "src/bin/signalbox-file-media-synthetic-worker.rs"
+required-features = ["test-worker"]
+
+[dependencies]
+base64 = "0.22.1"
+rustix = { version = "1.1.4", default-features = false, features = [
+    "fs",
+    "pipe",
+    "process",
+    "std",
+] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+signalbox-file-media-runtime = { path = "../file-media-runtime" }
+tokio = { version = "1.53.0", default-features = false, features = [
+    "io-std",
+    "io-util",
+    "macros",
+    "process",
+    "rt",
+    "sync",
+    "time",
+] }
+
+[lints]
+workspace = true
