@@ -8,6 +8,9 @@ untrusted processor-response boundary, stable agent tool contracts,
 visibility-authorizing application bridge, and fresh daemon-supervised worker
 runtime.
 
+The video adapter is verified against this PR
+(`agent/file-media-adapter-video`).
+
 This page owns typed interpretation above immutable blob bytes. Blob identity,
 catalog placement, replica verification, raw reads, attachment visibility, and
 generated-artifact ingest remain owned by [blob storage](blob-storage.md). Tool
@@ -63,6 +66,12 @@ receive only a placement-free `VerifiedBlobSource`, cooperative cancellation,
 and their checked request. They return raw processor outputs: the registry
 reparses and cross-checks every type, evidence claim, reason, metadata object,
 body, JSON tree, continuation, and bound before admitting it.
+
+## Implemented adapter coverage
+
+| Family | Exact types               | Views      | Decoder and enforced exclusions                                                                                                                                                                                                                                                 |
+| ------ | ------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Video  | `video/mp4`, `video/webm` | `metadata` | Bounded in-worker ISO BMFF and EBML container parsers with no codec library; frame/audio decoding, rendering, frame extraction, thumbnails, OCR, transcription, subtitles, external resources, recursive containers, and files above the 256 KiB metadata envelope are excluded |
 
 ## Detection and validation
 
@@ -218,8 +227,8 @@ and transcription are absent in version one.
 
 ## Open edges
 
-- Concrete format families and their independently reviewed dependencies remain
-  with
+- Additional format families and their independently reviewed dependencies
+  remain with
   [general-purpose artifacts](../open-questions.md#general-purpose-artifacts).
 - Cumulative per-turn typed-read and source-work budgets wait for the first
   adapter benchmarks under

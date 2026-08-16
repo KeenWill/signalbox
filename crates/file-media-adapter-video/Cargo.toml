@@ -1,0 +1,30 @@
+[package]
+name = "signalbox-file-media-adapter-video"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "signalbox-file-media-video-worker"
+path = "src/bin/signalbox-file-media-video-worker.rs"
+
+[dependencies]
+serde_json = "1.0.140"
+signalbox-file-media-processor-runtime = { path = "../file-media-processor-runtime" }
+signalbox-file-media-runtime = { path = "../file-media-runtime" }
+tokio = { version = "1.53.0", default-features = false, features = [
+    "macros",
+    "rt",
+] }
+
+[dev-dependencies]
+tokio = { version = "1.53.0", default-features = false, features = [
+    "macros",
+    "rt",
+] }
+
+[lints]
+workspace = true
