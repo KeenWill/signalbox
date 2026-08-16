@@ -318,12 +318,15 @@ impl PostgresRepoWatchDispatchStore {
                     SELECT 1
                       FROM (
                             SELECT assessment.head_sha, assessment.base_revision
-                              FROM repo_watch_pull_request_convergence_assessment AS assessment
-                             WHERE assessment.repository = convergence.repository
-                               AND assessment.pull_request_number =
+                              FROM repo_watch_pull_request_convergence_identity AS identity
+                              JOIN repo_watch_pull_request_convergence_assessment AS assessment
+                                ON assessment.assessment_id = identity.assessment_id
+                             WHERE identity.repository = convergence.repository
+                               AND identity.pull_request_number =
                                    convergence.pull_request_number
-                             ORDER BY assessment.recorded_at DESC,
-                                      assessment.assessment_id DESC
+                             ORDER BY identity.cursor_generation DESC,
+                                      identity.recorded_at DESC,
+                                      identity.assessment_id DESC
                              LIMIT 1
                            ) AS current
                      WHERE current.head_sha = convergence.head_sha
@@ -446,6 +449,73 @@ impl PostgresRepoWatchDispatchStore {
                 Ok(false) => {
                     return Err(RepoWatchDispatchRepositoryError::Corruption(
                         "selected pending lifecycle cutoff disappeared",
+                    ));
+                }
+                Err(RepoWatchDispatchRepositoryError::GoalCutoff(
+                    crate::goal::GoalRepositoryError::Corruption(_),
+                )) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Drains eligible convergence cutoffs before repository-specific tasks start.
+    pub async fn process_pending_convergence_cutoffs<NextCommandId>(
+        &self,
+        mut next_command_id: NextCommandId,
+    ) -> Result<(), RepoWatchDispatchRepositoryError>
+    where
+        NextCommandId: FnMut() -> DurableCommandId,
+    {
+        loop {
+            let repository: Option<String> = sqlx::query_scalar(
+                "SELECT convergence.repository
+                   FROM repo_watch_pull_request_convergence AS convergence
+                  WHERE NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_convergence_cutoff AS cutoff
+                         WHERE cutoff.assessment_id = convergence.assessment_id
+                  )
+                    AND EXISTS (
+                        SELECT 1
+                          FROM (
+                                SELECT assessment.head_sha, assessment.base_revision
+                                  FROM repo_watch_pull_request_convergence_identity AS identity
+                                  JOIN repo_watch_pull_request_convergence_assessment AS assessment
+                                    ON assessment.assessment_id = identity.assessment_id
+                                 WHERE identity.repository = convergence.repository
+                                   AND identity.pull_request_number =
+                                       convergence.pull_request_number
+                                 ORDER BY identity.cursor_generation DESC,
+                                          identity.recorded_at DESC,
+                                          identity.assessment_id DESC
+                                 LIMIT 1
+                               ) AS current
+                         WHERE current.head_sha = convergence.head_sha
+                           AND current.base_revision = convergence.base_revision
+                    )
+                  ORDER BY convergence.repository, convergence.converged_at,
+                           convergence.assessment_id
+                  LIMIT 1",
+            )
+            .fetch_optional(&self.pool)
+            .await?;
+            let Some(repository) = repository else {
+                return Ok(());
+            };
+            let repository = RepositorySlug::try_new(repository).map_err(|_| {
+                RepoWatchDispatchRepositoryError::Corruption(
+                    "pending convergence cutoff has an invalid repository",
+                )
+            })?;
+            match self
+                .process_next_convergence_cutoff(&repository, &mut next_command_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(RepoWatchDispatchRepositoryError::Corruption(
+                        "selected pending convergence cutoff disappeared",
                     ));
                 }
                 Err(RepoWatchDispatchRepositoryError::GoalCutoff(
@@ -841,7 +911,7 @@ impl PostgresRepoWatchDispatchStore {
                     commit(transaction).await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::TargetClosed);
                 }
-                if event_target_is_converged(&mut transaction, &event).await? {
+                if !terminal_event && event_target_is_converged(&mut transaction, &event).await? {
                     match matched_admission {
                         MatchedAdmission::Fresh => {
                             insert_evaluation(
@@ -1518,10 +1588,13 @@ async fn event_target_is_converged(
             SELECT 1
               FROM (
                     SELECT assessment.head_sha, assessment.base_revision
-                      FROM repo_watch_pull_request_convergence_assessment AS assessment
-                     WHERE assessment.repository = $1
-                       AND assessment.pull_request_number = $2
-                     ORDER BY assessment.recorded_at DESC, assessment.assessment_id DESC
+                      FROM repo_watch_pull_request_convergence_identity AS identity
+                      JOIN repo_watch_pull_request_convergence_assessment AS assessment
+                        ON assessment.assessment_id = identity.assessment_id
+                     WHERE identity.repository = $1
+                       AND identity.pull_request_number = $2
+                     ORDER BY identity.cursor_generation DESC, identity.recorded_at DESC,
+                              identity.assessment_id DESC
                      LIMIT 1
                    ) AS current
               JOIN repo_watch_pull_request_convergence AS convergence
