@@ -10,18 +10,173 @@ use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
     CodexCliServiceTier, DangerousToolAutoApproval, DelegateApprovalRecommendation,
     DelegationMessageDirection, DelegationOutcomeKind, DelegationOutcomeReason,
-    DelegationTransitionFailure, DelegationWaitMode, DescendantTerminationScope,
+    DelegationTransitionFailure, DelegationWaitMode, DeliveryKind, DescendantTerminationScope,
     DirectModelSelection, DurableCommandId, EffectiveModelSettings, FastMode, FastModeOverlay,
-    GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind,
-    GoalUserAction, MergeableState, ModelChangeAdjustment, ModelSettingSource,
-    ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange,
-    ReactionSubject, ReasoningLevel, RepoWatchEventKindNameV1, ReviewState,
-    RunnerPlacementLossSource, RunnerSandboxProfile, ServiceTier,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
-    SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolAttemptId,
-    ToolPermissionDefault, ToolRequestId, TurnId, UpdateSessionPlacementRejectionKind,
-    ValidatedModelSettings, WorkspaceOrigin,
+    FaultCause, GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind,
+    GoalModelBlockedReasonKind, GoalUserAction, MergeableState, ModelChangeAdjustment,
+    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier,
+    ProgramCapability, ReactionChange, ReactionSubject, ReasoningLevel, RejectReason,
+    RepoWatchEventKindNameV1, RequestKind, ReviewState, RunnerPlacementLossSource,
+    RunnerSandboxProfile, ScopeOperation, ServiceTier, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionId, SessionInputPosition, SessionPlacementEventKind,
+    SettingOverlay, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault, ToolRequestId,
+    TurnId, UpdateSessionPlacementRejectionKind, ValidatedModelSettings, WorkspaceOrigin,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProgramRequestStorageKind {
+    Now,
+    Random,
+    Sleep,
+    AwaitEvent,
+    Effect,
+    Scope,
+    Terminal,
+}
+
+pub(crate) fn program_request_kind_from_str(value: &str) -> Option<ProgramRequestStorageKind> {
+    match value {
+        "now" => Some(ProgramRequestStorageKind::Now),
+        "random" => Some(ProgramRequestStorageKind::Random),
+        "sleep" => Some(ProgramRequestStorageKind::Sleep),
+        "await_event" => Some(ProgramRequestStorageKind::AwaitEvent),
+        "effect" => Some(ProgramRequestStorageKind::Effect),
+        "scope" => Some(ProgramRequestStorageKind::Scope),
+        "terminal" => Some(ProgramRequestStorageKind::Terminal),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProgramDeliveryStorageKind {
+    Answer,
+    Wake,
+    Reject,
+    Cancel,
+    RunCancel,
+    Fault,
+}
+
+pub(crate) const fn program_delivery_kind_to_str(value: &DeliveryKind) -> &'static str {
+    match value {
+        DeliveryKind::Answer { .. } => "answer",
+        DeliveryKind::Wake { .. } => "wake",
+        DeliveryKind::Reject { .. } => "reject",
+        DeliveryKind::Cancel { .. } => "cancel",
+        DeliveryKind::RunCancel(_) => "run_cancel",
+        DeliveryKind::Fault(_) => "fault",
+    }
+}
+
+pub(crate) fn program_delivery_kind_from_str(value: &str) -> Option<ProgramDeliveryStorageKind> {
+    match value {
+        "answer" => Some(ProgramDeliveryStorageKind::Answer),
+        "wake" => Some(ProgramDeliveryStorageKind::Wake),
+        "reject" => Some(ProgramDeliveryStorageKind::Reject),
+        "cancel" => Some(ProgramDeliveryStorageKind::Cancel),
+        "run_cancel" => Some(ProgramDeliveryStorageKind::RunCancel),
+        "fault" => Some(ProgramDeliveryStorageKind::Fault),
+        _ => None,
+    }
+}
+
+pub(crate) const fn program_fault_cause_to_str(value: FaultCause) -> &'static str {
+    match value {
+        FaultCause::Timeout => "timeout",
+        FaultCause::Memory => "memory",
+        FaultCause::Nondeterminism => "nondeterminism",
+        FaultCause::ProgramError => "program_error",
+        FaultCause::ContractRetired => "contract_retired",
+        FaultCause::JournalBound => "journal_bound",
+        FaultCause::PayloadTooLarge => "payload_too_large",
+    }
+}
+
+pub(crate) fn program_fault_cause_from_str(value: &str) -> Option<FaultCause> {
+    match value {
+        "timeout" => Some(FaultCause::Timeout),
+        "memory" => Some(FaultCause::Memory),
+        "nondeterminism" => Some(FaultCause::Nondeterminism),
+        "program_error" => Some(FaultCause::ProgramError),
+        "contract_retired" => Some(FaultCause::ContractRetired),
+        "journal_bound" => Some(FaultCause::JournalBound),
+        "payload_too_large" => Some(FaultCause::PayloadTooLarge),
+        _ => None,
+    }
+}
+
+pub(crate) const fn program_request_kind_to_str(value: &RequestKind) -> &'static str {
+    match value {
+        RequestKind::Now(_) => "now",
+        RequestKind::Random(_) => "random",
+        RequestKind::Sleep(_) => "sleep",
+        RequestKind::AwaitEvent(_) => "await_event",
+        RequestKind::Effect(_) => "effect",
+        RequestKind::Scope(_) => "scope",
+        RequestKind::Terminal(_) => "terminal",
+    }
+}
+
+pub(crate) const fn program_capability_to_str(value: ProgramCapability) -> &'static str {
+    match value {
+        ProgramCapability::Time => "time",
+        ProgramCapability::Random => "random",
+        ProgramCapability::Sleep => "sleep",
+        ProgramCapability::Subscribe => "subscribe",
+        ProgramCapability::Session => "session",
+        ProgramCapability::Judge => "judge",
+        ProgramCapability::ExecStage => "exec-stage",
+        ProgramCapability::Corpus => "corpus",
+        ProgramCapability::EvalRecord => "eval-record",
+        ProgramCapability::Blob => "blob",
+        ProgramCapability::Register => "register",
+    }
+}
+
+pub(crate) fn program_capability_from_str(value: &str) -> Option<ProgramCapability> {
+    match value {
+        "time" => Some(ProgramCapability::Time),
+        "random" => Some(ProgramCapability::Random),
+        "sleep" => Some(ProgramCapability::Sleep),
+        "subscribe" => Some(ProgramCapability::Subscribe),
+        "session" => Some(ProgramCapability::Session),
+        "judge" => Some(ProgramCapability::Judge),
+        "exec-stage" => Some(ProgramCapability::ExecStage),
+        "corpus" => Some(ProgramCapability::Corpus),
+        "eval-record" => Some(ProgramCapability::EvalRecord),
+        "blob" => Some(ProgramCapability::Blob),
+        "register" => Some(ProgramCapability::Register),
+        _ => None,
+    }
+}
+
+pub(crate) const fn program_scope_operation_to_str(value: ScopeOperation) -> &'static str {
+    match value {
+        ScopeOperation::Open => "open",
+        ScopeOperation::Close => "close",
+    }
+}
+
+pub(crate) fn program_scope_operation_from_str(value: &str) -> Option<ScopeOperation> {
+    match value {
+        "open" => Some(ScopeOperation::Open),
+        "close" => Some(ScopeOperation::Close),
+        _ => None,
+    }
+}
+
+pub(crate) const fn program_reject_reason_to_str(value: RejectReason) -> &'static str {
+    match value {
+        RejectReason::OutstandingRequests => "outstanding_requests",
+    }
+}
+
+pub(crate) fn program_reject_reason_from_str(value: &str) -> Option<RejectReason> {
+    match value {
+        "outstanding_requests" => Some(RejectReason::OutstandingRequests),
+        _ => None,
+    }
+}
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
