@@ -604,7 +604,8 @@ pub(super) fn committed_tool_attempt_end(
         | ToolExecutionServiceOutcome::ChildWaitParked(_)
         | ToolExecutionServiceOutcome::ChildWaitResumed(_)
         | ToolExecutionServiceOutcome::ContinuationCheckpointed(_)
-        | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => None,
+        | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_)
+        | ToolExecutionServiceOutcome::ContinuationPoolExhausted(_) => None,
     }
 }
 
