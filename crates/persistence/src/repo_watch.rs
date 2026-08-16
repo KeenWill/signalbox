@@ -16,8 +16,7 @@ use signalbox_application::{
     RepoWatchObservation, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
     RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
     RepoWatchReviewObservation, RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation,
-    RepoWatchThreadState,
-    RepoWatchWorkflowRunObservation,
+    RepoWatchThreadState, RepoWatchWorkflowRunObservation,
 };
 use signalbox_domain::{
     BranchName, CheckRunName, CommitSha, GitHubObjectId, LabelName, PullRequestBody,

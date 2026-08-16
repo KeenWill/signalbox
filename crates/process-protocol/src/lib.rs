@@ -7993,18 +7993,6 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
                     .non_green_gating_checks
                     .windows(2)
                     .all(|pair| pair[0] <= pair[1])
-                && item.seal.is_none_or(|seal| {
-                    matches!(
-                        (item.verdict, seal),
-                        (
-                            OperatorStatusConvergenceVerdict::InternallyConverged,
-                            OperatorStatusConvergenceSeal::InternallyConverged
-                        ) | (
-                            OperatorStatusConvergenceVerdict::MergeReady,
-                            OperatorStatusConvergenceSeal::MergeReady
-                        )
-                    )
-                })
         }
         OperatorStatusMessage::PendingStaleReviewClearance(item) => {
             operator_status_text_is_valid(&item.repository, 201)
@@ -9552,6 +9540,34 @@ mod tests {
             invalid_ready,
             Err(FrameValidationError::OperatorStatusShape)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn operator_status_allows_a_seal_to_outlive_the_latest_assessment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
+                Box::new(OperatorStatusPullRequestConvergenceMessage {
+                    repository: String::from("example/repo"),
+                    pull_request_number: CanonicalU64::new(41),
+                    head_sha: String::from("1111111111111111111111111111111111111111"),
+                    base_branch: String::from("main"),
+                    base_revision: String::from("2222222222222222222222222222222222222222"),
+                    mergeable_state: OperatorStatusMergeableState::Mergeable,
+                    review_decision: OperatorStatusReviewDecision::Approved,
+                    unresolved_thread_count: CanonicalU64::new(0),
+                    gating_check_count: CanonicalU64::new(1),
+                    non_green_gating_checks: vec![String::from("rust-checks")],
+                    verdict: OperatorStatusConvergenceVerdict::NotConverged,
+                    seal: Some(OperatorStatusConvergenceSeal::MergeReady),
+                    assessed_seconds_ago: CanonicalU64::new(1),
+                }),
+            ))),
+        );
+
+        assert!(frame.is_ok());
         Ok(())
     }
 

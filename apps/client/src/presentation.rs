@@ -69,6 +69,13 @@ pub(crate) struct SessionMessageSentPresentation {
     pub(crate) delivery_sequence: u64,
 }
 
+pub(crate) struct OperatorStatusPresentationCounts {
+    pub(crate) held_slots: u64,
+    pub(crate) queued_obligations: u64,
+    pub(crate) pull_request_convergences: u64,
+    pub(crate) pending_stale_review_clearances: u64,
+}
+
 pub(crate) enum BlobUploadPresentation {
     AlreadyPresent,
     Committed,
@@ -1109,11 +1116,14 @@ impl<'a> Output<'a> {
 
     pub(crate) fn operator_status_counts(
         &mut self,
-        held_slots: u64,
-        queued_obligations: u64,
-        pull_request_convergences: u64,
-        pending_stale_review_clearances: u64,
+        counts: OperatorStatusPresentationCounts,
     ) -> io::Result<()> {
+        let OperatorStatusPresentationCounts {
+            held_slots,
+            queued_obligations,
+            pull_request_convergences,
+            pending_stale_review_clearances,
+        } = counts;
         writeln!(
             self.stdout,
             "status held_slots={held_slots} queued_obligations={queued_obligations} \
@@ -3654,7 +3664,12 @@ mod tests {
         {
             let mut output = Output::new(&mut stdout, &mut stderr, false);
             output
-                .operator_status_counts(1, 1, 1, 1)
+                .operator_status_counts(super::OperatorStatusPresentationCounts {
+                    held_slots: 1,
+                    queued_obligations: 1,
+                    pull_request_convergences: 1,
+                    pending_stale_review_clearances: 1,
+                })
                 .expect("in-memory output cannot fail");
             output
                 .operator_status_item(&ServerMessage::OperatorStatus(Box::new(
