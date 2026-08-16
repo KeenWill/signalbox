@@ -439,10 +439,11 @@ def validate(bounds: list[Bound]) -> list[str]:
     def visible_owner(bound: Bound, source: str) -> Bound | None:
         """Resolve ``source`` as the Rust scope around ``bound`` would.
 
-        A file-level declaration is visible everywhere in its file and an inline
-        module's declaration only within that module, so a sibling module never
-        supplies an owner. The nearest enclosing declaration shadows the rest;
-        two at the same depth would not compile, and resolve to neither here.
+        A file-level declaration is visible everywhere in its file, and one
+        inside a block only within that block, so a sibling module or another
+        function never supplies an owner. The nearest enclosing declaration
+        shadows the rest; two at the same depth would not compile, and resolve
+        to neither here.
         """
         visible = [
             candidate
