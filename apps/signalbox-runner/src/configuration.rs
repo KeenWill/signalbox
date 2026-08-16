@@ -644,6 +644,7 @@ impl Error for RunnerConfigurationError {
 mod tests {
     use std::os::unix::fs::symlink;
 
+    use expect_test::expect;
     use tempfile::TempDir;
 
     use super::*;
@@ -932,10 +933,7 @@ credentials = {{}}
         let error = RunnerConfiguration::read(&configuration_path)
             .expect_err("a nonexecutable supervisor path fails closed");
 
-        assert_eq!(
-            error.to_string(),
-            "runner execution supervisor path is invalid"
-        );
+        expect![["runner execution supervisor path is invalid"]].assert_eq(&error.to_string());
     }
 
     #[test]
