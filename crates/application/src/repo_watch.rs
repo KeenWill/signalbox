@@ -111,6 +111,10 @@ impl RepoWatchEventIdentityFrontierEntryV1 {
         &self.stream_identity
     }
 
+    /// The last occurrence number assigned on this stream.
+    ///
+    /// Positive by construction: the first occurrence takes one, so a stored
+    /// zero is a corrupt entry rather than an empty stream.
     pub const fn sequence(&self) -> NonZeroU64 {
         self.sequence
     }
