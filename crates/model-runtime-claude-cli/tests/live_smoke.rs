@@ -1670,6 +1670,7 @@ fn fixture_exchange() -> ExchangeFacts {
     ExchangeFacts {
         provider_request_id: Some(ProviderRequestId::new(FIXTURE_SESSION_ID)),
         http_status: None,
+        retry_after: None,
     }
 }
 

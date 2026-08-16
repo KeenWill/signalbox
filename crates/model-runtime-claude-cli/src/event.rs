@@ -646,6 +646,7 @@ impl<C: Clone> EventDecoder<C> {
                     exchange: self.exchange,
                     reported_model: self.reported_model,
                     kind,
+                    non_acceptance_proven: false,
                     native: NativeErrorFacts {
                         error_token: Some(subtype),
                         error_code: status.map(|value| value.to_string()),
@@ -749,6 +750,7 @@ impl<C: Clone> EventDecoder<C> {
                 exchange: self.exchange,
                 reported_model: self.reported_model,
                 kind,
+                non_acceptance_proven: false,
                 native: NativeErrorFacts {
                     error_token: Some(subtype),
                     error_code: status.map(|value| value.to_string()),
@@ -761,6 +763,7 @@ impl<C: Clone> EventDecoder<C> {
                 exchange: self.exchange,
                 reported_model: self.reported_model,
                 kind: fallback_kind,
+                non_acceptance_proven: false,
                 native: NativeErrorFacts {
                     error_token: Some("claude_cli_exit".to_string()),
                     error_code: None,
