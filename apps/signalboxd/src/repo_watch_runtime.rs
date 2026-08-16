@@ -31,12 +31,12 @@ use signalbox_application::{
     UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
 };
 use signalbox_domain::{
-    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
-    MergeableState, ModelAlias, PullRequestBody, PullRequestEventContext,
-    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionChange,
-    ReactionContent, ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventKindV1,
-    RepoWatchEventTarget, RepoWatchRule, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState,
-    ReviewThreadId, UserContent, WorkflowName,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, DurableCommandId,
+    GitHubObjectId, LabelName, MergeableState, ModelAlias, PullRequestBody,
+    PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
+    ReactionChange, ReactionContent, ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent,
+    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchWorkflowRunAttempt,
+    RepositorySlug, ReviewState, ReviewThreadId, UserContent, WorkflowName,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
@@ -46,6 +46,7 @@ use signalbox_persistence::repo_watch::{
 use signalbox_persistence::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
 };
+use signalbox_persistence::repo_watch_dispatch_obligation::RepoWatchDispatchObligation;
 use sqlx::PgPool;
 use tokio::{
     select,
@@ -76,7 +77,7 @@ const MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS: usize = 4;
 // One polling attempt may transfer this many response bytes. The dogfooded
 // repository exceeds 64 MiB in a single attempt, and the bound fails the
 // attempt rather than shedding, so it has to clear real event volume.
-const MAX_POLL_WIRE_BYTES: usize = 512 * 1024 * 1024;
+const MAX_POLL_WIRE_BYTES: usize = 768 * 1024 * 1024;
 // What one poller may retain between attempts, which is per watched repository
 // and therefore multiplies by the configured repository count. Deliberately not
 // raised with the per-attempt bound: transfer is transient, retention is not.
@@ -301,6 +302,7 @@ impl RepositoryWatchTask {
             let mut attempt_cancelled = false;
             select! {
                 result = self.run_attempt() => {
+                    let metrics = self.poller.attempt_metrics();
                     match result {
                         Ok(()) => tracing::debug!(
                             repository = %self.repository.as_str(),
@@ -309,6 +311,10 @@ impl RepositoryWatchTask {
                         Err(error) => tracing::warn!(
                             repository = %self.repository.as_str(),
                             cause_code = error.cause_code(),
+                            request_count = metrics.requests,
+                            poll_wire_bytes = metrics.poll_wire_bytes,
+                            cached_resource_count = metrics.cached_resources,
+                            cached_wire_bytes = metrics.cached_wire_bytes,
                             "repository-watch polling attempt failed closed"
                         ),
                     }
@@ -345,13 +351,16 @@ impl RepositoryWatchTask {
     }
 
     async fn run_attempt(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+        self.poller.begin_attempt();
         let result = async {
             if !self.rules_activated {
                 self.activate_rules().await?;
                 self.rules_activated = true;
             }
+            self.process_cutoffs().await?;
             self.process_dispatches().await?;
             self.poll_and_commit().await?;
+            self.process_cutoffs().await?;
             self.process_dispatches().await
         }
         .await;
@@ -361,6 +370,33 @@ impl RepositoryWatchTask {
             self.poller.invalidate_freshness();
         }
         result
+    }
+
+    async fn process_cutoffs(&self) -> Result<(), RepositoryWatchAttemptError> {
+        loop {
+            match self
+                .dispatch_store
+                .process_next_lifecycle_cutoff(&self.repository, || {
+                    DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+                })
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => return Ok(()),
+                Err(RepoWatchDispatchRepositoryError::GoalCutoff(
+                    error @ signalbox_persistence::goal::GoalRepositoryError::Corruption(_),
+                )) => {
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        cause_code = "repository_watch_cutoff_corruption",
+                        error = %error,
+                        "repository-watch lifecycle cutoff quarantined a corrupt goal; dispatch processing continues"
+                    );
+                    continue;
+                }
+                Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
+            }
+        }
     }
 
     async fn activate_rules(&self) -> Result<(), RepositoryWatchAttemptError> {
@@ -391,6 +427,45 @@ impl RepositoryWatchTask {
                     RepoWatchDispatchPersistence {
                         store: self.dispatch_store.clone(),
                         models: &self.models,
+                        obligation: None,
+                    },
+                );
+                let outcome = service
+                    .evaluate(
+                        event,
+                        rule,
+                        cursor.candidate().observation(),
+                        &self.templates,
+                        content,
+                    )
+                    .await
+                    .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
+                self.nudge_dispatched_sessions(&outcome);
+            }
+            while let Some(obligation) = self
+                .dispatch_store
+                .load_next_dispatch_obligation(&self.repository, rule.id(), rule.version())
+                .await
+                .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+            {
+                let cursor = self
+                    .store
+                    .load_cursor(&self.repository)
+                    .await
+                    .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+                    .ok_or(RepositoryWatchAttemptError::Persistence)?;
+                let event = obligation.latest_event().clone();
+                let content = UserContent::try_text(owed_dispatch_context_json(
+                    &obligation,
+                    cursor.candidate().observation(),
+                ))
+                .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
+                let mut service = RepoWatchDispatchService::new(
+                    UuidV7RepoWatchDispatchIdGenerator,
+                    RepoWatchDispatchPersistence {
+                        store: self.dispatch_store.clone(),
+                        models: &self.models,
+                        obligation: Some(obligation),
                     },
                 );
                 let outcome = service
@@ -419,6 +494,7 @@ impl RepositoryWatchTask {
             }
             RepoWatchRuleEvaluationOutcome::NotMatched
             | RepoWatchRuleEvaluationOutcome::Inactive
+            | RepoWatchRuleEvaluationOutcome::TargetClosed
             | RepoWatchRuleEvaluationOutcome::Occupied
             | RepoWatchRuleEvaluationOutcome::Cooldown => {}
         }
@@ -474,6 +550,7 @@ impl RepositoryWatchTask {
 struct RepoWatchDispatchPersistence<'configuration> {
     store: PostgresRepoWatchDispatchStore,
     models: &'configuration HubModelConfiguration,
+    obligation: Option<RepoWatchDispatchObligation>,
 }
 
 impl RepoWatchDispatchTransaction for RepoWatchDispatchPersistence<'_> {
@@ -483,15 +560,31 @@ impl RepoWatchDispatchTransaction for RepoWatchDispatchPersistence<'_> {
         &mut self,
         evaluation: RepoWatchRuleEvaluation,
     ) -> Result<RepoWatchRuleEvaluationOutcome, Self::Error> {
-        self.store
-            .handle_repo_watch_evaluation_with_alias_resolver(evaluation, |alias: ModelAlias| {
-                self.models.resolve_alias(alias)
-            })
-            .await
+        let select_definition = |alias: ModelAlias| self.models.resolve_alias(alias);
+        match self.obligation.take() {
+            Some(obligation) => {
+                self.store
+                    .handle_repo_watch_obligation_with_alias_resolver(
+                        obligation,
+                        evaluation,
+                        select_definition,
+                    )
+                    .await
+            }
+            None => {
+                self.store
+                    .handle_repo_watch_evaluation_with_alias_resolver(evaluation, select_definition)
+                    .await
+            }
+        }
     }
 }
 
 fn dispatch_context_json(event: &RepoWatchEvent) -> String {
+    dispatch_context_value(event).to_string()
+}
+
+fn dispatch_context_value(event: &RepoWatchEvent) -> serde_json::Value {
     let event_value = serde_json::json!({
         "version": 1,
         "id": event.id().as_uuid().to_string(),
@@ -507,8 +600,7 @@ fn dispatch_context_json(event: &RepoWatchEvent) -> String {
             "number": context.number().get(),
             "head_sha": context.head_sha().as_str(),
             "event": event_value,
-        })
-        .to_string(),
+        }),
         RepoWatchEventTarget::Branch => {
             let RepoWatchEventKindV1::BranchWorkflowRunCompleted {
                 branch,
@@ -516,7 +608,7 @@ fn dispatch_context_json(event: &RepoWatchEvent) -> String {
                 conclusion,
             } = event.kind()
             else {
-                return event_value.to_string();
+                return event_value;
             };
             serde_json::json!({
                 "type": "branch",
@@ -526,9 +618,157 @@ fn dispatch_context_json(event: &RepoWatchEvent) -> String {
                 "conclusion": check_conclusion_name(*conclusion),
                 "event": event_value,
             })
-            .to_string()
         }
     }
+}
+
+fn owed_dispatch_context_json(
+    obligation: &RepoWatchDispatchObligation,
+    observation: &RepoWatchObservation,
+) -> String {
+    owed_dispatch_context_json_parts(
+        obligation.latest_event(),
+        obligation.id(),
+        obligation.first_event_id(),
+        obligation.matched_event_count(),
+        observation,
+    )
+}
+
+fn owed_dispatch_context_json_parts(
+    event: &RepoWatchEvent,
+    obligation_id: uuid::Uuid,
+    first_event_id: signalbox_domain::RepoWatchEventId,
+    matched_event_count: u64,
+    observation: &RepoWatchObservation,
+) -> String {
+    let mut context = dispatch_context_value(event);
+    if let Some(object) = context.as_object_mut() {
+        object.insert(
+            String::from("delivery"),
+            serde_json::json!({
+                "mode": "owed_current_state",
+                "obligation_id": obligation_id.to_string(),
+                "matched_event_count": matched_event_count,
+                "first_event_id": first_event_id.as_uuid().to_string(),
+                "latest_event_id": event.id().as_uuid().to_string(),
+                "current": current_dispatch_state_json(event, observation),
+            }),
+        );
+    }
+    context.to_string()
+}
+
+fn current_dispatch_state_json(
+    event: &RepoWatchEvent,
+    observation: &RepoWatchObservation,
+) -> serde_json::Value {
+    match event.target() {
+        RepoWatchEventTarget::PullRequest(context) => observation
+            .state()
+            .pull_requests()
+            .iter()
+            .find(|pull_request| pull_request.context().number() == context.number())
+            .map(current_pull_request_json)
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "type": "pull_request",
+                    "number": context.number().get(),
+                    "present": false,
+                })
+            }),
+        RepoWatchEventTarget::Branch => current_branch_state_json(event, observation),
+    }
+}
+
+fn current_pull_request_json(pull_request: &RepoWatchPullRequestState) -> serde_json::Value {
+    serde_json::json!({
+        "type": "pull_request",
+        "present": true,
+        "target": pull_request_context_json(pull_request.context()),
+        "lifecycle": pull_request_lifecycle_name(pull_request.lifecycle()),
+        "mergeable_state": mergeable_state_name(pull_request.mergeable_state()),
+        "completed_check_suites": pull_request.completed_check_suites().iter().map(|suite| {
+            serde_json::json!({
+                "id": suite.id().get(),
+                "completion_generation": suite.completion_generation().as_str(),
+                "outcome": checks_outcome_name(suite.outcome()),
+            })
+        }).collect::<Vec<_>>(),
+        "completed_check_runs": pull_request.completed_check_runs().iter().map(|run| {
+            serde_json::json!({
+                "id": run.id().get(),
+                "completion_generation": run.completion_generation().as_str(),
+                "name": run.name().as_str(),
+                "conclusion": check_conclusion_name(run.conclusion()),
+            })
+        }).collect::<Vec<_>>(),
+        "reviews": pull_request.reviews().iter().map(|review| {
+            serde_json::json!({
+                "id": review.id().get(),
+                "reviewer": review.reviewer().as_str(),
+                "state": review.state().map(review_state_name),
+                "commit": review.commit().as_str(),
+            })
+        }).collect::<Vec<_>>(),
+        "threads": pull_request.threads().iter().map(|thread| {
+            serde_json::json!({
+                "thread": thread.thread().as_str(),
+                "state": review_thread_state_name(thread.state()),
+            })
+        }).collect::<Vec<_>>(),
+        "reactions": pull_request.reactions().iter().map(|reaction| {
+            serde_json::json!({
+                "subject": reaction_subject_json(reaction.subject()),
+                "reactor": reaction.reactor().as_str(),
+                "content": reaction.content().as_str(),
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
+fn current_branch_state_json(
+    event: &RepoWatchEvent,
+    observation: &RepoWatchObservation,
+) -> serde_json::Value {
+    let RepoWatchEventKindV1::BranchWorkflowRunCompleted {
+        branch, workflow, ..
+    } = event.kind()
+    else {
+        return serde_json::json!({ "type": "branch", "present": false });
+    };
+    serde_json::json!({
+        "type": "branch",
+        "branch": branch.as_str(),
+        "head_sha": observation.state().branch_heads().iter()
+            .find(|head| head.branch() == branch)
+            .map(|head| head.head().as_str()),
+        "workflow": workflow.as_str(),
+        "completed_runs": observation.state().workflow_runs().iter()
+            .filter(|run| run.branch() == branch && run.workflow() == workflow)
+            .map(|run| serde_json::json!({
+                "id": run.id().get(),
+                "workflow_id": run.workflow_id().get(),
+                "attempt": run.attempt().get(),
+                "conclusion": check_conclusion_name(run.conclusion()),
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn pull_request_context_json(context: &PullRequestEventContext) -> serde_json::Value {
+    serde_json::json!({
+        "number": context.number().get(),
+        "head_sha": context.head_sha().as_str(),
+        "head_repo": context.head_repository().as_str(),
+        "base_branch": context.base_branch().as_str(),
+        "head_branch": context.head_branch().as_str(),
+        "title": context.title().as_str(),
+        "body": context.body().as_str(),
+        "labels": context.labels().iter().map(LabelName::as_str).collect::<Vec<_>>(),
+        "draft": context.draft(),
+        "author": context.author().map(RepoWatchAuthorLogin::as_str),
+    })
 }
 
 fn event_target_json(target: &RepoWatchEventTarget) -> serde_json::Value {
@@ -678,6 +918,21 @@ const fn review_state_name(value: ReviewState) -> &'static str {
     }
 }
 
+const fn pull_request_lifecycle_name(value: RepoWatchPullRequestLifecycle) -> &'static str {
+    match value {
+        RepoWatchPullRequestLifecycle::Open => "open",
+        RepoWatchPullRequestLifecycle::Closed => "closed",
+        RepoWatchPullRequestLifecycle::Merged => "merged",
+    }
+}
+
+const fn review_thread_state_name(value: RepoWatchThreadState) -> &'static str {
+    match value {
+        RepoWatchThreadState::Open => "open",
+        RepoWatchThreadState::Resolved => "resolved",
+    }
+}
+
 const fn reaction_change_name(value: ReactionChange) -> &'static str {
     match value {
         ReactionChange::Added => "added",
@@ -773,6 +1028,12 @@ struct PullRequestFreshness {
     published_generation: Option<RepoWatchCursorGeneration>,
 }
 
+#[derive(Clone)]
+struct ListedPullRequest {
+    updated_at: String,
+    head_sha: CommitSha,
+}
+
 struct FetchedPullRequest {
     state: RepoWatchPullRequestState,
     settlement: PullRequestSettlement,
@@ -842,6 +1103,20 @@ impl GitHubRepositoryPoller {
         self.cache.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn attempt_metrics(&self) -> PollAttemptMetrics {
+        let cache = self.cache();
+        PollAttemptMetrics {
+            requests: cache.requests,
+            poll_wire_bytes: cache.poll_wire_bytes,
+            cached_resources: cache.resources.len(),
+            cached_wire_bytes: cache.cached_wire_bytes,
+        }
+    }
+
+    fn begin_attempt(&self) {
+        self.cache().begin_attempt();
+    }
+
     #[cfg(test)]
     async fn poll(
         self: &Arc<Self>,
@@ -908,7 +1183,7 @@ impl GitHubRepositoryPoller {
     async fn fetch_pull_requests(
         self: &Arc<Self>,
         pull_numbers: BTreeSet<u64>,
-        listed: &BTreeMap<u64, String>,
+        listed: &BTreeMap<u64, ListedPullRequest>,
         previous: Option<&RepoWatchObservation>,
         cursor_generation: Option<RepoWatchCursorGeneration>,
     ) -> Result<Vec<RepoWatchPullRequestState>, RepositoryWatchAttemptError> {
@@ -950,7 +1225,7 @@ impl GitHubRepositoryPoller {
     async fn collect_pull_request_fetches(
         self: &Arc<Self>,
         pull_numbers: BTreeSet<u64>,
-        listed: &BTreeMap<u64, String>,
+        listed: &BTreeMap<u64, ListedPullRequest>,
         previous: Option<&RepoWatchObservation>,
         cursor_generation: Option<RepoWatchCursorGeneration>,
         fetches: &mut JoinSet<Result<RepoWatchPullRequestState, RepositoryWatchAttemptError>>,
@@ -963,7 +1238,7 @@ impl GitHubRepositoryPoller {
                     break;
                 };
                 let poller = Arc::clone(self);
-                let listed_updated_at = listed.get(&number).cloned();
+                let listed_pull_request = listed.get(&number).cloned();
                 let previous_pull_request = previous
                     .and_then(|observation| previous_pull_request(observation, number))
                     .cloned();
@@ -971,7 +1246,7 @@ impl GitHubRepositoryPoller {
                     poller
                         .fetch_or_reuse_pull_request(
                             number,
-                            listed_updated_at.as_deref(),
+                            listed_pull_request.as_ref(),
                             previous_pull_request.as_ref(),
                             cursor_generation,
                         )
@@ -990,7 +1265,7 @@ impl GitHubRepositoryPoller {
 
     async fn fetch_open_pull_numbers(
         &self,
-    ) -> Result<BTreeMap<u64, String>, RepositoryWatchAttemptError> {
+    ) -> Result<BTreeMap<u64, ListedPullRequest>, RepositoryWatchAttemptError> {
         let mut numbers = BTreeMap::new();
         let mut page = 1_u16;
         loop {
@@ -1008,7 +1283,15 @@ impl GitHubRepositoryPoller {
             let has_next = response.has_next_page;
             for value in response.value {
                 positive(value.number)?;
-                numbers.insert(value.number, value.updated_at);
+                let head_sha = CommitSha::try_new(value.head.sha)
+                    .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+                numbers.insert(
+                    value.number,
+                    ListedPullRequest {
+                        updated_at: value.updated_at,
+                        head_sha,
+                    },
+                );
             }
             if !has_next {
                 return Ok(numbers);
@@ -1020,42 +1303,45 @@ impl GitHubRepositoryPoller {
     async fn fetch_or_reuse_pull_request(
         &self,
         number: u64,
-        listed_updated_at: Option<&str>,
+        listed_pull_request: Option<&ListedPullRequest>,
         previous_pull_request: Option<&RepoWatchPullRequestState>,
         cursor_generation: Option<RepoWatchCursorGeneration>,
     ) -> Result<RepoWatchPullRequestState, RepositoryWatchAttemptError> {
-        if let (Some(listed_updated_at), Some(previous)) =
-            (listed_updated_at, previous_pull_request)
-            && self.pull_request_is_unchanged(number, listed_updated_at, cursor_generation)
+        if let (Some(listed), Some(previous)) = (listed_pull_request, previous_pull_request)
+            && self.pull_request_detail_is_reusable(number, listed, previous, cursor_generation)
         {
+            let reviews = self.fetch_reviews(number, Some(previous.reviews())).await?;
+            let threads = self.fetch_threads(number).await?;
             let reactions = self
                 .fetch_reactions(number, Some(previous.reactions()))
                 .await?;
             self.record_skipped_poll(number);
-            return reuse_pull_request(previous, reactions);
+            return reuse_pull_request(previous, reviews, threads, reactions);
         }
         let fetched = self
             .fetch_pull_request(number, previous_pull_request)
             .await?;
-        match listed_updated_at {
-            Some(listed_updated_at) => {
-                self.record_fetched_pull_request(number, listed_updated_at, fetched.settlement);
+        match listed_pull_request {
+            Some(listed) => {
+                self.record_fetched_pull_request(number, listed, fetched.settlement);
             }
             None => self.forget_pull_request(number),
         }
         Ok(fetched.state)
     }
 
-    fn pull_request_is_unchanged(
+    fn pull_request_detail_is_reusable(
         &self,
         number: u64,
-        listed_updated_at: &str,
+        listed: &ListedPullRequest,
+        previous: &RepoWatchPullRequestState,
         cursor_generation: Option<RepoWatchCursorGeneration>,
     ) -> bool {
         self.freshness().get(&number).is_some_and(|freshness| {
             freshness.published_generation == cursor_generation
                 && cursor_generation.is_some()
-                && freshness.updated_at == listed_updated_at
+                && freshness.updated_at == listed.updated_at
+                && previous.context().head_sha() == &listed.head_sha
                 && freshness.settlement == PullRequestSettlement::Settled
                 && freshness.skipped_polls < MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS
         })
@@ -1070,13 +1356,13 @@ impl GitHubRepositoryPoller {
     fn record_fetched_pull_request(
         &self,
         number: u64,
-        updated_at: &str,
+        listed: &ListedPullRequest,
         settlement: PullRequestSettlement,
     ) {
         self.freshness().insert(
             number,
             PullRequestFreshness {
-                updated_at: updated_at.to_owned(),
+                updated_at: listed.updated_at.clone(),
                 settlement,
                 skipped_polls: 0,
                 published_generation: None,
@@ -1757,6 +2043,7 @@ impl GitHubRepositoryPoller {
     // fail an attempt whose true total fits.
     async fn read_bounded(
         &self,
+        resource_kind: &'static str,
         mut response: Response,
     ) -> Result<Vec<u8>, RepositoryWatchAttemptError> {
         let mut body = Vec::new();
@@ -1772,7 +2059,8 @@ impl GitHubRepositoryPoller {
             if next > MAX_RESPONSE_BYTES {
                 return Err(RepositoryWatchAttemptError::ResponseTooLarge);
             }
-            self.cache().record_poll_wire_bytes(chunk.len())?;
+            self.cache()
+                .record_poll_wire_bytes(resource_kind, chunk.len())?;
             body.extend_from_slice(&chunk);
         }
         Ok(body)
@@ -1882,7 +2170,7 @@ impl GitHubRepositoryPoller {
         // invalidates it.
         let response_entity_tag = response.headers().get(ETAG).map(entity_tag).transpose()?;
         let has_next_page = has_next_link(&response)?;
-        let bytes = self.read_bounded(response).await?;
+        let bytes = self.read_bounded(resource_kind, response).await?;
         let Ok(value) = serde_json::from_slice::<T>(&bytes) else {
             self.cache().remove(&key);
             return Err(RepositoryWatchAttemptError::InvalidResponse);
@@ -2013,11 +2301,23 @@ struct PollCache {
     cached_wire_bytes: usize,
 }
 
+#[derive(Clone, Copy)]
+struct PollAttemptMetrics {
+    requests: usize,
+    poll_wire_bytes: usize,
+    cached_resources: usize,
+    cached_wire_bytes: usize,
+}
+
 impl PollCache {
-    fn begin_poll(&mut self) {
-        self.touched.clear();
+    fn begin_attempt(&mut self) {
         self.requests = 0;
         self.poll_wire_bytes = 0;
+    }
+
+    fn begin_poll(&mut self) {
+        self.touched.clear();
+        self.begin_attempt();
     }
 
     fn touch(&mut self, key: ResourceKey) -> Result<(), RepositoryWatchAttemptError> {
@@ -2051,6 +2351,7 @@ impl PollCache {
 
     fn record_poll_wire_bytes(
         &mut self,
+        resource_kind: &'static str,
         wire_bytes: usize,
     ) -> Result<(), RepositoryWatchAttemptError> {
         let projected = self
@@ -2058,6 +2359,13 @@ impl PollCache {
             .checked_add(wire_bytes)
             .ok_or(RepositoryWatchAttemptError::ResourceLimit)?;
         if projected > MAX_POLL_WIRE_BYTES {
+            tracing::warn!(
+                resource_kind,
+                accepted_poll_wire_bytes = self.poll_wire_bytes,
+                next_chunk_bytes = wire_bytes,
+                projected_poll_wire_bytes = projected,
+                "repository-watch poll wire budget exceeded"
+            );
             return Err(RepositoryWatchAttemptError::ResourceLimit);
         }
         self.poll_wire_bytes = projected;
@@ -2209,6 +2517,8 @@ const fn remaining_interval(timing: PollCycleTiming) -> Duration {
 
 fn reuse_pull_request(
     previous: &RepoWatchPullRequestState,
+    reviews: Vec<RepoWatchReviewObservation>,
+    threads: Vec<RepoWatchThreadObservation>,
     reactions: Vec<RepoWatchReactionObservation>,
 ) -> Result<RepoWatchPullRequestState, RepositoryWatchAttemptError> {
     RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
@@ -2217,8 +2527,8 @@ fn reuse_pull_request(
         mergeable_state: previous.mergeable_state(),
         completed_check_suites: previous.completed_check_suites().to_vec(),
         completed_check_runs: previous.completed_check_runs().to_vec(),
-        reviews: previous.reviews().to_vec(),
-        threads: previous.threads().to_vec(),
+        reviews,
+        threads,
         reactions,
     })
     .map_err(|_| RepositoryWatchAttemptError::Normalization)
@@ -2367,6 +2677,12 @@ fn normalize_review_state(state: &str) -> Result<ProviderReviewState, Repository
 struct PullNumberResponse {
     number: u64,
     updated_at: String,
+    head: ListedPullHeadResponse,
+}
+
+#[derive(Clone, Deserialize)]
+struct ListedPullHeadResponse {
+    sha: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -2607,16 +2923,18 @@ mod tests {
 
     use super::{
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
-        MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
+        ListedPullRequest, MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
         MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
         PollCache, PollCycleTiming, PullRequestSettlement, PullResponse, ReactionContent,
         RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
-        RepositoryWatchRuntimeError, ResourceKey, ReviewState, Url, WorkflowName, WorkflowResponse,
+        RepositoryWatchRuntimeError, ResourceKey, ReviewState, Url,
+        UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse, derive_repo_watch_events,
         dispatch_context_json, normalize_checks_outcome, normalize_pull_request_context, object_id,
-        remaining_interval, rule_activation_error, supervise_repository_tasks,
+        owed_dispatch_context_json_parts, remaining_interval, rule_activation_error,
+        supervise_repository_tasks,
     };
     use signalbox_domain::{
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
@@ -2672,6 +2990,7 @@ mod tests {
     // and the fetch set on the same pull request.
     const CANCELLED_FETCH_PULL_NUMBER: u64 = 7;
     const PULL_UPDATED_AT: &str = "2026-08-03T12:30:00Z";
+    const CHANGED_PULL_UPDATED_AT: &str = "2026-08-03T12:30:01Z";
     const POLL_INTERVAL: Duration = Duration::from_secs(300);
     const SHORT_CYCLE: Duration = Duration::from_secs(75);
     const SHORT_CYCLE_REMAINDER: Duration = Duration::from_secs(225);
@@ -2701,10 +3020,15 @@ mod tests {
     const EXPECTED_FEATURE_WORKFLOW_CONCLUSION: CheckConclusion = CheckConclusion::Failure;
     const EXPECTED_MAIN_WORKFLOW_CONCLUSION: CheckConclusion = CheckConclusion::Success;
     const PULL_NUMBER: u64 = 7;
+    const BASE_ADVANCE_EVENT_ID: u128 = 72;
     const HEAD_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OWED_EVENT_HEAD_SHA: &str = "dddddddddddddddddddddddddddddddddddddddd";
+    const OWED_MATCH_COUNT: u64 = 51;
+    const CHANGED_LISTED_HEAD_SHA: &str = "cccccccccccccccccccccccccccccccccccccccc";
     const BASE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const HEAD_REPOSITORY: &str = "fork/repository";
     const HEAD_BRANCH: &str = "feature/watch";
+    const AGENT_HEAD_BRANCH: &str = "agent/dependent";
     const BASE_BRANCH: &str = "main";
     const PULL_TITLE: &str = "Exercise repository watch";
     const PULL_BODY: &str = "Typed fixture body";
@@ -2731,6 +3055,12 @@ mod tests {
     const IN_PROGRESS_CHECK_RUN_NAME: &str = "lint";
     const RETAINED_REVIEW_IDS: [u64; 2] = [31, 32];
     const PENDING_REVIEW_ID: u64 = 33;
+    // Distinct ordered identities preserve the provider order of the deferred
+    // review fixtures.
+    const DEFERRED_REVIEW_IDS: [u64; 3] = [34, 35, 36];
+    const DEFERRED_USER_REVIEWER: &str = "watch-user";
+    const DEFERRED_APPROVING_REVIEWER: &str = "review-agent-one[bot]";
+    const DEFERRED_COMMENTING_REVIEWER: &str = "review-agent-two[bot]";
     const REVIEW_THREADS: [&str; 2] = [REVIEW_THREAD, RESOLVED_REVIEW_THREAD];
     const SIGNAL_REACTION_CONTENTS: [&str; 3] = ["+1", "rocket", "eyes"];
     const AMBIENT_REACTOR: &str = "ambient-user";
@@ -2749,8 +3079,20 @@ mod tests {
     const SCRIPTED_SERVER_TIMEOUT: Duration = Duration::from_secs(5);
 
     fn pulls_with_one() -> String {
-        serde_json::json!([{ "number": PULL_NUMBERS[0], "updated_at": PULL_UPDATED_AT }])
-            .to_string()
+        serde_json::json!([{
+            "number": PULL_NUMBERS[0],
+            "updated_at": PULL_UPDATED_AT,
+            "head": { "sha": HEAD_SHA }
+        }])
+        .to_string()
+    }
+
+    fn listed_pull_request(head_sha: &str) -> ListedPullRequest {
+        ListedPullRequest {
+            updated_at: PULL_UPDATED_AT.to_owned(),
+            head_sha: CommitSha::try_new(head_sha.to_owned())
+                .expect("fixture listed head is valid"),
+        }
     }
 
     fn pull_detail() -> String {
@@ -2948,6 +3290,48 @@ mod tests {
                 "id": PENDING_REVIEW_ID,
                 "user": { "login": PROVIDER_REVIEWER },
                 "state": "PENDING",
+                "commit_id": HEAD_SHA
+            }
+        ])
+        .to_string()
+    }
+
+    fn reviews_with_deferred_wave() -> String {
+        serde_json::json!([
+            {
+                "id": RETAINED_REVIEW_IDS[0],
+                "user": { "login": PROVIDER_REVIEWER },
+                "state": "APPROVED",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": RETAINED_REVIEW_IDS[1],
+                "user": { "login": PROVIDER_REVIEWER },
+                "state": "DISMISSED",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": PENDING_REVIEW_ID,
+                "user": { "login": PROVIDER_REVIEWER },
+                "state": "PENDING",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": DEFERRED_REVIEW_IDS[0],
+                "user": { "login": DEFERRED_USER_REVIEWER },
+                "state": "COMMENTED",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": DEFERRED_REVIEW_IDS[1],
+                "user": { "login": DEFERRED_APPROVING_REVIEWER },
+                "state": "APPROVED",
+                "commit_id": HEAD_SHA
+            },
+            {
+                "id": DEFERRED_REVIEW_IDS[2],
+                "user": { "login": DEFERRED_COMMENTING_REVIEWER },
+                "state": "COMMENTED",
                 "commit_id": HEAD_SHA
             }
         ])
@@ -3807,10 +4191,26 @@ mod tests {
     }
 
     fn skipped_pull_request_responses() -> Vec<ScriptedResponse> {
+        skipped_pull_request_responses_with_reviews(reviews())
+    }
+
+    fn skipped_pull_request_responses_with_deferred_reviews() -> Vec<ScriptedResponse> {
+        skipped_pull_request_responses_with_reviews(reviews_with_deferred_wave())
+    }
+
+    fn skipped_pull_request_responses_with_reviews(reviews: String) -> Vec<ScriptedResponse> {
         vec![
             ScriptedResponse::conditional_ok(
                 RequestTarget(PULLS_TARGET.to_owned()),
                 ResponseBody(pulls_with_one()),
+            ),
+            ScriptedResponse::conditional_ok(
+                RequestTarget(REVIEWS_TARGET.to_owned()),
+                ResponseBody(reviews),
+            ),
+            ScriptedResponse::post(
+                RequestTarget(THREADS_TARGET.to_owned()),
+                ResponseBody(threads()),
             ),
             ScriptedResponse::conditional_ok(
                 RequestTarget(PULL_REACTIONS_TARGET.to_owned()),
@@ -4038,7 +4438,10 @@ mod tests {
         ])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-        let listed = BTreeMap::from([(CANCELLED_FETCH_PULL_NUMBER, PULL_UPDATED_AT.to_owned())]);
+        let listed = BTreeMap::from([(
+            CANCELLED_FETCH_PULL_NUMBER,
+            listed_pull_request(&minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER)),
+        )]);
         let mut tasks = JoinSet::new();
         tasks.spawn({
             let poller = Arc::clone(&fixture.poller);
@@ -4084,7 +4487,10 @@ mod tests {
         ])
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-        let listed = BTreeMap::from([(CANCELLED_FETCH_PULL_NUMBER, PULL_UPDATED_AT.to_owned())]);
+        let listed = BTreeMap::from([(
+            CANCELLED_FETCH_PULL_NUMBER,
+            listed_pull_request(&minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER)),
+        )]);
         let mut tasks = JoinSet::new();
         tasks.spawn({
             let poller = Arc::clone(&fixture.poller);
@@ -4610,7 +5016,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unchanged_pull_request_with_settled_checks_refetches_only_its_reactions() {
+    async fn an_unchanged_pull_request_refetches_dispatch_signals() {
         let responses = settled_typed_observation_responses()
             .into_iter()
             .chain(skipped_pull_request_responses())
@@ -4634,6 +5040,72 @@ mod tests {
         server.finish().await;
 
         assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn a_reused_pull_request_emits_every_deferred_review_once() {
+        let responses = settled_typed_observation_responses()
+            .into_iter()
+            .chain(skipped_pull_request_responses_with_deferred_reviews())
+            .collect();
+        let server = ConcurrentScriptedServer::start(responses).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+
+        let previous = fixture
+            .poller
+            .poll(None)
+            .await
+            .expect("the prior cursor observation is fetched");
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+        let current = fixture
+            .poller
+            .poll(Some(&previous))
+            .await
+            .expect("the deferred remote state is fetched");
+        server.finish().await;
+        let events = derive_repo_watch_events(
+            &fixture.poller.repository,
+            Some(&previous),
+            &current,
+            &mut UuidV7RepoWatchEventIdGenerator,
+        )
+        .expect("the deferred review wave forms events");
+        let deferred_reviews =
+            &current.state().pull_requests()[0].reviews()[RETAINED_REVIEW_IDS.len()..];
+
+        assert_eq!(events.len(), deferred_reviews.len());
+        assert_eq!(
+            events[0].kind(),
+            &RepoWatchEventKindV1::ReviewSubmitted {
+                reviewer: deferred_reviews[0].reviewer().clone(),
+                state: deferred_reviews[0]
+                    .state()
+                    .expect("fixture review is submitted"),
+                commit: deferred_reviews[0].commit().clone(),
+            }
+        );
+        assert_eq!(
+            events[1].kind(),
+            &RepoWatchEventKindV1::ReviewSubmitted {
+                reviewer: deferred_reviews[1].reviewer().clone(),
+                state: deferred_reviews[1]
+                    .state()
+                    .expect("fixture review is submitted"),
+                commit: deferred_reviews[1].commit().clone(),
+            }
+        );
+        assert_eq!(
+            events[2].kind(),
+            &RepoWatchEventKindV1::ReviewSubmitted {
+                reviewer: deferred_reviews[2].reviewer().clone(),
+                state: deferred_reviews[2]
+                    .state()
+                    .expect("fixture review is submitted"),
+                commit: deferred_reviews[2].commit().clone(),
+            }
+        );
     }
 
     #[tokio::test]
@@ -4749,9 +5221,18 @@ mod tests {
             .collect();
         let server = ConcurrentScriptedServer::start(responses).await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-        let listed: BTreeMap<u64, String> = numbers
+        let listed: BTreeMap<u64, ListedPullRequest> = numbers
             .iter()
-            .map(|number| (*number, PULL_UPDATED_AT.to_owned()))
+            .map(|number| {
+                (
+                    *number,
+                    ListedPullRequest {
+                        updated_at: PULL_UPDATED_AT.to_owned(),
+                        head_sha: CommitSha::try_new(minimal_pull_head_sha(*number))
+                            .expect("fixture listed head is valid"),
+                    },
+                )
+            })
             .collect();
 
         let pull_requests = fixture
@@ -4809,7 +5290,14 @@ mod tests {
         .await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
         let poller = Arc::clone(&fixture.poller);
-        let listed = BTreeMap::from([(CANCELLED_FETCH_PULL_NUMBER, PULL_UPDATED_AT.to_owned())]);
+        let listed = BTreeMap::from([(
+            CANCELLED_FETCH_PULL_NUMBER,
+            ListedPullRequest {
+                updated_at: PULL_UPDATED_AT.to_owned(),
+                head_sha: CommitSha::try_new(minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER))
+                    .expect("fixture listed head is valid"),
+            },
+        )]);
         let fetch = tokio::spawn(async move {
             poller
                 .fetch_pull_requests(
@@ -4846,27 +5334,27 @@ mod tests {
     /// After a commit conflict the durable baseline belongs to a competing
     /// watcher, so entries recorded and published against the superseded
     /// baseline must authorize no further reuse.
-    #[test]
-    fn invalidated_freshness_authorizes_no_reuse() {
+    #[tokio::test]
+    async fn invalidated_freshness_authorizes_no_reuse() {
         let fixture = poller_fixture(
             Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
         )
         .expect("poller is constructed");
-        // Arbitrary: reuse authorization is keyed by the number alone, so any
-        // listed pull number exercises it.
-        let number = 7_u64;
-        fixture.poller.record_fetched_pull_request(
-            number,
-            PULL_UPDATED_AT,
-            PullRequestSettlement::Settled,
-        );
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let listed = listed_pull_request(HEAD_SHA);
+        let number = previous.context().number().get();
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
         assert!(
-            fixture.poller.pull_request_is_unchanged(
+            fixture.poller.pull_request_detail_is_reusable(
                 number,
-                PULL_UPDATED_AT,
+                &listed,
+                previous,
                 Some(RepoWatchCursorGeneration::INITIAL),
             ),
             "a published settled entry authorizes reuse against its cursor generation"
@@ -4874,78 +5362,88 @@ mod tests {
         fixture.poller.invalidate_freshness();
 
         assert!(
-            !fixture.poller.pull_request_is_unchanged(
+            !fixture.poller.pull_request_detail_is_reusable(
                 number,
-                PULL_UPDATED_AT,
+                &listed,
+                previous,
                 Some(RepoWatchCursorGeneration::INITIAL),
             ),
             "an invalidated record authorizes nothing"
         );
     }
 
-    #[test]
-    fn freshness_published_against_another_cursor_authorizes_no_reuse() {
+    #[tokio::test]
+    async fn freshness_published_against_another_cursor_authorizes_no_reuse() {
         let fixture = poller_fixture(
             Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
         )
         .expect("poller is constructed");
-        let number = 7_u64;
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let listed = listed_pull_request(HEAD_SHA);
+        let number = previous.context().number().get();
         let published_generation = RepoWatchCursorGeneration::INITIAL;
         let loaded_generation = published_generation
             .next()
             .expect("fixture cursor generation has a successor");
-        fixture.poller.record_fetched_pull_request(
-            number,
-            PULL_UPDATED_AT,
-            PullRequestSettlement::Settled,
-        );
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
         fixture.poller.publish_freshness(published_generation);
 
         assert!(
-            !fixture.poller.pull_request_is_unchanged(
+            !fixture.poller.pull_request_detail_is_reusable(
                 number,
-                PULL_UPDATED_AT,
+                &listed,
+                previous,
                 Some(loaded_generation),
             ),
             "freshness published against another durable cursor must not authorize reuse"
         );
     }
 
-    #[test]
-    fn changed_pull_request_timestamp_authorizes_no_reuse() {
+    #[tokio::test]
+    async fn changed_pull_request_timestamp_authorizes_no_reuse() {
         let fixture = poller_fixture(
             Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
         )
         .expect("poller is constructed");
-        let number = 7_u64;
-        fixture.poller.record_fetched_pull_request(
-            number,
-            PULL_UPDATED_AT,
-            PullRequestSettlement::Settled,
-        );
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let listed = listed_pull_request(HEAD_SHA);
+        let changed_listing = ListedPullRequest {
+            updated_at: String::from(CHANGED_PULL_UPDATED_AT),
+            head_sha: listed.head_sha.clone(),
+        };
+        let number = previous.context().number().get();
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
 
-        assert!(!fixture.poller.pull_request_is_unchanged(
+        assert!(!fixture.poller.pull_request_detail_is_reusable(
             number,
-            "2026-08-03T12:30:01Z",
+            &changed_listing,
+            previous,
             Some(RepoWatchCursorGeneration::INITIAL),
         ));
     }
 
-    #[test]
-    fn pull_request_reuse_stops_at_the_skipped_poll_limit() {
+    #[tokio::test]
+    async fn pull_request_reuse_stops_at_the_skipped_poll_limit() {
         let fixture = poller_fixture(
             Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
         )
         .expect("poller is constructed");
-        let number = 7_u64;
-        fixture.poller.record_fetched_pull_request(
-            number,
-            PULL_UPDATED_AT,
-            PullRequestSettlement::Settled,
-        );
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let listed = listed_pull_request(HEAD_SHA);
+        let number = previous.context().number().get();
+        fixture
+            .poller
+            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
@@ -4956,23 +5454,57 @@ mod tests {
             .expect("fixture freshness is recorded")
             .skipped_polls = MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS - 1;
 
-        assert!(fixture.poller.pull_request_is_unchanged(
+        assert!(fixture.poller.pull_request_detail_is_reusable(
             number,
-            PULL_UPDATED_AT,
+            &listed,
+            previous,
             Some(RepoWatchCursorGeneration::INITIAL),
         ));
         fixture.poller.record_skipped_poll(number);
-        assert!(!fixture.poller.pull_request_is_unchanged(
+        assert!(!fixture.poller.pull_request_detail_is_reusable(
             number,
-            PULL_UPDATED_AT,
+            &listed,
+            previous,
             Some(RepoWatchCursorGeneration::INITIAL),
         ));
         fixture.poller.record_skipped_poll(number);
-        assert!(!fixture.poller.pull_request_is_unchanged(
+        assert!(!fixture.poller.pull_request_detail_is_reusable(
             number,
-            PULL_UPDATED_AT,
+            &listed,
+            previous,
             Some(RepoWatchCursorGeneration::INITIAL),
         ));
+    }
+
+    #[tokio::test]
+    async fn a_listed_head_change_forbids_pull_request_reuse() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        let observation = complete_typed_observation().await;
+        let previous = &observation.state().pull_requests()[0];
+        let previously_listed = listed_pull_request(HEAD_SHA);
+        let changed_listing = listed_pull_request(CHANGED_LISTED_HEAD_SHA);
+        let number = previous.context().number().get();
+        fixture.poller.record_fetched_pull_request(
+            number,
+            &previously_listed,
+            PullRequestSettlement::Settled,
+        );
+        fixture
+            .poller
+            .publish_freshness(RepoWatchCursorGeneration::INITIAL);
+
+        assert!(
+            !fixture.poller.pull_request_detail_is_reusable(
+                number,
+                &changed_listing,
+                previous,
+                Some(RepoWatchCursorGeneration::INITIAL),
+            ),
+            "a head change is never hidden by unchanged listing metadata"
+        );
     }
 
     #[tokio::test]
@@ -5471,15 +6003,40 @@ mod tests {
     }
 
     #[test]
+    fn a_new_attempt_clears_prior_poll_metrics_without_discarding_the_cache() {
+        let mut cache = PollCache::default();
+        let key = ResourceKey(CACHE_RESOURCE_KEY.to_owned());
+        let entity_tag = EntityTag(ENTITY_TAG.to_owned());
+        cache.insert(
+            key.clone(),
+            entity_tag.clone(),
+            CACHE_WIRE_BYTES,
+            Vec::<u8>::new(),
+        );
+        cache.begin_poll();
+        cache.touch(key.clone()).expect("cached fixture is touched");
+        cache
+            .record_poll_wire_bytes(CACHE_KEY_KIND, CACHE_WIRE_BYTES)
+            .expect("fixture wire bytes are admitted");
+
+        cache.begin_attempt();
+
+        assert_eq!(cache.requests, 0);
+        assert_eq!(cache.poll_wire_bytes, 0);
+        assert_eq!(cache.cached_wire_bytes, CACHE_WIRE_BYTES);
+        assert_eq!(cache.entity_tag(&key), Some(&entity_tag));
+    }
+
+    #[test]
     fn one_poll_rejects_response_bytes_beyond_its_aggregate_wire_bound() {
         let mut cache = PollCache::default();
         cache.begin_poll();
         cache
-            .record_poll_wire_bytes(MAX_POLL_WIRE_BYTES)
+            .record_poll_wire_bytes(CACHE_KEY_KIND, MAX_POLL_WIRE_BYTES)
             .expect("exact aggregate wire bound is accepted");
 
         assert_eq!(
-            cache.record_poll_wire_bytes(1),
+            cache.record_poll_wire_bytes(CACHE_KEY_KIND, 1),
             Err(RepositoryWatchAttemptError::ResourceLimit)
         );
     }
@@ -5538,5 +6095,124 @@ mod tests {
         assert_eq!(encoded["event"]["target"]["head_branch"], HEAD_BRANCH);
         assert_eq!(encoded["event"]["kind"], "MergeableStateChanged");
         assert_eq!(encoded["event"]["payload"]["current"], "conflicting");
+    }
+
+    #[test]
+    fn base_advance_dispatch_context_targets_the_dependent_pull_request() {
+        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())
+            .expect("fixture repository is valid");
+        let base_branch =
+            BranchName::try_new(BASE_BRANCH.to_owned()).expect("fixture base branch is valid");
+        let context = PullRequestEventContext::new(PullRequestEventContextInput {
+            number: PullRequestNumber::new(
+                PULL_NUMBER
+                    .try_into()
+                    .expect("fixture pull-request number is positive"),
+            ),
+            head_sha: CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture SHA is valid"),
+            head_repository: repository.clone(),
+            base_branch: base_branch.clone(),
+            head_branch: BranchName::try_new(AGENT_HEAD_BRANCH.to_owned())
+                .expect("fixture head branch is valid"),
+            title: PullRequestTitle::try_new(PULL_TITLE.to_owned())
+                .expect("fixture title is valid"),
+            body: PullRequestBody::try_new(PULL_BODY.to_owned()).expect("fixture body is valid"),
+            labels: Vec::new(),
+            draft: false,
+            author: None,
+        });
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(uuid::Uuid::from_u128(BASE_ADVANCE_EVENT_ID)),
+            repository,
+            context,
+            RepoWatchEventKindV1::BaseAdvanced {
+                branch: base_branch,
+            },
+        )
+        .expect("fixture event is coherent");
+        let encoded: serde_json::Value =
+            serde_json::from_str(&dispatch_context_json(&event)).expect("dispatch context is JSON");
+
+        assert_eq!(encoded["type"], "pull_request");
+        assert_eq!(encoded["number"], PULL_NUMBER);
+        assert_eq!(encoded["event"]["target"]["base_branch"], BASE_BRANCH);
+        assert_eq!(encoded["event"]["target"]["head_branch"], AGENT_HEAD_BRANCH);
+        assert_eq!(encoded["event"]["kind"], "BaseAdvanced");
+        assert_eq!(encoded["event"]["payload"]["branch"], BASE_BRANCH);
+    }
+
+    #[tokio::test]
+    async fn owed_dispatch_context_collapses_history_into_the_current_durable_state() {
+        let observation = complete_typed_observation().await;
+        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())
+            .expect("fixture repository is valid");
+        let context = PullRequestEventContext::new(PullRequestEventContextInput {
+            number: PullRequestNumber::new(
+                PULL_NUMBER
+                    .try_into()
+                    .expect("fixture pull-request number is positive"),
+            ),
+            head_sha: CommitSha::try_new(OWED_EVENT_HEAD_SHA.to_owned())
+                .expect("fixture old SHA is valid"),
+            head_repository: repository.clone(),
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())
+                .expect("fixture base branch is valid"),
+            head_branch: BranchName::try_new(HEAD_BRANCH.to_owned())
+                .expect("fixture head branch is valid"),
+            title: PullRequestTitle::try_new("Earlier repository watch".to_owned())
+                .expect("fixture title is valid"),
+            body: PullRequestBody::try_new("Earlier review state.".to_owned())
+                .expect("fixture body is valid"),
+            labels: Vec::new(),
+            draft: false,
+            author: None,
+        });
+        let event = RepoWatchEvent::try_pull_request(
+            RepoWatchEventId::from_uuid(uuid::Uuid::from_u128(81)),
+            repository,
+            context,
+            RepoWatchEventKindV1::ReviewSubmitted {
+                reviewer: RepoWatchAuthorLogin::try_new(PROVIDER_REVIEWER.to_owned())
+                    .expect("fixture reviewer is valid"),
+                state: ReviewState::Approved,
+                commit: CommitSha::try_new(OWED_EVENT_HEAD_SHA.to_owned())
+                    .expect("fixture review commit is valid"),
+            },
+        )
+        .expect("fixture event is coherent");
+        let encoded: serde_json::Value = serde_json::from_str(&owed_dispatch_context_json_parts(
+            &event,
+            uuid::Uuid::from_u128(82),
+            RepoWatchEventId::from_uuid(uuid::Uuid::from_u128(79)),
+            OWED_MATCH_COUNT,
+            &observation,
+        ))
+        .expect("owed dispatch context is JSON");
+
+        assert_eq!(encoded["event"]["target"]["head_sha"], OWED_EVENT_HEAD_SHA);
+        assert_eq!(encoded["delivery"]["mode"], "owed_current_state");
+        assert_eq!(encoded["delivery"]["matched_event_count"], OWED_MATCH_COUNT);
+        assert_eq!(
+            encoded["delivery"]["current"]["target"]["head_sha"],
+            HEAD_SHA
+        );
+        assert_eq!(
+            encoded["delivery"]["current"]["reviews"]
+                .as_array()
+                .map(Vec::len),
+            Some(RETAINED_REVIEW_IDS.len())
+        );
+        assert_eq!(
+            encoded["delivery"]["current"]["threads"][0]["thread"],
+            REVIEW_THREAD
+        );
+        assert_eq!(
+            encoded["delivery"]["current"]["threads"][0]["state"],
+            "open"
+        );
+        assert_eq!(
+            encoded["delivery"]["current"]["threads"][1]["thread"],
+            RESOLVED_REVIEW_THREAD
+        );
     }
 }

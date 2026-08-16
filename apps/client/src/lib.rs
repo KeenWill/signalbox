@@ -23,7 +23,7 @@ use presentation::{
 };
 use rustix::{
     fd::OwnedFd,
-    fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fstat, openat, statat},
+    fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fchmod, fstat, openat, statat},
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
@@ -34,9 +34,9 @@ use signalbox_process_protocol::{
     DelegationOutcome, DelegationPolicy, DelegationProvenance, DelegationReason,
     DelegationWaitMode, DescendantTerminationScope, ErrorCode, ErrorDetail, FrameEncodeError,
     GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_BLOB_CHUNK_BYTES,
-    MAX_CONTENT_FRAGMENT_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES, MAX_FRAME_BYTES,
-    MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState, ModelSelection,
-    ModelSettingsOverlay, ProtocolVersion, RejectionDetail, RequestId,
+    MAX_BLOB_READ_BYTES, MAX_CONTENT_FRAGMENT_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
+    MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
+    ModelSelection, ModelSettingsOverlay, ProtocolVersion, RejectionDetail, RequestId,
     ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
     ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
     ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
@@ -47,7 +47,7 @@ use signalbox_process_protocol::{
     SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
     decode_server_line, encode_client_line, encode_server_line,
 };
-use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
 use uuid::Uuid;
 
@@ -393,7 +393,9 @@ fn delegation_rejection_matches(
         | RejectionDetail::BlobUploadLengthOutOfRange { .. }
         | RejectionDetail::BlobUploadSizeExceeded { .. }
         | RejectionDetail::BlobUploadLengthMismatch { .. }
-        | RejectionDetail::BlobUploadDigestMismatch { .. } => false,
+        | RejectionDetail::BlobUploadDigestMismatch { .. }
+        | RejectionDetail::BlobReadLengthOutOfRange { .. }
+        | RejectionDetail::BlobReadRangeOutOfBounds { .. } => false,
     }
 }
 
@@ -499,6 +501,8 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::BlobUploadAppended { .. }
         | ServerMessage::BlobUploadCommitted { .. }
         | ServerMessage::BlobUploadAborted {}
+        | ServerMessage::BlobMetadata { .. }
+        | ServerMessage::BlobChunkRead { .. }
         | ServerMessage::ImportedConversationStart { .. }
         | ServerMessage::ImportedConversationEntry { .. }
         | ServerMessage::ImportedConversationEnd { .. }
@@ -598,6 +602,8 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::BlobUploadAppended { .. }
         | ServerMessage::BlobUploadCommitted { .. }
         | ServerMessage::BlobUploadAborted {}
+        | ServerMessage::BlobMetadata { .. }
+        | ServerMessage::BlobChunkRead { .. }
         | ServerMessage::ImportedConversationStart { .. }
         | ServerMessage::ImportedConversationEntry { .. }
         | ServerMessage::ImportedConversationEnd { .. }
@@ -709,6 +715,8 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::ConversationImportAlreadyImported { .. }
         | ServerMessage::ConversationImportAborted {}
         | ServerMessage::BlobUploadAborted {}
+        | ServerMessage::BlobMetadata { .. }
+        | ServerMessage::BlobChunkRead { .. }
         | ServerMessage::ImportedConversationStart { .. }
         | ServerMessage::ImportedConversationEntry { .. }
         | ServerMessage::ImportedConversationEnd { .. }
@@ -868,6 +876,8 @@ async fn execute(
             ..
         } => Some(PreparedImport::Scan(collect_import_paths(path)?)),
         Command::BlobUpload { .. }
+        | Command::BlobMetadata { .. }
+        | Command::BlobRead { .. }
         | Command::Create { .. }
         | Command::Place { .. }
         | Command::Continue { .. }
@@ -915,6 +925,8 @@ async fn execute(
         | Command::Stop { .. }
         | Command::Approve { .. }
         | Command::Deny { .. }
+        | Command::BlobMetadata { .. }
+        | Command::BlobRead { .. }
         | Command::Import { .. } => None,
     };
     let system_prompt_text = match &arguments.command {
@@ -949,7 +961,9 @@ async fn execute(
         | Command::Imported { .. }
         | Command::Review(_)
         | Command::Import { .. }
-        | Command::BlobUpload { .. } => None,
+        | Command::BlobUpload { .. }
+        | Command::BlobMetadata { .. }
+        | Command::BlobRead { .. } => None,
     };
     let socket = socket_path(arguments.socket, socket_environment)?;
     let mut client = ProcessClient::new(socket);
@@ -1124,6 +1138,18 @@ async fn execute(
         Command::BlobUpload { .. } => {
             let source = prepared_blob.ok_or(ClientError::Input("blob source was not prepared"))?;
             upload_blob(&mut client, &mut output, source).await
+        }
+        Command::BlobMetadata { digest } => {
+            read_blob_metadata(&mut client, &mut output, digest).await
+        }
+        Command::BlobRead {
+            digest,
+            offset_bytes,
+            length_bytes,
+            output,
+        } => {
+            let bytes = read_blob_chunk(&mut client, digest, offset_bytes, length_bytes).await?;
+            write_blob_output(&output, &bytes).await
         }
         Command::Reconcile {
             session_id,
@@ -1392,6 +1418,105 @@ async fn upload_blob_once(
         )
         .mutation()),
     }
+}
+
+async fn read_blob_metadata(
+    client: &mut ProcessClient,
+    output: &mut Output<'_>,
+    digest: CanonicalBlobDigest,
+) -> Result<(), ClientError> {
+    let mut connection = client
+        .setup_request(ClientRequest::ReadBlobMetadata { digest })
+        .await?;
+    match connection.message().await? {
+        ServerMessage::BlobMetadata {
+            digest: returned_digest,
+            byte_length,
+            replica_count,
+        } if returned_digest == digest => output
+            .blob_metadata(digest, byte_length.value(), replica_count.value())
+            .map_err(ClientError::from),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail)),
+        _ => Err(ClientError::Protocol(
+            "blob metadata returned an unexpected response",
+        )),
+    }
+}
+
+async fn read_blob_chunk(
+    client: &mut ProcessClient,
+    digest: CanonicalBlobDigest,
+    offset_bytes: CanonicalU64,
+    length_bytes: CanonicalU64,
+) -> Result<Vec<u8>, ClientError> {
+    if !(1..=MAX_BLOB_READ_BYTES as u64).contains(&length_bytes.value()) {
+        return Err(ClientError::BlobReadLengthOutOfRange);
+    }
+    let mut connection = client
+        .setup_request(ClientRequest::ReadBlobChunk {
+            digest,
+            offset_bytes,
+            length_bytes,
+        })
+        .await?;
+    match connection.message().await? {
+        ServerMessage::BlobChunkRead {
+            digest: returned_digest,
+            offset_bytes: returned_offset,
+            bytes,
+        } if returned_digest == digest
+            && returned_offset == offset_bytes
+            && u64::try_from(bytes.as_bytes().len()) == Ok(length_bytes.value()) =>
+        {
+            Ok(bytes.into_bytes())
+        }
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail)),
+        _ => Err(ClientError::Protocol(
+            "blob range returned an unexpected response",
+        )),
+    }
+}
+
+async fn write_blob_output(path: &Path, bytes: &[u8]) -> Result<(), ClientError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
+    fchmod(temporary.as_file(), Mode::RUSR | Mode::WUSR)
+        .map_err(std::io::Error::from)
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
+    let mut file = tokio::fs::File::from_std(
+        temporary
+            .reopen()
+            .map_err(|source| ClientError::blob_output_file(path, source))?,
+    );
+    file.write_all(bytes)
+        .await
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
+    file.sync_all()
+        .await
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
+    drop(file);
+    temporary
+        .persist_noclobber(path)
+        .map_err(|error| ClientError::blob_output_file(path, error.error))?;
+    tokio::fs::File::open(parent)
+        .await
+        .map_err(|source| ClientError::blob_output_file(path, source))?
+        .sync_all()
+        .await
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
+    Ok(())
 }
 
 async fn hash_blob_source(
@@ -5714,7 +5839,7 @@ mod tests {
         ffi::OsString,
         fs,
         io::{self, Cursor},
-        os::unix::fs::symlink,
+        os::unix::fs::{PermissionsExt, symlink},
         path::{Path, PathBuf},
         process::ExitCode,
         time::Duration,
@@ -5804,16 +5929,16 @@ mod tests {
         hash_blob_source, import_conversation_file, imported, model_call_recovery_transition,
         open_blob_source, open_scanned_import_source, placement_update_receipt_matches,
         placement_update_rejection_matches, queued_turn_recovery, queued_turn_runner_recovery,
-        read_delegation_content_file, read_goal_text_file, read_import_file, read_input,
-        read_review_json_file, read_system_prompt_file, reconcile_turn, replace_session_model,
-        replacement_receipt_settings_match, review, review_concern_state_is_coherent,
-        review_finding_event_status, review_judgment_effect_state_is_coherent,
-        review_judgment_plan_state_is_coherent, review_pass_completion_is_coherent,
-        review_publication_state_is_coherent, review_repair_state_is_coherent, run, search,
-        selected_turn_recovery_transition, session_recovery_transition, socket_path,
-        source_fits_single_shot_import, stop_turn, submit_input, terminal_event_state,
-        terminal_snapshot_selection, terminal_snapshot_state, tool_recovery_transition,
-        upload_blob,
+        read_blob_chunk, read_blob_metadata, read_delegation_content_file, read_goal_text_file,
+        read_import_file, read_input, read_review_json_file, read_system_prompt_file,
+        reconcile_turn, replace_session_model, replacement_receipt_settings_match, review,
+        review_concern_state_is_coherent, review_finding_event_status,
+        review_judgment_effect_state_is_coherent, review_judgment_plan_state_is_coherent,
+        review_pass_completion_is_coherent, review_publication_state_is_coherent,
+        review_repair_state_is_coherent, run, search, selected_turn_recovery_transition,
+        session_recovery_transition, socket_path, source_fits_single_shot_import, stop_turn,
+        submit_input, terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
+        tool_recovery_transition, upload_blob, write_blob_output,
     };
     use crate::{
         child_lifecycle_terminalization, error::ClientError, presentation::Output,
@@ -8243,6 +8368,158 @@ mod tests {
         "#]].assert_eq(&String::from_utf8(stdout)?);
         assert!(stderr.is_empty());
         server.await??;
+        Ok(())
+    }
+
+    /// INV-060: terminal metadata validates echoed identity and prints the
+    /// bounded catalog facts returned by the daemon.
+    #[tokio::test]
+    async fn inv060_blob_metadata_preserves_exact_wire_facts() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        let byte_length = CanonicalU64::new(9);
+        let replica_count = CanonicalU64::new(1);
+        let listener = UnixListener::bind(&socket)?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let metadata = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                metadata.request(),
+                &ClientRequest::ReadBlobMetadata { digest }
+            );
+            let metadata_response = ServerFrame::try_new_for_version(
+                metadata.version(),
+                metadata.request_id(),
+                ServerMessage::BlobMetadata {
+                    digest,
+                    byte_length,
+                    replica_count,
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&metadata_response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+        let mut client = ProcessClient::new(socket);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+
+        read_blob_metadata(&mut client, &mut output, digest).await?;
+
+        assert_eq!(
+            String::from_utf8(stdout)?,
+            format!(
+                "digest={digest} byte_length={} replica_count={}\n",
+                byte_length.value(),
+                replica_count.value()
+            )
+        );
+        assert!(stderr.is_empty());
+        server.await??;
+        Ok(())
+    }
+
+    /// INV-060: a terminal range read validates echoed identity and offset and
+    /// returns only the exact requested bytes for file delivery.
+    #[tokio::test]
+    async fn inv060_blob_read_returns_only_the_exact_range() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        let offset_bytes = CanonicalU64::new(7);
+        let bytes = vec![0, 255];
+        let length_bytes = CanonicalU64::new(u64::try_from(bytes.len())?);
+        let listener = UnixListener::bind(&socket)?;
+        let expected_bytes = bytes.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let range = decode_client_line(&line).map_err(io::Error::other)?;
+            assert_eq!(
+                range.request(),
+                &ClientRequest::ReadBlobChunk {
+                    digest,
+                    offset_bytes,
+                    length_bytes,
+                }
+            );
+            let response = ServerFrame::try_new_for_version(
+                range.version(),
+                range.request_id(),
+                ServerMessage::BlobChunkRead {
+                    digest,
+                    offset_bytes,
+                    bytes: BlobChunk::new(expected_bytes),
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+        let mut client = ProcessClient::new(socket);
+
+        let observed = read_blob_chunk(&mut client, digest, offset_bytes, length_bytes).await?;
+
+        assert_eq!(observed, bytes);
+        server.await??;
+        Ok(())
+    }
+
+    /// INV-060: terminal range delivery creates one file containing exactly the
+    /// bounded bytes returned by the daemon.
+    #[tokio::test]
+    async fn inv060_blob_output_file_contains_exact_bytes() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let output = directory.path().join("range.bin");
+        let bytes = b"exact range bytes";
+
+        write_blob_output(&output, bytes).await?;
+
+        assert_eq!(fs::read(&output)?, bytes);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blob_output_file_uses_private_mode() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let output = directory.path().join("range.bin");
+
+        write_blob_output(&output, b"range").await?;
+
+        assert_eq!(fs::metadata(&output)?.permissions().mode() & 0o777, 0o600);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blob_output_refuses_to_replace_an_existing_file() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let output = directory.path().join("existing.bin");
+        let existing = b"existing bytes";
+        fs::write(&output, existing)?;
+
+        let failure = write_blob_output(&output, b"replacement")
+            .await
+            .expect_err("blob range delivery must not replace an existing file");
+
+        let ClientError::BlobOutputFile { path, source } = failure else {
+            panic!("an output collision must retain its path and OS failure")
+        };
+        assert_eq!(path, output);
+        assert_eq!(source.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path)?, existing);
         Ok(())
     }
 
