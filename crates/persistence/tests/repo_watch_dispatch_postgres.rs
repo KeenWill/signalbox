@@ -94,6 +94,7 @@ const SUCCESSOR_ACHIEVEMENT_REQUEST_ID: u128 = 0x50_702;
 const STOPPED_TERMINAL_OPENED_EVENT_ID: u128 = 0x59_000;
 const STOPPED_TERMINAL_MERGED_EVENT_ID: u128 = 0x59_100;
 const STOPPED_TERMINAL_STOP_COMMAND_ID: u128 = 0x59_200;
+const TERMINATION_RACE_STOP_COMMAND_ID: u128 = 0x59_300;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -830,6 +831,35 @@ async fn wait_for_backend_lock(pool: &PgPool, backend: i32) -> Result<(), Box<dy
     })
     .await??;
     Ok(())
+}
+
+/// Takes, in its own transaction, the singleton advisory key SQL computes for
+/// one admitted batch.
+async fn hold_singleton_advisory_key(
+    fixture: &DispatchFixture,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, Box<dyn Error>> {
+    let mut holder = fixture.pool.begin().await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(
+                    hashtextextended(
+                        repo_watch_dispatch_singleton_lock_key(
+                            batch.rule_id,
+                            batch.rule_version,
+                            batch.singleton_scope,
+                            batch.singleton_repository,
+                            batch.singleton_pull_request_number,
+                            batch.singleton_stack_root_pull_request_number
+                        ),
+                        0
+                    )
+                )
+           FROM repo_watch_dispatch_batch AS batch
+          WHERE batch.dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .execute(&mut *holder)
+    .await?;
+    Ok(holder)
 }
 
 async fn wait_for_advisory_lock(pool: &PgPool) -> Result<(), Box<dyn Error>> {
@@ -2637,6 +2667,73 @@ async fn cooldown_clock_is_sampled_after_singleton_lock_wait() -> Result<(), Box
     let outcome = evaluation.await??;
 
     assert!(outcome_is_dispatched(&outcome));
+    Ok(())
+}
+
+/// Release reproduces admission's singleton advisory key in SQL, and a drift
+/// between the two spellings would stop serializing silently rather than fail.
+/// Holding the key SQL computes must therefore block admission itself.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn admission_waits_for_the_singleton_key_computed_in_sql() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let (loaded, observation) = load_second_conflict(&fixture).await?;
+    let holder = hold_singleton_advisory_key(&fixture).await?;
+    let store = fixture.store.clone();
+    let rule = fixture.rule.clone();
+    let evaluation = tokio::spawn(async move {
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, store)
+            .evaluate(
+                loaded,
+                &rule,
+                &observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await
+    });
+
+    wait_for_advisory_lock(&fixture.pool).await?;
+    holder.commit().await?;
+
+    assert_eq!(evaluation.await??, RepoWatchRuleEvaluationOutcome::Occupied);
+    Ok(())
+}
+
+/// Termination takes the singleton key before it reads durable state or writes
+/// an obligation, so a match racing it joins that obligation instead of
+/// aborting on the active-singleton index.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn termination_waits_for_the_singleton_key_before_owing_a_requeue()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let holder = hold_singleton_advisory_key(&fixture).await?;
+    let pool = fixture.pool.clone();
+    let session = fixture.session(0);
+    let termination = tokio::spawn(async move {
+        GoalRepository::new(pool)
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(TERMINATION_RACE_STOP_COMMAND_ID)),
+                    session,
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                ),
+                None,
+                |_| None,
+            )
+            .await
+    });
+
+    wait_for_advisory_lock(&fixture.pool).await?;
+    let owed_while_blocked = outstanding_obligation_count(&fixture.pool).await?;
+    holder.commit().await?;
+    assert_applied_goal_command(termination.await??);
+
+    assert_eq!(owed_while_blocked, 0);
+    assert_eq!(outstanding_obligation_count(&fixture.pool).await?, 1);
     Ok(())
 }
 
