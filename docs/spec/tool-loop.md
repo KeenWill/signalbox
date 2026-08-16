@@ -475,11 +475,19 @@ the session's admitted-set head and atomically appends the
 `InstructionAdmission` specified by
 [workspace instructions](workspace-instructions.md#durable-admission-transition)
 with the receipt-only completed result. A stale head, failed read, or failed
-admission validation rolls back both effects. Replay of an already committed
-request returns the recorded receipt and admission link without appending either
-again; a conflicting receipt or link is corruption. That head lock's position in
-the repository-wide order and its mode belong to the
-[persistence lock protocol](persistence-protocol.md#lock-protocol), which
+admission validation discards the admission, not the round: the transaction
+commits the terminal typed failure as this attempt's result and leaves the
+admitted-set head and every existing admission untouched. Rolling both back
+would discard a completed executor result and strand the attempt `InFlight`,
+which contradicts the monotonic terminal transition required above and would
+wedge the serialized batch behind an attempt that can never close. The
+distinction is that the executor work already happened outside any transaction;
+what this transaction decides is whether its evidence becomes an admission, and
+"no" is a result to record rather than a reason to forget the attempt. Replay of
+an already committed request returns the recorded receipt and admission link
+without appending either again; a conflicting receipt or link is corruption.
+That head lock's position in the repository-wide order and its mode belong to
+the [persistence lock protocol](persistence-protocol.md#lock-protocol), which
 carries it in the same inventory as this transaction's scheduler lock; this page
 states that the lock is taken, never where or how. No present tool supplies this
 effect until an implementing child advances the owning workspace contract.

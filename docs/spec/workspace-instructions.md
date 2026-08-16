@@ -330,31 +330,35 @@ and frozen turn snapshot.
 Eligible inventory is progressively disclosed. `instructions.list` returns a
 cursor-paginated catalog with bundle identity, kind, display name, description
 when present, source byte length, source hash, provider-safe root reference, and
-root-relative source and scope paths. The root reference is the closed
-`workspace` kind or `configured` plus `ConfiguredInstructionRootId`; neither it
-nor any other result field contains a canonical absolute path. For `AGENTS.md`,
-an empty scope means the root and a nested scope applies only to that directory
-and descendants. One canonical order serves the whole page, and it is total over
-both kinds: every `agent_document` precedes every `agent_skill`; documents order
-by root, then increasing scope depth, then raw relative path, then the 16 raw
-bytes of their `InstructionBundleId` in ascending lexicographic order; and
-skills, which carry no directory scope, order among themselves by those same
-identity bytes. The identity tie-breaker is what makes the document order total
-rather than merely usually total: two distinct registrations can present the
-same root, depth, and relative path when one is a workspace document and the
-other reached this session through the configured alias of a bundle whose
-primary root is `workspace`. No implementation invents a scope depth or a root
-placement for a skill, and none is left to break a document tie by arrival
-order, so a snapshot has exactly one page ordinal sequence, one cursor sequence,
-and one instruction-region byte string. The provider-safe root comparator orders
-`workspace` before `configured`; all workspace bundles have the same root key,
-while configured roots compare by the 32 raw bytes of
-`ConfiguredInstructionRootId` in ascending lexicographic order. Canonical
-absolute paths never participate. This order is used wherever this page says
-catalog order or projection order, including admitted-set records and manifest
-records. An ancestor document precedes a descendant document, so a deliberately
-admitted descendant is the later, more specific instruction; sibling scopes
-never apply to each other.
+root-relative source and scope paths. The display name is derived, never
+invented: for an `agent_skill` it is the registered portable name, and for an
+`agent_document` it is the root-relative source path, which is the only value
+that distinguishes two documents in one catalog — the filename is always
+`AGENTS.md` and the scope is a prefix of that path. The root reference is the
+closed `workspace` kind or `configured` plus `ConfiguredInstructionRootId`;
+neither it nor any other result field contains a canonical absolute path. For
+`AGENTS.md`, an empty scope means the root and a nested scope applies only to
+that directory and descendants. One canonical order serves the whole page, and
+it is total over both kinds: every `agent_document` precedes every
+`agent_skill`; documents order by root, then increasing scope depth, then raw
+relative path, then the 16 raw bytes of their `InstructionBundleId` in ascending
+lexicographic order; and skills, which carry no directory scope, order among
+themselves by those same identity bytes. The identity tie-breaker is what makes
+the document order total rather than merely usually total: two distinct
+registrations can present the same root, depth, and relative path when one is a
+workspace document and the other reached this session through the configured
+alias of a bundle whose primary root is `workspace`. No implementation invents a
+scope depth or a root placement for a skill, and none is left to break a
+document tie by arrival order, so a snapshot has exactly one page ordinal
+sequence, one cursor sequence, and one instruction-region byte string. The
+provider-safe root comparator orders `workspace` before `configured`; all
+workspace bundles have the same root key, while configured roots compare by the
+32 raw bytes of `ConfiguredInstructionRootId` in ascending lexicographic order.
+Canonical absolute paths never participate. This order is used wherever this
+page says catalog order or projection order, including admitted-set records and
+manifest records. An ancestor document precedes a descendant document, so a
+deliberately admitted descendant is the later, more specific instruction;
+sibling scopes never apply to each other.
 
 Version one returns at most 32 identities and 524,288 catalog-result bytes per
 page. Those bytes are compact UTF-8 JSON with object keys sorted by raw ASCII
@@ -466,6 +470,20 @@ deployment that clears the posture leaves the request undecided for a person,
 where `Auto` alone would have approved it unattended. No path reaches a user
 prompt while the declared posture is in force.
 
+Delegation is only meaningful if the judge can tell what it is approving, and
+`bundle_id` alone cannot tell it. The approval request for a delegated
+`instructions.read` therefore carries daemon-resolved bundle evidence beside the
+raw arguments: closed kind, provider-safe root reference, root-relative source
+path, the registered portable name and description for a skill, source byte
+length, and source hash. Every field is resolved by the daemon from registration
+under the session's eligibility, never taken from the model's arguments, so the
+evidence cannot be steered by the request it justifies. It is metadata only —
+never source content, which would put the untrusted bytes into the decision that
+is supposed to gate them, and never a canonical absolute path. With it a judge
+can decide one bundle against the commissioned brief on the same footing as any
+other tool argument; without it, it could only approve blindly or escalate every
+request, which would defeat the posture.
+
 List and preview declare `Auto` with no posture; both are bounded reads that
 admit nothing.
 
@@ -509,8 +527,12 @@ its session from the trusted tool-dispatch correlation.
   stale-source, aggregate-exhaustion, and target-capability failures are typed
   request outcomes, each naming its closed reason and none of them partial.
 
-Identity strings are the lowercase hyphenated form everywhere, and byte lengths
-and counts are canonical decimal strings, matching the surrounding catalog.
+Identity strings are the lowercase hyphenated form everywhere. Byte lengths,
+counts, ordinals, and truncation boundaries are JSON numbers — unsigned decimal
+integers without leading zeroes — in tool results exactly as in the canonical
+result encoding above, never decimal strings. One JSON type for these fields is
+what keeps a result's encoded byte total, and therefore the fixed response
+budget, the same across implementations.
 
 **Committed unimplemented functionality — model-facing operations.** No present
 tool supplies list, preview, or read unless an implementing child explicitly
@@ -629,11 +651,19 @@ root, increasing scope depth, relative path, and bundle identity bytes, then
 skills by bundle identity bytes. Each bundle is wrapped as UTF-8 bytes. `root`
 is the closed authorizing-root kind and `source` is its UTF-8 root-relative
 path; canonical absolute paths remain daemon-side manifest provenance and never
-enter provider input.
+enter provider input. A `configured` root additionally carries `root_id`, the
+lowercase hexadecimal `ConfiguredInstructionRootId` the catalog already reports.
+Without it two configured roots holding documents at the same relative paths
+would be indistinguishable in the region, and the model could not tell one scope
+hierarchy from two namespaces — which is exactly what the ancestor and
+sibling-scope rules above ask it to apply. The field is absent for `workspace`,
+which needs no discriminator because a session has at most one. It is
+provider-safe by construction and discloses no host filesystem layout, and the
+rendered-content hash covers it like every other wrapper byte.
 
 ```text
 <signalbox_workspace_instruction>
-{"bundle_id":"<lowercase UUID>","kind":"<closed kind>","root":"<closed root kind>","source":"<JSON-escaped root-relative path>","source_sha256":"<lowercase hex>"}
+{"bundle_id":"<lowercase UUID>","kind":"<closed kind>","root":"<closed root kind>","root_id":"<lowercase hex, configured roots only>","source":"<JSON-escaped root-relative path>","source_sha256":"<lowercase hex>"}
 <content>
 <XML-escaped budgeted source bytes>
 </content>
@@ -834,11 +864,15 @@ implicitly unload, summarize, or evict instructions.
 This section is split between the two categories, and the split is exactly the
 first slice's boundary. The turn-start manifest with an empty eligibility and
 admitted set is implemented behavior: the first slice inserts it in the
-activation transaction and authenticates it. **Committed unimplemented
+activation transaction and authenticates it. Every field the canonical preimage
+requires of that manifest is therefore implemented too, the region version among
+them — the first slice writes region version 1 and hashes it in position, since
+a manifest cannot be authenticated against a preimage whose fields it omits.
+What version 1 selects is a preamble no present slice prepends, but the field
+itself is not optional and not deferred. **Committed unimplemented
 functionality.** Everything here that depends on an admission — successor
-manifests at model-call boundaries, rendered bundle rows, and the region version
-selecting a preamble to prepend — constrains the implementing child; no present
-surface produces a nonempty manifest.
+manifests at model-call boundaries and rendered bundle rows — constrains the
+implementing child; no present surface produces a nonempty manifest.
 
 Every turn owns an append-only sequence of immutable `TurnInstructionManifest`
 values, beginning with exactly one turn-start manifest even when the eligibility
