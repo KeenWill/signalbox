@@ -3291,10 +3291,7 @@ mod tests {
     async fn inv011_inv024_inv037_executor_failure_classifies_before_gate_release() {
         let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
         let events = Arc::new(Mutex::new(Vec::new()));
-        let prepared = match batch.attempt(batch.requests()[0].id()) {
-            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
-            _ => panic!("fixture has one prepared attempt"),
-        };
+        let prepared = current_attempt_fixture(&batch);
         let transaction = FakeTransaction {
             batch: batch.clone(),
             prepared,
