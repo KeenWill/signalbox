@@ -7,8 +7,14 @@
 -- a second batch for the same event when no later matching event exists. Fresh
 -- evaluation replay is serialized by its evaluation row, while obligation replay
 -- is serialized by atomic settlement.
+--
+-- IF EXISTS because 202608150005_repo_watch_continuous_dispatch.sql drops the
+-- same constraint for the same reason, and is already applied to the deployed
+-- database this migration was renumbered behind. Whichever of the two applies
+-- first supersedes the definition; the second must not fail the daemon's
+-- startup migration over a constraint that is already gone.
 ALTER TABLE repo_watch_dispatch_batch
-    DROP CONSTRAINT repo_watch_dispatch_batch_event_id_rule_id_rule_version_key;
+    DROP CONSTRAINT IF EXISTS repo_watch_dispatch_batch_event_id_rule_id_rule_version_key;
 
 -- A fresh batch delivers its originating event, but an obligation successor
 -- replays a still-matching earlier event over the target's collapsed current
