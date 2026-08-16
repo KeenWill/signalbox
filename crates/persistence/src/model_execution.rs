@@ -686,7 +686,11 @@ impl PostgresModelCallRepository {
             prepared.session(),
             prepared.turn(),
             prepared.attempt(),
-            prepared.call().target(),
+            serving_pool_target(
+                self.credential_families.as_ref(),
+                prepared.call().target(),
+                fast_mode,
+            ),
             credential_reference,
             &self.credential_pools,
         )
@@ -846,7 +850,11 @@ impl PostgresModelCallRepository {
                         session,
                         execution.turn(),
                         execution.current_attempt().id(),
-                        resolved.target(),
+                        serving_pool_target(
+                            self.credential_families.as_ref(),
+                            resolved.target(),
+                            fast_mode,
+                        ),
                         credential_reference,
                         &self.credential_pools,
                     )
@@ -1173,18 +1181,13 @@ impl PostgresModelCallRepository {
                     .execute(&mut *transaction)
                     .await?;
                     pool_exhausted_name = Some(Arc::<str>::from(policy.name()));
-                    let excluded = sqlx::query_scalar::<_, String>(
-                        "SELECT credential_reference
-                           FROM credential_pool_chain_exclusion
-                          WHERE session_id = $1
-                            AND turn_id = $2",
+                    let DurablePoolExclusions { excluded, .. } = load_durable_pool_exclusions(
+                        &mut transaction,
+                        session,
+                        observation.correlation().turn(),
+                        &policy,
                     )
-                    .bind(session_id_to_uuid(session))
-                    .bind(turn_id_to_uuid(observation.correlation().turn()))
-                    .fetch_all(&mut *transaction)
-                    .await?
-                    .into_iter()
-                    .collect::<HashSet<_>>();
+                    .await?;
                     if policy
                         .members()
                         .iter()
@@ -2182,7 +2185,7 @@ where
                     session,
                     turn,
                     execution.current_attempt().id(),
-                    resolved.target(),
+                    serving_pool_target(credential_families, resolved.target(), fast_mode),
                     default_reference,
                     credential_pools,
                 )
@@ -5065,6 +5068,22 @@ fn require_exact_call(
     }
 }
 
+/// Resolves the target whose credential pool governs this call.
+///
+/// Fast mode can route a selectable model to an alternate serving target with a
+/// different credential family and a different pool. Looking the pool up under
+/// the base target would replace the correctly resolved serving credential with
+/// a member of an unrelated pool and freeze that unrelated failover policy.
+fn serving_pool_target(
+    families: Option<&crate::ModelCredentialFamilyCatalog>,
+    selected: ResolvedProviderTarget,
+    fast_mode: FastMode,
+) -> ResolvedProviderTarget {
+    families.map_or(selected, |families| {
+        families.serving_target_for_call(selected, fast_mode)
+    })
+}
+
 struct SelectedRuntimePoolCredential {
     reference: Option<ModelCallCredentialReference>,
     policy: Option<CredentialPoolRuntimePolicy>,
@@ -5125,6 +5144,158 @@ async fn load_availability_successor_backoff(
         .transpose()
 }
 
+/// Every member one pool currently excludes, with the rows a call would satisfy.
+struct DurablePoolExclusions {
+    excluded: HashSet<String>,
+    pending_consumed_actions: Vec<i64>,
+}
+
+/// Serializes action-head reads and writes for one credential profile.
+///
+/// Quarantine and membership exclusion are global to a profile rather than to a
+/// pool, so the profile reference alone is the lock key. Callers needing
+/// several profiles take them in sorted order, so two sessions preparing calls
+/// over the same pool cannot deadlock against each other.
+async fn lock_credential_pool_action_head(
+    connection: &mut PgConnection,
+    credential_reference: &str,
+) -> Result<(), ModelCallRepositoryError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "credential_pool_action_head:{credential_reference}"
+        ))
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
+}
+
+/// Reads the durable exclusions governing one pool under its members' locks.
+///
+/// Selection and the availability-successor test must apply exactly the same
+/// predicate. Reading only same-turn chain exclusions let the observation
+/// commit create a successor no member could serve, and reading action rows
+/// without the profile locks let a concurrent quarantine commit between the
+/// read and the dispatch it was supposed to prevent.
+async fn load_durable_pool_exclusions(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    policy: &CredentialPoolRuntimePolicy,
+) -> Result<DurablePoolExclusions, ModelCallRepositoryError> {
+    let mut locked = policy
+        .members()
+        .iter()
+        .map(CredentialPoolRuntimeMember::credential_reference)
+        .collect::<Vec<_>>();
+    locked.sort_unstable();
+    locked.dedup();
+    for reference in locked {
+        lock_credential_pool_action_head(connection, reference).await?;
+    }
+    let mut excluded = sqlx::query_scalar::<_, String>(
+        "SELECT credential_reference
+           FROM credential_pool_chain_exclusion
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_all(&mut *connection)
+    .await?
+    .into_iter()
+    .collect::<HashSet<_>>();
+    let completed_references = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT call.credential_reference
+           FROM model_call AS call
+           JOIN model_call_credential_pool_policy AS call_policy
+             ON call_policy.model_call_id = call.model_call_id
+          WHERE call.session_id = $1
+            AND call_policy.pool_name = $2
+            AND call.state_kind = 'terminal'
+            AND call.terminal_disposition_kind = 'completed'",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(policy.name())
+    .fetch_all(&mut *connection)
+    .await?
+    .into_iter()
+    .collect::<HashSet<_>>();
+    let actions = sqlx::query_as::<_, (i64, String, String, Uuid, Uuid)>(
+        "SELECT action_id, credential_reference, action_kind,
+                observed_session_id, observed_turn_id
+           FROM credential_pool_member_action
+          WHERE consumed_turn_id IS NULL
+            AND (pool_name = $1 OR action_kind = 'quarantine')",
+    )
+    .bind(policy.name())
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut pending_consumed_actions = Vec::new();
+    for (action_id, reference, action_kind, observed_session, observed_turn) in actions {
+        let applies = match action_kind.as_str() {
+            "quarantine" => true,
+            "avoid_new_sessions" => !completed_references.contains(&reference),
+            "switch_next_turn" => {
+                observed_session == session_id_to_uuid(session)
+                    && observed_turn != turn_id_to_uuid(turn)
+            }
+            _ => {
+                return Err(ModelCallCorruption::Unsupported {
+                    field: "credential_pool_member_action action_kind",
+                    value: action_kind,
+                }
+                .into());
+            }
+        };
+        if applies {
+            excluded.insert(reference);
+            if action_kind == "switch_next_turn" {
+                pending_consumed_actions.push(action_id);
+            }
+        }
+    }
+    Ok(DurablePoolExclusions {
+        excluded,
+        pending_consumed_actions,
+    })
+}
+
+/// Returns the member this session most recently prepared a call on.
+///
+/// Selection is sticky across turns: once a displacement moves a session off
+/// its preferred member, the following turn must stay on the replacement while
+/// it remains admissible instead of returning to a member whose immediate
+/// exclusion merely expired with the turn.
+async fn load_session_sticky_pool_member(
+    connection: &mut PgConnection,
+    session: SessionId,
+    pool_name: &str,
+) -> Result<Option<String>, ModelCallRepositoryError> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT call.credential_reference
+           FROM model_call AS call
+           JOIN model_call_credential_pool_policy AS call_policy
+             ON call_policy.model_call_id = call.model_call_id
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.turn_id = call.turn_id
+            AND lifecycle.session_id = call.session_id
+          WHERE call.session_id = $1
+            AND call_policy.pool_name = $2
+          ORDER BY lifecycle.acceptance_position DESC,
+                   EXISTS (
+                       SELECT 1
+                         FROM credential_pool_availability_successor AS successor
+                        WHERE successor.predecessor_model_call_id = call.model_call_id
+                   ) ASC
+          LIMIT 1",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(pool_name)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(Into::into)
+}
+
 async fn select_runtime_pool_credential(
     connection: &mut PgConnection,
     session: SessionId,
@@ -5168,68 +5339,16 @@ async fn select_runtime_pool_credential(
             pending_consumed_actions: Vec::new(),
         });
     };
-    let mut excluded = sqlx::query_scalar::<_, String>(
-        "SELECT credential_reference
-           FROM credential_pool_chain_exclusion
-          WHERE session_id = $1
-            AND turn_id = $2",
-    )
-    .bind(session_id_to_uuid(session))
-    .bind(turn_id_to_uuid(turn))
-    .fetch_all(&mut *connection)
-    .await?
-    .into_iter()
-    .collect::<HashSet<_>>();
-    let completed_references = sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT call.credential_reference
-           FROM model_call AS call
-           JOIN model_call_credential_pool_policy AS call_policy
-             ON call_policy.model_call_id = call.model_call_id
-          WHERE call.session_id = $1
-            AND call_policy.pool_name = $2
-            AND call.state_kind = 'terminal'
-            AND call.terminal_disposition_kind = 'completed'",
-    )
-    .bind(session_id_to_uuid(session))
-    .bind(policy.name())
-    .fetch_all(&mut *connection)
-    .await?
-    .into_iter()
-    .collect::<HashSet<_>>();
-    let actions = sqlx::query_as::<_, (i64, String, String, Uuid, Uuid)>(
-        "SELECT action_id, credential_reference, action_kind,
-                observed_session_id, observed_turn_id
-           FROM credential_pool_member_action
-          WHERE consumed_turn_id IS NULL
-            AND (pool_name = $1 OR action_kind = 'quarantine')",
-    )
-    .bind(policy.name())
-    .fetch_all(&mut *connection)
-    .await?;
-    let mut next_turn_actions = Vec::new();
-    for (action_id, reference, action_kind, observed_session, observed_turn) in actions {
-        let applies = match action_kind.as_str() {
-            "quarantine" => true,
-            "avoid_new_sessions" => !completed_references.contains(&reference),
-            "switch_next_turn" => {
-                observed_session == session_id_to_uuid(session)
-                    && observed_turn != turn_id_to_uuid(turn)
-            }
-            _ => {
-                return Err(ModelCallCorruption::Unsupported {
-                    field: "credential_pool_member_action action_kind",
-                    value: action_kind,
-                }
-                .into());
-            }
-        };
-        if applies {
-            excluded.insert(reference);
-        }
-        if action_kind == "switch_next_turn" && applies {
-            next_turn_actions.push(action_id);
-        }
-    }
+    let DurablePoolExclusions {
+        excluded,
+        pending_consumed_actions: next_turn_actions,
+    } = load_durable_pool_exclusions(connection, session, turn, &policy).await?;
+    let sticky_reference = match predecessor_reference {
+        // An availability successor continues its predecessor's chain, so the
+        // chain position rather than session stickiness governs it.
+        Some(_) => None,
+        None => load_session_sticky_pool_member(connection, session, policy.name()).await?,
+    };
     let start = predecessor_reference
         .as_deref()
         .and_then(|reference| {
@@ -5242,9 +5361,18 @@ async fn select_runtime_pool_credential(
     let selected = policy
         .members()
         .iter()
-        .skip(start)
-        .chain(policy.members().iter().take(start))
-        .find(|member| !excluded.contains(member.credential_reference()))
+        .find(|member| {
+            sticky_reference.as_deref() == Some(member.credential_reference())
+                && !excluded.contains(member.credential_reference())
+        })
+        .or_else(|| {
+            policy
+                .members()
+                .iter()
+                .skip(start)
+                .chain(policy.members().iter().take(start))
+                .find(|member| !excluded.contains(member.credential_reference()))
+        })
         .map(|member| ModelCallCredentialReference::new(member.credential_reference()));
     let pending_consumed_actions = if selected.is_some() {
         next_turn_actions
@@ -5296,6 +5424,7 @@ async fn persist_call_pool_policy(
     Ok(())
 }
 
+/// Records one durable exclusion under the profile's action-head lock.
 async fn persist_credential_pool_member_action(
     connection: &mut PgConnection,
     policy: &CredentialPoolRuntimePolicy,
@@ -5311,6 +5440,7 @@ async fn persist_credential_pool_member_action(
             "non-durable pool action reached durable action persistence",
         ));
     }
+    lock_credential_pool_action_head(connection, &credential_reference).await?;
     sqlx::query(
         "INSERT INTO credential_pool_member_action
             (pool_name, credential_reference, action_kind,

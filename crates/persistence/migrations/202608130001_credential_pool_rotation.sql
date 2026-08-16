@@ -341,9 +341,11 @@ BEGIN
          WHERE call.model_call_id = checked_model_call_id
     ) THEN
         -- A terminal availability successor with no later availability
-        -- successor may have yielded into the ordinary tool-round lifecycle.
-        -- Preserve the availability lineage checks here, then delegate the
-        -- terminal lifecycle shape to the validator that owns tool rounds.
+        -- successor may have yielded into the ordinary tool-round lifecycle,
+        -- or ended ambiguously and parked its still-active turn for model-call
+        -- recovery. Preserve the availability lineage checks here, then
+        -- delegate the terminal lifecycle shape to the validator that owns
+        -- both of those active shapes.
         IF EXISTS (
             SELECT 1
               FROM model_call AS call
@@ -368,10 +370,22 @@ BEGIN
                     predecessor.frozen_alias_selected_direct_id
                )
                AND call.state_kind = 'terminal'
-               AND EXISTS (
-                    SELECT 1
-                      FROM tool_round AS round
-                     WHERE round.producing_model_call_id = call.model_call_id
+               AND (
+                    EXISTS (
+                        SELECT 1
+                          FROM tool_round AS round
+                         WHERE round.producing_model_call_id = call.model_call_id
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                          FROM turn_lifecycle AS waiting
+                         WHERE waiting.turn_id = call.turn_id
+                           AND waiting.session_id = call.session_id
+                           AND waiting.state_kind = 'active'
+                           AND waiting.active_phase_kind =
+                               'awaiting_model_call_recovery'
+                           AND waiting.recovery_model_call_id = call.model_call_id
+                    )
                )
                AND NOT EXISTS (
                     SELECT 1
