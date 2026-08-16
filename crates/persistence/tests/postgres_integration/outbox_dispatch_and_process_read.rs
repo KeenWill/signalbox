@@ -219,6 +219,45 @@ async fn s24_process_session_summary_page_batches_placement_projection()
     Ok(())
 }
 
+/// Inserts exactly one full 64-session summary page plus one continuation row,
+/// returning their identities in the order the summary cursor must yield them.
+async fn insert_session_summary_page_boundary_fixture(
+    pool: &PgPool,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let mut sessions = Vec::with_capacity(65);
+    for session_seed in 0xf000..=0xf040 {
+        sessions.push(insert_outbox_session_fixture(pool, session_seed).await?);
+    }
+    Ok(sessions)
+}
+
+/// S24: a summary catalog one row beyond the 64-session safety ceiling
+/// continues onto a second page without skipping or duplicating an identity.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_process_session_summary_page_continues_after_64_sessions() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let expected_sessions = insert_session_summary_page_boundary_fixture(&pool).await?;
+
+    let summaries = ProcessReadRepository::new(pool.clone())
+        .list_sessions()
+        .await?;
+    let actual_sessions = summaries
+        .iter()
+        .map(|summary| summary.session().into_uuid())
+        .collect::<Vec<_>>();
+
+    assert_eq!(summaries.len(), 65);
+    assert_eq!(actual_sessions, expected_sessions);
+    assert_eq!(summaries[63].session().into_uuid(), expected_sessions[63]);
+    assert_eq!(summaries[64].session().into_uuid(), expected_sessions[64]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S24 / INV-032: the process transcript read observes the global outbox
 /// cursor, ordered turn state, and latest semantic frontier in one
 /// repeatable-read snapshot.
