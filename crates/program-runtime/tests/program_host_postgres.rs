@@ -39,6 +39,7 @@ const FIRST_LIVE_ANSWER_BYTE: u8 = 22;
 const SECOND_LIVE_REQUEST_BYTE: u8 = 3;
 const SECOND_LIVE_ANSWER_BYTE: u8 = 33;
 const DIVERGENT_REQUEST_BYTE: u8 = 9;
+const RUN_CANCEL_BYTE: u8 = 44;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -130,6 +131,25 @@ if (second.kind !== "answer" || second.payload[0] !== {FIRST_LIVE_ANSWER_BYTE}) 
 if (third.kind !== "answer" || third.payload[0] !== {SECOND_LIVE_ANSWER_BYTE}) {{
   throw new Error("unexpected second live answer");
 }}
+"#
+    ))
+}
+
+fn immediately_requesting_artifact() -> ProgramArtifact {
+    ProgramArtifact::new(format!(
+        r#"
+import {{ now }} from "{PROGRAM_SDK_V1_SPECIFIER}";
+await now(new Uint8Array([{FIRST_LIVE_REQUEST_BYTE}]));
+"#
+    ))
+}
+
+fn two_request_artifact() -> ProgramArtifact {
+    ProgramArtifact::new(format!(
+        r#"
+import {{ now }} from "{PROGRAM_SDK_V1_SPECIFIER}";
+await now(new Uint8Array([{REPLAY_REQUEST_BYTE}]));
+await now(new Uint8Array([{SECOND_LIVE_REQUEST_BYTE}]));
 "#
     ))
 }
@@ -398,6 +418,134 @@ now(new Uint8Array([{FIRST_LIVE_REQUEST_BYTE}]));
         .await?
         .expect("the created journal stream exists");
     assert_eq!(journal.entries().len(), 2);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn isolate_closes_shared_memory_and_locale_sensitive_methods() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = distinct_run_id(5);
+    repository.create_stream(run).await?;
+    let artifact = ProgramArtifact::new(
+        r#"
+globalThis.SharedArrayBuffer === undefined || (() => { throw new Error("SharedArrayBuffer reached the artifact"); })();
+globalThis.Atomics === undefined || (() => { throw new Error("Atomics reached the artifact"); })();
+Object.prototype.toLocaleString === undefined || (() => { throw new Error("Object.prototype.toLocaleString reached the artifact"); })();
+Number.prototype.toLocaleString === undefined || (() => { throw new Error("Number.prototype.toLocaleString reached the artifact"); })();
+BigInt.prototype.toLocaleString === undefined || (() => { throw new Error("BigInt.prototype.toLocaleString reached the artifact"); })();
+Array.prototype.toLocaleString === undefined || (() => { throw new Error("Array.prototype.toLocaleString reached the artifact"); })();
+Object.getPrototypeOf(Int8Array.prototype).toLocaleString === undefined || (() => { throw new Error("TypedArray.prototype.toLocaleString reached the artifact"); })();
+String.prototype.localeCompare === undefined || (() => { throw new Error("String.prototype.localeCompare reached the artifact"); })();
+String.prototype.toLocaleLowerCase === undefined || (() => { throw new Error("String.prototype.toLocaleLowerCase reached the artifact"); })();
+String.prototype.toLocaleUpperCase === undefined || (() => { throw new Error("String.prototype.toLocaleUpperCase reached the artifact"); })();
+"#,
+    );
+    let host = ProgramHost::new(repository);
+    let mut live_must_not_run = ScriptedDeliveries::new([]);
+
+    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+
+    assert_eq!(outcome, ProgramExecutionOutcome::Completed);
+    assert!(live_must_not_run.observed_outstanding.is_empty());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_journal_opening_with_a_run_cancel_replays_before_the_artifact_requests()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = distinct_run_id(6);
+    repository.create_stream(run).await?;
+    let recorded_cancel = repository
+        .append_delivery(run, DeliveryKind::RunCancel(payload(&[RUN_CANCEL_BYTE])))
+        .await?;
+    let artifact = immediately_requesting_artifact();
+    let host = ProgramHost::new(repository.clone());
+    let mut live_must_not_run = ScriptedDeliveries::new([]);
+
+    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+
+    assert_eq!(
+        outcome,
+        ProgramExecutionOutcome::RunCancelled(payload(&[RUN_CANCEL_BYTE]))
+    );
+    assert!(live_must_not_run.observed_outstanding.is_empty());
+    let journal = repository
+        .load(run)
+        .await?
+        .expect("the created journal stream exists");
+    assert_eq!(journal.entries().len(), 1);
+    assert_eq!(
+        journal.entries()[0].frame(),
+        &JournalFrame::Delivery(recorded_cancel)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_run_cancel_behind_a_recorded_answer_replays_before_the_next_request()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = ProgramJournalRepository::new(pool.clone());
+    let run = distinct_run_id(7);
+    repository.create_stream(run).await?;
+    let recorded_request = repository
+        .append_request(run, None, RequestKind::Now(payload(&[REPLAY_REQUEST_BYTE])))
+        .await?;
+    let recorded_answer = repository
+        .append_delivery(
+            run,
+            DeliveryKind::Answer {
+                resolves: recorded_request.ordinal(),
+                payload: payload(&[REPLAY_ANSWER_BYTE]),
+            },
+        )
+        .await?;
+    let recorded_cancel = repository
+        .append_delivery(run, DeliveryKind::RunCancel(payload(&[RUN_CANCEL_BYTE])))
+        .await?;
+    let artifact = two_request_artifact();
+    let host = ProgramHost::new(repository.clone());
+    let mut live_must_not_run = ScriptedDeliveries::new([]);
+
+    let outcome = host.execute(run, &artifact, &mut live_must_not_run).await?;
+
+    assert_eq!(
+        outcome,
+        ProgramExecutionOutcome::RunCancelled(payload(&[RUN_CANCEL_BYTE]))
+    );
+    assert!(live_must_not_run.observed_outstanding.is_empty());
+    let journal = repository
+        .load(run)
+        .await?
+        .expect("the created journal stream exists");
+    assert_eq!(journal.entries().len(), 3);
+    assert_eq!(
+        journal.entries()[0].frame(),
+        &JournalFrame::Request(recorded_request)
+    );
+    assert_eq!(
+        journal.entries()[1].frame(),
+        &JournalFrame::Delivery(recorded_answer)
+    );
+    assert_eq!(
+        journal.entries()[2].frame(),
+        &JournalFrame::Delivery(recorded_cancel)
+    );
 
     pool.close().await;
     drop(container);

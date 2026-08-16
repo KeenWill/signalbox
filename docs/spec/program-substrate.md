@@ -121,10 +121,16 @@ program-initiated registrations can mint a capability its root was never granted
 **Implemented behavior.** The program-runtime crate runs one module per
 execution attempt in a fresh embedded `deno_core` isolate, pinned exactly by
 crate version. The isolate exposes no filesystem, network, environment, module
-source, wall clock, or unvirtualized randomness: the host removes the engine's
-`Date`, `Math.random`, and `Deno.core` globals before artifact evaluation. Its
-only admitted asynchronous operation is the closed request op behind the
-synthetic SDK module. A caller supplies the stripped artifact and an existing
+source, wall clock, or unvirtualized randomness. Before artifact evaluation the
+host removes the engine's `Date`, `Math.random`, `Intl`, `WeakRef`,
+`FinalizationRegistry`, `SharedArrayBuffer`, `Atomics`, and `Deno.core` globals,
+along with the Intl-backed prototype methods that outlive `Intl` itself —
+`toLocaleString`, `localeCompare`, and the locale-aware case mappings. The
+shared buffer and its atomics go because `Atomics.wait` blocks the isolate
+thread and `Atomics.waitAsync` settles on a wall clock; the prototype methods go
+because their results follow the host's default locale and ICU data, which two
+hosts running the same run need not share. Its only admitted asynchronous
+operation is the closed request op behind the synthetic SDK module. A caller supplies the stripped artifact and an existing
 run journal; no isolate is retained between attempts.
 
 **Committed unimplemented functionality.** No admitted run-creation surface
@@ -233,7 +239,9 @@ that differs from its journaled twin returns a typed nondeterminism failure
 carrying both complete frames, which the persistence adapter can append as a
 closed `fault` delivery; divergence is never silent and never a panic. The seam
 yields at most one recorded delivery per step, committing the future isolate
-host to drain its microtask queue to quiescence between deliveries. Concurrent
+host to drain its microtask queue to quiescence between deliveries; a terminal
+delivery is taken through a step of its own, ahead of any executor progress,
+because it resolves no promise and ends the attempt. Concurrent
 outstanding requests are permitted — the journaled delivery order is what makes
 promise interleaving identical across live execution and replay. Virtualized
 time advances only at journaled points, and each randomness draw is journaled.
@@ -246,7 +254,11 @@ compares the complete request before taking live action, and persists a typed
 nondeterminism fault on mismatch. A matching replay delivery is applied to its
 named promise without consulting the live-delivery source. After each individual
 delivery the host polls the engine to a microtask quiescence point before it
-observes another request or applies another delivery. At the durable tail it
+observes another request or applies another delivery. A recorded `run_cancel` or
+`fault` is the exception, taken at the head of every step before the host polls
+the engine or accepts a request: an outcome already durable outranks anything
+the attempt could still produce, so an artifact that requests immediately or
+blocks cannot displace it. At the durable tail it
 uses the journal repository's ordinary append methods for the request and the
 caller-supplied delivery, then continues through the same promise-resolution
 path. The delivery-source seam receives only the currently outstanding durable

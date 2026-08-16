@@ -30,3 +30,43 @@ Object.defineProperty(globalThis, "FinalizationRegistry", {
   writable: false,
   configurable: false,
 });
+// `Atomics.waitAsync` settles a promise on a wall-clock timeout and
+// `Atomics.wait` blocks the isolate thread outright, so racing either against a
+// journaled request can pick a different next request on replay, or wedge the
+// thread before the host can report `Stalled`. Both need a `SharedArrayBuffer`,
+// and neither the buffer nor the rest of `Atomics` has a use in an isolate that
+// never shares memory with another thread.
+Object.defineProperty(globalThis, "SharedArrayBuffer", {
+  value: undefined,
+  writable: false,
+  configurable: false,
+});
+Object.defineProperty(globalThis, "Atomics", {
+  value: undefined,
+  writable: false,
+  configurable: false,
+});
+// Deleting `Intl` leaves the Intl-backed prototype methods: `toLocaleString`,
+// `localeCompare`, and the locale-aware case mappings still read the host's
+// default locale and ICU data. An artifact that encodes one of those results
+// into a request diverges the moment it restarts on a host configured
+// differently, so the closed isolate removes them rather than pinning a locale
+// an artifact could not observe it had been given.
+const typedArrayPrototype = Object.getPrototypeOf(Int8Array.prototype);
+const localeSensitiveMethods = [
+  [Object.prototype, "toLocaleString"],
+  [Number.prototype, "toLocaleString"],
+  [BigInt.prototype, "toLocaleString"],
+  [Array.prototype, "toLocaleString"],
+  [typedArrayPrototype, "toLocaleString"],
+  [String.prototype, "localeCompare"],
+  [String.prototype, "toLocaleLowerCase"],
+  [String.prototype, "toLocaleUpperCase"],
+];
+for (const [holder, name] of localeSensitiveMethods) {
+  Object.defineProperty(holder, name, {
+    value: undefined,
+    writable: false,
+    configurable: false,
+  });
+}

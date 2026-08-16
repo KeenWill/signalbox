@@ -280,6 +280,18 @@ impl ProgramHost {
         let mut completed_evaluation = None;
 
         loop {
+            // A recorded terminal outcome outranks anything this attempt could
+            // still produce, and a valid journal both can open with one and can
+            // place one directly behind the delivery just applied. Replaying it
+            // before the artifact runs is what keeps it durable: an artifact
+            // that requests immediately is otherwise refused as
+            // `DeliveryPending`, and one that blocks wedges the host instead.
+            if let Some(delivery) = execution.cursor.take_terminal_delivery()
+                && let Some(outcome) = execution.apply_delivery(delivery)?
+            {
+                return Ok(outcome);
+            }
+
             let runtime_status = poll_runtime_once(&mut runtime).await;
             poll_evaluation_once(&mut evaluation, &mut completed_evaluation).await;
             while let Ok(request) = request_receiver.try_recv() {
