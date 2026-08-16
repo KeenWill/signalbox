@@ -1820,6 +1820,9 @@ where
                     return Ok(ModelCallExecutionOutcome::AvailabilitySuccessor(successor));
                 }
                 Ok(Some(ModelCallObservationCommitOutcome::PoolExhausted(exhausted))) => {
+                    if let CredentialPoolExhaustedOutcome::AfterCall { terminal, .. } = &exhausted {
+                        report_model_call_terminalization(terminal);
+                    }
                     return Ok(ModelCallExecutionOutcome::PoolExhausted(Box::new(
                         exhausted,
                     )));

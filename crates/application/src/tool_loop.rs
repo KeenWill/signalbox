@@ -1734,12 +1734,16 @@ where
                     return Ok(ToolExecutionServiceOutcome::ContinuationCheckpointed(call));
                 }
                 Ok(PrepareToolContinuationOutcome::TargetUnavailable(failed)) => {
-                    report_tool_turn_terminalization(&failed);
+                    report_tool_turn_terminalization(&failed, "continuation_target_unavailable");
                     return Ok(ToolExecutionServiceOutcome::ContinuationTargetUnavailable(
                         failed,
                     ));
                 }
                 Ok(PrepareToolContinuationOutcome::PoolExhausted(exhausted)) => {
+                    report_tool_turn_terminalization(
+                        exhausted.failed(),
+                        "continuation_pool_exhausted",
+                    );
                     return Ok(ToolExecutionServiceOutcome::ContinuationPoolExhausted(
                         exhausted,
                     ));
@@ -1821,16 +1825,17 @@ fn report_tool_dispatch(name: &ToolName, correlation: &ToolAttemptDispatchCorrel
     );
 }
 
-/// Records the terminal turn outcome caused by an unavailable continuation target.
+/// Records a terminal turn outcome that closed the tool continuation itself.
 ///
 /// This event distinguishes a terminalized turn from one waiting on tool-loop
-/// work. Its closed outcome label and daemon-minted identities cannot contain
-/// provider prose, credentials, tool arguments, or conversation content.
-fn report_tool_turn_terminalization(failed: &FailedModelCallTurn) {
+/// work. The caller supplies the closed outcome label, which together with the
+/// daemon-minted identities cannot contain provider prose, credentials, tool
+/// arguments, or conversation content.
+fn report_tool_turn_terminalization(failed: &FailedModelCallTurn, terminal_outcome: &'static str) {
     tracing::info!(
         session_id = %failed.session().as_uuid(),
         turn_id = %failed.turn().as_uuid(),
-        terminal_outcome = "continuation_target_unavailable",
+        terminal_outcome,
         "turn terminalized"
     );
 }

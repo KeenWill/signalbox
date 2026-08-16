@@ -704,6 +704,12 @@ impl PostgresModelCallRepository {
             self.cache_inclusive_input_targets
                 .contains(&prepared.call().target()),
         )
+        .await?;
+        consume_pool_member_actions(
+            connection,
+            prepared.turn(),
+            &selected.pending_consumed_actions,
+        )
         .await
     }
 
@@ -852,6 +858,7 @@ impl PostgresModelCallRepository {
             if let Some(SelectedRuntimePoolCredential {
                 reference: None,
                 policy: Some(policy),
+                ..
             }) = selected.as_ref()
             {
                 let source_turn = execution.turn();
@@ -879,8 +886,7 @@ impl PostgresModelCallRepository {
                             "credential-pool exhaustion could not close fresh execution state",
                         )
                     })?;
-                persist_credential_pool_exhaustion(&mut transaction, &exhausted, None, None)
-                    .await?;
+                persist_credential_pool_exhaustion(&mut transaction, &exhausted).await?;
                 return Ok((
                     true,
                     PrepareInitialModelCallOutcome::PoolExhausted(Box::new(exhausted)),
@@ -959,6 +965,12 @@ impl PostgresModelCallRepository {
                 selected.policy.as_ref(),
                 self.cache_inclusive_input_targets
                     .contains(&prepared.call().target()),
+            )
+            .await?;
+            consume_pool_member_actions(
+                &mut transaction,
+                prepared.turn(),
+                &selected.pending_consumed_actions,
             )
             .await?;
             let reloaded = require_exact_call(
@@ -1097,8 +1109,33 @@ impl PostgresModelCallRepository {
                     provider_failure_cause.ok_or(ModelCallRepositoryError::InvalidTransition(
                         "availability candidates require a classified provider failure",
                     ))?;
-                let policy =
-                    load_call_pool_policy(&mut transaction, observation.call().into_uuid()).await?;
+                let Some(policy) =
+                    load_call_pool_policy(&mut transaction, observation.call().into_uuid()).await?
+                else {
+                    // The call carried no credential pool, so no configured
+                    // action governs this availability cause. Close the turn on
+                    // the ordinary terminal path rather than failing the commit.
+                    let outcome = execution
+                        .apply_terminal_observation(
+                            observation,
+                            ModelCallTerminalIdentities::Failed(failed),
+                        )
+                        .map_err(|_| {
+                            ModelCallRepositoryError::InvalidTransition(
+                                "terminal observation does not match fresh issued state",
+                            )
+                        })?;
+                    persist_terminal_outcome_with_usage(
+                        &mut transaction,
+                        &outcome,
+                        usage,
+                        provider_failure_cause,
+                    )
+                    .await?;
+                    return Ok(Some(ModelCallObservationCommitOutcome::Terminal(Box::new(
+                        outcome,
+                    ))));
+                };
                 let action = policy.action(cause);
                 let mut pool_exhausted_name = None;
                 let current_reference = if action == CredentialPoolRuntimeAction::Stay {
@@ -1180,19 +1217,15 @@ impl PostgresModelCallRepository {
                             )),
                         ));
                     }
-                    sqlx::query(
-                        "INSERT INTO credential_pool_terminal_exhaustion
-                            (terminal_attempt_id, terminal_model_call_id,
-                             session_id, turn_id, pool_name, cause_kind)
-                         VALUES ($1, $2, $3, $4, $5, $6)",
+                    insert_credential_pool_terminal_exhaustion(
+                        &mut transaction,
+                        observation.correlation().attempt(),
+                        session,
+                        observation.correlation().turn(),
+                        policy.name(),
+                        Some(observation.call()),
+                        Some(cause),
                     )
-                    .bind(observation.correlation().attempt().into_uuid())
-                    .bind(observation.call().into_uuid())
-                    .bind(session_id_to_uuid(session))
-                    .bind(turn_id_to_uuid(observation.correlation().turn()))
-                    .bind(policy.name())
-                    .bind(encode_provider_failure_cause(cause))
-                    .execute(&mut *transaction)
                     .await?;
                 } else if let Some(current_reference) = current_reference {
                     persist_credential_pool_member_action(
@@ -2161,12 +2194,22 @@ where
     if let Some(SelectedRuntimePoolCredential {
         reference: None,
         policy: Some(policy),
+        ..
     }) = selected.as_ref()
     {
+        let source_turn = execution.turn();
         let reclassifications = steering_identities
             .iter()
             .map(|(_, reclassification)| *reclassification)
             .collect::<Vec<_>>();
+        let mut proposed_turns = BTreeSet::new();
+        for reclassification in &reclassifications {
+            record_reclassified_turn_candidate(
+                source_turn,
+                reclassification.turn(),
+                &mut proposed_turns,
+            )?;
+        }
         let exhausted = execution
             .fail_credential_pool_exhausted(
                 policy.name().to_owned(),
@@ -2179,7 +2222,7 @@ where
                     "credential-pool exhaustion could not close tool continuation",
                 )
             })?;
-        persist_credential_pool_exhaustion(connection, &exhausted, None, None).await?;
+        persist_credential_pool_exhaustion(connection, &exhausted).await?;
         return Ok(PrepareToolContinuationOutcome::PoolExhausted(Box::new(
             exhausted,
         )));
@@ -2253,6 +2296,12 @@ where
         &credential_reference,
         selected.policy.as_ref(),
         cache_inclusive_input_targets.contains(&prepared.call().target()),
+    )
+    .await?;
+    consume_pool_member_actions(
+        connection,
+        prepared.turn(),
+        &selected.pending_consumed_actions,
     )
     .await?;
     Ok(PrepareToolContinuationOutcome::Checkpointed(call))
@@ -5019,6 +5068,34 @@ fn require_exact_call(
 struct SelectedRuntimePoolCredential {
     reference: Option<ModelCallCredentialReference>,
     policy: Option<CredentialPoolRuntimePolicy>,
+    /// Uncommitted `switch_next_turn` rows this selection would satisfy.
+    ///
+    /// Selection cannot consume them itself: preparation can still fail after
+    /// selection succeeds, and a member that never carried a call must leave
+    /// its displacement durable for the next turn.
+    pending_consumed_actions: Vec<i64>,
+}
+
+/// Marks the displacement rows a prepared call has now satisfied.
+async fn consume_pool_member_actions(
+    connection: &mut PgConnection,
+    turn: TurnId,
+    actions: &[i64],
+) -> Result<(), ModelCallRepositoryError> {
+    if actions.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE credential_pool_member_action
+            SET consumed_turn_id = $1
+          WHERE action_id = ANY($2)
+            AND consumed_turn_id IS NULL",
+    )
+    .bind(turn_id_to_uuid(turn))
+    .bind(actions)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
 }
 
 async fn load_availability_successor_backoff(
@@ -5067,7 +5144,11 @@ async fn select_runtime_pool_credential(
     .await?;
     let (policy, predecessor_reference) = match predecessor {
         Some(predecessor) => {
-            let policy = load_call_pool_policy(connection, predecessor).await?;
+            let policy = load_call_pool_policy(connection, predecessor)
+                .await?
+                .ok_or(ModelCallCorruption::Missing(
+                    "availability successor predecessor pool policy",
+                ))?;
             let reference: String = sqlx::query_scalar(
                 "SELECT credential_reference
                    FROM model_call
@@ -5084,6 +5165,7 @@ async fn select_runtime_pool_credential(
         return Ok(SelectedRuntimePoolCredential {
             reference: Some(default_reference),
             policy: None,
+            pending_consumed_actions: Vec::new(),
         });
     };
     let mut excluded = sqlx::query_scalar::<_, String>(
@@ -5164,21 +5246,15 @@ async fn select_runtime_pool_credential(
         .chain(policy.members().iter().take(start))
         .find(|member| !excluded.contains(member.credential_reference()))
         .map(|member| ModelCallCredentialReference::new(member.credential_reference()));
-    if selected.is_some() && !next_turn_actions.is_empty() {
-        sqlx::query(
-            "UPDATE credential_pool_member_action
-                SET consumed_turn_id = $1
-              WHERE action_id = ANY($2)
-                AND consumed_turn_id IS NULL",
-        )
-        .bind(turn_id_to_uuid(turn))
-        .bind(&next_turn_actions)
-        .execute(&mut *connection)
-        .await?;
-    }
+    let pending_consumed_actions = if selected.is_some() {
+        next_turn_actions
+    } else {
+        Vec::new()
+    };
     Ok(SelectedRuntimePoolCredential {
         reference: selected,
         policy: Some(policy),
+        pending_consumed_actions,
     })
 }
 
@@ -5254,19 +5330,26 @@ async fn persist_credential_pool_member_action(
     Ok(())
 }
 
+/// Loads the policy frozen onto one call, or `None` when it carried no pool.
+///
+/// Deployments without credential pools prepare calls with no policy row at
+/// all, so absence is an ordinary shape rather than durable corruption.
 async fn load_call_pool_policy(
     connection: &mut PgConnection,
     call: Uuid,
-) -> Result<CredentialPoolRuntimePolicy, ModelCallRepositoryError> {
-    let row = sqlx::query(
+) -> Result<Option<CredentialPoolRuntimePolicy>, ModelCallRepositoryError> {
+    let Some(row) = sqlx::query(
         "SELECT pool_name, on_pool_exhausted,
                 on_quota_exhausted, on_rate_limited, on_overloaded
            FROM model_call_credential_pool_policy
           WHERE model_call_id = $1",
     )
     .bind(call)
-    .fetch_one(&mut *connection)
-    .await?;
+    .fetch_optional(&mut *connection)
+    .await?
+    else {
+        return Ok(None);
+    };
     let members = sqlx::query_as::<_, (String, i64)>(
         "SELECT credential_reference, priority
            FROM model_call_credential_pool_member
@@ -5287,14 +5370,14 @@ async fn load_call_pool_policy(
         Ok(CredentialPoolRuntimeMember::new(reference, priority))
     })
     .collect::<Result<Vec<_>, ModelCallRepositoryError>>()?;
-    Ok(CredentialPoolRuntimePolicy::new(
+    Ok(Some(CredentialPoolRuntimePolicy::new(
         row.try_get::<String, _>("pool_name")?,
         Arc::<[CredentialPoolRuntimeMember]>::from(members),
         CredentialPoolRuntimeExhaustion::parse(row.try_get("on_pool_exhausted")?)?,
         CredentialPoolRuntimeAction::parse(row.try_get("on_quota_exhausted")?)?,
         CredentialPoolRuntimeAction::parse(row.try_get("on_rate_limited")?)?,
         CredentialPoolRuntimeAction::parse(row.try_get("on_overloaded")?)?,
-    ))
+    )))
 }
 
 pub(crate) async fn insert_prepared_call(
@@ -6509,11 +6592,39 @@ async fn persist_availability_successor(
     .await
 }
 
+/// Writes the single terminal-exhaustion row shared by both exhaustion shapes.
+///
+/// Pre-call exhaustion has no failing call to name; post-call exhaustion pins
+/// the member call that consumed the last admissible member and its cause.
+async fn insert_credential_pool_terminal_exhaustion(
+    connection: &mut PgConnection,
+    attempt: TurnAttemptId,
+    session: SessionId,
+    turn: TurnId,
+    pool_name: &str,
+    last_call: Option<ModelCallId>,
+    last_cause: Option<ProviderModelCallFailureCause>,
+) -> Result<(), ModelCallRepositoryError> {
+    sqlx::query(
+        "INSERT INTO credential_pool_terminal_exhaustion
+            (terminal_attempt_id, terminal_model_call_id,
+             session_id, turn_id, pool_name, cause_kind)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(attempt.into_uuid())
+    .bind(last_call.map(ModelCallId::into_uuid))
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(pool_name)
+    .bind(last_cause.map(encode_provider_failure_cause))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
 async fn persist_credential_pool_exhaustion(
     connection: &mut PgConnection,
     exhausted: &CredentialPoolExhaustedModelCallTurn,
-    last_call: Option<ModelCallId>,
-    last_cause: Option<ProviderModelCallFailureCause>,
 ) -> Result<(), ModelCallRepositoryError> {
     persist_failed_with_delegated_child_result(
         connection,
@@ -6522,21 +6633,16 @@ async fn persist_credential_pool_exhaustion(
         None,
     )
     .await?;
-    sqlx::query(
-        "INSERT INTO credential_pool_terminal_exhaustion
-            (terminal_attempt_id, terminal_model_call_id,
-             session_id, turn_id, pool_name, cause_kind)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+    insert_credential_pool_terminal_exhaustion(
+        connection,
+        exhausted.failed().attempt().id(),
+        exhausted.failed().session(),
+        exhausted.failed().turn(),
+        exhausted.pool_name(),
+        None,
+        None,
     )
-    .bind(exhausted.failed().attempt().id().into_uuid())
-    .bind(last_call.map(ModelCallId::into_uuid))
-    .bind(session_id_to_uuid(exhausted.failed().session()))
-    .bind(turn_id_to_uuid(exhausted.failed().turn()))
-    .bind(exhausted.pool_name())
-    .bind(last_cause.map(encode_provider_failure_cause))
-    .execute(&mut *connection)
-    .await?;
-    Ok(())
+    .await
 }
 
 const MAX_AVAILABILITY_BACKOFF: Duration = Duration::from_secs(300);
