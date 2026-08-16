@@ -19,6 +19,19 @@ axum = { version = "0.8.9", default-features = false, features = [
     "tokio",
 ] }
 hmac = { version = "0.13.0", default-features = false }
+# The webhook listener drives Hyper directly rather than through `axum::serve`,
+# because the raw-header ceilings below the router are only reachable on the
+# HTTP/1 builder. Both were already present transitively.
+hyper = { version = "1.10.1", default-features = false, features = [
+    "http1",
+    "server",
+] }
+hyper-util = { version = "0.1.20", default-features = false, features = [
+    "server",
+    "server-graceful",
+    "service",
+    "tokio",
+] }
 opentelemetry = { version = "0.32.0", default-features = false, features = [
     "trace",
 ] }

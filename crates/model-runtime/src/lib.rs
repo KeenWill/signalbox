@@ -86,7 +86,7 @@ pub use evidence::{
     ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, ProvenUnsentEvidence,
     ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderRequestId,
     RefusalEvidence, StreamInterruption, TerminalEvidence, TerminalReport, ToolCallsAtLoss,
-    TransportFacts, UnsentCause,
+    TransportFacts, UnsentCause, parse_retry_after,
 };
 pub use input_count::{InputTokenCountOutcome, ModelInputTokenCounter};
 pub use message::{

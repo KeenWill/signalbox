@@ -27,14 +27,17 @@ held-slot diagnostics, and terminal-target cutoff are also verified against this
 PR. The provider members the poller adopts as check-suite and check-run
 completion generations are verified against PR #541
 (`fix/check-run-updated-at`). Eager merge-forward dispatch is verified against
-PR #886 (`agent/eager-merge-forward`). The source-independent event occurrence
-identity, its durable frontier, and the one-time storage migration are verified
-against this PR (`agent/repo-watch-content-identity`). The authenticated webhook
-intake, shadow projection, parity view, and targeted refresh behavior are
-verified against this PR (`agent/repo-watch-webhook-receiver`). Webhook drain
-liveness and stall reporting are verified against this PR
-(`agent/webhook-projection-drain`). Webhook preemption of slow complete
-reconciliation is verified against this PR
+PR #886 (`agent/eager-merge-forward`). Requeue after non-converged dispatch
+termination is verified against PR #894
+(`agent/dispatch-requeue-on-invalidation`). The source-independent event
+occurrence identity, its durable frontier, the commit-time coalescing of a
+restated occurrence, and the storage migration are verified against this PR
+(`agent/repo-watch-content-identity`). The authenticated webhook intake, its
+ingress ceilings, shadow projection, parity view and causes, and targeted
+refresh behavior are verified against this PR
+(`agent/repo-watch-webhook-receiver`). Webhook drain liveness and stall
+reporting are verified against this PR (`agent/webhook-projection-drain`).
+Webhook preemption of slow complete reconciliation is verified against this PR
 (`agent/webhook-projection-preemption-review`).
 
 ## Configuration and credential boundary
@@ -617,16 +620,40 @@ evaluations remain append-only audit facts. The batch releases the singleton at
 the transition that makes every dispatched turn terminal or runtime-irrelevant,
 leaves no live runtime-relevant turn for its session, and leaves no pursuing
 goal. A goal-ending recheck is deferred to its transaction boundary so an active
-turn's stop cascade is visible. The obligation becomes eligible only after that
-release and the same cooldown that would suppress a fresh successor; cooldown
-suppression without an existing obligation does not create one. Eligibility
-settles the obligation and creates its one current-state batch atomically. Equal
-recovery cannot create a second session for the same admitted action or
-obligation. A session whose current goal is pursuing remains nonterminal for
-singleton ownership across the gap between a completed goal turn and its durably
-queued continuation. Goal blocking, achievement, or user stop rechecks release
-after pursuit ends. The append-only dispatch records identify the sessions
-responsible for the PR; no mutable assignment flag replaces them.
+turn's stop cascade is visible. A blocked or user-stopped dispatch session, and
+an achieved session whose delivered state is no longer the pull request's latest
+durable head, opens the same latest-state obligation before release; sibling
+terminations and matching events collapse into that one obligation without
+regressing its latest event. A batch delivers its originating event when
+admission dispatched that event, and the target's collapsed current state when
+admission settled an obligation by replaying a still-matching earlier event.
+Achievement is terminal exactly when that delivered state is known and is still
+the pull request's latest durable head, so the successor that carried the newest
+head seals instead of owing another batch after every cooldown. A batch admitted
+before the delivered state was recorded has none, and achievement cannot seal
+it: reading its originating event as the delivered state would seal without
+delivery whenever a head returns to an earlier value. A branch target records no
+durable revision, only a workflow conclusion, so achievement is its own seal
+there. A batch owes at most one requeue, at its own release, and the terminal
+event deciding it is the one ending the generation the dispatch commissioned; a
+later goal generation its session accepts terminates without reopening one,
+including while a sibling action still holds the batch. Termination takes the
+singleton advisory key that admission takes, and locks the rule activation row
+that recording a deactivation shares, so a match racing a termination joins its
+obligation and a racing deactivation cannot miss it. Termination does not take
+the repository key: it runs inside the transaction ending the goal, which holds
+that session row, and lifecycle-cutoff processing takes the repository key
+before waiting on the same row, so the reverse order would deadlock a goal pass
+against a cutoff attempt. The obligation becomes eligible only after release and
+the same cooldown that would suppress a fresh successor; cooldown suppression
+without an existing obligation does not create one. Eligibility settles the
+obligation and creates its one current-state batch atomically. Equal recovery
+cannot create a second session for the same admitted action or obligation. A
+session whose current goal is pursuing remains nonterminal for singleton
+ownership across the gap between a completed goal turn and its durably queued
+continuation. Goal blocking, achievement, or user stop rechecks release after
+pursuit ends. The append-only dispatch records identify the sessions responsible
+for the PR; no mutable assignment flag replaces them.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies
@@ -639,11 +666,13 @@ obligation for that pull request immediately, without waiting for singleton or
 cooldown readiness; the admission recheck is the race-closing backstop. Either
 path settles stale nonterminal work as `target_closed` without creating a
 session. A rule that matches the `PullRequestClosed` or `PullRequestMerged`
-event itself remains dispatch-eligible; the terminal event is the cutoff fact,
-not work made stale by that fact. Corruption in one commissioned goal rolls back
-that goal's stop to a savepoint but does not roll back the cutoff: the terminal
-event remains durably dispositioned, healthy commissioned goals are stopped, and
-later cutoffs remain eligible for processing.
+event itself remains dispatch-eligible, and a non-converged termination of that
+dispatch still owes its requeue while its own cutoff remains the latest one; the
+terminal event is the cutoff fact, not work made stale by that fact. Corruption
+in one commissioned goal rolls back that goal's stop to a savepoint but does not
+roll back the cutoff: the terminal event remains durably dispositioned, healthy
+commissioned goals are stopped, and later cutoffs remain eligible for
+processing.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
@@ -743,11 +772,20 @@ therefore releases its concurrency slot and memory reservation instead of
 holding both. The received buffer is released before the delivery is persisted,
 so what the budget accounts for is what is actually held across that wait.
 
+The receiver bounds request heads as well as bodies. One request may carry at
+most 64 header fields and 32 KiB of aggregate header bytes counted across every
+name and value, and a head that exceeds either is refused with `431` before any
+credential is read or any body is collected. Below the router, the connection
+itself refuses a head that does not fit a 64 KiB read buffer, which is the
+memory bound on a head that is still arriving. All are hard safety ceilings.
+
 Nothing the handler bounds begins until whole request headers arrive, so two
-bounds sit before it: the listener holds at most 256 connections at once, and it
-retires any connection whose read makes no progress for 15 seconds. The
-connection budget is what bounds a peer that keeps dripping bytes, since each
-byte received restarts that deadline.
+further bounds sit before it: the listener holds at most 256 connections at
+once, taken at accept time before any router or handler work, and it retires any
+connection whose read makes no progress for 15 seconds. The connection budget is
+what bounds a peer that keeps dripping bytes, since each byte received restarts
+that deadline. The daemon serves HTTP/1 directly for this reason: the head
+ceilings sit on the connection builder, below any router.
 
 Each hook admits at most 3,000 deliveries in each 60-second window, charged only
 once a delivery has proved the shared secret. Nothing is charged before
@@ -776,16 +814,19 @@ one at a time, so a backlog of near-limit deliveries cannot retain far more than
 admission itself is allowed to; the oldest delivery is always read, so one body
 at the admission ceiling still drains. One drain visits a bounded number of
 pending pages and then re-arms that same wake, so a sustained stream is
-accelerated without holding the worker past an overdue full poll. A delivery
-whose processing fails is deferred for the rest of that drain rather than
-failing it, so one persistently unprocessable receipt cannot pin the head of the
-queue and starve every later one; the attempt still reports the first such
-failure. A primary-mode wake also preempts an in-flight complete poll without
-resetting that poll's deadline, so the durable delivery drains before
-reconciliation resumes. A signature-valid delivery whose event or action is
-outside the mapped set, including a broadly subscribed `workflow_job`, is still
-acknowledged successfully and is cheaply logged and recorded as ignored rather
-than treated as an intake failure.
+accelerated without holding the worker past an overdue full poll. A terminal
+commit whose result is lost in transit is resolved by re-recording the same
+request, which reports the row already terminal or records it now, rather than
+leaving a durable disposition the shadow never accounted for. A delivery whose
+processing fails is deferred for the rest of that drain rather than failing it,
+so one persistently unprocessable receipt cannot pin the head of the queue and
+starve every later one; the attempt still reports the first such failure. A
+primary-mode wake also preempts an in-flight complete poll without resetting
+that poll's deadline, so the durable delivery drains before reconciliation
+resumes. A signature-valid delivery whose event or action is outside the mapped
+set, including a broadly subscribed `workflow_job`, is still acknowledged
+successfully and is cheaply logged and recorded as ignored rather than treated
+as an intake failure.
 
 **Implemented behavior.** A drain page attempts every loaded delivery even when
 one delivery fails. Each failure is logged at warning level with the delivery
@@ -840,29 +881,48 @@ durable, so a failure between deriving and recording leaves the accumulated
 shadow exactly as it was.
 
 Only a full poll replaces that baseline, because only a full poll is the
-complete reconciliation sweep. A targeted query reconciles just the pull
-requests it names, so its commit is left to the cursor and the shadow is kept;
-the accepted cost is that what a targeted query learns reaches the shadow at the
-next full poll rather than immediately. Pending deliveries are drained before a
-full poll as well as after it, so a poll that observes the same transition as an
-already-admitted delivery cannot advance the cursor past it and leave the
-delivery applying to state that already contains it. A delivery's targeted
-provider queries run before anything is recorded, so a transient provider
-failure leaves it pending and retryable rather than terminal with a query that
-never ran; its terminal disposition is then recorded before the resulting cursor
-commit, so a failure between those two cannot make a retry re-derive projections
-against a cursor that has already moved past them. On daemon restart the
-baseline is re-seeded from the durable cursor, which is the same complete
-reconciliation a full poll performs. `repo_watch_webhook_projection` records
-each resulting version-one content identity and event kind, while
-`repo_watch_webhook_disposition` atomically records projected, duplicate-state,
-superseded, ignored, or quarantined terminal disposition. Shadow mode reserves
-no committed disposition and no resulting cursor generation: the schema refuses
-both, so the durable shape a later write mode would need is left to the ruling
-that authorizes it. The `repo_watch_webhook_parity` view joins those identities
-to version-one poll-produced `repo_watch_event` rows since that repository's
-first shadow receipt and reports `matched`, `webhook_only`, `poll_only`, or
-`not_directly_mapped`. Event projections intentionally carry no uniqueness
+complete reconciliation sweep, and only once nothing is still pending. The queue
+is read after the poll commits, so a delivery admitted while that poll was
+fetching counts too; a delivery still waiting would otherwise apply to state the
+cursor already contains and record nothing. A poll that has to leave the
+baseline in place hands it over as soon as the queue drains, rather than letting
+the pre-poll state stand until the next interval. A targeted query reconciles
+just the pull requests it names, so its commit is left to the cursor and the
+shadow is kept; the accepted cost is that what a targeted query learns reaches
+the shadow at the next full poll rather than immediately. Pending deliveries are
+drained before a full poll as well as after it. That drain failing is reported
+and not propagated: acceleration is not allowed to cancel the reconciliation
+sweep, so one delivery whose targeted request keeps failing cannot abort every
+scheduled poll. A poll that observes the same transition as an already-admitted
+delivery cannot advance the cursor past it and leave the delivery applying to
+state that already contains it. A delivery's targeted provider queries run
+before anything is recorded, so a transient provider failure leaves it pending
+and retryable rather than terminal with a query that never ran; its terminal
+disposition is then recorded before the resulting cursor commit, so a failure
+between those two cannot make a retry re-derive projections against a cursor
+that has already moved past them. On daemon restart the baseline is re-seeded
+from the durable cursor, which is the same complete reconciliation a full poll
+performs. The divergence a re-seeding leaves is accepted rather than removed: a
+delivery projected against a freshly seeded baseline records
+`cross_drain_shadow_gap` on its projections, so the gap is explained in the
+parity view instead of being carried by a durable shadow cursor.
+`repo_watch_webhook_projection` records each resulting version-one content
+identity and event kind, and the cause of any divergence the producing delivery
+already knows, while `repo_watch_webhook_disposition` atomically records
+projected, duplicate-state, superseded, ignored, or quarantined terminal
+disposition. Shadow mode reserves no committed disposition and no resulting
+cursor generation: the schema refuses both, so the durable shape a later write
+mode would need is left to the ruling that authorizes it. The
+`repo_watch_webhook_parity` view joins those identities to version-one
+poll-produced `repo_watch_event` rows since that repository's first shadow
+receipt and reports `matched`, `webhook_only`, `poll_only`, or
+`not_directly_mapped`, each divergent row alongside a `cause` drawn from one
+closed vocabulary: `compressed_transition`, `context_drift`, `poll_only_family`,
+and `cross_drain_shadow_gap`. A delivery records the cause it knows beside its
+own projection; `poll_only_family` is derived instead, because the event
+families polling produces and webhooks are not designed to reproduce —
+mergeability changes, aggregate check rollups, and reaction changes — have no
+delivery to carry it. Event projections intentionally carry no uniqueness
 constraint because separate deliveries may represent one content occurrence.
 Terminal exact payload bytes remain for seven days, after which maintenance may
 delete only the payload; delivery tombstones, digests, projections, and
@@ -908,6 +968,15 @@ the slow complete reconciliation sweep and remains authoritative for missed
 deliveries, reactions, and every provider fact outside the mapped set. Poll
 frequency does not drop in shadow mode; any later write mode or slower cadence
 requires a separately reviewed ruling after parity over a real workday.
+
+**Committed unimplemented functionality.** The rollout gate is no *unexplained*
+divergence, not no divergence: it is zero `repo_watch_webhook_parity` rows whose
+status is `webhook_only` or `poll_only` and whose cause is null, measured over a
+real workday. Divergence that names a closed cause is understood and does not
+hold the gate. Reaching zero uncaused rows is the remaining rollout work, since
+the runtime today records `cross_drain_shadow_gap` and derives
+`poll_only_family`, while `compressed_transition` and `context_drift` are
+available to record and not yet emitted.
 
 ## Open edges
 

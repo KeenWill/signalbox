@@ -3296,6 +3296,7 @@ name = "signalbox-model-runtime"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "httpdate",
  "rustix",
  "schemars 1.2.2",
  "serde",
@@ -3647,6 +3648,8 @@ dependencies = [
  "expect-test",
  "git2",
  "hmac",
+ "hyper",
+ "hyper-util",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

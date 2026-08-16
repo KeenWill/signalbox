@@ -60,12 +60,28 @@ pub(crate) fn classify_error(status: u16, token: Option<&str>) -> ProviderErrorK
     }
 }
 
+/// Classifies an error envelope and grants substitution proof only to an
+/// admitted native availability token paired with its documented status.
+pub(crate) fn classify_error_with_proof(
+    status: u16,
+    token: Option<&str>,
+) -> (ProviderErrorKind, bool) {
+    let kind = classify_error(status, token);
+    let non_acceptance_proven = matches!(
+        (status, token),
+        (429, Some("rate_limit_error")) | (529, Some("overloaded_error"))
+    );
+    (kind, non_acceptance_proven)
+}
+
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
     use signalbox_expect_table::table;
 
-    use super::{classify_error, classify_error_status, classify_error_token};
+    use super::{
+        classify_error, classify_error_status, classify_error_token, classify_error_with_proof,
+    };
 
     #[derive(Debug)]
     #[allow(
@@ -125,6 +141,35 @@ mod tests {
         assert_eq!(
             classify_error(401, Some("rate_limit_error")),
             signalbox_model_runtime::ProviderErrorKind::CredentialRejected
+        );
+    }
+
+    #[test]
+    fn substitution_proof_requires_an_admitted_noncontradictory_token() {
+        assert_eq!(
+            classify_error_with_proof(429, Some("rate_limit_error")),
+            (
+                signalbox_model_runtime::ProviderErrorKind::RateLimited,
+                true
+            )
+        );
+        assert_eq!(
+            classify_error_with_proof(529, Some("overloaded_error")),
+            (signalbox_model_runtime::ProviderErrorKind::Overloaded, true)
+        );
+        assert_eq!(
+            classify_error_with_proof(429, Some("future_limit_error")),
+            (
+                signalbox_model_runtime::ProviderErrorKind::RateLimited,
+                false
+            )
+        );
+        assert_eq!(
+            classify_error_with_proof(401, Some("rate_limit_error")),
+            (
+                signalbox_model_runtime::ProviderErrorKind::CredentialRejected,
+                false
+            )
         );
     }
 
