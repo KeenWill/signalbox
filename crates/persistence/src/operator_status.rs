@@ -654,21 +654,23 @@ fn decode_convergence(
     row: &PgRow,
 ) -> Result<ProcessOperatorStatusPullRequestConvergence, ProcessOperatorStatusError> {
     let mergeable_state_value = row.try_get::<String, _>("mergeable_state")?;
-    let mergeable_state = match repo_watch_mergeable_state_from_str(&mergeable_state_value)
-        .ok_or_else(|| ProcessOperatorStatusCorruption::Unsupported {
+    let mergeable_state = match repo_watch_mergeable_state_from_str(&mergeable_state_value).ok_or(
+        ProcessOperatorStatusCorruption::Unsupported {
             field: "mergeable state",
             value: mergeable_state_value,
-        })? {
+        },
+    )? {
         MergeableState::Mergeable => ProcessOperatorStatusMergeableState::Mergeable,
         MergeableState::Conflicting => ProcessOperatorStatusMergeableState::Conflicting,
         MergeableState::Unknown => ProcessOperatorStatusMergeableState::Unknown,
     };
     let review_decision_value = row.try_get::<String, _>("review_decision")?;
-    let review_decision = match repo_watch_review_decision_from_str(&review_decision_value)
-        .ok_or_else(|| ProcessOperatorStatusCorruption::Unsupported {
+    let review_decision = match repo_watch_review_decision_from_str(&review_decision_value).ok_or(
+        ProcessOperatorStatusCorruption::Unsupported {
             field: "review decision",
             value: review_decision_value,
-        })? {
+        },
+    )? {
         RepoWatchReviewDecision::None => ProcessOperatorStatusReviewDecision::None,
         RepoWatchReviewDecision::Approved => ProcessOperatorStatusReviewDecision::Approved,
         RepoWatchReviewDecision::ReviewRequired => {
@@ -679,23 +681,22 @@ fn decode_convergence(
         }
     };
     let verdict_value = row.try_get::<String, _>("verdict_kind")?;
-    let verdict =
-        match repo_watch_convergence_verdict_from_str(&verdict_value).ok_or_else(|| {
-            ProcessOperatorStatusCorruption::Unsupported {
-                field: "convergence verdict",
-                value: verdict_value,
-            }
-        })? {
-            RepoWatchConvergenceVerdict::NotConverged => {
-                ProcessOperatorStatusConvergenceVerdict::NotConverged
-            }
-            RepoWatchConvergenceVerdict::InternallyConverged => {
-                ProcessOperatorStatusConvergenceVerdict::InternallyConverged
-            }
-            RepoWatchConvergenceVerdict::MergeReady => {
-                ProcessOperatorStatusConvergenceVerdict::MergeReady
-            }
-        };
+    let verdict = match repo_watch_convergence_verdict_from_str(&verdict_value).ok_or(
+        ProcessOperatorStatusCorruption::Unsupported {
+            field: "convergence verdict",
+            value: verdict_value,
+        },
+    )? {
+        RepoWatchConvergenceVerdict::NotConverged => {
+            ProcessOperatorStatusConvergenceVerdict::NotConverged
+        }
+        RepoWatchConvergenceVerdict::InternallyConverged => {
+            ProcessOperatorStatusConvergenceVerdict::InternallyConverged
+        }
+        RepoWatchConvergenceVerdict::MergeReady => {
+            ProcessOperatorStatusConvergenceVerdict::MergeReady
+        }
+    };
     let seal = row
         .try_get::<Option<String>, _>("sealed_kind")?
         .map(|value| {
@@ -773,12 +774,12 @@ fn decode_singleton(
     row: &PgRow,
 ) -> Result<ProcessOperatorStatusSingleton, ProcessOperatorStatusError> {
     let scope_value = row.try_get::<String, _>("singleton_scope")?;
-    let scope = match repo_watch_singleton_scope_from_str(&scope_value).ok_or_else(|| {
+    let scope = match repo_watch_singleton_scope_from_str(&scope_value).ok_or(
         ProcessOperatorStatusCorruption::Unsupported {
             field: "singleton scope",
             value: scope_value,
-        }
-    })? {
+        },
+    )? {
         RepoWatchSingletonScopeStorageKind::PullRequest => {
             ProcessOperatorStatusSingletonScope::PullRequest
         }

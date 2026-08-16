@@ -14,6 +14,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as STANDARD_BASE64};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
+    ser::SerializeSeq,
 };
 use serde_json::value::RawValue;
 use signalbox_domain::{
@@ -6964,6 +6965,10 @@ pub struct OperatorStatusPullRequestConvergenceMessage {
     pub review_decision: OperatorStatusReviewDecision,
     pub unresolved_thread_count: CanonicalU64,
     pub gating_check_count: CanonicalU64,
+    #[serde(
+        serialize_with = "serialize_operator_status_check_names",
+        deserialize_with = "deserialize_operator_status_check_names"
+    )]
     pub non_green_gating_checks: Vec<String>,
     pub verdict: OperatorStatusConvergenceVerdict,
     #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -8048,6 +8053,43 @@ fn operator_status_singleton_is_valid(
 
 fn operator_status_text_is_valid(value: &str, maximum: usize) -> bool {
     !value.is_empty() && value.len() <= maximum && !value.contains('\0')
+}
+
+fn serialize_operator_status_check_names<SerializerT>(
+    names: &[String],
+    serializer: SerializerT,
+) -> Result<SerializerT::Ok, SerializerT::Error>
+where
+    SerializerT: Serializer,
+{
+    let mut sequence = serializer.serialize_seq(Some(names.len()))?;
+    for name in names {
+        sequence.serialize_element(&STANDARD_BASE64.encode(name.as_bytes()))?;
+    }
+    sequence.end()
+}
+
+fn deserialize_operator_status_check_names<'de, DeserializerT>(
+    deserializer: DeserializerT,
+) -> Result<Vec<String>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer)?
+        .into_iter()
+        .map(|encoded| {
+            let decoded = STANDARD_BASE64.decode(encoded.as_bytes()).map_err(|_| {
+                serde::de::Error::custom("operator-status check name is not canonical base64")
+            })?;
+            if STANDARD_BASE64.encode(&decoded) != encoded {
+                return Err(serde::de::Error::custom(
+                    "operator-status check name is not canonical base64",
+                ));
+            }
+            String::from_utf8(decoded)
+                .map_err(|_| serde::de::Error::custom("operator-status check name is not UTF-8"))
+        })
+        .collect()
 }
 
 fn operator_status_sha_is_valid(value: &str) -> bool {
@@ -9567,6 +9609,38 @@ mod tests {
             ))),
             r#"{"type":"operator_status","kind":"pull_request_convergence","repository":"example/repo","pull_request_number":"41","head_sha":"1111111111111111111111111111111111111111","base_branch":"main","base_revision":"2222222222222222222222222222222222222222","mergeable_state":"mergeable","review_decision":"approved","unresolved_thread_count":"1","gating_check_count":"2","non_green_gating_checks":[],"verdict":"not_converged","seal":"merge_ready","assessed_seconds_ago":"12"}"#,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn maximum_operator_status_convergence_inventory_fits_one_frame()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let maximum_check_name = "\u{1}".repeat(256);
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::One,
+            RequestId::try_new(u64::MAX)?,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
+                Box::new(OperatorStatusPullRequestConvergenceMessage {
+                    repository: String::from("example/repo"),
+                    pull_request_number: CanonicalU64::new(41),
+                    head_sha: String::from("1111111111111111111111111111111111111111"),
+                    base_branch: String::from("main"),
+                    base_revision: String::from("2222222222222222222222222222222222222222"),
+                    mergeable_state: OperatorStatusMergeableState::Mergeable,
+                    review_decision: OperatorStatusReviewDecision::ChangesRequested,
+                    unresolved_thread_count: CanonicalU64::new(10_000),
+                    gating_check_count: CanonicalU64::new(10_000),
+                    non_green_gating_checks: vec![maximum_check_name; 10_000],
+                    verdict: OperatorStatusConvergenceVerdict::NotConverged,
+                    seal: None,
+                    assessed_seconds_ago: CanonicalU64::new(u64::MAX),
+                }),
+            ))),
+        )?;
+
+        let encoded = encode_server_line(&frame)?;
+        assert!(encoded.len() <= super::MAX_FRAME_BYTES);
+        assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
     }
 

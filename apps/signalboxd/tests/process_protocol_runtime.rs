@@ -2953,8 +2953,18 @@ async fn process_runtime_reads_populated_convergence_status_rows() -> Result<(),
                    '1111111111111111111111111111111111111111', 'main',
                    '2222222222222222222222222222222222222222', 'mergeable',
                    'changes_requested', ARRAY[]::text[], 1, ARRAY['ci'],
-                   'not_converged', transaction_timestamp() + interval '1 day')",
+                   'not_converged', transaction_timestamp())",
     )
+    .bind(assessment_id)
+    .execute(&runtime.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_pull_request_convergence_identity (
+            identity_id, repository, cursor_generation, pull_request_number,
+            assessment_id
+         ) VALUES ($1, 'example/repo', 1, 41, $2)",
+    )
+    .bind(Uuid::from_u128(0x903))
     .bind(assessment_id)
     .execute(&runtime.pool)
     .await?;
@@ -2969,7 +2979,7 @@ async fn process_runtime_reads_populated_convergence_status_rows() -> Result<(),
                    'PRR_node', 'reviewer',
                    '3333333333333333333333333333333333333333',
                    'Superseded by the current head.',
-                   transaction_timestamp() + interval '1 day')",
+                   transaction_timestamp())",
     )
     .bind(Uuid::from_u128(0x902))
     .bind(assessment_id)

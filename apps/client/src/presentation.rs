@@ -1279,14 +1279,15 @@ impl<'a> Output<'a> {
                 writeln!(
                     self.stdout,
                     "convergence repository={repository} pr={} verdict={} seal={} \
-                     unresolved_threads={} gating_checks={} non_green={} mergeable={} review={} \
+                     unresolved_threads={} gating_checks={} non_green_count={} non_green={} mergeable={} review={} \
                      assessed_ago={} head={} base={base_branch}@{}",
                     pull_request_number.value(),
                     operator_status_verdict_label(*verdict),
                     seal.map_or("none", operator_status_seal_label),
                     unresolved_thread_count.value(),
                     gating_check_count.value(),
-                    if checks.is_empty() { "none" } else { &checks },
+                    non_green_gating_checks.len(),
+                    checks,
                     operator_status_mergeable_label(*mergeable_state),
                     operator_status_review_decision_label(*review_decision),
                     duration_label(assessed_seconds_ago.value()),
@@ -3764,11 +3765,45 @@ mod tests {
             status held_slots=1 queued_obligations=1 pull_request_convergences=1 pending_stale_review_clearances=1
             held repository=example/repo pr=41 rule=review@1 singleton=pull_request:example/repo#41 held=1h1m1s blockers=pursuing_goal sessions=00000000-0000-0000-0000-000000000002 dispatch=00000000-0000-0000-0000-000000000001
             queued repository=example/repo rule=review@1 singleton=rule waiting=1m5s matches=3 ready=false occupying=none cooldown=5s first_event=00000000-0000-0000-0000-000000000004 latest_event=00000000-0000-0000-0000-000000000005 obligation=00000000-0000-0000-0000-000000000003
-            convergence repository=example/repo pr=41 verdict=merge_ready seal=merge_ready unresolved_threads=0 gating_checks=2 non_green=none mergeable=mergeable review=approved assessed_ago=9s head=1111111111111111111111111111111111111111 base=main@2222222222222222222222222222222222222222
+            convergence repository=example/repo pr=41 verdict=merge_ready seal=merge_ready unresolved_threads=0 gating_checks=2 non_green_count=0 non_green= mergeable=mergeable review=approved assessed_ago=9s head=1111111111111111111111111111111111111111 base=main@2222222222222222222222222222222222222222
             stale_review_clearance repository=example/repo pr=41 reviewer=reviewer pending=8s review=PRR_node reviewed_head=3333333333333333333333333333333333333333 current_head=1111111111111111111111111111111111111111
             model_usage=omitted reason=no_cheap_status_aggregate
         "#]]
         .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn operator_status_distinguishes_a_check_named_none_from_an_empty_inventory() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        {
+            let mut output = Output::new(&mut stdout, &mut stderr, false);
+            output
+                .operator_status_item(&ServerMessage::OperatorStatus(Box::new(
+                    OperatorStatusMessage::PullRequestConvergence(Box::new(
+                        OperatorStatusPullRequestConvergenceMessage {
+                            repository: String::from("example/repo"),
+                            pull_request_number: CanonicalU64::new(41),
+                            head_sha: String::from("1111111111111111111111111111111111111111"),
+                            base_branch: String::from("main"),
+                            base_revision: String::from("2222222222222222222222222222222222222222"),
+                            mergeable_state: OperatorStatusMergeableState::Mergeable,
+                            review_decision: OperatorStatusReviewDecision::ChangesRequested,
+                            unresolved_thread_count: CanonicalU64::new(1),
+                            gating_check_count: CanonicalU64::new(1),
+                            non_green_gating_checks: vec![String::from("none")],
+                            verdict: OperatorStatusConvergenceVerdict::NotConverged,
+                            seal: None,
+                            assessed_seconds_ago: CanonicalU64::new(1),
+                        },
+                    )),
+                )))
+                .expect("in-memory output cannot fail");
+        }
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        assert!(rendered.contains("non_green_count=1 non_green=none"));
         assert!(stderr.is_empty());
     }
 
