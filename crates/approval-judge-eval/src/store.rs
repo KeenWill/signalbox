@@ -1,3 +1,5 @@
+//! Pluggable corpus-store contracts governed by the evaluation-system specification.
+
 use std::{
     error::Error,
     fmt,
@@ -231,6 +233,8 @@ pub enum CorpusStoreError {
     Manifest(crate::manifest::ManifestError),
     /// Durable database access failed.
     Database(sqlx::Error),
+    /// Stored case JSON did not decode into the strict case shape.
+    StoredCaseJson(serde_json::Error),
     /// A database row violated the store representation.
     CorruptRegistration(CorpusStoreCorruption),
     /// The manifest names a blob, but this slice has no blob backend.
@@ -256,8 +260,6 @@ pub enum CorpusStoreCorruption {
     CaseCountMismatch,
     /// Registration and content digests differ.
     CorpusDigestMismatch,
-    /// Stored case JSON could not be decoded into the current strict shape.
-    StoredCaseJson,
     /// The logical key already names different metadata or cases.
     RegistrationConflict,
     /// A durable source discriminator is unknown.
@@ -293,7 +295,6 @@ impl fmt::Display for CorpusStoreCorruption {
             Self::CorpusDigestMismatch => {
                 formatter.write_str("registration digest does not match stored cases")
             }
-            Self::StoredCaseJson => formatter.write_str("stored case JSON is invalid"),
             Self::RegistrationConflict => {
                 formatter.write_str("logical key already names different metadata or cases")
             }
@@ -321,6 +322,9 @@ impl fmt::Display for CorpusStoreError {
             Self::Database(source) => {
                 write!(formatter, "corpus database operation failed: {source}")
             }
+            Self::StoredCaseJson(source) => {
+                write!(formatter, "stored case JSON is invalid: {source}")
+            }
             Self::CorruptRegistration(corruption) => {
                 write!(formatter, "corpus registration is corrupt: {corruption}")
             }
@@ -336,6 +340,7 @@ impl Error for CorpusStoreError {
         match self {
             Self::Manifest(source) => Some(source),
             Self::Database(source) => Some(source),
+            Self::StoredCaseJson(source) => Some(source),
             Self::NotFound(_) | Self::CorruptRegistration(_) | Self::BlobBackendUnavailable => None,
         }
     }

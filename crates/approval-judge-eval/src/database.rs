@@ -1,5 +1,11 @@
+//! PostgreSQL corpus storage governed by the evaluation-system specification.
+
 use std::path::Path;
 
+use signalbox_persistence::mapping::{
+    EvaluationCorpusSourceStorageKind, evaluation_corpus_source_from_str,
+    evaluation_corpus_source_to_str,
+};
 use sqlx::{PgPool, Row};
 
 use crate::{
@@ -10,10 +16,6 @@ use crate::{
         CorpusStoreError, CorpusStoreFuture, Sha256Digest,
     },
 };
-
-const SOURCE_REPOSITORY: &str = "repository";
-const SOURCE_DATABASE_NATIVE: &str = "database_native";
-const SOURCE_BLOB_REFERENCE: &str = "blob_reference";
 
 /// PostgreSQL-backed corpus registrations and ordered evaluation cases.
 #[derive(Clone, Debug)]
@@ -94,9 +96,8 @@ impl DatabaseCorpusStore {
             let position = i64::try_from(position).map_err(|_| {
                 CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::CasePositionOutOfRange)
             })?;
-            let case_json = serde_json::to_string(case).map_err(|_| {
-                CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::StoredCaseJson)
-            })?;
+            let case_json =
+                serde_json::to_string(case).map_err(CorpusStoreError::StoredCaseJson)?;
             sqlx::query(
                 "INSERT INTO evaluation_corpus_case (
                     corpus_name, corpus_version, case_id, replay_position, case_json
@@ -162,9 +163,7 @@ impl DatabaseCorpusStore {
         let mut cases = Vec::with_capacity(rows.len());
         for row in rows {
             let json: String = row.try_get("case_json")?;
-            let case = serde_json::from_str(&json).map_err(|_| {
-                CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::StoredCaseJson)
-            })?;
+            let case = serde_json::from_str(&json).map_err(CorpusStoreError::StoredCaseJson)?;
             cases.push(case);
         }
         let corpus = ApprovalJudgeCorpus {
@@ -231,22 +230,27 @@ type EncodedSource<'a> = (
 fn encode_source(source: &CorpusSourceDescriptor) -> EncodedSource<'_> {
     match source {
         CorpusSourceDescriptor::Repository { repository, path } => (
-            SOURCE_REPOSITORY,
+            evaluation_corpus_source_to_str(EvaluationCorpusSourceStorageKind::Repository),
             Some(repository),
             Some(path),
             None,
             None,
             None,
         ),
-        CorpusSourceDescriptor::DatabaseNative => {
-            (SOURCE_DATABASE_NATIVE, None, None, None, None, None)
-        }
+        CorpusSourceDescriptor::DatabaseNative => (
+            evaluation_corpus_source_to_str(EvaluationCorpusSourceStorageKind::DatabaseNative),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
         CorpusSourceDescriptor::BlobReference {
             store,
             digest,
             byte_length,
         } => (
-            SOURCE_BLOB_REFERENCE,
+            evaluation_corpus_source_to_str(EvaluationCorpusSourceStorageKind::BlobReference),
             None,
             None,
             store.as_deref(),
@@ -265,13 +269,15 @@ fn decode_registration(
     let corpus_digest: Vec<u8> = row.try_get("corpus_digest")?;
     let case_count: i64 = row.try_get("case_count")?;
     let source_kind: String = row.try_get("source_kind")?;
-    let source = match source_kind.as_str() {
-        SOURCE_REPOSITORY => CorpusSourceDescriptor::Repository {
+    let source = match evaluation_corpus_source_from_str(&source_kind) {
+        Some(EvaluationCorpusSourceStorageKind::Repository) => CorpusSourceDescriptor::Repository {
             repository: required_column(row, "source_repository")?,
             path: required_column(row, "source_path")?,
         },
-        SOURCE_DATABASE_NATIVE => CorpusSourceDescriptor::DatabaseNative,
-        SOURCE_BLOB_REFERENCE => {
+        Some(EvaluationCorpusSourceStorageKind::DatabaseNative) => {
+            CorpusSourceDescriptor::DatabaseNative
+        }
+        Some(EvaluationCorpusSourceStorageKind::BlobReference) => {
             let digest: Vec<u8> = required_column(row, "source_blob_digest")?;
             CorpusSourceDescriptor::BlobReference {
                 store: row.try_get("source_blob_store")?,
@@ -285,9 +291,9 @@ fn decode_registration(
                     })?,
             }
         }
-        other => {
+        None => {
             return Err(CorpusStoreError::CorruptRegistration(
-                CorpusStoreCorruption::UnknownSourceKind(other.to_owned()),
+                CorpusStoreCorruption::UnknownSourceKind(source_kind),
             ));
         }
     };

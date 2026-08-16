@@ -1,3 +1,5 @@
+//! Portable corpus manifests governed by the evaluation-system specification.
+
 use std::{
     collections::BTreeSet,
     error::Error,
@@ -283,8 +285,12 @@ fn validate_blob_store(value: &str) -> Result<(), ManifestError> {
 
 fn portable_relative_path(value: &str) -> Result<PathBuf, ManifestError> {
     let path = Path::new(value);
+    let bytes = value.as_bytes();
+    let has_windows_drive_prefix =
+        bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
     if value.is_empty()
         || value.contains('\\')
+        || has_windows_drive_prefix
         || path.is_absolute()
         || path
             .components()
@@ -549,6 +555,19 @@ mod tests {
             decode_manifest(&encoded).expect_err("an unknown source-variant field is rejected");
 
         assert!(error.to_string().contains("unknown field `future_field`"));
+    }
+
+    #[test]
+    fn repository_manifest_rejects_windows_drive_prefix_on_every_host() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        manifest["case_source"]["path"] = serde_json::Value::String(String::from("C:/cases.json"));
+        let encoded = serde_json::to_vec(&manifest).expect("the modified manifest serializes");
+
+        let error =
+            decode_manifest(&encoded).expect_err("a Windows drive-prefixed path is never portable");
+
+        assert!(error.to_string().contains("not a portable relative path"));
     }
 
     fn manifest_source(manifest: &CorpusManifest) -> CorpusSourceDescriptor {

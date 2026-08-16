@@ -124,6 +124,45 @@ async fn blob_source_constraint_requires_digest_and_byte_length() -> Result<(), 
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stored_case_decode_error_retains_serde_context() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let disk = DiskCorpusStore::open(seed_manifest_path())?;
+    let registration = disk
+        .enumerate()
+        .await?
+        .into_iter()
+        .next()
+        .expect("the seed store has one registration");
+    let database = DatabaseCorpusStore::new(pool.clone());
+    database.import_manifest(seed_manifest_path()).await?;
+    sqlx::query(
+        "UPDATE evaluation_corpus_case
+            SET case_json = '{}'::jsonb
+          WHERE corpus_name = $1 AND corpus_version = $2 AND replay_position = 0",
+    )
+    .bind(&registration.key.name)
+    .bind(&registration.key.version)
+    .execute(&pool)
+    .await?;
+
+    let error = database
+        .load(&registration.key)
+        .await
+        .expect_err("a malformed durable case fails closed");
+
+    assert!(
+        error.source().is_some(),
+        "the serde decode source is retained"
+    );
+    assert!(error.to_string().contains("missing field"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 async fn insert_blob_registration(
     pool: &PgPool,
     corpus_version: &str,
