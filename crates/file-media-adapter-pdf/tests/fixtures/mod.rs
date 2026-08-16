@@ -8,6 +8,7 @@ use signalbox_file_media_runtime::{
 
 const FIXTURE_TEXT: &str = "generated PDF text";
 const FIXTURE_PAGE_COUNT: usize = 1;
+const READ_SOURCE_LIMIT: u64 = 8 * 1024 * 1024;
 
 pub struct PdfFixture {
     bytes: Vec<u8>,
@@ -40,22 +41,56 @@ impl PdfFixture {
     pub fn locked() -> Result<Self, Box<dyn Error>> {
         let mut bytes = Self::ordinary()?.bytes;
         let insertion = bytes
-            .windows(b"startxref".len())
-            .position(|window| window == b"startxref")
-            .ok_or("generated PDF omitted startxref")?;
+            .windows(b"<<".len())
+            .rposition(|window| window == b"<<")
+            .ok_or("generated PDF omitted trailer dictionary")?
+            + 2;
         bytes.splice(
             insertion..insertion,
-            b"trailer\n<< /Encrypt 99 0 R >>\n".iter().copied(),
+            b" /Encrypt << /Filter /Standard /V 1 /R 2 /P -4 >>"
+                .iter()
+                .copied(),
+        );
+        Ok(Self { bytes })
+    }
+
+    pub fn trailer_encrypt_comment() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = Self::ordinary()?.bytes;
+        let insertion = bytes
+            .windows(b"<<".len())
+            .rposition(|window| window == b"<<")
+            .ok_or("generated PDF omitted trailer dictionary")?;
+        bytes.splice(insertion..insertion, b"% /Encrypt\n".iter().copied());
+        Ok(Self { bytes })
+    }
+
+    pub fn catalog_version_override() -> Result<Self, Box<dyn Error>> {
+        let mut document = Document::load_mem(&Self::ordinary()?.bytes)?;
+        document
+            .catalog_mut()?
+            .set("Version", Object::Name(b"1.7".to_vec()));
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes)?;
+        Ok(Self { bytes })
+    }
+
+    pub fn malformed_large() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = b"%PDF-1.5\n".to_vec();
+        bytes.resize(300 * 1024, b' ');
+        bytes.extend_from_slice(
+            b"xref\n0 1\n0000000000 65535 f\ntrailer\n<< /Size 1 /Root 1 0 R >>\nstartxref\n9\n%%EOF\n",
         );
         Ok(Self { bytes })
     }
 
     pub fn over_source_limit() -> Result<Self, Box<dyn Error>> {
-        let ordinary = Self::ordinary()?;
-        let mut bytes = Vec::with_capacity(8 * 1024 * 1024 + ordinary.bytes.len() + 1);
-        bytes.extend_from_slice(b"%PDF-1.5\n");
-        bytes.resize(8 * 1024 * 1024 + 1, b' ');
-        bytes.extend_from_slice(&ordinary.bytes[9..]);
+        let mut bytes = Self::ordinary()?.bytes;
+        let insertion = bytes
+            .windows(b"startxref".len())
+            .rposition(|window| window == b"startxref")
+            .ok_or("generated PDF omitted startxref")?;
+        let padding = READ_SOURCE_LIMIT as usize + 1 - bytes.len();
+        bytes.splice(insertion..insertion, std::iter::repeat_n(b' ', padding));
         Ok(Self { bytes })
     }
 
@@ -72,6 +107,14 @@ impl PdfFixture {
 
     pub const fn expected_page_count(&self) -> usize {
         FIXTURE_PAGE_COUNT
+    }
+
+    pub const fn expected_source_limit(&self) -> u64 {
+        READ_SOURCE_LIMIT
+    }
+
+    pub const fn expected_version_override(&self) -> &'static str {
+        "1.7"
     }
 
     pub fn into_source(self) -> Result<MemorySource, Box<dyn Error>> {

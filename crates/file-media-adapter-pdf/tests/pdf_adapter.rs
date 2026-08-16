@@ -209,8 +209,47 @@ async fn encrypt_token_in_page_text_does_not_claim_a_locked_trailer() -> Result<
 }
 
 #[tokio::test]
+async fn encrypt_token_in_trailer_comment_does_not_claim_a_locked_file()
+-> Result<(), Box<dyn Error>> {
+    let source = PdfFixture::trailer_encrypt_comment()?.into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn token_shaped_large_garbage_is_not_structurally_validated() -> Result<(), Box<dyn Error>> {
+    let source = PdfFixture::malformed_large()?.into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn metadata_reports_catalog_version_override() -> Result<(), Box<dyn Error>> {
+    let fixture = PdfFixture::catalog_version_override()?;
+    let expected_version = fixture.expected_version_override();
+    let source = fixture.into_source()?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "metadata",
+        serde_json::json!({}),
+    )
+    .await?;
+    let body = complete_structure(result)?;
+
+    assert_eq!(body["version"], expected_version);
+    Ok(())
+}
+
+#[tokio::test]
 async fn oversized_pdf_read_fails_at_the_declared_source_ceiling() -> Result<(), Box<dyn Error>> {
-    let source = PdfFixture::over_source_limit()?.into_source()?;
+    let fixture = PdfFixture::over_source_limit()?;
+    let expected_source_limit = fixture.expected_source_limit();
+    let source = fixture.into_source()?;
     let result = read(
         &DirectProcessor::new(),
         &source,
@@ -222,7 +261,7 @@ async fn oversized_pdf_read_fails_at_the_declared_source_ceiling() -> Result<(),
     assert_eq!(
         result,
         Err(FileMediaFailure::SourceTooLarge {
-            maximum_bytes: 8 * 1024 * 1024,
+            maximum_bytes: expected_source_limit,
         })
     );
     Ok(())
