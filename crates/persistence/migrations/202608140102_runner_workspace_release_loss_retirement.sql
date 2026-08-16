@@ -55,7 +55,8 @@ BEGIN
     SELECT * INTO release
       FROM runner_workspace_release
      WHERE session_id = NEW.session_id
-       AND placement_revision = NEW.placement_revision;
+       AND placement_revision = NEW.placement_revision
+       FOR UPDATE;
     SELECT * INTO loss
       FROM runner_connection_loss_epoch
      WHERE enrollment_id = NEW.enrollment_id
@@ -100,39 +101,16 @@ BEFORE TRUNCATE ON runner_workspace_release_loss_retirement
 FOR EACH STATEMENT
 EXECUTE FUNCTION reject_immutable_record_change();
 
--- No production writer predates this migration, but preserve exact valid rows
--- created by tests or a forward-compatible adapter: a release whose source
--- connection is already lost is deterministically unowned.
-INSERT INTO runner_workspace_release_loss_retirement (
-    session_id,
-    placement_revision,
-    runner_id,
-    manifest_id,
-    enrollment_id,
-    connection_epoch,
-    loss_epoch,
-    connection_event_ordinal
-)
-SELECT release.session_id,
-       release.placement_revision,
-       release.runner_id,
-       release.manifest_id,
-       release.enrollment_id,
-       release.connection_epoch,
-       loss.loss_epoch,
-       loss.connection_event_ordinal
-  FROM runner_workspace_release AS release
-  JOIN runner_connection_loss_epoch AS loss
-    ON loss.enrollment_id = release.enrollment_id
-   AND loss.connection_epoch = release.connection_epoch
-  LEFT JOIN runner_workspace_release_acknowledgement AS acknowledgement
-    ON acknowledgement.session_id = release.session_id
-   AND acknowledgement.placement_revision = release.placement_revision
- WHERE acknowledgement.session_id IS NULL;
-
 -- A release can outlive the placement that originally made its session part of
 -- a loss page. Extend the cursor guard with that independent subject set so a
 -- later placement change cannot hide an unowned release behind the cursor.
+CREATE INDEX runner_workspace_release_connection_session_idx
+    ON runner_workspace_release (
+        enrollment_id,
+        connection_epoch,
+        session_id
+    );
+
 CREATE FUNCTION guard_runner_connection_loss_release_propagation()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -194,7 +172,8 @@ BEGIN
     SELECT * INTO release
       FROM runner_workspace_release
      WHERE session_id = NEW.session_id
-       AND placement_revision = NEW.placement_revision;
+       AND placement_revision = NEW.placement_revision
+       FOR UPDATE;
 
     IF release.state_kind IS DISTINCT FROM 'pending'
        OR release.runner_id IS DISTINCT FROM NEW.runner_id

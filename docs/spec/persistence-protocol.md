@@ -747,10 +747,13 @@ Representation rules, all enforced in the schema:
   rejects a completion after the cleanup-owning physical connection is durably
   lost, returns exact replay, and makes pending-release reads exclude the
   recorded terminal. Typed readback rejoins the complete release correlation
-  instead of trusting acknowledgement columns alone. **Committed unimplemented
-  functionality.** No present production transaction inserts the pending
-  release, records cleanup refusal, or retires it on connection loss; those
-  transitions must consume this exact representation rather than presenting
+  instead of trusting acknowledgement columns alone. Migration `202608140102`
+  retains one immutable unowned-release proof under the same exact correlation
+  when connection-loss propagation retires a pending release. Completion and
+  loss retirement serialize on the release row and are mutually exclusive.
+  **Committed unimplemented functionality.** No present production transaction
+  inserts the pending release or records cleanup refusal; those transitions must
+  consume this exact representation rather than presenting
   `RunnerWorkspaceReleaseCandidate` as cleanup authority.
 - Migration `202608110028` retains one immutable repository-replacement
   workspace receipt under its single-use provisioning authorization. The row
