@@ -368,6 +368,7 @@ impl StreamDecoder {
                 exchange: self.exchange.clone(),
                 reported_model: self.reported_model.clone(),
                 kind,
+                non_acceptance_proven: false,
                 native: error.into_native_facts(),
                 usage: self.usage,
             },
@@ -871,6 +872,7 @@ mod tests {
         ExchangeFacts {
             provider_request_id: Some(ProviderRequestId::new("req_1")),
             http_status: Some(200),
+            retry_after: None,
         }
     }
 
@@ -1663,6 +1665,7 @@ mod tests {
             panic!("a mid-stream error event is a definitive provider error");
         };
         assert_eq!(error.kind, ProviderErrorKind::Overloaded);
+        assert!(!error.non_acceptance_proven);
         assert_eq!(
             error.native.error_token,
             Some("overloaded_error".to_string())
