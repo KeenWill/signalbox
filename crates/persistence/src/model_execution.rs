@@ -556,7 +556,7 @@ impl PostgresModelCallRepository {
         &self,
         preview: &signalbox_domain::PreparedTurnActivation,
         call: ModelCallId,
-    ) -> Result<ProspectiveModelCall, ModelCallRepositoryError> {
+    ) -> Result<Option<ProspectiveModelCall>, ModelCallRepositoryError> {
         let session_id = preview.turn().session();
         let mut transaction = self.pool.begin().await?;
         let session = match load_session_from_connection(&mut transaction, session_id).await {
@@ -653,17 +653,24 @@ impl PostgresModelCallRepository {
             &self.credential_pools,
         )
         .await?;
-        // An exhausted pool has no member to preview. Preparation owns the
-        // typed exhaustion closure, so the preview keeps the session default
-        // rather than inventing a second exhaustion path here.
-        let credential_reference = selected.reference.unwrap_or(credential_reference);
+        // An exhausted pool has no member to preview at all. Falling back to
+        // the session default would spend an authenticated token count against
+        // a quarantined or rejected account, and that count fails, aborting
+        // activation before preparation could record the typed exhaustion. The
+        // caller activates the turn call-free instead and lets ordinary
+        // preparation own the closure, exactly as the counted-activation
+        // checkpoint already does when selection admits no member.
+        let Some(credential_reference) = selected.reference else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
         transaction.rollback().await?;
-        Ok(ProspectiveModelCall {
+        Ok(Some(ProspectiveModelCall {
             request,
             credential_reference,
             system_prompt,
             tool_entries,
-        })
+        }))
     }
 
     /// Checkpoints the exact no-steering initial call in the transaction that

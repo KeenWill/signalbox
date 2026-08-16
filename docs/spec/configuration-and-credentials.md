@@ -1720,8 +1720,13 @@ Model-call preparation resolves a pool and persists the selected member and
 immutable call-pinned policy. Observation commit translates the closed quota,
 rate-limit, and overload classifications through that frozen policy and applies
 `stay`, `switch_next_turn`, `switch_now`, `avoid_new_sessions`, or `quarantine`.
-Capacity-derived selection and reset-aware exclusion expiry remain committed
-unimplemented functionality where called out below.
+The durable trigger effects below are what this build appends and reads.
+Capacity-derived selection remains committed unimplemented functionality where
+called out below, and so does the whole exclusion lifecycle — reset-aware
+expiry, operator clear, probe recovery, action-head generations, correlation
+coalescing, and origin-aware clearing — which
+[committed unimplemented functionality — credential-exclusion lifecycle](#committed-unimplemented-functionality--credential-exclusion-lifecycle)
+states in full.
 
 #### Durable trigger effects
 
@@ -1740,21 +1745,20 @@ session that prepares against that pool excludes the member; the transaction
 that successfully prepares that turn through another member consumes the
 displacement. If no other member is admissible, the displacement remains pending
 while the pool's exhaustion policy runs; it cannot expire merely because a
-preparation found no successor. An explicit operator clear may remove it.
+preparation found no successor.
 
 An `avoid_new_sessions` exclusion is durable and scoped to the membership that
-observed it, not to every pool containing the profile. A reported reset time
-clears it when that time passes. Without a reset time it remains until an
-explicit operator clear or a zero-cost, no-model probe reports availability.
-Restart does not clear it. The session test in the table is evaluated against
-that pool: a completed call through another pool does not make this member
-sticky or exempt from the exclusion.
+observed it, not to every pool containing the profile. Nothing in this build
+ends one: no reported reset expires it, no restart clears it, and no clear or
+probe path exists to release it. The session test in the table is evaluated
+against that pool: a completed call through another pool does not make this
+member sticky or exempt from the exclusion.
 
 Every trigger action is a derived effect of its exact classified observation.
 The observation-commit transaction atomically stores the terminal observation
-and any profile quarantine, pending displacement, or reset-aware membership
-exclusion it causes. The correlation runs one way only: an action record names
-the observation that caused it and cannot exist without it. It does not run the
+and any profile quarantine, pending displacement, or membership exclusion it
+causes. The correlation runs one way only: an action record names the
+observation that caused it and cannot exist without it. It does not run the
 other way, and this is stated explicitly because reading it as symmetric breaks
 the most common configuration there is. `stay` is the action every omitted
 trigger key selects, and it creates no quarantine, no displacement, no
@@ -1770,36 +1774,15 @@ commits that evidence atomically with quarantine.
 
 Two sessions can observe the same trigger for one profile at the same moment,
 and their session-scheduler locks do not serialize that. Every transaction that
-mints, activates, or clears an exclusion therefore first locks the affected
-profile's durable action head `FOR UPDATE` — after its session scheduler lock,
-before any bounded-profile capacity row or policy cursor row, and in
-profile-reference byte order when it touches more than one — and rereads the
-current generation under that lock. The first commit mints the generation. A
-later commit for an exclusion already active at the same scope **and of the same
-origin** records its own observation correlation against that existing
-generation and mints no second one, so a repeated trigger is idempotent on the
-exclusion and can never make a uniqueness conflict block the terminal
-observation that requires it. Origin is part of the coalescing key because the
-clear protocol decides administrability from it — a policy-origin quarantine is
-clearable by operator command while an OAuth delivery-origin one requires
-re-provisioning
-([credential-exclusion administration](process-protocol.md#credential-exclusion-administration)).
-Coalescing across origins would produce one generation with two contradictory
-answers, so a delivery-origin failure against a profile already carrying an
-active policy-origin generation mints its own, and the two are cleared, and
-reported, separately. An operator clear takes the same lock, which is what lets
-a clear and a concurrent re-observation agree on which generation is current.
-
-Attaching a correlation also accumulates its reset evidence, because a
-reset-aware exclusion clears itself when its reported reset passes and a
-generation carrying a stale deadline would re-admit a member the provider is
-still refusing. The generation's effective reset is the latest reset any
-correlation attached to it reported, and an observation reporting no reset makes
-the generation indefinite. Indefinite is absorbing: once any correlation
-reported no reset, a later correlation carrying one does not restore a deadline,
-since the observation that reported none is evidence the provider named no
-recovery time. Only an operator clear, an availability probe, or another durable
-availability update ends an indefinite generation.
+writes an exclusion therefore first takes the affected profile's action-head
+lock — keyed by the profile reference alone, because quarantine and membership
+exclusion are global to the profile rather than to one pool — after its session
+scheduler lock, before any bounded-profile capacity row or policy cursor row,
+and in profile-reference byte order when it touches more than one. Each
+observation appends its own durable row naming the exact observation that caused
+it, so a repeated trigger can never make a uniqueness conflict block the
+terminal observation that requires it, and two observations excluding one member
+still leave one excluded member at selection.
 
 Preparation is the other side of that race and joins the same protocol. Before
 it reads any member's exclusion state, it locks the action head of every member
@@ -1997,8 +1980,8 @@ unknown action, an action on a trigger that does not admit it, and any unknown
 field. It also rejects `headroom_reserve_percent`, `tie_break = "least_used"`,
 and any `on_headroom_low` action other than `stay` in this build, because no
 composed runtime observes remaining capacity, and `switch_now` on any
-adapter-and-trigger pair whose adapter supplies no native token for that cause —
-every trigger under `claude_cli` and `codex_cli`, `on_quota_exhausted` under
+adapter-and-trigger pair whose adapter cannot prove non-acceptance for that
+cause — every trigger under `claude_cli`, `on_quota_exhausted` under
 `anthropic`, and `on_overloaded` under `openai`. The admission gate is the
 capacity report alone, so an adapter that reports capacity admits `least_used`
 and a headroom reserve with no further parser change; the adapter contract that
@@ -2013,6 +1996,71 @@ observation itself is routed through
 
 A one-member pool is the ordinary single-account deployment and requires no
 trigger keys, since no member can succeed another.
+
+### Committed unimplemented functionality — credential-exclusion lifecycle
+
+Durable exclusions are appended and read; no present composition expires,
+coalesces, or clears one. The runtime writes one bare durable action row per
+observation — pool, member, action kind, the observing session, turn, and model
+call, and the classified cause — and the only row it ever updates is a
+`switch_next_turn` displacement that a later prepared call on that pool
+consumes. The four topics below state the lifecycle that record is meant to
+carry. They sit here rather than among the durable trigger effects above so that
+a reader can take a paragraph's position for its tier; none of them describes
+behavior available from this build.
+
+- **Reset-aware exclusion expiry.** A membership exclusion is reset-aware: a
+  reported reset time clears it when that time passes, and only an exclusion
+  carrying no reported reset is indefinite. Attaching a correlation also
+  accumulates its reset evidence, because a reset-aware exclusion clears itself
+  when its reported reset passes and a generation carrying a stale deadline
+  would re-admit a member the provider is still refusing. The generation's
+  effective reset is the latest reset any correlation attached to it reported,
+  and an observation reporting no reset makes the generation indefinite.
+  Indefinite is absorbing: once any correlation reported no reset, a later
+  correlation carrying one does not restore a deadline, since the observation
+  that reported none is evidence the provider named no recovery time. No present
+  durable record carries a reported reset beside an exclusion and no present
+  composition expires one, so every exclusion this build writes is indefinite in
+  fact, whatever its observation reported.
+
+- **Operator clear and probe recovery.** An explicit operator clear may remove a
+  pending `switch_next_turn` displacement or an `avoid_new_sessions` exclusion,
+  exactly as it clears a quarantine, and only an operator clear, an availability
+  probe that costs nothing and calls no model, or another durable availability
+  update ends an indefinite generation. The clear request itself is owned by
+  [credential-exclusion administration](process-protocol.md#credential-exclusion-administration)
+  and stated once under [pool-based preparation](#pool-based-preparation), so it
+  is not restated here; no present process or application surface implements it
+  and no composed adapter exposes such a probe, so no exclusion this build
+  writes is ever cleared.
+
+- **Action-head generations and correlation coalescing.** Each profile carries a
+  durable action head, and every transaction that mints, activates, or clears an
+  exclusion rereads the current generation under that head's `FOR UPDATE` lock.
+  The first commit mints the generation. A later commit for an exclusion already
+  active at the same scope **and of the same origin** records its own
+  observation correlation against that existing generation and mints no second
+  one, so a repeated trigger is idempotent on the exclusion. An operator clear
+  takes the same lock, which is what lets a clear and a concurrent
+  re-observation agree on which generation is current. No present schema stores
+  a generation, an activation, or a second correlation against an existing
+  exclusion: this build appends one independent row per observation under the
+  profile lock stated above, which keeps a repeated trigger from blocking its
+  terminal observation but records no generation a clear could name.
+
+- **Origin-aware clearing.** Origin is part of the coalescing key because the
+  clear protocol decides administrability from it — a policy-origin quarantine
+  is clearable by operator command while an OAuth delivery-origin one requires
+  re-provisioning
+  ([credential-exclusion administration](process-protocol.md#credential-exclusion-administration)).
+  Coalescing across origins would produce one generation with two contradictory
+  answers, so a delivery-origin failure against a profile already carrying an
+  active policy-origin generation mints its own, and the two are cleared, and
+  reported, separately. No present durable row records an origin at all — it
+  carries its classified provider cause and nothing more — and both
+  credential-home deliveries that could raise a delivery-origin exclusion are
+  themselves reserved, so nothing in this build can distinguish the two.
 
 ## The static session-template catalog
 
