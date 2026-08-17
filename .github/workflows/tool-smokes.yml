@@ -51,6 +51,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          shared-key: rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: tool-live-smokes
       - name: Run GitHub read smokes
         continue-on-error: true
@@ -127,6 +129,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          shared-key: rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: web-smoke
       # Compile before the credential exists in any step environment, and
       # capture the resulting binary path: the credentialed step below

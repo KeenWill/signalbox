@@ -194,6 +194,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          shared-key: rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: claude-smoke
       # Compile the smoke test binary BEFORE any step carries the credential, so
       # no repository build script or procedural macro executes while the API
