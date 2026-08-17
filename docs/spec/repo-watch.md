@@ -250,7 +250,12 @@ completion generation; reviews name their provider review identity; workflow
 facts name branch, workflow identity, run identity, and attempt. The normalized
 review observation has no submitted-time member, so version one assumes the
 provider review identity alone uniquely identifies that immutable submission.
-The random `RepoWatchEventId` is deliberately excluded from the digest.
+The random `RepoWatchEventId` is deliberately excluded from the digest, and so
+is the workflow display name: it is rule-visible payload rather than an
+identifying member, the differ suppresses a re-observed run attempt on members
+the stream identity already names, and a provider can rename a workflow under
+all of them, so hashing the name would mint a new identity for a run that leaves
+the observation and returns after a rename.
 
 **Implemented behavior.** A later equal fact on a recurring stream advances its
 sequence and therefore has a different content identity. Equal normalized facts
@@ -258,8 +263,14 @@ derived from an equal cursor frontier have the same content identity even when
 their candidate UUIDs differ. Persistence rejects duplicate UUID or content
 identity members within one batch, and the relational store uniquely constrains
 `(content_identity_version, content_identity)` across batches. Exact replay
-compares the cursor candidate, UUID-bearing event values, and content
-identities.
+compares the cursor candidate and accounts for every requested occurrence: one
+the replayed generation stored is compared on its whole UUID-bearing event value
+and its content identity, and one that generation coalesced is required to be
+durable in an earlier generation under the same content identity and identified
+content. A coalesced occurrence's own candidate UUID is not compared, because it
+was never written — the fact it restates is durable under the UUID of the
+occurrence that first recorded it, so a request whose occurrences are all
+coalesced replays on candidate and content identity alone.
 
 **Implemented behavior.** The version-one cursor reader remains compatible with
 the earlier version-one workflow record that lacked a workflow-definition ID. It
