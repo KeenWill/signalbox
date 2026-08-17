@@ -157,7 +157,7 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
         arguments: vec![
             String::from("-c"),
             format!(
-                "import socket; s=socket.create_connection(('127.0.0.1',18080)); s.sendall({BRIDGE_REQUEST:?}.encode()); s.shutdown(socket.SHUT_WR); assert s.recv(32)=={BRIDGE_RESPONSE:?}.encode()"
+                "import os, socket; assert not os.path.exists('/run/signalbox/https-broker.sock'); s=socket.create_connection(('127.0.0.1',18080)); s.sendall({BRIDGE_REQUEST:?}.encode()); s.shutdown(socket.SHUT_WR); assert s.recv(32)=={BRIDGE_RESPONSE:?}.encode()"
             ),
         ],
         working_directory: String::from("."),

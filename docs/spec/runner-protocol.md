@@ -1693,7 +1693,7 @@ before both the availability probe and dispatch, recreates standard usr-merge
 aliases only when their targets are inside the configured mounts, and derives
 `PATH` only from configured mounts. The proof-only generic exec-family runner
 composes that constructor and advertises `WorkspaceRestricted`. Resource limits
-remain separate work, with first-release resource limits still owner-gated in
+remain separate work, with first-release resource limits still user-gated in
 [open questions](../open-questions.md#identity-credentials-and-resource-governance).
 
 Confinement is defined over that writable root, which need not be a repository.
@@ -1748,10 +1748,13 @@ proves a TLS tunnel to the checked host; it does not claim visibility into the
 encrypted application protocol.
 
 For every generic exec-family restricted dispatch, the runner creates one
-effective-user-private Unix socket below its locked state root, pins that exact socket in
-the sandbox request, and serves accepted namespace-local proxy connections
-through the runner-owned broker under the exec timeout. The host endpoint and
-its directory are removed when execution finishes, broker serving fails, or the
+effective-user-private Unix socket below its locked state root and serves it
+through the runner-owned broker under the exec timeout. The restricted sandbox
+pins the exact socket identity, passes its descriptor only to the supervisor,
+sets the fixed loopback HTTPS proxy, and starts the supervisor's bounded
+namespace-local TCP-to-Unix relay. The target has no pathname for the broker
+socket and can reach it only through that relay. The host endpoint and its
+directory are removed when execution finishes, broker serving fails, or the
 deadline expires. Both the namespace shim and the host listener admit at most
 eight simultaneous tunnels, and finishing the dispatch aborts every remaining
 tunnel before the endpoint is removed. An empty configured host inventory keeps
