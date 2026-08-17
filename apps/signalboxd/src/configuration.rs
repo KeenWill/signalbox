@@ -11,7 +11,7 @@ use std::{
 };
 
 use rust_decimal::Decimal;
-use signalbox_application::scheduler_pass_admission_hard_ceiling;
+use signalbox_application::scheduler_pass_admission_cap;
 use signalbox_domain::{
     AnthropicServiceTier, BranchName, CheckConclusion, CodexCliServiceTier, DirectModelSelection,
     FastMode, FastModeOverlay, FastModeSupport, FrozenAliasDefinition, LabelName, MergeableState,
@@ -2484,7 +2484,7 @@ fn parse_scheduler_max_in_flight_passes(
         .get("max_in_flight_passes")
         .and_then(Item::as_integer)
         .and_then(|value| usize::try_from(value).ok())
-        .filter(|value| *value <= scheduler_pass_admission_hard_ceiling())
+        .filter(|value| *value <= scheduler_pass_admission_cap())
         .ok_or(HubModelConfigurationError::InvalidSchedulerConfiguration)?;
     Ok(Some(limit))
 }
@@ -3587,7 +3587,7 @@ mod tests {
         FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError,
         MAX_COMPACTION_PROMPT_UTF8_BYTES, MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter,
         ModelCallInputUsage, UnknownSessionModel, absolute_search_entries, credential_bytes,
-        resolved_mcp_bridge_reference, scheduler_pass_admission_hard_ceiling, validate_alias_count,
+        resolved_mcp_bridge_reference, scheduler_pass_admission_cap, validate_alias_count,
         validate_model_count,
     };
 
@@ -4673,7 +4673,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
 
     #[test]
     fn scheduler_pass_limit_accepts_a_bounded_override() {
-        let configured_limit = scheduler_pass_admission_hard_ceiling();
+        let configured_limit = scheduler_pass_admission_cap();
         let configured = CONFIGURATION.replace(
             "[compaction]",
             &format!("[scheduler]\nmax_in_flight_passes = {configured_limit}\n\n[compaction]"),

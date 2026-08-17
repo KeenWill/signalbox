@@ -8008,7 +8008,7 @@ impl<
 ## application: scheduler
 
 ```rust
-pub const fn scheduler_pass_admission_hard_ceiling() -> usize;
+pub const fn scheduler_pass_admission_cap() -> usize;
 
 pub struct ReconciliationSweepInterval(/* private */);
 impl ReconciliationSweepInterval {

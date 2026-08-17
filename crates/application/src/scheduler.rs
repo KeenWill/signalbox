@@ -40,16 +40,16 @@ use crate::{
 const BASELINE_RECONCILIATION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 // numeric-bound: tunable - controls baseline scheduler nudge backpressure
 const BASELINE_NUDGE_BUFFER_CAPACITY: usize = 1_024;
-/// Hard safety ceiling for concurrent authoritative scheduler passes.
+/// Shared product cap for concurrent authoritative scheduler passes.
 ///
-/// This bounds simultaneous provider, tool, and database pressure. Deployment
-/// configuration may lower or pause admission but cannot raise this ceiling.
-// numeric-bound: ceiling - limits concurrent authoritative scheduler passes
-const SCHEDULER_PASS_ADMISSION_HARD_CEILING: usize = 16;
+/// This controls simultaneous provider, tool, and database pressure. Deployment
+/// configuration may lower or pause admission but cannot raise this cap.
+// numeric-bound: tunable - controls concurrent authoritative scheduler passes
+const SCHEDULER_PASS_ADMISSION_CAP: usize = 16;
 
-/// Returns the hard safety ceiling for concurrent authoritative passes.
-pub const fn scheduler_pass_admission_hard_ceiling() -> usize {
-    SCHEDULER_PASS_ADMISSION_HARD_CEILING
+/// Returns the shared product cap for concurrent authoritative passes.
+pub const fn scheduler_pass_admission_cap() -> usize {
+    SCHEDULER_PASS_ADMISSION_CAP
 }
 
 /// A validated nonzero reconciliation-sweep interval.
@@ -638,7 +638,7 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
         Self {
             work_source,
             pass,
-            max_in_flight_passes: SCHEDULER_PASS_ADMISSION_HARD_CEILING,
+            max_in_flight_passes: SCHEDULER_PASS_ADMISSION_CAP,
         }
     }
 
@@ -650,8 +650,8 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
         max_in_flight_passes: NonZeroUsize,
     ) -> Self {
         let requested = max_in_flight_passes.get();
-        let max_in_flight_passes = if requested > SCHEDULER_PASS_ADMISSION_HARD_CEILING {
-            SCHEDULER_PASS_ADMISSION_HARD_CEILING
+        let max_in_flight_passes = if requested > SCHEDULER_PASS_ADMISSION_CAP {
+            SCHEDULER_PASS_ADMISSION_CAP
         } else {
             requested
         };
@@ -939,7 +939,7 @@ mod tests {
         EligibilitySweep, EligibilitySweepBatch, EligibilityWorkSource, GoalAwareEligibilityPass,
         GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityWorkSource,
         InvalidReconciliationSweepInterval, ReconciliationSweepInterval,
-        SCHEDULER_PASS_ADMISSION_HARD_CEILING, SchedulerLoop, SchedulerLoopExit,
+        SCHEDULER_PASS_ADMISSION_CAP, SchedulerLoop, SchedulerLoopExit,
     };
     use crate::{
         OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
@@ -1637,15 +1637,12 @@ mod tests {
     }
 
     #[test]
-    fn inv007_explicit_scheduler_bound_is_capped_at_hard_ceiling() {
-        let requested = NonZeroUsize::new(SCHEDULER_PASS_ADMISSION_HARD_CEILING + 1)
-            .expect("the fixture exceeds a positive ceiling");
+    fn inv007_explicit_scheduler_bound_is_capped_at_admission_cap() {
+        let requested = NonZeroUsize::new(SCHEDULER_PASS_ADMISSION_CAP + 1)
+            .expect("the fixture exceeds a positive admission cap");
         let scheduler = SchedulerLoop::with_max_in_flight((), (), requested);
 
-        assert_eq!(
-            scheduler.max_in_flight_passes,
-            SCHEDULER_PASS_ADMISSION_HARD_CEILING
-        );
+        assert_eq!(scheduler.max_in_flight_passes, SCHEDULER_PASS_ADMISSION_CAP);
     }
 
     #[tokio::test]

@@ -405,9 +405,10 @@ the sweep (INV-007).
   and retried at the next interval.
 - **Loop.** `SchedulerLoop::run_until` spawns at most 16 concurrent per-session
   passes. Every explicit nonzero application bound, including the deployment's
-  configured bound, is capped at that hard ceiling. The loop deduplicates hints
-  for a session already in flight (recording one rerun) and keeps an in-progress
-  sweep read alive across pass completions. A failed or panicked pass is logged
+  configured bound, is capped at that shared admission cap. The loop
+  deduplicates hints for a session already in flight (recording one rerun) and
+  keeps an in-progress sweep read alive across pass completions. A failed or
+  panicked pass is logged
   and retried by a later hint or sweep; nothing is lost because the rows are the
   queue. A pass about to perform attachment store I/O first tries the blob
   contract's separate attachment-preparation permit without waiting. If none is
