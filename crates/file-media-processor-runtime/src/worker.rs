@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     broker::{read_frame, write_frame},
-    protocol::{DaemonFrame, Invocation, WorkerFrame, decode_bytes},
+    protocol::{DaemonFrame, Invocation, WorkerFrame, declaration_fingerprint, decode_bytes},
 };
 
 /// Immutable worker-side inventory of compiled format providers.
@@ -128,7 +128,16 @@ pub async fn serve_one(catalog: &WorkerCatalog) -> Result<(), WorkerServiceError
             "--signalbox-file-media-isolation-probe",
         )]
     {
-        return Ok(());
+        let fingerprint = declaration_fingerprint(&catalog.declarations());
+        let mut output = tokio::io::stdout();
+        output
+            .write_all(&fingerprint)
+            .await
+            .map_err(|_| WorkerServiceError::Protocol)?;
+        return output
+            .shutdown()
+            .await
+            .map_err(|_| WorkerServiceError::Protocol);
     }
     if !arguments.is_empty() {
         return Err(WorkerServiceError::Protocol);

@@ -3,11 +3,13 @@
 **Foundation contract.** This page owns the durable-execution contract for
 registered programs: TypeScript orchestrators that drive sessions, evaluations,
 and repository-watch reactions through a journaled effect protocol. The entire
-surface below is committed ahead of code as Stage 0 of the substrate build,
-verified against PR #580 (`agent/program-substrate-spec`); each paragraph
-records the compatibility constraint it imposes on present surfaces. Model
-execution remains owned by [model-call execution](model-call-execution.md) and
-the [model-runtime substrate](runtime-substrate.md), sessions and turns by
+surface below was committed ahead of code as Stage 0 of the substrate build,
+verified against PR #580 (`agent/program-substrate-spec`). The durable journal
+and executor-facing replay seam are verified against this PR
+(`agent/program-substrate-journal`); each remaining committed-unimplemented
+paragraph records the compatibility constraint it imposes on present surfaces.
+Model execution remains owned by [model-call execution](model-call-execution.md)
+and the [model-runtime substrate](runtime-substrate.md), sessions and turns by
 [sessions and the transcript](sessions-and-transcript.md) and
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), goals by
 [goal mode](goal-mode.md), tool dispatch by [tool loop](tool-loop.md), event
@@ -135,10 +137,18 @@ a daemon failure while every registered program is the operator's own. Why: the
 isolate's closure is what makes deterministic replay a structural property
 instead of an authoring discipline.
 
-**Committed unimplemented functionality.** No present surface journals program
-effects. Every nondeterministic act crosses the frame protocol and is recorded
-as append-only journal rows. Requests (what the program asked, in program order)
-and deliveries (what the host answered, in delivery order) are both journaled.
+**Implemented behavior.** The persistence crate provides one append-only frame
+journal per program-run identity. Every nondeterministic act crosses the typed
+frame protocol and is recorded as an immutable journal row. Requests (what the
+program asked, in program order) and deliveries (what the host answered, in
+delivery order) are both journaled. Each row also carries one contiguous global
+journal position, the simplest ordering implied by one journal: it retains the
+request/delivery interleaving needed to know whether the executor must emit its
+next request or receive a recorded delivery. A per-run allocator serializes
+appends and the database checks that the global, request, and delivery sequences
+advance contiguously together; resolution references are unique and can name
+only an earlier answerable request.
+
 Every request carries a per-run monotone request ordinal, and every `answer` and
 `wake` names the request ordinal it resolves, so a delivery is unambiguous under
 concurrency: delivery order fixes the interleaving, and the named ordinal fixes
@@ -165,7 +175,16 @@ outside, from its own closed cause set: `timeout`, `memory`, `nondeterminism`,
 `program_error` (an uncaught exception or unhandled promise rejection before
 `terminal`, carrying bounded, replay-stable evidence of the error),
 `contract_retired`, `journal_bound`, and `payload_too_large`. Faults are
-themselves journaled so even a kill replays.
+themselves journaled so even a kill replays. Frame payloads are currently exact
+inline byte strings; the relational row keeps payload carriage separate from the
+closed frame discriminators so a later digest column can offload new payloads
+without rewriting existing inline rows.
+
+**Committed unimplemented functionality.** No present executor applies scope
+cancellation, terminal-request admission, capability rejection, or run
+terminalization. The typed journal can represent those frames, and the database
+retains their closed discriminators, but the producing transitions remain with
+the executor and capability slices that can enforce them.
 
 **Committed unimplemented functionality.** No present surface synchronizes
 journal rows with effects, and the synchronization guarantee differs by effect
@@ -186,19 +205,29 @@ external-effect ambiguity contract of [tool loop](tool-loop.md), which forbids
 pretending an unresolved external loss did not happen. Why: one honest ambiguity
 is recoverable; a false exactly-once claim is not.
 
-**Committed unimplemented functionality.** No present surface replays program
-runs. Resume discards nothing and restores nothing: a woken run re-executes its
-artifact from the start while the host answers each request from the journal,
-delivering answers in the journaled delivery order, and switches to live
-execution exactly where the journal ends. A replayed request that differs from
-its journaled twin is a nondeterminism fault that fails the run with both frames
-recorded; divergence is never silent. Concurrent outstanding requests are
-permitted — the journaled delivery order, with the microtask queue drained to
-quiescence between deliveries, is what makes promise interleaving identical
-across live execution and replay. Virtualized time advances only at journaled
-points, and each randomness draw is journaled. Why: recording the delivery order
-is the one discipline that buys unrestricted intra-program concurrency without
-restricting the language.
+**Implemented behavior.** The domain crate provides a checked replay cursor as
+the executor-facing seam. Resume discards nothing and restores nothing: a woken
+run re-executes its artifact from the start while the host answers each request
+from the journal, delivering answers in the journaled delivery order, and
+switches to live execution exactly where the journal ends. A replayed request
+that differs from its journaled twin returns a typed nondeterminism failure
+carrying both complete frames, which the persistence adapter can append as a
+closed `fault` delivery; divergence is never silent and never a panic. The seam
+yields at most one recorded delivery per step, committing the future isolate
+host to drain its microtask queue to quiescence between deliveries. Concurrent
+outstanding requests are permitted — the journaled delivery order is what makes
+promise interleaving identical across live execution and replay. Virtualized
+time advances only at journaled points, and each randomness draw is journaled.
+Why: recording the delivery order is the one discipline that buys unrestricted
+intra-program concurrency without restricting the language.
+
+The implemented journal anchor truthfully pins only frame-contract version one.
+It is not yet a complete run aggregate. Registration identity, artifact digest,
+SDK and engine versions, capability grants, heap and execution budgets, frame
+bound, and payload ceiling remain absent until their owning registration,
+isolate, and configuration producers can supply and enforce them. A later slice
+extends the run aggregate and correlates the journal anchor to it rather than
+backfilling guessed values.
 
 **Committed unimplemented functionality.** No present surface bounds journal
 growth. A long-lived program does not accumulate one unbounded journal:
