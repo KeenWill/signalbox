@@ -656,8 +656,15 @@ enum RetainedToolExecutionStateKind {
         turn: TurnId,
         attempt: ToolAttemptId,
         result_entry_count: usize,
+        fatal_executor_failure: Option<RetainedFatalExecutorFailure>,
         dispatch_permit: InProcessToolDispatchPermit,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetainedFatalExecutorFailure {
+    failure_class: OperatorFailureClass,
+    cause_code: &'static str,
 }
 
 enum UntrustedExecutorFailure<ExecutorError> {
@@ -776,6 +783,13 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     ChildWaitMismatch,
     /// Crash classification failed.
     CrashClassification(TransactionError),
+    /// A retained fatal executor failure was durably classified on retry.
+    RecoveredFatalExecutorFailure {
+        /// Original fatal operator classification.
+        failure_class: OperatorFailureClass,
+        /// Original safe executor cause token.
+        cause_code: &'static str,
+    },
     /// Atomic continuation preparation failed.
     Continuation(TransactionError),
     /// Catalog metadata no longer matches durable attempt authorization.
@@ -852,6 +866,9 @@ where
             Self::CrashClassification(error) => {
                 write!(formatter, "tool crash classification failed: {error}")
             }
+            Self::RecoveredFatalExecutorFailure { .. } => formatter.write_str(
+                "fatal tool executor failure remained fatal after crash classification recovery",
+            ),
             Self::Continuation(error) => write!(formatter, "tool continuation failed: {error}"),
             Self::CatalogDrift => {
                 formatter.write_str("tool catalog metadata changed after attempt preparation")
@@ -889,6 +906,7 @@ where
             Self::ExecutorCorrelationMismatch
             | Self::DurableCompletionMismatch
             | Self::ChildWaitMismatch
+            | Self::RecoveredFatalExecutorFailure { .. }
             | Self::CatalogDrift => None,
         }
     }
@@ -920,6 +938,7 @@ where
                 classification_error,
                 ..
             } => classification_error.operator_failure_class(),
+            Self::RecoveredFatalExecutorFailure { failure_class, .. } => *failure_class,
             Self::ExecutorCorrelationMismatch
             | Self::DurableCompletionMismatch
             | Self::ChildWaitMismatch
@@ -948,6 +967,7 @@ where
             Self::ChildWaitReconciliation(_) => "tool_child_wait_reconciliation",
             Self::ChildWaitMismatch => "tool_child_wait_mismatch",
             Self::CrashClassification(_) => "tool_crash_classification",
+            Self::RecoveredFatalExecutorFailure { cause_code, .. } => cause_code,
             Self::Continuation(_) => "tool_continuation",
             Self::CatalogDrift => "tool_catalog_drift",
         }
@@ -1145,21 +1165,33 @@ where
                     turn,
                     attempt,
                     result_entry_count,
+                    fatal_executor_failure,
                     dispatch_permit,
                 } => {
-                    return self
+                    let classification = self
                         .classify_crash_loss(
                             session,
                             turn,
                             attempt,
                             result_entry_count,
+                            fatal_executor_failure,
                             dispatch_permit,
                         )
-                        .await
-                        .map(|outcome| {
-                            ToolExecutionServiceOutcome::CrashClassified(Box::new(outcome))
-                        })
-                        .map_err(ToolExecutionServiceError::CrashClassification);
+                        .await;
+                    return match (classification, fatal_executor_failure) {
+                        (Ok(_), Some(failure)) => {
+                            Err(ToolExecutionServiceError::RecoveredFatalExecutorFailure {
+                                failure_class: failure.failure_class,
+                                cause_code: failure.cause_code,
+                            })
+                        }
+                        (Ok(outcome), None) => Ok(ToolExecutionServiceOutcome::CrashClassified(
+                            Box::new(outcome),
+                        )),
+                        (Err(error), _) => {
+                            Err(ToolExecutionServiceError::CrashClassification(error))
+                        }
+                    };
                 }
             }
         }
@@ -1249,6 +1281,7 @@ where
                             current.turn(),
                             current.attempt(),
                             reloaded_batch.requests().len(),
+                            None,
                             _dispatch_permit,
                         )
                         .await
@@ -1581,12 +1614,25 @@ where
         ToolExecutionServiceOutcome,
         ToolExecutionServiceError<Transaction::Error, Executor::Error>,
     > {
+        let fatal_executor_failure = match &failure {
+            UntrustedExecutorFailure::Executor(error)
+                if is_fatal_executor_failure_class(error.operator_failure_class()) =>
+            {
+                Some(RetainedFatalExecutorFailure {
+                    failure_class: error.operator_failure_class(),
+                    cause_code: error.operator_failure_cause_code(),
+                })
+            }
+            UntrustedExecutorFailure::Executor(_)
+            | UntrustedExecutorFailure::CorrelationMismatch => None,
+        };
         let classification = self
             .classify_crash_loss(
                 correlation.session(),
                 correlation.turn(),
                 correlation.attempt(),
                 result_entry_count,
+                fatal_executor_failure,
                 dispatch_permit,
             )
             .await;
@@ -1657,6 +1703,7 @@ where
         turn: TurnId,
         attempt: ToolAttemptId,
         result_entry_count: usize,
+        fatal_executor_failure: Option<RetainedFatalExecutorFailure>,
         dispatch_permit: InProcessToolDispatchPermit,
     ) -> Result<ToolAttemptCrashOutcome, Transaction::Error> {
         loop {
@@ -1692,6 +1739,7 @@ where
                             turn,
                             attempt,
                             result_entry_count,
+                            fatal_executor_failure,
                             dispatch_permit,
                         },
                     });
@@ -3501,6 +3549,86 @@ mod tests {
                 .expect("retained classification commits"),
             ToolExecutionServiceOutcome::CrashClassified(_)
         ));
+        let _released = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            gate.acquire(batch.turn()),
+        )
+        .await
+        .expect("durable closure releases the interrupt gate");
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["authorize", "execute", "classify", "classify"]
+        );
+    }
+
+    /// INV-011 / INV-024 / INV-037: a failed classification retry retains the
+    /// original fatal executor class after durable closure succeeds.
+    #[tokio::test]
+    async fn inv011_inv024_inv037_recovered_classification_preserves_fatal_executor_failure() {
+        let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = current_attempt_fixture(&batch);
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 1,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: true,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let gate = InProcessToolDispatchGate::default();
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            FailingExecutor {
+                events: Arc::clone(&events),
+                error: FakeError::Corruption,
+            },
+            gate.clone(),
+        );
+
+        assert!(matches!(
+            service.execute(batch.session(), batch.turn()).await,
+            Err(ToolExecutionServiceError::ExecutorCrashClassification {
+                executor_error: FakeError::Corruption,
+                classification_error: FakeError::Ordinary,
+            })
+        ));
+        assert!(service.retained_state().is_some());
+        let recovered = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect_err("fatal executor failure survives classification recovery");
+
+        assert_eq!(
+            recovered.operator_failure_class(),
+            OperatorFailureClass::FailClosedCorruption
+        );
+        assert_eq!(
+            recovered.operator_failure_cause_code(),
+            "durable_state_corruption"
+        );
+        assert!(matches!(
+            recovered,
+            ToolExecutionServiceError::RecoveredFatalExecutorFailure {
+                failure_class: OperatorFailureClass::FailClosedCorruption,
+                cause_code: "durable_state_corruption",
+            }
+        ));
+        assert!(service.retained_state().is_none());
         let _released = tokio::time::timeout(
             std::time::Duration::from_millis(10),
             gate.acquire(batch.turn()),
