@@ -351,6 +351,29 @@ async fn receive_webhook_work(receiver: &mut Option<watch::Receiver<()>>) -> boo
     received
 }
 
+/// Marks a wake already covered by the immediately following durable drain.
+///
+/// The scheduler may select an equally ready poll deadline ahead of this wake.
+/// Observing it before the drain means a delivery admitted while the drain is
+/// running publishes a later change and remains visible to the provider-sweep
+/// interrupt arm.
+fn observe_webhook_work_before_drain(receiver: &mut Option<watch::Receiver<()>>) {
+    let Some(active_receiver) = receiver.as_mut() else {
+        return;
+    };
+    let disconnected = match active_receiver.has_changed() {
+        Ok(true) => {
+            active_receiver.borrow_and_update();
+            false
+        }
+        Ok(false) => false,
+        Err(_) => true,
+    };
+    if disconnected {
+        *receiver = None;
+    }
+}
+
 enum PollAttemptWait<T> {
     Completed(T),
     Continue,
@@ -1061,6 +1084,10 @@ impl RepositoryWatchTask {
         allow_webhook_interrupt: bool,
     ) -> PollAttemptWait<Result<(), RepositoryWatchAttemptError>> {
         self.poller.begin_attempt();
+        match drain {
+            WebhookDrain::Run => observe_webhook_work_before_drain(&mut self.webhook_work),
+            WebhookDrain::Deferred => {}
+        }
         let Some(prelude) = run_until_shutdown(shutdown, self.run_attempt_prelude(drain)).await
         else {
             self.poller.invalidate_freshness();
@@ -1079,7 +1106,7 @@ impl RepositoryWatchTask {
             self.prepare_complete_poll(),
             shutdown,
             &mut webhook_work,
-            allow_webhook_interrupt,
+            allow_webhook_interrupt && accelerated.is_ok(),
         )
         .await;
         self.webhook_work = webhook_work;
@@ -4537,9 +4564,9 @@ mod tests {
         WebhookDrain, WebhookDrainRetry, WorkflowName, WorkflowResponse, await_poll_or_interrupt,
         derive_repo_watch_events, dispatch_context_json, inspect_webhook_drain,
         next_cadence_deadline, next_repository_wake, normalize_checks_outcome,
-        normalize_pull_request_context, object_id, owed_dispatch_context_json_parts,
-        rule_activation_error, run_until_shutdown, supervise_repository_tasks,
-        targeted_pull_requests,
+        normalize_pull_request_context, object_id, observe_webhook_work_before_drain,
+        owed_dispatch_context_json_parts, rule_activation_error, run_until_shutdown,
+        supervise_repository_tasks, targeted_pull_requests,
     };
     use signalbox_application::{
         InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
@@ -6686,6 +6713,41 @@ mod tests {
         .await;
 
         assert!(matches!(outcome, PollAttemptWait::Completed(COMPLETION)));
+    }
+
+    #[test]
+    fn a_pending_webhook_wake_is_observed_before_its_drain() {
+        let (webhook_sender, webhook_receiver) = watch::channel(());
+        let mut webhook_work = Some(webhook_receiver);
+        webhook_sender.send_replace(());
+
+        observe_webhook_work_before_drain(&mut webhook_work);
+
+        assert!(
+            !webhook_work
+                .as_ref()
+                .expect("the fixture keeps its webhook sender")
+                .has_changed()
+                .expect("the fixture keeps its webhook sender")
+        );
+    }
+
+    #[test]
+    fn a_webhook_wake_after_the_observation_remains_pending() {
+        let (webhook_sender, webhook_receiver) = watch::channel(());
+        let mut webhook_work = Some(webhook_receiver);
+        webhook_sender.send_replace(());
+        observe_webhook_work_before_drain(&mut webhook_work);
+
+        webhook_sender.send_replace(());
+
+        assert!(
+            webhook_work
+                .as_ref()
+                .expect("the fixture keeps its webhook sender")
+                .has_changed()
+                .expect("the fixture keeps its webhook sender")
+        );
     }
 
     #[tokio::test]
