@@ -527,23 +527,24 @@ mod tests {
     #[tokio::test]
     async fn scorer_reports_case_verdicts() {
         let corpus = decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
-        let (model, binding) = fixture_model([
-            scripted_decision(ApprovalDisposition::Approve, APPROVE_RATIONALE),
-            scripted_decision(ApprovalDisposition::EscalateToHuman, ESCALATE_RATIONALE),
-            scripted_decision(ApprovalDisposition::Deny, DENY_RATIONALE),
-        ]);
+        let response_fixture = [
+            (ApprovalDisposition::Approve, APPROVE_RATIONALE),
+            (ApprovalDisposition::EscalateToHuman, ESCALATE_RATIONALE),
+            (ApprovalDisposition::Deny, DENY_RATIONALE),
+        ];
+        let expected_verdicts = response_fixture.map(|(disposition, _)| disposition);
+        let scripts = response_fixture
+            .map(|(disposition, rationale)| scripted_decision(disposition, rationale));
+        let (model, binding) = fixture_model(scripts);
 
         let scorecard = score_corpus(&model, &binding, &corpus)
             .await
             .expect("the scripted judge scores every seed case");
 
         assert_eq!(scorecard.verdicts.len(), corpus.cases.len());
-        assert_eq!(scorecard.verdicts[0].actual, ApprovalDisposition::Approve);
-        assert_eq!(
-            scorecard.verdicts[1].actual,
-            ApprovalDisposition::EscalateToHuman
-        );
-        assert_eq!(scorecard.verdicts[2].actual, ApprovalDisposition::Deny);
+        assert_eq!(scorecard.verdicts[0].actual, expected_verdicts[0]);
+        assert_eq!(scorecard.verdicts[1].actual, expected_verdicts[1]);
+        assert_eq!(scorecard.verdicts[2].actual, expected_verdicts[2]);
     }
 
     #[tokio::test]
