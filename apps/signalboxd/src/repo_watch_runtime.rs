@@ -584,7 +584,6 @@ impl RepositoryWatchTask {
                 .load_pending(&self.repository, page_size, after_receipt)
                 .await
                 .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-            self.webhook_pending_drained = deliveries.is_empty();
             if deliveries.is_empty() {
                 if deferred.is_empty() {
                     // Nothing is pending at all, so a poll that left the shadow
@@ -820,21 +819,26 @@ impl RepositoryWatchTask {
                             &observation,
                             cause,
                         )?;
-                        // Every delivery projects the query it needs, so parity
-                        // accounting stays per delivery. Coalescing decides only
-                        // how many times the page asks the provider for it.
-                        projections.extend(
-                            refreshes
-                                .iter()
-                                .map(targeted_query_projection)
-                                .collect::<Result<Vec<_>, _>>()?,
-                        );
                         let unissued = page.unissued(&refreshes);
                         // The provider query runs before anything is recorded, so
                         // a transient fetch failure leaves this delivery pending
                         // and retryable instead of terminal with a targeted query
                         // that never happened.
                         let prepared = self.prepare_targeted_refresh(&unissued).await?;
+                        // Only refreshes actually sent are recorded, so neither a
+                        // branch-only delivery naming no pull request nor one
+                        // whose hydration this page already issued can claim a
+                        // query the poller never made.
+                        let issued = prepared
+                            .as_ref()
+                            .map(|prepared| prepared.queried.clone())
+                            .unwrap_or_default();
+                        projections.extend(
+                            issued
+                                .iter()
+                                .map(targeted_query_projection)
+                                .collect::<Result<Vec<_>, _>>()?,
+                        );
                         // Its disposition is then durable before the cursor
                         // mutation becomes externally visible, so a failure
                         // between the two reproduces this disposition rather than
@@ -860,7 +864,7 @@ impl RepositoryWatchTask {
                             // Recorded only once the refresh has landed, so a
                             // failure above leaves the hydration for the page's
                             // remaining deliveries to reissue.
-                            page.record_issued(&unissued);
+                            page.record_issued(&issued);
                         }
                         self.process_dispatches().await
                     }

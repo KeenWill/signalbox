@@ -958,22 +958,24 @@ comment deliveries. Coalescing is scoped to the page and never to a whole drain,
 because a later page may carry deliveries admitted after the earlier hydration
 ran. Head-guarded mergeability and check-rollup queries name a specific commit
 and do not coalesce against a hydration. Only a hydration that reached the
-provider suppresses a later one. A delivery's terminal disposition is durable
-before its refresh runs, so a refresh that fails is left for the page's
-remaining deliveries to reissue; and a hydration requested beside a head-guarded
-query is never recorded, because the merged request carries that guard and a
-superseded head discards the fetched state while the query still reports
-success. Coalescing therefore bounds bursts and not pacing: a delivery admitted
-after a hydration reports state that hydration could not have observed, so it is
-refreshed however slowly such deliveries arrive. Bounding a paced stream would
-require a minimum interval between a pull request's refreshes, trading both
-freshness and the fidelity of the parity measurement shadow mode exists to
-produce; that trade is not taken while poll frequency is unchanged and the
-complete sweep remains authoritative. Full polling continues unchanged as the
-slow complete reconciliation sweep and remains authoritative for missed
-deliveries, reactions, and every provider fact outside the mapped set. Poll
-frequency does not drop in shadow mode; any later write mode or slower cadence
-requires a separately reviewed ruling after parity over a real workday.
+provider suppresses a later one. A refresh that fails before its fetch or before
+its commit is left for the page's remaining deliveries to reissue, and a
+hydration requested beside a head-guarded query is never recorded, because the
+merged request carries that guard and a superseded head discards the fetched
+state while the query still reports success. A delivery whose hydration the page
+already issued records no targeted-query projection of its own, on the same rule
+that only a query the poller actually made is recorded. Coalescing therefore
+bounds bursts and not pacing: a delivery admitted after a hydration reports
+state that hydration could not have observed, so it is refreshed however slowly
+such deliveries arrive. Bounding a paced stream would require a minimum interval
+between a pull request's refreshes, trading both freshness and the fidelity of
+the parity measurement shadow mode exists to produce; that trade is not taken
+while poll frequency is unchanged and the complete sweep remains authoritative.
+Full polling continues unchanged as the slow complete reconciliation sweep and
+remains authoritative for missed deliveries, reactions, and every provider fact
+outside the mapped set. Poll frequency does not drop in shadow mode; any later
+write mode or slower cadence requires a separately reviewed ruling after parity
+over a real workday.
 
 **Committed unimplemented functionality.** The rollout gate is no *unexplained*
 divergence, not no divergence: it is zero `repo_watch_webhook_parity` rows whose
