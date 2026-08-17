@@ -14,6 +14,7 @@ from reconcile import (
     Config,
     GitHubGraphQL,
     choose_decision,
+    comment_only_patch,
     evaluate_convergence,
     load_state,
     normalize_pull_request,
@@ -436,6 +437,16 @@ class DecisionTests(unittest.TestCase):
 
 
 class InputValidationTests(unittest.TestCase):
+    def test_non_string_repository_is_rejected_as_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            path.write_text(
+                '{"version":1,"repository":7,"pull_requests":{}}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "malformed state file"):
+                load_state(path, "OWNER/REPOSITORY")
+
     def test_non_object_pull_request_record_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
@@ -464,6 +475,145 @@ class InputValidationTests(unittest.TestCase):
 
 
 class GitHubGraphQLTests(unittest.TestCase):
+    def test_c_preprocessor_change_is_not_comment_only(self) -> None:
+        changed_file = {
+            "filename": "include/config.h",
+            "patch": "@@ -1 +1 @@\n-#define LIMIT 4\n+#define LIMIT 8",
+        }
+
+        self.assertFalse(comment_only_patch(changed_file))
+
+    def test_rust_dereference_change_is_not_comment_only(self) -> None:
+        changed_file = {
+            "filename": "src/value.rs",
+            "patch": "@@ -1 +1 @@\n-*value = 4;\n+*value = 8;",
+        }
+
+        self.assertFalse(comment_only_patch(changed_file))
+
+    def test_python_hash_comments_are_comment_only(self) -> None:
+        changed_file = {
+            "filename": "tool.py",
+            "patch": "@@ -1 +1 @@\n-# old explanation\n+# new explanation",
+        }
+
+        self.assertTrue(comment_only_patch(changed_file))
+
+    def test_edited_rename_is_not_review_exempt(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        comparison = {
+            "commits": [{"sha": "head"}],
+            "files": [
+                {
+                    "status": "renamed",
+                    "changes": 2,
+                    "additions": 1,
+                    "deletions": 1,
+                    "filename": "src/new.rs",
+                    "patch": "@@ -1 +1 @@\n-let old = 1;\n+let new = 2;",
+                }
+            ],
+        }
+        with mock.patch.object(client, "execute_rest", return_value=comparison):
+            exempt = client._review_exempt_change("reviewed", "head")
+
+        self.assertFalse(exempt)
+
+    def test_unverified_merge_commit_is_not_review_exempt(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        comparison = {
+            "commits": [
+                {
+                    "sha": "head",
+                    "parents": [{"sha": "reviewed"}, {"sha": "other"}],
+                }
+            ],
+            "files": [
+                {
+                    "status": "modified",
+                    "filename": "src/value.rs",
+                    "patch": "@@ -1 +1 @@\n-let old = 1;\n+let new = 2;",
+                }
+            ],
+        }
+        with mock.patch.object(client, "execute_rest", return_value=comparison):
+            exempt = client._review_exempt_change("reviewed", "head")
+
+        self.assertFalse(exempt)
+
+    def test_all_declined_review_completes_terminal_wave(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        head = "a" * 40
+        pull_request = {
+            "head_oid": head,
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "review_threads": [
+                {
+                    "isResolved": True,
+                    "isDispositioned": True,
+                    "isEscalated": False,
+                    "dispositionKind": "declined",
+                    "reviewIds": ["review-node"],
+                }
+            ],
+            "_review_comments": [
+                {
+                    "authorAssociation": "OWNER",
+                    "body": f"@codex review\nExact head {head}",
+                    "createdAt": "2026-08-16T10:00:00Z",
+                }
+            ],
+            "_reviews": [
+                {
+                    "id": "review-node",
+                    "author": {"login": "chatgpt-codex-connector"},
+                    "submittedAt": "2026-08-16T10:01:00Z",
+                    "commit": {"oid": head},
+                    "comments": {"totalCount": 1},
+                }
+            ],
+        }
+
+        client._finalize_review_evidence([pull_request])
+
+        self.assertEqual(pull_request["quiet_review_head_oids"], [head])
+
+    def test_review_requests_and_reviews_are_paginated(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "node_id": "pull-request-node",
+            "_review_comments": [{"body": "first comment"}],
+            "_reviews": [{"id": "first-review"}],
+            "_review_comment_page": {
+                "hasNextPage": True,
+                "endCursor": "comment-cursor",
+            },
+            "_review_page": {
+                "hasNextPage": True,
+                "endCursor": "review-cursor",
+            },
+        }
+        response = {
+            "node": {
+                "comments": {
+                    "nodes": [{"body": "later request"}],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+                "reviews": {
+                    "nodes": [{"id": "later-review"}],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+            }
+        }
+        with mock.patch.object(client, "execute", return_value=response) as execute:
+            client._finish_review_evidence_connections([pull_request])
+
+        self.assertEqual(len(pull_request["_review_comments"]), 2)
+        self.assertEqual(len(pull_request["_reviews"]), 2)
+        self.assertEqual(execute.call_args.args[1]["commentsAfter"], "comment-cursor")
+        self.assertEqual(execute.call_args.args[1]["reviewsAfter"], "review-cursor")
+
     def test_answered_informational_thread_is_dispositioned(self) -> None:
         threads = [
             {
@@ -651,6 +801,8 @@ class GitHubGraphQLTests(unittest.TestCase):
                     "isResolved": True,
                     "isDispositioned": False,
                     "isEscalated": False,
+                    "dispositionKind": None,
+                    "reviewIds": [],
                 }
             ],
         )
@@ -680,6 +832,8 @@ class GitHubGraphQLTests(unittest.TestCase):
                     "isResolved": True,
                     "isDispositioned": True,
                     "isEscalated": False,
+                    "dispositionKind": "fixed",
+                    "reviewIds": [],
                 }
             ],
         )
@@ -709,6 +863,8 @@ class GitHubGraphQLTests(unittest.TestCase):
                     "isResolved": False,
                     "isDispositioned": True,
                     "isEscalated": True,
+                    "dispositionKind": "escalated",
+                    "reviewIds": [],
                 }
             ],
         )
@@ -991,6 +1147,10 @@ class DispatchFenceTests(unittest.TestCase):
 
         self.assertEqual(
             state["pull_requests"]["17"]["last_dispatched_at"], 1300
+        )
+        self.assertEqual(
+            state["pull_requests"]["17"]["authenticated_review_head"],
+            "head",
         )
 
     def test_state_save_fsyncs_file_and_parent_directory(self) -> None:

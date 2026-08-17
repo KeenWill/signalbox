@@ -70,22 +70,25 @@ query($ids: [ID!]!) {
           isResolved
           comments(first: 100) {
             totalCount
-            nodes { author { login } body }
+            nodes { author { login } body pullRequestReview { id } }
             pageInfo { hasNextPage endCursor }
           }
         }
         pageInfo { hasNextPage endCursor }
       }
-      comments(last: 100) {
+      comments(first: 100) {
         nodes { author { login } authorAssociation body createdAt }
+        pageInfo { hasNextPage endCursor }
       }
-      reviews(last: 100) {
+      reviews(first: 100) {
         nodes {
+          id
           author { login }
           submittedAt
           commit { oid }
           comments(first: 1) { totalCount }
         }
+        pageInfo { hasNextPage endCursor }
       }
       files(first: 100) {
         nodes { path changeType }
@@ -246,7 +249,10 @@ class GitHubGraphQL:
             raise RuntimeError("gh REST request returned invalid JSON") from error
 
     def snapshot(
-        self, tracked_node_ids: Sequence[str], head_pattern: str
+        self,
+        tracked_node_ids: Sequence[str],
+        head_pattern: str,
+        authenticated_review_heads: dict[int, str] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         open_pull_requests: list[dict[str, Any]] = []
         tracked: list[dict[str, Any]] = []
@@ -298,12 +304,82 @@ class GitHubGraphQL:
                 pull_requests.append(normalize_pull_request(node))
         self._finish_paginated_connections(pull_requests)
         self._finish_thread_comments(pull_requests)
+        self._finish_review_evidence_connections(pull_requests)
         self._finalize_review_evidence(pull_requests)
+        for pull_request in pull_requests:
+            persisted_head = (authenticated_review_heads or {}).get(
+                pull_request["number"]
+            )
+            if (
+                persisted_head == pull_request["head_oid"]
+                and persisted_head not in pull_request["quiet_review_head_oids"]
+            ):
+                pull_request["quiet_review_head_oids"].append(persisted_head)
+                pull_request["authenticated_quiet_review_oids"].append(
+                    persisted_head
+                )
         self._load_review_exempt_status(pull_requests)
         self._load_renamed_paths(pull_requests)
         self._load_planning_only_status(pull_requests)
         self._load_base_ancestry(pull_requests)
         return pull_requests, tracked
+
+    def _finish_review_evidence_connections(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        query = """
+query($id: ID!, $commentsAfter: String, $reviewsAfter: String) {
+  node(id: $id) {
+    ... on PullRequest {
+      comments(first: 100, after: $commentsAfter) {
+        nodes { author { login } authorAssociation body createdAt }
+        pageInfo { hasNextPage endCursor }
+      }
+      reviews(first: 100, after: $reviewsAfter) {
+        nodes {
+          id
+          author { login }
+          submittedAt
+          commit { oid }
+          comments(first: 1) { totalCount }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+        for pull_request in pull_requests:
+            comment_page = pull_request.pop("_review_comment_page")
+            review_page = pull_request.pop("_review_page")
+            while comment_page["hasNextPage"] or review_page["hasNextPage"]:
+                data = self.execute(
+                    query,
+                    {
+                        "id": pull_request["node_id"],
+                        "commentsAfter": (
+                            comment_page["endCursor"]
+                            if comment_page["hasNextPage"]
+                            else None
+                        ),
+                        "reviewsAfter": (
+                            review_page["endCursor"]
+                            if review_page["hasNextPage"]
+                            else None
+                        ),
+                    },
+                )
+                node = data.get("node")
+                if node is None:
+                    raise RuntimeError("pull request became unavailable")
+                if comment_page["hasNextPage"]:
+                    comments = node["comments"]
+                    pull_request["_review_comments"].extend(comments["nodes"])
+                    comment_page = comments["pageInfo"]
+                if review_page["hasNextPage"]:
+                    reviews = node["reviews"]
+                    pull_request["_reviews"].extend(reviews["nodes"])
+                    review_page = reviews["pageInfo"]
 
     def _finish_thread_comments(
         self, pull_requests: list[dict[str, Any]]
@@ -313,7 +389,7 @@ query($id: ID!, $after: String!) {
   node(id: $id) {
     ... on PullRequestReviewThread {
       comments(first: 100, after: $after) {
-        nodes { author { login } body }
+        nodes { author { login } body pullRequestReview { id } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -363,12 +439,26 @@ query($id: ID!, $after: String!) {
                         comment["createdAt"],
                     )
                 ]
+                review_id = review.get("id")
+                review_threads = [
+                    thread
+                    for thread in pull_request.get("review_threads", [])
+                    if review_id in thread.get("reviewIds", [])
+                ]
+                all_findings_declined = bool(review_threads) and all(
+                    thread["isResolved"]
+                    and thread.get("dispositionKind") == "declined"
+                    for thread in review_threads
+                )
                 if (
                     request_times
                     and author_login(review) is not None
                     and author_login(review).casefold()
                     == CODEX_REVIEWER_LOGIN.casefold()
-                    and review["comments"]["totalCount"] == 0
+                    and (
+                        review["comments"]["totalCount"] == 0
+                        or all_findings_declined
+                    )
                 ):
                     quiet_oids.append(reviewed_oid)
             pull_request["authenticated_quiet_review_oids"] = quiet_oids
@@ -397,27 +487,13 @@ query($id: ID!, $after: String!) {
         files = comparison.get("files") if isinstance(comparison, dict) else None
         if not isinstance(commits, list) or not isinstance(files, list) or not commits:
             return False
-        if files and all(file.get("status") == "renamed" for file in files):
-            return True
-        commits_by_oid = {
-            commit.get("sha"): commit
-            for commit in commits
-            if isinstance(commit.get("sha"), str)
-        }
-        current_oid = head_oid
-        merge_forward = False
-        while current_oid != reviewed_oid:
-            commit = commits_by_oid.get(current_oid)
-            parents = commit.get("parents") if commit is not None else None
-            if not isinstance(parents, list) or len(parents) != 2:
-                break
-            first_parent = parents[0].get("sha")
-            if not isinstance(first_parent, str):
-                break
-            current_oid = first_parent
-        else:
-            merge_forward = True
-        if merge_forward:
+        if files and all(
+            file.get("status") == "renamed"
+            and file.get("changes") == 0
+            and file.get("additions") == 0
+            and file.get("deletions") == 0
+            for file in files
+        ):
             return True
         return bool(files) and all(comment_only_patch(file) for file in files)
 
@@ -453,6 +529,7 @@ query($id: ID!, $after: String!) {
     def _load_base_ancestry(
         self, pull_requests: list[dict[str, Any]]
     ) -> None:
+        comparisons: list[tuple[dict[str, Any], int | None]] = []
         for offset in range(0, len(pull_requests), DETAIL_BATCH_SIZE):
             batch = pull_requests[offset : offset + DETAIL_BATCH_SIZE]
             declarations = ["$owner: String!", "$name: String!"]
@@ -479,26 +556,33 @@ query($id: ID!, $after: String!) {
             repository = data.get("repository")
             if repository is None:
                 raise RuntimeError("configured GitHub repository is unavailable")
-            verification_declarations: list[str] = []
-            verification_selections: list[str] = []
-            verification_variables: dict[str, Any] = {}
             for index, pull_request in enumerate(batch):
+                comparison = repository[f"item{index}"]
+                comparisons.append(
+                    (
+                        pull_request,
+                        comparison["behindBy"] if comparison is not None else None,
+                    )
+                )
+
+        for offset in range(0, len(comparisons), DETAIL_BATCH_SIZE):
+            batch = comparisons[offset : offset + DETAIL_BATCH_SIZE]
+            declarations: list[str] = []
+            selections: list[str] = []
+            variables: dict[str, Any] = {}
+            for index, (pull_request, _) in enumerate(batch):
                 variable = f"node{index}"
-                verification_declarations.append(f"${variable}: ID!")
-                verification_variables[variable] = pull_request["node_id"]
-                verification_selections.append(
+                declarations.append(f"${variable}: ID!")
+                variables[variable] = pull_request["node_id"]
+                selections.append(
                     f"state{index}: node(id: ${variable}) {{ ... on PullRequest "
                     "{ baseRefOid headRefOid } }"
                 )
-            verification_query = (
-                f"query({', '.join(verification_declarations)}) {{ "
-                f"{' '.join(verification_selections)} }}"
-            )
             verification = self.execute(
-                verification_query, verification_variables
+                f"query({', '.join(declarations)}) {{ {' '.join(selections)} }}",
+                variables,
             )
-            for index, pull_request in enumerate(batch):
-                comparison = repository[f"item{index}"]
+            for index, (pull_request, behind_by) in enumerate(batch):
                 current = verification[f"state{index}"]
                 snapshot_still_current = (
                     current is not None
@@ -506,9 +590,7 @@ query($id: ID!, $after: String!) {
                     and current["headRefOid"] == pull_request["head_oid"]
                 )
                 pull_request["base_commits_not_in_head"] = (
-                    comparison["behindBy"]
-                    if comparison is not None and snapshot_still_current
-                    else None
+                    behind_by if snapshot_still_current else None
                 )
 
     def _load_planning_only_status(
@@ -683,10 +765,15 @@ def comment_only_patch(file: dict[str, Any]) -> bool:
     patch = file.get("patch")
     if not isinstance(filename, str) or not isinstance(patch, str):
         return False
-    if Path(filename).suffix.casefold() not in {
+    suffix = Path(filename).suffix.casefold()
+    if suffix in {".py", ".sh"}:
+        comment_prefix = "#"
+    elif suffix in {
         ".c", ".cc", ".cpp", ".go", ".h", ".hpp", ".js",
-        ".jsx", ".py", ".rs", ".sh", ".ts", ".tsx",
+        ".jsx", ".rs", ".ts", ".tsx",
     }:
+        comment_prefix = "//"
+    else:
         return False
     changed = [
         line[1:].strip()
@@ -694,9 +781,8 @@ def comment_only_patch(file: dict[str, Any]) -> bool:
         if (line.startswith("+") and not line.startswith("+++"))
         or (line.startswith("-") and not line.startswith("---"))
     ]
-    comment_prefixes = ("#", "//", "/*", "*", "*/", "\"\"\"", "'''")
     return bool(changed) and all(
-        not line or line.startswith(comment_prefixes) for line in changed
+        not line or line.startswith(comment_prefix) for line in changed
     )
 
 
@@ -727,6 +813,14 @@ def normalize_review_threads(
             disposition_kind(comment.get("body") or "")
             for comment in author_replies
         ]
+        review_ids = sorted(
+            {
+                review["id"]
+                for comment in comments
+                for review in [comment.get("pullRequestReview")]
+                if isinstance(review, dict) and isinstance(review.get("id"), str)
+            }
+        )
         first_body = (comments[0].get("body") or "") if comments else ""
         informational = INFORMATIONAL_REVIEW_COMMENT.search(first_body.strip()) is not None
         dispositioned = (
@@ -739,6 +833,11 @@ def normalize_review_threads(
                 "isResolved": thread["isResolved"],
                 "isDispositioned": dispositioned,
                 "isEscalated": "escalated" in dispositions,
+                "dispositionKind": next(
+                    (kind for kind in reversed(dispositions) if kind is not None),
+                    None,
+                ),
+                "reviewIds": review_ids,
             }
         )
     return normalized
@@ -778,6 +877,12 @@ def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
         "_review_thread_nodes": list(threads["nodes"]),
         "_review_comments": list(node["comments"]["nodes"]),
         "_reviews": list(node["reviews"]["nodes"]),
+        "_review_comment_page": node["comments"].get(
+            "pageInfo", empty_page_info()
+        ),
+        "_review_page": node["reviews"].get(
+            "pageInfo", empty_page_info()
+        ),
         "_thread_page": threads["pageInfo"],
         "_check_page": contexts["pageInfo"],
         "_file_page": files["pageInfo"],
@@ -800,7 +905,7 @@ def pagination_query(tasks: Sequence[PaginationTask]) -> tuple[str, dict[str, An
             connection = (
                 f"reviewThreads(first: 100, after: $after{index}) {{ "
                 "nodes { id isResolved comments(first: 100) { totalCount "
-                "nodes { author { login } body } "
+                "nodes { author { login } body pullRequestReview { id } } "
                 "pageInfo { hasNextPage endCursor } } } "
                 "pageInfo { hasNextPage endCursor } }"
             )
@@ -1090,6 +1195,7 @@ def load_state(path: Path, repository: str) -> dict[str, Any]:
     valid_shape = (
         isinstance(state, dict)
         and state.get("version") == STATE_VERSION
+        and isinstance(state.get("repository"), str)
         and isinstance(state.get("pull_requests"), dict)
     )
     if not valid_shape:
@@ -1107,6 +1213,7 @@ def load_state(path: Path, repository: str) -> dict[str, Any]:
             "head_oid",
             "terminal_state",
             "terminal_at",
+            "authenticated_review_head",
         ):
             value = record.get(field)
             if value is not None and not isinstance(value, str):
@@ -1249,6 +1356,8 @@ def process_pull_request(
             "terminal_state": None,
         }
     )
+    if pull_request["head_oid"] in pull_request["quiet_review_head_oids"]:
+        record["authenticated_review_head"] = pull_request["head_oid"]
     computed = evaluate_convergence(pull_request)
     if not computed["converged"] and record.get("unconverged_since") is None:
         record["unconverged_since"] = now
@@ -1423,9 +1532,14 @@ def run_tick(config: Config, logger: JsonLogger) -> list[dict[str, Any]]:
         if record.get("node_id") and not record.get("terminal_state")
     ]
     tracked_node_ids = [record["node_id"] for record in active_records]
+    authenticated_review_heads = {
+        int(number): record["authenticated_review_head"]
+        for number, record in state["pull_requests"].items()
+        if isinstance(record.get("authenticated_review_head"), str)
+    }
     pull_requests, tracked = GitHubGraphQL(
         config.repository, config.command_timeout_seconds
-    ).snapshot(tracked_node_ids, config.head_pattern)
+    ).snapshot(tracked_node_ids, config.head_pattern, authenticated_review_heads)
     now = time.time()
     summaries = record_terminal_pull_requests(config, logger, state, tracked, now)
     for pull_request in pull_requests:

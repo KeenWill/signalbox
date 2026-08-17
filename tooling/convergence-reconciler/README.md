@@ -42,8 +42,8 @@ directory before a dispatch child can start.
 
 ## Convergence predicate
 
-An open, watched pull request is converged exactly when all five facts hold on
-one GraphQL snapshot:
+An open, watched pull request is converged exactly when all six facts hold on
+one current GitHub snapshot:
 
 1. Every ordinary review thread is resolved and has a recognized in-thread fix
    or decline disposition from the pull request author. A thread carrying the
@@ -51,12 +51,16 @@ one GraphQL snapshot:
    reported separately without causing another dispatch.
 2. Unless every changed file is planning-only under the repository banner rule,
    a trusted repository member explicitly requested Codex review naming the
-   current head OID, and `chatgpt-codex-connector` subsequently completed a
-   comment-free review of that exact head.
+   current head OID, and `chatgpt-codex-connector` subsequently completed either
+   a comment-free review or a review whose findings were all validly declined
+   and resolved. Authenticated evidence is retained for an unchanged head across
+   later check reruns.
 3. A check rollup exists on the commit whose OID equals the current head OID,
    and every gating check is green.
 4. GitHub reports the pull request `MERGEABLE` against its current base.
 5. The current head contains every commit in the current base branch.
+6. The description contains at most 350 words and includes a
+   `Meaningfully changed lines:` count.
 
 A completed check run is green when its conclusion is `SUCCESS`, `NEUTRAL`, or
 `SKIPPED`; a commit status is green only when it is `SUCCESS`. Queued, pending,
@@ -87,9 +91,12 @@ compared and then re-read in a separate request so a racing base advance cannot
 converge from stale evidence. Planning-only status requires every changed file
 to carry the banner at the head and, unless newly added, at the base. Additional
 thread or check pages use dynamically aliased GraphQL fields, up to 20
-continuations in one request. The script makes no REST requests. Previously
-watched node IDs are folded into the listing call so merged and closed pull
-requests can be recorded once and then omitted from future queries.
+continuations in one request. Review-thread comments, top-level comments, and
+reviews are also paginated. REST compare requests conservatively classify
+post-review rename-only and source-comment-only changes; REST pull-request-file
+requests recover base paths for renamed planning files. Previously watched node
+IDs are folded into the listing call so merged and closed pull requests can be
+recorded once and then omitted from future queries.
 
 ## Decision flow
 
