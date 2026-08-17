@@ -65,6 +65,7 @@ const MAX_ARGUMENT_BYTES: usize = MAX_ARGUMENT_CHARACTERS * 4;
 const MAX_TOTAL_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_WORKING_DIRECTORY_CHARACTERS: usize = 4096;
 const MAX_WORKING_DIRECTORY_BYTES: usize = MAX_WORKING_DIRECTORY_CHARACTERS * 4;
+const MAX_SANDBOX_ENVIRONMENT_NAME_BYTES: usize = 4096;
 const MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES: usize = 64 * 1024;
 pub(crate) const EXEC_CAPTURE_BYTES: usize = 64 * 1024;
 const PROCESS_CAPTURE_BYTES_LIMIT: usize = 1024 * 1024;
@@ -138,7 +139,7 @@ impl SandboxEnvironmentVariable {
             .is_some_and(|byte| byte.is_ascii_uppercase() || byte == b'_')
             && name_bytes
                 .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
-        if !valid_name {
+        if !valid_name || name.len() > MAX_SANDBOX_ENVIRONMENT_NAME_BYTES {
             return Err(InvalidSandboxEnvironmentVariable::Name);
         }
         if name.starts_with("LD_")
@@ -175,7 +176,8 @@ impl fmt::Debug for SandboxEnvironmentVariable {
 /// Rejection while constructing one explicit restricted-process environment value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvalidSandboxEnvironmentVariable {
-    /// The name is not a canonical uppercase environment identifier.
+    /// The name is not a canonical uppercase environment identifier or exceeds
+    /// 4,096 UTF-8 bytes.
     Name,
     /// The name belongs to the fixed sandbox runtime environment or controls
     /// the dynamic loader used to start the outer supervisor.
@@ -5149,6 +5151,26 @@ mod tests {
         );
 
         assert_eq!(result, Err(InvalidSandboxEnvironmentVariable::Name));
+    }
+
+    #[test]
+    fn sandbox_environment_rejects_names_beyond_the_byte_bound() {
+        let result = SandboxEnvironmentVariable::try_new(
+            "A".repeat(MAX_SANDBOX_ENVIRONMENT_NAME_BYTES + 1),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        );
+
+        assert_eq!(result, Err(InvalidSandboxEnvironmentVariable::Name));
+    }
+
+    #[test]
+    fn sandbox_environment_accepts_the_exact_name_byte_bound() {
+        let result = SandboxEnvironmentVariable::try_new(
+            "A".repeat(MAX_SANDBOX_ENVIRONMENT_NAME_BYTES),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        );
+
+        assert!(result.is_ok());
     }
 
     #[test]
