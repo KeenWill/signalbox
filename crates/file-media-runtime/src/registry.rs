@@ -387,7 +387,7 @@ impl FileMediaRegistry {
     ) -> Result<FileReadResult, FileMediaFailure> {
         if !request.options.is_object()
             || serde_json::to_vec(&request.options)
-                .is_err_or(|encoded| encoded.len() > MAX_READ_OPTIONS_BYTES)
+                .map_or(true, |encoded| encoded.len() > MAX_READ_OPTIONS_BYTES)
         {
             return Err(FileMediaFailure::InvalidViewArguments);
         }
