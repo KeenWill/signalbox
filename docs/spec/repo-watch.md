@@ -870,10 +870,13 @@ repeated work rather than a fixed five-second loop. Only the drain advances that
 delay: an attempt whose drain succeeded and whose dispatch work then failed
 returns it to five seconds and keeps a retry armed there, because that work runs
 only from a later attempt and the delivery that would have woken one is already
-terminal, and one that failed before reaching the drain arms a retry at the
-current delay without advancing it, so unrelated dispatch failures cannot grow
-the delay, suppress admission wakes, or make polls omit their drain steps while
-projection is healthy. Taking a retry spends its deadline, so an attempt that
+terminal. That follow-up is distinct from projection backoff: admission wakes
+remain enabled and full polls keep both drain steps while it is owed. A full poll
+whose drains succeeded and whose trailing dispatch work failed arms the same
+follow-up rather than waiting for the next poll. An attempt that failed before
+reaching the drain arms a retry at the current delay without advancing it, so
+unrelated dispatch failures cannot grow the projection delay. Taking a retry
+spends its deadline, so an attempt that
 then fails before its drain arms a fresh one rather than selecting itself again
 immediately, which the retry's priority over polling would otherwise cause. A
 deadline that expired while some other attempt ran is left expired, so the next
