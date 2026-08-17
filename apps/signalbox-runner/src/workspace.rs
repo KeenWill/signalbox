@@ -5,13 +5,16 @@ use std::{
     fmt,
     fs::File,
     io::{self, Read, Write},
-    os::unix::fs::{MetadataExt as _, PermissionsExt as _},
+    os::unix::{
+        fs::{MetadataExt as _, PermissionsExt as _},
+        io::AsRawFd as _,
+    },
 };
 
 use rustix::{
     fs::{
-        AtFlags, Mode, OFlags, RenameFlags, chmodat, fchmod, mkdirat, openat, renameat,
-        renameat_with, statat, unlinkat,
+        AtFlags, Mode, OFlags, RenameFlags, fchmod, mkdirat, openat, renameat, renameat_with,
+        statat, unlinkat,
     },
     process::geteuid,
 };
@@ -297,11 +300,24 @@ fn validate_directory(parent: &File, name: &str, directory: &File) -> Result<(),
 }
 
 fn open_created_directory(parent: &File, name: &str) -> Result<File, RunnerWorkspaceError> {
-    chmodat(parent, name, Mode::RWXU, AtFlags::empty()).map_err(rustix_io)?;
-    let descriptor = openat(
+    let pinned_descriptor = openat(
         parent,
         name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(rustix_io)?;
+    let pinned = File::from(pinned_descriptor);
+    let descriptor_path = format!("/proc/self/fd/{}", pinned.as_raw_fd());
+    std::fs::set_permissions(
+        descriptor_path,
+        std::fs::Permissions::from_mode(DIRECTORY_MODE),
+    )
+    .map_err(RunnerWorkspaceError::Io)?;
+    let descriptor = openat(
+        &pinned,
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map_err(rustix_io)?;
@@ -405,6 +421,7 @@ fn rustix_io(error: rustix::io::Errno) -> RunnerWorkspaceError {
 mod tests {
     use std::{fs, os::unix::fs::PermissionsExt as _};
 
+    use expect_test::expect;
     use signalbox_runner_wire::{
         CanonicalUuid, ManifestLifecycle, PositiveU64, SandboxProfile, workspace_manifest_digest,
     };
@@ -423,7 +440,6 @@ mod tests {
     const PLACEMENT_REVISION: u64 = 3;
     const OPEN_DIRECTORY_MODE: u32 = 0o750;
     const EXPECTED_DOCUMENT_MODE: u32 = 0o600;
-    const EXPECTED_RELATIVE_PATH: &str = "sessions/018f6f10-0000-7000-8000-0000000000e1/3/work";
 
     fn fixture_root() -> (TempDir, RunnerStateRoot) {
         let parent = tempfile::tempdir().expect("the workspace fixture parent exists");
@@ -466,7 +482,7 @@ mod tests {
         assert_eq!(prepared.manifest.session, expected.session());
         assert_eq!(prepared.manifest.runner, expected.runner());
         assert_eq!(prepared.manifest.lifecycle, ManifestLifecycle::Ready);
-        assert_eq!(prepared.manifest.relative_path, EXPECTED_RELATIVE_PATH);
+        assert_eq!(prepared.manifest.relative_path, expected.relative_path());
         assert_eq!(
             prepared.manifest_digest,
             workspace_manifest_digest(&prepared.manifest)
@@ -603,7 +619,7 @@ mod tests {
             .prepare_private_root(&request(RUNNER))
             .expect_err("a symlink cannot stand in for the sessions directory");
 
-        assert_eq!(failure.to_string(), "runner workspace storage failed");
+        expect![[r#"runner workspace storage failed"#]].assert_eq(&failure.to_string());
         assert_eq!(
             fs::read_dir(&outside)
                 .expect("the outside fixture remains readable")
@@ -630,7 +646,7 @@ mod tests {
             .mode()
             & 0o7777;
 
-        assert_eq!(failure.to_string(), "runner workspace storage failed");
+        expect![[r#"runner workspace storage failed"#]].assert_eq(&failure.to_string());
         assert_eq!(retained_mode, OPEN_DIRECTORY_MODE);
     }
 }
