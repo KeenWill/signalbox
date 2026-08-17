@@ -1,3 +1,5 @@
+//! Owns the supervised SVG worker entry point governed by `docs/spec/file-and-media.md`.
+
 use std::error::Error;
 
 use signalbox_file_media_adapter_svg::SvgProvider;

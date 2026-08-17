@@ -6,7 +6,7 @@ use quick_xml::{
     NsReader,
     escape::unescape,
     events::{BytesDecl, BytesStart, Event},
-    name::ResolveResult,
+    name::{NamespaceResolver, ResolveResult},
 };
 use signalbox_file_media_runtime::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider,
@@ -23,6 +23,7 @@ const PROVIDER_NAME: &str = "svg";
 const READER_NAME: &str = "quick-xml";
 const READER_REVISION: &str = "quick-xml-0-41-data-only-v1";
 const SVG_NAMESPACE: &[u8] = b"http://www.w3.org/2000/svg";
+const XLINK_NAMESPACE: &[u8] = b"http://www.w3.org/1999/xlink";
 const TEXT_VIEW: &str = "text";
 const METADATA_VIEW: &str = "metadata";
 const MALFORMED_REASON: &str = "malformed_svg";
@@ -314,14 +315,17 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
     let mut prolog_event_seen = false;
     loop {
         match reader
-            .read_resolved_event_into(&mut buffer)
+            .read_event_into(&mut buffer)
             .map_err(|_| ParseIssue::Malformed)?
         {
-            (namespace, Event::Start(start)) => {
+            Event::Start(start) => {
+                validate_qname(start.name().as_ref())?;
+                let (namespace, _) = reader.resolver().resolve_element(start.name());
                 prolog_event_seen = true;
                 inspect_element(
                     &start,
                     &namespace,
+                    reader.resolver(),
                     depth,
                     &mut attributes,
                     &mut parsed,
@@ -338,11 +342,14 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                         .ok_or(ParseIssue::StructureLimit)?;
                 }
             }
-            (namespace, Event::Empty(empty)) => {
+            Event::Empty(empty) => {
+                validate_qname(empty.name().as_ref())?;
+                let (namespace, _) = reader.resolver().resolve_element(empty.name());
                 prolog_event_seen = true;
                 inspect_element(
                     &empty,
                     &namespace,
+                    reader.resolver(),
                     depth,
                     &mut attributes,
                     &mut parsed,
@@ -353,7 +360,9 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     root_closed = true;
                 }
             }
-            (namespace, Event::End(end)) => {
+            Event::End(end) => {
+                validate_qname(end.name().as_ref())?;
+                let (namespace, _) = reader.resolver().resolve_element(end.name());
                 if depth == 0 {
                     return Err(ParseIssue::Malformed);
                 }
@@ -368,7 +377,10 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     root_closed = true;
                 }
             }
-            (_, Event::Text(text)) => {
+            Event::Text(text) => {
+                if text.as_ref().windows(3).any(|window| window == b"]]>") {
+                    return Err(ParseIssue::Malformed);
+                }
                 let decoded = text.xml10_content().map_err(|_| ParseIssue::Malformed)?;
                 if depth == 0 && !decoded.trim().is_empty() {
                     return Err(ParseIssue::Malformed);
@@ -380,7 +392,7 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     append_text(&mut parsed.text, &decoded)?;
                 }
             }
-            (_, Event::CData(cdata)) => {
+            Event::CData(cdata) => {
                 if depth == 0 {
                     return Err(ParseIssue::Malformed);
                 }
@@ -389,7 +401,7 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     append_text(&mut parsed.text, &decoded)?;
                 }
             }
-            (_, Event::GeneralRef(reference)) => {
+            Event::GeneralRef(reference) => {
                 if depth == 0 {
                     return Err(ParseIssue::Malformed);
                 }
@@ -399,13 +411,11 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     append_text(&mut parsed.text, &value)?;
                 }
             }
-            (_, Event::Decl(declaration))
-                if !root_seen && !declaration_seen && !prolog_event_seen =>
-            {
+            Event::Decl(declaration) if !root_seen && !declaration_seen && !prolog_event_seen => {
                 declaration_seen = true;
                 validate_declaration(&declaration)?;
             }
-            (_, Event::Comment(comment)) => {
+            Event::Comment(comment) => {
                 if comment.as_ref().windows(2).any(|window| window == b"--") {
                     return Err(ParseIssue::Malformed);
                 }
@@ -413,11 +423,11 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     prolog_event_seen = true;
                 }
             }
-            (_, Event::Decl(_)) => return Err(ParseIssue::Malformed),
-            (_, Event::DocType(_)) => return Err(ParseIssue::Malformed),
-            (_, Event::PI(_)) => return Err(ParseIssue::ActiveContent),
-            (_, Event::Eof) if root_seen && root_closed && depth == 0 => break,
-            (_, Event::Eof) => return Err(ParseIssue::Malformed),
+            Event::Decl(_) => return Err(ParseIssue::Malformed),
+            Event::DocType(_) => return Err(ParseIssue::Malformed),
+            Event::PI(_) => return Err(ParseIssue::ActiveContent),
+            Event::Eof if root_seen && root_closed && depth == 0 => break,
+            Event::Eof => return Err(ParseIssue::Malformed),
         }
         buffer.clear();
     }
@@ -427,6 +437,7 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
 fn inspect_element(
     element: &BytesStart<'_>,
     namespace: &ResolveResult<'_>,
+    resolver: &NamespaceResolver,
     depth: usize,
     attribute_count: &mut usize,
     parsed: &mut ParsedSvg,
@@ -468,6 +479,8 @@ fn inspect_element(
         if *attribute_count > MAX_ATTRIBUTES || attribute.value.len() > MAX_ATTRIBUTE_BYTES {
             return Err(ParseIssue::StructureLimit);
         }
+        validate_qname(attribute.key.as_ref())?;
+        let qualified_key = attribute.key.as_ref();
         let key_binding = attribute.key.local_name();
         let key = key_binding.as_ref();
         let raw_value =
@@ -480,16 +493,37 @@ fn inspect_element(
         if !has_only_xml10_characters(value) {
             return Err(ParseIssue::Malformed);
         }
-        if event_handler_attribute(key) || key == b"style" {
+        if qualified_key == b"xmlns" || qualified_key.starts_with(b"xmlns:") {
+            continue;
+        }
+        let attribute_namespace = if qualified_key.contains(&b':') {
+            let (namespace, _) = resolver.resolve_attribute(attribute.key);
+            if matches!(namespace, ResolveResult::Unbound) {
+                return Err(ParseIssue::Malformed);
+            }
+            Some(namespace)
+        } else {
+            None
+        };
+        let is_svg_attribute = attribute_namespace.is_none();
+        let is_xlink_href = matches!(
+            attribute_namespace,
+            Some(ResolveResult::Bound(namespace))
+                if namespace.as_ref() == XLINK_NAMESPACE && key == b"href"
+        );
+        if is_svg_attribute && (event_handler_attribute(key) || key == b"style") {
             return Err(ParseIssue::ActiveContent);
         }
-        if key == b"href"
-            || contains_ascii_case_insensitive(value.as_bytes(), b"url(")
-            || (resource_capable_attribute(key) && value.contains('\\'))
+        if (is_svg_attribute && key == b"href")
+            || is_xlink_href
+            || (is_svg_attribute
+                && resource_capable_attribute(key)
+                && (contains_ascii_case_insensitive(value.as_bytes(), b"url(")
+                    || value.contains('\\')))
         {
             return Err(ParseIssue::ExternalReference);
         }
-        if depth == 0 {
+        if depth == 0 && is_svg_attribute {
             match key {
                 b"width" => parsed.width = parse_dimension(value)?,
                 b"height" => parsed.height = parse_dimension(value)?,
@@ -554,13 +588,28 @@ fn event_handler_attribute(name: &[u8]) -> bool {
         name,
         b"onabort"
             | b"onactivate"
+            | b"onanimationcancel"
+            | b"onanimationend"
+            | b"onanimationiteration"
+            | b"onanimationstart"
+            | b"onauxclick"
+            | b"onbeforeinput"
+            | b"onbeforematch"
+            | b"onbeforetoggle"
             | b"onbegin"
+            | b"onblur"
             | b"oncancel"
             | b"oncanplay"
             | b"oncanplaythrough"
             | b"onchange"
             | b"onclick"
             | b"onclose"
+            | b"oncompositionend"
+            | b"oncompositionstart"
+            | b"oncompositionupdate"
+            | b"oncontextlost"
+            | b"oncontextmenu"
+            | b"oncontextrestored"
             | b"oncopy"
             | b"oncuechange"
             | b"oncut"
@@ -581,6 +630,10 @@ fn event_handler_attribute(name: &[u8]) -> bool {
             | b"onfocus"
             | b"onfocusin"
             | b"onfocusout"
+            | b"onformdata"
+            | b"onfullscreenchange"
+            | b"onfullscreenerror"
+            | b"ongotpointercapture"
             | b"oninput"
             | b"oninvalid"
             | b"onkeydown"
@@ -590,6 +643,7 @@ fn event_handler_attribute(name: &[u8]) -> bool {
             | b"onloadeddata"
             | b"onloadedmetadata"
             | b"onloadstart"
+            | b"onlostpointercapture"
             | b"onmousedown"
             | b"onmouseenter"
             | b"onmouseleave"
@@ -599,6 +653,7 @@ fn event_handler_attribute(name: &[u8]) -> bool {
             | b"onmouseup"
             | b"onmousewheel"
             | b"onpause"
+            | b"onpaste"
             | b"onplay"
             | b"onplaying"
             | b"onpointercancel"
@@ -608,6 +663,7 @@ fn event_handler_attribute(name: &[u8]) -> bool {
             | b"onpointermove"
             | b"onpointerout"
             | b"onpointerover"
+            | b"onpointerrawupdate"
             | b"onpointerup"
             | b"onprogress"
             | b"onratechange"
@@ -615,10 +671,15 @@ fn event_handler_attribute(name: &[u8]) -> bool {
             | b"onreset"
             | b"onresize"
             | b"onscroll"
+            | b"onscrollend"
+            | b"onsecuritypolicyviolation"
             | b"onseeked"
             | b"onseeking"
             | b"onselect"
+            | b"onselectionchange"
+            | b"onselectstart"
             | b"onshow"
+            | b"onslotchange"
             | b"onstalled"
             | b"onsubmit"
             | b"onsuspend"
@@ -628,12 +689,60 @@ fn event_handler_attribute(name: &[u8]) -> bool {
             | b"ontouchend"
             | b"ontouchmove"
             | b"ontouchstart"
+            | b"ontransitioncancel"
+            | b"ontransitionend"
+            | b"ontransitionrun"
+            | b"ontransitionstart"
             | b"onunload"
             | b"onvolumechange"
             | b"onwaiting"
             | b"onwheel"
             | b"onzoom"
     )
+}
+
+fn validate_qname(name: &[u8]) -> Result<(), ParseIssue> {
+    let name = std::str::from_utf8(name).map_err(|_| ParseIssue::Malformed)?;
+    let mut parts = name.split(':');
+    let first = parts.next().ok_or(ParseIssue::Malformed)?;
+    let second = parts.next();
+    if parts.next().is_some()
+        || !valid_ncname(first)
+        || second.is_some_and(|part| !valid_ncname(part))
+    {
+        return Err(ParseIssue::Malformed);
+    }
+    Ok(())
+}
+
+fn valid_ncname(name: &str) -> bool {
+    let mut characters = name.chars();
+    characters.next().is_some_and(is_name_start_character) && characters.all(is_name_character)
+}
+
+fn is_name_start_character(character: char) -> bool {
+    character == '_'
+        || character.is_ascii_alphabetic()
+        || ('\u{c0}'..='\u{d6}').contains(&character)
+        || ('\u{d8}'..='\u{f6}').contains(&character)
+        || ('\u{f8}'..='\u{2ff}').contains(&character)
+        || ('\u{370}'..='\u{37d}').contains(&character)
+        || ('\u{37f}'..='\u{1fff}').contains(&character)
+        || ('\u{200c}'..='\u{200d}').contains(&character)
+        || ('\u{2070}'..='\u{218f}').contains(&character)
+        || ('\u{2c00}'..='\u{2fef}').contains(&character)
+        || ('\u{3001}'..='\u{d7ff}').contains(&character)
+        || ('\u{f900}'..='\u{fdcf}').contains(&character)
+        || ('\u{fdf0}'..='\u{fffd}').contains(&character)
+        || ('\u{10000}'..='\u{effff}').contains(&character)
+}
+
+fn is_name_character(character: char) -> bool {
+    is_name_start_character(character)
+        || character.is_ascii_digit()
+        || matches!(character, '-' | '.' | '\u{b7}')
+        || ('\u{300}'..='\u{36f}').contains(&character)
+        || ('\u{203f}'..='\u{2040}').contains(&character)
 }
 
 fn parse_dimension(value: &str) -> Result<Option<f64>, ParseIssue> {
