@@ -420,6 +420,10 @@ jobs:
       (${{ matrix.suite }} ${{ matrix.partition }}/${{ matrix.partitions }})
     needs: postgres-integration-build
     runs-on: signalbox-docker
+    # Keep security-sensitive sockets and filesystem fixtures off the NFS
+    # workspace: their permission and atomicity contracts require local /tmp.
+    env:
+      TMPDIR: /tmp
     # Measured against the shards rather than guessed. The former three
     # persistence partitions were balanced but had grown to roughly 8m15s each;
     # runner took about eight minutes whole, and signalboxd about five. The
