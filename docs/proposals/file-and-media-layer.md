@@ -161,16 +161,22 @@ Detection follows one fixed algorithm:
 
 01. Start the inspection-wide 120-second wall deadline before source
     verification. Verify source digest and length through ordinary replica
-    traversal, charging every byte traversed to the inspection-wide source-work
-    ceiling below. Exhausting the wall deadline returns `ProcessorTimedOut`;
-    exhausting source work returns `SourceTooLarge` with that ceiling. Ordinary
-    blob traversal's longer deadline cannot extend either inspection limit.
+    traversal. Verification performs at most one complete traversal bounded by
+    the catalog's authenticated `byte_length`; those integrity bytes use the
+    blob layer's traversal accounting and process-wide traversal admission, not
+    the reader-work ceiling. Exhausting the wall deadline returns
+    `ProcessorTimedOut`. Ordinary blob traversal's longer deadline cannot extend
+    the inspection deadline. Missing, corrupt, unavailable, or no-longer-visible
+    sources propagate as `BlobMissing`, `BlobCorrupt`, `BlobUnavailable`, or
+    `BlobNotVisible` before candidate selection.
 02. Run relevant probes in isolation under both their provider limits and the
-    same inspection-wide deadline and source-work ceiling, plus the request-wide
+    same inspection-wide deadline, plus the request-wide
     probe-count, concurrency, memory, CPU, range, and probe-source-byte budgets
     below. Exceeding any probe-specific request-wide budget is
     `ProcessorFailed { reason_code: probe_budget_exceeded }`; an inspection
-    never schedules additional probes after that boundary.
+    never schedules additional probes after that boundary. Failure to reserve or
+    start a worker propagates as `ProcessorUnavailable`; none of these source or
+    processor outcomes becomes content evidence.
 03. Partition byte-evidence results—`Strong`, `StructuralCandidate`, and
     `RecognizedMalformed`—by canonical media type and exact `ReaderIdentity`.
     Claims for different types or reader identities conflict and return
@@ -221,6 +227,17 @@ the declared-versus-detected comparison. A container provider owns distinctions
 within its own family. Probe order is unsigned-ASCII provider/reader order for
 deterministic work and telemetry, never precedence.
 
+Each declared probe has a stable `ProbeName`, and a claim's canonical key is
+`{ ReaderIdentity, canonical media type, strength, ProbeName }`. A provider must
+reduce all internal signals for one key to one canonical outcome and one opaque
+request-bound capability before returning from `probe`; the registry never
+merges opaque capabilities. Repeated outcomes for one key are accepted only when
+their canonical outcome bytes and capability authenticator are identical, then
+collapse to that one outcome. A differing duplicate is a provider contract
+failure, `ProcessorFailed { reason_code: inconsistent_probe_state }`, not a
+selection tie. Thus the `selected_probe` passed to `validate` is unique and
+independent of scheduling or return order.
+
 Version one has no durable classification cache. Immutable tool results already
 preserve what a model saw. A later tool request may use a newer reader revision,
 but cannot rewrite the earlier result.
@@ -266,14 +283,17 @@ trait FileMediaProvider {
 
 The registry collects every bounded `ProbeOutcome`, applies the fixed selection
 algorithm, and invokes `validate` only on the selected provider. An
-implementation may keep an opaque, request-bound capability between those
-stages. The contract is that probing precedes registry selection, validation
-precedes interpretation, every stage is bounded and cancellable, and truncated
-worker output is never success.
+implementation may keep the uniquely authenticated opaque, request-bound
+capability between those stages. The contract is that probing precedes registry
+selection, validation precedes interpretation, every stage is bounded and
+cancellable, and truncated worker output is never success.
 
 Registry construction rejects duplicate identities or exact MIME owners,
 duplicate view names, non-object schemas, unsupported output kinds, absent or
-above-process limits, unbounded access/output, or unavailable isolation. Image
+above-process limits, unbounded access/output, or unavailable isolation. It also
+computes the complete worst-case detection schedule for every possible declared
+type and rejects a snapshot that could require more than 32 probes. No runtime
+prefilter may omit a byte probe based on declared type or filename. Image
 views must bound dimensions, pixels, and bytes; audio views duration, samples,
 channels, and bytes; structured views nesting, nodes, strings, and bytes. Each
 provider has at most 64 views, and registry construction encodes the worst-case
@@ -321,8 +341,11 @@ streaming, and is never interpreted as a control frame.
 The broker checks every range against source length, the provider declaration,
 cumulative source bytes, range count, and cancellation before store I/O. The
 supervisor enforces finite resident memory, CPU, wall time, descendants,
-descriptors, and output. Worker pooling is deferred so compromise cannot cross
-requests.
+descriptors, and output. Before spawning, it atomically reserves one slot and
+the declared memory limit from a process-wide pool of four workers and 2 GiB;
+unavailable capacity returns `ProcessorUnavailable` without spawning or reading
+the source. Reservations are released only after whole-process-tree termination.
+Worker reuse is deferred so compromise cannot cross requests.
 
 A control result is length-delimited and accepted only after clean worker exit.
 Binary output is likewise committed to ingest only after a valid terminal
@@ -339,6 +362,19 @@ The selected sandbox must prove process/address-space separation, no network or
 ambient credentials, whole-descendant termination, exact one-digest authority,
 and no durable partial output. Validation remains defense in depth rather than
 the containment boundary.
+
+A CLI parser is itself the fresh worker launched directly by the supervisor; no
+wrapper worker launches it as a child. When the CLI requires a path, the broker
+materializes the exact authorized source into one owner-private, read-only
+temporary file under the inspection deadline and source bounds, passes only that
+path, and removes it after whole-process-tree termination. The CLI inherits the
+same write-only length-delimited control descriptor and optional bounded binary
+descriptor as any other worker. Success requires one valid terminal frame, exact
+binary length/digest agreement when present, clean exit, and no extra output;
+cancellation, signal, timeout, nonzero exit, malformed framing, or descendant
+creation terminates the whole sandbox and discards staged output. The sandbox
+applies the same network, credential, environment, path, descriptor, and zero-
+descendant restrictions to this directly supervised process.
 
 ## Agent read surfaces
 
@@ -374,8 +410,9 @@ the exact `ReaderIdentity` returned by `file_inspect`. The permission default is
 observable authenticated store reads and publish a generated artifact. On an
 initial request, `options` is the provider object and `continuation` is null. On
 a continuation request, `options` is null and `continuation` is the cursor from
-the preceding result; the cursor carries and authenticates the original
-normalized options and next semantic position. The permission check reuses the
+the preceding result. The cursor is an opaque authenticated token that references
+process-local state containing the original normalized options and next semantic
+position; it does not embed either value. The permission check reuses the
 `blob_read` rendered-frontier allow-set before the executor boundary. An initial
 request must reauthorize the exact currently visible stub identified by its
 digest and selector. A continuation request must present a live authenticated
@@ -503,7 +540,7 @@ may lower but never raise these process ceilings:
 | Probes / concurrent workers per inspect | 32 / 2                 |
 | Aggregate probe ranges / source bytes   | 64 / 1,048,576         |
 | Aggregate probe memory / CPU / wall     | 1 GiB / 120 s / 120 s  |
-| Inspection verification + source work   | 1,073,741,824 bytes    |
+| Source verification traversals / bytes  | 1 / exact byte length  |
 | Control frame / text-or-JSON body       | 1,048,576 / 786,432    |
 | Views / complete inspection JSON        | 64 / 786,432 bytes     |
 | Structured depth / nodes                | 64 / 100,000           |
@@ -518,9 +555,13 @@ may lower but never raise these process ceilings:
 | Continuation state per turn / process   | 20 MiB / 64 MiB        |
 | Worker memory / CPU / wall time         | 512 MiB / 60 s / 120 s |
 | Worker descendants                      | 0                      |
+| Process worker slots / reserved memory  | 4 / 2 GiB              |
 
-A stored blob may remain multi-gigabyte. A compatible reader streams it under a
-finite cumulative source-work limit; a whole-decode view may return
+A stored blob may remain multi-gigabyte. Inspection may verify it with one
+deadline-bounded full traversal whose byte bound is its authenticated length;
+probe and reader work remain under their smaller fixed ceilings. A compatible
+reader streams it under a finite cumulative source-work limit; a whole-decode
+view may return
 `SourceTooLarge` without invalidating the blob. Text/structure stops before the
 first complete semantic unit that would cross output bounds; a single oversized
 unit returns `OutputUnitTooLarge`, never partial UTF-8 or JSON. Image and audio
@@ -560,9 +601,11 @@ use can reference the same digest. This avoids store I/O in accepted-input
 transactions and keeps metadata correction out of blob identity.
 
 Processor failure is operator failure, not malformed evidence unless a complete
-authenticated failure frame arrived before exit. Telemetry may name digest,
-reader, reason code, and numeric limits, never bytes, extracted text, filenames,
-declared types, stderr, paths, or credentials.
+authenticated failure frame arrived before exit. Telemetry follows the owning
+identity-and-commands contract exactly: it may use only daemon-minted aggregate
+identifiers plus the closed tool-name and error-classification tokens. It never
+records a blob digest, reader identity, bytes, extracted text, filename, declared
+type, parser message, stderr, path, credential, or content-derived identifier.
 
 ## Existing blob wire and trust boundary
 
@@ -595,8 +638,14 @@ One shared suite proves every provider and isolation implementation:
   specified, independent of registration order;
 - fixtures cover malformed claims from different readers, a strong claim with a
   conflicting structural claim, a declaration-only candidate alongside a unique
-  strong mismatch, duplicate compatible strong claims, successful and failed
-  structural-candidate validation, and failed declared-candidate validation;
+  strong mismatch, duplicate same-reader claims with different probe state,
+  duplicate compatible strong claims, successful and failed structural-candidate
+  validation, and failed declared-candidate validation;
+- an encrypted or locked fixture returns `EncryptedOrLocked` terminally without
+  a password channel, permissive parser recovery, or text fallback;
+- source visibility, missing, corruption, availability, worker-startup, and
+  process-wide worker-capacity failures preserve their exact closed variants
+  before candidate selection;
 - crash, cancellation, timeout, memory/output kill, or framing defect produces
   no partial success;
 - workers lack network, credentials, database, path, and second-digest access;
@@ -606,7 +655,9 @@ One shared suite proves every provider and isolation implementation:
   control frame; derived bytes are independently type-validated before commit,
   derived publication failure commits no reference, while a later failure leaves
   at most an orphan and equal output deduplicates;
-- durable replay does not rerun parsing or recharge the turn; and
+- durable replay does not rerun parsing or recharge the turn;
+- continuation tokens authenticate and resolve only to their bound digest, part
+  selector, reader identity, view, normalized initial options, and position; and
 - preparation rejects missing, corrupt, malformed, oversized, and
   modality-unsupported references before send authorization.
 
