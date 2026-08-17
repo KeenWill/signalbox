@@ -300,6 +300,8 @@ impl RunnerWorkspaceStore {
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         let placement_name = request.placement_revision().get().to_string();
         let execution_path = self.canonical_root.join(request.relative_path());
+        validate_execution_directory_representation(&execution_path)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         match open_directory(&session, &placement_name) {
             Ok(placement) => {
                 return read_ready_repository_workspace(&placement, request, &execution_path)
@@ -402,6 +404,9 @@ impl RunnerWorkspaceStore {
         )
         .map_err(RunnerWorkspaceError::Io)
         .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        validate_root_directory(&self.canonical_root, &self.root)
+            .map_err(RunnerWorkspaceError::Io)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         validate_directory(&self.root, SESSIONS_DIRECTORY, &sessions)
             .map_err(RunnerWorkspaceError::Io)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
@@ -629,6 +634,30 @@ fn checked_execution_directory(
         .to_str()
         .ok_or(RunnerWorkspaceError::CorruptManifest)?;
     WorkingDirectory::try_new(text.to_owned()).map_err(|_| RunnerWorkspaceError::CorruptManifest)
+}
+
+fn validate_execution_directory_representation(path: &Path) -> Result<(), RunnerWorkspaceError> {
+    let text = path.to_str().ok_or(RunnerWorkspaceError::CorruptManifest)?;
+    WorkingDirectory::try_new(text.to_owned())
+        .map(|_| ())
+        .map_err(|_| RunnerWorkspaceError::CorruptManifest)
+}
+
+fn validate_root_directory(path: &Path, directory: &File) -> Result<(), io::Error> {
+    let metadata = directory.metadata()?;
+    let path_metadata = std::fs::metadata(path)?;
+    if !metadata.is_dir()
+        || metadata.uid() != geteuid().as_raw()
+        || metadata.permissions().mode() & PERMISSION_MASK != DIRECTORY_MODE
+        || metadata.dev() != path_metadata.dev()
+        || metadata.ino() != path_metadata.ino()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "workspace root identity is invalid",
+        ));
+    }
+    Ok(())
 }
 
 fn open_private_placement(
@@ -1130,7 +1159,12 @@ fn rustix_io(error: rustix::io::Errno) -> RunnerWorkspaceError {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, future, os::unix::fs::PermissionsExt as _, sync::Arc};
+    use std::{
+        ffi::OsString,
+        fs, future,
+        os::unix::{ffi::OsStringExt as _, fs::PermissionsExt as _},
+        sync::Arc,
+    };
 
     use signalbox_runner_wire::{
         Advertisement, CanonicalUuid, ManifestLifecycle, PositiveU64, ProfileName, Recovery,
@@ -1614,6 +1648,63 @@ mod tests {
         assert!(matches!(
             failure,
             PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::Io(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_rechecks_runner_root_permissions_before_publish() {
+        let (_parent, state) = fixture_root();
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(&repository_request(), |target| async move {
+                let root = target
+                    .path()
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .and_then(std::path::Path::parent)
+                    .and_then(std::path::Path::parent)
+                    .expect("the repository fixture has a runner-root ancestor");
+                fs::set_permissions(root, fs::Permissions::from_mode(OPEN_DIRECTORY_MODE))?;
+                Ok::<Recovery, std::io::Error>(Recovery::Commit {
+                    revision: "3".repeat(40),
+                })
+            })
+            .await
+            .expect_err("an open runner root cannot publish a repository");
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::Io(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_rejects_a_non_utf8_root_before_preparation() {
+        let parent = tempfile::tempdir().expect("the non-UTF-8 fixture parent exists");
+        let non_utf8_parent = parent
+            .path()
+            .join(OsString::from_vec(b"non-utf8-\xff".to_vec()));
+        fs::create_dir(&non_utf8_parent).expect("the non-UTF-8 fixture directory exists");
+        let alias = parent.path().join("alias");
+        std::os::unix::fs::symlink(&non_utf8_parent, &alias)
+            .expect("the UTF-8 fixture alias exists");
+        let state = RunnerStateRoot::open(&alias.join("runner-state"))
+            .expect("the aliased owner-private runner root opens");
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(&repository_request(), |_| async {
+                Err::<Recovery, std::io::Error>(std::io::Error::other(
+                    "preparation must not run for a non-UTF-8 execution path",
+                ))
+            })
+            .await
+            .expect_err("a non-UTF-8 execution path cannot publish a repository");
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::CorruptManifest)
         ));
     }
 
