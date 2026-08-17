@@ -1,5 +1,8 @@
 # Persistence protocol
 
+The program-journal append transaction, reconstitution boundary, lock inventory,
+and migration were verified against this PR (`agent/program-substrate-journal`).
+
 The delegate denial-reason storage — the superseded decision-shape constraint
 and its byte-precise checks — was verified against this PR
 (`agent/judge-denial-reason`).
@@ -9,7 +12,9 @@ fences were verified against the parent slice (`agent/runner-loss-epoch`).
 Placement-relative lease-offer fencing was verified against the parent slice
 (`agent/runner-loss-propagation`). The bounded runner-loss propagation cursor
 and ordered page read were verified against this PR
-(`agent/runner-loss-session-propagation`).
+(`agent/runner-loss-session-propagation`). The atomic per-session runner-loss
+propagation transaction and cursor completion were verified against this PR
+(`agent/runner-loss-session-transaction`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -145,7 +150,7 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — seventy-seven files, `202607180001` through
+`crates/persistence/migrations/` — seventy-eight files, `202607180001` through
 `202608140100` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
@@ -196,6 +201,13 @@ log.
 
 Implemented table families (across the forward-only migrations):
 
+- `program_run_journal_stream`, its mutable per-run sequence allocator,
+  append-only `program_run_journal_entry` frames, and the typed
+  `program_run_journal_nondeterminism` evidence record. The allocator serializes
+  each run's global, request, and delivery orders; deferred checks require its
+  committed counters to equal the journal maxima. The adapter's composable
+  delivery append begins and commits no transaction, so a transactional effect
+  records its consequence and answer through one caller-owned commit;
 - `durable_command` plus typed command records (`create_session_command`,
   `create_session_from_imported_frontier_command`,
   `replace_session_defaults_command`, `replace_session_metadata_command`,
@@ -338,10 +350,15 @@ Representation rules, all enforced in the schema:
   predecessor instead of inferring history from a revision. The generic
   placement snapshot writer refuses loss, either replacement, and abandonment
   because those transitions require connection/loss, durable-command, scheduler,
-  and outbox authority outside the placement aggregate. **Committed
-  unimplemented functionality.** No present adapter installs those transitions;
-  their dedicated orchestration transactions will install these same checked
-  records, and direct snapshot storage cannot stand in for those transactions.
+  and outbox authority outside the placement aggregate. The connection-loss
+  propagation adapter installs only loss transitions under those authorities;
+  replacement and abandonment remain **committed unimplemented functionality**
+  for their dedicated orchestration transactions. Direct snapshot storage cannot
+  stand in for any of those transactions. `RunnerReplacementTestProjection` and
+  `store_runner_replacement_projection_for_test` are compiled only with
+  `postgres-integration` for integration-test round trips; they are not
+  production authority-bearing adapters. The generic production placement writer
+  rejects `runner_replaced`.
 - Migration `202608110005` records the connection-loss epoch observed when each
   placement selects a known enrollment and carries that baseline through later
   loss or abandonment records. The value is derived while holding scheduler,
@@ -352,8 +369,8 @@ Representation rules, all enforced in the schema:
   reconnecting. Lease insertion compares its pinned placement with the
   enrollment's latest loss and remains fenced across successor physical
   connections until a checked replacement installs a fresh baseline. This is the
-  implemented not-yet-projected placement fence; bounded session propagation
-  remains the committed unimplemented transaction described below.
+  implemented placement fence consumed by the bounded session-propagation
+  transaction described below.
 - Migration `202608110006` gives every new durable connection-loss epoch a
   pending propagation cursor in the same transaction. Migration backfill marks a
   loss completed only when no affected current placement remains: losses already
@@ -366,14 +383,16 @@ Representation rules, all enforced in the schema:
   later loss for its selected runner despite having no enrollment baseline; the
   page and both cursor guards associate it through the runner identity. Cursor
   advancement is monotonic, cannot pass an affected current placement, and
-  cannot complete while one remains. Enrollment insertion, exact-identity
-  placement baseline derivation, and cursor completion share a transaction-level
-  runner-identity fence. An insertion that observes enrollment absence therefore
-  becomes visible before that enrollment can create and complete a loss cursor;
-  a completion that wins the fence becomes visible before a later insertion
-  derives its baseline. The cursor and ordered page are implemented; the
-  per-session transaction that changes placement, lease, turn, release, and
-  runner-event state remains the committed unimplemented propagation step below.
+  cannot complete while one remains. A per-session transaction locks the
+  scheduler, authenticates the exact loss and cursor, then atomically changes
+  placement, any current lease and physical attempt, an active runner-boundary
+  turn, the runner-state outbox, and the cursor. An offered lease records no
+  execution; a claimed pure or idempotent lease remains retryable in flight; a
+  claimed side-effecting lease becomes terminal ambiguous. A separate checked
+  operation completes an exhausted cursor. **Committed unimplemented
+  functionality.** No present daemon service pages the durable losses, invokes
+  these operations, or retires an unacknowledged workspace release; those
+  orchestration steps remain outside the persistence adapter.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -472,24 +491,23 @@ Representation rules, all enforced in the schema:
   reclassifies the ambiguity. Without this shape the loss transaction has
   nowhere to store the phase and restart cannot rebuild it. The same migration
   adds the optional interrupted-attempt fact to the exact placement-loss record,
-  and the runner persistence read boundary round-trips both nullable arms.
-  **Committed unimplemented functionality.** No present adapter produces the
-  phase: the dedicated runner-loss propagation transaction will install it under
-  the lock order below. Independently of that future writer, a present
-  interrupted-attempt fact on the placement-loss record is admitted only for one
-  of two exact lease-derived shapes: an in-flight retryable attempt whose loss
-  proves no execution or whose pure/idempotent effect permits successor
-  reissuance, or a terminal ambiguous side-effecting attempt whose execution may
-  have occurred. Both carry physical runner-lease lineage to the record's exact
-  lost runner and placement revision, and the same active runner-recovery
-  tool-round boundary names the attempt. Stopping the wait retires retryable
-  authority before releasing the active slot. The claimed-retry reservation
-  writer takes that same scheduler lock and rechecks that the exact
-  lease-derived source attempt remains in flight, so stale authority loaded
-  before the stop cannot be reserved afterward. No-execution and pure work
-  become known crash loss and cancel, while execution-possible idempotent work
-  becomes ambiguous and requires reconciliation. A same-session foreign or older
-  same-placement attempt therefore cannot survive placement readback.
+  and the runner persistence read boundary round-trips both nullable arms. The
+  runner-loss propagation transaction produces this phase under the lock order
+  below. Independently of that writer, a present interrupted-attempt fact on the
+  placement-loss record is admitted only for one of two exact lease-derived
+  shapes: an in-flight retryable attempt whose loss proves no execution or whose
+  pure/idempotent effect permits successor reissuance, or a terminal ambiguous
+  side-effecting attempt whose execution may have occurred. Both carry physical
+  runner-lease lineage to the record's exact lost runner and placement revision,
+  and the same active runner-recovery tool-round boundary names the attempt.
+  Stopping the wait retires retryable authority before releasing the active
+  slot. The claimed-retry reservation writer takes that same scheduler lock and
+  rechecks that the exact lease-derived source attempt remains in flight, so
+  stale authority loaded before the stop cannot be reserved afterward.
+  No-execution and pure work become known crash loss and cancel, while
+  execution-possible idempotent work becomes ambiguous and requires
+  reconciliation. A same-session foreign or older same-placement attempt
+  therefore cannot survive placement readback.
 - The same slice adds the closed `runner_placement_changed` semantic-entry
   payload: one positive placement revision, total only for that kind, with a
   foreign key to the same session's placement record at exactly that revision.
@@ -656,8 +674,8 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Twenty-three explicit lock
-statements live in the schema instead:
+`crates/persistence/src/lock_inventory.rs`. Twenty-four explicit lock statements
+live in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
@@ -706,13 +724,22 @@ statements live in the schema instead:
   migration `202608110006` adds a transaction-level runner-identity advisory
   lock between the scheduler and enrollment locks, and enrollment insertion and
   loss-cursor completion take that same identity lock before they can publish
-  the competing fact.
+  the competing fact; and
+- the program-journal append-sequence trigger in migration `202608140004` takes
+  `FOR UPDATE` on the run's sequence row before admitting the next contiguous
+  global and direction-specific ordinal.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
 because they fire outside the Rust inventory's view.
 
 Locks per transaction, in acquisition order:
+
+- **Program journal append**: the adapter locks the run's sequence row
+  `FOR UPDATE`, inserts the immutable frame, then advances that same sequence
+  row. The insert trigger reacquires the already-held row lock to reject a frame
+  that does not extend the committed global position and its applicable request
+  or delivery ordinal by exactly one.
 
 - **CreateSessionFromImportedFrontier**: no explicit row lock. Registry claim
   insertion and the command/session uniqueness constraints serialize competing
@@ -991,11 +1018,12 @@ Locks per transaction, in acquisition order:
   its own transaction by locking `session_scheduler` first, then the loss head,
   placement, current lease, and guarded turn rows. Offered leases with no
   durable claim acquire exact no-execution proof; claimed leases follow effect
-  loss law. That same session transaction retires any unacknowledged release the
-  lost connection still owed, since no successor inherits authority to complete
-  it. A crash resumes at the first uncommitted session, while every
-  not-yet-projected placement is already effectively lost through the epoch
-  fence.
+  loss law. Retirement of any unacknowledged release the lost connection still
+  owed remains a daemon-orchestration responsibility outside this persistence
+  transaction; this adapter commits the session projection and advances its
+  cursor without retiring that release. A crash resumes at the first uncommitted
+  session, while every not-yet-projected placement is already effectively lost
+  through the epoch fence.
 
 - **Runner replace, abandon, and release**: an unseen abandonment command owns
   its durable-command claim and terminalizes in one transaction. An unseen
