@@ -246,14 +246,19 @@ fn validate_manifest_header(manifest: &CorpusManifest) -> Result<(), ManifestErr
             validate_bounded_text("repository", repository, MAX_REPOSITORY_BYTES)?;
             validate_bounded_text("repository path", path, MAX_REPOSITORY_PATH_BYTES)?;
             portable_relative_path(path)?;
+            if manifest.integrity.source_sha256.is_none() {
+                return Err(ManifestError::MissingSourceDigest);
+            }
         }
         ManifestCaseSource::DatabaseNative { cases } => {
-            if cases.is_empty() {
-                return Err(ManifestError::Corpus(crate::CorpusLoadError::EmptyCorpus));
-            }
             if manifest.integrity.source_sha256.is_some() {
                 return Err(ManifestError::UnexpectedSourceDigest);
             }
+            crate::validate_corpus(&ApprovalJudgeCorpus {
+                format_version: manifest.corpus_format_version,
+                cases: cases.clone(),
+            })
+            .map_err(ManifestError::Corpus)?;
         }
         ManifestCaseSource::BlobReference {
             store, byte_length, ..
@@ -617,6 +622,65 @@ mod tests {
             .expect_err("a blob source cannot carry repository byte integrity");
 
         assert!(error.to_string().contains("must not carry source_sha256"));
+    }
+
+    #[test]
+    fn repository_manifest_requires_source_digest_during_decoding() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        manifest["integrity"]["source_sha256"] = serde_json::Value::Null;
+        let encoded = serde_json::to_vec(&manifest).expect("the digest-less manifest serializes");
+
+        let error = decode_manifest(&encoded)
+            .expect_err("a repository source without exact-byte integrity is rejected");
+
+        assert!(error.to_string().contains("requires source_sha256"));
+    }
+
+    #[test]
+    fn database_native_manifest_rejects_blank_label_provenance_during_decoding() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        let corpus: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../corpora/seed-v1.json"))
+                .expect("the seed corpus is valid JSON");
+        manifest["case_source"] = serde_json::json!({
+            "kind": "database_native",
+            "cases": corpus["cases"].clone()
+        });
+        manifest["case_source"]["cases"][0]["label_provenance"] =
+            serde_json::Value::String(String::from(" \t "));
+        manifest["integrity"]["source_sha256"] = serde_json::Value::Null;
+        let encoded = serde_json::to_vec(&manifest)
+            .expect("the embedded corpus without provenance serializes");
+
+        let error = decode_manifest(&encoded)
+            .expect_err("an embedded corpus with blank label provenance is rejected");
+
+        assert!(error.to_string().contains("has no label provenance"));
+    }
+
+    #[test]
+    fn database_native_manifest_rejects_duplicate_case_ids_during_decoding() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        let corpus: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../corpora/seed-v1.json"))
+                .expect("the seed corpus is valid JSON");
+        manifest["case_source"] = serde_json::json!({
+            "kind": "database_native",
+            "cases": corpus["cases"].clone()
+        });
+        manifest["case_source"]["cases"][1]["id"] =
+            manifest["case_source"]["cases"][0]["id"].clone();
+        manifest["integrity"]["source_sha256"] = serde_json::Value::Null;
+        let encoded =
+            serde_json::to_vec(&manifest).expect("the duplicate embedded corpus serializes");
+
+        let error = decode_manifest(&encoded)
+            .expect_err("an embedded corpus with duplicate case identities is rejected");
+
+        assert!(error.to_string().contains("appears more than once"));
     }
 
     #[test]
