@@ -66,12 +66,12 @@ pub use diagnostics::{
 pub use process::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecExecutor, ExecExecutorError,
     ExecResult, ExecToolConstructionError, ExecutionConfinement, InvalidExecArguments,
-    InvalidSandboxEnvironmentVariable, OutputCapture, OutputEncoding, ProcessEnvironment,
-    ProcessOutcome, ProcessOutput, ProcessRequest, ProcessRunResult, ProcessRunner,
-    ProcessSpawnFailure, ProcessStatusProtocol, ProcessSupervisionFailure, SANDBOXED_EXEC_NAME,
-    SandboxEnvironmentRunError, SandboxEnvironmentVariable, SandboxedCommandRunner,
-    SandboxedExecTool, TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner,
-    UnsandboxedExecTool,
+    InvalidSandboxEnvironmentVariable, MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES, OutputCapture,
+    OutputEncoding, ProcessEnvironment, ProcessOutcome, ProcessOutput, ProcessRequest,
+    ProcessRunResult, ProcessRunner, ProcessSpawnFailure, ProcessStatusProtocol,
+    ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxEnvironmentRunError,
+    SandboxEnvironmentVariable, SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner,
+    UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
 
 /// Runs the separately packaged process-tree supervisor entrypoint.

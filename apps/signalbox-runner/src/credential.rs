@@ -13,11 +13,13 @@ use rustix::{
     process::geteuid,
 };
 use signalbox_runner_wire::ProfileName;
-use signalbox_tools_exec::{InvalidSandboxEnvironmentVariable, SandboxEnvironmentVariable};
+use signalbox_tools_exec::{
+    InvalidSandboxEnvironmentVariable, MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES,
+    SandboxEnvironmentVariable,
+};
 
 use crate::RunnerConfiguration;
 
-const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 const REDACTED: &str = "[redacted]";
 
 /// A resolved value that exists only for one provisioning or tool dispatch.
@@ -74,13 +76,16 @@ impl ResolvedRunnerCredential {
         } else {
             REDACTED
         };
-        let redacted = text
+        let enumerated = text
             .replace(&self.solidus_unicode_escaped_value, replacement)
             .replace(&self.unicode_escaped_value, replacement)
             .replace(&self.solidus_escaped_value, replacement)
             .replace(&self.escaped_value, replacement)
             .replace(&self.value, replacement);
-        if self.contains_secret_spelling(&redacted) {
+        let redacted = redact_json_decoded_spellings(&enumerated, &self.value, replacement);
+        if self.contains_secret_spelling(&redacted)
+            || contains_json_decoded_spelling(&redacted, &self.value)
+        {
             String::new()
         } else {
             redacted
@@ -94,6 +99,110 @@ impl ResolvedRunnerCredential {
             || text.contains(&self.unicode_escaped_value)
             || text.contains(&self.solidus_unicode_escaped_value)
     }
+}
+
+fn redact_json_decoded_spellings(text: &str, value: &str, replacement: &str) -> String {
+    let (decoded, source_spans) = decode_json_escapes(text);
+    let ranges = decoded
+        .match_indices(value)
+        .map(|(start, matched)| {
+            let end = start + matched.len();
+            (source_spans[start].0, source_spans[end - 1].1)
+        })
+        .collect::<Vec<_>>();
+    if ranges.is_empty() {
+        return text.to_owned();
+    }
+
+    let mut redacted = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for (start, end) in ranges {
+        if start < cursor {
+            continue;
+        }
+        redacted.push_str(&text[cursor..start]);
+        redacted.push_str(replacement);
+        cursor = end;
+    }
+    redacted.push_str(&text[cursor..]);
+    redacted
+}
+
+fn contains_json_decoded_spelling(text: &str, value: &str) -> bool {
+    decode_json_escapes(text).0.contains(value)
+}
+
+fn decode_json_escapes(text: &str) -> (String, Vec<(usize, usize)>) {
+    let mut decoded = String::with_capacity(text.len());
+    let mut source_spans = Vec::with_capacity(text.len());
+    let mut offset = 0;
+    while offset < text.len() {
+        let (character, source_end) = decoded_json_escape(text, offset).unwrap_or_else(|| {
+            let character = text[offset..]
+                .chars()
+                .next()
+                .expect("the offset is inside the string");
+            (character, offset + character.len_utf8())
+        });
+        decoded.push(character);
+        source_spans.extend(std::iter::repeat_n(
+            (offset, source_end),
+            character.len_utf8(),
+        ));
+        offset = source_end;
+    }
+    (decoded, source_spans)
+}
+
+fn decoded_json_escape(text: &str, offset: usize) -> Option<(char, usize)> {
+    let bytes = text.as_bytes();
+    if bytes.get(offset) != Some(&b'\\') {
+        return None;
+    }
+    let escaped = *bytes.get(offset + 1)?;
+    let simple = match escaped {
+        b'\"' => Some('\"'),
+        b'\\' => Some('\\'),
+        b'/' => Some('/'),
+        b'b' => Some('\u{0008}'),
+        b'f' => Some('\u{000c}'),
+        b'n' => Some('\n'),
+        b'r' => Some('\r'),
+        b't' => Some('\t'),
+        b'u' => None,
+        _ => return None,
+    };
+    if let Some(character) = simple {
+        return Some((character, offset + 2));
+    }
+
+    let first = parse_json_hex_quad(bytes.get(offset + 2..offset + 6)?)?;
+    if (0xd800..=0xdbff).contains(&first) {
+        if bytes.get(offset + 6..offset + 8) != Some(&b"\\u"[..]) {
+            return None;
+        }
+        let second = parse_json_hex_quad(bytes.get(offset + 8..offset + 12)?)?;
+        if !(0xdc00..=0xdfff).contains(&second) {
+            return None;
+        }
+        let scalar = 0x1_0000 + ((u32::from(first) - 0xd800) << 10) + (u32::from(second) - 0xdc00);
+        return char::from_u32(scalar).map(|character| (character, offset + 12));
+    }
+    if (0xdc00..=0xdfff).contains(&first) {
+        return None;
+    }
+    char::from_u32(u32::from(first)).map(|character| (character, offset + 6))
+}
+
+fn parse_json_hex_quad(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() != 4 {
+        return None;
+    }
+    bytes.iter().try_fold(0_u16, |value, byte| {
+        char::from(*byte)
+            .to_digit(16)
+            .map(|digit| (value << 4) | digit as u16)
+    })
 }
 
 impl fmt::Debug for ResolvedRunnerCredential {
@@ -201,10 +310,10 @@ pub fn resolve_runner_credential(
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     Read::by_ref(&mut file)
-        .take((MAX_CREDENTIAL_BYTES + 1) as u64)
+        .take((MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| unavailable(profile))?;
-    if bytes.len() > MAX_CREDENTIAL_BYTES {
+    if bytes.len() > MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES {
         return Err(unavailable(profile));
     }
     while matches!(bytes.last(), Some(b'\n' | b'\r')) {
@@ -272,7 +381,7 @@ fn credential_file_facts_are_valid(facts: CredentialFileFacts, effective_user: u
     facts.regular
         && facts.user_id == effective_user
         && facts.mode == 0o600
-        && facts.bytes <= MAX_CREDENTIAL_BYTES as u64
+        && facts.bytes <= MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES as u64
 }
 
 #[cfg(test)]
@@ -374,6 +483,22 @@ injection_env = "{ENVIRONMENT}"
 
         assert_eq!(
             resolved.redact_text(r"json=synthetic-\u00e9-\ud83d\ude00".to_owned()),
+            "json=[redacted]"
+        );
+    }
+
+    /// INV-035: arbitrary JSON Unicode escapes cannot expose an ASCII value.
+    #[test]
+    fn inv_035_redaction_scrubs_an_ascii_unicode_escape() {
+        let directory = TempDir::new().expect("a synthetic value directory exists");
+        let path = directory.path().join("value");
+        let value = "alpha-beta";
+        write_credential(&path, value.as_bytes());
+        let resolved = resolve_runner_credential(&configuration(&path), &profile())
+            .expect("the synthetic value resolves");
+
+        assert_eq!(
+            resolved.redact_text(r"json=alpha-\u0062eta".to_owned()),
             "json=[redacted]"
         );
     }
@@ -527,7 +652,7 @@ injection_env = "{ENVIRONMENT}"
     fn exact_byte_bound_is_accepted() {
         let directory = TempDir::new().expect("a synthetic credential directory exists");
         let path = directory.path().join("credential");
-        let value = "s".repeat(MAX_CREDENTIAL_BYTES);
+        let value = "s".repeat(MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES);
         write_credential(&path, value.as_bytes());
 
         let resolved = resolve_runner_credential(&configuration(&path), &profile())
@@ -545,7 +670,11 @@ injection_env = "{ENVIRONMENT}"
     fn oversized_value_is_unavailable() {
         let directory = TempDir::new().expect("a synthetic credential directory exists");
         let path = directory.path().join("credential");
-        write_credential(&path, "s".repeat(MAX_CREDENTIAL_BYTES + 1).as_bytes());
+        write_credential(
+            &path,
+            "s".repeat(MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES + 1)
+                .as_bytes(),
+        );
 
         let error = unavailable_error(&path);
 
