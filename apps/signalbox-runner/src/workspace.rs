@@ -330,9 +330,13 @@ impl RunnerWorkspaceStore {
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         let mut staging =
             UnpublishedDirectory::new(cleanup_parent, OsString::from(&staging_name), staging);
-        let repository =
-            open_or_create_directory(staging.directory(), REPOSITORY_WORKSPACE_DIRECTORY)
-                .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let repository = open_or_create_directory(
+            staging
+                .directory()
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?,
+            REPOSITORY_WORKSPACE_DIRECTORY,
+        )
+        .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         let staging_execution_path = self
             .canonical_root
             .join(SESSIONS_DIRECTORY)
@@ -358,28 +362,47 @@ impl RunnerWorkspaceStore {
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         let mut manifest =
             repository_manifest(ManifestLifecycle::Staging, manifest_id, request, recovery);
-        write_manifest(staging.directory(), &manifest)
-            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        repository
-            .sync_all()
-            .map_err(RunnerWorkspaceError::Io)
-            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        write_manifest(
+            staging
+                .directory()
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?,
+            &manifest,
+        )
+        .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        sync_directory_tree(&repository).map_err(PrepareRepositoryWorkspaceError::Storage)?;
         manifest.lifecycle = ManifestLifecycle::Ready;
-        write_manifest(staging.directory(), &manifest)
-            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        write_manifest(
+            staging
+                .directory()
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?,
+            &manifest,
+        )
+        .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         staging
             .directory()
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?
             .sync_all()
             .map_err(RunnerWorkspaceError::Io)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         validate_directory(
-            staging.directory(),
+            staging
+                .directory()
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?,
             REPOSITORY_WORKSPACE_DIRECTORY,
             &repository,
         )
         .map_err(RunnerWorkspaceError::Io)
         .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        validate_directory(&session, &staging_name, staging.directory())
+        validate_directory(
+            &session,
+            &staging_name,
+            staging
+                .directory()
+                .map_err(PrepareRepositoryWorkspaceError::Storage)?,
+        )
+        .map_err(RunnerWorkspaceError::Io)
+        .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        validate_directory(&sessions, &session_name, &session)
             .map_err(RunnerWorkspaceError::Io)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         let publication = renameat_with(
@@ -805,10 +828,10 @@ impl UnpublishedDirectory {
         }
     }
 
-    fn directory(&self) -> &File {
+    fn directory(&self) -> Result<&File, RunnerWorkspaceError> {
         self.directory
             .as_ref()
-            .expect("an armed unpublished directory retains its descriptor")
+            .ok_or(RunnerWorkspaceError::ManifestConflict)
     }
 
     fn cleanup(mut self) -> Result<(), RunnerWorkspaceError> {
@@ -853,6 +876,83 @@ impl DirectoryIdentity {
         let status = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
         Ok(self.device == status.st_dev && self.inode == status.st_ino)
     }
+}
+
+enum DurabilityStep {
+    Inspect { parent: Rc<File>, name: OsString },
+    SyncDirectory(Rc<File>),
+}
+
+fn sync_directory_tree(directory: &File) -> Result<(), RunnerWorkspaceError> {
+    let root = Rc::new(directory.try_clone().map_err(RunnerWorkspaceError::Io)?);
+    let mut steps = vec![DurabilityStep::SyncDirectory(Rc::clone(&root))];
+    push_durability_entries(&mut steps, root)?;
+    while let Some(step) = steps.pop() {
+        match step {
+            DurabilityStep::Inspect { parent, name } => {
+                let status =
+                    statat(parent.as_ref(), &name, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
+                let file_type = FileType::from_raw_mode(status.st_mode);
+                if file_type == FileType::Directory {
+                    let descriptor = openat(
+                        parent.as_ref(),
+                        &name,
+                        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(rustix_io)?;
+                    let child = Rc::new(File::from(descriptor));
+                    if !DirectoryIdentity::from_file(&child)?.names(parent.as_ref(), &name)? {
+                        return Err(RunnerWorkspaceError::ManifestConflict);
+                    }
+                    steps.push(DurabilityStep::SyncDirectory(Rc::clone(&child)));
+                    push_durability_entries(&mut steps, child)?;
+                } else if file_type == FileType::RegularFile {
+                    let descriptor = openat(
+                        parent.as_ref(),
+                        &name,
+                        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(rustix_io)?;
+                    let file = File::from(descriptor);
+                    let metadata = file.metadata().map_err(RunnerWorkspaceError::Io)?;
+                    if metadata.dev() != status.st_dev || metadata.ino() != status.st_ino {
+                        return Err(RunnerWorkspaceError::ManifestConflict);
+                    }
+                    file.sync_all().map_err(RunnerWorkspaceError::Io)?;
+                } else if file_type != FileType::Symlink {
+                    return Err(RunnerWorkspaceError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "prepared repository contains an unsupported file type",
+                    )));
+                }
+            }
+            DurabilityStep::SyncDirectory(directory) => {
+                directory.sync_all().map_err(RunnerWorkspaceError::Io)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn push_durability_entries(
+    steps: &mut Vec<DurabilityStep>,
+    directory: Rc<File>,
+) -> Result<(), RunnerWorkspaceError> {
+    let mut entries = Dir::read_from(directory.as_ref()).map_err(rustix_io)?;
+    while let Some(entry) = entries.read() {
+        let entry = entry.map_err(rustix_io)?;
+        let name = OsStr::from_bytes(entry.file_name().to_bytes());
+        if name == OsStr::new(".") || name == OsStr::new("..") {
+            continue;
+        }
+        steps.push(DurabilityStep::Inspect {
+            parent: Rc::clone(&directory),
+            name: OsString::from_vec(name.as_bytes().to_vec()),
+        });
+    }
+    Ok(())
 }
 
 enum RemovalStep {
@@ -1459,6 +1559,48 @@ mod tests {
             failure,
             PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::Io(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_rechecks_session_permissions_before_publish() {
+        let (_parent, state) = fixture_root();
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(&repository_request(), |target| async move {
+                let session = target
+                    .path()
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .expect("the repository fixture has a session ancestor");
+                fs::set_permissions(session, fs::Permissions::from_mode(OPEN_DIRECTORY_MODE))?;
+                Ok::<Recovery, std::io::Error>(Recovery::Commit {
+                    revision: "1".repeat(40),
+                })
+            })
+            .await
+            .expect_err("an open session directory cannot publish a repository");
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn prepared_repository_durability_walks_nested_files_and_symlinks() {
+        let repository = tempfile::tempdir().expect("the repository fixture exists");
+        let nested = repository.path().join("objects").join("pack");
+        fs::create_dir_all(&nested).expect("the nested repository fixture exists");
+        fs::write(nested.join("pack"), b"prepared repository\n")
+            .expect("the nested repository file exists");
+        std::os::unix::fs::symlink("objects/pack/pack", repository.path().join("HEAD"))
+            .expect("the repository symlink fixture exists");
+        let descriptor =
+            fs::File::open(repository.path()).expect("the repository fixture descriptor opens");
+
+        super::sync_directory_tree(&descriptor)
+            .expect("every prepared repository level becomes durable");
     }
 
     #[tokio::test]
