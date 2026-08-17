@@ -610,15 +610,14 @@ either local socket binds. The diagnostic names the rule and changed field and
 directs the operator to increment `version`; when multiple fields changed, it
 names the first changed TOML field in canonical fingerprint order. It never
 first appears as a repository-task runtime death. An activation recorded before
-field fingerprints existed cannot produce them from its aggregate digest, so
-the one-time migration introducing fingerprints retires every such activation.
-No active activation
-lacks fingerprints and the daemon carries no path for that shape; a missing
-fingerprint under any non-deactivated activation is storage corruption, checked
-before reconciliation compares that activation against configuration, retires it
-as an unconfigured rule, or retires it because its whole repository left
-configuration. The operator increments `version` once on that first upgraded
-boot.
+field fingerprints existed cannot produce them from its aggregate digest, so the
+one-time migration introducing fingerprints retires every such activation. No
+active activation lacks fingerprints and the daemon carries no path for that
+shape; a missing fingerprint under any non-deactivated activation is storage
+corruption, checked before reconciliation compares that activation against
+configuration, retires it as an unconfigured rule, or retires it because its
+whole repository left configuration. The operator increments `version` once on
+that first upgraded boot.
 
 **Implemented behavior.** A higher revision under the same rule ID is a
 replacement. Reconciliation appends deactivation of the active old revision and
