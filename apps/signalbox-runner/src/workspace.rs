@@ -297,7 +297,7 @@ fn validate_directory(parent: &File, name: &str, directory: &File) -> Result<(),
 }
 
 fn open_created_directory(parent: &File, name: &str) -> Result<File, RunnerWorkspaceError> {
-    chmodat(parent, name, Mode::RWXU, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
+    chmodat(parent, name, Mode::RWXU, AtFlags::empty()).map_err(rustix_io)?;
     let descriptor = openat(
         parent,
         name,
@@ -480,17 +480,17 @@ mod tests {
     }
 
     #[test]
-    fn created_directory_is_reopened_after_restoring_owner_permissions() {
+    fn created_directory_is_reopened_after_restoring_user_permissions() {
         let (parent, _state) = fixture_root();
         let root_path = parent.path().join("runner-state");
         let inaccessible = root_path.join("inaccessible");
         fs::create_dir(&inaccessible).expect("the inaccessible fixture directory exists");
         fs::set_permissions(&inaccessible, fs::Permissions::from_mode(0o000))
-            .expect("the fixture starts without owner access");
+            .expect("the fixture starts without user access");
         let root = fs::File::open(&root_path).expect("the runner root remains openable");
 
         let reopened = open_created_directory(&root, "inaccessible")
-            .expect("owner permissions are restored before reopening");
+            .expect("user permissions are restored before reopening");
         let reopened_mode = reopened
             .metadata()
             .expect("the reopened directory has metadata")
