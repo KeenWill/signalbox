@@ -67,45 +67,58 @@ impl<'de> Deserialize<'de> for ProtocolVersion {
 }
 
 /// Maximum encoded frame size, including its final newline.
+// numeric-bound: ceiling - protects process memory from oversized wire frames
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// Maximum decoded source bytes carried by one conversation-import append.
 ///
 /// The half-frame raw-byte bound leaves fixed headroom for canonical padded
 /// base64, the request envelope, and the maximum-width correlation identity.
+// numeric-bound: derived ceiling from MAX_FRAME_BYTES
 pub const MAX_CONVERSATION_IMPORT_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum decoded bytes carried by one immutable-blob append.
+// numeric-bound: derived ceiling from MAX_FRAME_BYTES
 pub const MAX_BLOB_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum decoded bytes returned by one direct blob-range request.
+// numeric-bound: derived ceiling from MAX_FRAME_BYTES
 pub const MAX_BLOB_READ_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum replica count representable by the version-one deployment catalog.
+// numeric-bound: ceiling - restates blob-store's durable catalog capacity
 pub const MAX_BLOB_REPLICA_COUNT: u64 = signalbox_blob_store::MAX_BLOB_STORES as u64;
 
 /// Maximum number of simultaneously open JSON objects and arrays in one frame.
+// numeric-bound: ceiling - protects parser stack and latency from pathological nesting
 pub const MAX_JSON_CONTAINER_DEPTH: usize = 127;
 
 /// Maximum UTF-8 bytes in one transcript content fragment.
+// numeric-bound: ceiling - protects frame memory and transcript storage
 pub const MAX_CONTENT_FRAGMENT_BYTES: usize = 1024 * 1024;
 
 /// Maximum total UTF-8 bytes in one complete metadata object or filter.
+// numeric-bound: ceiling - protects metadata memory and storage
 pub const MAX_SESSION_METADATA_TOTAL_UTF8_BYTES: usize = 262_144;
 
 /// Maximum UTF-8 bytes in one indexed metadata tag or attribute key.
+// numeric-bound: ceiling - protects index storage and comparison latency
 pub const MAX_SESSION_METADATA_INDEXED_UTF8_BYTES: usize = 1_024;
 
 /// Maximum exact tags in one complete metadata object.
+// numeric-bound: ceiling - protects metadata memory and index fan-out
 pub const MAX_SESSION_METADATA_TAGS: usize = 256;
 
 /// Maximum exact attributes in one complete metadata object.
+// numeric-bound: ceiling - protects metadata memory and index fan-out
 pub const MAX_SESSION_METADATA_ATTRIBUTES: usize = 256;
 
 /// Maximum exact required tags in one metadata-list filter.
+// numeric-bound: ceiling - protects filter memory and matching work
 pub const MAX_SESSION_METADATA_REQUIRED_TAGS: usize = 256;
 
 /// Maximum UTF-8 bytes in one session system prompt.
+// numeric-bound: ceiling - protects context memory and provider spend
 pub const MAX_SYSTEM_PROMPT_UTF8_BYTES: usize = 1_048_576;
 
 /// Maximum UTF-8 bytes in one imported-entry text preview.
@@ -113,24 +126,31 @@ pub const MAX_SYSTEM_PROMPT_UTF8_BYTES: usize = 1_048_576;
 /// An inspection row is a scannable line, not the entry's content authority:
 /// the transcript snapshot already carries attested imported text in full, and
 /// the immutable aggregate remains the authority for everything else.
+// numeric-bound: tunable - controls retained inspection-preview detail
 pub const MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES: usize = 256;
 
 /// Maximum entries in one deployment model-alias catalog.
+// numeric-bound: ceiling - protects catalog memory and frame size
 pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
 
 /// Maximum entries in one deployment model-capability catalog.
+// numeric-bound: ceiling - protects catalog memory and frame size
 pub const MAX_MODEL_CAPABILITY_CATALOG_ENTRIES: usize = 10_000;
 
 /// Maximum canonical decimal USD amount text.
+// numeric-bound: not-a-bound - the longest canonical rust_decimal spelling
 pub const MAX_DOLLAR_AMOUNT_BYTES: usize = 30;
 
 /// Maximum UTF-8 bytes in one deployment-owned billing rate version.
+// numeric-bound: tunable - admits the deployment-owned rate version text
 pub const MAX_RATE_VERSION_UTF8_BYTES: usize = 128;
 
 /// Maximum concerns in one frozen review-orchestration attempt.
+// numeric-bound: ceiling - protects memory and work from runaway model concerns
 pub const MAX_REVIEW_ORCHESTRATION_CONCERNS: usize = 32;
 
 /// Maximum finding-indexed members in one review-orchestration request.
+// numeric-bound: ceiling - protects review request memory and wire size
 pub const MAX_REVIEW_ORCHESTRATION_MEMBERS: usize = 1_024;
 
 /// A lowercase hyphenated UUID at the process boundary.
@@ -1026,6 +1046,7 @@ pub struct CanonicalDollarAmount(String);
 impl CanonicalDollarAmount {
     /// Validates one shortest nonnegative base-ten decimal spelling.
     pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
+        // numeric-bound: not-a-bound - fixed rust_decimal coefficient representation
         const MAX_DECIMAL_COEFFICIENT: u128 = 79_228_162_514_264_337_593_543_950_335;
 
         let (integer, fraction) = value
@@ -2504,6 +2525,7 @@ impl MetadataLastWriter {
 
 /// Maximum Unicode scalars in one imported-conversation display title,
 /// restating the domain derivation bound on the wire.
+// numeric-bound: tunable - controls retained imported-title display detail
 pub const MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS: usize = 256;
 
 /// One closed conversation origin class.
@@ -5857,6 +5879,7 @@ pub struct RunnerWorkingDirectory(String);
 
 impl RunnerWorkingDirectory {
     /// Maximum UTF-8 bytes admitted by the runner domain and process wire.
+    // numeric-bound: tunable - mirrors the domain's exact runner-value grammar
     pub const MAX_UTF8_BYTES: usize = DomainRunnerWorkingDirectory::MAX_BYTES;
 
     /// Admits nonempty, NUL-free text within the exact byte bound.

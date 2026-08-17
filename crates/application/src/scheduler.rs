@@ -36,9 +36,11 @@ use crate::{
 ///
 /// The composition root may supply another nonzero interval after validating
 /// deployment configuration through [`ReconciliationSweepInterval::try_new`].
+// numeric-bound: tunable - controls the baseline reconciliation cadence
 const BASELINE_RECONCILIATION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+// numeric-bound: tunable - controls baseline scheduler nudge backpressure
 const BASELINE_NUDGE_BUFFER_CAPACITY: usize = 1_024;
-
+// numeric-bound: safety ceiling for concurrent authoritative scheduler passes
 /// Hard safety ceiling for concurrent authoritative scheduler passes.
 ///
 /// This bounds simultaneous provider, tool, and database pressure. Deployment

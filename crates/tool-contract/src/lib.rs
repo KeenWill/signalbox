@@ -84,7 +84,29 @@ pub fn rendered_contract_schema<Contract: ToolContract + ?Sized>() -> serde_json
         object.remove("title");
         object.remove("description");
     }
-    object_rooted_schema(value)
+    let mut value = object_rooted_schema(value);
+    sort_json_object_keys(&mut value);
+    value
+}
+
+fn sort_json_object_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            object.sort_keys();
+            for nested in object.values_mut() {
+                sort_json_object_keys(nested);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for nested in values {
+                sort_json_object_keys(nested);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
 }
 
 /// JSON Schema keyword holding a schema root's reusable definitions.
@@ -731,20 +753,20 @@ pub mod __private {
         let guard = RenderRootGuard { finished: false };
         let mut schema = build();
         let generated_definitions = guard.finish().definitions;
-        if generated_definitions.is_empty() {
-            return schema;
+        if !generated_definitions.is_empty() {
+            let object = schema
+                .as_object_mut()
+                .expect("a recursive public schema root must be an object");
+            let definitions = object
+                .entry(String::from("$defs"))
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+                .as_object_mut()
+                .expect("a public schema root $defs value must be an object");
+            for (name, definition) in generated_definitions {
+                insert_definition(definitions, String::from(name), definition);
+            }
         }
-        let object = schema
-            .as_object_mut()
-            .expect("a recursive public schema root must be an object");
-        let definitions = object
-            .entry(String::from("$defs"))
-            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
-            .as_object_mut()
-            .expect("a public schema root $defs value must be an object");
-        for (name, definition) in generated_definitions {
-            insert_definition(definitions, String::from(name), definition);
-        }
+        super::sort_json_object_keys(&mut schema);
         schema
     }
 
