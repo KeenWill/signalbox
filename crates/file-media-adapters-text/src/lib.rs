@@ -98,34 +98,34 @@ impl FileMediaProvider for TextFamilyProvider {
 pub fn text_family_declaration()
 -> Result<FileMediaProviderDeclaration, Box<dyn Error + Send + Sync>> {
     let provider = FileReaderProviderName::try_new(PROVIDER_NAME)?;
-    let text = reader(
-        &provider,
-        TEXT_READER_NAME,
-        TEXT_MEDIA_TYPE,
-        text_view()?,
-        vec!["invalid_utf8", "nul_byte", "source_too_large"],
-        StreamingTextFallback::Enabled,
-    )?;
-    let json = reader(
-        &provider,
-        JSON_READER_NAME,
-        JSON_MEDIA_TYPE,
-        structured_view("Reads the complete JSON value as bounded structured data.")?,
-        vec![
+    let text = reader(ReaderInput {
+        provider: &provider,
+        name: TEXT_READER_NAME,
+        media_type: TEXT_MEDIA_TYPE,
+        view: text_view()?,
+        reasons: vec!["invalid_utf8", "nul_byte", "source_too_large"],
+        fallback: StreamingTextFallback::Enabled,
+    })?;
+    let json = reader(ReaderInput {
+        provider: &provider,
+        name: JSON_READER_NAME,
+        media_type: JSON_MEDIA_TYPE,
+        view: structured_view("Reads the complete JSON value as bounded structured data.")?,
+        reasons: vec![
             "invalid_utf8",
             "nul_byte",
             "malformed_json",
             "source_too_large",
             "depth_limit_exceeded",
         ],
-        StreamingTextFallback::Disabled,
-    )?;
-    let csv = reader(
-        &provider,
-        CSV_READER_NAME,
-        CSV_MEDIA_TYPE,
-        structured_view("Reads a rectangular CSV table as headers and rows.")?,
-        vec![
+        fallback: StreamingTextFallback::Disabled,
+    })?;
+    let csv = reader(ReaderInput {
+        provider: &provider,
+        name: CSV_READER_NAME,
+        media_type: CSV_MEDIA_TYPE,
+        view: structured_view("Reads a rectangular CSV table as headers and rows.")?,
+        reasons: vec![
             "invalid_utf8",
             "nul_byte",
             "malformed_csv",
@@ -133,35 +133,38 @@ pub fn text_family_declaration()
             "row_limit_exceeded",
             "column_limit_exceeded",
         ],
-        StreamingTextFallback::Disabled,
-    )?;
+        fallback: StreamingTextFallback::Disabled,
+    })?;
     Ok(FileMediaProviderDeclaration::try_new(
         provider,
         vec![text, json, csv],
     )?)
 }
 
-fn reader(
-    provider: &FileReaderProviderName,
-    name: &str,
-    media_type: &str,
+struct ReaderInput<'a> {
+    provider: &'a FileReaderProviderName,
+    name: &'a str,
+    media_type: &'a str,
     view: ReadViewDeclaration,
-    reasons: Vec<&str>,
+    reasons: Vec<&'a str>,
     fallback: StreamingTextFallback,
-) -> Result<ReaderDeclaration, Box<dyn Error + Send + Sync>> {
-    let reason_codes = reasons
+}
+
+fn reader(input: ReaderInput<'_>) -> Result<ReaderDeclaration, Box<dyn Error + Send + Sync>> {
+    let reason_codes = input
+        .reasons
         .into_iter()
         .map(ReasonCode::try_new)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ReaderDeclaration::try_new(ReaderDeclarationInput {
-        provider: provider.clone(),
-        reader: FileReaderName::try_new(name)?,
+        provider: input.provider.clone(),
+        reader: FileReaderName::try_new(input.name)?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
-        media_types: vec![CanonicalMediaType::from_str(media_type)?],
+        media_types: vec![CanonicalMediaType::from_str(input.media_type)?],
         probe: ProbeDeclaration::new(PROBE_PREFIX_BYTES, 1, 2, MAX_TEXT_FAMILY_BYTES),
-        views: vec![view],
+        views: vec![input.view],
         reason_codes,
-        streaming_text_fallback: fallback,
+        streaming_text_fallback: input.fallback,
     })?)
 }
 

@@ -42,12 +42,15 @@ fn validation_failure(
     request: &FileMediaProviderValidationRequest,
     reason: &str,
 ) -> ProcessorValidationOutput {
-    if request.evidence == ValidationEvidence::StreamingTextValidation {
-        ProcessorValidationOutput::NoMatch
-    } else {
-        ProcessorValidationOutput::Malformed {
-            media_type: String::from(TEXT_MEDIA_TYPE),
-            reason_code: String::from(reason),
+    match request.evidence {
+        ValidationEvidence::StreamingTextValidation => ProcessorValidationOutput::NoMatch,
+        ValidationEvidence::StrongSignature
+        | ValidationEvidence::StructuralValidation
+        | ValidationEvidence::DeclaredCandidateStructurallyValidated => {
+            ProcessorValidationOutput::Malformed {
+                media_type: String::from(TEXT_MEDIA_TYPE),
+                reason_code: String::from(reason),
+            }
         }
     }
 }

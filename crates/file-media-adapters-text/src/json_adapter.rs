@@ -27,12 +27,14 @@ pub(crate) async fn probe(
 
 fn has_json_structure(prefix: &[u8]) -> bool {
     let prefix = trim_ascii_start(prefix);
+    if let Some(value_end) = parse_value_prefix(prefix) {
+        return prefix[value_end..].iter().all(u8::is_ascii_whitespace);
+    }
     let Some((&opening, rest)) = prefix.split_first() else {
         return false;
     };
     let rest = trim_ascii_start(rest);
     match (opening, rest.first()) {
-        (b'{', Some(b'}')) | (b'[', Some(b']')) => true,
         (b'{', Some(_)) => rest.iter().enumerate().any(|(index, byte)| {
             *byte == b':' && serde_json::from_slice::<String>(&rest[..index]).is_ok()
         }),
@@ -47,16 +49,18 @@ fn has_array_structure(rest: &[u8]) -> bool {
     };
     let after_first = trim_ascii_start(&rest[first_end..]);
     match after_first.split_first() {
-        Some((b']', _)) => true,
+        Some((b']', trailing)) => trailing.iter().all(u8::is_ascii_whitespace),
         Some((b',', after_comma)) => {
             let after_comma = trim_ascii_start(after_comma);
             let Some(second_end) = parse_value_prefix(after_comma) else {
                 return false;
             };
-            matches!(
-                trim_ascii_start(&after_comma[second_end..]).first(),
-                Some(b',') | Some(b']')
-            )
+            let after_second = trim_ascii_start(&after_comma[second_end..]);
+            match after_second.split_first() {
+                Some((b',', _)) => true,
+                Some((b']', trailing)) => trailing.iter().all(u8::is_ascii_whitespace),
+                _ => false,
+            }
         }
         _ => false,
     }
@@ -91,7 +95,7 @@ pub(crate) async fn inspect(
         Ok(text) => text,
         Err(reason) => return Ok(validation_failure(request.evidence, reason)),
     };
-    if parse_json(&text).is_err() {
+    if validate_json(&text).is_err() {
         return Ok(validation_failure(request.evidence, "malformed_json"));
     }
     Ok(ProcessorValidationOutput::Validated {
@@ -115,8 +119,13 @@ pub(crate) async fn read(
         });
     };
     let text = source::checked_utf8(bytes).map_err(|_| ProcessorFailure::Failed)?;
+    if json_depth_exceeds(text.as_bytes(), MAX_STRUCTURED_DEPTH) {
+        return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+            limit_kind: String::from("depth_limit_exceeded"),
+        });
+    }
     let value = parse_json(&text).map_err(|_| ProcessorFailure::Failed)?;
-    if json_depth(&value, 1) > MAX_STRUCTURED_DEPTH {
+    if json_value_depth_exceeds(&value, MAX_STRUCTURED_DEPTH) {
         return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
             limit_kind: String::from("depth_limit_exceeded"),
         });
@@ -132,6 +141,13 @@ pub(crate) async fn read(
     })
 }
 
+fn validate_json(text: &str) -> Result<(), serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    deserializer.disable_recursion_limit();
+    serde::de::IgnoredAny::deserialize(serde_stacker::Deserializer::new(&mut deserializer))?;
+    deserializer.end()
+}
+
 fn parse_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {
     let mut deserializer = serde_json::Deserializer::from_str(text);
     deserializer.disable_recursion_limit();
@@ -141,23 +157,56 @@ fn parse_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {
     Ok(value)
 }
 
-fn json_depth(value: &serde_json::Value, depth: u32) -> u32 {
-    match value {
-        serde_json::Value::Array(values) => values
-            .iter()
-            .map(|value| json_depth(value, depth.saturating_add(1)))
-            .max()
-            .unwrap_or(depth),
-        serde_json::Value::Object(values) => values
-            .values()
-            .map(|value| json_depth(value, depth.saturating_add(1)))
-            .max()
-            .unwrap_or(depth),
-        serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_) => depth,
+/// Detects excessive nesting before building a recursively dropped JSON tree.
+fn json_depth_exceeds(bytes: &[u8], maximum_depth: u32) -> bool {
+    let mut depth = 0_u32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in bytes {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'\"' {
+                in_string = false;
+            }
+        } else if *byte == b'\"' {
+            in_string = true;
+        } else if matches!(*byte, b'{' | b'[') {
+            depth = depth.saturating_add(1);
+            if depth > maximum_depth {
+                return true;
+            }
+        } else if matches!(*byte, b'}' | b']') {
+            depth = depth.saturating_sub(1);
+        }
     }
+    false
+}
+
+/// Measures admitted trees iteratively so depth enforcement cannot overflow the stack.
+fn json_value_depth_exceeds(value: &serde_json::Value, maximum_depth: u32) -> bool {
+    let mut pending = vec![(value, 1_u32)];
+    while let Some((value, depth)) = pending.pop() {
+        if depth > maximum_depth {
+            return true;
+        }
+        let child_depth = depth.saturating_add(1);
+        match value {
+            serde_json::Value::Array(values) => {
+                pending.extend(values.iter().map(|value| (value, child_depth)));
+            }
+            serde_json::Value::Object(values) => {
+                pending.extend(values.values().map(|value| (value, child_depth)));
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+    }
+    false
 }
 
 fn malformed(reason: &str) -> ProcessorValidationOutput {
@@ -168,9 +217,12 @@ fn malformed(reason: &str) -> ProcessorValidationOutput {
 }
 
 fn validation_failure(evidence: ValidationEvidence, reason: &str) -> ProcessorValidationOutput {
-    if evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated {
-        ProcessorValidationOutput::NoMatch
-    } else {
-        malformed(reason)
+    match evidence {
+        ValidationEvidence::DeclaredCandidateStructurallyValidated => {
+            ProcessorValidationOutput::NoMatch
+        }
+        ValidationEvidence::StrongSignature
+        | ValidationEvidence::StructuralValidation
+        | ValidationEvidence::StreamingTextValidation => malformed(reason),
     }
 }

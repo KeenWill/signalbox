@@ -10,10 +10,7 @@ use std::{
     time::Duration,
 };
 
-use rustix::{
-    fd::AsFd as _,
-    process::{Resource, Rlimit},
-};
+use rustix::fd::AsFd as _;
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProcessCeilings, FileMediaProcessor, FileMediaProcessorFuture,
     FileMediaProviderDeclaration, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
@@ -145,7 +142,7 @@ impl SandboxedFileMediaProcessor {
     ) -> Result<(), ProcessorFailure> {
         let mut running = self.spawn(worker, true).await?;
         running.release_startup()?;
-        let mut stdout = running
+        let stdout = running
             .child
             .stdout
             .take()
@@ -299,7 +296,7 @@ impl SandboxedFileMediaProcessor {
             worker,
             seccomp.as_raw_fd(),
             block_read.as_raw_fd(),
-            self.ceilings.memory_bytes(),
+            self.ceilings,
             probe,
         );
         let mut command = Command::new(&self.bubblewrap);
@@ -311,13 +308,7 @@ impl SandboxedFileMediaProcessor {
             .stdout(Stdio::piped())
             .stderr(if probe { Stdio::null() } else { Stdio::piped() })
             .kill_on_drop(true);
-        let ceilings = self.ceilings;
         command.as_std_mut().process_group(0);
-        unsafe {
-            command
-                .as_std_mut()
-                .pre_exec(move || apply_process_limits(ceilings).map_err(std::io::Error::from));
-        }
         let child = command.spawn().map_err(|_| ProcessorFailure::Unavailable)?;
         drop(block_read);
         let raw_pid = child.id().ok_or(ProcessorFailure::Unavailable)?;
@@ -626,30 +617,14 @@ async fn finish_diagnostics(
     }
 }
 
-fn apply_process_limits(ceilings: FileMediaProcessCeilings) -> Result<(), rustix::io::Errno> {
-    set_limit(Resource::As, ceilings.memory_bytes())?;
-    set_limit(Resource::Cpu, ceilings.cpu_seconds())?;
-    set_limit(Resource::Nproc, MAX_WORKER_TASKS)?;
-    set_limit(Resource::Nofile, ceilings.file_descriptors())
-}
-
-fn set_limit(resource: Resource, value: u64) -> Result<(), rustix::io::Errno> {
-    rustix::process::setrlimit(
-        resource,
-        Rlimit {
-            current: Some(value),
-            maximum: Some(value),
-        },
-    )
-}
-
 fn sandbox_arguments(
     worker: &Path,
     seccomp_fd: i32,
     block_fd: i32,
-    memory_bytes: u64,
+    ceilings: FileMediaProcessCeilings,
     probe: bool,
 ) -> Vec<std::ffi::OsString> {
+    let memory_bytes = ceilings.memory_bytes();
     let first_tmpfs_bytes = memory_bytes / 2;
     let second_tmpfs_bytes = memory_bytes - first_tmpfs_bytes;
     let mut arguments = [
@@ -662,6 +637,18 @@ fn sandbox_arguments(
         "--cap-drop",
         "ALL",
         "--clearenv",
+        "--rlimit",
+        "as",
+        &memory_bytes.to_string(),
+        "--rlimit",
+        "cpu",
+        &ceilings.cpu_seconds().to_string(),
+        "--rlimit",
+        "nproc",
+        &MAX_WORKER_TASKS.to_string(),
+        "--rlimit",
+        "nofile",
+        &ceilings.file_descriptors().to_string(),
         "--proc",
         "/proc",
         "--dev",
@@ -926,8 +913,13 @@ mod tests {
 
     #[test]
     fn sandbox_profile_clears_authority_before_the_exact_worker() {
-        let arguments =
-            sandbox_arguments(Path::new("/fixture/worker"), 8, 9, 512 * 1024 * 1024, false);
+        let arguments = sandbox_arguments(
+            Path::new("/fixture/worker"),
+            8,
+            9,
+            signalbox_file_media_runtime::FileMediaProcessCeilings::version_one(),
+            false,
+        );
         let expected_prefix = [
             "--die-with-parent",
             "--new-session",

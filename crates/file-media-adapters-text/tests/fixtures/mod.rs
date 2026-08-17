@@ -46,6 +46,18 @@ pub(crate) fn bracketed_numeric_csv() -> Vec<u8> {
     b"[1,2\n3,4\n".to_vec()
 }
 
+pub(crate) fn complete_json_arrays_as_csv() -> Vec<u8> {
+    b"[1,2]\n[3,4]\n".to_vec()
+}
+
+pub(crate) fn complete_json_array_followed_by_prose() -> Vec<u8> {
+    b"[1,2]\nbody".to_vec()
+}
+
+pub(crate) fn deeply_nested_json_within_source_ceiling() -> Vec<u8> {
+    format!("{}0{}", "[".repeat(60_000), "]".repeat(60_000)).into_bytes()
+}
+
 pub(crate) fn csv_table() -> Vec<u8> {
     b"name,value\nalpha,1\nbeta,2\n".to_vec()
 }
@@ -73,7 +85,7 @@ pub(crate) fn csv_with_partial_third_probe_record() -> Vec<u8> {
     let mut bytes = b"name,value\n".to_vec();
     bytes.extend_from_slice(&vec![b'a'; 4_060]);
     bytes.extend_from_slice(b",1\nthird,\"");
-    bytes.extend_from_slice(&vec![b'b'; 100]);
+    bytes.extend_from_slice(&[b'b'; 100]);
     bytes.extend_from_slice(b"\"\n");
     bytes
 }

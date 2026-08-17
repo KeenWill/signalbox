@@ -6,7 +6,9 @@ use signalbox_file_media_runtime::{
 
 use crate::{CSV_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, options_are_empty, source};
 
+// Hard safety ceiling preventing one record from causing runaway allocation.
 const MAX_COLUMNS: usize = 256;
+// Hard safety ceiling bounding table allocation and parse latency.
 const MAX_ROWS: usize = 10_000;
 
 pub(crate) async fn probe(
@@ -183,9 +185,12 @@ fn malformed(reason: &str) -> ProcessorValidationOutput {
 }
 
 fn validation_failure(evidence: ValidationEvidence, reason: &str) -> ProcessorValidationOutput {
-    if evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated {
-        ProcessorValidationOutput::NoMatch
-    } else {
-        malformed(reason)
+    match evidence {
+        ValidationEvidence::DeclaredCandidateStructurallyValidated => {
+            ProcessorValidationOutput::NoMatch
+        }
+        ValidationEvidence::StrongSignature
+        | ValidationEvidence::StructuralValidation
+        | ValidationEvidence::StreamingTextValidation => malformed(reason),
     }
 }

@@ -386,8 +386,10 @@ impl FileMediaRegistry {
         cancellation: &dyn crate::CancellationSignal,
     ) -> Result<FileReadResult, FileMediaFailure> {
         if !request.options.is_object()
-            || serde_json::to_vec(&request.options)
-                .is_err_or(|encoded| encoded.len() > MAX_READ_OPTIONS_BYTES)
+            || match serde_json::to_vec(&request.options) {
+                Ok(encoded) => encoded.len() > MAX_READ_OPTIONS_BYTES,
+                Err(_) => true,
+            }
         {
             return Err(FileMediaFailure::InvalidViewArguments);
         }
