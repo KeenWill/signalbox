@@ -966,6 +966,10 @@ impl RepositoryWatchTask {
                         }
                         PollAttemptWait::Webhook => {
                             self.poller.drain_fetches().await;
+                            // A cancelled child can publish freshness until its
+                            // final await completes. Invalidate only after every
+                            // child is joined so none can repopulate partial state.
+                            self.poller.invalidate_freshness();
                             let Some(outcome) =
                                 self.run_webhook_attempt_until_shutdown(&mut shutdown).await
                             else {
@@ -988,6 +992,10 @@ impl RepositoryWatchTask {
                             // complete reconciliation sweep. Any later wake
                             // remains coalesced for the next scheduling pass.
                             let resumed_drain = webhook_retry.poll_drain();
+                            // The preempting webhook attempt has already updated
+                            // retry state. Only a drain performed by the resumed
+                            // poll may disposition that state below.
+                            drained = None;
                             let Some(result) = run_until_shutdown(
                                 &mut shutdown,
                                 self.run_attempt(resumed_drain, &mut drained),

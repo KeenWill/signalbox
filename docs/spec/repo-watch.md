@@ -857,10 +857,10 @@ unprocessable receipt cannot pin the head of the queue and starve every later
 one; the attempt still reports the first such failure. A signature-valid
 delivery whose event or action is outside the mapped set, including a broadly
 subscribed `workflow_job`, is still acknowledged successfully and is cheaply
-logged and recorded as ignored rather than treated as an intake failure.
-A webhook-enabled shadow wake may also preempt the read-only provider sweep of
-an in-flight complete poll, without resetting that poll's deadline, so the
-durable delivery drains before bounded reconciliation resumes.
+logged and recorded as ignored rather than treated as an intake failure. A
+webhook-enabled shadow wake may also preempt the read-only provider sweep of an
+in-flight complete poll, without resetting that poll's deadline, so the durable
+delivery drains before bounded reconciliation resumes.
 
 **Implemented behavior.** A drain page attempts every loaded delivery even when
 one delivery fails. Each failure is logged at warning level with the delivery
