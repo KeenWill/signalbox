@@ -694,6 +694,25 @@ fn admission_refusal(error: &RepoWatchDispatchRepositoryError) -> RuleAdmissionR
     }
 }
 
+/// The recorded revisions of one rule and whether each is deactivated.
+async fn revisions_of(
+    fixture: &DispatchFixture,
+    rule_id: &str,
+) -> Result<Vec<(i64, bool)>, Box<dyn Error>> {
+    Ok(sqlx::query_as(
+        "SELECT activation.rule_version, deactivation.rule_id IS NOT NULL AS deactivated
+           FROM repo_watch_rule_activation AS activation
+           LEFT JOIN repo_watch_rule_deactivation AS deactivation
+             USING (repository, rule_id, rule_version)
+          WHERE activation.repository = $1 AND activation.rule_id = $2
+          ORDER BY activation.rule_version",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(rule_id)
+    .fetch_all(&fixture.pool)
+    .await?)
+}
+
 /// Removes the fixture rule's stored fingerprints to stage a corrupt shape.
 ///
 /// The table is append-only in production, so the trigger is disabled only
@@ -2883,6 +2902,39 @@ async fn a_revision_below_the_highest_recorded_revision_is_refused() -> Result<(
             )
         }
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repeating_an_admission_commit_changes_nothing() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let replacement_version = RepoWatchRuleVersion::new(
+        NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
+    );
+    let replacement = rule_at_version(replacement_version)?;
+    let repositories = [fixture.repository.clone()];
+    fixture
+        .store
+        .reconcile_configured_rules(&repositories, std::slice::from_ref(&replacement))
+        .await?;
+    let after_first: Vec<(i64, bool)> = revisions_of(&fixture, replacement.id().as_str()).await?;
+
+    // The rerun that resolves a lost commit response takes this path.
+    fixture
+        .store
+        .reconcile_configured_rules(&repositories, std::slice::from_ref(&replacement))
+        .await?;
+
+    let after_second: Vec<(i64, bool)> = revisions_of(&fixture, replacement.id().as_str()).await?;
+    assert_eq!(
+        after_first,
+        [
+            (i64::try_from(fixture.rule.version().get())?, true),
+            (i64::try_from(replacement.version().get())?, false)
+        ]
+    );
+    assert_eq!(after_second, after_first);
     Ok(())
 }
 

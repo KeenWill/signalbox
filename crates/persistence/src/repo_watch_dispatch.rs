@@ -439,13 +439,35 @@ impl PostgresRepoWatchDispatchStore {
         admission
     }
 
-    /// Commits the complete configured repository set in one transaction.
+    /// Commits the complete configured repository set, resolving ambiguity.
     ///
     /// Every watched repository is admitted together, so a refusal anywhere in
     /// the set leaves no deactivation and no activation behind. Startup calls
     /// this only after every other fallible construction has succeeded, so the
     /// revisions it consumes belong to a daemon that reaches its runtime.
+    ///
+    /// A lost commit response leaves the durable outcome unknown, which the
+    /// caller must not guess. Admission is idempotent — it reads the current
+    /// activations and writes only what is missing — so running it again
+    /// rereads durable state and resolves the ambiguity exactly: the rerun
+    /// finds the configured identities already active and commits nothing when
+    /// the first commit won, and performs the admission when it never landed.
+    /// A second ambiguous commit is surfaced rather than guessed.
     pub async fn reconcile_configured_rules(
+        &self,
+        repositories: &[RepositorySlug],
+        configured: &[RepoWatchRule],
+    ) -> Result<(), RepoWatchDispatchRepositoryError> {
+        match self.commit_configured_rules(repositories, configured).await {
+            Err(RepoWatchDispatchRepositoryError::CommitAmbiguous(_)) => {
+                self.commit_configured_rules(repositories, configured).await
+            }
+            outcome => outcome,
+        }
+    }
+
+    /// Admits the configured repository set in one committed transaction.
+    async fn commit_configured_rules(
         &self,
         repositories: &[RepositorySlug],
         configured: &[RepoWatchRule],
