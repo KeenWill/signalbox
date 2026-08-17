@@ -10,8 +10,8 @@ use std::{
 
 use rustix::{
     fs::{
-        AtFlags, Mode, OFlags, RenameFlags, fchmod, mkdirat, openat, renameat, renameat_with,
-        statat, unlinkat,
+        AtFlags, Mode, OFlags, RenameFlags, chmodat, fchmod, mkdirat, openat, renameat,
+        renameat_with, statat, unlinkat,
     },
     process::geteuid,
 };
@@ -297,6 +297,7 @@ fn validate_directory(parent: &File, name: &str, directory: &File) -> Result<(),
 }
 
 fn open_created_directory(parent: &File, name: &str) -> Result<File, RunnerWorkspaceError> {
+    chmodat(parent, name, Mode::RWXU, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
     let descriptor = openat(
         parent,
         name,
@@ -412,7 +413,9 @@ mod tests {
 
     use crate::RunnerStateRoot;
 
-    use super::{MANIFEST_FILE, PrivateWorkspaceRequest, RunnerWorkspaceError};
+    use super::{
+        MANIFEST_FILE, PrivateWorkspaceRequest, RunnerWorkspaceError, open_created_directory,
+    };
 
     const SESSION: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e1;
     const RUNNER: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e2;
@@ -474,6 +477,28 @@ mod tests {
         assert!(prepared.manifest.recovery.is_none());
         assert!(placement.join("work").is_dir());
         assert_eq!(manifest_mode, EXPECTED_DOCUMENT_MODE);
+    }
+
+    #[test]
+    fn created_directory_is_reopened_after_restoring_owner_permissions() {
+        let (parent, _state) = fixture_root();
+        let root_path = parent.path().join("runner-state");
+        let inaccessible = root_path.join("inaccessible");
+        fs::create_dir(&inaccessible).expect("the inaccessible fixture directory exists");
+        fs::set_permissions(&inaccessible, fs::Permissions::from_mode(0o000))
+            .expect("the fixture starts without owner access");
+        let root = fs::File::open(&root_path).expect("the runner root remains openable");
+
+        let reopened = open_created_directory(&root, "inaccessible")
+            .expect("owner permissions are restored before reopening");
+        let reopened_mode = reopened
+            .metadata()
+            .expect("the reopened directory has metadata")
+            .permissions()
+            .mode()
+            & 0o7777;
+
+        assert_eq!(reopened_mode, 0o700);
     }
 
     #[test]
