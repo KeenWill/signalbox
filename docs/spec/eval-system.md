@@ -4,8 +4,8 @@
 [program substrate](program-substrate.md): what an evaluation is, how its
 corpus, expectations, trials, and stages are recorded, and how evaluation
 traffic stays unmistakably separate from production traffic. The entire surface
-below other than the explicitly implemented standalone approval-judge harness
-is committed ahead of code as Stage 0. Stage 0 was verified through PR #580
+below other than the explicitly implemented standalone approval-judge harness is
+committed ahead of code as Stage 0. Stage 0 was verified through PR #580
 (`agent/program-substrate-spec`). Execution, registration, journaling, and
 replay are owned by the substrate page and not restated here; model scoring is
 ordinary session traffic owned by
@@ -55,8 +55,8 @@ nonempty free-text label provenance. Its replay uses the daemon's current
 approval-judge prompt, request renderer, structured output contract, and
 decision decoder without entering the daemon's durable decision path. The
 library reports every case verdict, exact-match accuracy, and one-vs-rest
-precision and recall for every disposition; a rate whose denominator is zero
-has no decimal value and retains its zero denominator.
+precision and recall for every disposition; a rate whose denominator is zero has
+no decimal value and retains its zero denominator.
 
 The operator entry point is offline: it consumes a corpus and ordered recorded
 responses, feeds those responses through the repository's deterministic scripted
