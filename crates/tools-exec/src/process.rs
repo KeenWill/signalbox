@@ -1229,7 +1229,6 @@ struct ReadOnlyPathIdentity {
 
 #[derive(Clone, Debug)]
 struct HttpsBrokerSocketIdentity {
-    destination: PathBuf,
     bind_source: PathBuf,
     #[cfg(target_os = "linux")]
     device: u64,
@@ -1323,7 +1322,6 @@ impl HttpsBrokerSocketIdentity {
                 });
             }
             Ok(Self {
-                destination,
                 bind_source: descriptor_path(rustix::fd::AsRawFd::as_raw_fd(&descriptor)),
                 device: metadata.st_dev,
                 inode: metadata.st_ino,
@@ -1335,10 +1333,11 @@ impl HttpsBrokerSocketIdentity {
     fn matches(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
-            self.destination.symlink_metadata().is_ok_and(|metadata| {
-                rustix::fs::FileType::from_raw_mode(metadata.mode()) == rustix::fs::FileType::Socket
-                    && metadata.dev() == self.device
-                    && metadata.ino() == self.inode
+            rustix::fs::fstat(self._descriptor.as_ref()).is_ok_and(|metadata| {
+                rustix::fs::FileType::from_raw_mode(metadata.st_mode)
+                    == rustix::fs::FileType::Socket
+                    && metadata.st_dev == self.device
+                    && metadata.st_ino == self.inode
             })
         }
         #[cfg(not(target_os = "linux"))]
@@ -4836,8 +4835,8 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn runner_restricted_https_bridge_accepts_current_process_descriptor_path()
+    #[tokio::test]
+    async fn runner_restricted_https_bridge_retains_descriptor_path_after_root_rename()
     -> Result<(), Box<dyn Error>> {
         let workspace = ReplacementWorkspace::new()?;
         let read_only = ReplacementWorkspace::new()?;
@@ -4855,14 +4854,26 @@ mod tests {
             successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
         );
 
-        let constructed = SandboxedCommandRunner::try_new_runner_restricted_with_https_broker(
-            runner,
-            workspace.path(),
-            &[read_only.path().to_owned()],
-            &descriptor_socket,
-        );
+        let observation = runner.clone();
+        let mut command_runner =
+            SandboxedCommandRunner::try_new_runner_restricted_with_https_broker(
+                runner,
+                workspace.path(),
+                &[read_only.path().to_owned()],
+                &descriptor_socket,
+            )?;
+        broker_root.replace()?;
+        let arguments = ExecArguments {
+            program: String::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
 
-        assert!(constructed.is_ok());
+        let result = command_runner.try_run(arguments).await?;
+
+        assert_eq!(result.stdout.text, SANDBOXED_STDOUT);
+        assert_eq!(observation.recorded_requests().len(), 1);
         Ok(())
     }
 
