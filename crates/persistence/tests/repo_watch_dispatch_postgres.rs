@@ -2779,6 +2779,22 @@ async fn sealed_identity_return_reapplies_its_convergence_cutoff() -> Result<(),
         mergeable_outcome,
         RepoWatchRuleEvaluationOutcome::NotMatched
     );
+    let obligation = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the released sealed-head obligation is ready for settlement");
+    let current = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("the sealed cursor exists");
+    let settled =
+        evaluate_obligation(&fixture, obligation, current.candidate().observation()).await?;
+    assert_eq!(settled, RepoWatchRuleEvaluationOutcome::TargetConverged);
     let (second_event, second_observation) = load_conflict(&fixture, 0x54_652, SECOND_HEAD).await?;
     let second_generation = PostgresRepoWatchStore::new(fixture.pool.clone())
         .load_cursor(&fixture.repository)

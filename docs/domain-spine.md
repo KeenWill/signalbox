@@ -10657,5 +10657,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **252 (+1 free fn)**  |
-| **signalbox-application total**                    | **254 (+1 free fn)**  |
+| **signalbox-application total**                    | **257 (+1 free fn)**  |
