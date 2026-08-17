@@ -12,9 +12,16 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_application::RepoWatchEventContentIdentityV1;
+use signalbox_application::{
+    RepoWatchObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
+};
 use signalbox_domain::{CommitSha, PullRequestNumber, RepoWatchEventKindNameV1, RepositorySlug};
 use signalbox_persistence::{
     disposable_test_container_labels, local_test_connection_options, migrate,
+    repo_watch::{
+        PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
+        RepoWatchCursorCandidate, RepoWatchCursorGeneration,
+    },
     repo_watch_webhook::{
         MAX_PENDING_PAGE_BYTES, PostgresRepoWatchWebhookStore, RepoWatchWebhookAdmission,
         RepoWatchWebhookAdmissionOutcome, RepoWatchWebhookDeliveryKey, RepoWatchWebhookDisposition,
@@ -875,6 +882,67 @@ async fn an_uncaused_divergence_fails_the_parity_gate() -> Result<(), Box<dyn Er
     .await?;
 
     assert_eq!(unexplained, 1);
+    Ok(())
+}
+
+/// A cursor commit that loses its generation race, writing nothing.
+fn conflicting_commit_request() -> Result<RepoWatchCommitRequest, Box<dyn Error>> {
+    Ok(RepoWatchCommitRequest::new(
+        Some(RepoWatchCursorGeneration::INITIAL),
+        RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+            Vec::new(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())?,
+        )),
+        Vec::new(),
+    ))
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_failed_cursor_commit_leaves_its_delivery_retryable() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let webhook = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let cursors = PostgresRepoWatchStore::new(pool);
+    let key = delivery_key(0x701);
+    admit_fixture(&webhook, key).await?;
+
+    let outcome = cursors
+        .commit(&repository()?, conflicting_commit_request()?)
+        .await?;
+
+    assert!(matches!(outcome, RepoWatchCommitOutcome::Conflict { .. }));
+    let pending = webhook
+        .load_pending(&repository()?, pending_page_size(), None)
+        .await?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].key(), key);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_delivery_recorded_before_its_cursor_commit_cannot_be_retried()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let webhook = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let cursors = PostgresRepoWatchStore::new(pool);
+    let key = delivery_key(0x702);
+    admit_fixture(&webhook, key).await?;
+    webhook
+        .record_terminal(key, &projected_request(Vec::new())?)
+        .await?;
+
+    let outcome = cursors
+        .commit(&repository()?, conflicting_commit_request()?)
+        .await?;
+
+    // This is what recording a delivery terminal before its cursor commit costs:
+    // the commit writes nothing and the delivery can never be loaded again.
+    assert!(matches!(outcome, RepoWatchCommitOutcome::Conflict { .. }));
+    let pending = webhook
+        .load_pending(&repository()?, pending_page_size(), None)
+        .await?;
+    assert!(pending.is_empty());
     Ok(())
 }
 
