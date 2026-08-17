@@ -91,6 +91,7 @@ pub const MAX_BLOB_READ_BYTES: usize = MAX_FRAME_BYTES / 2;
 /// additionally reserves pool connections outside snapshot work; this
 /// protocol-owned ceiling prevents a larger pool from expanding snapshot
 /// admission beyond the implemented contract.
+// numeric-bound: tunable - controls concurrent snapshot-reader admission
 pub const MAX_CONCURRENT_SNAPSHOT_READERS: usize = 8;
 
 /// Maximum replica count representable by the version-one deployment catalog.
