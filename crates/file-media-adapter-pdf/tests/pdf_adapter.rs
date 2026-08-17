@@ -5,12 +5,13 @@ use std::error::Error;
 use fixtures::{MemorySource, PdfFixture};
 use signalbox_file_media_adapter_pdf::{PdfProvider, declaration};
 use signalbox_file_media_runtime::{
-    CancellationSignal, FileInspection, FileInspectionStatus, FileMediaCeilings, FileMediaFailure,
-    FileMediaProcessor, FileMediaProcessorFuture, FileMediaProvider, FileMediaProviderReadRequest,
-    FileMediaProviderValidationRequest, FileMediaRegistry, FileReadRequest, FileReadResult,
-    InspectionRequest, NeverCancelled, ProcessorIsolation, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation, ReadViewName, ReaderIdentity,
-    ReasonCode, VerifiedBlobSource,
+    BoundedMetadata, CancellationSignal, CanonicalMediaType, FileInspection, FileInspectionStatus,
+    FileMediaCeilings, FileMediaFailure, FileMediaProcessor, FileMediaProcessorFuture,
+    FileMediaProvider, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
+    FileMediaRegistry, FileReadRequest, FileReadResult, FileReaderName, FileReaderProviderName,
+    FileReaderRevision, InspectionRequest, NeverCancelled, ProcessorIsolation,
+    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation,
+    ReadViewName, ReaderIdentity, ReasonCode, ValidationEvidence, VerifiedBlobSource,
 };
 
 struct DirectProcessor {
@@ -224,6 +225,46 @@ async fn token_shaped_large_garbage_is_not_structurally_validated() -> Result<()
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bounded_validation_stays_within_its_declared_source_budget() -> Result<(), Box<dyn Error>>
+{
+    let fixture = PdfFixture::over_source_limit()?;
+    let expected_limit = fixture.expected_validation_source_limit();
+    let source = fixture.into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert!(source.requested_bytes() <= expected_limit + 8);
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_large_trailer_values_are_rejected() -> Result<(), Box<dyn Error>> {
+    let source = PdfFixture::malformed_large_trailer_values().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn escaped_encrypt_name_is_terminal_in_bounded_validation() -> Result<(), Box<dyn Error>> {
+    let source = PdfFixture::large_escaped_encrypt_name()?.into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::EncryptedOrLocked);
+    Ok(())
+}
+
+#[tokio::test]
+async fn nul_is_accepted_as_xref_whitespace() -> Result<(), Box<dyn Error>> {
+    let source = PdfFixture::large_nul_xref_whitespace()?.into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
     Ok(())
 }
 

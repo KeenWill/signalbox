@@ -1,4 +1,11 @@
-use std::{error::Error, num::NonZeroU64};
+use std::{
+    error::Error,
+    num::NonZeroU64,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use lopdf::{Document, Object, Stream, content::Content, content::Operation, dictionary};
 use signalbox_file_media_runtime::{
@@ -9,6 +16,7 @@ use signalbox_file_media_runtime::{
 const FIXTURE_TEXT: &str = "generated PDF text";
 const FIXTURE_PAGE_COUNT: usize = 1;
 const READ_SOURCE_LIMIT: u64 = 8 * 1024 * 1024;
+const VALIDATION_SOURCE_LIMIT: u64 = 256 * 1024;
 
 pub struct PdfFixture {
     bytes: Vec<u8>,
@@ -83,6 +91,48 @@ impl PdfFixture {
         Ok(Self { bytes })
     }
 
+    pub fn malformed_large_trailer_values() -> Self {
+        let mut bytes = b"%PDF-1.5\n".to_vec();
+        bytes.resize(300 * 1024, b' ');
+        let xref_offset = bytes.len();
+        bytes.extend_from_slice(
+            b"xref\n0 1\n0000000000 65535 f\ntrailer\n<< /Size (bad) /Root null >>\nstartxref\n",
+        );
+        bytes.extend_from_slice(xref_offset.to_string().as_bytes());
+        bytes.extend_from_slice(b"\n%%EOF\n");
+        Self { bytes }
+    }
+
+    pub fn large_escaped_encrypt_name() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = Self::locked()?.bytes;
+        replace_once(&mut bytes, b"/Encrypt", b"/Encr#79pt")?;
+        enlarge_before_startxref(&mut bytes, 300 * 1024)?;
+        Ok(Self { bytes })
+    }
+
+    pub fn large_nul_xref_whitespace() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = Self::ordinary()?.bytes;
+        let startxref = bytes
+            .windows(b"startxref".len())
+            .rposition(|window| window == b"startxref")
+            .ok_or("generated PDF omitted startxref")?;
+        let offset_start = startxref + b"startxref".len();
+        let offset_bytes = bytes[offset_start..]
+            .iter()
+            .copied()
+            .skip_while(|byte| byte.is_ascii_whitespace())
+            .take_while(u8::is_ascii_digit)
+            .collect::<Vec<_>>();
+        let xref = std::str::from_utf8(&offset_bytes)?.parse::<usize>()?;
+        for byte in &mut bytes[xref..startxref] {
+            if *byte == b' ' {
+                *byte = 0;
+            }
+        }
+        enlarge_before_startxref(&mut bytes, 300 * 1024)?;
+        Ok(Self { bytes })
+    }
+
     pub fn over_source_limit() -> Result<Self, Box<dyn Error>> {
         let mut bytes = Self::ordinary()?.bytes;
         let insertion = bytes
@@ -111,6 +161,10 @@ impl PdfFixture {
 
     pub const fn expected_source_limit(&self) -> u64 {
         READ_SOURCE_LIMIT
+    }
+
+    pub const fn expected_validation_source_limit(&self) -> u64 {
+        VALIDATION_SOURCE_LIMIT
     }
 
     pub const fn expected_version_override(&self) -> &'static str {
@@ -193,13 +247,18 @@ fn build_pdf(content_bytes: &[u8], shape: ContentShape) -> Result<Vec<u8>, Box<d
 pub struct MemorySource {
     bytes: Vec<u8>,
     byte_length: NonZeroU64,
+    requested_bytes: Arc<AtomicU64>,
 }
 
 impl MemorySource {
     pub fn new(bytes: Vec<u8>) -> Result<Self, Box<dyn Error>> {
         let byte_length = NonZeroU64::new(u64::try_from(bytes.len())?)
             .ok_or("fixture source must be nonempty")?;
-        Ok(Self { bytes, byte_length })
+        Ok(Self {
+            bytes,
+            byte_length,
+            requested_bytes: Arc::new(AtomicU64::new(0)),
+        })
     }
 
     pub fn file_use(&self) -> Result<FileUse, Box<dyn Error>> {
@@ -215,6 +274,10 @@ impl MemorySource {
             None,
         ))
     }
+
+    pub fn requested_bytes(&self) -> u64 {
+        self.requested_bytes.load(Ordering::Relaxed)
+    }
 }
 
 impl VerifiedBlobSource for MemorySource {
@@ -227,6 +290,8 @@ impl VerifiedBlobSource for MemorySource {
     }
 
     fn read_range(&self, offset: u64, length: NonZeroU64) -> SourceReadFuture<'_> {
+        self.requested_bytes
+            .fetch_add(length.get(), Ordering::Relaxed);
         let outcome = usize::try_from(offset)
             .ok()
             .and_then(|start| {
@@ -238,4 +303,26 @@ impl VerifiedBlobSource for MemorySource {
             .ok_or(SourceReadError::RangeOutOfBounds);
         Box::pin(async move { outcome })
     }
+}
+
+fn enlarge_before_startxref(
+    bytes: &mut Vec<u8>,
+    minimum_length: usize,
+) -> Result<(), Box<dyn Error>> {
+    let insertion = bytes
+        .windows(b"startxref".len())
+        .rposition(|window| window == b"startxref")
+        .ok_or("generated PDF omitted startxref")?;
+    let padding = minimum_length.saturating_sub(bytes.len());
+    bytes.splice(insertion..insertion, std::iter::repeat_n(b' ', padding));
+    Ok(())
+}
+
+fn replace_once(bytes: &mut Vec<u8>, old: &[u8], new: &[u8]) -> Result<(), Box<dyn Error>> {
+    let start = bytes
+        .windows(old.len())
+        .position(|window| window == old)
+        .ok_or("generated PDF omitted replacement token")?;
+    bytes.splice(start..start + old.len(), new.iter().copied());
+    Ok(())
 }

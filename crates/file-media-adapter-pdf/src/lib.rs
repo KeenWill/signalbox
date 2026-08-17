@@ -1,6 +1,6 @@
 //! Bounded PDF interpretation inside the supervised file-media worker.
 
-use std::{error::Error, num::NonZeroU64, str::FromStr};
+use std::{collections::BTreeSet, error::Error, num::NonZeroU64, str::FromStr};
 
 use lopdf::{Document, Error as LopdfError};
 use signalbox_file_media_runtime::{
@@ -52,11 +52,32 @@ impl ValidationMode {
 #[derive(Default)]
 struct TrailerFacts {
     encrypted: bool,
-    has_prev: bool,
-    has_root: bool,
-    has_size: bool,
-    has_widths: bool,
+    root: Option<IndirectReference>,
+    size: Option<u64>,
+    widths: Option<[u64; 3]>,
     is_xref_stream: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct IndirectReference {
+    object_number: u64,
+    generation: u64,
+}
+
+struct LiveXrefEntry {
+    reference: IndirectReference,
+    offset: u64,
+}
+
+struct ParsedXref {
+    facts: TrailerFacts,
+    live_entries: Vec<LiveXrefEntry>,
+    object_limit_exceeded: bool,
+}
+
+enum PageCollectionError {
+    Limit,
+    Malformed,
 }
 
 /// PDF adapter registered in the dedicated worker catalog.
@@ -150,19 +171,28 @@ impl FileMediaProvider for PdfProvider {
                 });
             }
             let bytes = read_all(source, cancellation).await?;
+            if preflight_object_limit(&bytes)? {
+                return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+                    limit_kind: String::from(OBJECT_COUNT_LIMIT),
+                });
+            }
             let document = Document::load_mem(&bytes).map_err(|_| ProcessorFailure::Failed)?;
             require_active(cancellation)?;
             if document.is_encrypted() {
                 return Err(ProcessorFailure::Failed);
             }
-            if let Err(limit_kind) = enforce_document_limits(&document) {
-                return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
-                    limit_kind: String::from(limit_kind),
-                });
-            }
+            let pages = match collect_pages(&document) {
+                Ok(pages) => pages,
+                Err(PageCollectionError::Limit) => {
+                    return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+                        limit_kind: String::from(PAGE_COUNT_LIMIT),
+                    });
+                }
+                Err(PageCollectionError::Malformed) => return Err(ProcessorFailure::Failed),
+            };
             match request.view.as_str() {
-                TEXT_VIEW => read_text(&document, cancellation),
-                METADATA_VIEW => read_metadata(&document),
+                TEXT_VIEW => read_text(&document, &pages, cancellation),
+                METADATA_VIEW => read_metadata(&document, pages.len()),
                 _ => Ok(ProcessorReadOutput::UnsupportedView),
             }
         })
@@ -240,16 +270,38 @@ async fn inspect_bounded(
     if xref_offset >= source_length {
         return Ok(malformed_validation());
     }
-    let xref_length = (source_length - xref_offset).min(VALIDATION_SOURCE_BYTES);
-    let xref_bytes = read_range(source, xref_offset, xref_length).await?;
+    let suffix_offset = source_length - suffix_length;
+    let xref_bytes = if xref_offset >= suffix_offset {
+        let relative_offset =
+            usize::try_from(xref_offset - suffix_offset).map_err(|_| ProcessorFailure::Failed)?;
+        suffix
+            .get(relative_offset..)
+            .ok_or(ProcessorFailure::Failed)?
+            .to_vec()
+    } else {
+        let remaining_budget = VALIDATION_SOURCE_BYTES
+            .checked_sub(PDF_HEADER_BYTES)
+            .and_then(|remaining| remaining.checked_sub(suffix_length))
+            .ok_or(ProcessorFailure::Failed)?;
+        let missing_length = suffix_offset - xref_offset;
+        let additional_length = missing_length.min(remaining_budget);
+        let mut bytes = read_range(source, xref_offset, additional_length).await?;
+        if additional_length == missing_length {
+            bytes.extend_from_slice(&suffix);
+        }
+        bytes
+    };
     require_active(cancellation)?;
-    let Some(trailer) = parse_xref_structure(&xref_bytes) else {
+    let Some(parsed_xref) = parse_xref_structure(&xref_bytes) else {
         return Ok(malformed_validation());
     };
-    if trailer.encrypted {
+    if parsed_xref.facts.encrypted {
         return Ok(ProcessorValidationOutput::EncryptedOrLocked {
             media_type: String::from(MEDIA_TYPE),
         });
+    }
+    if parsed_xref.object_limit_exceeded || !valid_xref_targets(&parsed_xref, source_length) {
+        return Ok(malformed_validation());
     }
     validated_output(
         evidence,
@@ -276,13 +328,16 @@ fn inspect_complete(
     let Some(xref_bytes) = bytes.get(xref_offset..) else {
         return Ok(malformed_validation());
     };
-    let Some(trailer) = parse_xref_structure(xref_bytes) else {
+    let Some(parsed_xref) = parse_xref_structure(xref_bytes) else {
         return Ok(malformed_validation());
     };
-    if trailer.encrypted {
+    if parsed_xref.facts.encrypted {
         return Ok(ProcessorValidationOutput::EncryptedOrLocked {
             media_type: String::from(MEDIA_TYPE),
         });
+    }
+    if parsed_xref.object_limit_exceeded || !valid_xref_targets(&parsed_xref, bytes.len() as u64) {
+        return Ok(malformed_validation());
     }
     let document = match Document::load_mem(bytes) {
         Ok(document) => document,
@@ -293,13 +348,17 @@ fn inspect_complete(
             media_type: String::from(MEDIA_TYPE),
         });
     }
-    if document.objects.len() > MAX_OBJECTS || document.get_pages().len() > MAX_PAGES {
+    if document.objects.len() > MAX_OBJECTS {
         return Ok(malformed_validation());
     }
+    let pages = match collect_pages(&document) {
+        Ok(pages) => pages,
+        Err(_) => return Ok(malformed_validation()),
+    };
     validated_output(
         evidence,
         effective_version(&document),
-        Some(document.get_pages().len()),
+        Some(pages.len()),
         Some(document.objects.len()),
         ValidationMode::Complete,
     )
@@ -328,15 +387,15 @@ fn validated_output(
 
 fn read_text(
     document: &Document,
+    pages: &[(u32, lopdf::ObjectId)],
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorReadOutput, ProcessorFailure> {
-    let pages = document.get_pages();
     let mut text = String::new();
     for (page_number, page_id) in pages {
         require_active(cancellation)?;
-        validate_page_contents(document, page_id)?;
+        validate_page_contents(document, *page_id)?;
         let page_text =
-            match document.extract_text_with_limit(&[page_number], MAX_DECOMPRESSED_PAGE_BYTES) {
+            match document.extract_text_with_limit(&[*page_number], MAX_DECOMPRESSED_PAGE_BYTES) {
                 Ok(text) => text,
                 Err(LopdfError::Decompress(_)) => {
                     return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
@@ -360,11 +419,14 @@ fn read_text(
     })
 }
 
-fn read_metadata(document: &Document) -> Result<ProcessorReadOutput, ProcessorFailure> {
+fn read_metadata(
+    document: &Document,
+    page_count: usize,
+) -> Result<ProcessorReadOutput, ProcessorFailure> {
     let body_json = serde_json::to_string(&serde_json::json!({
         "encrypted": false,
         "objects": document.objects.len(),
-        "pages": document.get_pages().len(),
+        "pages": page_count,
         "version": effective_version(document),
     }))
     .map_err(|_| ProcessorFailure::Failed)?;
@@ -375,14 +437,64 @@ fn read_metadata(document: &Document) -> Result<ProcessorReadOutput, ProcessorFa
     })
 }
 
-fn enforce_document_limits(document: &Document) -> Result<(), &'static str> {
-    if document.objects.len() > MAX_OBJECTS {
-        return Err(OBJECT_COUNT_LIMIT);
+fn preflight_object_limit(bytes: &[u8]) -> Result<bool, ProcessorFailure> {
+    let xref_offset = startxref_offset(bytes).ok_or(ProcessorFailure::Failed)?;
+    let xref_offset = usize::try_from(xref_offset).map_err(|_| ProcessorFailure::Failed)?;
+    let xref_bytes = bytes.get(xref_offset..).ok_or(ProcessorFailure::Failed)?;
+    let parsed = parse_xref_structure(xref_bytes).ok_or(ProcessorFailure::Failed)?;
+    Ok(parsed.object_limit_exceeded)
+}
+
+fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, PageCollectionError> {
+    let catalog = document
+        .catalog()
+        .map_err(|_| PageCollectionError::Malformed)?;
+    let pages_root = catalog
+        .get(b"Pages")
+        .and_then(lopdf::Object::as_reference)
+        .map_err(|_| PageCollectionError::Malformed)?;
+    let mut pending = vec![pages_root];
+    let mut visited = BTreeSet::new();
+    let mut pages = Vec::new();
+    while let Some(object_id) = pending.pop() {
+        if !visited.insert(object_id) {
+            return Err(PageCollectionError::Malformed);
+        }
+        let dictionary = document
+            .get_dictionary(object_id)
+            .map_err(|_| PageCollectionError::Malformed)?;
+        match dictionary.get(b"Kids") {
+            Ok(kids) => {
+                let kids = kids
+                    .as_array()
+                    .map_err(|_| PageCollectionError::Malformed)?;
+                if pending
+                    .len()
+                    .saturating_add(kids.len())
+                    .saturating_add(pages.len())
+                    > MAX_PAGES
+                {
+                    return Err(PageCollectionError::Limit);
+                }
+                for kid in kids.iter().rev() {
+                    pending.push(
+                        kid.as_reference()
+                            .map_err(|_| PageCollectionError::Malformed)?,
+                    );
+                }
+            }
+            Err(LopdfError::DictKey(_)) => {
+                if pages.len() == MAX_PAGES {
+                    return Err(PageCollectionError::Limit);
+                }
+                let page_number =
+                    u32::try_from(pages.len() + 1).map_err(|_| PageCollectionError::Limit)?;
+                pages.push((page_number, object_id));
+            }
+            Err(_) => return Err(PageCollectionError::Malformed),
+        }
     }
-    if document.get_pages().len() > MAX_PAGES {
-        return Err(PAGE_COUNT_LIMIT);
-    }
-    Ok(())
+    Ok(pages)
 }
 
 fn validate_page_contents(
@@ -493,7 +605,7 @@ fn startxref_offset(bytes: &[u8]) -> Option<u64> {
     parse_unsigned(bytes, &mut cursor)
 }
 
-fn parse_xref_structure(bytes: &[u8]) -> Option<TrailerFacts> {
+fn parse_xref_structure(bytes: &[u8]) -> Option<ParsedXref> {
     let mut cursor = 0;
     skip_pdf_space_and_comments(bytes, &mut cursor);
     if consume_keyword(bytes, &mut cursor, b"xref") {
@@ -503,38 +615,59 @@ fn parse_xref_structure(bytes: &[u8]) -> Option<TrailerFacts> {
     }
 }
 
-fn parse_classic_xref(bytes: &[u8], mut cursor: usize) -> Option<TrailerFacts> {
+fn parse_classic_xref(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
     let mut entries = 0_u64;
+    let mut live_entries = Vec::new();
+    let mut object_limit_exceeded = false;
     loop {
         skip_pdf_space_and_comments(bytes, &mut cursor);
         if consume_keyword(bytes, &mut cursor, b"trailer") {
             break;
         }
-        parse_unsigned(bytes, &mut cursor)?;
+        let first_object = parse_unsigned(bytes, &mut cursor)?;
         skip_pdf_whitespace(bytes, &mut cursor);
         let count = parse_unsigned(bytes, &mut cursor)?;
         entries = entries.checked_add(count)?;
-        if entries > MAX_OBJECTS as u64 {
-            return None;
+        if entries > MAX_OBJECTS as u64 + 1 {
+            return Some(ParsedXref {
+                facts: TrailerFacts::default(),
+                live_entries: Vec::new(),
+                object_limit_exceeded: true,
+            });
         }
-        for _ in 0..count {
+        for index in 0..count {
             skip_pdf_space_and_comments(bytes, &mut cursor);
-            parse_unsigned(bytes, &mut cursor)?;
+            let offset = parse_unsigned(bytes, &mut cursor)?;
             skip_pdf_whitespace(bytes, &mut cursor);
-            parse_unsigned(bytes, &mut cursor)?;
+            let generation = parse_unsigned(bytes, &mut cursor)?;
             skip_pdf_whitespace(bytes, &mut cursor);
             let state = *bytes.get(cursor)?;
             if state != b'n' && state != b'f' {
                 return None;
             }
             cursor += 1;
+            if state == b'n' && !object_limit_exceeded {
+                live_entries.push(LiveXrefEntry {
+                    reference: IndirectReference {
+                        object_number: first_object.checked_add(index)?,
+                        generation,
+                    },
+                    offset,
+                });
+            }
         }
     }
     let (facts, _) = parse_trailer_dictionary(bytes, cursor)?;
-    valid_trailer_facts(facts, false)
+    let facts = valid_trailer_facts(facts, false)?;
+    object_limit_exceeded |= facts.size.is_some_and(|size| size > MAX_OBJECTS as u64 + 1);
+    Some(ParsedXref {
+        facts,
+        live_entries,
+        object_limit_exceeded,
+    })
 }
 
-fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<TrailerFacts> {
+fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
     parse_unsigned(bytes, &mut cursor)?;
     skip_pdf_whitespace(bytes, &mut cursor);
     parse_unsigned(bytes, &mut cursor)?;
@@ -548,14 +681,27 @@ fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<TrailerFacts> {
     if !consume_keyword(bytes, &mut cursor, b"stream") {
         return None;
     }
-    valid_trailer_facts(facts, true)
+    let facts = valid_trailer_facts(facts, true)?;
+    let object_limit_exceeded = facts.size.is_some_and(|size| size > MAX_OBJECTS as u64 + 1);
+    Some(ParsedXref {
+        facts,
+        live_entries: Vec::new(),
+        object_limit_exceeded,
+    })
 }
 
 fn valid_trailer_facts(mut facts: TrailerFacts, stream: bool) -> Option<TrailerFacts> {
-    if !facts.has_size || (!facts.has_root && !facts.has_prev) {
+    let size = facts.size?;
+    let root = facts.root?;
+    if size == 0 || root.object_number >= size {
         return None;
     }
-    if stream && (!facts.is_xref_stream || !facts.has_widths) {
+    if stream
+        && (!facts.is_xref_stream
+            || facts
+                .widths
+                .is_none_or(|widths| widths.iter().all(|width| *width == 0)))
+    {
         return None;
     }
     facts.is_xref_stream = stream;
@@ -578,15 +724,24 @@ fn parse_trailer_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(TrailerF
         skip_pdf_space_and_comments(bytes, &mut cursor);
         let value_start = cursor;
         skip_pdf_object(bytes, &mut cursor, 0)?;
-        match key {
+        match key.as_slice() {
             b"Encrypt" => facts.encrypted = true,
-            b"Prev" => facts.has_prev = true,
-            b"Root" => facts.has_root = true,
-            b"Size" => facts.has_size = true,
-            b"W" => facts.has_widths = true,
+            b"Root" => {
+                let mut value_cursor = value_start;
+                facts.root = Some(parse_indirect_reference(bytes, &mut value_cursor)?);
+            }
+            b"Size" => {
+                let mut value_cursor = value_start;
+                facts.size = Some(parse_unsigned(bytes, &mut value_cursor)?);
+            }
+            b"W" => {
+                let mut value_cursor = value_start;
+                facts.widths = Some(parse_widths(bytes, &mut value_cursor)?);
+            }
             b"Type" => {
                 let mut value_cursor = value_start;
-                facts.is_xref_stream = parse_name(bytes, &mut value_cursor) == Some(b"XRef");
+                facts.is_xref_stream =
+                    parse_name(bytes, &mut value_cursor).as_deref() == Some(b"XRef");
             }
             _ => {}
         }
@@ -675,19 +830,88 @@ fn skip_scalar_or_reference(bytes: &[u8], cursor: &mut usize) -> Option<()> {
     Some(())
 }
 
-fn parse_name<'a>(bytes: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
+fn parse_name(bytes: &[u8], cursor: &mut usize) -> Option<Vec<u8>> {
     if bytes.get(*cursor) != Some(&b'/') {
         return None;
     }
     *cursor += 1;
-    let start = *cursor;
+    let mut name = Vec::new();
     while bytes
         .get(*cursor)
         .is_some_and(|byte| !is_pdf_delimiter(*byte))
     {
-        *cursor += 1;
+        if bytes.get(*cursor) == Some(&b'#') {
+            let high = hex_value(*bytes.get(*cursor + 1)?)?;
+            let low = hex_value(*bytes.get(*cursor + 2)?)?;
+            name.push((high << 4) | low);
+            *cursor += 3;
+        } else {
+            name.push(*bytes.get(*cursor)?);
+            *cursor += 1;
+        }
     }
-    bytes.get(start..*cursor)
+    Some(name)
+}
+
+fn parse_indirect_reference(bytes: &[u8], cursor: &mut usize) -> Option<IndirectReference> {
+    let object_number = parse_unsigned(bytes, cursor)?;
+    skip_pdf_whitespace(bytes, cursor);
+    let generation = parse_unsigned(bytes, cursor)?;
+    skip_pdf_whitespace(bytes, cursor);
+    if bytes.get(*cursor) != Some(&b'R') {
+        return None;
+    }
+    *cursor += 1;
+    Some(IndirectReference {
+        object_number,
+        generation,
+    })
+}
+
+fn parse_widths(bytes: &[u8], cursor: &mut usize) -> Option<[u64; 3]> {
+    if bytes.get(*cursor) != Some(&b'[') {
+        return None;
+    }
+    *cursor += 1;
+    skip_pdf_space_and_comments(bytes, cursor);
+    let first = parse_unsigned(bytes, cursor)?;
+    skip_pdf_space_and_comments(bytes, cursor);
+    let second = parse_unsigned(bytes, cursor)?;
+    skip_pdf_space_and_comments(bytes, cursor);
+    let third = parse_unsigned(bytes, cursor)?;
+    skip_pdf_space_and_comments(bytes, cursor);
+    if bytes.get(*cursor) != Some(&b']') {
+        return None;
+    }
+    *cursor += 1;
+    Some([first, second, third])
+}
+
+fn valid_xref_targets(parsed: &ParsedXref, source_length: u64) -> bool {
+    if parsed
+        .live_entries
+        .iter()
+        .any(|entry| entry.offset >= source_length)
+    {
+        return false;
+    }
+    let Some(root) = parsed.facts.root else {
+        return false;
+    };
+    parsed.live_entries.is_empty()
+        || parsed
+            .live_entries
+            .iter()
+            .any(|entry| entry.reference == root)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn parse_unsigned(bytes: &[u8], cursor: &mut usize) -> Option<u64> {
@@ -728,7 +952,10 @@ fn consume_keyword(bytes: &[u8], cursor: &mut usize, keyword: &[u8]) -> bool {
 }
 
 fn skip_pdf_whitespace(bytes: &[u8], cursor: &mut usize) {
-    while bytes.get(*cursor).is_some_and(u8::is_ascii_whitespace) {
+    while bytes
+        .get(*cursor)
+        .is_some_and(|byte| is_pdf_whitespace(*byte))
+    {
         *cursor += 1;
     }
 }
@@ -749,11 +976,15 @@ fn skip_pdf_space_and_comments(bytes: &[u8], cursor: &mut usize) {
 }
 
 fn is_pdf_delimiter(byte: u8) -> bool {
-    byte.is_ascii_whitespace()
+    is_pdf_whitespace(byte)
         || matches!(
             byte,
             b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
         )
+}
+
+fn is_pdf_whitespace(byte: u8) -> bool {
+    matches!(byte, 0x00 | b'\t' | b'\n' | 0x0c | b'\r' | b' ')
 }
 
 fn header_version(bytes: &[u8]) -> String {
@@ -801,5 +1032,48 @@ fn malformed_validation() -> ProcessorValidationOutput {
     ProcessorValidationOutput::Malformed {
         media_type: String::from(MEDIA_TYPE),
         reason_code: String::from(MALFORMED_REASON),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lopdf::{Object, dictionary};
+
+    #[test]
+    fn xref_preflight_rejects_object_count_before_document_construction() {
+        let bytes = format!(
+            "%PDF-1.5\nxref\n0 {}\nstartxref\n9\n%%EOF\n",
+            MAX_OBJECTS + 2
+        );
+
+        assert!(matches!(preflight_object_limit(bytes.as_bytes()), Ok(true)));
+    }
+
+    #[test]
+    fn page_collection_stops_before_exceeding_the_page_ceiling() {
+        let mut document = Document::with_version("1.5");
+        let pages_id = document.new_object_id();
+        let kids = (0..=MAX_PAGES)
+            .map(|_| Object::Reference(document.new_object_id()))
+            .collect::<Vec<_>>();
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids,
+                "Count" => i64::try_from(MAX_PAGES + 1).unwrap_or(i64::MAX),
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+
+        assert!(matches!(
+            collect_pages(&document),
+            Err(PageCollectionError::Limit)
+        ));
     }
 }
