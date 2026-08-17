@@ -64,7 +64,7 @@ use tokio::{
     select,
     sync::watch,
     task::JoinSet,
-    time::{Instant, sleep_until},
+    time::{Instant, sleep, sleep_until},
 };
 
 use crate::SessionTemplateConfiguration;
@@ -127,6 +127,13 @@ const WEBHOOK_DRAIN_MONITOR_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 // out the full poll that performs it, so a sustained stream re-arms its own wake
 // instead of holding the worker across poll deadlines.
 const WEBHOOK_DRAIN_PAGE_LIMIT: usize = 2;
+// How many times one terminal record may be re-attempted while PostgreSQL keeps
+// losing its commit result. Each attempt is settled by a read, so this bounds a
+// flapping connection rather than a genuinely undecided outcome.
+const MAX_WEBHOOK_TERMINAL_ATTEMPTS: u32 = 5;
+// What separates those attempts, so a dropping connection cannot become a hot
+// loop against the pool.
+const WEBHOOK_TERMINAL_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 const REVIEW_THREADS_QUERY: &str = r#"
 query RepositoryWatchReviewThreads(
@@ -1391,10 +1398,14 @@ impl RepositoryWatchTask {
                         // The shadow advances only once the disposition is
                         // durable, so a retry after a failed record derives the
                         // same projections rather than an empty duplicate.
+                        // Advancing it also clears any supersession a poll left
+                        // pending: the baseline now carries facts newer than
+                        // that cursor, so handing it over would discard them.
                         self.webhook_shadow = Some(WebhookShadowBaseline {
                             observation,
                             identity_frontier,
                         });
+                        self.webhook_shadow_superseded = false;
                         Ok(())
                     }
                     RepoWatchObservationApplyV1::NeedsTargetedRefresh {
@@ -1450,11 +1461,15 @@ impl RepositoryWatchTask {
                         )
                         .await?;
                         // The shadow advances only once that disposition is
-                        // durable, so the two never disagree.
+                        // durable, so the two never disagree. Advancing it also
+                        // clears any supersession a poll left pending: the
+                        // baseline now carries facts newer than that cursor, so
+                        // handing it over would discard them.
                         self.webhook_shadow = Some(WebhookShadowBaseline {
                             observation,
                             identity_frontier,
                         });
+                        self.webhook_shadow_superseded = false;
                         if let Err(error) = self.process_dispatches().await {
                             dispatch_failure.get_or_insert(error);
                         }
@@ -1466,7 +1481,7 @@ impl RepositoryWatchTask {
     }
 
     async fn record_webhook_terminal(
-        &self,
+        &mut self,
         pending: &PendingRepoWatchWebhookDelivery,
         projections: Vec<RepoWatchWebhookProjection>,
         disposition: RepoWatchWebhookDisposition,
@@ -1478,7 +1493,7 @@ impl RepositoryWatchTask {
             outcome_code.map(str::to_owned),
         )
         .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-        loop {
+        for attempt in 1..=MAX_WEBHOOK_TERMINAL_ATTEMPTS {
             match self
                 .webhook_store
                 .record_terminal(pending.key(), &request)
@@ -1487,14 +1502,36 @@ impl RepositoryWatchTask {
                 Ok(_) => return Ok(()),
                 // A commit whose result was lost in transit may already be
                 // durable, and the delivery would then never be loaded again.
-                // Re-record the exact same request until PostgreSQL returns a
-                // definitive outcome: either the row is already terminal or
-                // this attempt records it. Another lost commit response is
-                // still ambiguous and must not strand the in-memory shadow.
-                Err(RepoWatchWebhookStoreError::CommitAmbiguous(_)) => {}
+                // Reading settles which happened and cannot itself be
+                // ambiguous, so the outcome is definitive without retrying the
+                // write indefinitely against a connection that keeps dropping.
+                Err(RepoWatchWebhookStoreError::CommitAmbiguous(_)) => {
+                    match self
+                        .webhook_store
+                        .terminal_disposition_exists(pending.key())
+                        .await
+                    {
+                        Ok(true) => return Ok(()),
+                        // A read that fails settles nothing, so it is retried
+                        // rather than propagated: propagating would abandon a
+                        // delivery that may already be durable.
+                        Ok(false) | Err(_) => {
+                            if attempt < MAX_WEBHOOK_TERMINAL_ATTEMPTS {
+                                sleep(WEBHOOK_TERMINAL_RETRY_DELAY).await;
+                            }
+                        }
+                    }
+                }
                 Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
             }
         }
+        // Every attempt was ambiguous or unreadable, so whether a disposition
+        // is durable is unknown. The shadow is discarded rather than trusted:
+        // if one did land, this delivery will never be loaded again, and a
+        // baseline that silently missed it would supersede its dependents. The
+        // next delivery re-seeds from the cursor and records the gap.
+        self.webhook_shadow = None;
+        Err(RepositoryWatchAttemptError::Persistence)
     }
 
     /// Runs one delivery's targeted provider queries without writing anything.
