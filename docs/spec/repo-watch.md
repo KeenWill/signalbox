@@ -859,14 +859,18 @@ reach terminal state: a targeted refresh the provider will not serve is one such
 failure, because that query runs before anything is recorded. A targeted commit
 runs before the disposition is recorded, so its failure leaves the delivery
 pending too. A delivery whose disposition is already durable when a later step
-fails — the dispatch work that follows it — is terminal and is not loaded again.
-The repository task schedules a new drain attempt after five seconds without
-waiting for a full poll, another delivery, or a restart. Consecutive failures
-double that delay to a five-minute ceiling and a success returns it to five
-seconds, so a delivery that cannot be projected costs bounded repeated work
-rather than a fixed five-second loop. Only the drain advances that delay: an
-attempt whose drain succeeded and whose dispatch work then failed returns it to
-five seconds, and one that failed before reaching the drain arms a retry at the
+fails — the dispatch work that follows it — is terminal and is not loaded again;
+that failure carries the same delivery identity and closed cause at warning
+level, recorded where it happens because the delivery never reaches the drain
+page's deferral record. The repository task schedules a new drain attempt after
+five seconds without waiting for a full poll, another delivery, or a restart.
+Consecutive failures double that delay to a five-minute ceiling and a success
+returns it to five seconds, so a delivery that cannot be projected costs bounded
+repeated work rather than a fixed five-second loop. Only the drain advances that
+delay: an attempt whose drain succeeded and whose dispatch work then failed
+returns it to five seconds and keeps a retry armed there, because that work runs
+only from a later attempt and the delivery that would have woken one is already
+terminal, and one that failed before reaching the drain arms a retry at the
 current delay without advancing it, so unrelated dispatch failures cannot grow
 the delay, suppress admission wakes, or make polls omit their drain steps while
 projection is healthy. Taking a retry spends its deadline, so an attempt that

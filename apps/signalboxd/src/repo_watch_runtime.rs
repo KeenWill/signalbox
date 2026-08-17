@@ -403,6 +403,20 @@ impl WebhookDrainRetry {
         }
     }
 
+    /// Spends the earned backoff and arms a retry at the base delay.
+    ///
+    /// The drain itself succeeded, so the consecutive-failure count it earned
+    /// is spent. The work that failed after it runs only from a later
+    /// repository attempt, and the delivery that would have woken one is
+    /// already terminal — its admission wake is spent too — so without an armed
+    /// retry that work waits for another admission or the next full poll rather
+    /// than the delay this schedule promises. The drain's own escalation does
+    /// not apply, because the drain is not what failed.
+    fn arm_follow_up(&mut self, now: Instant) {
+        self.consecutive_failures = 0;
+        self.deadline = Some(now + self.delay());
+    }
+
     /// Marks the owed retry as taken, keeping the delay it has earned.
     ///
     /// The retry arm firing is that retry being spent. Leaving the deadline
@@ -868,10 +882,13 @@ impl RepositoryWatchTask {
                     // terminal state would arm a retry with nothing left to
                     // drain, and a projection failure would not be counted.
                     match drained {
-                        Some(
-                            WebhookDrainOutcome::Drained
-                            | WebhookDrainOutcome::DispatchFailedAfterTerminal(_),
-                        ) => webhook_retry.update_after(&Ok(())),
+                        Some(WebhookDrainOutcome::Drained) => webhook_retry.update_after(&Ok(())),
+                        // The drain succeeded, so its escalation is spent, but
+                        // the dispatch that failed after it still owes an
+                        // attempt no wake will bring.
+                        Some(WebhookDrainOutcome::DispatchFailedAfterTerminal(_)) => {
+                            webhook_retry.arm_follow_up(Instant::now());
+                        }
                         Some(WebhookDrainOutcome::ProjectionFailed(error)) => {
                             webhook_retry.update_after(&Err(error));
                         }
@@ -981,11 +998,12 @@ impl RepositoryWatchTask {
                 );
             }
             WebhookAttemptOutcome::DrainedThenFailed(error) => {
-                webhook_retry.update_after(&Ok(()));
+                webhook_retry.arm_follow_up(Instant::now());
                 tracing::error!(
                     repository = %self.repository.as_str(),
                     trigger = trigger.as_str(),
                     cause_code = error.cause_code(),
+                    retry_seconds = webhook_retry.delay().as_secs(),
                     "repository-watch webhook attempt drained but its dispatch work failed"
                 );
             }
@@ -1471,6 +1489,18 @@ impl RepositoryWatchTask {
                         });
                         self.webhook_shadow_superseded = false;
                         if let Err(error) = self.process_dispatches().await {
+                            // Carries the identity here because this delivery
+                            // is already terminal: it never reaches the drain
+                            // page's deferral record, and the classified
+                            // outcome the attempt reports names only a cause.
+                            tracing::warn!(
+                                repository = %self.repository.as_str(),
+                                hook_id = pending.key().hook_id().get(),
+                                delivery_id = %pending.key().delivery_id(),
+                                receipt_sequence = pending.receipt().sequence().get(),
+                                cause_code = error.cause_code(),
+                                "webhook delivery dispatch failed after it reached terminal state"
+                            );
                             dispatch_failure.get_or_insert(error);
                         }
                         Ok(())
@@ -6418,6 +6448,24 @@ mod tests {
         retry.arm_if_unowed(armed_at);
 
         assert_eq!(retry.deadline, Some(armed_at + WEBHOOK_DRAIN_RETRY_DELAY));
+    }
+
+    /// The dispatch work that failed runs only from a later attempt, and the
+    /// delivery that would have woken one is already terminal, so the drain
+    /// succeeding must still leave a retry owed — at the base delay, because
+    /// the drain is not what failed.
+    #[tokio::test(start_paused = true)]
+    async fn a_drain_whose_dispatch_failed_arms_a_follow_up_at_the_base_delay() {
+        let armed_at = Instant::now();
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_DELAY * 2);
+
+        retry.arm_follow_up(armed_at);
+
+        assert_eq!(retry.deadline, Some(armed_at + WEBHOOK_DRAIN_RETRY_DELAY));
+        assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_DELAY);
     }
 
     /// The retry arm precedes the poll arm, so a deadline left owed once its
