@@ -392,7 +392,7 @@ impl From<sqlx::Error> for RepoWatchStoreError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchPlannedStaleReviewClearance {
     clearance_id: Uuid,
-    claim_token: [redacted],
+    claim_token: Uuid,
     number: PullRequestNumber,
     current_head_sha: CommitSha,
     base_branch: BranchName,
@@ -923,13 +923,13 @@ impl PostgresRepoWatchStore {
             if stored.completion_state == ClearanceCompletionState::Completed {
                 continue;
             }
-            let claim_token = [redacted];
+            let claim_token = Uuid::now_v7();
             let claimed = sqlx::query_scalar::<_, Uuid>(
                 "INSERT INTO repo_watch_stale_review_clearance_claim
                     (clearance_id, claim_token, claimed_until)
                  VALUES ($1, $2, clock_timestamp() + interval '2 minutes')
                  ON CONFLICT (clearance_id) DO UPDATE
-                     SET claim_token = [redacted],
+                     SET claim_token = EXCLUDED.claim_token,
                          claimed_until = EXCLUDED.claimed_until
                    WHERE repo_watch_stale_review_clearance_claim.claimed_until
                          <= clock_timestamp()
@@ -1044,13 +1044,13 @@ impl PostgresRepoWatchStore {
         }
         let mut claimed = Vec::with_capacity(rows.len());
         for row in rows {
-            let claim_token = [redacted];
+            let claim_token = Uuid::now_v7();
             let acquired = sqlx::query_scalar::<_, Uuid>(
                 "INSERT INTO repo_watch_stale_review_clearance_claim
                     (clearance_id, claim_token, claimed_until)
                  VALUES ($1, $2, clock_timestamp() + interval '2 minutes')
                  ON CONFLICT (clearance_id) DO UPDATE
-                     SET claim_token = [redacted],
+                     SET claim_token = EXCLUDED.claim_token,
                          claimed_until = EXCLUDED.claimed_until
                    WHERE repo_watch_stale_review_clearance_claim.claimed_until
                          <= clock_timestamp()
@@ -1086,13 +1086,13 @@ impl PostgresRepoWatchStore {
     pub async fn renew_stale_review_clearance_claim(
         &self,
         clearance_id: Uuid,
-        claim_token: [redacted],
+        claim_token: Uuid,
     ) -> Result<bool, RepoWatchStoreError> {
         let renewed = sqlx::query_scalar::<_, Uuid>(
             "UPDATE repo_watch_stale_review_clearance_claim
                 SET claimed_until = clock_timestamp() + interval '2 minutes'
               WHERE clearance_id = $1
-                AND claim_token = [redacted]
+                AND claim_token = $2
               RETURNING clearance_id",
         )
         .bind(clearance_id)
@@ -1106,7 +1106,7 @@ impl PostgresRepoWatchStore {
     pub async fn record_stale_review_clearance_outcome(
         &self,
         clearance_id: Uuid,
-        claim_token: [redacted],
+        claim_token: Uuid,
         outcome: RepoWatchStaleReviewClearanceOutcome,
         provider_state: RepoWatchObservedReviewState,
     ) -> Result<(), RepoWatchStoreError> {
@@ -1117,7 +1117,7 @@ impl PostgresRepoWatchStore {
              SELECT $1,$3,$4
                FROM repo_watch_stale_review_clearance_claim
               WHERE clearance_id = $1
-                AND claim_token = [redacted]
+                AND claim_token = $2
              ON CONFLICT (clearance_id) DO NOTHING",
         )
         .bind(clearance_id)
@@ -1133,7 +1133,7 @@ impl PostgresRepoWatchStore {
         sqlx::query(
             "DELETE FROM repo_watch_stale_review_clearance_claim
               WHERE clearance_id = $1
-                AND claim_token = [redacted]",
+                AND claim_token = $2",
         )
         .bind(clearance_id)
         .bind(claim_token)
@@ -1149,12 +1149,12 @@ impl PostgresRepoWatchStore {
     pub async fn release_stale_review_clearance_claim(
         &self,
         clearance_id: Uuid,
-        claim_token: [redacted],
+        claim_token: Uuid,
     ) -> Result<(), RepoWatchStoreError> {
         sqlx::query(
             "DELETE FROM repo_watch_stale_review_clearance_claim
               WHERE clearance_id = $1
-                AND claim_token = [redacted]",
+                AND claim_token = $2",
         )
         .bind(clearance_id)
         .bind(claim_token)
@@ -1252,7 +1252,7 @@ struct PendingClearanceRow {
 
 fn decode_pending_clearance(
     row: PendingClearanceRow,
-    claim_token: [redacted],
+    claim_token: Uuid,
 ) -> Result<RepoWatchPlannedStaleReviewClearance, RepoWatchStoreError> {
     repo_watch_stale_review_clearance_reason_from_str(&row.reason_kind)
         .ok_or(RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
