@@ -2,6 +2,33 @@
 
 use crate::*;
 
+#[derive(Debug, sqlx::FromRow)]
+struct StoredReclassifiedSteeringFacts {
+    disposition_kind: String,
+    origin_turn_id: Option<Uuid>,
+}
+
+#[derive(Debug, PartialEq)]
+enum TurnOriginPresence {
+    Absent,
+    Present,
+}
+
+impl From<Option<Uuid>> for TurnOriginPresence {
+    fn from(origin_turn_id: Option<Uuid>) -> Self {
+        match origin_turn_id {
+            Some(_) => Self::Present,
+            None => Self::Absent,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct ReclassifiedSteeringFacts {
+    disposition_kind: String,
+    origin: TurnOriginPresence,
+}
+
 /// S02 / S08 / INV-016 / INV-036: a NextSafePoint input accepted while a tool
 /// round executes is consumed by the same-turn continuation call, and the
 /// committed continuation shape reloads through the scheduling projection —
@@ -1574,8 +1601,8 @@ async fn inv006_inv025_inv029_inv037_replays_reclassified_tool_reconciliation_pr
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
     ));
 
-    let reclassified_steering: (String, bool) = sqlx::query_as(
-        "SELECT disposition_kind, origin_turn_id IS NOT NULL
+    let stored_steering: StoredReclassifiedSteeringFacts = sqlx::query_as(
+        "SELECT disposition_kind, origin_turn_id
            FROM accepted_input
           WHERE accepted_input_id = $1",
     )
@@ -1583,8 +1610,14 @@ async fn inv006_inv025_inv029_inv037_replays_reclassified_tool_reconciliation_pr
     .fetch_one(&pool)
     .await?;
     assert_eq!(
-        reclassified_steering,
-        (String::from("reclassified_as_turn_origin"), true,),
+        ReclassifiedSteeringFacts {
+            disposition_kind: stored_steering.disposition_kind,
+            origin: stored_steering.origin_turn_id.into(),
+        },
+        ReclassifiedSteeringFacts {
+            disposition_kind: String::from("reclassified_as_turn_origin"),
+            origin: TurnOriginPresence::Present,
+        },
     );
     assert_eq!(
         activated_turn(
