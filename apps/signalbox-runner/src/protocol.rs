@@ -625,6 +625,7 @@ pub struct RunnerConnection<S> {
     heartbeat: Option<HeartbeatExchange>,
     claimed_capability: Option<LeaseCorrelation>,
     pending_offer: Option<LeaseOffer>,
+    deferred_release: Option<signalbox_runner_wire::WorkspaceRelease>,
 }
 
 #[derive(Clone)]
@@ -737,6 +738,7 @@ where
             heartbeat: None,
             claimed_capability: None,
             pending_offer: None,
+            deferred_release: None,
         })
     }
 
@@ -859,6 +861,11 @@ where
         &mut self,
         state: &mut RunnerStateRoot,
     ) -> Result<Option<ServeOutcome>, RunnerConnectionError> {
+        if let Some(release) = self.deferred_release.take() {
+            return self
+                .serve_message(state, Message::WorkspaceRelease(release))
+                .await;
+        }
         let message = receive_message(&mut self.io).await?;
         self.serve_message(state, message).await
     }
@@ -1272,7 +1279,19 @@ where
                     return Ok(());
                 }
                 message = receive_message(&mut self.io) => {
-                    if self.serve_message(state, message?).await?.is_some() {
+                    let message = message?;
+                    if let Message::WorkspaceRelease(release) = message {
+                        if release.correlation.runner_id != self.receipt.runner_id()
+                            || self.deferred_release.is_some()
+                        {
+                            return Err(RunnerConnectionError::Violation(
+                                ProtocolViolation::ConnectionCorrelationMismatch,
+                            ));
+                        }
+                        self.deferred_release = Some(release);
+                        continue;
+                    }
+                    if self.serve_message(state, message).await?.is_some() {
                         return Err(RunnerConnectionError::Violation(
                             ProtocolViolation::UnexpectedFrame {
                                 expected: MessageKind::Heartbeat,
@@ -1337,6 +1356,14 @@ where
                 message = receive_message(&mut self.io) => {
                     let message = message?;
                     let received = MessageKind::of(&message);
+                    if !matches!(&message, Message::Heartbeat(_)) {
+                        return Err(RunnerConnectionError::Violation(
+                            ProtocolViolation::UnexpectedFrame {
+                                expected: MessageKind::Heartbeat,
+                                received,
+                            },
+                        ));
+                    }
                     if self.serve_message(state, message).await?.is_some() {
                         return Err(RunnerConnectionError::Violation(
                             ProtocolViolation::UnexpectedFrame {
@@ -3142,6 +3169,145 @@ mod tests {
         );
     }
 
+    /// INV-011 / INV-024 / INV-043: a workspace release received during
+    /// execution is deferred until terminal execution evidence is durable.
+    #[tokio::test]
+    async fn s31_inv011_inv024_inv043_execution_defers_workspace_release() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let advertisement = advertisement_with_exec_tool();
+        let mut state = enrolled_state_for(&parent, &advertisement);
+        let lease_correlation = retained_lease_correlation();
+        let release_correlation = release_correlation();
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: lease_correlation.clone(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        let dispatch = retained_dispatch();
+        let terminal = TerminalResult::Success {
+            text: String::from("fixture-result"),
+        };
+        let expected_terminal = terminal.clone();
+        let (release_execution, execution_released) = tokio::sync::oneshot::channel();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume accepts the exact retained lease");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the canonical claim acknowledgement is accepted");
+            let ready = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the canonical dispatch is accepted")
+                .expect("dispatch yields one executor handoff")
+                .into_dispatch_ready()
+                .expect("the dispatch forms its executor handoff");
+            let execution = async {
+                execution_released
+                    .await
+                    .expect("the release observation preserves execution");
+                terminal
+            };
+            connection
+                .execute_while_serving(&mut state, ready, execution)
+                .await
+                .expect("terminal evidence is projected before release acceptance");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the deferred release reaches a serving boundary")
+                .expect("the deferred release produces a cleanup handoff")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_lease_directives(DirectiveAction::Await),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::LeaseClaimed(LeaseClaimed {
+                    correlation: lease_correlation.clone(),
+                }),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::Dispatch(dispatch)).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::WorkspaceRelease(WorkspaceRelease {
+                    correlation: release_correlation.clone(),
+                }),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Heartbeat(Heartbeat {
+                    sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                    last_accepted_peer_sequence: NO_ACCEPTED_PEER_SEQUENCE,
+                }),
+            )
+            .await;
+            let heartbeat = receive_hub_message(&mut hub_io).await;
+            let observed_state = state_root(&parent);
+            assert_eq!(
+                observed_state.reconnect_inventory().workspace_operation,
+                None
+            );
+            release_execution
+                .send(())
+                .expect("the execution future remains live");
+            let result = receive_hub_message(&mut hub_io).await;
+            (heartbeat, result)
+        };
+        let (release, (heartbeat, result)) = tokio::join!(runner, hub);
+
+        assert!(matches!(release, ServeOutcome::WorkspaceReleaseReady(_)));
+        assert_eq!(
+            heartbeat,
+            Message::HeartbeatAck(HeartbeatAck {
+                challenge_sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                runner_sequence: positive(FIRST_RUNNER_SEQUENCE),
+                lease_phase: Some(LeasePhase {
+                    correlation: lease_correlation.clone(),
+                    phase: LeasePhaseKind::ExecutionMayHaveStarted,
+                }),
+                workspace_phase: None,
+            })
+        );
+        assert_eq!(
+            result,
+            Message::Result(ResultFrame {
+                correlation: lease_correlation.clone(),
+                result: expected_terminal.clone(),
+            })
+        );
+        assert_eq!(
+            state.reconnect_inventory().result,
+            Some(RetainedResult {
+                correlation: lease_correlation,
+                result: expected_terminal,
+            })
+        );
+        assert_eq!(
+            state.reconnect_inventory().workspace_operation,
+            Some(WorkspaceOperation::Release {
+                correlation: release_correlation,
+                phase: ReleasePhase::ReleaseAccepted,
+            })
+        );
+    }
+
     /// INV-011 / INV-024 / INV-043: resume sends the exact retained terminal
     /// pair and atomically clears it only after matching recorded directives.
     #[tokio::test]
@@ -4001,6 +4167,78 @@ mod tests {
             Some(WorkspaceOperation::Release {
                 correlation,
                 phase: ReleasePhase::ReleaseCompleted,
+            })
+        );
+    }
+
+    /// INV-011 / INV-024: cleanup serving rejects state-mutating frames before
+    /// they can create unrelated durable operation state.
+    #[tokio::test]
+    async fn inv011_inv024_workspace_cleanup_rejects_lease_offer_without_journaling() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let correlation = release_correlation();
+        let offer = unavailable_lease_offer();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the release");
+            let release = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the release reaches a serving boundary")
+                .expect("the release produces a cleanup handoff")
+                .into_workspace_release_ready()
+                .expect("the accepted release forms the cleanup handoff");
+            connection
+                .release_while_serving(
+                    &mut state,
+                    release,
+                    std::future::pending::<Result<(), ()>>(),
+                )
+                .await
+                .expect_err("a lease offer is not served during cleanup")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::WorkspaceRelease(WorkspaceRelease {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::LeaseOffer(offer)).await;
+        };
+        let (error, ()) = tokio::join!(runner, hub);
+
+        assert!(matches!(
+            error,
+            RunnerConnectionError::Violation(ProtocolViolation::UnexpectedFrame {
+                expected: MessageKind::Heartbeat,
+                received: MessageKind::LeaseOffer,
+            })
+        ));
+        assert_eq!(state.reconnect_inventory().operation_failure, None);
+        assert_eq!(state.reconnect_inventory().lease, None);
+        assert_eq!(
+            state.reconnect_inventory().workspace_operation,
+            Some(WorkspaceOperation::Release {
+                correlation,
+                phase: ReleasePhase::ReleaseAccepted,
             })
         );
     }

@@ -746,15 +746,15 @@ is terminalized as `protocol_failure` and closed.
 
 The daemon sends a heartbeat challenge every five seconds. The runner replies
 with its monotonically increasing heartbeat sequence and the exact current
-journaled lease phase when one exists; it still reports no workspace phase. The
-phase must name the active connection's runner and registration or the runner
-fails closed before sending. An acknowledgement must name the exact outstanding
-challenge, and a second challenge is not issued while the first remains
-unanswered. One missed interval durably records `suspect`; the third consecutive
-miss, fifteen seconds after the challenge, records `lost`. An exact late
-acknowledgement before the third miss appends `connected` with
-`heartbeat_recovered`. No present live path populates an operation phase because
-this runtime advertises and serves no operation provider.
+journaled lease phase when one exists. It also reports an accepted or completed
+workspace release, or its exact unrecorded cleanup failure, from the durable
+journal. A lease phase must name the active connection's runner and registration
+or the runner fails closed before sending. An acknowledgement must name the
+exact outstanding challenge, and a second challenge is not issued while the
+first remains unanswered. One missed interval durably records `suspect`; the
+third consecutive miss, fifteen seconds after the challenge, records `lost`. An
+exact late acknowledgement before the third miss appends `connected` with
+`heartbeat_recovered`.
 
 An unannounced transport close or protocol failure durably records `lost`; an
 epoch-targeted shutdown from either side durably records `shutdown`. On hub
@@ -817,16 +817,18 @@ accepts only matching paired `discard_as_recorded` or paired `fail_stale`
 directives for retained terminal evidence and atomically frees both slots. For a
 retained lease-offer failure, `resend` emits the exact stored envelope while
 retaining it, and `discard_as_recorded` or `fail_stale` frees it. Unsupported
-actions preserve the journal and fail closed. The only live failure producer is
-the registration-only empty catalog refusing an offered unknown tool. For
+actions preserve the journal and fail closed. Live failure producers are the
+registration-only empty catalog refusing an offered unknown tool and accepted
+workspace cleanup returning failure. For
 retained ready-workspace evidence, `resend` emits the complete stored frame
 while retaining it and `fail_stale` frees the exact correlation and payload
 together; every other action preserves them and fails closed.
 
 **Committed unimplemented functionality.** No present filesystem producer
-creates ready evidence or begins or advances a release, and resumed release
-directives remain unsupported. This boundary supplies neither workspace
-provisioning, workspace cleanup, nor a workstation tool inventory.
+creates ready evidence, and resumed release directives remain unsupported. This
+boundary supplies neither workspace provisioning nor a workstation tool
+inventory; accepted cleanup is supplied by the release handoff composed by its
+caller.
 
 **Committed unimplemented functionality.** Future execution support populates
 the bounded inventory that resume already exchanges, containing at most the one
