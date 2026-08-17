@@ -7209,7 +7209,7 @@ impl RepoWatchDifferError {
     pub const fn kind(&self) -> RepoWatchDifferFailureKind;
 }
 
-pub fn repo_watch_events_state_the_same_fact(
+pub fn repo_watch_events_have_equal_identified_content(
     left: &RepoWatchEvent,
     right: &RepoWatchEvent,
 ) -> bool;

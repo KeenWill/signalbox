@@ -17,7 +17,7 @@ use signalbox_application::{
     RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPullRequestState,
     RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
     RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchThreadObservation,
-    RepoWatchWorkflowRunObservation, repo_watch_events_state_the_same_fact,
+    RepoWatchWorkflowRunObservation, repo_watch_events_have_equal_identified_content,
 };
 use signalbox_domain::{
     BranchName, CheckRunName, CommitSha, GitHubObjectId, LabelName, PullRequestBody,
@@ -665,6 +665,13 @@ async fn exact_replay(
         .iter()
         .filter(|occurrence| is_new_occurrence(&coalesced, occurrence))
         .collect::<Vec<_>>();
+    // Every requested occurrence is accounted for: one this generation stored is
+    // compared on its whole event value, candidate identity included, while one
+    // it coalesced was just proven durable in an earlier generation under the
+    // same identity and identified content. A coalesced occurrence's own
+    // candidate identity is not compared, because it was never written — the
+    // fact is durable under the identity of the occurrence that first recorded
+    // it, so a fresh candidate has nothing to be checked against.
     let exact_events = stored.len() == expected.len()
         && stored.iter().zip(expected).all(|(stored, requested)| {
             stored.event == *requested.event()
@@ -699,16 +706,21 @@ fn is_new_occurrence(
     }
 }
 
-/// Whether two events state the same fact.
+/// Whether two events already known to share a content identity agree on the
+/// content that identity is derived from.
 ///
-/// Delegated to the application crate, which derives this equivalence from the
-/// same members the content identity is computed over. Comparing whole events
-/// here instead would let storage disagree with the identity it is coalescing
-/// on — a workflow renamed while its run was out of the observation restates
-/// its identity but not its display name, and the disagreement would abort the
-/// commit on the durable unique constraint.
+/// Only ever asked after a lookup by content identity, which is the precondition
+/// that makes the answer meaningful: identified content alone does not separate
+/// two occurrences of one recurring fact, because their sequences do.
+///
+/// Delegated to the application crate, which frames this content with the same
+/// function the identity is computed over. Comparing whole events here instead
+/// would let storage disagree with the identity it is coalescing on — a workflow
+/// renamed while its run was out of the observation restates its identity but
+/// not its display name, and the disagreement would abort the commit on the
+/// durable unique constraint.
 fn is_same_occurrence(stored: &RepoWatchEvent, derived: &RepoWatchEvent) -> bool {
-    repo_watch_events_state_the_same_fact(stored, derived)
+    repo_watch_events_have_equal_identified_content(stored, derived)
 }
 
 /// The already-durable occurrences among these, by content identity.

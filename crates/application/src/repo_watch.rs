@@ -1729,19 +1729,25 @@ fn repo_watch_event_stream_identity_v1(key: RepoWatchEventStreamKeyV1<'_>) -> [u
     hash.finish()
 }
 
-/// Whether two events state the same identified fact.
+/// Whether two events frame identical identifying content.
 ///
-/// This is exactly the equivalence the content identity induces: both are
-/// computed from `hash_identified_content`, so a caller comparing occurrences
-/// cannot disagree with the identities they carry. Members the identity
-/// deliberately excludes are excluded here too — the random `RepoWatchEventId`,
-/// and a workflow's mutable display name.
+/// **This is not identity equality, and equal identities are its precondition.**
+/// The identity digest frames this content and then the stream identity and the
+/// occurrence sequence, so two occurrences of one recurring fact — a label
+/// added, removed, and added again under an unchanged context — frame equal
+/// identified content while carrying different identities. Deciding to coalesce
+/// on this alone would discard a genuine later occurrence.
 ///
-/// Storage needs this to recognize a restated occurrence. Comparing whole
-/// events instead would call a renamed workflow's reappearing run a different
-/// fact while its identity said otherwise, and the durable unique constraint
-/// would then abort the commit.
-pub fn repo_watch_events_state_the_same_fact(
+/// Its use is to confirm that two occurrences *already known to share an
+/// identity* agree on the content that identity is derived from. Storage looks
+/// an occurrence up by content identity first and only then asks this, which is
+/// the order that makes the answer meaningful.
+///
+/// Both sides come from `hash_identified_content`, the same framing the identity
+/// is computed over, so this cannot disagree with the digest about which members
+/// identify a fact: the random `RepoWatchEventId` and a workflow's mutable
+/// display name are excluded from both.
+pub fn repo_watch_events_have_equal_identified_content(
     left: &RepoWatchEvent,
     right: &RepoWatchEvent,
 ) -> bool {
@@ -3511,6 +3517,53 @@ mod tests {
         Ok(())
     }
 
+    /// Equal identified content is not identity equality. A label added,
+    /// removed, and added again restates the first fact exactly, so the two
+    /// occurrences frame equal content, and only the advancing occurrence
+    /// sequence separates their identities. A caller that coalesced on content
+    /// alone would discard the second addition.
+    #[test]
+    fn equal_identified_content_is_not_identity_equality() -> Result<(), Box<dyn Error>> {
+        let ready = label(LABEL_READY)?;
+        let without = observation(
+            vec![pull_request(PullRequestFacts {
+                labels: Vec::new(),
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let with = observation(
+            vec![pull_request(PullRequestFacts {
+                labels: vec![ready.clone()],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let added = derive_occurrences(Some(&without), &with, &mut frontier, 1)?;
+        let removed = derive_occurrences(Some(&with), &without, &mut frontier, 10)?;
+        let added_again = derive_occurrences(Some(&without), &with, &mut frontier, 20)?;
+
+        assert_eq!(added.len(), 1);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(added_again.len(), 1);
+        assert!(repo_watch_events_have_equal_identified_content(
+            added[0].event(),
+            added_again[0].event()
+        ));
+        assert_ne!(
+            added[0].content_identity(),
+            added_again[0].content_identity(),
+            "a repeated label must advance its occurrence sequence"
+        );
+        Ok(())
+    }
+
     #[test]
     fn label_changes_emit_current_context_facts() -> Result<(), Box<dyn Error>> {
         let old_label = label(LABEL_OLD)?;
@@ -3818,7 +3871,8 @@ mod tests {
     /// must therefore state the same fact, while a different conclusion is a
     /// different fact under both.
     #[test]
-    fn stating_the_same_fact_agrees_with_the_content_identity() -> Result<(), Box<dyn Error>> {
+    fn equal_identified_content_agrees_with_the_identity_under_one_sequence()
+    -> Result<(), Box<dyn Error>> {
         let absent = observation(Vec::new(), Vec::new(), Vec::new(), Vec::new())?;
         let named = observation(
             Vec::new(),
@@ -3859,7 +3913,7 @@ mod tests {
         let after_rename = derive_occurrences(Some(&absent), &renamed, &mut frontier, 10)?;
         let after_failure = derive_occurrences(Some(&absent), &failed, &mut frontier, 20)?;
 
-        assert!(repo_watch_events_state_the_same_fact(
+        assert!(repo_watch_events_have_equal_identified_content(
             first[0].event(),
             after_rename[0].event()
         ));
@@ -3867,7 +3921,7 @@ mod tests {
             first[0].content_identity(),
             after_rename[0].content_identity()
         );
-        assert!(!repo_watch_events_state_the_same_fact(
+        assert!(!repo_watch_events_have_equal_identified_content(
             first[0].event(),
             after_failure[0].event()
         ));

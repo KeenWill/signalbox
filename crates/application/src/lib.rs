@@ -88,7 +88,7 @@ pub use repo_watch::{
     RepoWatchTemplateResolver, RepoWatchThreadObservation, RepoWatchThreadState,
     RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
     UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
-    repo_watch_events_state_the_same_fact,
+    repo_watch_events_have_equal_identified_content,
 };
 pub use review_orchestration::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,
