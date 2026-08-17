@@ -872,10 +872,17 @@ pub(crate) struct WebhookRateLimiter {
     verified: Mutex<HashMap<NonZeroU64, HookRateWindow>>,
 }
 
+/// One hook's admission counters for the current window and the one before it.
+///
+/// A fixed window that simply resets admits a full allowance on either side of
+/// its boundary, so twice the ceiling can pass within one rolling minute. The
+/// preceding window's count is carried in proportion to how much of it still
+/// overlaps the trailing minute, which bounds every rolling window instead.
 #[derive(Clone, Copy, Debug)]
 struct HookRateWindow {
     started: Instant,
     admitted: u32,
+    preceding: u32,
 }
 
 impl WebhookRateLimiter {
@@ -904,14 +911,26 @@ impl WebhookRateLimiter {
         let window = windows.entry(hook_id).or_insert(HookRateWindow {
             started: now,
             admitted: 0,
+            preceding: 0,
         });
-        if now.duration_since(window.started) >= RATE_WINDOW {
+        let elapsed = now.duration_since(window.started);
+        if elapsed >= RATE_WINDOW.saturating_mul(2) {
+            // Both windows are older than the trailing minute.
             *window = HookRateWindow {
                 started: now,
                 admitted: 0,
+                preceding: 0,
+            };
+        } else if elapsed >= RATE_WINDOW {
+            // Roll forward exactly one window, so what is carried stays aligned
+            // to real time rather than to when this request happened to arrive.
+            *window = HookRateWindow {
+                started: window.started + RATE_WINDOW,
+                admitted: 0,
+                preceding: window.admitted,
             };
         }
-        if window.admitted >= ceiling {
+        if estimated_rolling_admissions(window, now) >= u128::from(ceiling) {
             return false;
         }
         window.admitted += 1;
@@ -933,9 +952,24 @@ impl WebhookRateLimiter {
                 HookRateWindow {
                     started,
                     admitted: ceiling,
+                    preceding: 0,
                 },
             );
     }
+}
+
+/// What one hook has admitted across the trailing window ending at `now`.
+///
+/// The current window is counted exactly; the preceding one contributes the
+/// share of itself that still lies inside the trailing window.
+fn estimated_rolling_admissions(window: &HookRateWindow, now: Instant) -> u128 {
+    let window_span = RATE_WINDOW.as_millis();
+    let elapsed = now
+        .duration_since(window.started)
+        .as_millis()
+        .min(window_span);
+    let carried = u128::from(window.preceding) * (window_span - elapsed) / window_span;
+    carried + u128::from(window.admitted)
 }
 
 #[cfg(test)]
@@ -1214,7 +1248,7 @@ mod tests {
     }
 
     #[test]
-    fn per_hook_rate_window_reopens_at_one_minute() {
+    fn a_saturated_window_stays_closed_across_its_boundary() {
         let limiter = WebhookRateLimiter::new();
         let started = std::time::Instant::now();
         WebhookRateLimiter::saturate(
@@ -1224,10 +1258,33 @@ mod tests {
             MAX_WEBHOOK_DELIVERIES_PER_MINUTE,
         );
 
-        assert!(WebhookRateLimiter::admit_at(
+        // The instant the fixed window would have reset, the whole preceding
+        // allowance still lies inside the trailing minute.
+        assert!(!WebhookRateLimiter::admit_at(
             &limiter.verified,
             FIXTURE_HOOK_ID,
             started + Duration::from_secs(60),
+            MAX_WEBHOOK_DELIVERIES_PER_MINUTE
+        ));
+    }
+
+    #[test]
+    fn a_saturated_window_reopens_in_proportion_as_it_ages() {
+        let limiter = WebhookRateLimiter::new();
+        let started = std::time::Instant::now();
+        WebhookRateLimiter::saturate(
+            &limiter.verified,
+            FIXTURE_HOOK_ID,
+            started,
+            MAX_WEBHOOK_DELIVERIES_PER_MINUTE,
+        );
+
+        // Half of the saturated window has left the trailing minute, so half of
+        // the allowance is available again.
+        assert!(WebhookRateLimiter::admit_at(
+            &limiter.verified,
+            FIXTURE_HOOK_ID,
+            started + Duration::from_secs(90),
             MAX_WEBHOOK_DELIVERIES_PER_MINUTE
         ));
     }

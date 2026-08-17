@@ -789,14 +789,18 @@ what bounds a peer that keeps dripping bytes, since each byte received restarts
 that deadline. The daemon serves HTTP/1 directly for this reason: the head
 ceilings sit on the connection builder, below any router.
 
-Each hook admits at most 3,000 deliveries in each 60-second window, charged only
-once a delivery has proved the shared secret. Nothing is charged before
-verification: a budget keyed on the hook a request claims is a lever the
-attacker holds and GitHub does not, and spending it with forged signatures would
-reject the deliveries it exists to protect. Unauthenticated cost is bounded by
-resources instead. These are hard safety ceilings, not configuration knobs. The
-listener does not grant GitHub-originated data process-protocol authority,
-session authority, or polling credentials.
+Each hook admits at most 3,000 deliveries in any rolling 60-second window,
+charged only once a delivery has proved the shared secret. The count is smoothed
+across window boundaries by carrying the preceding window in proportion to how
+much of it still overlaps the trailing minute, because a window that simply
+reset would admit a full allowance on either side of its boundary and pass twice
+the ceiling within one rolling minute. Nothing is charged before verification: a
+budget keyed on the hook a request claims is a lever the attacker holds and
+GitHub does not, and spending it with forged signatures would reject the
+deliveries it exists to protect. Unauthenticated cost is bounded by resources
+instead. These are hard safety ceilings, not configuration knobs. The listener
+does not grant GitHub-originated data process-protocol authority, session
+authority, or polling credentials.
 
 **Implemented behavior.** A verified delivery is durably admitted before the
 listener returns `202 Accepted`. `repo_watch_webhook_delivery` keeps the unique
@@ -860,26 +864,28 @@ cancel the reconciliation sweep, so one delivery whose targeted request keeps
 failing cannot abort every scheduled poll. A poll that observes the same
 transition as an already-admitted delivery cannot advance the cursor past it and
 leave the delivery applying to state that already contains it. A delivery's
-targeted provider queries run before anything is recorded, so a transient
-provider failure leaves it pending and retryable rather than terminal with a
-query that never ran; its terminal disposition is then recorded before the
-resulting cursor commit, so a failure between those two cannot make a retry
-re-derive projections against a cursor that has already moved past them. On
-daemon restart the baseline is re-seeded from the durable cursor, which is the
-same complete reconciliation a full poll performs. The divergence a re-seeding
-leaves is accepted rather than removed: a delivery projected against a freshly
-seeded baseline records `cross_drain_shadow_gap` on its projections, so the gap
-is explained in the parity view instead of being carried by a durable shadow
-cursor. `repo_watch_webhook_projection` records each resulting version-one
-content identity and event kind, and the cause of any divergence the producing
-delivery already knows, while `repo_watch_webhook_disposition` atomically
-records projected, duplicate-state, superseded, ignored, or quarantined terminal
-disposition. Shadow mode reserves no committed disposition and no resulting
-cursor generation: the schema refuses both, so the durable shape a later write
-mode would need is left to the ruling that authorizes it. The
-`repo_watch_webhook_parity` view joins those identities to version-one
-poll-produced `repo_watch_event` rows since that repository's first shadow
-receipt and reports `matched`, `webhook_only`, `poll_only`, or
+targeted provider queries and the cursor commit they produce both complete
+before anything is recorded, so a transient provider or commit failure leaves
+the delivery pending and the whole step is retried, rather than terminal with
+work that never landed. Recording after the commit is safe because projections
+are derived from the repository task shadow baseline, which a targeted commit
+does not replace: a retry reproduces the same projections even though the cursor
+has moved. The shadow advances only once the disposition is durable, so the two
+never disagree. On daemon restart the baseline is re-seeded from the durable
+cursor, which is the same complete reconciliation a full poll performs. The
+divergence a re-seeding leaves is accepted rather than removed: a delivery
+projected against a freshly seeded baseline records `cross_drain_shadow_gap` on
+its projections, so the gap is explained in the parity view instead of being
+carried by a durable shadow cursor. `repo_watch_webhook_projection` records each
+resulting version-one content identity and event kind, and the cause of any
+divergence the producing delivery already knows, while
+`repo_watch_webhook_disposition` atomically records projected, duplicate-state,
+superseded, ignored, or quarantined terminal disposition. Shadow mode reserves
+no committed disposition and no resulting cursor generation: the schema refuses
+both, so the durable shape a later write mode would need is left to the ruling
+that authorizes it. The `repo_watch_webhook_parity` view joins those identities
+to version-one poll-produced `repo_watch_event` rows since that repository's
+first shadow receipt and reports `matched`, `webhook_only`, `poll_only`, or
 `not_directly_mapped`, each divergent row alongside a `cause` drawn from one
 closed vocabulary: `compressed_transition`, `context_drift`, `poll_only_family`,
 and `cross_drain_shadow_gap`. A delivery records the cause it knows beside its

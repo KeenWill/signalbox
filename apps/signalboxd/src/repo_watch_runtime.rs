@@ -822,21 +822,6 @@ impl RepositoryWatchTask {
                                 .map(targeted_query_projection)
                                 .collect::<Result<Vec<_>, _>>()?,
                         );
-                        // Its disposition is then durable before the cursor
-                        // mutation becomes externally visible, so a failure
-                        // between the two reproduces this disposition rather than
-                        // re-deriving against a cursor that already moved past it.
-                        self.record_webhook_terminal(
-                            pending,
-                            projections,
-                            RepoWatchWebhookDisposition::Projected,
-                            None,
-                        )
-                        .await?;
-                        self.webhook_shadow = Some(WebhookShadowBaseline {
-                            observation,
-                            identity_frontier,
-                        });
                         if let Some(prepared) = prepared {
                             // A targeted poll reconciles only the pull requests it
                             // names, so its cursor does not carry what the webhook
@@ -845,6 +830,29 @@ impl RepositoryWatchTask {
                             // the complete sweep that replaces it.
                             self.commit_targeted_refresh(prepared).await?;
                         }
+                        // The delivery becomes terminal only once every durable
+                        // write it asked for has landed, so a failed cursor commit
+                        // leaves it pending and the whole step is retried.
+                        //
+                        // Recording after the commit was unsafe while projections
+                        // were derived from the durable cursor, because a retry
+                        // would then derive against a cursor that had moved. They
+                        // are derived from the repository task's shadow baseline
+                        // now, which a targeted commit deliberately does not
+                        // replace, so a retry reproduces these same projections.
+                        self.record_webhook_terminal(
+                            pending,
+                            projections,
+                            RepoWatchWebhookDisposition::Projected,
+                            None,
+                        )
+                        .await?;
+                        // The shadow advances only once that disposition is
+                        // durable, so the two never disagree.
+                        self.webhook_shadow = Some(WebhookShadowBaseline {
+                            observation,
+                            identity_frontier,
+                        });
                         self.process_dispatches().await
                     }
                 }
