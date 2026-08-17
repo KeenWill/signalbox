@@ -23,6 +23,7 @@ mod imported_session;
 mod model_call;
 mod model_execution;
 mod model_settings;
+mod program_journal;
 mod provider_evidence;
 mod queue_order;
 mod replace_session_defaults;
@@ -151,6 +152,13 @@ pub use model_settings::{
     OpenAiServiceTier, ReasoningLevel, ResolvedModelSettings, ServiceTier,
     SessionModelSettingsChanged, SettingOverlay, TurnModelSettingsResolved,
     UnsupportedModelSetting, ValidatedModelSettings,
+};
+pub use program_journal::{
+    DeliveryFrame, DeliveryKind, DeliveryOrdinal, EffectRequest, FaultCause, FaultEvidenceRef,
+    InlineFramePayload, JournalEntry, JournalFrame, JournalPosition, NondeterminismError,
+    ProgramCapability, ProgramFault, ProgramJournal, ProgramJournalError, RejectReason,
+    ReplayCursor, ReplayInstruction, ReplayedRequest, RequestFrame, RequestKind, RequestOrdinal,
+    ScopeOperation, ScopeOrdinal, ScopeRequest,
 };
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,
@@ -492,6 +500,11 @@ define_identity!(
 define_identity!(
     /// Identifies one stable runner-owned workspace manifest across lifecycle changes.
     WorkspaceManifestId
+);
+
+define_identity!(
+    /// Identifies one durable execution of a registered program.
+    ProgramRunId
 );
 
 define_identity!(
