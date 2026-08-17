@@ -210,10 +210,10 @@ impl FileMediaProcessCeilings {
         }
     }
 
-    /// Returns whether every candidate value is positive and no greater.
+    /// Returns whether the protocol frame remains fixed and every resource value is positive
+    /// and no greater.
     pub const fn admits(self, candidate: Self) -> bool {
-        candidate.frame_bytes > 0
-            && candidate.frame_bytes <= self.frame_bytes
+        candidate.frame_bytes == self.frame_bytes
             && candidate.memory_bytes > 0
             && candidate.memory_bytes <= self.memory_bytes
             && candidate.cpu_seconds > 0
@@ -295,6 +295,17 @@ mod tests {
                 MAX_PROCESSOR_FRAME_BYTES,
                 MAX_WORKER_MEMORY_BYTES,
                 MAX_WORKER_CPU_SECONDS + 1,
+                MAX_WORKER_WALL_SECONDS,
+                MAX_WORKER_FILE_DESCRIPTORS,
+                MAX_WORKER_STDERR_BYTES,
+            ),
+            None
+        );
+        assert_eq!(
+            FileMediaProcessCeilings::try_lower(
+                MAX_PROCESSOR_FRAME_BYTES - 1,
+                MAX_WORKER_MEMORY_BYTES,
+                MAX_WORKER_CPU_SECONDS,
                 MAX_WORKER_WALL_SECONDS,
                 MAX_WORKER_FILE_DESCRIPTORS,
                 MAX_WORKER_STDERR_BYTES,

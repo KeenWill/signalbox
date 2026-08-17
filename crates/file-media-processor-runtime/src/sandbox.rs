@@ -151,10 +151,15 @@ impl SandboxedFileMediaProcessor {
             .take()
             .ok_or(ProcessorFailure::Unavailable)?;
         let expected = declaration_fingerprint(declarations);
+        let output_limit = u64::try_from(expected.len())
+            .map_err(|_| ProcessorFailure::Unavailable)?
+            .checked_add(1)
+            .ok_or(ProcessorFailure::Unavailable)?;
         let deadline = Duration::from_secs(self.ceilings.wall_seconds());
         let waited = tokio::time::timeout(deadline, async {
             let mut observed = Vec::new();
             stdout
+                .take(output_limit)
                 .read_to_end(&mut observed)
                 .await
                 .map_err(|_| ProcessorFailure::Unavailable)?;
@@ -256,21 +261,27 @@ impl SandboxedFileMediaProcessor {
             cancellation_poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
-                    result = &mut session => break result,
+                    biased;
                     () = tokio::time::sleep_until(deadline) => break Err(ProcessorFailure::TimedOut),
                     _ = cancellation_poll.tick() => {
                         if cancellation.is_cancelled() {
                             break Err(ProcessorFailure::Cancelled);
                         }
                     }
+                    result = &mut session => {
+                        if Instant::now() >= deadline {
+                            break Err(ProcessorFailure::TimedOut);
+                        }
+                        break result;
+                    }
                 }
             }
         };
-        let outcome = admit_completed(outcome, cancellation);
         if outcome.is_err() {
             running.terminate().await;
         }
         let diagnostics = finish_diagnostics(&mut stderr_task).await;
+        let outcome = admit_completed(outcome, cancellation);
         match (outcome, diagnostics) {
             (Ok(output), Ok(())) => Ok(output),
             (Err(error), _) => Err(error),
