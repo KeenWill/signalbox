@@ -5,7 +5,9 @@
 //! execution lives in `tool_attempt`; persistence, registry lookup, and
 //! executor selection remain outside the domain boundary.
 
-use serde::{Deserialize, Serialize, de::IgnoredAny};
+use serde::{
+    Deserialize, Serialize, Serializer, de::IgnoredAny, ser::SerializeMap, ser::SerializeSeq,
+};
 
 use crate::{
     AssistantText, DurableCommandId, ModelCallId, SessionId, ToolAttemptId, ToolRequestId, TurnId,
@@ -161,7 +163,7 @@ impl NormalizedToolArguments {
         let mut canonical = Vec::with_capacity(value.len());
         let mut serializer = serde_json::Serializer::new(&mut canonical);
         let serializer = serde_stacker::Serializer::new(&mut serializer);
-        let serialization = decoded.serialize(serializer);
+        let serialization = LexicallyOrderedJson(&decoded).serialize(serializer);
         drop_json_value_iteratively(decoded);
         serialization.map_err(|_| ToolArgumentsError {
             value: value.clone(),
@@ -218,6 +220,43 @@ impl NormalizedToolArguments {
     /// Returns the tag and stored text.
     pub fn into_parts(self) -> (ToolArgumentsKind, String) {
         (self.kind, self.value)
+    }
+}
+
+/// A stacker-compatible view that restores the lexical object ordering which
+/// canonical tool JSON promises independently of serde_json's map backend.
+struct LexicallyOrderedJson<'a>(&'a serde_json::Value);
+
+impl Serialize for LexicallyOrderedJson<'_> {
+    fn serialize<SerializerType>(
+        &self,
+        serializer: SerializerType,
+    ) -> Result<SerializerType::Ok, SerializerType::Error>
+    where
+        SerializerType: Serializer,
+    {
+        match self.0 {
+            serde_json::Value::Null => serializer.serialize_unit(),
+            serde_json::Value::Bool(value) => serializer.serialize_bool(*value),
+            serde_json::Value::Number(value) => value.serialize(serializer),
+            serde_json::Value::String(value) => serializer.serialize_str(value),
+            serde_json::Value::Array(values) => {
+                let mut sequence = serializer.serialize_seq(Some(values.len()))?;
+                for value in values {
+                    sequence.serialize_element(&Self(value))?;
+                }
+                sequence.end()
+            }
+            serde_json::Value::Object(object) => {
+                let mut entries = object.iter().collect::<Vec<_>>();
+                entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+                let mut map = serializer.serialize_map(Some(entries.len()))?;
+                for (key, value) in entries {
+                    map.serialize_entry(key, &Self(value))?;
+                }
+                map.end()
+            }
+        }
     }
 }
 
