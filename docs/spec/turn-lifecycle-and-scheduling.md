@@ -13,6 +13,9 @@ The cancelled-turn outbox projection for stopped tool responses with completed
 producing calls was re-verified against this PR
 (`agent/cancelled-outbox-completed-call`).
 
+Tool-attempt reconciliation predecessor replay was verified against this PR
+(`agent/tool-reconciliation-origin-replay`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
