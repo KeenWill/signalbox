@@ -247,10 +247,20 @@ fn validate_manifest_header(manifest: &CorpusManifest) -> Result<(), ManifestErr
             validate_bounded_text("repository path", path, MAX_REPOSITORY_PATH_BYTES)?;
             portable_relative_path(path)?;
         }
-        ManifestCaseSource::DatabaseNative { .. } => {}
+        ManifestCaseSource::DatabaseNative { cases } => {
+            if cases.is_empty() {
+                return Err(ManifestError::Corpus(crate::CorpusLoadError::EmptyCorpus));
+            }
+            if manifest.integrity.source_sha256.is_some() {
+                return Err(ManifestError::UnexpectedSourceDigest);
+            }
+        }
         ManifestCaseSource::BlobReference {
             store, byte_length, ..
         } => {
+            if manifest.integrity.source_sha256.is_some() {
+                return Err(ManifestError::UnexpectedSourceDigest);
+            }
             if *byte_length == 0 {
                 return Err(ManifestError::InvalidBlobByteLength);
             }
@@ -571,6 +581,42 @@ mod tests {
         let decoded = decode_manifest(&encoded).expect("the blob reference shape is admitted");
 
         assert_eq!(decoded, manifest);
+    }
+
+    #[test]
+    fn database_native_manifest_rejects_empty_corpus() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        manifest["case_source"] = serde_json::json!({
+            "kind": "database_native",
+            "cases": []
+        });
+        manifest["integrity"]["source_sha256"] = serde_json::Value::Null;
+        manifest["integrity"]["cases"] = serde_json::json!([]);
+        let encoded = serde_json::to_vec(&manifest).expect("the empty manifest serializes");
+
+        let error = decode_manifest(&encoded).expect_err("an empty embedded corpus is rejected");
+
+        assert!(error.to_string().contains("no cases"));
+    }
+
+    #[test]
+    fn blob_reference_manifest_rejects_repository_source_digest() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        let digest = manifest["integrity"]["corpus_sha256"].clone();
+        manifest["case_source"] = serde_json::json!({
+            "kind": "blob_reference",
+            "store": null,
+            "digest": digest,
+            "byte_length": 1
+        });
+        let encoded = serde_json::to_vec(&manifest).expect("the contradictory manifest serializes");
+
+        let error = decode_manifest(&encoded)
+            .expect_err("a blob source cannot carry repository byte integrity");
+
+        assert!(error.to_string().contains("must not carry source_sha256"));
     }
 
     #[test]

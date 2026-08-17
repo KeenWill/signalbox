@@ -83,7 +83,7 @@ async fn manifest_import_conforms_with_disk_and_scores_identically() -> Result<(
     let key = disk_registrations
         .first()
         .expect("the manifest-backed disk store has one registration")
-        .key
+        .key()
         .clone();
     let database = DatabaseCorpusStore::new(pool.clone());
     let imported = database.import_manifest(seed_manifest_path()).await?;
@@ -168,6 +168,41 @@ async fn stored_case_decode_error_retains_serde_context() -> Result<(), Box<dyn 
         "the serde decode source is retained"
     );
     assert!(error.to_string().contains("missing field"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stored_case_identity_must_match_its_row_key() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let disk = DiskCorpusStore::open(seed_manifest_path())?;
+    let registration = disk
+        .enumerate()
+        .await?
+        .into_iter()
+        .next()
+        .expect("the seed store has one registration");
+    let database = DatabaseCorpusStore::new(pool.clone());
+    database.import_manifest(seed_manifest_path()).await?;
+    sqlx::query(
+        "UPDATE evaluation_corpus_case
+            SET case_id = 'different-row-key'
+          WHERE corpus_name = $1 AND corpus_version = $2 AND replay_position = 0",
+    )
+    .bind(&registration.key().name)
+    .bind(&registration.key().version)
+    .execute(&pool)
+    .await?;
+
+    let error = database
+        .load(registration.key())
+        .await
+        .expect_err("a row key that disagrees with the case payload fails closed");
+
+    assert!(error.to_string().contains("does not match its row key"));
 
     pool.close().await;
     drop(container);
