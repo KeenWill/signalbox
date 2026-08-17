@@ -1469,6 +1469,7 @@ async fn delegated_initial_task_activates_without_an_accepted_input() -> Result<
             ModelCallId::from_uuid(Uuid::from_u128(0xd40f)),
         )
         .await?
+        .expect("an admitted credential previews the activation operation")
         .render(Box::new([]))?;
     let frontier_entries = operation
         .request()
