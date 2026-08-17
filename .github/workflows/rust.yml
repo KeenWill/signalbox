@@ -42,6 +42,8 @@ jobs:
         run: python3 scripts/check_docs_consistency.py
       - name: Check migration version uniqueness
         run: python3 scripts/check_migration_versions.py
+      - name: Check numeric bound declarations
+        run: python3 scripts/check_numeric_bounds.py
       - name: Check user vocabulary
         run: python3 scripts/check_user_vocabulary.py
       # Gates normally: the tree satisfies this today, so the step can only
@@ -94,6 +96,8 @@ jobs:
         run: python3 scripts/test_check_domain_spine.py
       - name: Test migration version checker
         run: python3 scripts/test_check_migration_versions.py
+      - name: Test numeric bound checker
+        run: python3 scripts/test_check_numeric_bounds.py
       - name: Test panic-gate checker
         run: python3 scripts/test_check_panic_gate.py
       # The checker's own tests gate normally: report-only describes what the
@@ -156,12 +160,13 @@ jobs:
             exit 1
           }
   rust-checks:
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -248,17 +253,16 @@ jobs:
   domain-instruction-counts:
     name: Domain instruction counts (report only)
     continue-on-error: true
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
-      - name: Install Valgrind
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes valgrind
+      # The pinned Signalbox runner image includes Valgrind, so this public-repo
+      # job needs neither root access nor an unpinned package installation.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -300,7 +304,7 @@ jobs:
   # checks the sources out and passes `--workspace-remap`.
   postgres-integration-build:
     name: postgres-integration (build)
-    runs-on: ubuntu-latest
+    runs-on: signalbox-docker
     # Generous by design: this job now absorbs all five suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
@@ -311,6 +315,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
       # First, so a malformed manifest fails before any compilation. The run
       # job expands this into its shard matrix, which is why adding a shard is
@@ -327,7 +332,7 @@ jobs:
           cache-on-failure: true
           key: postgres-integration
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@b27e114ddbae5cc01df19a22cf70a124d5177567 # v2.86.0
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -395,9 +400,11 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # GitHub-hosted Ubuntu runners provide Docker. Each test below starts its own
-  # pinned PostgreSQL container through testcontainers, so the four runner CPUs
-  # can execute isolated tests concurrently without sharing database state.
+  # The dedicated Docker fleet gives each shard an isolated DinD daemon. The
+  # build and run jobs share the same runner image and absolute work-path shape,
+  # which keeps paths embedded in nextest archives valid across their pods.
+  # Each test starts its own pinned PostgreSQL container through testcontainers,
+  # so four test processes can run without sharing database state.
   #
   # The matrix is generated from `.github/postgres-integration-suites.toml`:
   # one runner per shard, so a suite declaring one shard costs one runner and
@@ -415,7 +422,11 @@ jobs:
       postgres-integration
       (${{ matrix.suite }} ${{ matrix.partition }}/${{ matrix.partitions }})
     needs: postgres-integration-build
-    runs-on: ubuntu-latest
+    runs-on: signalbox-docker
+    # Keep security-sensitive sockets and filesystem fixtures off the NFS
+    # workspace: their permission and atomicity contracts require local /tmp.
+    env:
+      TMPDIR: /tmp
     # Measured against the shards rather than guessed. The former three
     # persistence partitions were balanced but had grown to roughly 8m15s each;
     # runner took about eight minutes whole, and signalboxd about five. The
@@ -439,9 +450,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@b27e114ddbae5cc01df19a22cf70a124d5177567 # v2.86.0
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive
