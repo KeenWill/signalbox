@@ -1750,7 +1750,8 @@ before both the availability probe and dispatch, recreates standard usr-merge
 aliases only when their targets are inside the configured mounts, and derives
 `PATH` only from configured mounts. The proof-only generic exec-family runner
 composes that constructor and advertises `WorkspaceRestricted`. Resource limits
-remain separate work, with first-release resource limits still owner-gated in
+remain separate work, with first-release resource limits still awaiting a user
+decision in
 [open questions](../open-questions.md#identity-credentials-and-resource-governance).
 
 Confinement is defined over that writable root, which need not be a repository.
