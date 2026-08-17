@@ -851,13 +851,16 @@ drain succeeded and whose dispatch work then failed returns it to five seconds,
 and one that failed before reaching the drain arms a retry at the current delay
 without advancing it, so unrelated dispatch failures cannot grow the delay,
 suppress admission wakes, or make polls omit their drain steps while projection
-is healthy. Such a retry always lands in the future: leaving an owed deadline in
-the past would select the same attempt again immediately, because the retry
-precedes the poll. A poll's own drain runs at most once per attempt — the step
-after the poll is skipped when the step before it failed — so work already known
-to be failing waits for that delay rather than repeating inside one attempt. A
-failed full poll schedules that retry only when none is already owed, an
-admission wake is suppressed while one is, and a full poll omits both of its
+is healthy. Taking a retry spends its deadline, so an attempt that then fails
+before its drain arms a fresh one rather than selecting itself again
+immediately, which the retry's priority over polling would otherwise cause. A
+deadline that expired while some other attempt ran is left expired, so the next
+pass takes it at once rather than having it pushed out again by a poll that
+keeps failing slowly. A poll's own drain runs at most once per attempt — the
+step after the poll is skipped when the step before it failed — so work already
+known to be failing waits for that delay rather than repeating inside one
+attempt. A failed full poll schedules that retry only when none is already owed,
+an admission wake is suppressed while one is, and a full poll omits both of its
 drain steps while one is, so neither a rapidly failing poll nor an authenticated
 replay stream can defer or bypass the backoff; a suppressed wake coalesces and
 is observed by the attempt that follows the retry. A poll taken during a backoff
