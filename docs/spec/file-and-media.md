@@ -94,9 +94,10 @@ content is terminal `EncryptedOrLocked`; version one has no password channel.
 
 The stable `file_inspect` contract accepts exactly a canonical `digest` and an
 optional bounded visible-part selector. `file_read` adds an exact provider-owned
-`view` and object `options`; it accepts no model-supplied type or reader. Both
-are effect-free tool declarations. The generic executor projects only compact
-JSON or bounded typed failure evidence.
+`view` and object `options`; the serialized options object is limited to 65,536
+bytes before adapter validation, and the request accepts no model-supplied type
+or reader. Both are effect-free tool declarations. The generic executor projects
+only compact JSON or bounded typed failure evidence.
 
 `signalbox-file-media-provider-runtime` supplies their registry-backed service.
 Its injected `FileUseResolver` is the sole authorization boundary: it must reuse
@@ -174,8 +175,8 @@ worker exit, and complete bounded stderr drain. EOF before a final frame, crash,
 signal, timeout, cancellation, malformed or oversized framing, extra output,
 source failure, or limit excess discards the whole result. Thus the isolation
 slice can leave neither a partial durable result nor parser output that bypasses
-the registry sanitizer (INV-066 through INV-071). Authoritative cancellation
-terminates the in-flight worker and admits no result (INV-073).
+the registry sanitizer (INV-074 through INV-079). Authoritative cancellation
+terminates the in-flight worker and admits no result (INV-080).
 
 The version-one compiled ceilings are:
 
@@ -183,7 +184,8 @@ The version-one compiled ceilings are:
 | ------------------------------------- | ---------------------- |
 | Probe prefix and suffix               | 65,536 bytes each      |
 | Probe ranges / cumulative bytes       | 16 / 262,144           |
-| Processor frame / text-or-JSON body   | 1,048,576 / 786,432    |
+| Processor frame / text-or-JSON body   | 1,048,576 / 170,000    |
+| Serialized read options               | 65,536 bytes           |
 | Structured depth / nodes              | 64 / 100,000           |
 | Observed container entries            | 10,000                 |
 | Image axis / decoded pixels           | 8,192 / 16,777,216     |
@@ -196,9 +198,12 @@ The version-one compiled ceilings are:
 | Worker descriptors / retained stderr  | 32 / 16,384 bytes      |
 | Worker descendants                    | 0                      |
 
-`FileMediaCeilings` and `FileMediaProcessCeilings` admit only positive effective
-values at or below these compiled maxima; descendants are fixed at zero
-(INV-072). A stored source may be larger. A streaming view must request it in
+`FileMediaCeilings` admits only positive effective values at or below its
+compiled maxima. `FileMediaProcessCeilings` keeps the protocol frame fixed at
+1,048,576 bytes while admitting only positive resource values at or below their
+compiled maxima; descendants are fixed at zero (INV-072). The text-or-JSON body
+ceiling reserves enough frame space for worst-case JSON escaping and envelope
+fields. A stored source may be larger. A streaming view must request it in
 bounded frames under its finite declared source-work envelope; a whole-decode
 view may reject it without changing the blob.
 
