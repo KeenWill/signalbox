@@ -218,6 +218,14 @@ pub(crate) fn assert_structured(result: FileReadResult, expected: &serde_json::V
 }
 
 #[track_caller]
+pub(crate) fn assert_structured_json(result: FileReadResult, expected: &str) {
+    assert!(matches!(result, FileReadResult::Structured { .. }));
+    if let FileReadResult::Structured { body, .. } = result {
+        assert_eq!(body.to_string(), expected);
+    }
+}
+
+#[track_caller]
 pub(crate) fn assert_processor_failed(result: Result<FileReadResult, FileMediaFailure>) {
     assert_eq!(result, Err(FileMediaFailure::ProcessorFailed));
 }

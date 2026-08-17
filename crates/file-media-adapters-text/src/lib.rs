@@ -186,7 +186,7 @@ fn structured_view(description: &str) -> Result<ReadViewDeclaration, Box<dyn Err
         ReadViewBounds::Structured {
             source_bytes: MAX_TEXT_FAMILY_BYTES,
             output_bytes: MAX_TEXT_FAMILY_BYTES as usize,
-            depth: 64,
+            depth: json_adapter::MAX_STRUCTURED_DEPTH,
             nodes: 100_000,
             string_bytes: MAX_TEXT_FAMILY_BYTES as usize,
         },

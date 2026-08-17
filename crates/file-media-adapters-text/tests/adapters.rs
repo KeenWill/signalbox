@@ -56,6 +56,23 @@ async fn json_detects_validates_and_returns_structured_data() -> Result<(), Box<
 }
 
 #[tokio::test]
+async fn json_preserves_arbitrary_precision_numbers() -> Result<(), Box<dyn Error>> {
+    let bytes = fixtures::arbitrary_precision_json();
+    let expected = std::str::from_utf8(&bytes)?.to_owned();
+    let source = MemorySource::new(bytes);
+
+    let result = support::read(
+        &source,
+        "application/json",
+        "structured",
+        &DirectProcessor::provider(),
+    )
+    .await?;
+    support::assert_structured_json(result, &expected);
+    Ok(())
+}
+
+#[tokio::test]
 async fn json_rejects_truncated_structure_as_typed_malformed() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::truncated_json());
 

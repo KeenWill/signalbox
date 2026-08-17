@@ -14,6 +14,10 @@ pub(crate) fn json_document_value() -> serde_json::Value {
     serde_json::json!({"name":"fixture","values":[1,2,3]})
 }
 
+pub(crate) fn arbitrary_precision_json() -> Vec<u8> {
+    br#"{"integer":18446744073709551616,"decimal":1.2345678901234567890123456789}"#.to_vec()
+}
+
 pub(crate) fn truncated_json() -> Vec<u8> {
     br#"{"name":"fixture""#.to_vec()
 }

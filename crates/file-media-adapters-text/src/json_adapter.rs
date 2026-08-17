@@ -6,7 +6,7 @@ use signalbox_file_media_runtime::{
 
 use crate::{JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, options_are_empty, source};
 
-const MAX_STRUCTURED_DEPTH: u32 = 64;
+pub(crate) const MAX_STRUCTURED_DEPTH: u32 = 64;
 
 pub(crate) async fn probe(
     source: &dyn VerifiedBlobSource,
