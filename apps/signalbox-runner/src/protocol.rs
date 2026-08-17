@@ -626,6 +626,7 @@ pub struct RunnerConnection<S> {
     claimed_capability: Option<LeaseCorrelation>,
     pending_offer: Option<LeaseOffer>,
     deferred_release: Option<signalbox_runner_wire::WorkspaceRelease>,
+    deferred_connection_end: Option<ConnectionEnd>,
 }
 
 #[derive(Clone)]
@@ -739,6 +740,7 @@ where
             claimed_capability: None,
             pending_offer: None,
             deferred_release: None,
+            deferred_connection_end: None,
         })
     }
 
@@ -846,6 +848,18 @@ where
     {
         tokio::pin!(shutdown);
         loop {
+            if let Some(end) = self.deferred_connection_end.take() {
+                return Ok(ServeOutcome::ConnectionEnded(end));
+            }
+            if let Some(release) = self.deferred_release.take() {
+                if let Some(outcome) = self
+                    .serve_message(state, Message::WorkspaceRelease(release))
+                    .await?
+                {
+                    return Ok(outcome);
+                }
+                continue;
+            }
             let message = tokio::select! {
                 message = receive_message(&mut self.io) => message?,
                 () = &mut shutdown => return Ok(ServeOutcome::ShutdownReady),
@@ -861,6 +875,9 @@ where
         &mut self,
         state: &mut RunnerStateRoot,
     ) -> Result<Option<ServeOutcome>, RunnerConnectionError> {
+        if let Some(end) = self.deferred_connection_end.take() {
+            return Ok(Some(ServeOutcome::ConnectionEnded(end)));
+        }
         if let Some(release) = self.deferred_release.take() {
             return self
                 .serve_message(state, Message::WorkspaceRelease(release))
@@ -1323,6 +1340,7 @@ where
             ));
         }
         let correlation = release.correlation().clone();
+        let mut deferred_shutdown = None;
         tokio::pin!(cleanup);
         loop {
             tokio::select! {
@@ -1351,26 +1369,43 @@ where
                             .await?;
                         }
                     }
+                    self.deferred_connection_end = deferred_shutdown;
                     return Ok(());
                 }
-                message = receive_message(&mut self.io) => {
+                message = receive_message(&mut self.io), if deferred_shutdown.is_none() => {
                     let message = message?;
                     let received = MessageKind::of(&message);
-                    if !matches!(&message, Message::Heartbeat(_)) {
-                        return Err(RunnerConnectionError::Violation(
-                            ProtocolViolation::UnexpectedFrame {
-                                expected: MessageKind::Heartbeat,
-                                received,
-                            },
-                        ));
-                    }
-                    if self.serve_message(state, message).await?.is_some() {
-                        return Err(RunnerConnectionError::Violation(
-                            ProtocolViolation::UnexpectedFrame {
-                                expected: MessageKind::Heartbeat,
-                                received,
-                            },
-                        ));
+                    match message {
+                        Message::Heartbeat(challenge) => {
+                            if self
+                                .serve_message(state, Message::Heartbeat(challenge))
+                                .await?
+                                .is_some()
+                            {
+                                return Err(RunnerConnectionError::Violation(
+                                    ProtocolViolation::UnexpectedFrame {
+                                        expected: MessageKind::Heartbeat,
+                                        received,
+                                    },
+                                ));
+                            }
+                        }
+                        Message::Shutdown(shutdown)
+                            if shutdown.reason == ShutdownReason::DaemonShutdown
+                                && shutdown.connection_epoch == self.connection_epoch =>
+                        {
+                            deferred_shutdown = Some(ConnectionEnd::DaemonShutdown {
+                                connection_epoch: shutdown.connection_epoch,
+                            });
+                        }
+                        _ => {
+                            return Err(RunnerConnectionError::Violation(
+                                ProtocolViolation::UnexpectedFrame {
+                                    expected: MessageKind::Heartbeat,
+                                    received,
+                                },
+                            ));
+                        }
                     }
                 }
             }
@@ -3219,10 +3254,9 @@ mod tests {
                 .await
                 .expect("terminal evidence is projected before release acceptance");
             connection
-                .serve_one(&mut state)
+                .serve_until_shutdown(&mut state, std::future::pending())
                 .await
-                .expect("the deferred release reaches a serving boundary")
-                .expect("the deferred release produces a cleanup handoff")
+                .expect("the production serving loop drains the deferred release")
         };
         let hub = async {
             let _resume = receive_hub_message(&mut hub_io).await;
@@ -4160,6 +4194,101 @@ mod tests {
             released,
             Message::WorkspaceReleased(WorkspaceReleased {
                 correlation: correlation.clone(),
+            })
+        );
+        assert_eq!(
+            state.reconnect_inventory().workspace_operation,
+            Some(WorkspaceOperation::Release {
+                correlation,
+                phase: ReleasePhase::ReleaseCompleted,
+            })
+        );
+    }
+
+    /// INV-011 / INV-024: an exact daemon shutdown received during cleanup is
+    /// returned only after the cleanup result is durable and projected.
+    #[tokio::test]
+    async fn inv011_inv024_workspace_cleanup_defers_daemon_shutdown_until_projection() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let correlation = release_correlation();
+        let epoch = positive(CONNECTION_EPOCH);
+        let (complete_cleanup, cleanup_completed) = tokio::sync::oneshot::channel();
+        let frame_backpressure_bytes = 1;
+        let (runner_io, hub_io) = tokio::io::duplex(frame_backpressure_bytes);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the release");
+            let release = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the release reaches a serving boundary")
+                .expect("the release produces a cleanup handoff")
+                .into_workspace_release_ready()
+                .expect("the accepted release forms the cleanup handoff");
+            let cleanup = async {
+                cleanup_completed
+                    .await
+                    .expect("daemon shutdown leaves cleanup live");
+                Ok::<(), ()>(())
+            };
+            connection
+                .release_while_serving(&mut state, release, cleanup)
+                .await
+                .expect("cleanup reaches its durable result before shutdown");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the retained daemon shutdown is returned")
+                .expect("daemon shutdown terminates serving after cleanup")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: epoch,
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::WorkspaceRelease(WorkspaceRelease {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Shutdown(Shutdown {
+                    connection_epoch: epoch,
+                    reason: ShutdownReason::DaemonShutdown,
+                }),
+            )
+            .await;
+            complete_cleanup
+                .send(())
+                .expect("cleanup remains live after daemon shutdown");
+            receive_hub_message(&mut hub_io).await
+        };
+        let (outcome, released) = tokio::join!(runner, hub);
+
+        assert_eq!(
+            released,
+            Message::WorkspaceReleased(WorkspaceReleased {
+                correlation: correlation.clone(),
+            })
+        );
+        assert_eq!(
+            outcome,
+            ServeOutcome::ConnectionEnded(ConnectionEnd::DaemonShutdown {
+                connection_epoch: epoch,
             })
         );
         assert_eq!(
