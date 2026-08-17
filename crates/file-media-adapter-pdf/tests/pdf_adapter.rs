@@ -5,13 +5,12 @@ use std::error::Error;
 use fixtures::{MemorySource, PdfFixture};
 use signalbox_file_media_adapter_pdf::{PdfProvider, declaration};
 use signalbox_file_media_runtime::{
-    BoundedMetadata, CancellationSignal, CanonicalMediaType, FileInspection, FileInspectionStatus,
-    FileMediaCeilings, FileMediaFailure, FileMediaProcessor, FileMediaProcessorFuture,
-    FileMediaProvider, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    FileMediaRegistry, FileReadRequest, FileReadResult, FileReaderName, FileReaderProviderName,
-    FileReaderRevision, InspectionRequest, NeverCancelled, ProcessorIsolation,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation,
-    ReadViewName, ReaderIdentity, ReasonCode, ValidationEvidence, VerifiedBlobSource,
+    CancellationSignal, FileInspection, FileInspectionStatus, FileMediaCeilings, FileMediaFailure,
+    FileMediaProcessor, FileMediaProcessorFuture, FileMediaProvider, FileMediaProviderReadRequest,
+    FileMediaProviderValidationRequest, FileMediaRegistry, FileReadRequest, FileReadResult,
+    InspectionRequest, NeverCancelled, ProcessorIsolation, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation, ReadViewName, ReaderIdentity,
+    ReasonCode, VerifiedBlobSource,
 };
 
 struct DirectProcessor {
