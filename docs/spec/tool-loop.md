@@ -120,8 +120,9 @@ declares the pre-approval admissibility check below — closed inadmissible.
 
 **Committed unimplemented functionality — pre-approval admissibility.** A family
 may declare that a request is inadmissible on evidence available before any
-approval decision, and the instruction family declares one: a bundle outside the
-session's eligibility snapshot, specified by
+approval decision, and the instruction family declares two: arguments that do
+not decode to its schema, and a bundle outside the effective eligibility view,
+both specified by
 [workspace instructions](workspace-instructions.md#enumeration-preview-and-admission).
 Such a request resolves before approval through a request-level transition that
 mints no attempt: it records a fourth durable logical resolution,

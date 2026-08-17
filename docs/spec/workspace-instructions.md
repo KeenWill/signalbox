@@ -674,14 +674,20 @@ so an implementation must preserve them: a judge that cannot escalate would have
 to approve or deny every admission it is unsure about, and a terminal judge
 failure would strand the wait.
 
-Eligibility is proved before approval is resolved, not after. The owning loop
-resolves a request's approval before creating and executing the attempt, so a
-`bundle_id` outside the turn's effective eligibility view — the frozen snapshot
-as narrowed by any recovery revocation, not the snapshot alone — would otherwise
-reach judge preparation with no evidence to build from — leaving an
-implementation to expose metadata for a bundle the session may not see, or to
-invent an evidence-free judge request. Neither is acceptable, so this is the
-family's declared
+Two things are proved before approval is resolved, not after: that the arguments
+decode, and that the bundle is eligible. Argument-type failure is ordinarily
+deferred to execution, but a request routed to a judge before it executes cannot
+wait that long — malformed JSON or a `bundle_id` that is not a lowercase
+hyphenated UUID names no bundle, so there is nothing to resolve evidence for and
+nothing for the eligibility check to close on. Such a request resolves through
+the same request-level transition with the typed `invalid_arguments` reason,
+before any judge routing. The owning loop resolves a request's approval before
+creating and executing the attempt, so a `bundle_id` outside the turn's
+effective eligibility view — the frozen snapshot as narrowed by any recovery
+revocation, not the snapshot alone — would otherwise reach judge preparation
+with no evidence to build from — leaving an implementation to expose metadata
+for a bundle the session may not see, or to invent an evidence-free judge
+request. Neither is acceptable, so this is the family's declared
 [pre-approval admissibility check](tool-loop.md#intra-turn-rounds-and-request-batches):
 the request resolves through the owning request-level transition before
 approval, carrying the typed `not_eligible` reason and creating no approval
