@@ -369,10 +369,14 @@ or partial snapshot (INV-040).
 
 **Committed unimplemented functionality — instruction eligibility freeze.** When
 session instruction eligibility is implemented, step 4 also copies the session's
-exact ordered eligible-bundle identities under the same `session_scheduler` lock
-and, after locking the admitted-set head at the position and in the mode fixed
-by the [persistence lock protocol](persistence-protocol.md#lock-protocol),
-snapshots the exact retained admitted-set head and every retained admission's
+exact ordered eligibility entries under the same `session_scheduler` lock — the
+authority-qualified pairs whose shape
+[workspace instructions](workspace-instructions.md#eligibility) owns, each
+naming a bundle identity together with the authorizing root the session reaches
+it through, not identities alone — and, after locking the admitted-set head at
+the position and in the mode fixed by the
+[persistence lock protocol](persistence-protocol.md#lock-protocol), snapshots
+the exact retained admitted-set head and every retained admission's
 rendered-bundle row. It inserts the turn-start instruction manifest carrying the
 eligibility hash, admitted-set hash, and those rows in projection order in this
 transaction. The replacement command takes that same scheduler lock and the

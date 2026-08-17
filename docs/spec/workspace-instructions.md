@@ -335,10 +335,12 @@ ordinal is an index into the effective sequence, and a shorter sequence would
 silently reinterpret it — skipping an eligible item, returning a different page,
 or reading as stale purely by how many revoked entries preceded it. A cursor
 issued before a turn's revocation took effect is therefore the typed
-stale-cursor failure, and the caller re-enumerates from the start. This needs no
-change to the hash, the snapshot, or the manifest: revocation is turn state, and
-a cursor is checked against the effective view its turn currently has rather
-than against history.
+stale-cursor failure, and the caller re-enumerates from the start. That is
+decidable rather than merely required: the cursor's first field is the effective
+view's hash, so a pre-revocation token carries a value the current view no
+longer matches. This needs no change to the hash, the snapshot, or the manifest:
+revocation is turn state, and a cursor is checked against the effective view its
+turn currently has rather than against history.
 
 Revocation is otherwise confined to the affected turn. The next activation
 builds a fresh snapshot from live eligibility, where the dropped entries are
@@ -468,7 +470,7 @@ whose byte length does not exceed 512, and reports its full byte length plus
 truncation boundary. The longest prefix, not merely some prefix ending at a
 character boundary: a shorter one would also satisfy a boundary rule while
 changing the serialized bytes, and therefore which item fits the page and what
-the next cursor names. The cursor is the eligibility-snapshot hash plus the
+the next cursor names. The cursor is the effective-enumeration hash plus the
 zero-based ordinal of the next item in canonical order, encoded as the exact
 opaque token the tool schema below fixes. Each page reports the snapshot's total
 item count and the returned ordinal range; the remaining count is derived from
@@ -760,9 +762,17 @@ its session from the trusted tool-dispatch correlation.
 
 - `instructions_list` accepts one optional `cursor` string. Absent, enumeration
   starts at ordinal zero. Present, it is the exact opaque token a previous page
-  returned: the lowercase 64-character hexadecimal eligibility-snapshot hash, a
+  returned: the lowercase 64-character hexadecimal effective-enumeration hash, a
   single `:`, then the zero-based ordinal of the next item as a decimal integer
-  with no leading zeroes and no sign. Any other shape is `InvalidArguments`; a
+  with no leading zeroes and no sign. The first field is the effective view's
+  hash rather than the snapshot's, which is what makes a cursor issued before a
+  revocation detectable: with no revocation in force it equals the eligibility
+  hash, and under revocation it is SHA-256 over
+  `signalbox-instruction-effective-view-v1`, the 32-byte eligibility hash, an
+  unsigned count of revoked entries, and their bundle UUIDs in ascending
+  UUID-byte order. The snapshot's own eligibility hash and its manifest are
+  untouched, so history stays authenticated while the token that indexes a
+  changed sequence changes with it. Any other shape is `InvalidArguments`; a
   well-formed cursor naming another snapshot is the typed stale-cursor failure,
   which is a request outcome rather than an argument error. A cursor naming the
   current snapshot is accepted only when its ordinal is at most `total`;
