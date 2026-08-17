@@ -66,6 +66,13 @@ skip = []
 include_binaries = ["runner_protocol_postgres"]
 
 [[suite]]
+name = "program-runtime"
+package = "signalbox-program-runtime"
+features = ["postgres-integration"]
+shards = 1
+skip = []
+
+[[suite]]
 name = "signalboxd"
 package = "signalboxd"
 features = ["test-support"]
