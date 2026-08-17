@@ -1,38 +1,40 @@
 //! Compiled upper bounds shared by declarations and processor supervision.
 
-/// Maximum prefix bytes one probe may request.
+/// Hard safety ceiling; bounds prefix reads to protect broker memory and I/O.
 pub const MAX_PROBE_PREFIX_BYTES: u64 = 65_536;
-/// Maximum suffix bytes one probe may request.
+/// Hard safety ceiling; bounds suffix reads to protect broker memory and I/O.
 pub const MAX_PROBE_SUFFIX_BYTES: u64 = 65_536;
-/// Maximum arbitrary ranges one probe may request.
+/// Hard safety ceiling; bounds range fan-out to protect broker I/O scheduling.
 pub const MAX_PROBE_RANGES: u32 = 16;
-/// Maximum cumulative bytes one probe may request.
+/// Hard safety ceiling; bounds aggregate probe reads to protect broker resources.
 pub const MAX_PROBE_CUMULATIVE_BYTES: u64 = 262_144;
-/// Maximum length-delimited processor frame.
+/// Hard safety ceiling; bounds one processor frame to protect daemon memory.
 pub const MAX_PROCESSOR_FRAME_BYTES: usize = 1_048_576;
-/// Maximum admitted text or compact JSON body.
+/// Hard safety ceiling; bounds serialized read options before processor framing.
+pub const MAX_READ_OPTIONS_BYTES: usize = 65_536;
+/// Hard safety ceiling; bounds admitted text and JSON allocation before projection.
 pub const MAX_TEXT_OR_JSON_BYTES: usize = 786_432;
-/// Maximum structured output nesting.
+/// Hard safety ceiling; bounds JSON nesting to protect recursive traversal.
 pub const MAX_STRUCTURED_DEPTH: u32 = 64;
-/// Maximum structured output nodes.
+/// Hard safety ceiling; bounds JSON nodes to protect traversal work and memory.
 pub const MAX_STRUCTURED_NODES: u64 = 100_000;
-/// Maximum observed entries in one container.
+/// Hard safety ceiling; bounds one JSON container to protect concentrated fan-out.
 pub const MAX_OBSERVED_CONTAINER_ENTRIES: u64 = 10_000;
-/// Maximum decoded image axis.
+/// Hard safety ceiling; bounds one image axis to protect decoder allocation.
 pub const MAX_IMAGE_AXIS: u32 = 8_192;
-/// Maximum decoded image pixels.
+/// Hard safety ceiling; bounds decoded image area to protect decoder memory.
 pub const MAX_DECODED_IMAGE_PIXELS: u64 = 16_777_216;
-/// Maximum presented image bytes.
+/// Hard safety ceiling; bounds presented image payloads to protect result memory.
 pub const MAX_PRESENTED_IMAGE_BYTES: u64 = 8_388_608;
-/// Maximum decoded audio channels.
+/// Hard safety ceiling; bounds channel fan-out to protect decoder memory and work.
 pub const MAX_AUDIO_CHANNELS: u16 = 8;
-/// Maximum decoded audio sample rate.
+/// Hard safety ceiling; bounds samples per second to protect decoder work.
 pub const MAX_AUDIO_SAMPLE_RATE_HZ: u32 = 192_000;
-/// Maximum presented audio duration.
+/// Hard safety ceiling; bounds clip duration to protect decoder work and memory.
 pub const MAX_AUDIO_CLIP_SECONDS: u32 = 60;
-/// Maximum presented audio bytes.
+/// Hard safety ceiling; bounds presented audio payloads to protect result memory.
 pub const MAX_PRESENTED_AUDIO_BYTES: u64 = 8_388_608;
-/// Maximum presented general-file bytes.
+/// Hard safety ceiling; bounds presented file payloads to protect result memory.
 pub const MAX_PRESENTED_FILE_BYTES: u64 = 8_388_608;
 /// Maximum durable media references emitted by one model call.
 pub const MAX_MEDIA_REFERENCES_PER_CALL: u16 = 16;
