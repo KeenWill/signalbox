@@ -15,8 +15,8 @@ use std::{
 
 use rustix::{
     fs::{
-        AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, fchmod, mkdirat, openat, renameat,
-        renameat_with, statat, unlinkat,
+        AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, chmodat, fchmod, mkdirat, openat,
+        renameat, renameat_with, statat, unlinkat,
     },
     process::geteuid,
 };
@@ -328,8 +328,19 @@ impl RunnerWorkspaceStore {
         )
         .map_err(rustix_io)
         .map_err(PrepareRepositoryWorkspaceError::Storage)?;
-        let staging = open_created_directory(&session, &staging_name)
-            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        let staging = match open_created_directory(&session, &staging_name) {
+            Ok(staging) => staging,
+            Err(open_error) => {
+                unlinkat(&session, staging_name.as_str(), AtFlags::REMOVEDIR)
+                    .map_err(rustix_io)
+                    .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+                session
+                    .sync_all()
+                    .map_err(RunnerWorkspaceError::CommitAmbiguous)
+                    .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+                return Err(PrepareRepositoryWorkspaceError::Storage(open_error));
+            }
+        };
         let mut staging =
             UnpublishedDirectory::new(cleanup_parent, OsString::from(&staging_name), staging);
         let repository = open_or_create_directory(
@@ -1019,6 +1030,13 @@ fn remove_open_directory_tree(
                 let status =
                     statat(parent.as_ref(), &name, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
                 if FileType::from_raw_mode(status.st_mode) == FileType::Directory {
+                    chmodat(
+                        parent.as_ref(),
+                        &name,
+                        Mode::RUSR | Mode::WUSR | Mode::XUSR,
+                        AtFlags::SYMLINK_NOFOLLOW,
+                    )
+                    .map_err(rustix_io)?;
                     let descriptor = openat(
                         parent.as_ref(),
                         &name,
@@ -1191,6 +1209,7 @@ mod tests {
     const OPEN_DIRECTORY_MODE: u32 = 0o750;
     const EXPECTED_RELATIVE_PATH: &str = "sessions/018f6f10-0000-7000-8000-0000000000e1/3/work";
     const CLONE_URL: &str = "https://github.com/KeenWill/signalbox.git";
+    const PREPARED_REPOSITORY_BYTES: &[u8] = b"repository\n";
 
     fn fixture_root() -> (TempDir, RunnerStateRoot) {
         let parent = tempfile::tempdir().expect("the workspace fixture parent exists");
@@ -1267,7 +1286,7 @@ mod tests {
             .workspace_store()
             .expect("the locked root forms a workspace store")
             .prepare_repository_workspace(request, |target| async move {
-                fs::write(target.path().join("prepared"), b"repository\n")?;
+                fs::write(target.path().join("prepared"), PREPARED_REPOSITORY_BYTES)?;
                 Ok::<Recovery, std::io::Error>(recovery)
             })
             .await
@@ -1340,7 +1359,7 @@ mod tests {
         assert_eq!(
             fs::read(placement.join("repo").join("prepared"))
                 .expect("the prepared repository file is readable"),
-            b"repository\n"
+            PREPARED_REPOSITORY_BYTES
         );
     }
 
@@ -1437,6 +1456,7 @@ mod tests {
                 .expect("the locked root forms a workspace store")
                 .prepare_repository_workspace(&expected, |target| async move {
                     fs::write(target.path().join("partial"), b"partial repository\n")?;
+                    fs::set_permissions(target.path(), fs::Permissions::from_mode(0o000))?;
                     let _ = started.send(());
                     future::pending::<Result<Recovery, std::io::Error>>().await
                 })
