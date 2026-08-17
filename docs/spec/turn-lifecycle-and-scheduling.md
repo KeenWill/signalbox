@@ -9,6 +9,10 @@ transition into runner recovery was verified against this PR
 The active-tail predecessor-steering correction was verified against this PR
 (`agent/daemon-ops-overnight`).
 
+The cancelled-turn outbox projection for stopped tool responses with completed
+producing calls was re-verified against this PR
+(`agent/cancelled-outbox-completed-call`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
