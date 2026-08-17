@@ -2465,6 +2465,8 @@ async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_succ
             ),
         )])
         .expect("the fixture contains one tool proposal");
+    let cancellation_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 29));
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 30));
     let outcome = model_repository
         .apply_terminal_observation(
             fixture.session,
@@ -2481,8 +2483,8 @@ async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_succ
                         SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 25)),
                         InitialToolApproval::Confirm,
                     )],
-                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 29)),
-                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 30)),
+                    cancellation_entry,
+                    terminal_frontier,
                 ),
             ),
             |_| panic!("the fixture has no pending steering to reclassify"),
@@ -2492,6 +2494,25 @@ async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_succ
         outcome,
         ModelCallTerminalOutcome::CancelledWithToolResponse(_)
     ));
+    let terminal_call_disposition: String = sqlx::query_scalar(
+        "SELECT terminal_disposition_kind
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(terminal_call_disposition, "completed");
+    let mut dispatched = Vec::new();
+    drain_outbox(&pool, |event| dispatched.push(event.kind().clone())).await?;
+    assert!(
+        dispatched.contains(&DispatchedOutboxEventKind::TurnCancelled {
+            turn: fixture.turn,
+            cancellation_entry,
+            terminal_frontier,
+        }),
+        "the cancelled turn with its completed producing call must dispatch"
+    );
 
     let activation = StartEligibleTurnRepository::new(pool.clone())
         .handle(
