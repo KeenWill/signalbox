@@ -93,7 +93,9 @@ to carry the banner at the head and, unless newly added, at the base. Additional
 thread or check pages use dynamically aliased GraphQL fields, up to 20
 continuations in one request. Review-thread comments, top-level comments, and
 reviews are also paginated. REST compare requests conservatively classify
-post-review rename-only and source-comment-only changes; REST pull-request-file
+post-review rename-only, source-comment-only, and proven clean base-forward
+changes; a base forward must be a single merge of the reviewed head and exact
+current base whose complete patch matches the base delta. REST pull-request-file
 requests recover base paths for renamed planning files. Previously watched node
 IDs are folded into the listing call so merged and closed pull requests can be
 recorded once and then omitted from future queries.

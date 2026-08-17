@@ -515,7 +515,7 @@ class GitHubGraphQLTests(unittest.TestCase):
             ],
         }
         with mock.patch.object(client, "execute_rest", return_value=comparison):
-            exempt = client._review_exempt_change("reviewed", "head")
+            exempt = client._review_exempt_change("reviewed", "head", "base")
 
         self.assertFalse(exempt)
 
@@ -537,7 +537,82 @@ class GitHubGraphQLTests(unittest.TestCase):
             ],
         }
         with mock.patch.object(client, "execute_rest", return_value=comparison):
-            exempt = client._review_exempt_change("reviewed", "head")
+            exempt = client._review_exempt_change("reviewed", "head", "base")
+
+        self.assertFalse(exempt)
+
+    def test_exact_clean_base_forward_is_review_exempt(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        base_delta = {
+            "filename": "workflow.yml",
+            "status": "modified",
+            "additions": 1,
+            "deletions": 1,
+            "changes": 2,
+            "sha": "base-blob",
+            "patch": "@@ -1 +1 @@\n-old\n+new",
+        }
+        comparison = {
+            "commits": [
+                {
+                    "sha": "head",
+                    "parents": [{"sha": "reviewed"}, {"sha": "base"}],
+                }
+            ],
+            "files": [base_delta],
+        }
+        reviewed_to_base = {"merge_base_commit": {"sha": "common-base"}}
+        base_comparison = {"files": [base_delta]}
+        with mock.patch.object(
+            client,
+            "execute_rest",
+            side_effect=[comparison, reviewed_to_base, base_comparison],
+        ):
+            exempt = client._review_exempt_change("reviewed", "head", "base")
+
+        self.assertTrue(exempt)
+
+    def test_merge_forward_with_conflict_edit_is_not_review_exempt(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        comparison = {
+            "commits": [
+                {
+                    "sha": "head",
+                    "parents": [{"sha": "reviewed"}, {"sha": "base"}],
+                }
+            ],
+            "files": [
+                {
+                    "filename": "workflow.yml",
+                    "status": "modified",
+                    "additions": 1,
+                    "deletions": 1,
+                    "changes": 2,
+                    "sha": "conflict-edit",
+                    "patch": "@@ -1 +1 @@\n-old\n+unexpected",
+                }
+            ],
+        }
+        reviewed_to_base = {"merge_base_commit": {"sha": "common-base"}}
+        base_comparison = {
+            "files": [
+                {
+                    "filename": "workflow.yml",
+                    "status": "modified",
+                    "additions": 1,
+                    "deletions": 1,
+                    "changes": 2,
+                    "sha": "base-blob",
+                    "patch": "@@ -1 +1 @@\n-old\n+new",
+                }
+            ]
+        }
+        with mock.patch.object(
+            client,
+            "execute_rest",
+            side_effect=[comparison, reviewed_to_base, base_comparison],
+        ):
+            exempt = client._review_exempt_change("reviewed", "head", "base")
 
         self.assertFalse(exempt)
 

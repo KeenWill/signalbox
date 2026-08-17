@@ -475,11 +475,17 @@ query($id: ID!, $after: String!) {
             if pull_request["quiet_review_head_oids"]:
                 continue
             for reviewed_oid in reversed(quiet_oids):
-                if self._review_exempt_change(reviewed_oid, pull_request["head_oid"]):
+                if self._review_exempt_change(
+                    reviewed_oid,
+                    pull_request["head_oid"],
+                    pull_request["base_oid"],
+                ):
                     pull_request["review_exempt_since_quiet_review"] = True
                     break
 
-    def _review_exempt_change(self, reviewed_oid: str, head_oid: str) -> bool:
+    def _review_exempt_change(
+        self, reviewed_oid: str, head_oid: str, base_oid: str
+    ) -> bool:
         comparison = self.execute_rest(
             f"repos/{self.owner}/{self.name}/compare/{reviewed_oid}...{head_oid}"
         )
@@ -495,7 +501,58 @@ query($id: ID!, $after: String!) {
             for file in files
         ):
             return True
+        if self._is_clean_merge_forward(
+            comparison, reviewed_oid, head_oid, base_oid
+        ):
+            return True
         return bool(files) and all(comment_only_patch(file) for file in files)
+
+    def _is_clean_merge_forward(
+        self,
+        comparison: dict[str, Any],
+        reviewed_oid: str,
+        head_oid: str,
+        base_oid: str,
+    ) -> bool:
+        commits = comparison.get("commits")
+        files = comparison.get("files")
+        if not isinstance(commits, list) or len(commits) != 1:
+            return False
+        merge_commit = commits[0]
+        parents = merge_commit.get("parents")
+        if (
+            merge_commit.get("sha") != head_oid
+            or not isinstance(parents, list)
+            or [parent.get("sha") for parent in parents]
+            != [reviewed_oid, base_oid]
+        ):
+            return False
+        head_delta = comparison_file_delta(files)
+        if head_delta is None:
+            return False
+        reviewed_to_base = self.execute_rest(
+            f"repos/{self.owner}/{self.name}/compare/{reviewed_oid}...{base_oid}"
+        )
+        merge_base = (
+            reviewed_to_base.get("merge_base_commit")
+            if isinstance(reviewed_to_base, dict)
+            else None
+        )
+        merge_base_oid = (
+            merge_base.get("sha") if isinstance(merge_base, dict) else None
+        )
+        if not isinstance(merge_base_oid, str):
+            return False
+        base_comparison = self.execute_rest(
+            f"repos/{self.owner}/{self.name}/compare/{merge_base_oid}...{base_oid}"
+        )
+        base_files = (
+            base_comparison.get("files")
+            if isinstance(base_comparison, dict)
+            else None
+        )
+        base_delta = comparison_file_delta(base_files)
+        return base_delta is not None and head_delta == base_delta
 
     def _load_renamed_paths(
         self, pull_requests: list[dict[str, Any]]
@@ -784,6 +841,43 @@ def comment_only_patch(file: dict[str, Any]) -> bool:
     return bool(changed) and all(
         not line or line.startswith(comment_prefix) for line in changed
     )
+
+
+def comparison_file_delta(files: Any) -> tuple[tuple[Any, ...], ...] | None:
+    if not isinstance(files, list):
+        return None
+    normalized: list[tuple[Any, ...]] = []
+    for changed_file in files:
+        if not isinstance(changed_file, dict):
+            return None
+        filename = changed_file.get("filename")
+        status = changed_file.get("status")
+        additions = changed_file.get("additions")
+        deletions = changed_file.get("deletions")
+        changes = changed_file.get("changes")
+        patch = changed_file.get("patch")
+        if (
+            not isinstance(filename, str)
+            or not isinstance(status, str)
+            or not isinstance(additions, int)
+            or not isinstance(deletions, int)
+            or not isinstance(changes, int)
+            or (changes > 0 and not isinstance(patch, str))
+        ):
+            return None
+        normalized.append(
+            (
+                filename,
+                changed_file.get("previous_filename"),
+                status,
+                additions,
+                deletions,
+                changes,
+                changed_file.get("sha"),
+                patch,
+            )
+        )
+    return tuple(sorted(normalized))
 
 
 def normalize_review_threads(
