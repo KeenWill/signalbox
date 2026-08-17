@@ -118,6 +118,14 @@ async fn zip_with_preamble_validates_and_enumerates() -> Result<(), Box<dyn Erro
 }
 
 #[tokio::test]
+async fn zip_with_signature_like_preamble_validates_and_enumerates() -> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(
+        valid_inventory(ArchiveFixture::zip_with_gzip_signature_preamble()?).await?,
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn legacy_zip_filename_is_decoded_before_validation() -> Result<(), Box<dyn Error>> {
     assert_valid_inventory(valid_inventory(ArchiveFixture::legacy_named_zip()?).await?);
     Ok(())
@@ -333,6 +341,16 @@ async fn disguised_recursive_zip_payload_is_rejected() -> Result<(), Box<dyn Err
 async fn disguised_empty_zip_payload_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::disguised_empty_zip()?).await?,
+        "recursive_container",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn disguised_zip_after_long_preamble_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::disguised_recursive_zip_after_long_preamble()?)
+            .await?,
         "recursive_container",
     );
     Ok(())

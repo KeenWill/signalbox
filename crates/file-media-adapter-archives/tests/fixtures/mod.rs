@@ -44,6 +44,21 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn zip_with_gzip_signature_preamble() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = b"\x1f\x8b\x08signature-like ZIP preamble".to_vec();
+        bytes.extend_from_slice(&zip_bytes(&[(
+            "docs/readme.txt",
+            PAYLOAD,
+            ZipEntryKind::File,
+        )])?);
+        Ok(Self {
+            bytes,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "docs/readme.txt",
+        })
+    }
+
     pub fn legacy_named_zip() -> Result<Self, Box<dyn Error>> {
         let mut bytes = zip_bytes(&[("cafe.txt", PAYLOAD, ZipEntryKind::File)])?;
         set_legacy_filename(&mut bytes, b"caf\x82.txt")?;
@@ -302,6 +317,17 @@ impl ArchiveFixture {
         let empty_zip = writer.finish()?.into_inner();
         Ok(Self {
             bytes: zip_bytes(&[("payload.bin", &empty_zip, ZipEntryKind::File)])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
+    pub fn disguised_recursive_zip_after_long_preamble() -> Result<Self, Box<dyn Error>> {
+        let mut nested = vec![b'x'; 1_025];
+        nested.extend_from_slice(&zip_bytes(&[("nested.txt", PAYLOAD, ZipEntryKind::File)])?);
+        Ok(Self {
+            bytes: zip_bytes(&[("payload.bin", &nested, ZipEntryKind::File)])?,
             media_type: "application/zip",
             expected_format: "zip",
             expected_name: "payload.bin",

@@ -74,9 +74,20 @@ impl FileMediaProvider for ArchiveProvider {
             let bytes = read_range(source, 0, length).await?;
             require_active(cancellation)?;
             if kind.matches_probe(&bytes) {
+                let strength = if source.byte_length().get() <= SOURCE_BYTES
+                    && (kind == ArchiveKind::Zip
+                        || zip_header(&bytes)
+                            && matches!(kind, ArchiveKind::Gzip | ArchiveKind::Zstd))
+                {
+                    let complete = read_all(source).await?;
+                    require_active(cancellation)?;
+                    kind.probe_strength_with_complete_bytes(&bytes, &complete)
+                } else {
+                    kind.probe_strength(&bytes)
+                };
                 Ok(ProcessorProbeOutput::Candidate {
                     media_type: String::from(kind.media_type()),
-                    strength: kind.probe_strength(&bytes),
+                    strength,
                 })
             } else {
                 Ok(ProcessorProbeOutput::NoMatch)
@@ -263,6 +274,15 @@ impl ArchiveKind {
         }
     }
 
+    fn probe_strength_with_complete_bytes(self, prefix: &[u8], complete: &[u8]) -> ProbeStrength {
+        let structurally_valid_zip = ZipArchive::new(Cursor::new(complete)).is_ok();
+        match self {
+            Self::Zip if structurally_valid_zip => ProbeStrength::Strong,
+            Self::Gzip | Self::Zstd if structurally_valid_zip => ProbeStrength::StructuralCandidate,
+            Self::Zip | Self::Gzip | Self::Zstd | Self::Tar => self.probe_strength(prefix),
+        }
+    }
+
     fn matches_probe(self, bytes: &[u8]) -> bool {
         match self {
             Self::Zip => zip_header(bytes),
@@ -367,12 +387,12 @@ fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         let mut file = archive
             .by_index(index)
             .map_err(|_| ArchiveIssue::Malformed)?;
-        let (expanded, prefix) = if file.is_dir() {
-            (0, Vec::new())
+        let (expanded, recursive) = if file.is_dir() {
+            (0, false)
         } else {
             count_reader(&mut file, MAX_ENTRY_BYTES)?
         };
-        if recursive_bytes(&prefix) {
+        if recursive {
             return Err(ArchiveIssue::Recursive);
         }
         total = bounded_total(total, expanded)?;
@@ -422,12 +442,12 @@ fn enumerate_tar(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         } else {
             "file"
         };
-        let (expanded, prefix) = if entry_type.is_dir() {
-            (0, Vec::new())
+        let (expanded, recursive) = if entry_type.is_dir() {
+            (0, false)
         } else {
             count_reader(&mut entry, MAX_ENTRY_BYTES)?
         };
-        if recursive_bytes(&prefix) {
+        if recursive {
             return Err(ArchiveIssue::Recursive);
         }
         total = bounded_total(total, expanded)?;
@@ -452,8 +472,8 @@ fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         return Err(ArchiveIssue::Recursive);
     }
     let mut decoder = MultiGzDecoder::new(bytes);
-    let (expanded, prefix) = count_reader(&mut decoder, MAX_EXPANDED_BYTES)?;
-    if recursive_bytes(&prefix) {
+    let (expanded, recursive) = count_reader(&mut decoder, MAX_EXPANDED_BYTES)?;
+    if recursive {
         return Err(ArchiveIssue::Recursive);
     }
     Ok(single_stream_summary(name, expanded))
@@ -465,8 +485,8 @@ fn enumerate_zstd(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
     }
     let mut decoder =
         zstd::stream::read::Decoder::new(bytes).map_err(|_| ArchiveIssue::Malformed)?;
-    let (expanded, prefix) = count_reader(&mut decoder, MAX_EXPANDED_BYTES)?;
-    if recursive_bytes(&prefix) {
+    let (expanded, recursive) = count_reader(&mut decoder, MAX_EXPANDED_BYTES)?;
+    if recursive {
         return Err(ArchiveIssue::Recursive);
     }
     Ok(single_stream_summary(String::from("content"), expanded))
@@ -483,9 +503,9 @@ fn single_stream_summary(name: String, expanded: u64) -> ArchiveSummary {
     }
 }
 
-fn count_reader(reader: &mut dyn Read, maximum: u64) -> Result<(u64, Vec<u8>), ArchiveIssue> {
+fn count_reader(reader: &mut dyn Read, maximum: u64) -> Result<(u64, bool), ArchiveIssue> {
     let mut total = 0_u64;
-    let mut prefix = Vec::with_capacity(PREFIX_BYTES);
+    let mut detector = RecursiveDetector::new();
     let mut buffer = [0_u8; 8192];
     loop {
         let count = reader
@@ -500,10 +520,43 @@ fn count_reader(reader: &mut dyn Read, maximum: u64) -> Result<(u64, Vec<u8>), A
         if total > maximum {
             return Err(ArchiveIssue::Expansion);
         }
-        let remaining = PREFIX_BYTES.saturating_sub(prefix.len());
-        prefix.extend_from_slice(&buffer[..count.min(remaining)]);
+        detector.observe(&buffer[..count]);
     }
-    Ok((total, prefix))
+    Ok((total, detector.detected()))
+}
+
+struct RecursiveDetector {
+    prefix: Vec<u8>,
+    zip_tail: Vec<u8>,
+    zip_detected: bool,
+}
+
+impl RecursiveDetector {
+    fn new() -> Self {
+        Self {
+            prefix: Vec::with_capacity(PREFIX_BYTES),
+            zip_tail: Vec::with_capacity(3),
+            zip_detected: false,
+        }
+    }
+
+    fn observe(&mut self, bytes: &[u8]) {
+        let remaining = PREFIX_BYTES.saturating_sub(self.prefix.len());
+        self.prefix
+            .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+
+        let mut searchable = Vec::with_capacity(self.zip_tail.len() + bytes.len());
+        searchable.extend_from_slice(&self.zip_tail);
+        searchable.extend_from_slice(bytes);
+        self.zip_detected |= zip_header(&searchable);
+        let tail_start = searchable.len().saturating_sub(3);
+        self.zip_tail.clear();
+        self.zip_tail.extend_from_slice(&searchable[tail_start..]);
+    }
+
+    fn detected(&self) -> bool {
+        self.zip_detected || recursive_bytes(&self.prefix)
+    }
 }
 
 fn bounded_total(total: u64, added: u64) -> Result<u64, ArchiveIssue> {

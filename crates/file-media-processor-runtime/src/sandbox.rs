@@ -145,7 +145,7 @@ impl SandboxedFileMediaProcessor {
     ) -> Result<(), ProcessorFailure> {
         let mut running = self.spawn(worker, true).await?;
         running.release_startup()?;
-        let mut stdout = running
+        let stdout = running
             .child
             .stdout
             .take()
@@ -311,18 +311,17 @@ impl SandboxedFileMediaProcessor {
             .stdout(Stdio::piped())
             .stderr(if probe { Stdio::null() } else { Stdio::piped() })
             .kill_on_drop(true);
-        let ceilings = self.ceilings;
         command.as_std_mut().process_group(0);
-        unsafe {
-            command
-                .as_std_mut()
-                .pre_exec(move || apply_process_limits(ceilings).map_err(std::io::Error::from));
-        }
-        let child = command.spawn().map_err(|_| ProcessorFailure::Unavailable)?;
+        let mut child = command.spawn().map_err(|_| ProcessorFailure::Unavailable)?;
         drop(block_read);
         let raw_pid = child.id().ok_or(ProcessorFailure::Unavailable)?;
         let pid =
             rustix::process::Pid::from_raw(raw_pid as i32).ok_or(ProcessorFailure::Unavailable)?;
+        if apply_process_limits(pid, self.ceilings).is_err() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(ProcessorFailure::Unavailable);
+        }
         Ok(RunningWorker {
             child,
             process_group: pid,
@@ -626,21 +625,30 @@ async fn finish_diagnostics(
     }
 }
 
-fn apply_process_limits(ceilings: FileMediaProcessCeilings) -> Result<(), rustix::io::Errno> {
-    set_limit(Resource::As, ceilings.memory_bytes())?;
-    set_limit(Resource::Cpu, ceilings.cpu_seconds())?;
-    set_limit(Resource::Nproc, MAX_WORKER_TASKS)?;
-    set_limit(Resource::Nofile, ceilings.file_descriptors())
+fn apply_process_limits(
+    pid: rustix::process::Pid,
+    ceilings: FileMediaProcessCeilings,
+) -> Result<(), rustix::io::Errno> {
+    set_limit(pid, Resource::As, ceilings.memory_bytes())?;
+    set_limit(pid, Resource::Cpu, ceilings.cpu_seconds())?;
+    set_limit(pid, Resource::Nproc, MAX_WORKER_TASKS)?;
+    set_limit(pid, Resource::Nofile, ceilings.file_descriptors())
 }
 
-fn set_limit(resource: Resource, value: u64) -> Result<(), rustix::io::Errno> {
-    rustix::process::setrlimit(
+fn set_limit(
+    pid: rustix::process::Pid,
+    resource: Resource,
+    value: u64,
+) -> Result<(), rustix::io::Errno> {
+    rustix::process::prlimit(
+        Some(pid),
         resource,
         Rlimit {
             current: Some(value),
             maximum: Some(value),
         },
     )
+    .map(|_| ())
 }
 
 fn sandbox_arguments(
