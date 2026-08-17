@@ -82,9 +82,19 @@ async fn json_rejects_truncated_structure_as_typed_malformed() -> Result<(), Box
 }
 
 #[tokio::test]
+async fn unprobed_declared_json_candidate_is_unknown() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(b"hello".to_vec());
+
+    let inspection = support::inspect(&source, "application/json").await?;
+    support::assert_unknown(inspection);
+    Ok(())
+}
+
+#[tokio::test]
 async fn json_rejects_oversized_input_with_registered_reason() -> Result<(), Box<dyn Error>> {
     let mut bytes = fixtures::oversized(b' ');
     bytes[0] = b'{';
+    bytes[1] = b'}';
     let source = MemorySource::new(bytes);
 
     let inspection = support::inspect(&source, "application/json").await?;
@@ -104,6 +114,15 @@ async fn pretty_json_is_not_ambiguous_with_csv() -> Result<(), Box<dyn Error>> {
 #[tokio::test]
 async fn bracket_prefixed_prose_uses_the_text_fallback() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::bracket_prefixed_prose());
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_validated_media(inspection, "text/plain");
+    Ok(())
+}
+
+#[tokio::test]
+async fn json_token_prefixed_prose_uses_the_text_fallback() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::json_token_prefixed_prose());
 
     let inspection = support::inspect(&source, "text/plain").await?;
     support::assert_validated_media(inspection, "text/plain");
@@ -168,6 +187,15 @@ async fn csv_rejects_truncated_quoted_field_as_typed_malformed() -> Result<(), B
 }
 
 #[tokio::test]
+async fn unprobed_declared_csv_candidate_is_unknown() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(b"hello".to_vec());
+
+    let inspection = support::inspect(&source, "text/csv").await?;
+    support::assert_unknown(inspection);
+    Ok(())
+}
+
+#[tokio::test]
 async fn csv_rejects_quotes_inside_an_unquoted_field() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::csv_with_quotes_inside_unquoted_field());
 
@@ -190,6 +218,15 @@ async fn comma_bearing_prose_uses_the_text_fallback() -> Result<(), Box<dyn Erro
 }
 
 #[tokio::test]
+async fn csv_probe_ignores_a_partial_trailing_record() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::csv_with_partial_third_probe_record());
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_declared_mismatch(inspection, "text/plain", "text/csv");
+    Ok(())
+}
+
+#[tokio::test]
 async fn csv_rejects_row_bomb_shape_at_declared_ceiling() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::row_bomb_csv());
 
@@ -201,8 +238,7 @@ async fn csv_rejects_row_bomb_shape_at_declared_ceiling() -> Result<(), Box<dyn 
 #[tokio::test]
 async fn csv_rejects_oversized_input_with_registered_reason() -> Result<(), Box<dyn Error>> {
     let mut bytes = fixtures::oversized(b'a');
-    bytes[1] = b',';
-    bytes[2] = b'\n';
+    bytes[..8].copy_from_slice(b"a,b\nc,d\n");
     let source = MemorySource::new(bytes);
 
     let inspection = support::inspect(&source, "text/csv").await?;

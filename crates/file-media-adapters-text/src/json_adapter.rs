@@ -1,7 +1,7 @@
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
     ProbeStrength, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, VerifiedBlobSource,
+    ProcessorValidationOutput, ValidationEvidence, VerifiedBlobSource,
 };
 
 use crate::{JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, options_are_empty, source};
@@ -25,18 +25,30 @@ pub(crate) async fn probe(
 }
 
 fn has_json_structure(prefix: &[u8]) -> bool {
-    let mut bytes = prefix
-        .iter()
-        .copied()
-        .filter(|byte| !byte.is_ascii_whitespace());
-    match (bytes.next(), bytes.next()) {
-        (Some(b'{'), Some(next)) => matches!(next, b'}' | b'"'),
-        (Some(b'['), Some(next)) => matches!(
-            next,
-            b']' | b'{' | b'[' | b'"' | b'-' | b'0'..=b'9' | b't' | b'f' | b'n'
-        ),
+    let prefix = trim_ascii_start(prefix);
+    let Some((&opening, rest)) = prefix.split_first() else {
+        return false;
+    };
+    let rest = trim_ascii_start(rest);
+    match (opening, rest.first()) {
+        (b'{', Some(b'}')) | (b'[', Some(b']')) => true,
+        (b'{', Some(_)) => rest.iter().enumerate().any(|(index, byte)| {
+            *byte == b':' && serde_json::from_slice::<String>(&rest[..index]).is_ok()
+        }),
+        (b'[', Some(_)) => rest.iter().enumerate().any(|(index, byte)| {
+            matches!(*byte, b',' | b']')
+                && serde_json::from_slice::<serde_json::Value>(&rest[..index]).is_ok()
+        }),
         _ => false,
     }
+}
+
+fn trim_ascii_start(bytes: &[u8]) -> &[u8] {
+    let first = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    &bytes[first..]
 }
 
 pub(crate) async fn inspect(
@@ -48,14 +60,14 @@ pub(crate) async fn inspect(
         return Err(ProcessorFailure::Protocol);
     }
     let Some(bytes) = source::read_complete(source, cancellation).await? else {
-        return Ok(malformed("source_too_large"));
+        return Ok(validation_failure(request.evidence, "source_too_large"));
     };
     let text = match source::checked_utf8(bytes) {
         Ok(text) => text,
-        Err(reason) => return Ok(malformed(reason)),
+        Err(reason) => return Ok(validation_failure(request.evidence, reason)),
     };
     if serde_json::from_str::<serde_json::Value>(&text).is_err() {
-        return Ok(malformed("malformed_json"));
+        return Ok(validation_failure(request.evidence, "malformed_json"));
     }
     Ok(ProcessorValidationOutput::Validated {
         media_type: String::from(JSON_MEDIA_TYPE),
@@ -119,5 +131,13 @@ fn malformed(reason: &str) -> ProcessorValidationOutput {
     ProcessorValidationOutput::Malformed {
         media_type: String::from(JSON_MEDIA_TYPE),
         reason_code: String::from(reason),
+    }
+}
+
+fn validation_failure(evidence: ValidationEvidence, reason: &str) -> ProcessorValidationOutput {
+    if evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated {
+        ProcessorValidationOutput::NoMatch
+    } else {
+        malformed(reason)
     }
 }

@@ -202,6 +202,25 @@ pub(crate) fn assert_unknown(inspection: FileInspection) {
 }
 
 #[track_caller]
+pub(crate) fn assert_declared_mismatch(
+    inspection: FileInspection,
+    expected_declared: &str,
+    expected_detected: &str,
+) {
+    assert!(matches!(
+        inspection,
+        FileInspection::DeclaredMismatch { .. }
+    ));
+    if let FileInspection::DeclaredMismatch {
+        declared, detected, ..
+    } = inspection
+    {
+        assert_eq!(declared.as_str(), expected_declared);
+        assert_eq!(detected.as_str(), expected_detected);
+    }
+}
+
+#[track_caller]
 pub(crate) fn assert_text(result: FileReadResult, expected: &str) {
     assert!(matches!(result, FileReadResult::Text { .. }));
     if let FileReadResult::Text { body, .. } = result {

@@ -1,7 +1,7 @@
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
     ProbeStrength, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, VerifiedBlobSource,
+    ProcessorValidationOutput, ValidationEvidence, VerifiedBlobSource,
 };
 
 use crate::{CSV_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, options_are_empty, source};
@@ -36,15 +36,15 @@ pub(crate) async fn inspect(
         return Err(ProcessorFailure::Protocol);
     }
     let Some(bytes) = source::read_complete(source, cancellation).await? else {
-        return Ok(malformed("source_too_large"));
+        return Ok(validation_failure(request.evidence, "source_too_large"));
     };
     let text = match source::checked_utf8(bytes) {
         Ok(text) => text,
-        Err(reason) => return Ok(malformed(reason)),
+        Err(reason) => return Ok(validation_failure(request.evidence, reason)),
     };
     let table = match parse_table(&text) {
         Ok(table) => table,
-        Err(reason) => return Ok(malformed(reason)),
+        Err(reason) => return Ok(validation_failure(request.evidence, reason)),
     };
     Ok(ProcessorValidationOutput::Validated {
         media_type: String::from(CSV_MEDIA_TYPE),
@@ -126,9 +126,6 @@ fn parse_table(text: &str) -> Result<CsvTable, &'static str> {
 }
 
 fn has_record_structure(text: &str) -> bool {
-    if !quotes_are_well_formed(text) {
-        return false;
-    }
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(false)
@@ -182,5 +179,13 @@ fn malformed(reason: &str) -> ProcessorValidationOutput {
     ProcessorValidationOutput::Malformed {
         media_type: String::from(CSV_MEDIA_TYPE),
         reason_code: String::from(reason),
+    }
+}
+
+fn validation_failure(evidence: ValidationEvidence, reason: &str) -> ProcessorValidationOutput {
+    if evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated {
+        ProcessorValidationOutput::NoMatch
+    } else {
+        malformed(reason)
     }
 }

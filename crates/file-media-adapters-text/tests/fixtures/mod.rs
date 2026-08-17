@@ -15,7 +15,7 @@ pub(crate) fn json_document_value() -> serde_json::Value {
 }
 
 pub(crate) fn arbitrary_precision_json() -> Vec<u8> {
-    br#"{"integer":18446744073709551616,"decimal":1.2345678901234567890123456789}"#.to_vec()
+    br#"{"decimal":1.2345678901234567890123456789,"integer":18446744073709551616}"#.to_vec()
 }
 
 pub(crate) fn truncated_json() -> Vec<u8> {
@@ -28,6 +28,10 @@ pub(crate) fn pretty_json_document() -> Vec<u8> {
 
 pub(crate) fn bracket_prefixed_prose() -> Vec<u8> {
     b"[section]\nbody".to_vec()
+}
+
+pub(crate) fn json_token_prefixed_prose() -> Vec<u8> {
+    b"[todo]\nbody".to_vec()
 }
 
 pub(crate) fn json_beyond_structured_depth() -> Vec<u8> {
@@ -55,6 +59,15 @@ pub(crate) fn csv_with_quotes_inside_unquoted_field() -> Vec<u8> {
 
 pub(crate) fn prose_with_comma_and_newline() -> Vec<u8> {
     b"Hello, world\nnext line".to_vec()
+}
+
+pub(crate) fn csv_with_partial_third_probe_record() -> Vec<u8> {
+    let mut bytes = b"name,value\n".to_vec();
+    bytes.extend_from_slice(&vec![b'a'; 4_060]);
+    bytes.extend_from_slice(b",1\nthird,\"");
+    bytes.extend_from_slice(&vec![b'b'; 100]);
+    bytes.extend_from_slice(b"\"\n");
+    bytes
 }
 
 pub(crate) fn row_bomb_csv() -> Vec<u8> {
