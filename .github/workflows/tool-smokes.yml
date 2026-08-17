@@ -39,7 +39,7 @@ jobs:
   live-smokes:
     name: Tool live smokes (report only)
     continue-on-error: true
-    runs-on: signalbox-docker
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - name: Check out repository
