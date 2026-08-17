@@ -509,9 +509,15 @@ would leave U+000D inside heading text and defeat fence-close recognition. It
 recognizes only ATX headings: zero through three leading ASCII spaces, one
 through six `#` bytes, then end of line or one ASCII space or tab. The returned
 heading records are in source order and contain the one-based line number,
-level, and heading text after removing leading and trailing spaces or tabs and
-an optional closing run of `#` bytes that is preceded by whitespace. A heading
-text longer than 512 UTF-8 bytes is shortened to the unique longest UTF-8 prefix
+level, and heading text cleaned in this exact order: remove leading spaces or
+tabs, then remove trailing spaces or tabs, then remove an optional closing run
+of `#` bytes preceded by at least one space or tab, then remove the spaces or
+tabs that preceded that run. Order is specified because it is observable —
+`# foo ###   ` yields `foo`, whereas stripping the run before the trailing
+whitespace would leave `foo ` — and two different strings change the canonical
+preview JSON and can move the heading cutoff. A closing run not preceded by
+whitespace is heading text, not a closing run, and is kept. A heading text
+longer than 512 UTF-8 bytes is shortened to the unique longest UTF-8 prefix
 whose byte length does not exceed 512, by the same rule descriptions use, and
 reports its full byte length and truncation boundary. Setext headings, headings
 inside fenced blocks, and other Markdown constructs are not interpreted. Fence
@@ -825,9 +831,16 @@ numbers, matching every other result on this page. The receipt carries no
 repository-controlled string, so it needs no untrusted region.
 
 These reasons are durable typed evidence first and provider-visible bytes
-second, and the two are not the same surface. The tool attempt stores its closed
-reason as the attempt's own error evidence, which is what replay, audit, and
-recovery read; nothing about that is negotiable by what a provider can be shown.
+second, and the two are not the same surface. Where an attempt exists it stores
+its closed reason as the attempt's own error evidence, which is what replay,
+audit, and recovery read; nothing about that is negotiable by what a provider
+can be shown. The two pre-approval reasons are the exception, because their
+transition creates no attempt: `not_eligible` and `invalid_arguments` resolved
+before approval store their reason on the request itself, under the owning
+[request-level transition](tool-loop.md#intra-turn-rounds-and-request-batches),
+and replay, audit, and recovery read it there. Looking for an attempt in those
+two cases would find none, and creating one would recreate exactly the orphan
+that transition exists to avoid.
 
 What the model sees is the owning
 [tool error algebra](tool-loop.md#provider-bridge-and-daemon-catalog), whose
