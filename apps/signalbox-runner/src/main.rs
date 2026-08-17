@@ -3,13 +3,16 @@
 //! reconnect backoff on either the socket or the enrollment handshake, and
 //! attempts a graceful exit on `SIGTERM`/`SIGINT`.
 
-use std::{cmp, env, error::Error, ffi::OsString, fmt, io, process::ExitCode, time::Duration};
+use std::{
+    cmp, env, error::Error, ffi::OsString, fmt, future::Future, io, process::ExitCode,
+    time::Duration,
+};
 
 use signalbox_runner::{
-    ArgumentError, ConnectionEnd, DispatchHttpsEndpoint, EnrollmentOutcome, HttpsBroker,
-    ProtocolViolation, RunnerConfiguration, RunnerConfigurationError, RunnerConfigurationPath,
-    RunnerConnection, RunnerConnectionError, RunnerStateError, RunnerStateRoot, ServeOutcome,
-    SocketConnectError, connect_verified,
+    AcceptedWorkspaceRelease, ArgumentError, ConnectionEnd, DispatchHttpsEndpoint,
+    EnrollmentOutcome, HttpsBroker, ProtocolViolation, RunnerConfiguration,
+    RunnerConfigurationError, RunnerConfigurationPath, RunnerConnection, RunnerConnectionError,
+    RunnerStateError, RunnerStateRoot, ServeOutcome, SocketConnectError, connect_verified,
 };
 use signalbox_runner_wire::{ExecutionErrorKind, SandboxProfile, TerminalResult};
 use signalbox_tools_exec::{ExecArguments, SandboxedCommandRunner, TokioProcessRunner};
@@ -124,6 +127,15 @@ async fn run(
                         break Err(error);
                     }
                 }
+                Ok(ServeOutcome::WorkspaceReleaseReady(release)) => {
+                    let cleanup = release_private_workspace(&state, release.accepted());
+                    if let Err(error) = connection
+                        .release_while_serving(&mut state, *release, cleanup)
+                        .await
+                    {
+                        break Err(error);
+                    }
+                }
                 outcome => break outcome,
             }
         };
@@ -150,7 +162,7 @@ async fn run(
             Ok(ServeOutcome::WorkspaceReleaseReady(_)) => {
                 return Err(RunnerDaemonError::Connection(
                     RunnerConnectionError::Violation(
-                        ProtocolViolation::WorkspaceReleaseHandoffUncomposed,
+                        ProtocolViolation::WorkspaceReleaseHandoffMismatch,
                     ),
                 ));
             }
@@ -163,6 +175,24 @@ async fn run(
             }
             Err(error) => return Err(RunnerDaemonError::Connection(error)),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PrivateWorkspaceCleanupFailed;
+
+fn release_private_workspace(
+    state: &RunnerStateRoot,
+    accepted: &AcceptedWorkspaceRelease,
+) -> impl Future<Output = Result<(), PrivateWorkspaceCleanupFailed>> + use<> {
+    let store = state.workspace_store();
+    let accepted = accepted.clone();
+    async move {
+        let store = store.map_err(|_| PrivateWorkspaceCleanupFailed)?;
+        tokio::task::spawn_blocking(move || store.release_private_root(&accepted))
+            .await
+            .map_err(|_| PrivateWorkspaceCleanupFailed)?
+            .map_err(|_| PrivateWorkspaceCleanupFailed)
     }
 }
 
@@ -440,7 +470,86 @@ impl Error for RunnerDaemonError {
 
 #[cfg(test)]
 mod tests {
+    use signalbox_runner::{EnrollmentAuthority, EnrollmentReceipt, PrivateWorkspaceRequest};
+    use signalbox_runner_wire::{
+        Advertisement, CanonicalUuid, PositiveU64, ReleaseCorrelation, SandboxProfile,
+        advertisement_digest,
+    };
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
     use super::*;
+
+    const SESSION: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00f1;
+    const RUNNER: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00f2;
+    const ENROLLMENT: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00f3;
+    const AUTHENTICATION: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00f4;
+    const PLACEMENT_REVISION: u64 = 3;
+
+    struct PrivateReleaseFixture {
+        _parent: TempDir,
+        state: RunnerStateRoot,
+        accepted: AcceptedWorkspaceRelease,
+        placement: std::path::PathBuf,
+    }
+
+    fn private_release_fixture() -> PrivateReleaseFixture {
+        let parent = tempfile::tempdir().expect("the release fixture parent exists");
+        let runner_root = parent.path().join("runner-state");
+        let mut state =
+            RunnerStateRoot::open(&runner_root).expect("the runner-private state root opens");
+        let advertisement = Advertisement {
+            capability_classes: Vec::new(),
+            tools: Vec::new(),
+            workspace_capabilities: Vec::new(),
+            sandbox_profiles: Vec::new(),
+            credential_profiles: Vec::new(),
+            repositories: Vec::new(),
+        };
+        let runner = CanonicalUuid::from_uuid(Uuid::from_u128(RUNNER));
+        state
+            .record_receipt(EnrollmentReceipt::new(
+                state.state().request_id(),
+                CanonicalUuid::from_uuid(Uuid::from_u128(ENROLLMENT)),
+                runner,
+                CanonicalUuid::from_uuid(Uuid::from_u128(AUTHENTICATION)),
+                PositiveU64::try_new(1).expect("the fixture registration revision is positive"),
+                advertisement_digest(&advertisement)
+                    .expect("the explicit empty advertisement has a digest"),
+                EnrollmentAuthority::Active,
+            ))
+            .expect("the fixture enrollment receipt is durable");
+        let request = PrivateWorkspaceRequest::new(
+            CanonicalUuid::from_uuid(Uuid::from_u128(SESSION)),
+            PositiveU64::try_new(PLACEMENT_REVISION)
+                .expect("the fixture placement revision is positive"),
+            runner,
+            SandboxProfile::WorkspaceRestricted,
+        );
+        let prepared = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_private_root(&request)
+            .expect("the private workspace publishes");
+        let placement = runner_root
+            .join("sessions")
+            .join(request.session().to_string())
+            .join(request.placement_revision().get().to_string());
+        let accepted = state
+            .accept_workspace_release(ReleaseCorrelation {
+                session_id: prepared.manifest.session,
+                placement_revision: prepared.manifest.placement_revision,
+                runner_id: prepared.manifest.runner,
+                manifest_id: prepared.manifest.manifest_id,
+            })
+            .expect("the exact private release is journaled");
+        PrivateReleaseFixture {
+            _parent: parent,
+            state,
+            accepted,
+            placement,
+        }
+    }
 
     #[test]
     fn reconnect_backoff_caps_and_resets() {
@@ -455,5 +564,16 @@ mod tests {
         assert_eq!(backoff.next_delay(), MAXIMUM_RECONNECT_DELAY);
         backoff.reset();
         assert_eq!(backoff.next_delay(), INITIAL_RECONNECT_DELAY);
+    }
+
+    #[tokio::test]
+    async fn accepted_private_release_runs_through_the_blocking_cleanup_adapter() {
+        let fixture = private_release_fixture();
+
+        release_private_workspace(&fixture.state, &fixture.accepted)
+            .await
+            .expect("the accepted private workspace cleanup completes");
+
+        assert!(!fixture.placement.exists());
     }
 }

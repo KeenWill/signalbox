@@ -431,7 +431,6 @@ pub enum ProtocolViolation {
     DispatchMismatch,
     ExecutionHandoffMismatch,
     WorkspaceReleaseHandoffMismatch,
-    WorkspaceReleaseHandoffUncomposed,
     InvalidShutdownReason,
     PendingRegistrationMutation,
     ConnectionCorrelationMismatch,
@@ -518,9 +517,6 @@ impl fmt::Display for ProtocolViolation {
             }
             Self::WorkspaceReleaseHandoffMismatch => {
                 formatter.write_str("workspace release handoff belongs to another connection")
-            }
-            Self::WorkspaceReleaseHandoffUncomposed => {
-                formatter.write_str("workspace release handoff has no cleanup composition")
             }
             Self::InvalidShutdownReason => {
                 formatter.write_str("daemon sent a shutdown frame with runner reason")

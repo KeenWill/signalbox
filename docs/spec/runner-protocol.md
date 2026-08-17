@@ -67,8 +67,10 @@ Journal-authorized private-root trash publication, deletion, and exact replay
 are verified against this PR (`agent/runner-private-workspace-release`).
 Accepted-release protocol handoff, heartbeat-serving cleanup, and success and
 failure journaling before projection are verified against this PR
-(`agent/runner-live-workspace-release-handoff`). Established-connection routing
-of those inbound claim and result frames through the durable transactions before
+(`agent/runner-live-workspace-release-handoff`). Top-level private-root cleanup
+composition is verified against this PR
+(`agent/runner-private-release-composition`). Established-connection routing of
+those inbound claim and result frames through the durable transactions before
 acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
@@ -1914,13 +1916,13 @@ versioned protected manifest through `staging` to `ready`, and returns the exact
 canonical ready-manifest digest. Reopening the store authenticates and replays
 that same ready manifest instead of creating another root.
 
-**Committed unimplemented functionality.** The top-level runner process invokes
-neither the private-root producer nor cleanup adapter, and no path places a
-produced ready manifest into the retained ready frame. No present runner
-provisions or deletes a repository workspace, no present daemon producer
-constructs a workspace operation, and startup staging/leak reconciliation
-remains absent. The typed `RecoveryUnavailable` seam therefore remains on live
-workspace provisioning.
+**Committed unimplemented functionality.** The top-level runner process does not
+invoke the private-root producer, and no path places a produced ready manifest
+into the retained ready frame. No present runner provisions or deletes a
+repository workspace, no present daemon producer constructs a workspace
+provisioning operation, and startup staging/leak reconciliation remains absent.
+The typed `RecoveryUnavailable` seam therefore remains on live workspace
+provisioning.
 
 The application receipt boundary accepts complete already-validated
 repository-workspace manifest facts without deriving an execution working
@@ -2059,11 +2061,13 @@ an entry and never followed. Exact replay resumes the authenticated releasing
 trash entry or accepts the already-absent placement as completed deletion;
 absence is not a fifth lifecycle token.
 
+The top-level runner process connects an accepted-release handoff to the
+private-root cleanup adapter on a blocking thread. The connection continues
+serving heartbeats while that filesystem work runs.
+
 **Committed unimplemented functionality.** Durable `workspace_recorded`
-admission will advance the protected manifest to `active`. The top-level runner
-process does not connect the accepted-release handoff to the private-root
-cleanup adapter, no repository cleanup adapter exists, and no startup scanner
-resumes the accepted journal.
+admission will advance the protected manifest to `active`. No repository cleanup
+adapter exists, and no startup scanner resumes the accepted journal.
 
 **Committed unimplemented functionality.** The guarded Git invocation contract
 in the following paragraphs remains absent. No present runner surface provides
@@ -2241,16 +2245,19 @@ state and filesystem adapters therefore enforce the irreversible boundary
 locally, and deletion replay uses the journal rather than a manifest the runner
 may already have deleted.
 
-**Committed unimplemented functionality.** The top-level runner process does not
-yet invoke the private-root cleanup future from that handoff, and repository
-workspace cleanup remains absent. A cleanup failure's existing
-`operation_failure_recorded` acknowledgement retires the accepted release and
-failure together and frees the slot. Startup will resume deletion for trash
-proven by a manifest or retained release entry, may remove staging whose
-manifest proves it was never published, and will report every unknown,
-retired-but-present, conflicting, or otherwise unreconciled workspace as a typed
-leak. It will never silently delete a reported leak, and the report remains
-visible even when no session can be resumed.
+The top-level runner constructs a descriptor-pinned store from the locked runner
+root and invokes private-root cleanup on a blocking thread. Store construction,
+thread completion, and filesystem failures all reach the same bounded protocol
+failure boundary; none blocks connection heartbeat service.
+
+**Committed unimplemented functionality.** Repository workspace cleanup remains
+absent. A cleanup failure's existing `operation_failure_recorded`
+acknowledgement retires the accepted release and failure together and frees the
+slot. Startup will resume deletion for trash proven by a manifest or retained
+release entry, may remove staging whose manifest proves it was never published,
+and will report every unknown, retired-but-present, conflicting, or otherwise
+unreconciled workspace as a typed leak. It will never silently delete a reported
+leak, and the report remains visible even when no session can be resumed.
 
 ## Open edges
 
