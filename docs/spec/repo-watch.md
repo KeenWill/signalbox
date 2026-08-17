@@ -790,17 +790,20 @@ that deadline. The daemon serves HTTP/1 directly for this reason: the head
 ceilings sit on the connection builder, below any router.
 
 Each hook admits at most 3,000 deliveries in any rolling 60-second window,
-charged only once a delivery has proved the shared secret. The count is smoothed
-across window boundaries by carrying the preceding window in proportion to how
-much of it still overlaps the trailing minute, because a window that simply
-reset would admit a full allowance on either side of its boundary and pass twice
-the ceiling within one rolling minute. Nothing is charged before verification: a
-budget keyed on the hook a request claims is a lever the attacker holds and
-GitHub does not, and spending it with forged signatures would reject the
-deliveries it exists to protect. Unauthenticated cost is bounded by resources
-instead. These are hard safety ceilings, not configuration knobs. The listener
-does not grant GitHub-originated data process-protocol authority, session
-authority, or polling credentials.
+charged only once a delivery has proved the shared secret. Admissions are
+counted in ten-second buckets and attributed to the bucket they land in, so a
+burst is counted where it happened: a window that simply reset would admit a
+full allowance on either side of its boundary, and smoothing an assumed even
+distribution would still under-count a burst arriving at a window edge. One
+bucket more than the window spans is kept and counted whole, so the bucket
+straddling the edge is never dropped while part of it is still inside the
+trailing minute. Both choices err toward refusing rather than admitting. Nothing
+is charged before verification: a budget keyed on the hook a request claims is a
+lever the attacker holds and GitHub does not, and spending it with forged
+signatures would reject the deliveries it exists to protect. Unauthenticated
+cost is bounded by resources instead. These are hard safety ceilings, not
+configuration knobs. The listener does not grant GitHub-originated data
+process-protocol authority, session authority, or polling credentials.
 
 **Implemented behavior.** A verified delivery is durably admitted before the
 listener returns `202 Accepted`. `repo_watch_webhook_delivery` keeps the unique
@@ -916,8 +919,10 @@ the baseline; an equal generation still replaces, which is how a conclusion edit
 arrives. A workflow completion whose branch head is already gone is superseded,
 because polling projects workflow runs only for the heads it queries and could
 never reproduce it. A delivered run adopts the workflow name retained state
-already carries for that workflow identity, since polling names a run from the
-workflows endpoint's current name and the occurrence identity hashes it. A
+already carries for that workflow identity. The occurrence identity deliberately
+excludes that mutable display name, so this is not what keeps the two sources
+matching; it keeps the shadow observation equal to the one polling stores, so a
+rename cannot make an otherwise duplicate delivery look like a changed fact. A
 completed check run rerequested under the same provider identity carries a new
 completion generation or conclusion, which the differ treats as a new observable
 completion, so the retained run is replaced under the same head guard. GitHub

@@ -876,7 +876,7 @@ impl RepositoryWatchTask {
     }
 
     async fn record_webhook_terminal(
-        &self,
+        &mut self,
         pending: &PendingRepoWatchWebhookDelivery,
         projections: Vec<RepoWatchWebhookProjection>,
         disposition: RepoWatchWebhookDisposition,
@@ -901,24 +901,31 @@ impl RepositoryWatchTask {
                 // ambiguous, so the outcome is definitive without retrying the
                 // write indefinitely against a connection that keeps dropping.
                 Err(RepoWatchWebhookStoreError::CommitAmbiguous(_)) => {
-                    if self
+                    match self
                         .webhook_store
                         .terminal_disposition_exists(pending.key())
                         .await
-                        .map_err(|_| RepositoryWatchAttemptError::Persistence)?
                     {
-                        return Ok(());
-                    }
-                    if attempt < MAX_WEBHOOK_TERMINAL_ATTEMPTS {
-                        sleep(WEBHOOK_TERMINAL_RETRY_DELAY).await;
+                        Ok(true) => return Ok(()),
+                        // A read that fails settles nothing, so it is retried
+                        // rather than propagated: propagating would abandon a
+                        // delivery that may already be durable.
+                        Ok(false) | Err(_) => {
+                            if attempt < MAX_WEBHOOK_TERMINAL_ATTEMPTS {
+                                sleep(WEBHOOK_TERMINAL_RETRY_DELAY).await;
+                            }
+                        }
                     }
                 }
                 Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
             }
         }
-        // The read says nothing is durable, so the delivery stays pending and
-        // the next drain retries it, which is the fallback every other failure
-        // in this path already takes.
+        // Every attempt was ambiguous or unreadable, so whether a disposition
+        // is durable is unknown. The shadow is discarded rather than trusted:
+        // if one did land, this delivery will never be loaded again, and a
+        // baseline that silently missed it would supersede its dependents. The
+        // next delivery re-seeds from the cursor and records the gap.
+        self.webhook_shadow = None;
         Err(RepositoryWatchAttemptError::Persistence)
     }
 

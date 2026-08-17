@@ -110,7 +110,12 @@ const RATE_WINDOW: Duration = Duration::from_secs(60);
 /// How finely the rolling window is counted. Admissions are attributed to the
 /// bucket they land in, so a burst is counted where it actually happened rather
 /// than smeared across the window it belongs to.
-const WEBHOOK_RATE_BUCKETS: usize = 6;
+///
+/// One bucket more than the window spans is kept, because the oldest bucket
+/// straddles the window's edge: dropping it whole would discard admissions that
+/// are still inside the trailing minute. Keeping it counts a few that have just
+/// left instead, which errs toward refusing rather than admitting.
+const WEBHOOK_RATE_BUCKETS: usize = 7;
 /// One bucket's span, which is `RATE_WINDOW` divided by the bucket count.
 const RATE_BUCKET: Duration = Duration::from_secs(10);
 /// Granularity of the shared body-memory budget, so one request reserves close
@@ -575,7 +580,21 @@ async fn admit_webhook(
             }
             StatusCode::ACCEPTED
         }
-        Ok(RepoWatchWebhookAdmissionOutcome::EqualDuplicate(_)) => StatusCode::ACCEPTED,
+        Ok(RepoWatchWebhookAdmissionOutcome::EqualDuplicate(receipt)) => {
+            // The admission whose result was lost still returned no nudge, so
+            // this replay carries it. Waking the worker for a delivery that is
+            // already terminal costs one empty drain and nothing else.
+            if hook.nudge.try_send(()).is_err() {
+                tracing::debug!(
+                    repository = %hook.repository.as_str(),
+                    hook_id = headers.hook_id().get(),
+                    delivery_id = %headers.delivery_id(),
+                    receipt_sequence = receipt.sequence().get(),
+                    "equal webhook replay awaits repository worker drain"
+                );
+            }
+            StatusCode::ACCEPTED
+        }
         Ok(RepoWatchWebhookAdmissionOutcome::Conflict) => {
             tracing::warn!(
                 repository = %hook.repository.as_str(),
@@ -968,8 +987,9 @@ impl WebhookRateLimiter {
 /// Retires whatever buckets have aged out of the trailing window by `now`.
 fn advance_rate_buckets(window: &mut HookRateWindow, now: Instant) {
     let elapsed = now.duration_since(window.bucket_started);
-    if elapsed >= RATE_WINDOW {
-        // Nothing recorded is still inside the trailing window.
+    if elapsed >= RATE_WINDOW + RATE_BUCKET {
+        // Every bucket, including the one straddling the window edge, is older
+        // than the trailing window.
         *window = HookRateWindow {
             bucket_started: now,
             newest: 0,
@@ -1291,6 +1311,27 @@ mod tests {
     }
 
     #[test]
+    fn a_burst_at_the_window_edge_still_counts_a_minute_later() {
+        let limiter = WebhookRateLimiter::new();
+        let started = std::time::Instant::now();
+        WebhookRateLimiter::saturate(
+            &limiter.verified,
+            FIXTURE_HOOK_ID,
+            started,
+            MAX_WEBHOOK_DELIVERIES_PER_MINUTE,
+        );
+
+        // The bucket anchored here can hold admissions arriving almost a bucket
+        // later, so at one window it is still partly inside the trailing minute.
+        assert!(!WebhookRateLimiter::admit_at(
+            &limiter.verified,
+            FIXTURE_HOOK_ID,
+            started + super::RATE_WINDOW,
+            MAX_WEBHOOK_DELIVERIES_PER_MINUTE
+        ));
+    }
+
+    #[test]
     fn a_burst_older_than_the_window_releases_its_allowance() {
         let limiter = WebhookRateLimiter::new();
         let started = std::time::Instant::now();
@@ -1304,7 +1345,7 @@ mod tests {
         assert!(WebhookRateLimiter::admit_at(
             &limiter.verified,
             FIXTURE_HOOK_ID,
-            started + super::RATE_WINDOW,
+            started + super::RATE_WINDOW + super::RATE_BUCKET,
             MAX_WEBHOOK_DELIVERIES_PER_MINUTE
         ));
     }
