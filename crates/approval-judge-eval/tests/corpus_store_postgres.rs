@@ -108,13 +108,24 @@ async fn manifest_import_conforms_with_disk_and_scores_identically() -> Result<(
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn blob_source_constraint_requires_digest_and_byte_length() -> Result<(), Box<dyn Error>> {
+async fn blob_source_constraint_requires_digest() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
-    let digest = [0_u8; 32];
 
     insert_blob_registration(&pool, "missing-digest", None, Some("1"))
         .await
         .expect_err("a blob registration without a digest is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn blob_source_constraint_requires_byte_length() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let digest = [0_u8; 32];
+
     insert_blob_registration(&pool, "missing-byte-length", Some(&digest), None)
         .await
         .expect_err("a blob registration without a byte length is rejected");
@@ -142,13 +153,13 @@ async fn stored_case_decode_error_retains_serde_context() -> Result<(), Box<dyn 
             SET case_json = '{}'::jsonb
           WHERE corpus_name = $1 AND corpus_version = $2 AND replay_position = 0",
     )
-    .bind(&registration.key.name)
-    .bind(&registration.key.version)
+    .bind(&registration.key().name)
+    .bind(&registration.key().version)
     .execute(&pool)
     .await?;
 
     let error = database
-        .load(&registration.key)
+        .load(registration.key())
         .await
         .expect_err("a malformed durable case fails closed");
 

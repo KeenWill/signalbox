@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let registration = registrations
         .first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "disk corpus store is empty"))?;
-    let corpus = store.load(&registration.key).await?;
+    let corpus = store.load(registration.key()).await?;
     let response_bytes = fs::read(responses_path)?;
     let responses: OfflineResponseFile = serde_json::from_slice(&response_bytes)?;
     validate_responses(&corpus, &responses)?;

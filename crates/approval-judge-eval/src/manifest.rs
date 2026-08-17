@@ -153,6 +153,9 @@ pub fn load_manifest_corpus(path: impl AsRef<Path>) -> Result<LoadedManifestCorp
             if manifest.integrity.source_sha256.is_some() {
                 return Err(ManifestError::UnexpectedSourceDigest);
             }
+            if cases.is_empty() {
+                return Err(ManifestError::Corpus(crate::CorpusLoadError::EmptyCorpus));
+            }
             (
                 ApprovalJudgeCorpus {
                     format_version: manifest.corpus_format_version,
@@ -162,6 +165,9 @@ pub fn load_manifest_corpus(path: impl AsRef<Path>) -> Result<LoadedManifestCorp
             )
         }
         ManifestCaseSource::BlobReference { .. } => {
+            if manifest.integrity.source_sha256.is_some() {
+                return Err(ManifestError::UnexpectedSourceDigest);
+            }
             return Err(ManifestError::BlobBackendUnavailable);
         }
     };
@@ -260,6 +266,33 @@ fn validate_identity_component(field: &'static str, value: &str) -> Result<(), M
     validate_bounded_text(field, value, MAX_IDENTITY_BYTES)
 }
 
+pub(crate) fn validate_registration_metadata(
+    key: &CorpusKey,
+    source: &CorpusSourceDescriptor,
+) -> Result<(), ManifestError> {
+    validate_identity_component("name", &key.name)?;
+    validate_identity_component("version", &key.version)?;
+    match source {
+        CorpusSourceDescriptor::Repository { repository, path } => {
+            validate_bounded_text("repository", repository, MAX_REPOSITORY_BYTES)?;
+            validate_bounded_text("repository path", path, MAX_REPOSITORY_PATH_BYTES)?;
+            portable_relative_path(path)?;
+        }
+        CorpusSourceDescriptor::DatabaseNative => {}
+        CorpusSourceDescriptor::BlobReference {
+            store, byte_length, ..
+        } => {
+            if *byte_length == 0 {
+                return Err(ManifestError::InvalidBlobByteLength);
+            }
+            if let Some(store) = store {
+                validate_blob_store(store)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_bounded_text(
     field: &'static str,
     value: &str,
@@ -334,18 +367,14 @@ fn validate_manifest_content(
             observed: observed_corpus,
         });
     }
-    let case_count =
-        u64::try_from(corpus.cases.len()).map_err(|_| ManifestError::LengthOverflow)?;
-    let registration = CorpusRegistration {
-        key: CorpusKey {
+    let registration = CorpusRegistration::new(
+        CorpusKey {
             name: manifest.name.clone(),
             version: manifest.version.clone(),
         },
-        format_version: corpus.format_version,
-        corpus_sha256: observed_corpus,
-        case_count,
         source,
-    };
+        &corpus,
+    )?;
     Ok(LoadedManifestCorpus {
         manifest,
         registration,
@@ -430,7 +459,7 @@ impl fmt::Display for ManifestError {
                 formatter.write_str("repository case source requires source_sha256")
             }
             Self::UnexpectedSourceDigest => {
-                formatter.write_str("database-native case source must not carry source_sha256")
+                formatter.write_str("non-repository case source must not carry source_sha256")
             }
             Self::InvalidBlobByteLength => {
                 formatter.write_str("blob source byte length must be positive")
@@ -515,16 +544,16 @@ mod tests {
             loaded.corpus.cases.len(),
             loaded.manifest.integrity.cases.len()
         );
-        assert_eq!(loaded.registration.key.name, loaded.manifest.name);
-        assert_eq!(loaded.registration.key.version, loaded.manifest.version);
+        assert_eq!(loaded.registration.key().name, loaded.manifest.name);
+        assert_eq!(loaded.registration.key().version, loaded.manifest.version);
         assert_eq!(
-            usize::try_from(loaded.registration.case_count)
+            usize::try_from(loaded.registration.case_count())
                 .expect("the fixture case count fits usize"),
             loaded.manifest.integrity.cases.len()
         );
         assert_eq!(
-            loaded.registration.source,
-            manifest_source(&loaded.manifest)
+            loaded.registration.source(),
+            &manifest_source(&loaded.manifest)
         );
     }
 

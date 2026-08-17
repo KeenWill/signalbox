@@ -40,5 +40,8 @@ name = "corpus_store_postgres"
 path = "tests/corpus_store_postgres.rs"
 required-features = ["postgres-integration"]
 
+[dev-dependencies]
+expect-test = "1.5.1"
+
 [lints]
 workspace = true

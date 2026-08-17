@@ -48,14 +48,15 @@ decision this page does not commit.
 The implemented `signalbox-approval-judge-eval` workspace crate is the temporary
 standalone evaluation surface for the current three-disposition approval judge,
 verified against this PR (`agent/eval-corpus-stores`). Its version-one JSON
-corpus carries each exact
-synthetic tool request and frozen authority context, an expected `approve`,
-`deny`, or `escalate_to_human` disposition, and free-text label provenance. Its
-replay uses the daemon's current approval-judge prompt, request renderer,
-structured output contract, and decision decoder without entering the daemon's
-durable decision path. The library reports every case verdict, exact-match
-accuracy, and one-vs-rest precision and recall for every disposition; a rate
-whose denominator is zero has no decimal value and retains its zero denominator.
+corpus carries each synthetic tool request and frozen authority context; valid
+JSON argument text is normalized by the daemon renderer before judging. It also
+carries an expected `approve`, `deny`, or `escalate_to_human` disposition and
+nonempty free-text label provenance. Its replay uses the daemon's current
+approval-judge prompt, request renderer, structured output contract, and decision
+decoder without entering the daemon's durable decision path. The library reports
+every case verdict, exact-match accuracy, and one-vs-rest precision and recall
+for every disposition; a rate whose denominator is zero has no decimal value and
+retains its zero denominator.
 
 The operator entry point is offline: it consumes a portable corpus manifest and
 ordered recorded responses, loads the corpus through the pluggable store

@@ -158,19 +158,71 @@ pub enum CorpusSourceDescriptor {
 }
 
 /// Metadata an instance uses to enumerate a corpus and its origin.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CorpusRegistration {
     /// Instance-local logical identity.
-    pub key: CorpusKey,
+    key: CorpusKey,
     /// Version of the case representation.
-    pub format_version: u32,
+    format_version: u32,
     /// Storage-form-independent logical corpus digest.
-    pub corpus_sha256: Sha256Digest,
+    corpus_sha256: Sha256Digest,
     /// Number of cases covered by the digest.
-    pub case_count: u64,
+    case_count: u64,
     /// Where this registration's content originated.
-    pub source: CorpusSourceDescriptor,
+    source: CorpusSourceDescriptor,
+}
+
+impl CorpusRegistration {
+    /// Constructs registration metadata from an admitted corpus.
+    pub fn new(
+        key: CorpusKey,
+        source: CorpusSourceDescriptor,
+        corpus: &ApprovalJudgeCorpus,
+    ) -> Result<Self, crate::manifest::ManifestError> {
+        crate::validate_corpus(corpus).map_err(crate::manifest::ManifestError::Corpus)?;
+        crate::manifest::validate_registration_metadata(&key, &source)?;
+        let corpus_sha256 = crate::manifest::corpus_digest(corpus)?;
+        let case_count = u64::try_from(corpus.cases.len())
+            .map_err(|_| crate::manifest::ManifestError::LengthOverflow)?;
+        Ok(Self {
+            key,
+            format_version: corpus.format_version,
+            corpus_sha256,
+            case_count,
+            source,
+        })
+    }
+
+    /// Returns the instance-local logical identity.
+    #[must_use]
+    pub const fn key(&self) -> &CorpusKey {
+        &self.key
+    }
+
+    /// Returns the admitted case-representation version.
+    #[must_use]
+    pub const fn format_version(&self) -> u32 {
+        self.format_version
+    }
+
+    /// Returns the storage-independent logical corpus digest.
+    #[must_use]
+    pub const fn corpus_sha256(&self) -> Sha256Digest {
+        self.corpus_sha256
+    }
+
+    /// Returns the number of cases covered by the digest.
+    #[must_use]
+    pub const fn case_count(&self) -> u64 {
+        self.case_count
+    }
+
+    /// Returns the admitted source descriptor.
+    #[must_use]
+    pub const fn source(&self) -> &CorpusSourceDescriptor {
+        &self.source
+    }
 }
 
 /// Pluggable corpus lookup used by the evaluation harness.
@@ -215,7 +267,7 @@ impl CorpusStore for DiskCorpusStore {
     }
 
     fn load<'a>(&'a self, key: &'a CorpusKey) -> CorpusStoreFuture<'a, ApprovalJudgeCorpus> {
-        let result = if key == &self.registration.key {
+        let result = if key == self.registration.key() {
             Ok(self.corpus.clone())
         } else {
             Err(CorpusStoreError::NotFound(key.clone()))
@@ -260,6 +312,8 @@ pub enum CorpusStoreCorruption {
     CaseCountMismatch,
     /// Registration and content digests differ.
     CorpusDigestMismatch,
+    /// A durable case row key differs from the identity in its JSON payload.
+    CaseIdMismatch,
     /// The logical key already names different metadata or cases.
     RegistrationConflict,
     /// A durable source discriminator is unknown.
@@ -294,6 +348,9 @@ impl fmt::Display for CorpusStoreCorruption {
             }
             Self::CorpusDigestMismatch => {
                 formatter.write_str("registration digest does not match stored cases")
+            }
+            Self::CaseIdMismatch => {
+                formatter.write_str("stored case identity does not match its row key")
             }
             Self::RegistrationConflict => {
                 formatter.write_str("logical key already names different metadata or cases")

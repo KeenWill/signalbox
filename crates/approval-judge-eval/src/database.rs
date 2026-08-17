@@ -46,14 +46,14 @@ impl DatabaseCorpusStore {
         corpus: &ApprovalJudgeCorpus,
     ) -> Result<CorpusRegistration, CorpusStoreError> {
         validate_registration(&registration, corpus)?;
-        let case_count = i64::try_from(registration.case_count).map_err(|_| {
+        let case_count = i64::try_from(registration.case_count()).map_err(|_| {
             CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::CaseCountOutOfRange)
         })?;
-        let format_version = i32::try_from(registration.format_version).map_err(|_| {
+        let format_version = i32::try_from(registration.format_version()).map_err(|_| {
             CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::FormatVersionOutOfRange)
         })?;
         let (source_kind, repository, path, blob_store, blob_digest, blob_byte_length) =
-            encode_source(&registration.source);
+            encode_source(registration.source());
         let mut transaction = self.pool.begin().await?;
         let inserted = sqlx::query(
             "INSERT INTO evaluation_corpus (
@@ -63,10 +63,10 @@ impl DatabaseCorpusStore {
              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::numeric)
              ON CONFLICT (corpus_name, corpus_version) DO NOTHING",
         )
-        .bind(&registration.key.name)
-        .bind(&registration.key.version)
+        .bind(&registration.key().name)
+        .bind(&registration.key().version)
         .bind(format_version)
-        .bind(registration.corpus_sha256.as_bytes().as_slice())
+        .bind(registration.corpus_sha256().as_bytes().as_slice())
         .bind(case_count)
         .bind(source_kind)
         .bind(repository)
@@ -80,9 +80,9 @@ impl DatabaseCorpusStore {
 
         if inserted == 0 {
             transaction.rollback().await?;
-            let existing = self.registration(&registration.key).await?;
+            let existing = self.registration(registration.key()).await?;
             if existing == registration {
-                let loaded = self.load_owned(&registration.key).await?;
+                let loaded = self.load_owned(registration.key()).await?;
                 if loaded == *corpus {
                     return Ok(existing);
                 }
@@ -103,8 +103,8 @@ impl DatabaseCorpusStore {
                     corpus_name, corpus_version, case_id, replay_position, case_json
                  ) VALUES ($1, $2, $3, $4, $5::jsonb)",
             )
-            .bind(&registration.key.name)
-            .bind(&registration.key.version)
+            .bind(&registration.key().name)
+            .bind(&registration.key().version)
             .bind(&case.id)
             .bind(position)
             .bind(case_json)
@@ -132,7 +132,9 @@ impl DatabaseCorpusStore {
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| CorpusStoreError::NotFound(key.clone()))?;
-        decode_registration(&row)
+        let stored = decode_registration(&row)?;
+        let corpus = self.load_stored_corpus(&stored).await?;
+        registration_from_stored(stored, &corpus)
     }
 
     async fn enumerate_owned(&self) -> Result<Vec<CorpusRegistration>, CorpusStoreError> {
@@ -145,33 +147,65 @@ impl DatabaseCorpusStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        rows.iter().map(decode_registration).collect()
+        let mut registrations = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let stored = decode_registration(row)?;
+            let corpus = self.load_stored_corpus(&stored).await?;
+            registrations.push(registration_from_stored(stored, &corpus)?);
+        }
+        Ok(registrations)
     }
 
     async fn load_owned(&self, key: &CorpusKey) -> Result<ApprovalJudgeCorpus, CorpusStoreError> {
-        let registration = self.registration(key).await?;
+        let row = sqlx::query(
+            "SELECT corpus_name, corpus_version, format_version, corpus_digest, case_count,
+                    source_kind, source_repository, source_path, source_blob_store,
+                    source_blob_digest, source_blob_byte_length::text AS source_blob_byte_length
+               FROM evaluation_corpus
+              WHERE corpus_name = $1 AND corpus_version = $2",
+        )
+        .bind(&key.name)
+        .bind(&key.version)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| CorpusStoreError::NotFound(key.clone()))?;
+        let stored = decode_registration(&row)?;
+        let corpus = self.load_stored_corpus(&stored).await?;
+        registration_from_stored(stored, &corpus)?;
+        Ok(corpus)
+    }
+
+    async fn load_stored_corpus(
+        &self,
+        registration: &StoredRegistration,
+    ) -> Result<ApprovalJudgeCorpus, CorpusStoreError> {
         let rows = sqlx::query(
-            "SELECT case_json::text AS case_json
+            "SELECT case_id, case_json::text AS case_json
                FROM evaluation_corpus_case
               WHERE corpus_name = $1 AND corpus_version = $2
               ORDER BY replay_position",
         )
-        .bind(&key.name)
-        .bind(&key.version)
+        .bind(&registration.key.name)
+        .bind(&registration.key.version)
         .fetch_all(&self.pool)
         .await?;
         let mut cases = Vec::with_capacity(rows.len());
         for row in rows {
+            let stored_id: String = row.try_get("case_id")?;
             let json: String = row.try_get("case_json")?;
-            let case = serde_json::from_str(&json).map_err(CorpusStoreError::StoredCaseJson)?;
+            let case: crate::ApprovalJudgeCase =
+                serde_json::from_str(&json).map_err(CorpusStoreError::StoredCaseJson)?;
+            if case.id != stored_id {
+                return Err(CorpusStoreError::CorruptRegistration(
+                    CorpusStoreCorruption::CaseIdMismatch,
+                ));
+            }
             cases.push(case);
         }
-        let corpus = ApprovalJudgeCorpus {
+        Ok(ApprovalJudgeCorpus {
             format_version: registration.format_version,
             cases,
-        };
-        validate_registration(&registration, &corpus)?;
-        Ok(corpus)
+        })
     }
 }
 
@@ -192,25 +226,25 @@ fn validate_registration(
     let count = u64::try_from(corpus.cases.len()).map_err(|_| {
         CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::CaseCountOutOfRange)
     })?;
-    if registration.format_version != corpus.format_version {
+    if registration.format_version() != corpus.format_version {
         return Err(CorpusStoreError::CorruptRegistration(
             CorpusStoreCorruption::FormatVersionMismatch,
         ));
     }
-    if registration.format_version != CORPUS_FORMAT_VERSION {
+    if registration.format_version() != CORPUS_FORMAT_VERSION {
         return Err(CorpusStoreError::Manifest(
             ManifestError::UnsupportedCorpusVersion {
-                observed: registration.format_version,
+                observed: registration.format_version(),
             },
         ));
     }
-    if registration.case_count != count {
+    if registration.case_count() != count {
         return Err(CorpusStoreError::CorruptRegistration(
             CorpusStoreCorruption::CaseCountMismatch,
         ));
     }
     let observed = corpus_digest(corpus).map_err(CorpusStoreError::Manifest)?;
-    if registration.corpus_sha256 != observed {
+    if registration.corpus_sha256() != observed {
         return Err(CorpusStoreError::CorruptRegistration(
             CorpusStoreCorruption::CorpusDigestMismatch,
         ));
@@ -260,9 +294,17 @@ fn encode_source(source: &CorpusSourceDescriptor) -> EncodedSource<'_> {
     }
 }
 
+struct StoredRegistration {
+    key: CorpusKey,
+    format_version: u32,
+    corpus_sha256: Sha256Digest,
+    case_count: u64,
+    source: CorpusSourceDescriptor,
+}
+
 fn decode_registration(
     row: &sqlx::postgres::PgRow,
-) -> Result<CorpusRegistration, CorpusStoreError> {
+) -> Result<StoredRegistration, CorpusStoreError> {
     let name: String = row.try_get("corpus_name")?;
     let version: String = row.try_get("corpus_version")?;
     let format_version: i32 = row.try_get("format_version")?;
@@ -297,17 +339,43 @@ fn decode_registration(
             ));
         }
     };
-    Ok(CorpusRegistration {
+    let format_version = u32::try_from(format_version).map_err(|_| {
+        CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::NegativeFormatVersion)
+    })?;
+    let case_count = u64::try_from(case_count).map_err(|_| {
+        CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::NegativeCaseCount)
+    })?;
+    Ok(StoredRegistration {
         key: CorpusKey { name, version },
-        format_version: u32::try_from(format_version).map_err(|_| {
-            CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::NegativeFormatVersion)
-        })?,
+        format_version,
         corpus_sha256: decode_digest(&corpus_digest)?,
-        case_count: u64::try_from(case_count).map_err(|_| {
-            CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::NegativeCaseCount)
-        })?,
+        case_count,
         source,
     })
+}
+
+fn registration_from_stored(
+    stored: StoredRegistration,
+    corpus: &ApprovalJudgeCorpus,
+) -> Result<CorpusRegistration, CorpusStoreError> {
+    if stored.format_version != corpus.format_version {
+        return Err(CorpusStoreError::CorruptRegistration(
+            CorpusStoreCorruption::FormatVersionMismatch,
+        ));
+    }
+    let registration = CorpusRegistration::new(stored.key, stored.source, corpus)
+        .map_err(CorpusStoreError::Manifest)?;
+    if registration.case_count() != stored.case_count {
+        return Err(CorpusStoreError::CorruptRegistration(
+            CorpusStoreCorruption::CaseCountMismatch,
+        ));
+    }
+    if registration.corpus_sha256() != stored.corpus_sha256 {
+        return Err(CorpusStoreError::CorruptRegistration(
+            CorpusStoreCorruption::CorpusDigestMismatch,
+        ));
+    }
+    Ok(registration)
 }
 
 fn required_column<Value>(

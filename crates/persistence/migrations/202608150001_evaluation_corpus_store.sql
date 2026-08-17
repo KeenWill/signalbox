@@ -88,6 +88,3 @@ CREATE TABLE evaluation_corpus_case (
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
 );
-
-CREATE INDEX evaluation_corpus_case_replay_order
-    ON evaluation_corpus_case (corpus_name, corpus_version, replay_position);
