@@ -2879,9 +2879,12 @@ async fn every_active_activation_carries_its_field_fingerprints() -> Result<(), 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_revision_below_the_highest_recorded_revision_is_refused() -> Result<(), Box<dyn Error>> {
-    let fixture = dispatch_fixture_for(rule_at_version(RepoWatchRuleVersion::new(
-        NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("recorded version is positive"),
-    ))?)
+    let fixture = dispatch_fixture_for(rule_at_version(
+        RepoWatchRuleVersion::new(
+            NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("recorded version is positive"),
+        )
+        .expect("recorded version is within the durable range"),
+    )?)
     .await?;
 
     let error = fixture
@@ -2900,6 +2903,7 @@ async fn a_revision_below_the_highest_recorded_revision_is_refused() -> Result<(
             latest: RepoWatchRuleVersion::new(
                 NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("recorded version is positive")
             )
+            .expect("recorded version is within the durable range")
         }
     );
     Ok(())
@@ -2911,7 +2915,8 @@ async fn repeating_an_admission_commit_changes_nothing() -> Result<(), Box<dyn E
     let fixture = dispatch_fixture().await?;
     let replacement_version = RepoWatchRuleVersion::new(
         NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
-    );
+    )
+    .expect("replacement version is within the durable range");
     let replacement = rule_at_version(replacement_version)?;
     let repositories = [fixture.repository.clone()];
     fixture
@@ -2944,7 +2949,8 @@ async fn validating_an_admissible_revision_consumes_no_revision() -> Result<(), 
     let fixture = dispatch_fixture().await?;
     let replacement_version = RepoWatchRuleVersion::new(
         NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
-    );
+    )
+    .expect("replacement version is within the durable range");
     let replacement = rule_at_version(replacement_version)?;
 
     fixture
@@ -3012,7 +3018,8 @@ async fn a_refused_repository_leaves_every_other_repository_unmutated() -> Resul
     let second_repository = RepositorySlug::try_new(SECOND_REPOSITORY.to_owned())?;
     let replacement_version = RepoWatchRuleVersion::new(
         NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
-    );
+    )
+    .expect("replacement version is within the durable range");
     let replacement = rule_at_version(replacement_version)?;
     fixture
         .store
@@ -3062,7 +3069,8 @@ async fn version_bump_retires_the_old_rule_and_activates_the_replacement_after_h
     let fixture = dispatch_fixture().await?;
     let replacement_version = RepoWatchRuleVersion::new(
         NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
-    );
+    )
+    .expect("replacement version is within the durable range");
     let replacement = rule_at_version(replacement_version)?;
 
     fixture

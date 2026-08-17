@@ -447,23 +447,72 @@ impl PostgresRepoWatchDispatchStore {
     /// revisions it consumes belong to a daemon that reaches its runtime.
     ///
     /// A lost commit response leaves the durable outcome unknown, which the
-    /// caller must not guess. Admission is idempotent — it reads the current
-    /// activations and writes only what is missing — so running it again
-    /// rereads durable state and resolves the ambiguity exactly: the rerun
-    /// finds the configured identities already active and commits nothing when
-    /// the first commit won, and performs the admission when it never landed.
-    /// A second ambiguous commit is surfaced rather than guessed.
+    /// caller must not guess. The resolution is a read-only reread of the
+    /// active set, which commits nothing and so cannot itself become
+    /// ambiguous: it answers the only question the outcome turned on. Either
+    /// the admission is already applied, so the commit won and startup
+    /// proceeds, or it is not, so the commit never landed, no revision was
+    /// consumed, and startup fails with the previous configuration still
+    /// admissible. One reread therefore settles the ambiguity instead of
+    /// leaving another unknown commit outcome behind; only an unreachable
+    /// database defeats it, and the next start rereads again.
     pub async fn reconcile_configured_rules(
         &self,
         repositories: &[RepositorySlug],
         configured: &[RepoWatchRule],
     ) -> Result<(), RepoWatchDispatchRepositoryError> {
         match self.commit_configured_rules(repositories, configured).await {
-            Err(RepoWatchDispatchRepositoryError::CommitAmbiguous(_)) => {
-                self.commit_configured_rules(repositories, configured).await
+            Err(RepoWatchDispatchRepositoryError::CommitAmbiguous(error)) => {
+                if self.admission_is_applied(repositories, configured).await? {
+                    return Ok(());
+                }
+                Err(RepoWatchDispatchRepositoryError::CommitAmbiguous(error))
             }
             outcome => outcome,
         }
+    }
+
+    /// Whether the durable active set already equals the configured admission.
+    ///
+    /// Read-only by construction, so resolving an ambiguous commit never adds
+    /// another commit boundary to be ambiguous about.
+    async fn admission_is_applied(
+        &self,
+        repositories: &[RepositorySlug],
+        configured: &[RepoWatchRule],
+    ) -> Result<bool, RepoWatchDispatchRepositoryError> {
+        let mut expected = BTreeSet::new();
+        for repository in repositories {
+            for rule in configured {
+                expected.insert((
+                    repository.as_str().to_owned(),
+                    rule.id().as_str().to_owned(),
+                    stored_rule_version(rule.version())?,
+                ));
+            }
+        }
+        let rows = sqlx::query(
+            "SELECT activation.repository, activation.rule_id, activation.rule_version
+               FROM repo_watch_rule_activation AS activation
+              WHERE NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_rule_deactivation AS deactivation
+                     WHERE deactivation.repository = activation.repository
+                       AND deactivation.rule_id = activation.rule_id
+                       AND deactivation.rule_version = activation.rule_version
+              )",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut active = BTreeSet::new();
+        for row in rows {
+            active.insert((
+                row.try_get::<String, _>("repository")?,
+                row.try_get::<String, _>("rule_id")?,
+                row.try_get::<i64, _>("rule_version")?,
+            ));
+        }
+        Ok(active == expected)
     }
 
     /// Admits the configured repository set in one committed transaction.
@@ -1671,13 +1720,13 @@ pub(crate) fn stored_rule_version(
 fn decoded_rule_version(
     version: i64,
 ) -> Result<RepoWatchRuleVersion, RepoWatchDispatchRepositoryError> {
-    let version = u64::try_from(version)
+    u64::try_from(version)
         .ok()
         .and_then(NonZeroU64::new)
+        .and_then(RepoWatchRuleVersion::new)
         .ok_or(RepoWatchDispatchRepositoryError::Corruption(
             "stored rule version is invalid",
-        ))?;
-    Ok(RepoWatchRuleVersion::new(version))
+        ))
 }
 
 fn stored_rule_id(rule_id: &str) -> Result<RepoWatchRuleId, RepoWatchDispatchRepositoryError> {

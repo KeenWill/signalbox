@@ -9450,7 +9450,7 @@ impl RepoWatchPattern {
 pub struct RepoWatchRuleVersion(/* private NonZeroU64 */);
 impl RepoWatchRuleVersion {
     pub const V1: Self;
-    pub const fn new(value: NonZeroU64) -> Self;
+    pub const fn new(value: NonZeroU64) -> Option<Self>;
     pub const fn get(self) -> u64;
 }
 

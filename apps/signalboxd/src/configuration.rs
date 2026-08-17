@@ -1811,9 +1811,8 @@ fn parse_repository_watch_rules(
             .get("version")
             .and_then(Item::as_integer)
             .and_then(|value| u64::try_from(value).ok())
-            .filter(|value| *value <= i64::MAX as u64)
             .and_then(NonZeroU64::new)
-            .map(RepoWatchRuleVersion::new)
+            .and_then(RepoWatchRuleVersion::new)
             .ok_or_else(|| HubModelConfigurationError::InvalidRepositoryWatchRule {
                 rule: id.as_str().to_owned(),
                 reason: String::from(
@@ -4221,7 +4220,8 @@ selection_id = "10000000-0000-4000-8000-000000000001"
     #[test]
     fn repository_watch_accepts_a_positive_rule_revision() {
         let revision =
-            RepoWatchRuleVersion::new(NonZeroU64::new(2).expect("configured revision is positive"));
+            RepoWatchRuleVersion::new(NonZeroU64::new(2).expect("configured revision is positive"))
+                .expect("configured revision is within the durable range");
         let configured = configuration_with_repository_watch_rule().replace(
             &format!(
                 "id = \"{WATCH_RULE_ID}\"\nversion = {}",

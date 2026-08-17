@@ -4592,7 +4592,8 @@ mod tests {
             .expect("fixture rule ID is valid");
         let latest_version = RepoWatchRuleVersion::new(
             NonZeroU64::new(2).expect("recorded fixture version is positive"),
-        );
+        )
+        .expect("recorded fixture version is within the durable range");
         let error = rule_activation_error(RepoWatchDispatchRepositoryError::RegressedRuleVersion {
             rule_id,
             rule_version: RepoWatchRuleVersion::V1,

@@ -433,8 +433,17 @@ pub struct RepoWatchRuleVersion(NonZeroU64);
 impl RepoWatchRuleVersion {
     pub const V1: Self = Self(NonZeroU64::MIN);
 
-    pub const fn new(value: NonZeroU64) -> Self {
-        Self(value)
+    /// The revision, or `None` beyond the durable signed 64-bit range.
+    ///
+    /// Storage records a revision as a signed 64-bit integer, so a larger
+    /// value has no durable representation. Refusing it here keeps every
+    /// constructed revision persistable, instead of admitting a rule whose
+    /// reconciliation would later report caller input as storage corruption.
+    pub const fn new(value: NonZeroU64) -> Option<Self> {
+        if value.get() > i64::MAX.unsigned_abs() {
+            return None;
+        }
+        Some(Self(value))
     }
 
     pub const fn get(self) -> u64 {
@@ -2354,6 +2363,23 @@ mod tests {
         assert_eq!(
             RepoWatchEventKindNameV1::ReactionChanged.inventory_predecessor(),
             Some(RepoWatchEventKindNameV1::BaseAdvanced)
+        );
+    }
+
+    /// The revision bound is the durable one, checked at both edges.
+    #[test]
+    fn a_revision_beyond_the_durable_range_is_refused() {
+        let highest = NonZeroU64::new(i64::MAX.unsigned_abs()).expect("the bound is positive");
+        let beyond = NonZeroU64::new(i64::MAX.unsigned_abs() + 1).expect("one past is positive");
+
+        assert_eq!(
+            RepoWatchRuleVersion::new(highest).map(RepoWatchRuleVersion::get),
+            Some(highest.get())
+        );
+        assert_eq!(RepoWatchRuleVersion::new(beyond), None);
+        assert_eq!(
+            RepoWatchRuleVersion::new(NonZeroU64::MIN),
+            Some(RepoWatchRuleVersion::V1)
         );
     }
 
