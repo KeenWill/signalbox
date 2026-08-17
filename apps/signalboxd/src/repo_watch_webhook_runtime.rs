@@ -107,6 +107,12 @@ pub(crate) const WEBHOOK_BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const WEBHOOK_ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 const RATE_WINDOW: Duration = Duration::from_secs(60);
+/// How finely the rolling window is counted. Admissions are attributed to the
+/// bucket they land in, so a burst is counted where it actually happened rather
+/// than smeared across the window it belongs to.
+const WEBHOOK_RATE_BUCKETS: usize = 6;
+/// One bucket's span, which is `RATE_WINDOW` divided by the bucket count.
+const RATE_BUCKET: Duration = Duration::from_secs(10);
 /// Granularity of the shared body-memory budget, so one request reserves close
 /// to what it may actually buffer instead of one indivisible slot.
 const WEBHOOK_BODY_BUDGET_GRANULE_BYTES: usize = 64 * 1024;
@@ -882,17 +888,19 @@ pub(crate) struct WebhookRateLimiter {
     verified: Mutex<HashMap<NonZeroU64, HookRateWindow>>,
 }
 
-/// One hook's admission counters for the current window and the one before it.
+/// One hook's admissions, counted per bucket across the trailing window.
 ///
 /// A fixed window that simply resets admits a full allowance on either side of
-/// its boundary, so twice the ceiling can pass within one rolling minute. The
-/// preceding window's count is carried in proportion to how much of it still
-/// overlaps the trailing minute, which bounds every rolling window instead.
+/// its boundary. Carrying the preceding window in proportion fixes that only if
+/// its admissions were spread evenly, which a burst is not. Counting buckets
+/// attributes each admission to when it happened, so every rolling window is
+/// bounded whatever the arrival shape. The oldest bucket is counted whole, which
+/// makes the ceiling strict rather than permissive at the boundary.
 #[derive(Clone, Copy, Debug)]
 struct HookRateWindow {
-    started: Instant,
-    admitted: u32,
-    preceding: u32,
+    bucket_started: Instant,
+    newest: usize,
+    buckets: [u32; WEBHOOK_RATE_BUCKETS],
 }
 
 impl WebhookRateLimiter {
@@ -919,31 +927,16 @@ impl WebhookRateLimiter {
     ) -> bool {
         let mut windows = windows.lock().unwrap_or_else(PoisonError::into_inner);
         let window = windows.entry(hook_id).or_insert(HookRateWindow {
-            started: now,
-            admitted: 0,
-            preceding: 0,
+            bucket_started: now,
+            newest: 0,
+            buckets: [0; WEBHOOK_RATE_BUCKETS],
         });
-        let elapsed = now.duration_since(window.started);
-        if elapsed >= RATE_WINDOW.saturating_mul(2) {
-            // Both windows are older than the trailing minute.
-            *window = HookRateWindow {
-                started: now,
-                admitted: 0,
-                preceding: 0,
-            };
-        } else if elapsed >= RATE_WINDOW {
-            // Roll forward exactly one window, so what is carried stays aligned
-            // to real time rather than to when this request happened to arrive.
-            *window = HookRateWindow {
-                started: window.started + RATE_WINDOW,
-                admitted: 0,
-                preceding: window.admitted,
-            };
-        }
-        if estimated_rolling_admissions(window, now) >= u128::from(ceiling) {
+        advance_rate_buckets(window, now);
+        let admitted: u64 = window.buckets.iter().copied().map(u64::from).sum();
+        if admitted >= u64::from(ceiling) {
             return false;
         }
-        window.admitted += 1;
+        window.buckets[window.newest] = window.buckets[window.newest].saturating_add(1);
         true
     }
 
@@ -960,26 +953,45 @@ impl WebhookRateLimiter {
             .insert(
                 hook_id,
                 HookRateWindow {
-                    started,
-                    admitted: ceiling,
-                    preceding: 0,
+                    bucket_started: started,
+                    newest: 0,
+                    buckets: {
+                        let mut buckets = [0; WEBHOOK_RATE_BUCKETS];
+                        buckets[0] = ceiling;
+                        buckets
+                    },
                 },
             );
     }
 }
 
-/// What one hook has admitted across the trailing window ending at `now`.
-///
-/// The current window is counted exactly; the preceding one contributes the
-/// share of itself that still lies inside the trailing window.
-fn estimated_rolling_admissions(window: &HookRateWindow, now: Instant) -> u128 {
-    let window_span = RATE_WINDOW.as_millis();
-    let elapsed = now
-        .duration_since(window.started)
-        .as_millis()
-        .min(window_span);
-    let carried = u128::from(window.preceding) * (window_span - elapsed) / window_span;
-    carried + u128::from(window.admitted)
+/// Retires whatever buckets have aged out of the trailing window by `now`.
+fn advance_rate_buckets(window: &mut HookRateWindow, now: Instant) {
+    let elapsed = now.duration_since(window.bucket_started);
+    if elapsed >= RATE_WINDOW {
+        // Nothing recorded is still inside the trailing window.
+        *window = HookRateWindow {
+            bucket_started: now,
+            newest: 0,
+            buckets: [0; WEBHOOK_RATE_BUCKETS],
+        };
+        return;
+    }
+    let steps =
+        usize::try_from(elapsed.as_millis() / RATE_BUCKET.as_millis()).unwrap_or(usize::MAX);
+    if steps >= WEBHOOK_RATE_BUCKETS {
+        *window = HookRateWindow {
+            bucket_started: now,
+            newest: 0,
+            buckets: [0; WEBHOOK_RATE_BUCKETS],
+        };
+        return;
+    }
+    for _ in 0..steps {
+        window.newest = (window.newest + 1) % WEBHOOK_RATE_BUCKETS;
+        window.buckets[window.newest] = 0;
+    }
+    window.bucket_started += RATE_BUCKET.saturating_mul(u32::try_from(steps).unwrap_or(u32::MAX));
 }
 
 #[cfg(test)]
@@ -1258,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn a_saturated_window_stays_closed_across_its_boundary() {
+    fn a_burst_still_counts_part_way_through_the_window() {
         let limiter = WebhookRateLimiter::new();
         let started = std::time::Instant::now();
         WebhookRateLimiter::saturate(
@@ -1268,18 +1280,18 @@ mod tests {
             MAX_WEBHOOK_DELIVERIES_PER_MINUTE,
         );
 
-        // The instant the fixed window would have reset, the whole preceding
-        // allowance still lies inside the trailing minute.
+        // A burst is counted where it happened, so half a window later the whole
+        // of it still lies inside the trailing minute.
         assert!(!WebhookRateLimiter::admit_at(
             &limiter.verified,
             FIXTURE_HOOK_ID,
-            started + Duration::from_secs(60),
+            started + Duration::from_secs(30),
             MAX_WEBHOOK_DELIVERIES_PER_MINUTE
         ));
     }
 
     #[test]
-    fn a_saturated_window_reopens_in_proportion_as_it_ages() {
+    fn a_burst_older_than_the_window_releases_its_allowance() {
         let limiter = WebhookRateLimiter::new();
         let started = std::time::Instant::now();
         WebhookRateLimiter::saturate(
@@ -1289,12 +1301,10 @@ mod tests {
             MAX_WEBHOOK_DELIVERIES_PER_MINUTE,
         );
 
-        // Half of the saturated window has left the trailing minute, so half of
-        // the allowance is available again.
         assert!(WebhookRateLimiter::admit_at(
             &limiter.verified,
             FIXTURE_HOOK_ID,
-            started + Duration::from_secs(90),
+            started + super::RATE_WINDOW,
             MAX_WEBHOOK_DELIVERIES_PER_MINUTE
         ));
     }

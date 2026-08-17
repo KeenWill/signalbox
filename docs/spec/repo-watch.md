@@ -819,16 +819,18 @@ still drains, and every later body is discarded rather than allowed to
 overshoot, so a page retains no more than that ceiling. One drain visits a
 bounded number of pending pages and then re-arms its own wake, so a sustained
 stream is accelerated without holding the worker past an overdue full poll. A
-terminal commit whose result is lost in transit is resolved by re-recording the
-same request, which reports the row already terminal or records it now, rather
-than leaving a durable disposition the shadow never accounted for. A delivery
-whose processing fails is deferred for the rest of that drain rather than
-failing it, so one persistently unprocessable receipt cannot pin the head of the
-queue and starve every later one; the attempt still reports the first such
-failure. A signature-valid delivery whose event or action is outside the mapped
-set, including a broadly subscribed `workflow_job`, is still acknowledged
-successfully and is cheaply logged and recorded as ignored rather than treated
-as an intake failure.
+terminal commit whose result is lost in transit is resolved by reading whether
+the row is already terminal, which cannot itself be ambiguous: if it is, the
+delivery counts as recorded and the shadow advances; if it is not, the record is
+re-attempted a bounded number of times before the delivery is left pending for
+the next drain. A durable disposition the shadow never accounted for is what
+this avoids. A delivery whose processing fails is deferred for the rest of that
+drain rather than failing it, so one persistently unprocessable receipt cannot
+pin the head of the queue and starve every later one; the attempt still reports
+the first such failure. A signature-valid delivery whose event or action is
+outside the mapped set, including a broadly subscribed `workflow_job`, is still
+acknowledged successfully and is cheaply logged and recorded as ignored rather
+than treated as an intake failure.
 
 **Implemented behavior.** Shadow mode never inserts a webhook-produced row into
 `repo_watch_event` and never mutates the cursor from a payload-derived patch.
