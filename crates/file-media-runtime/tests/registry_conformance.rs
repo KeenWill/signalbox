@@ -79,6 +79,7 @@ enum ReadBehavior {
     Text,
     OversizedText,
     MalformedStructured,
+    DuplicateStructuredMember,
     ContradictoryContinuation,
 }
 
@@ -167,6 +168,11 @@ impl FileMediaProcessor for SyntheticProcessor {
                 },
                 ReadBehavior::MalformedStructured => ProcessorReadOutput::Structured {
                     body_json: String::from(r#"{"value":"</tool><script>","unterminated":true"#),
+                    truncated: false,
+                    cursor: None,
+                },
+                ReadBehavior::DuplicateStructuredMember => ProcessorReadOutput::Structured {
+                    body_json: String::from(r#"{\"kind\":\"safe\",\"kind\":\"attacker\"}"#),
                     truncated: false,
                     cursor: None,
                 },
@@ -396,6 +402,26 @@ fn inv068_malformed_injection_shaped_structure_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
+/// INV-068: duplicate structured members never cross the processor boundary.
+#[test]
+fn inv068_duplicate_structured_member_is_sanitized_to_failure() {
+    let source = MemorySource::synthetic();
+    let registry = registry_with_view(structured_view());
+    let processor = SyntheticProcessor {
+        validation: ValidationBehavior::Valid,
+        read: ReadBehavior::DuplicateStructuredMember,
+    };
+    let request = FileReadRequest {
+        inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+        view: ReadViewName::try_new(STRUCTURED_VIEW_NAME).expect("fixture view name is valid"),
+        options: serde_json::json!({}),
+    };
+
+    let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
+
+    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
 /// INV-068: contradictory continuation facts from a processor do not enter the
 /// sanitized read-result type.
 #[test]
@@ -415,6 +441,54 @@ fn inv068_contradictory_processor_continuation_is_sanitized_to_failure() {
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
 
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
+struct SourceFailureProcessor;
+
+impl FileMediaProcessor for SourceFailureProcessor {
+    fn probe<'a>(
+        &'a self,
+        _reader: &'a ReaderIdentity,
+        _source: &'a dyn VerifiedBlobSource,
+        _cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
+        Box::pin(async { Err(SourceReadError::Unavailable.into()) })
+    }
+
+    fn validate<'a>(
+        &'a self,
+        _reader: &'a ReaderIdentity,
+        _request: FileMediaProviderValidationRequest,
+        _source: &'a dyn VerifiedBlobSource,
+        _cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
+        Box::pin(async { Err(ProcessorFailure::Failed.into()) })
+    }
+
+    fn read<'a>(
+        &'a self,
+        _reader: &'a ReaderIdentity,
+        _request: FileMediaProviderReadRequest,
+        _source: &'a dyn VerifiedBlobSource,
+        _cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
+        Box::pin(async { Err(ProcessorFailure::Failed.into()) })
+    }
+}
+
+#[test]
+fn processor_boundary_preserves_verified_source_unavailability() {
+    let source = MemorySource::synthetic();
+    let registry = registry_with_view(text_view());
+
+    let outcome = block_on_ready(registry.inspect(
+        &SourceFailureProcessor,
+        inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+        &source,
+        &NeverCancelled,
+    ));
+
+    assert_eq!(outcome, Err(FileMediaFailure::BlobUnavailable));
 }
 
 #[test]
@@ -462,4 +536,54 @@ fn distinct_static_media_claims_are_admitted() {
 
     assert_eq!(registry.providers()[0].provider().as_str(), "first");
     assert_eq!(registry.providers()[1].provider().as_str(), "second");
+}
+
+#[test]
+fn provider_reader_inventory_is_canonically_sorted() {
+    let provider =
+        FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
+    let second = reader_declaration(&provider, "second", OTHER_SYNTHETIC_MEDIA_TYPE);
+    let first = reader_declaration(&provider, "first", SYNTHETIC_MEDIA_TYPE);
+    let declaration = FileMediaProviderDeclaration::try_new(provider, vec![second, first])
+        .expect("fixture provider owns both readers");
+
+    let registry = FileMediaRegistry::try_new(
+        vec![declaration],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    )
+    .expect("distinct reader claims are conflict-free");
+
+    assert_eq!(
+        registry.providers()[0].readers()[0]
+            .identity()
+            .reader()
+            .as_str(),
+        "first"
+    );
+    assert_eq!(
+        registry.providers()[0].readers()[1]
+            .identity()
+            .reader()
+            .as_str(),
+        "second"
+    );
+}
+
+fn reader_declaration(
+    provider: &FileReaderProviderName,
+    reader: &str,
+    owned_media_type: &str,
+) -> ReaderDeclaration {
+    ReaderDeclaration::try_new(ReaderDeclarationInput {
+        provider: provider.clone(),
+        reader: FileReaderName::try_new(reader).expect("fixture reader name is valid"),
+        revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
+        media_types: vec![media_type(owned_media_type)],
+        probe: ProbeDeclaration::new(4, 0, 0, 4),
+        views: vec![text_view()],
+        reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
+        streaming_text_fallback: StreamingTextFallback::Disabled,
+    })
+    .expect("fixture reader declaration is nonempty")
 }

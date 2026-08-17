@@ -518,7 +518,6 @@ fn known_failure(value: Value) -> ToolExecutorEvidence {
 const fn attachment_kind_name(kind: AttachmentKind) -> &'static str {
     match kind {
         AttachmentKind::Image => "image",
-        AttachmentKind::Audio => "audio",
         AttachmentKind::Document => "document",
         AttachmentKind::File => "file",
     }

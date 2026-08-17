@@ -9,11 +9,17 @@ use crate::{
     ReasonCode, StreamingTextFallback, ValidatedFile, ValidationEvidence, VerifiedBlobSource,
 };
 
+// numeric-bound: ceiling - bounds process-lifetime provider inventory memory
 const MAX_REGISTRY_PROVIDERS: usize = 256;
+// numeric-bound: ceiling - bounds per-provider reader inventory memory and startup work
 const MAX_READERS_PER_PROVIDER: usize = 256;
+// numeric-bound: ceiling - bounds per-reader media-claim memory and conflict checks
 const MAX_MEDIA_TYPES_PER_READER: usize = 256;
+// numeric-bound: ceiling - bounds per-reader model-visible view inventory memory
 const MAX_VIEWS_PER_READER: usize = 256;
+// numeric-bound: ceiling - bounds per-reader sanitized reason inventory memory
 const MAX_REASON_CODES_PER_READER: usize = 256;
+// numeric-bound: ceiling - bounds retained untrusted continuation state
 const MAX_CURSOR_BYTES: usize = 1_024;
 
 /// Immutable process-lifetime registry snapshot.
@@ -52,6 +58,9 @@ impl FileMediaRegistry {
             return Err(FileMediaRegistryConstructionError::IsolationUnavailable);
         }
         providers.sort_by(|left, right| left.provider().cmp(right.provider()));
+        for provider in &mut providers {
+            provider.sort_readers();
+        }
         if providers
             .windows(2)
             .any(|pair| pair[0].provider() == pair[1].provider())
@@ -594,8 +603,8 @@ fn sanitize_read(
                 return Err(FileMediaFailure::ProcessorFailed);
             }
             let continuation = sanitize_continuation(truncated, cursor)?;
-            let body: serde_json::Value =
-                serde_json::from_str(&body_json).map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            let body = crate::value::parse_json_without_duplicate_members(&body_json)
+                .map_err(|_| FileMediaFailure::ProcessorFailed)?;
             let mut observed = ObservedJson::default();
             observe_json(&body, 1, &mut observed)?;
             if observed.depth > depth

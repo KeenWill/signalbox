@@ -364,6 +364,11 @@ impl FileMediaProviderDeclaration {
     pub fn readers(&self) -> &[ReaderDeclaration] {
         &self.readers
     }
+
+    pub(crate) fn sort_readers(&mut self) {
+        self.readers
+            .sort_by(|left, right| left.identity().cmp(right.identity()));
+    }
 }
 
 /// Provider request to validate one candidate selected by the registry.

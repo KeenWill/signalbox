@@ -19,9 +19,9 @@ pub use declaration::{
 pub use detection::{
     CancellationSignal, FileInspection, FileInspectionStatus, FileMediaFailure, FileMediaProcessor,
     FileMediaProcessorFuture, FileReadRequest, FileReadResult, InspectionRequest, NeverCancelled,
-    ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadContinuation, SourceReadError, SourceReadFuture, ValidatedFile, ValidationEvidence,
-    VerifiedBlobSource,
+    ProcessorBoundaryFailure, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadContinuation, SourceReadError, SourceReadFuture, ValidatedFile,
+    ValidationEvidence, VerifiedBlobSource,
 };
 pub use limits::{
     FileMediaCeilings, MAX_AUDIO_CHANNELS, MAX_AUDIO_CLIP_SECONDS, MAX_AUDIO_SAMPLE_RATE_HZ,
