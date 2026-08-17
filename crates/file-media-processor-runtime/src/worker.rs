@@ -196,10 +196,7 @@ async fn dispatch(
             let request: signalbox_file_media_runtime::FileMediaProviderReadRequest = request
                 .try_into()
                 .map_err(|_| WorkerServiceError::Protocol)?;
-            require_source_identity(source, request.file.source())?;
-            if request.file.reader() != &reader {
-                return Err(WorkerServiceError::Protocol);
-            }
+            require_source_identity(source, &request.source)?;
             let provider = catalog.provider(&reader)?;
             let output = provider
                 .read(&reader, request, source, &NeverCancelled)

@@ -4,7 +4,7 @@ use crate::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileReaderName,
     FileReaderProviderName, FileReaderRevision, FileUse, ProcessorFailure, ProcessorProbeOutput,
     ProcessorReadOutput, ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode,
-    ValidatedFile, VerifiedBlobSource,
+    VerifiedBlobSource,
 };
 
 /// Strength of one byte-derived probe candidate.
@@ -380,8 +380,14 @@ pub struct FileMediaProviderValidationRequest {
 /// Provider request to interpret one validated file through one view.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileMediaProviderReadRequest {
-    /// Registry-produced validation evidence.
-    pub file: ValidatedFile,
+    /// Exact semantic use whose bytes the registry validated.
+    pub source: FileUse,
+    /// Registry-selected canonical media type.
+    pub detected_media_type: CanonicalMediaType,
+    /// Registry-admitted validation evidence.
+    pub validation: crate::ValidationEvidence,
+    /// Registry-sanitized provider metadata.
+    pub metadata: crate::BoundedMetadata,
     /// Exact provider-owned view.
     pub view: ReadViewName,
     /// Model-supplied options retained as structured data.

@@ -419,7 +419,10 @@ impl FileMediaRegistry {
             .read(
                 validated.reader(),
                 FileMediaProviderReadRequest {
-                    file: validated.clone(),
+                    source: validated.source().clone(),
+                    detected_media_type: validated.detected_media_type().clone(),
+                    validation: validated.validation(),
+                    metadata: validated.metadata().clone(),
                     view: request.view,
                     options: request.options,
                 },

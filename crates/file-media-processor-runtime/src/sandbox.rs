@@ -260,13 +260,18 @@ impl SandboxedFileMediaProcessor {
             .stdout(if probe { Stdio::null() } else { Stdio::piped() })
             .stderr(if probe { Stdio::null() } else { Stdio::piped() })
             .kill_on_drop(true);
+        let ceilings = self.ceilings;
         command.as_std_mut().process_group(0);
+        unsafe {
+            command
+                .as_std_mut()
+                .pre_exec(move || apply_process_limits(ceilings).map_err(std::io::Error::from));
+        }
         let child = command.spawn().map_err(|_| ProcessorFailure::Unavailable)?;
         drop(block_read);
         let raw_pid = child.id().ok_or(ProcessorFailure::Unavailable)?;
         let pid =
             rustix::process::Pid::from_raw(raw_pid as i32).ok_or(ProcessorFailure::Unavailable)?;
-        apply_process_limits(pid, self.ceilings).map_err(|_| ProcessorFailure::Unavailable)?;
         Ok(RunningWorker {
             child,
             process_group: pid,
@@ -339,7 +344,7 @@ impl FileMediaProcessor for SandboxedFileMediaProcessor {
     ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
         Box::pin(async move {
             let declaration = self.reader(reader)?;
-            require_file_use_source(request.file.source(), source)?;
+            require_file_use_source(&request.source, source)?;
             let view = declaration
                 .views()
                 .iter()
@@ -493,11 +498,41 @@ impl RunningWorker {
     }
 
     async fn terminate(&mut self) {
+        let descendants = process_descendants(self.process_group);
+        for descendant in descendants.iter().rev() {
+            let _ = rustix::process::kill_process(*descendant, rustix::process::Signal::KILL);
+        }
         let _ =
             rustix::process::kill_process_group(self.process_group, rustix::process::Signal::KILL);
         let _ = self.child.start_kill();
         let _ = tokio::time::timeout(CLEANUP_TIMEOUT, self.child.wait()).await;
     }
+}
+
+fn process_descendants(root: rustix::process::Pid) -> Vec<rustix::process::Pid> {
+    let mut pending = vec![root];
+    let mut descendants = Vec::new();
+    while let Some(parent) = pending.pop() {
+        let raw_parent = parent.as_raw_nonzero().get();
+        let path = format!("/proc/{raw_parent}/task/{raw_parent}/children");
+        let Ok(children) = fs::read_to_string(path) else {
+            continue;
+        };
+        for child in children.split_whitespace() {
+            let Some(pid) = child
+                .parse::<i32>()
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+            else {
+                continue;
+            };
+            if !descendants.contains(&pid) {
+                descendants.push(pid);
+                pending.push(pid);
+            }
+        }
+    }
+    descendants
 }
 
 async fn read_and_discard_diagnostics(
@@ -529,29 +564,20 @@ async fn finish_diagnostics(
     }
 }
 
-fn apply_process_limits(
-    pid: rustix::process::Pid,
-    ceilings: FileMediaProcessCeilings,
-) -> Result<(), rustix::io::Errno> {
-    set_limit(pid, Resource::As, ceilings.memory_bytes())?;
-    set_limit(pid, Resource::Cpu, ceilings.cpu_seconds())?;
-    set_limit(pid, Resource::Nofile, ceilings.file_descriptors())
+fn apply_process_limits(ceilings: FileMediaProcessCeilings) -> Result<(), rustix::io::Errno> {
+    set_limit(Resource::As, ceilings.memory_bytes())?;
+    set_limit(Resource::Cpu, ceilings.cpu_seconds())?;
+    set_limit(Resource::Nofile, ceilings.file_descriptors())
 }
 
-fn set_limit(
-    pid: rustix::process::Pid,
-    resource: Resource,
-    value: u64,
-) -> Result<(), rustix::io::Errno> {
-    rustix::process::prlimit(
-        Some(pid),
+fn set_limit(resource: Resource, value: u64) -> Result<(), rustix::io::Errno> {
+    rustix::process::setrlimit(
         resource,
         Rlimit {
             current: Some(value),
             maximum: Some(value),
         },
-    )?;
-    Ok(())
+    )
 }
 
 fn sandbox_arguments(
@@ -659,6 +685,10 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
     const SECCOMP_ERRNO_ENOSYS: u32 = 0x0005_0026;
     const CLONE_THREAD: u32 = 0x0001_0000;
     #[cfg(target_arch = "x86_64")]
+    const X32_SYSCALL_BIT: Option<u32> = Some(0x4000_0000);
+    #[cfg(not(target_arch = "x86_64"))]
+    const X32_SYSCALL_BIT: Option<u32> = None;
+    #[cfg(target_arch = "x86_64")]
     let (audit_arch, clone, clone3, fork, vfork) =
         (0xc000_003e, 56_u32, 435_u32, Some(57_u32), Some(58_u32));
     #[cfg(target_arch = "aarch64")]
@@ -675,7 +705,8 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
     if let Some(vfork) = vfork {
         syscall_denials.push(vfork);
     }
-    let clone3_check_index = 4 + syscall_denials.len();
+    let x32_check_count = usize::from(X32_SYSCALL_BIT.is_some());
+    let clone3_check_index = 4 + x32_check_count + syscall_denials.len();
     let clone_check_index = clone3_check_index + 1;
     let jump_allow_index = clone_check_index + 1;
     let load_clone_flags_index = jump_allow_index + 1;
@@ -689,6 +720,14 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         instruction(RETURN, 0, 0, SECCOMP_KILL_PROCESS),
         instruction(LOAD_WORD_ABSOLUTE, 0, 0, 0),
     ];
+    if let Some(x32_syscall_bit) = X32_SYSCALL_BIT {
+        program.push(instruction(
+            JUMP_SET,
+            jump_distance(program.len(), deny_index)?,
+            0,
+            x32_syscall_bit,
+        ));
+    }
     for syscall in syscall_denials {
         program.push(instruction(
             JUMP_EQUAL,
@@ -844,5 +883,17 @@ mod tests {
         assert_eq!(program[0].value, 4);
         assert_eq!(program[2].value, 0x8000_0000);
         assert_eq!(program.last().map(|entry| entry.value), Some(0x7fff_0000));
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn descendant_filter_rejects_the_x32_syscall_abi() {
+        let program = seccomp_instructions().expect("the test architecture is supported");
+        let x32_check = program
+            .iter()
+            .find(|entry| entry.value == 0x4000_0000)
+            .expect("the x32 ABI bit is checked");
+        assert_eq!(x32_check.code, 0x45);
+        assert_ne!(x32_check.jump_true, 0);
     }
 }
