@@ -497,7 +497,7 @@ mod tests {
         let parent = tempfile::tempdir().expect("the release fixture parent exists");
         let runner_root = parent.path().join("runner-state");
         let mut state =
-            RunnerStateRoot::open(&runner_root).expect("the owner-private runner state root opens");
+            RunnerStateRoot::open(&runner_root).expect("the runner-private state root opens");
         let advertisement = Advertisement {
             capability_classes: Vec::new(),
             tools: Vec::new(),
