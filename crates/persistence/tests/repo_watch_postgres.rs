@@ -223,6 +223,25 @@ fn merge_ready_assessment(
     )?)
 }
 
+fn stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
 fn committed_generation(outcome: RepoWatchCommitOutcome) -> RepoWatchCursorGeneration {
     match outcome {
         RepoWatchCommitOutcome::Committed(cursor) => cursor.generation(),
@@ -728,8 +747,8 @@ async fn evidence_replay_after_a_head_round_trip_uses_the_candidate_head()
             .fetch_one(&pool)
             .await?;
 
-    assert_eq!(assessment_count, 2);
-    assert_eq!(first_head_assessment_count, 1);
+    assert_eq!(assessment_count, 3);
+    assert_eq!(first_head_assessment_count, 2);
     assert_eq!(current_head, INITIAL_HEAD);
     assert_eq!(identity_count, 3);
     Ok(())
@@ -807,8 +826,8 @@ async fn evidence_replay_after_a_base_round_trip_uses_the_candidate_base()
             .fetch_one(&pool)
             .await?;
 
-    assert_eq!(assessment_count, 2);
-    assert_eq!(first_base_assessment_count, 1);
+    assert_eq!(assessment_count, 3);
+    assert_eq!(first_base_assessment_count, 2);
     assert_eq!(current_base, BASE_REVISION);
     assert_eq!(identity_count, 3);
     Ok(())
@@ -937,6 +956,96 @@ async fn append_only_guards_reject_update_delete_and_truncate() -> Result<(), Bo
     assert!(update.is_err());
     assert!(delete.is_err());
     assert!(truncate.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv070_stale_review_clearance_journals_are_append_only() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+            &[stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let assessment_id: Uuid = sqlx::query_scalar(
+        "SELECT assessment_id
+           FROM repo_watch_pull_request_convergence_assessment
+          WHERE repository = $1 AND head_sha = $2",
+    )
+    .bind(repository.as_str())
+    .bind(INITIAL_HEAD)
+    .fetch_one(&pool)
+    .await?;
+    let clearance_id = Uuid::from_u128(0x70_001);
+    sqlx::query(
+        "INSERT INTO repo_watch_stale_review_clearance
+            (clearance_id, assessment_id, repository, pull_request_number,
+             current_head_sha, base_revision, review_node_id, reviewer,
+             reviewed_head_sha, dismissal_message)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    )
+    .bind(clearance_id)
+    .bind(assessment_id)
+    .bind(repository.as_str())
+    .bind(i64::try_from(PULL_REQUEST)?)
+    .bind(INITIAL_HEAD)
+    .bind(BASE_REVISION)
+    .bind("review-node-70")
+    .bind(REVIEW_REVIEWER)
+    .bind(REVIEW_COMMIT)
+    .bind("fixture stale-review dismissal")
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_stale_review_clearance_result
+            (clearance_id, outcome_kind, provider_review_state)
+         VALUES ($1, 'dismissed', 'dismissed')",
+    )
+    .bind(clearance_id)
+    .execute(&pool)
+    .await?;
+
+    let intent_update = sqlx::query(
+        "UPDATE repo_watch_stale_review_clearance SET reviewer = $1 WHERE clearance_id = $2",
+    )
+    .bind(AUTHOR)
+    .bind(clearance_id)
+    .execute(&pool)
+    .await;
+    let intent_delete =
+        sqlx::query("DELETE FROM repo_watch_stale_review_clearance WHERE clearance_id = $1")
+            .bind(clearance_id)
+            .execute(&pool)
+            .await;
+    let intent_truncate = sqlx::query("TRUNCATE repo_watch_stale_review_clearance CASCADE")
+        .execute(&pool)
+        .await;
+    let result_update = sqlx::query(
+        "UPDATE repo_watch_stale_review_clearance_result SET observed_at = clock_timestamp() WHERE clearance_id = $1",
+    )
+    .bind(clearance_id)
+    .execute(&pool)
+    .await;
+    let result_delete =
+        sqlx::query("DELETE FROM repo_watch_stale_review_clearance_result WHERE clearance_id = $1")
+            .bind(clearance_id)
+            .execute(&pool)
+            .await;
+    let result_truncate = sqlx::query("TRUNCATE repo_watch_stale_review_clearance_result CASCADE")
+        .execute(&pool)
+        .await;
+
+    assert!(intent_update.is_err());
+    assert!(intent_delete.is_err());
+    assert!(intent_truncate.is_err());
+    assert!(result_update.is_err());
+    assert!(result_delete.is_err());
+    assert!(result_truncate.is_err());
     Ok(())
 }
 

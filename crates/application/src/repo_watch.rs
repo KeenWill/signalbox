@@ -354,6 +354,11 @@ pub struct RepoWatchStaleReviewClearanceCandidate {
 }
 
 impl RepoWatchStaleReviewClearanceCandidate {
+    /// Returns whether one opaque provider review-node identity is admissible.
+    pub fn review_node_id_is_valid(value: &str) -> bool {
+        !value.is_empty() && value.len() <= 256 && !value.contains('\0')
+    }
+
     /// Requires the aggregate review decision to be the exact head's only
     /// remaining convergence blocker and the review to target an older head.
     pub fn try_new(
@@ -367,9 +372,7 @@ impl RepoWatchStaleReviewClearanceCandidate {
             || !assessment.non_green_gating_checks().is_empty()
             || assessment.mergeable_state() == MergeableState::Conflicting
             || &reviewed_head_sha == assessment.head_sha()
-            || review_node_id.is_empty()
-            || review_node_id.len() > 256
-            || review_node_id.contains('\0')
+            || !Self::review_node_id_is_valid(&review_node_id)
         {
             return Err(RepoWatchStaleReviewClearanceCandidateError);
         }
@@ -2050,7 +2053,7 @@ mod tests {
     }
 
     #[test]
-    fn current_head_blocking_review_is_not_clearable() -> Result<(), Box<dyn Error>> {
+    fn inv069_current_head_blocking_review_is_not_clearable() -> Result<(), Box<dyn Error>> {
         let assessment = convergence_assessment(ConvergenceFacts {
             base_branch: BASE_BRANCH,
             mergeable_state: MergeableState::Mergeable,

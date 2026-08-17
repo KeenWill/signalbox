@@ -179,6 +179,8 @@ query RepositoryWatchReviewClearanceState($review: ID!, $after: String) {
         number
         state
         headRefOid
+        baseRefName
+        baseRefOid
         reviewDecision
         latestOpinionatedReviews(first: 100, after: $after) {
           nodes { id }
@@ -667,18 +669,41 @@ impl RepositoryWatchTask {
                     .await
                     .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
                 for clearance in &planned_clearances {
-                    if self.poller.dismiss_stale_review(clearance).await?
-                        == StaleReviewDismissal::Ineligible
+                    if !self
+                        .poller
+                        .revalidate_stale_review_clearance(clearance)
+                        .await?
                     {
                         self.store
-                            .release_stale_review_clearance_claim(clearance.clearance_id())
+                            .release_stale_review_clearance_claim(
+                                clearance.clearance_id(),
+                                clearance.claim_token(),
+                            )
                             .await
                             .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
                         continue;
                     }
+                    if !self
+                        .store
+                        .renew_stale_review_clearance_claim(
+                            clearance.clearance_id(),
+                            clearance.claim_token(),
+                        )
+                        .await
+                        .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+                    {
+                        continue;
+                    }
+                    self.poller
+                        .dismiss_review_node(DismissReviewInput {
+                            review_node_id: clearance.review_node_id(),
+                            dismissal_message: clearance.dismissal_message(),
+                        })
+                        .await?;
                     self.store
                         .record_stale_review_clearance_outcome(
                             clearance.clearance_id(),
+                            clearance.claim_token(),
                             RepoWatchStaleReviewClearanceOutcome::Dismissed,
                             RepoWatchObservedReviewState::Dismissed,
                         )
@@ -697,48 +722,43 @@ impl RepositoryWatchTask {
     async fn reconcile_pending_stale_review_clearances(
         &self,
     ) -> Result<(), RepositoryWatchAttemptError> {
-        let mut after = None;
-        loop {
-            let pending = self
-                .store
-                .claim_pending_stale_review_clearances(&self.repository, after)
-                .await
-                .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-            if pending.is_empty() {
-                return Ok(());
-            }
-            after = pending.last().map(|clearance| clearance.clearance_id());
-            for clearance in &pending {
-                match self
-                    .poller
-                    .observe_stale_review_clearance(clearance)
-                    .await?
-                {
-                    StaleReviewClearanceObservation::StillBlocking => {
-                        self.store
-                            .release_stale_review_clearance_claim(clearance.clearance_id())
-                            .await
-                            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-                    }
-                    StaleReviewClearanceObservation::Terminal {
-                        outcome,
-                        provider_state,
-                    } => {
-                        self.store
-                            .record_stale_review_clearance_outcome(
-                                clearance.clearance_id(),
-                                outcome,
-                                provider_state,
-                            )
-                            .await
-                            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-                    }
+        let pending = self
+            .store
+            .claim_pending_stale_review_clearances(&self.repository)
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        for clearance in &pending {
+            match self
+                .poller
+                .observe_stale_review_clearance(clearance)
+                .await?
+            {
+                StaleReviewClearanceObservation::StillBlocking => {
+                    self.store
+                        .release_stale_review_clearance_claim(
+                            clearance.clearance_id(),
+                            clearance.claim_token(),
+                        )
+                        .await
+                        .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+                }
+                StaleReviewClearanceObservation::Terminal {
+                    outcome,
+                    provider_state,
+                } => {
+                    self.store
+                        .record_stale_review_clearance_outcome(
+                            clearance.clearance_id(),
+                            clearance.claim_token(),
+                            outcome,
+                            provider_state,
+                        )
+                        .await
+                        .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
                 }
             }
-            if pending.len() < 128 {
-                return Ok(());
-            }
         }
+        Ok(())
     }
 }
 
@@ -2166,13 +2186,11 @@ impl GitHubRepositoryPoller {
                 };
                 let reviewer = RepoWatchAuthorLogin::try_new(author.login)
                     .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-                let reviewed_head_sha = CommitSha::try_new(
-                    review
-                        .commit
-                        .ok_or(RepositoryWatchAttemptError::InvalidResponse)?
-                        .oid,
-                )
-                .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+                let Some(commit) = review.commit else {
+                    return Ok(Vec::new());
+                };
+                let reviewed_head_sha = CommitSha::try_new(commit.oid)
+                    .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
                 if &reviewed_head_sha == assessment.head_sha() {
                     return Ok(Vec::new());
                 }
@@ -2363,16 +2381,18 @@ impl GitHubRepositoryPoller {
                 .data
                 .and_then(|data| data.node)
                 .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
-            let commit = review
-                .commit
-                .ok_or(RepositoryWatchAttemptError::InvalidResponse)?;
             if review.id != clearance.review_node_id()
                 || review.pull_request.number != clearance.number().get()
-                || commit.oid != clearance.reviewed_head_sha().as_str()
             {
                 return Err(RepositoryWatchAttemptError::InvalidResponse);
             }
             let provider_state = normalize_observed_review_state(&review.state)?;
+            if provider_state == RepoWatchObservedReviewState::Dismissed {
+                return Ok(StaleReviewClearanceObservation::Terminal {
+                    outcome: RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed,
+                    provider_state,
+                });
+            }
             match review.pull_request.state.as_str() {
                 "OPEN" => {}
                 "CLOSED" | "MERGED" => {
@@ -2383,17 +2403,21 @@ impl GitHubRepositoryPoller {
                 }
                 _ => return Err(RepositoryWatchAttemptError::InvalidResponse),
             }
-            if review.pull_request.head_ref_oid != clearance.current_head_sha().as_str() {
+            if review.pull_request.head_ref_oid != clearance.current_head_sha().as_str()
+                || review.pull_request.base_ref_name != clearance.base_branch().as_str()
+                || review.pull_request.base_ref_oid != clearance.base_revision().as_str()
+            {
                 return Ok(StaleReviewClearanceObservation::Terminal {
                     outcome: RepoWatchStaleReviewClearanceOutcome::Superseded,
                     provider_state,
                 });
             }
-            if provider_state == RepoWatchObservedReviewState::Dismissed {
-                return Ok(StaleReviewClearanceObservation::Terminal {
-                    outcome: RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed,
-                    provider_state,
-                });
+            if review
+                .commit
+                .as_ref()
+                .is_some_and(|commit| commit.oid != clearance.reviewed_head_sha().as_str())
+            {
+                return Err(RepositoryWatchAttemptError::InvalidResponse);
             }
             if normalize_review_decision(review.pull_request.review_decision.as_deref())?
                 != RepoWatchReviewDecision::ChangesRequested
@@ -3806,6 +3830,10 @@ struct ReviewClearancePullRequest {
     state: String,
     #[serde(rename = "headRefOid")]
     head_ref_oid: String,
+    #[serde(rename = "baseRefName")]
+    base_ref_name: String,
+    #[serde(rename = "baseRefOid")]
+    base_ref_oid: String,
     #[serde(rename = "reviewDecision")]
     review_decision: Option<String>,
     #[serde(rename = "latestOpinionatedReviews")]
@@ -5691,7 +5719,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_head_review_is_not_a_clearance_candidate() {
+    async fn inv069_current_head_review_is_not_a_clearance_candidate() {
         let response = ScriptedResponse::post(
             RequestTarget(String::from(THREADS_TARGET)),
             ResponseBody(blocking_reviews(HEAD_SHA)),

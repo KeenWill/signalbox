@@ -16,8 +16,7 @@ use signalbox_application::{
     RepoWatchObservation, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
     RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
     RepoWatchReviewObservation, RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation,
-    RepoWatchThreadState,
-    RepoWatchWorkflowRunObservation,
+    RepoWatchThreadState, RepoWatchWorkflowRunObservation,
 };
 use signalbox_domain::{
     BranchName, CheckRunName, CommitSha, GitHubObjectId, LabelName, PullRequestBody,
@@ -47,7 +46,9 @@ use crate::{
         repo_watch_reaction_subject_kind_to_str, repo_watch_reaction_subject_to_storage,
         repo_watch_review_decision_to_str, repo_watch_review_state_from_str,
         repo_watch_review_state_to_str, repo_watch_stale_review_clearance_outcome_to_str,
-        repo_watch_thread_state_from_str, repo_watch_thread_state_to_str,
+        repo_watch_stale_review_clearance_reason_from_str,
+        repo_watch_stale_review_clearance_reason_to_str, repo_watch_thread_state_from_str,
+        repo_watch_thread_state_to_str,
     },
 };
 
@@ -391,6 +392,7 @@ impl From<sqlx::Error> for RepoWatchStoreError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchPlannedStaleReviewClearance {
     clearance_id: Uuid,
+    claim_token: [redacted],
     number: PullRequestNumber,
     current_head_sha: CommitSha,
     base_branch: BranchName,
@@ -404,6 +406,10 @@ pub struct RepoWatchPlannedStaleReviewClearance {
 impl RepoWatchPlannedStaleReviewClearance {
     pub const fn clearance_id(&self) -> Uuid {
         self.clearance_id
+    }
+
+    pub const fn claim_token(&self) -> Uuid {
+        self.claim_token
     }
 
     pub const fn number(&self) -> PullRequestNumber {
@@ -446,6 +452,12 @@ pub enum RepoWatchStaleReviewClearanceOutcome {
     AlreadyDismissed,
     ClearedElsewhere,
     Superseded,
+}
+
+/// Closed durable reason for planning one stale-review clearance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchStaleReviewClearanceReason {
+    OnlyStaleReviewBlocks,
 }
 
 /// Provider state observed while settling a clearance intent.
@@ -862,8 +874,8 @@ impl PostgresRepoWatchStore {
                 "INSERT INTO repo_watch_stale_review_clearance
                     (clearance_id, assessment_id, repository,
                      pull_request_number, current_head_sha, base_revision, review_node_id,
-                     reviewer, reviewed_head_sha, dismissal_message)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                     reviewer, reviewed_head_sha, dismissal_message, reason_kind)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                  ON CONFLICT (assessment_id, review_node_id) DO NOTHING",
             )
             .bind(clearance_id)
@@ -876,6 +888,9 @@ impl PostgresRepoWatchStore {
             .bind(candidate.reviewer().as_str())
             .bind(candidate.reviewed_head_sha().as_str())
             .bind(&dismissal_message)
+            .bind(repo_watch_stale_review_clearance_reason_to_str(
+                RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks,
+            ))
             .execute(&mut *transaction)
             .await?;
             let stored = sqlx::query_as::<_, PlannedClearanceRow>(
@@ -908,25 +923,28 @@ impl PostgresRepoWatchStore {
             if stored.completion_state == ClearanceCompletionState::Completed {
                 continue;
             }
-            let claimed = sqlx::query_scalar::<_, bool>(
+            let claim_token = [redacted];
+            let claimed = sqlx::query_scalar::<_, Uuid>(
                 "INSERT INTO repo_watch_stale_review_clearance_claim
-                    (clearance_id, claimed_until)
-                 VALUES ($1, clock_timestamp() + interval '2 minutes')
+                    (clearance_id, claim_token, claimed_until)
+                 VALUES ($1, $2, clock_timestamp() + interval '2 minutes')
                  ON CONFLICT (clearance_id) DO UPDATE
-                     SET claimed_until = EXCLUDED.claimed_until
+                     SET claim_token = [redacted],
+                         claimed_until = EXCLUDED.claimed_until
                    WHERE repo_watch_stale_review_clearance_claim.claimed_until
                          <= clock_timestamp()
-                 RETURNING TRUE",
+                 RETURNING claim_token",
             )
             .bind(stored.clearance_id)
+            .bind(claim_token)
             .fetch_optional(&mut *transaction)
-            .await?
-            .unwrap_or(false);
-            if !claimed {
+            .await?;
+            let Some(claim_token) = claimed else {
                 continue;
-            }
+            };
             planned.push(RepoWatchPlannedStaleReviewClearance {
                 clearance_id: stored.clearance_id,
+                claim_token,
                 number: candidate.number(),
                 current_head_sha: candidate.current_head_sha().clone(),
                 base_branch: BranchName::try_new(assessment.base_branch.clone())
@@ -945,18 +963,26 @@ impl PostgresRepoWatchStore {
         Ok(planned)
     }
 
-    /// Claims one bounded keyset page of intents lacking a terminal result.
+    /// Claims one bounded rotating page of intents lacking a terminal result.
     pub async fn claim_pending_stale_review_clearances(
         &self,
         repository: &RepositorySlug,
-        after: Option<Uuid>,
     ) -> Result<Vec<RepoWatchPlannedStaleReviewClearance>, RepoWatchStoreError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(repository.as_str())
             .execute(&mut *transaction)
             .await?;
-        let rows = sqlx::query_as::<_, PendingClearanceRow>(
+        let after = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT after_clearance_id
+               FROM repo_watch_stale_review_clearance_recovery_cursor
+              WHERE repository = $1",
+        )
+        .bind(repository.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .flatten();
+        let mut rows = sqlx::query_as::<_, PendingClearanceRow>(
             "SELECT clearance.clearance_id,
                     clearance.pull_request_number,
                     clearance.current_head_sha,
@@ -965,7 +991,8 @@ impl PostgresRepoWatchStore {
                     clearance.review_node_id,
                     clearance.reviewer,
                     clearance.reviewed_head_sha,
-                    clearance.dismissal_message
+                    clearance.dismissal_message,
+                    clearance.reason_kind
                FROM repo_watch_stale_review_clearance AS clearance
                JOIN repo_watch_pull_request_convergence_assessment AS assessment
                  ON assessment.assessment_id = clearance.assessment_id
@@ -985,46 +1012,131 @@ impl PostgresRepoWatchStore {
         .bind(after)
         .fetch_all(&mut *transaction)
         .await?;
-        for row in &rows {
-            sqlx::query(
-                "INSERT INTO repo_watch_stale_review_clearance_claim
-                    (clearance_id, claimed_until)
-                 VALUES ($1, clock_timestamp() + interval '2 minutes')
-                 ON CONFLICT (clearance_id) DO UPDATE
-                     SET claimed_until = EXCLUDED.claimed_until",
+        if rows.is_empty() && after.is_some() {
+            rows = sqlx::query_as::<_, PendingClearanceRow>(
+                "SELECT clearance.clearance_id,
+                        clearance.pull_request_number,
+                        clearance.current_head_sha,
+                        assessment.base_branch,
+                        clearance.base_revision,
+                        clearance.review_node_id,
+                        clearance.reviewer,
+                        clearance.reviewed_head_sha,
+                        clearance.dismissal_message,
+                        clearance.reason_kind
+                   FROM repo_watch_stale_review_clearance AS clearance
+                   JOIN repo_watch_pull_request_convergence_assessment AS assessment
+                     ON assessment.assessment_id = clearance.assessment_id
+                   LEFT JOIN repo_watch_stale_review_clearance_result AS result
+                     ON result.clearance_id = clearance.clearance_id
+                   LEFT JOIN repo_watch_stale_review_clearance_claim AS claim
+                     ON claim.clearance_id = clearance.clearance_id
+                  WHERE clearance.repository = $1
+                    AND result.clearance_id IS NULL
+                    AND (claim.clearance_id IS NULL
+                         OR claim.claimed_until <= clock_timestamp())
+                  ORDER BY clearance.clearance_id
+                  LIMIT 128",
             )
-            .bind(row.clearance_id)
-            .execute(&mut *transaction)
+            .bind(repository.as_str())
+            .fetch_all(&mut *transaction)
             .await?;
         }
+        let mut claimed = Vec::with_capacity(rows.len());
+        for row in rows {
+            let claim_token = [redacted];
+            let acquired = sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO repo_watch_stale_review_clearance_claim
+                    (clearance_id, claim_token, claimed_until)
+                 VALUES ($1, $2, clock_timestamp() + interval '2 minutes')
+                 ON CONFLICT (clearance_id) DO UPDATE
+                     SET claim_token = [redacted],
+                         claimed_until = EXCLUDED.claimed_until
+                   WHERE repo_watch_stale_review_clearance_claim.claimed_until
+                         <= clock_timestamp()
+                 RETURNING claim_token",
+            )
+            .bind(row.clearance_id)
+            .bind(claim_token)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(claim_token) = acquired {
+                claimed.push(decode_pending_clearance(row, claim_token)?);
+            }
+        }
+        let next_after = claimed
+            .last()
+            .map(RepoWatchPlannedStaleReviewClearance::clearance_id);
+        sqlx::query(
+            "INSERT INTO repo_watch_stale_review_clearance_recovery_cursor
+                (repository, after_clearance_id)
+             VALUES ($1, $2)
+             ON CONFLICT (repository) DO UPDATE
+                 SET after_clearance_id = EXCLUDED.after_clearance_id",
+        )
+        .bind(repository.as_str())
+        .bind(next_after)
+        .execute(&mut *transaction)
+        .await?;
         transaction.commit().await?;
-        rows.into_iter().map(decode_pending_clearance).collect()
+        Ok(claimed)
+    }
+
+    /// Renews the exact ownership token immediately before provider delivery.
+    pub async fn renew_stale_review_clearance_claim(
+        &self,
+        clearance_id: Uuid,
+        claim_token: [redacted],
+    ) -> Result<bool, RepoWatchStoreError> {
+        let renewed = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE repo_watch_stale_review_clearance_claim
+                SET claimed_until = clock_timestamp() + interval '2 minutes'
+              WHERE clearance_id = $1
+                AND claim_token = [redacted]
+              RETURNING clearance_id",
+        )
+        .bind(clearance_id)
+        .bind(claim_token)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(renewed.is_some())
     }
 
     /// Appends the first terminal provider observation for one clearance.
     pub async fn record_stale_review_clearance_outcome(
         &self,
         clearance_id: Uuid,
+        claim_token: [redacted],
         outcome: RepoWatchStaleReviewClearanceOutcome,
         provider_state: RepoWatchObservedReviewState,
     ) -> Result<(), RepoWatchStoreError> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::query(
+        let recorded = sqlx::query(
             "INSERT INTO repo_watch_stale_review_clearance_result
                 (clearance_id, outcome_kind, provider_review_state)
-             VALUES ($1,$2,$3)
+             SELECT $1,$3,$4
+               FROM repo_watch_stale_review_clearance_claim
+              WHERE clearance_id = $1
+                AND claim_token = [redacted]
              ON CONFLICT (clearance_id) DO NOTHING",
         )
         .bind(clearance_id)
+        .bind(claim_token)
         .bind(repo_watch_stale_review_clearance_outcome_to_str(outcome))
         .bind(repo_watch_observed_review_state_to_str(provider_state))
         .execute(&mut *transaction)
         .await?;
+        if recorded.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Err(RepoWatchStoreError::StaleReviewClearanceMismatch);
+        }
         sqlx::query(
             "DELETE FROM repo_watch_stale_review_clearance_claim
-              WHERE clearance_id = $1",
+              WHERE clearance_id = $1
+                AND claim_token = [redacted]",
         )
         .bind(clearance_id)
+        .bind(claim_token)
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -1037,12 +1149,15 @@ impl PostgresRepoWatchStore {
     pub async fn release_stale_review_clearance_claim(
         &self,
         clearance_id: Uuid,
+        claim_token: [redacted],
     ) -> Result<(), RepoWatchStoreError> {
         sqlx::query(
             "DELETE FROM repo_watch_stale_review_clearance_claim
-              WHERE clearance_id = $1",
+              WHERE clearance_id = $1
+                AND claim_token = [redacted]",
         )
         .bind(clearance_id)
+        .bind(claim_token)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1132,11 +1247,15 @@ struct PendingClearanceRow {
     reviewer: String,
     reviewed_head_sha: String,
     dismissal_message: String,
+    reason_kind: String,
 }
 
 fn decode_pending_clearance(
     row: PendingClearanceRow,
+    claim_token: [redacted],
 ) -> Result<RepoWatchPlannedStaleReviewClearance, RepoWatchStoreError> {
+    repo_watch_stale_review_clearance_reason_from_str(&row.reason_kind)
+        .ok_or(RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
     let number = positive_u64_from_numeric(row.pull_request_number)
         .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
     let number = pull_request_number(number, "stale review pull request")?;
@@ -1146,9 +1265,7 @@ fn decode_pending_clearance(
         .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
     let base_revision = CommitSha::try_new(row.base_revision)
         .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
-    if row.review_node_id.is_empty()
-        || row.review_node_id.len() > 256
-        || row.review_node_id.contains('\0')
+    if !RepoWatchStaleReviewClearanceCandidate::review_node_id_is_valid(&row.review_node_id)
         || row.dismissal_message.is_empty()
         || row.dismissal_message.len() > 1024
         || row.dismissal_message.contains('\0')
@@ -1164,6 +1281,7 @@ fn decode_pending_clearance(
     }
     Ok(RepoWatchPlannedStaleReviewClearance {
         clearance_id: row.clearance_id,
+        claim_token,
         number,
         current_head_sha,
         base_branch,

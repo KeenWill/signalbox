@@ -183,7 +183,10 @@ pub(crate) fn program_reject_reason_from_str(value: &str) -> Option<RejectReason
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
-use crate::repo_watch::{RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome};
+use crate::repo_watch::{
+    RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome,
+    RepoWatchStaleReviewClearanceReason,
+};
 
 use crate::{approval_judge::FailedApprovalJudgeDisposition, outbox::DispatchedRunnerState};
 
@@ -1275,6 +1278,25 @@ pub fn repo_watch_stale_review_clearance_outcome_from_str(
         "already_dismissed" => Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed),
         "cleared_elsewhere" => Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere),
         "superseded" => Some(RepoWatchStaleReviewClearanceOutcome::Superseded),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_stale_review_clearance_reason_to_str(
+    value: RepoWatchStaleReviewClearanceReason,
+) -> &'static str {
+    match value {
+        RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks => "only_stale_review_blocks",
+    }
+}
+
+pub(crate) fn repo_watch_stale_review_clearance_reason_from_str(
+    value: &str,
+) -> Option<RepoWatchStaleReviewClearanceReason> {
+    match value {
+        "only_stale_review_blocks" => {
+            Some(RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks)
+        }
         _ => None,
     }
 }

@@ -72,6 +72,7 @@ CREATE TABLE repo_watch_stale_review_clearance_result (
 -- provider mutation while allowing recovery after a crashed claimant.
 CREATE TABLE repo_watch_stale_review_clearance_claim (
     clearance_id uuid PRIMARY KEY,
+    claim_token uuid NOT NULL UNIQUE,
     claimed_until timestamptz NOT NULL,
 
     FOREIGN KEY (clearance_id)
@@ -79,8 +80,21 @@ CREATE TABLE repo_watch_stale_review_clearance_claim (
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 
+CREATE INDEX repo_watch_stale_review_clearance_recovery_idx
+    ON repo_watch_stale_review_clearance (repository, clearance_id);
+
+-- Recovery advances durably between bounded scans. A null cursor starts at the
+-- oldest pending intent; reaching the end wraps the next scan to the start.
+CREATE TABLE repo_watch_stale_review_clearance_recovery_cursor (
+    repository text PRIMARY KEY,
+    after_clearance_id uuid,
+    CHECK (repo_watch_repository_is_valid(repository))
+);
+
 CREATE VIEW repo_watch_pending_stale_review_clearance AS
-SELECT clearance.repository,
+SELECT clearance.clearance_id,
+       clearance.assessment_id,
+       clearance.repository,
        clearance.pull_request_number,
        clearance.current_head_sha,
        clearance.review_node_id,
@@ -112,4 +126,8 @@ FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
 
 CREATE TRIGGER repo_watch_stale_review_clearance_claim_reject_truncate
 BEFORE TRUNCATE ON repo_watch_stale_review_clearance_claim
+FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();
+
+CREATE TRIGGER repo_watch_stale_review_clearance_recovery_cursor_reject_truncate
+BEFORE TRUNCATE ON repo_watch_stale_review_clearance_recovery_cursor
 FOR EACH STATEMENT EXECUTE FUNCTION reject_repo_watch_table_truncate();

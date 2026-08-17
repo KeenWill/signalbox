@@ -7106,6 +7106,7 @@ pub struct RepoWatchConvergenceAssessmentError;
 
 pub struct RepoWatchStaleReviewClearanceCandidate { /* private */ }
 impl RepoWatchStaleReviewClearanceCandidate {
+    pub fn review_node_id_is_valid(value: &str) -> bool;
     pub fn try_new(
         assessment: &RepoWatchConvergenceAssessment,
         review_node_id: String,
