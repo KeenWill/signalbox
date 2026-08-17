@@ -6633,11 +6633,13 @@ mod tests {
         let (_webhook_sender, webhook_receiver) = watch::channel(());
         let mut webhook_work = Some(webhook_receiver);
         let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        const COMPLETION: u8 = 7;
 
         let outcome =
-            await_poll_or_interrupt(async { 7_u8 }, &mut shutdown, &mut webhook_work, true).await;
+            await_poll_or_interrupt(async { COMPLETION }, &mut shutdown, &mut webhook_work, true)
+                .await;
 
-        assert!(matches!(outcome, PollAttemptWait::Completed(7)));
+        assert!(matches!(outcome, PollAttemptWait::Completed(COMPLETION)));
     }
 
     #[tokio::test]
