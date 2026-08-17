@@ -50,7 +50,6 @@ mod linux {
     const DISPATCH_MODE: &str = "--dispatch";
     const DISPATCH_HTTPS_PROXY_MODE: &str = "--dispatch-with-https-proxy";
     const HTTPS_PROXY_PORT: u16 = 18_080;
-    const HTTPS_BROKER_SOCKET: &str = "/run/signalbox/https-broker.sock";
     const MAX_HTTPS_PROXY_TUNNELS: usize = 8;
     const CARGO_TEST_RUNNER_MODE: &str = "--cargo-test-runner";
     const LAUNCH_MODE: &str = "--launch";
@@ -298,10 +297,48 @@ mod linux {
         emit_target_status(arguments)
     }
 
-    fn dispatch_with_https_proxy(arguments: Vec<OsString>) -> ExitCode {
+    fn dispatch_with_https_proxy(mut arguments: Vec<OsString>) -> ExitCode {
+        if arguments.len() < 2 {
+            return ExitCode::FAILURE;
+        }
+        let Ok(descriptor) = parse_u64(arguments.remove(0)) else {
+            return ExitCode::FAILURE;
+        };
+        let Ok(descriptor) = i32::try_from(descriptor) else {
+            return ExitCode::FAILURE;
+        };
+        let Ok(broker_descriptor) = rustix::fs::open(
+            format!("/proc/self/fd/{descriptor}"),
+            rustix::fs::OFlags::PATH | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) else {
+            return ExitCode::FAILURE;
+        };
+        let broker_descriptor_number = rustix::fd::AsRawFd::as_raw_fd(&broker_descriptor);
+        let Ok(inherited_descriptors) = std::fs::read_dir("/proc/self/fd").and_then(|entries| {
+            entries
+                .map(|entry| {
+                    entry.and_then(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .parse::<i32>()
+                            .map_err(std::io::Error::other)
+                    })
+                })
+                .collect::<std::io::Result<Vec<_>>>()
+        }) else {
+            return ExitCode::FAILURE;
+        };
+        for inherited_descriptor in inherited_descriptors {
+            if inherited_descriptor > 2 && inherited_descriptor != broker_descriptor_number {
+                rustix::io::close(inherited_descriptor);
+            }
+        }
+        let broker = PathBuf::from(format!("/proc/self/fd/{}", broker_descriptor_number));
         let Ok(_proxy) = NamespaceHttpsProxy::start(
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, HTTPS_PROXY_PORT)),
-            PathBuf::from(HTTPS_BROKER_SOCKET),
+            broker,
         ) else {
             return ExitCode::FAILURE;
         };

@@ -1745,13 +1745,15 @@ ports, DNS rebinding, and missing or mismatched SNI fail closed. The broker
 proves a TLS tunnel to the checked host; it does not claim visibility into the
 encrypted application protocol.
 
+The restricted sandbox pins the exact per-dispatch Unix socket identity, passes
+its descriptor only to the supervisor, sets the fixed loopback HTTPS proxy, and
+starts the supervisor's bounded namespace-local TCP-to-Unix relay. The target
+has no pathname for the broker socket and can reach it only through that relay.
+
 **Committed unimplemented functionality.** No present surface creates the
-per-dispatch Unix socket or serves it through the runner-owned broker core. The
-restricted sandbox can pin an exact socket identity, bind only that endpoint at
-its fixed runtime path, set the fixed loopback HTTPS proxy, and start the
-supervisor's bounded namespace-local TCP-to-Unix relay. Until the runner creates
-and serves the socket under the dispatch deadline, a restricted runner dispatch
-has no network path.
+per-dispatch Unix socket or serves it through the runner-owned broker core.
+Until the runner creates and serves the socket under the dispatch deadline, a
+restricted runner dispatch has no network path.
 
 For `Ambient`, the runner still uses one labeled bubblewrap supervisor but binds
 the invoking user filesystem and shares host networking. It therefore provides
