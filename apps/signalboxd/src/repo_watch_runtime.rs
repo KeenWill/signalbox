@@ -2387,9 +2387,9 @@ impl GitHubRepositoryPoller {
                 return Err(RepositoryWatchAttemptError::InvalidResponse);
             }
             let provider_state = normalize_observed_review_state(&review.state)?;
-            if provider_state == RepoWatchObservedReviewState::Dismissed {
+            if let Some(outcome) = terminal_clearance_outcome(provider_state) {
                 return Ok(StaleReviewClearanceObservation::Terminal {
-                    outcome: RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed,
+                    outcome,
                     provider_state,
                 });
             }
@@ -3864,6 +3864,22 @@ enum StaleReviewClearanceObservation {
         outcome: RepoWatchStaleReviewClearanceOutcome,
         provider_state: RepoWatchObservedReviewState,
     },
+}
+
+const fn terminal_clearance_outcome(
+    provider_state: RepoWatchObservedReviewState,
+) -> Option<RepoWatchStaleReviewClearanceOutcome> {
+    match provider_state {
+        RepoWatchObservedReviewState::Dismissed => {
+            Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed)
+        }
+        RepoWatchObservedReviewState::ChangesRequested => None,
+        RepoWatchObservedReviewState::Approved
+        | RepoWatchObservedReviewState::Commented
+        | RepoWatchObservedReviewState::Pending => {
+            Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere)
+        }
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -5760,6 +5776,34 @@ mod tests {
         server.finish().await;
 
         assert_eq!(error, RepositoryWatchAttemptError::InvalidResponse);
+    }
+
+    #[test]
+    fn recovery_settles_review_states_that_no_longer_block() {
+        use signalbox_persistence::repo_watch::{
+            RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome,
+        };
+
+        assert_eq!(
+            super::terminal_clearance_outcome(RepoWatchObservedReviewState::Dismissed),
+            Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed)
+        );
+        assert_eq!(
+            super::terminal_clearance_outcome(RepoWatchObservedReviewState::Approved),
+            Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere)
+        );
+        assert_eq!(
+            super::terminal_clearance_outcome(RepoWatchObservedReviewState::Commented),
+            Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere)
+        );
+        assert_eq!(
+            super::terminal_clearance_outcome(RepoWatchObservedReviewState::Pending),
+            Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere)
+        );
+        assert_eq!(
+            super::terminal_clearance_outcome(RepoWatchObservedReviewState::ChangesRequested),
+            None
+        );
     }
 
     #[tokio::test]
