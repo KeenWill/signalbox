@@ -54,6 +54,7 @@ query($ids: [ID!]!) {
       mergedAt
       closedAt
       title
+      body
       url
       isDraft
       author { login }
@@ -65,10 +66,12 @@ query($ids: [ID!]!) {
       mergeable
       reviewThreads(first: 100) {
         nodes {
+          id
           isResolved
           comments(first: 100) {
             totalCount
             nodes { author { login } body }
+            pageInfo { hasNextPage endCursor }
           }
         }
         pageInfo { hasNextPage endCursor }
@@ -97,8 +100,8 @@ query($ids: [ID!]!) {
               contexts(first: 100) {
                 nodes {
                   __typename
-                  ... on CheckRun { name status conclusion }
-                  ... on StatusContext { context state }
+                  ... on CheckRun { name status conclusion completedAt }
+                  ... on StatusContext { context state createdAt }
                 }
                 pageInfo { hasNextPage endCursor }
               }
@@ -132,6 +135,12 @@ FIX_DISPOSITION = re.compile(
     r"^fixed in commits?\s+`?[0-9a-f]{7,40}`?", re.IGNORECASE
 )
 ESCALATION_DISPOSITION = "escalated without disposition"
+INFORMATIONAL_REVIEW_COMMENT = re.compile(
+    r"^(?:question|informational|note)\b|\?\s*$", re.IGNORECASE
+)
+MEANINGFUL_LINES = re.compile(
+    r"(?im)^meaningfully changed lines:\s*[0-9][0-9,]*\s*(?:\([^\n]*\))?\s*$"
+)
 NON_GATING_CHECK_NAMES = frozenset(
     {
         "coderabbit",
@@ -217,6 +226,25 @@ class GitHubGraphQL:
             raise RuntimeError(f"GitHub GraphQL errors: {json.dumps(response['errors'])}")
         return response["data"]
 
+    def execute_rest(self, path: str) -> Any:
+        try:
+            completed = subprocess.run(
+                ["gh", "api", path],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=self.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("gh REST request timed out") from error
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(f"gh REST request failed: {detail}")
+        try:
+            return json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("gh REST request returned invalid JSON") from error
+
     def snapshot(
         self, tracked_node_ids: Sequence[str], head_pattern: str
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -235,7 +263,10 @@ class GitHubGraphQL:
                     "tracked": list(first_tracked_batch) if after is None else [],
                 },
             )
-            connection = data["repository"]["pullRequests"]
+            repository = data.get("repository")
+            if repository is None:
+                raise RuntimeError("configured GitHub repository is unavailable")
+            connection = repository["pullRequests"]
             open_pull_requests.extend(connection["nodes"])
             if after is None:
                 tracked.extend(node for node in data["tracked"] if node is not None)
@@ -266,9 +297,158 @@ class GitHubGraphQL:
                     continue
                 pull_requests.append(normalize_pull_request(node))
         self._finish_paginated_connections(pull_requests)
-        self._load_base_ancestry(pull_requests)
+        self._finish_thread_comments(pull_requests)
+        self._finalize_review_evidence(pull_requests)
+        self._load_review_exempt_status(pull_requests)
+        self._load_renamed_paths(pull_requests)
         self._load_planning_only_status(pull_requests)
+        self._load_base_ancestry(pull_requests)
         return pull_requests, tracked
+
+    def _finish_thread_comments(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        query = """
+query($id: ID!, $after: String!) {
+  node(id: $id) {
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $after) {
+        nodes { author { login } body }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+        for pull_request in pull_requests:
+            for thread in pull_request.pop("_review_thread_nodes"):
+                comments = thread["comments"]
+                page = comments["pageInfo"]
+                while page["hasNextPage"]:
+                    data = self.execute(
+                        query, {"id": thread["id"], "after": page["endCursor"]}
+                    )
+                    node = data.get("node")
+                    if node is None:
+                        raise RuntimeError("review thread became unavailable")
+                    next_comments = node["comments"]
+                    comments["nodes"].extend(next_comments["nodes"])
+                    page = next_comments["pageInfo"]
+                pull_request["review_threads"].extend(
+                    normalize_review_threads([thread], pull_request["author_login"])
+                )
+
+    def _finalize_review_evidence(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        for pull_request in pull_requests:
+            comments = pull_request.pop("_review_comments")
+            reviews = pull_request.pop("_reviews")
+            quiet_oids: list[str] = []
+            for review in reviews:
+                commit = review.get("commit")
+                reviewed_oid = commit.get("oid") if isinstance(commit, dict) else None
+                submitted_at = review.get("submittedAt")
+                if reviewed_oid is None or submitted_at is None:
+                    continue
+                request_times = [
+                    comment["createdAt"]
+                    for comment in comments
+                    if is_codex_review_request(comment, reviewed_oid)
+                    and comment.get("createdAt") is not None
+                    and comment["createdAt"] <= submitted_at
+                    and checks_green_before_request(
+                        pull_request["checks"],
+                        pull_request["check_rollup_state"],
+                        comment["createdAt"],
+                    )
+                ]
+                if (
+                    request_times
+                    and author_login(review) is not None
+                    and author_login(review).casefold()
+                    == CODEX_REVIEWER_LOGIN.casefold()
+                    and review["comments"]["totalCount"] == 0
+                ):
+                    quiet_oids.append(reviewed_oid)
+            pull_request["authenticated_quiet_review_oids"] = quiet_oids
+            pull_request["quiet_review_head_oids"] = [
+                oid for oid in quiet_oids if oid == pull_request["head_oid"]
+            ]
+
+    def _load_review_exempt_status(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        for pull_request in pull_requests:
+            pull_request["review_exempt_since_quiet_review"] = False
+            quiet_oids = pull_request.pop("authenticated_quiet_review_oids")
+            if pull_request["quiet_review_head_oids"]:
+                continue
+            for reviewed_oid in reversed(quiet_oids):
+                if self._review_exempt_change(reviewed_oid, pull_request["head_oid"]):
+                    pull_request["review_exempt_since_quiet_review"] = True
+                    break
+
+    def _review_exempt_change(self, reviewed_oid: str, head_oid: str) -> bool:
+        comparison = self.execute_rest(
+            f"repos/{self.owner}/{self.name}/compare/{reviewed_oid}...{head_oid}"
+        )
+        commits = comparison.get("commits") if isinstance(comparison, dict) else None
+        files = comparison.get("files") if isinstance(comparison, dict) else None
+        if not isinstance(commits, list) or not isinstance(files, list) or not commits:
+            return False
+        if files and all(file.get("status") == "renamed" for file in files):
+            return True
+        commits_by_oid = {
+            commit.get("sha"): commit
+            for commit in commits
+            if isinstance(commit.get("sha"), str)
+        }
+        current_oid = head_oid
+        merge_forward = False
+        while current_oid != reviewed_oid:
+            commit = commits_by_oid.get(current_oid)
+            parents = commit.get("parents") if commit is not None else None
+            if not isinstance(parents, list) or len(parents) != 2:
+                break
+            first_parent = parents[0].get("sha")
+            if not isinstance(first_parent, str):
+                break
+            current_oid = first_parent
+        else:
+            merge_forward = True
+        if merge_forward:
+            return True
+        return bool(files) and all(comment_only_patch(file) for file in files)
+
+    def _load_renamed_paths(
+        self, pull_requests: list[dict[str, Any]]
+    ) -> None:
+        for pull_request in pull_requests:
+            renamed = {
+                changed_file["path"]: changed_file
+                for changed_file in pull_request["changed_files"]
+                if changed_file["changeType"] == "RENAMED"
+            }
+            page = 1
+            while renamed:
+                files = self.execute_rest(
+                    f"repos/{self.owner}/{self.name}/pulls/{pull_request['number']}/files"
+                    f"?per_page=100&page={page}"
+                )
+                if not isinstance(files, list):
+                    raise RuntimeError("GitHub pull-request files response is malformed")
+                for changed_file in files:
+                    current = renamed.get(changed_file.get("filename"))
+                    previous = changed_file.get("previous_filename")
+                    if current is not None and isinstance(previous, str):
+                        current["previous_path"] = previous
+                        del renamed[current["path"]]
+                if len(files) < 100:
+                    break
+                page += 1
+            if renamed:
+                raise RuntimeError("renamed pull-request file lacks its base path")
 
     def _load_base_ancestry(
         self, pull_requests: list[dict[str, Any]]
@@ -296,7 +476,9 @@ class GitHubGraphQL:
                 f"{{ {' '.join(selections)} }} }}"
             )
             data = self.execute(query, variables)
-            repository = data["repository"]
+            repository = data.get("repository")
+            if repository is None:
+                raise RuntimeError("configured GitHub repository is unavailable")
             verification_declarations: list[str] = []
             verification_selections: list[str] = []
             verification_variables: dict[str, Any] = {}
@@ -352,9 +534,8 @@ class GitHubGraphQL:
                 variables[head_variable] = (
                     f"{pull_request['head_oid']}:{changed_file['path']}"
                 )
-                variables[base_variable] = (
-                    f"{pull_request['base_oid']}:{changed_file['path']}"
-                )
+                base_path = changed_file.get("previous_path") or changed_file["path"]
+                variables[base_variable] = f"{pull_request['base_oid']}:{base_path}"
                 selections.extend(
                     (
                         f"head{index}: object(expression: ${head_variable}) "
@@ -367,7 +548,9 @@ class GitHubGraphQL:
                 f"query({', '.join(declarations)}) {{ repository("
                 f"owner: $owner, name: $name) {{ {' '.join(selections)} }} }}"
             )
-            repository = self.execute(query, variables)["repository"]
+            repository = self.execute(query, variables).get("repository")
+            if repository is None:
+                raise RuntimeError("configured GitHub repository is unavailable")
             planning_only = True
             for index, changed_file in enumerate(changed_files):
                 head_has_banner = blob_has_planning_banner(
@@ -404,12 +587,7 @@ class GitHubGraphQL:
             for index, task in enumerate(batch):
                 page = pagination_page(data[f"item{index}"], task.kind)
                 if task.kind == "threads":
-                    task.pull_request["review_threads"].extend(
-                        normalize_review_threads(
-                            page["nodes"],
-                            task.pull_request["author_login"],
-                        )
-                    )
+                    task.pull_request["_review_thread_nodes"].extend(page["nodes"])
                 elif task.kind == "checks":
                     task.pull_request["checks"].extend(page["nodes"])
                 else:
@@ -477,20 +655,85 @@ def is_codex_review_request(comment: dict[str, Any], head_oid: str) -> bool:
     )
 
 
+def checks_green_before_request(
+    checks: Sequence[dict[str, Any]],
+    rollup_state: str | None,
+    requested_at: str,
+) -> bool:
+    if rollup_state is None:
+        return False
+    gating_checks = [check for check in checks if not is_non_gating_check(check)]
+    for check in gating_checks:
+        observed_at = (
+            check.get("completedAt")
+            if check["__typename"] == "CheckRun"
+            else check.get("createdAt")
+        )
+        if (
+            not check_is_green(check)
+            or not isinstance(observed_at, str)
+            or observed_at > requested_at
+        ):
+            return False
+    return True
+
+
+def comment_only_patch(file: dict[str, Any]) -> bool:
+    filename = file.get("filename")
+    patch = file.get("patch")
+    if not isinstance(filename, str) or not isinstance(patch, str):
+        return False
+    if Path(filename).suffix.casefold() not in {
+        ".c", ".cc", ".cpp", ".go", ".h", ".hpp", ".js",
+        ".jsx", ".py", ".rs", ".sh", ".ts", ".tsx",
+    }:
+        return False
+    changed = [
+        line[1:].strip()
+        for line in patch.splitlines()
+        if (line.startswith("+") and not line.startswith("+++"))
+        or (line.startswith("-") and not line.startswith("---"))
+    ]
+    comment_prefixes = ("#", "//", "/*", "*", "*/", "\"\"\"", "'''")
+    return bool(changed) and all(
+        not line or line.startswith(comment_prefixes) for line in changed
+    )
+
+
 def normalize_review_threads(
     threads: Sequence[dict[str, Any]], pull_request_author: str | None
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for thread in threads:
         comments = thread["comments"]["nodes"]
-        dispositions = [
-            disposition_kind(comment.get("body") or "")
-            for comment in comments[1:]
+        latest_reviewer_index = max(
+            (
+                index
+                for index, comment in enumerate(comments)
+                if pull_request_author is None
+                or author_login(comment) is None
+                or author_login(comment).casefold() != pull_request_author.casefold()
+            ),
+            default=0,
+        )
+        author_replies = [
+            comment
+            for comment in comments[latest_reviewer_index + 1 :]
             if pull_request_author is not None
             and author_login(comment) is not None
             and author_login(comment).casefold() == pull_request_author.casefold()
         ]
-        dispositioned = any(kind is not None for kind in dispositions)
+        dispositions = [
+            disposition_kind(comment.get("body") or "")
+            for comment in author_replies
+        ]
+        first_body = (comments[0].get("body") or "") if comments else ""
+        informational = INFORMATIONAL_REVIEW_COMMENT.search(first_body.strip()) is not None
+        dispositioned = (
+            bool(author_replies)
+            if informational
+            else any(kind is not None for kind in dispositions)
+        )
         normalized.append(
             {
                 "isResolved": thread["isResolved"],
@@ -509,17 +752,12 @@ def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
     threads = node["reviewThreads"]
     files = node["files"]
     pull_request_author = author_login(node)
-    review_request_times = [
-        comment["createdAt"]
-        for comment in node["comments"]["nodes"]
-        if is_codex_review_request(comment, node["headRefOid"])
-    ]
-    latest_review_request = max(review_request_times, default=None)
     return {
         "node_id": node["id"],
         "number": node["number"],
         "state": node["state"],
         "title": node["title"],
+        "body": node.get("body") or "",
         "url": node["url"],
         "is_draft": node["isDraft"],
         "author_login": pull_request_author,
@@ -530,25 +768,16 @@ def normalize_pull_request(node: dict[str, Any]) -> dict[str, Any]:
         "head_repository": head_repository(node),
         "mergeable": node["mergeable"],
         "checked_head_oid": commit["oid"] if commit else None,
-        "review_threads": normalize_review_threads(
-            threads["nodes"], pull_request_author
-        ),
-        "quiet_review_head_oids": [
-            review["commit"]["oid"]
-            for review in node["reviews"]["nodes"]
-            if review.get("commit")
-            and author_login(review) is not None
-            and author_login(review).casefold()
-            == CODEX_REVIEWER_LOGIN.casefold()
-            and latest_review_request is not None
-            and review.get("submittedAt") is not None
-            and review["submittedAt"] >= latest_review_request
-            and review["comments"]["totalCount"] == 0
-        ],
+        "review_threads": [],
+        "quiet_review_head_oids": [],
         "check_rollup_state": rollup.get("state") if rollup else None,
         "checks": list(contexts["nodes"]),
         "changed_files": list(files["nodes"]),
         "planning_only": False,
+        "review_exempt_since_quiet_review": False,
+        "_review_thread_nodes": list(threads["nodes"]),
+        "_review_comments": list(node["comments"]["nodes"]),
+        "_reviews": list(node["reviews"]["nodes"]),
         "_thread_page": threads["pageInfo"],
         "_check_page": contexts["pageInfo"],
         "_file_page": files["pageInfo"],
@@ -570,16 +799,17 @@ def pagination_query(tasks: Sequence[PaginationTask]) -> tuple[str, dict[str, An
         if task.kind == "threads":
             connection = (
                 f"reviewThreads(first: 100, after: $after{index}) {{ "
-                "nodes { isResolved comments(first: 100) { totalCount "
-                "nodes { author { login } body } } } "
+                "nodes { id isResolved comments(first: 100) { totalCount "
+                "nodes { author { login } body } "
+                "pageInfo { hasNextPage endCursor } } } "
                 "pageInfo { hasNextPage endCursor } }"
             )
         elif task.kind == "checks":
             connection = (
                 "commits(last: 1) { nodes { commit { statusCheckRollup { "
                 f"contexts(first: 100, after: $after{index}) {{ nodes {{ __typename "
-                "... on CheckRun { name status conclusion } "
-                "... on StatusContext { context state } } "
+                "... on CheckRun { name status conclusion completedAt } "
+                "... on StatusContext { context state createdAt } } "
                 "pageInfo { hasNextPage endCursor } } } } } }"
             )
         else:
@@ -660,8 +890,15 @@ def evaluate_convergence(pull_request: dict[str, Any]) -> dict[str, Any]:
     if (
         not pull_request.get("planning_only", False)
         and pull_request["head_oid"] not in pull_request["quiet_review_head_oids"]
+        and not pull_request.get("review_exempt_since_quiet_review", False)
     ):
         reasons.append("quiet-review-not-completed-for-current-head")
+    if "body" in pull_request:
+        description = pull_request["body"]
+        if len(re.findall(r"\b[\w'-]+\b", description)) > 350:
+            reasons.append("description-exceeds-350-words")
+        if MEANINGFUL_LINES.search(description) is None:
+            reasons.append("description-missing-meaningfully-changed-lines")
     if pull_request["checked_head_oid"] != pull_request["head_oid"]:
         reasons.append("checks-not-for-current-head")
     if pull_request["check_rollup_state"] is None:
@@ -859,6 +1096,33 @@ def load_state(path: Path, repository: str) -> dict[str, Any]:
         raise ValueError(f"unsupported or malformed state file: {path}")
     if not same_repository(state.get("repository"), repository):
         raise ValueError(f"state file belongs to another repository: {path}")
+    for number, record in state["pull_requests"].items():
+        if not isinstance(number, str) or not number.isdecimal() or int(number) < 1:
+            raise ValueError(f"unsupported or malformed state file: {path}")
+        if not isinstance(record, dict):
+            raise ValueError(f"unsupported or malformed state file: {path}")
+        for field in (
+            "node_id",
+            "head_ref",
+            "head_oid",
+            "terminal_state",
+            "terminal_at",
+        ):
+            value = record.get(field)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"unsupported or malformed state file: {path}")
+        for field in ("unconverged_since", "idle_since", "last_dispatched_at"):
+            value = record.get(field)
+            if (
+                value is not None
+                and (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    or value < 0
+                )
+            ):
+                raise ValueError(f"unsupported or malformed state file: {path}")
     return state
 
 
