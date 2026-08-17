@@ -147,7 +147,14 @@ suffix, and exact-range reads backed by one request-local immutable snapshot.
 The broker creates that snapshot while performing the blob layer's initial full
 verification traversal, makes it read-only before any probe runs, and serves all
 later probe and reader ranges from that exact verified generation. It deletes
-the snapshot after the request and never exposes its path to a worker. This
+the snapshot after the request and never exposes its path to a worker. Before
+traversal, the broker atomically reserves the authenticated exact byte length
+from both per-request and process-wide snapshot pools. Capacity exhaustion
+returns `ProcessorUnavailable` without reading source bytes or creating a
+snapshot. The reservation remains held until the request-local file is removed.
+At startup, the broker removes abandoned files from its owner-private snapshot
+directory before admitting work, so a crash cannot permanently consume the
+pool. This
 preserves verification across range reads even for filesystem replicas and S3
 replicas without immutable version tokens. Detection does not call the process
 protocol, decode base64, expose paths, or hand store credentials to a worker.
@@ -165,8 +172,9 @@ strength = Strong | StructuralCandidate | DeclaredCandidate
 Detection follows one fixed algorithm:
 
 01. Start the inspection-wide 120-second wall deadline before source
-    verification. Verify source digest and length through ordinary replica
-    traversal while materializing the immutable request-local snapshot.
+    verification. Reserve the authenticated exact byte length from the bounded
+    snapshot pools, then verify source digest and length through ordinary
+    replica traversal while materializing the immutable request-local snapshot.
     Verification performs at most one complete traversal bounded by the
     catalog's authenticated `byte_length`; those integrity bytes use the blob
     layer's traversal accounting and process-wide traversal admission, not the
@@ -243,8 +251,13 @@ merges opaque capabilities. Repeated outcomes for one key are accepted only when
 their canonical outcome bytes and capability authenticator are identical, then
 collapse to that one outcome. A differing duplicate is a provider contract
 failure, `ProcessorFailed { reason_code: inconsistent_probe_state }`, not a
-selection tie. Thus the `selected_probe` passed to `validate` is unique and
-independent of scheduling or return order.
+selection tie. After claim classification, more than one winning canonical key
+for the selected reader, media type, and strength is
+`ProcessorFailed { reason_code: inconsistent_probe_state }`, even when the keys
+have distinct `ProbeName` values. The registry neither chooses among nor merges
+their opaque capabilities. Exactly one winning key therefore supplies the
+`selected_probe` passed to `validate`, independently of scheduling or return
+order.
 
 Version one has no durable classification cache. Immutable tool results already
 preserve what a model saw. A later tool request may use a newer reader revision,
@@ -313,11 +326,23 @@ complete projection exceeds the 786,432-byte text-or-JSON body ceiling, so an
 admitted provider's views are always reachable through inspection. Every image,
 audio, or file view also declares the finite set of canonical media types it can
 emit. Each model adapter declares its accepted canonical media types per
-presentation kind. Before processing or reserving a reference, `file_read`
-requires the view's complete emitted-type set to be accepted by the selected
-adapter, unless the view instead guarantees normalization to one accepted type.
-An unsupported combination returns typed modality-unsupported failure and cannot
-publish or commit a reference.
+presentation kind and its maximum materialized and provider-wire bytes for one
+reference of each accepted type. Before processing or reserving a reference,
+`file_read` requires the view's complete emitted-type set to be accepted by the
+selected adapter and each declared presentation-byte maximum to fit both
+target-specific limits, unless the view instead guarantees normalization to one
+accepted type and bound. An unsupported type returns typed
+modality-unsupported failure; an oversized target projection returns
+`SourceTooLarge` with the target-specific maximum. Neither path can publish,
+reserve, or commit a reference.
+
+Registry construction's 786,432-byte body ceiling is only a declaration bound.
+Before committing a successful `file_inspect`, the tool loop prospectively
+projects its complete rendered result into the pinned target and current
+frontier, including mandatory continuation-call framing and reserved output
+capacity. If that exact result cannot fit the target's remaining input capacity,
+the request returns `OutputUnitTooLarge` and commits no result; automatic
+compaction is not an admission mechanism.
 
 Configuration may disable compiled providers and lower bounds. It cannot add
 aliases, choose precedence, raise compiled ceilings, or load executable plugins.
@@ -503,10 +528,12 @@ verification precede registration; registration precedes result commit. After
 authorization and before processor or store I/O, a separate short pre-execution
 transaction prospectively projects the complete rendered frontier and durably
 reserves one reference slot and the view's maximum presented bytes for this
-request. It rejects the read before creating output when the reservation would
-exceed the selected model call's reference-count or aggregate media ceiling,
-then ends before any worker or store I/O begins. Publication consumes no more
-than the durable reservation. A short completion transaction atomically
+request. The projection includes the pinned target's per-type materialized and
+provider-wire byte limits and the mandatory continuation call's remaining input
+capacity. It rejects the read before creating output when the reservation would
+exceed any target-specific, reference-count, aggregate-media, or context-input
+boundary, then ends before any worker or store I/O begins. Publication consumes
+no more than the durable reservation. A short completion transaction atomically
 registers the verified blob, consumes the reservation, releases unused bytes,
 and commits the reference; a known-failure completion transaction releases the
 reservation without registering a blob. Every crash-lost authorized
@@ -553,6 +580,7 @@ may lower but never raise these process ceilings:
 | Aggregate probe ranges / source bytes   | 64 / 1,048,576         |
 | Aggregate probe memory / CPU / wall     | 1 GiB / 120 s / 120 s  |
 | Source verification traversals / bytes  | 1 / exact byte length  |
+| Snapshot bytes per request / process     | 64 GiB / 256 GiB       |
 | Per-read ranges / cumulative source     | 4,096 / 1,073,741,824  |
 | Control frame / text-or-JSON body       | 1,048,576 / 786,432    |
 | Views / complete inspection JSON        | 64 / 786,432 bytes     |
@@ -572,8 +600,10 @@ may lower but never raise these process ceilings:
 
 A stored blob may remain multi-gigabyte. Inspection may verify it into one
 immutable request-local snapshot with a deadline-bounded full traversal whose
-byte bound is its authenticated length; probe and reader work remain under their
-smaller fixed ceilings. A compatible reader can stream bounded regions from it,
+byte bound is its authenticated length, provided that length fits the compiled
+64 GiB per-request snapshot ceiling and available process capacity; deployments
+may lower both snapshot bounds. Probe and reader work remain under their smaller
+fixed ceilings. A compatible reader can stream bounded regions from it,
 but no one read may consume more than 1,073,741,824 source bytes; a whole-decode
 view may return `SourceTooLarge` without invalidating the blob. Text/structure
 stops before the first complete semantic unit that would cross output bounds; a
@@ -653,7 +683,8 @@ One shared suite proves every provider and isolation implementation:
 - fixtures cover malformed claims from different readers, a strong claim with a
   conflicting structural claim, a declaration-only candidate alongside a unique
   strong mismatch, duplicate same-reader claims with different probe state,
-  duplicate compatible strong claims, successful and failed structural-candidate
+  distinct probe names producing multiple winning capabilities, duplicate
+  compatible strong claims, successful and failed structural-candidate
   validation, and failed declared-candidate validation;
 - an encrypted or locked fixture returns `EncryptedOrLocked` terminally without
   a password channel, permissive parser recovery, or text fallback;
@@ -663,6 +694,9 @@ One shared suite proves every provider and isolation implementation:
 - filesystem and unversioned-S3 fixtures mutate the selected replica after the
   verification traversal and prove every probe/read range still observes only
   the completed verified snapshot;
+- snapshot admission reserves exact bytes before traversal, rejects exhausted
+  per-request or process capacity without source I/O, releases capacity only
+  after deletion, and removes crash leftovers before startup admission;
 - declarations above 4,096 reader ranges or 1,073,741,824 reader-source bytes
   are rejected, and runtime exhaustion returns `SourceTooLarge` without another
   source byte;
@@ -677,7 +711,11 @@ One shared suite proves every provider and isolation implementation:
   at most an orphan and equal output deduplicates;
 - durable replay does not rerun parsing or recharge the turn;
 - continuation tokens authenticate and resolve only to their bound digest, part
-  selector, reader identity, view, normalized initial options, and position; and
+  selector, reader identity, view, normalized initial options, and position;
+- inspection and rich-result commits are rejected prospectively when their
+  mandatory continuation cannot fit the pinned target context, and rich views
+  are rejected before processing when their maximum exceeds a target-specific
+  materialized or wire-byte limit; and
 - preparation rejects missing, corrupt, malformed, oversized, and
   modality-unsupported references before send authorization.
 
@@ -713,31 +751,11 @@ preparation-failure proofs.
 
 ## Open questions requiring owner ruling
 
-1. **Isolation substrate.** Choose a dedicated local worker, existing runner
-   sandbox, or another mechanism proving this contract. Recommendation: a
-   daemon-supervised local worker using already accepted platform sandbox
-   primitives, because reads must work without a session runner. Blocks slice 2.
-2. **First formats.** Recommendation: UTF-8 text, JSON, CSV, PDF, PNG, JPEG,
-   WebP, GIF, WAV, MP3, FLAC, and Ogg/Opus; defer office containers, SVG, video,
-   and archives. Blocks adapter slices, not registry work.
-3. **Parser dependency budget.** Decide whether isolated native decoders are
-   admissible. Recommendation: pure Rust first; approve native libraries per
-   adapter only when coverage requires them and isolation is executable.
-4. **OCR and transcription.** Choose explicit inference providers, local
-   readers, or absence. Recommendation: exclude both; they introduce selection,
-   credentials, cost, privacy, and nondeterministic replay beyond file reading.
-5. **Provider-native general files.** Decide which adapters may receive them.
-   Recommendation: require an exact per-adapter type inventory; never interpret
-   a generic provider “file” surface as accepting unknown bytes.
-6. **Encrypted files.** Decide whether a future credential reference may supply
-   a password. Recommendation: keep `EncryptedOrLocked` terminal in version one;
-   secrets must not enter tool arguments or results.
-7. **Turn budgets.** Set cumulative source-work and request ceilings after first
-   adapter benchmarks, while preserving every hard ceiling above. Blocks
-   production enablement, not interface work.
-8. **Classification cache.** Recommendation: omit it until measurement proves a
-   need. Immutable results already stabilize replay; a cache adds invalidation
-   and retirement law without improving correctness.
+The authoritative unresolved inventory is
+[`docs/open-questions.md`](../open-questions.md#file-and-media-interpretation). It
+owns the isolation substrate, first formats, parser dependency budget, OCR and
+transcription, provider-native general files, encrypted-file credentials, turn
+budgets, and classification-cache questions. This proposal does not settle them.
 
 Acceptance settles only this common architecture. Every parser dependency and
 new provider modality still receives a narrow implementation review and updates
