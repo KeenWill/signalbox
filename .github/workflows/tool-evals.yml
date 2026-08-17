@@ -169,13 +169,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        family: [git, workspace, web, exec]
-    runs-on: ubuntu-latest
+        include:
+          - family: git
+            runner: signalbox
+          - family: workspace
+            runner: signalbox
+          - family: web
+            runner: signalbox
+          - family: exec
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
       - name: Install Bubblewrap for the exec family
         if: ${{ matrix.family == 'exec' }}
