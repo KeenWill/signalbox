@@ -643,7 +643,7 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
     }
 
     /// Composes the ports with an explicit nonzero in-flight pass bound capped
-    /// at the hard admission ceiling.
+    /// at the shared admission cap.
     pub const fn with_max_in_flight(
         work_source: WorkSource,
         pass: Pass,

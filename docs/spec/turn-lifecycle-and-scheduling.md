@@ -408,10 +408,10 @@ the sweep (INV-007).
   configured bound, is capped at that shared admission cap. The loop
   deduplicates hints for a session already in flight (recording one rerun) and
   keeps an in-progress sweep read alive across pass completions. A failed or
-  panicked pass is logged
-  and retried by a later hint or sweep; nothing is lost because the rows are the
-  queue. A pass about to perform attachment store I/O first tries the blob
-  contract's separate attachment-preparation permit without waiting. If none is
+  panicked pass is logged and retried by a later hint or sweep; nothing is lost
+  because the rows are the queue. A pass about to perform attachment store I/O
+  first tries the blob contract's separate attachment-preparation permit without
+  waiting. If none is
   immediately available, the pass relinquishes its scheduler-pass capacity,
   ends, and leaves only the durable `Prepared` row for a later sweep. After
   acquiring a permit, its task remains in flight for per-session deduplication
