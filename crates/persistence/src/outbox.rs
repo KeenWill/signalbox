@@ -1789,7 +1789,8 @@ async fn load_event(
                     AND terminal_call.turn_id = event.turn_id
                     AND terminal_call.session_id = event.session_id
                     AND terminal_call.state_kind = 'terminal'
-                    AND terminal_call.terminal_disposition_kind = 'cancelled'
+                    AND terminal_call.terminal_disposition_kind
+                        IN ('cancelled', 'completed')
                   WHERE event.event_sequence = $1
                     AND event.session_id = $2
                     AND (
