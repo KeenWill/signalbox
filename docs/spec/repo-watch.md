@@ -26,7 +26,8 @@ against this PR (`agent/daemon-ops-overnight`). Runtime-relevance release,
 held-slot diagnostics, and terminal-target cutoff are also verified against this
 PR. The provider members the poller adopts as check-suite and check-run
 completion generations are verified against PR #541
-(`fix/check-run-updated-at`).
+(`fix/check-run-updated-at`). Eager merge-forward dispatch is verified against
+this PR (`agent/eager-merge-forward`).
 
 ## Configuration and credential boundary
 
@@ -584,14 +585,18 @@ singleton. After this transaction, the mapped rule is a subscription;
 subscription identity, delivery, continuation cursor inheritance, and
 cancellation follow the [program substrate](program-substrate.md).
 
-## First live rule
+## Live merge-forward rule
 
-**Foundation contract.** The first deployed rule is `merge-forward-on-conflict`.
-It matches `MergeableStateChanged` with
-`mergeable_state.any_of = ["conflicting"]`, uses pull-request singleton scope,
-and dispatches the merge-forward session template configured with the approved
-cheap model and pull-request context. The rule does not match transitions back
-to `mergeable` or `unknown`.
+**Foundation contract.** The live merge-forward rule is
+`merge-forward-on-base-advance`. It matches `BaseAdvanced` for pull requests
+whose head branch matches `^agent/.+$`, uses pull-request singleton scope, and
+dispatches the merge-forward session template configured with the approved cheap
+model and pull-request context. Because each `BaseAdvanced` fact targets an open
+pull request based on the branch that advanced, the rule dispatches for each
+immediate dependent when a stacked parent branch advances and for each matching
+main-based pull request when `main` advances. It does not wait for a workflow
+conclusion or a `MergeableStateChanged` conflict fact, and a parent's own
+`HeadChanged` fact does not dispatch the parent.
 
 ## Designed-for version-two poll-cache persistence
 

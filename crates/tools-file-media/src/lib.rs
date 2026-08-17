@@ -14,6 +14,7 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail, ToolPermissionDefault,
+    ToolResultText,
 };
 use signalbox_file_media_runtime::{
     AttachmentKind, FileDigest, FileInspection, FileMediaFailure, FileReadResult, ReadOutputKind,
@@ -411,7 +412,13 @@ fn inspection_evidence(inspection: FileInspection) -> ToolExecutorEvidence {
             "media_type": media_type.as_str(),
             "reason_code": reason_code.as_str(),
         })),
-        FileInspection::Ambiguous { .. } => known_failure(json!({"status": "ambiguous"})),
+        FileInspection::Ambiguous { media_types, .. } => known_failure(json!({
+            "status": "ambiguous",
+            "media_types": media_types
+                .iter()
+                .map(|media_type| media_type.as_str())
+                .collect::<Vec<_>>(),
+        })),
         FileInspection::DeclaredMismatch {
             declared, detected, ..
         } => known_failure(json!({
@@ -497,7 +504,10 @@ fn failure_evidence(failure: FileMediaFailure) -> ToolExecutorEvidence {
 }
 
 fn completed_json(value: Value) -> ToolExecutorEvidence {
-    ToolExecutorEvidence::CompletedText(value.to_string())
+    match ToolResultText::try_new(value.to_string()) {
+        Ok(text) => ToolExecutorEvidence::CompletedText(text.into_string()),
+        Err(_) => known_failure(json!({"status": "result_too_large"})),
+    }
 }
 
 fn known_failure(value: Value) -> ToolExecutorEvidence {
@@ -597,6 +607,21 @@ mod tests {
         assert!(matches!(
             outcome,
             Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
+        ));
+    }
+
+    #[test]
+    fn encoded_read_result_cannot_exceed_tool_result_text_bound() {
+        let result = FileReadResult::Text {
+            body: "\"".repeat(786_432),
+            continuation: signalbox_file_media_runtime::ReadContinuation::Complete,
+        };
+
+        let evidence = read_evidence(result);
+
+        assert!(matches!(
+            evidence,
+            ToolExecutorEvidence::KnownFailed { detail: Some(_) }
         ));
     }
 }
