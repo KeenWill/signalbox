@@ -6,12 +6,10 @@ use serde_json::Value;
 use signalbox_domain::{
     RunnerGeneration, RunnerId, SessionId, WorkspaceManifestId, WorkspaceRepositoryKey,
 };
-
-const MAX_FAILURE_DETAIL_BYTES: usize = 4_096;
-const MAX_FAILURE_MESSAGE_BYTES: usize = 1_024;
-const MAX_FAILURE_PAYLOAD_BYTES: usize = 2_048;
-const MAX_FAILURE_DETAIL_MEMBERS: usize = 64;
-const MAX_FAILURE_DETAIL_DEPTH: usize = 8;
+use signalbox_runner_wire::{
+    MAX_FAILURE_DETAIL_BYTES, MAX_FAILURE_DETAIL_DEPTH, MAX_FAILURE_DETAIL_MEMBERS,
+    MAX_FAILURE_MESSAGE_BYTES, MAX_FAILURE_PAYLOAD_BYTES,
+};
 
 /// Why runner-authored failure detail was refused at the application boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,13 +66,27 @@ pub struct RunnerOperationFailureDetail {
     payload_json: String,
 }
 
+/// Labeled runner-authored fields checked as one operation-failure detail.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerOperationFailureDetailInput {
+    /// Runner-specific portable catalog-key name.
+    pub code: String,
+    /// Exact nonempty retained message.
+    pub message: String,
+    /// Canonical bounded JSON-object payload.
+    pub payload_json: String,
+}
+
 impl RunnerOperationFailureDetail {
     /// Checks the exact runner-protocol spelling, recursive bounds, and bytes.
     pub fn try_new(
-        code: String,
-        message: String,
-        payload_json: String,
+        input: RunnerOperationFailureDetailInput,
     ) -> Result<Self, RunnerOperationFailureDetailError> {
+        let RunnerOperationFailureDetailInput {
+            code,
+            message,
+            payload_json,
+        } = input;
         WorkspaceRepositoryKey::try_new(code.clone()).map_err(|_| {
             RunnerOperationFailureDetailError {
                 failure: RunnerOperationFailureDetailFailure::InvalidCode,
@@ -272,8 +284,8 @@ mod tests {
 
     use super::{
         RunnerOperationFailureDetail, RunnerOperationFailureDetailFailure,
-        RunnerWorkspaceCleanupFailure, RunnerWorkspaceCleanupFailureService,
-        RunnerWorkspaceCleanupFailureTransaction,
+        RunnerOperationFailureDetailInput, RunnerWorkspaceCleanupFailure,
+        RunnerWorkspaceCleanupFailureService, RunnerWorkspaceCleanupFailureTransaction,
     };
 
     const SESSION: u128 = 1;
@@ -289,11 +301,11 @@ mod tests {
             RunnerGeneration::one(),
             RunnerId::from_uuid(Uuid::from_u128(RUNNER)),
             WorkspaceManifestId::from_uuid(Uuid::from_u128(MANIFEST)),
-            RunnerOperationFailureDetail::try_new(
-                String::from(CODE),
-                String::from(MESSAGE),
-                String::from(PAYLOAD),
-            )
+            RunnerOperationFailureDetail::try_new(RunnerOperationFailureDetailInput {
+                code: String::from(CODE),
+                message: String::from(MESSAGE),
+                payload_json: String::from(PAYLOAD),
+            })
             .expect("the fixture detail is valid"),
         )
     }
@@ -326,11 +338,11 @@ mod tests {
 
     #[test]
     fn detail_rejects_noncanonical_payload_json() {
-        let error = RunnerOperationFailureDetail::try_new(
-            String::from(CODE),
-            String::from(MESSAGE),
-            String::from("{ \"attempt\": 1 }"),
-        )
+        let error = RunnerOperationFailureDetail::try_new(RunnerOperationFailureDetailInput {
+            code: String::from(CODE),
+            message: String::from(MESSAGE),
+            payload_json: String::from("{ \"attempt\": 1 }"),
+        })
         .expect_err("noncanonical payload text is refused");
 
         assert_eq!(

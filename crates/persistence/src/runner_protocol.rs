@@ -24,12 +24,12 @@ use signalbox_application::{
     PinnedRunnerReplacementTransaction, ReplaceLostRunnerBeforePinOutcome,
     ReplaceLostRunnerBeforePinTransaction, RunnerLeaseClaimRequest, RunnerLeaseClaimTransaction,
     RunnerLeaseResultRequest, RunnerLeaseResultTransaction, RunnerOperationFailureDetail,
-    RunnerReadyManifestDigest, RunnerReplacementProvisioningOutcome,
-    RunnerReplacementProvisioningStage, RunnerReplacementProvisioningTransaction,
-    RunnerWorkspaceCleanupFailure, RunnerWorkspaceCleanupFailureTransaction,
-    RunnerWorkspaceReadyReceipt, RunnerWorkspaceReadyTransaction,
-    RunnerWorkspaceReleaseAcknowledgement, RunnerWorkspaceReleaseTransaction, ToolCatalog,
-    ToolDefinition, ToolInputSchema,
+    RunnerOperationFailureDetailInput, RunnerReadyManifestDigest,
+    RunnerReplacementProvisioningOutcome, RunnerReplacementProvisioningStage,
+    RunnerReplacementProvisioningTransaction, RunnerWorkspaceCleanupFailure,
+    RunnerWorkspaceCleanupFailureTransaction, RunnerWorkspaceReadyReceipt,
+    RunnerWorkspaceReadyTransaction, RunnerWorkspaceReleaseAcknowledgement,
+    RunnerWorkspaceReleaseTransaction, ToolCatalog, ToolDefinition, ToolInputSchema,
 };
 #[cfg(feature = "postgres-integration")]
 use signalbox_domain::RunnerWorkspaceReleaseCandidate;
@@ -85,7 +85,8 @@ use crate::lock_inventory::{
 use crate::mapping::{
     AbandonLostRunnerRejectionStorageKind, AbandonLostRunnerResultStorageKind,
     ReplaceLostRunnerRejectionStorageKind, ReplaceLostRunnerResultStorageKind,
-    RunnerLossPropagationStateStorageKind, ToolAttemptDispositionStorageKind,
+    RunnerLossPropagationStateStorageKind, RunnerOperationFailureCategoryStorageKind,
+    RunnerOperationFailureOperationStorageKind, ToolAttemptDispositionStorageKind,
     abandon_lost_runner_rejection_from_str, abandon_lost_runner_rejection_to_str,
     abandon_lost_runner_result_from_str, abandon_lost_runner_result_to_str,
     replace_lost_runner_rejection_from_str, replace_lost_runner_rejection_to_str,
@@ -93,6 +94,8 @@ use crate::mapping::{
     runner_connection_state_from_str, runner_connection_state_to_str,
     runner_enrollment_state_from_str, runner_enrollment_state_to_str,
     runner_loss_propagation_state_from_str, runner_loss_propagation_state_to_str,
+    runner_operation_failure_category_from_str, runner_operation_failure_category_to_str,
+    runner_operation_failure_operation_from_str, runner_operation_failure_operation_to_str,
     runner_placement_loss_source_from_str, runner_placement_loss_source_to_str,
     runner_sandbox_from_str, runner_sandbox_to_str, tool_attempt_disposition_to_str,
     tool_permission_default_from_str, tool_permission_default_to_str,
@@ -3868,12 +3871,15 @@ impl RunnerProtocolStore {
                  ON retirement.session_id = failure.release_session_id
                 AND retirement.placement_revision =
                     failure.release_placement_revision
-              WHERE failure.operation_kind = 'workspace_release'
+              WHERE failure.operation_kind = $3
                 AND failure.release_session_id = $1
                 AND failure.release_placement_revision = $2",
         )
         .bind(session.into_uuid())
         .bind(Decimal::from(placement_revision.get()))
+        .bind(runner_operation_failure_operation_to_str(
+            RunnerOperationFailureOperationStorageKind::WorkspaceRelease,
+        ))
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
@@ -3881,8 +3887,12 @@ impl RunnerProtocolStore {
         };
         let runner = runner_id(row.decode_column("runner_id")?);
         let manifest = WorkspaceManifestId::from_uuid(row.decode_column("failure_manifest_id")?);
-        if row.decode_column::<String>("operation_kind")? != "workspace_release"
-            || row.decode_column::<String>("category_kind")? != "workspace_cleanup_failed"
+        if runner_operation_failure_operation_from_str(
+            &row.decode_column::<String>("operation_kind")?,
+        ) != Some(RunnerOperationFailureOperationStorageKind::WorkspaceRelease)
+            || runner_operation_failure_category_from_str(
+                &row.decode_column::<String>("category_kind")?,
+            ) != Some(RunnerOperationFailureCategoryStorageKind::WorkspaceCleanupFailed)
             || row.decode_column::<Option<Uuid>>("release_session_id")? != Some(session.into_uuid())
             || row.decode_column::<Option<Uuid>>("release_runner_id")? != Some(runner.into_uuid())
             || row.decode_column::<Option<Uuid>>("release_manifest_id")?
@@ -3896,11 +3906,11 @@ impl RunnerProtocolStore {
         {
             return Err(RunnerProtocolCorruption::CrossWiredReference.into());
         }
-        let detail = RunnerOperationFailureDetail::try_new(
-            row.decode_column("detail_code")?,
-            row.decode_column("detail_message")?,
-            row.decode_column("detail_payload_json")?,
-        )
+        let detail = RunnerOperationFailureDetail::try_new(RunnerOperationFailureDetailInput {
+            code: row.decode_column("detail_code")?,
+            message: row.decode_column("detail_message")?,
+            payload_json: row.decode_column("detail_payload_json")?,
+        })
         .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
         Ok(Some(RunnerWorkspaceCleanupFailure::new(
             session,
@@ -4158,7 +4168,6 @@ impl RunnerProtocolStore {
             || WorkspaceManifestId::from_uuid(release.decode_column("manifest_id")?)
                 != failure.manifest_id()
             || release_enrollment != source_enrollment
-            || connection.decode_column::<Decimal>("connection_epoch")? != release_connection_epoch
             || connection.decode_column::<String>("state_kind")? != "connected"
         {
             return Err(RunnerProtocolStoreError::Domain(
@@ -4207,13 +4216,18 @@ impl RunnerProtocolStore {
                  release_placement_revision, release_manifest_id,
                  category_kind, detail_code, detail_message,
                  detail_payload_json)
-             VALUES ('workspace_release', $1, $2, $3, $4,
-                     'workspace_cleanup_failed', $5, $6, $7)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
+        .bind(runner_operation_failure_operation_to_str(
+            RunnerOperationFailureOperationStorageKind::WorkspaceRelease,
+        ))
         .bind(failure.runner().into_uuid())
         .bind(failure.session().into_uuid())
         .bind(Decimal::from(failure.placement_revision().get()))
         .bind(failure.manifest_id().into_uuid())
+        .bind(runner_operation_failure_category_to_str(
+            RunnerOperationFailureCategoryStorageKind::WorkspaceCleanupFailed,
+        ))
         .bind(failure.detail().code())
         .bind(failure.detail().message())
         .bind(failure.detail().payload_json())
@@ -8515,22 +8529,25 @@ async fn load_workspace_cleanup_failure_in_transaction(
         "SELECT runner_id, release_manifest_id, detail_code,
                 detail_message, detail_payload_json
            FROM runner_operation_failure
-          WHERE operation_kind = 'workspace_release'
+          WHERE operation_kind = $3
             AND release_session_id = $1
             AND release_placement_revision = $2",
     )
     .bind(session.into_uuid())
     .bind(Decimal::from(placement_revision.get()))
+    .bind(runner_operation_failure_operation_to_str(
+        RunnerOperationFailureOperationStorageKind::WorkspaceRelease,
+    ))
     .fetch_optional(&mut **transaction)
     .await?;
     let Some(row) = row else {
         return Ok(None);
     };
-    let detail = RunnerOperationFailureDetail::try_new(
-        row.decode_column("detail_code")?,
-        row.decode_column("detail_message")?,
-        row.decode_column("detail_payload_json")?,
-    )
+    let detail = RunnerOperationFailureDetail::try_new(RunnerOperationFailureDetailInput {
+        code: row.decode_column("detail_code")?,
+        message: row.decode_column("detail_message")?,
+        payload_json: row.decode_column("detail_payload_json")?,
+    })
     .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
     Ok(Some(RunnerWorkspaceCleanupFailure::new(
         session,

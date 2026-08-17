@@ -938,6 +938,56 @@ pub(crate) fn runner_connection_state_from_str(
     }
 }
 
+/// Closed operation kinds retained for runner-authored failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RunnerOperationFailureOperationStorageKind {
+    WorkspaceRelease,
+}
+
+pub(crate) const fn runner_operation_failure_operation_to_str(
+    value: RunnerOperationFailureOperationStorageKind,
+) -> &'static str {
+    match value {
+        RunnerOperationFailureOperationStorageKind::WorkspaceRelease => "workspace_release",
+    }
+}
+
+pub(crate) fn runner_operation_failure_operation_from_str(
+    value: &str,
+) -> Option<RunnerOperationFailureOperationStorageKind> {
+    match value {
+        "workspace_release" => Some(RunnerOperationFailureOperationStorageKind::WorkspaceRelease),
+        _ => None,
+    }
+}
+
+/// Closed categories retained for runner-authored failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RunnerOperationFailureCategoryStorageKind {
+    WorkspaceCleanupFailed,
+}
+
+pub(crate) const fn runner_operation_failure_category_to_str(
+    value: RunnerOperationFailureCategoryStorageKind,
+) -> &'static str {
+    match value {
+        RunnerOperationFailureCategoryStorageKind::WorkspaceCleanupFailed => {
+            "workspace_cleanup_failed"
+        }
+    }
+}
+
+pub(crate) fn runner_operation_failure_category_from_str(
+    value: &str,
+) -> Option<RunnerOperationFailureCategoryStorageKind> {
+    match value {
+        "workspace_cleanup_failed" => {
+            Some(RunnerOperationFailureCategoryStorageKind::WorkspaceCleanupFailed)
+        }
+        _ => None,
+    }
+}
+
 /// Closed stored result kinds for placement-update commands.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SessionPlacementResultStorageKind {

@@ -68,7 +68,15 @@ BEGIN
         END LOOP;
         RETURN true;
     ELSIF kind = 'string' THEN
-        RETURN octet_length(input_json #>> '{}') <= 1024;
+        -- PostgreSQL text cannot contain U+0000, so substitute an equal-width
+        -- JSON escape before materializing the decoded string for its bound.
+        RETURN octet_length(
+            replace(
+                input_json::text,
+                chr(92) || 'u0000',
+                chr(92) || 'u0001'
+            )::json #>> '{}'
+        ) <= 1024;
     ELSIF kind = 'number' THEN
         RETURN input_json::text ~ '^(0|[1-9][0-9]*)$'
            AND input_json::text::numeric <= 18446744073709551615;
