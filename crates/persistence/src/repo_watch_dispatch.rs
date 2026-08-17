@@ -1730,6 +1730,7 @@ fn decoded_rule_version(
 }
 
 fn stored_rule_id(rule_id: &str) -> Result<RepoWatchRuleId, RepoWatchDispatchRepositoryError> {
-    RepoWatchRuleId::try_new(rule_id.to_owned())
-        .map_err(|_| RepoWatchDispatchRepositoryError::Corruption("stored rule identifier"))
+    RepoWatchRuleId::try_new(rule_id.to_owned()).map_err(|_| {
+        RepoWatchDispatchRepositoryError::Corruption("stored rule identifier is invalid")
+    })
 }

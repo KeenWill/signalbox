@@ -607,10 +607,12 @@ and cooldown, plus content-free fingerprints labeled with the exact
 configuration fields they represent. Changing any of those semantics while
 retaining the same rule ID and revision fails in the Configuration phase before
 either local socket binds. The diagnostic names the rule and changed field and
-directs the operator to increment `version`; it never first appears as a
-repository-task runtime death. An activation recorded before field fingerprints
-existed cannot produce them from its aggregate digest, so the one-time migration
-introducing fingerprints retires every such activation. No active activation
+directs the operator to increment `version`; when multiple fields changed, it
+names the first changed TOML field in canonical fingerprint order. It never
+first appears as a repository-task runtime death. An activation recorded before
+field fingerprints existed cannot produce them from its aggregate digest, so
+the one-time migration introducing fingerprints retires every such activation.
+No active activation
 lacks fingerprints and the daemon carries no path for that shape; a missing
 fingerprint under any non-deactivated activation is storage corruption, checked
 before reconciliation compares that activation against configuration, retires it

@@ -320,6 +320,8 @@ allowed_origins = [
 # Increment this revision whenever matcher, actions, singleton_per, or cooldown
 # changes. Keeping the ID preserves history; startup retires the old revision
 # and activates the new one after the current event tail.
+# The schema upgrade that introduced rule fingerprints retires every existing
+# revision, so increment each configured rule's version once on the first boot.
 # version = 1
 # singleton_per = "pull_request"
 # cooldown_seconds = 0
