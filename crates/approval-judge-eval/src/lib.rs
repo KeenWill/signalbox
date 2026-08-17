@@ -636,7 +636,8 @@ mod tests {
 
         let error = decode_corpus(&encoded).expect_err("an unknown corpus version is rejected");
 
-        assert!(error.to_string().contains("unsupported"));
+        expect![["corpus format version 2 is unsupported; expected 1"]]
+            .assert_eq(&error.to_string());
     }
 
     #[test]
@@ -649,7 +650,7 @@ mod tests {
 
         let error = decode_corpus(&encoded).expect_err("an empty corpus is rejected");
 
-        assert!(error.to_string().contains("no cases"));
+        expect![["corpus contains no cases"]].assert_eq(&error.to_string());
     }
 
     #[tokio::test]
@@ -664,7 +665,8 @@ mod tests {
             .await
             .expect_err("the scoring boundary rejects an unsupported version");
 
-        assert!(error.to_string().contains("unsupported"));
+        expect![["corpus format version 2 is unsupported; expected 1"]]
+            .assert_eq(&error.to_string());
     }
 
     #[tokio::test]
@@ -679,7 +681,7 @@ mod tests {
             .await
             .expect_err("the scoring boundary rejects an empty corpus");
 
-        assert!(error.to_string().contains("no cases"));
+        expect![["corpus contains no cases"]].assert_eq(&error.to_string());
     }
 
     #[tokio::test]

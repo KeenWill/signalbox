@@ -3676,6 +3676,7 @@ dependencies = [
 name = "signalbox-approval-judge-eval"
 version = "0.0.0"
 dependencies = [
+ "expect-test",
  "serde",
  "serde_json",
  "signalbox-domain",
