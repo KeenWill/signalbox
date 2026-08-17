@@ -513,12 +513,12 @@ failing unrelated session execution. A fail-closed corruption or caller-or-hub
 bug remains an error after that same classification closes the attempt, so the
 daemon's fatal execution supervisor still stops scheduling. A failed
 classification retains the exact attempt identity and permit for another
-classification pass. It also retains a fatal executor failure's safe class and
-cause token, so a later successful classification still returns that fatal
-class; the initial combined error preserves both the executor failure and the
-classification failure. Evidence carrying a different dispatch correlation
-follows the same classification-before-release path, surfacing the correlation
-mismatch only after closure or together with a failed classification. The
+classification pass. It also retains whether closure belongs to prior-process
+loss, an executor failure, or a correlation mismatch. An executor failure keeps
+its safe class and cause token, so a later successful classification emits the
+same nonfatal diagnostic or returns the same fatal class; a correlation mismatch
+likewise resurfaces only after closure. The initial combined error preserves
+both the executor failure or mismatch and the classification failure. The
 durable attempt therefore cannot remain `InFlight` after the gate becomes
 available to an interrupt.
 
