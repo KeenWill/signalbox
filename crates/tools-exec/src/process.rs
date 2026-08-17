@@ -71,8 +71,6 @@ const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded direct-command arguments
 pub(crate) const BWRAP_PROGRAM: &str = "/usr/bin/bwrap";
 const SANDBOX_WORKSPACE: &str = "/workspace";
 const SANDBOX_DISPATCH_PROGRAM: &str = "/signalbox-exec-dispatch";
-const SANDBOX_HTTPS_BROKER_DIRECTORY: &str = "/run/signalbox";
-const SANDBOX_HTTPS_BROKER_SOCKET: &str = "/run/signalbox/https-broker.sock";
 const SANDBOX_HTTPS_PROXY: &str = "http://127.0.0.1:18080";
 const SANDBOX_FALLBACK_PATH: &str = "/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 pub(crate) const SANDBOX_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
@@ -1229,11 +1227,12 @@ struct ReadOnlyPathIdentity {
 
 #[derive(Clone, Debug)]
 struct HttpsBrokerSocketIdentity {
-    bind_source: PathBuf,
     #[cfg(target_os = "linux")]
     device: u64,
     #[cfg(target_os = "linux")]
     inode: u64,
+    #[cfg(target_os = "linux")]
+    descriptor: i32,
     #[cfg(target_os = "linux")]
     _descriptor: Arc<rustix::fd::OwnedFd>,
 }
@@ -1327,9 +1326,9 @@ impl HttpsBrokerSocketIdentity {
                 });
             }
             Ok(Self {
-                bind_source: descriptor_path(rustix::fd::AsRawFd::as_raw_fd(&descriptor)),
                 device: metadata.st_dev,
                 inode: metadata.st_ino,
+                descriptor: rustix::fd::AsRawFd::as_raw_fd(&descriptor),
                 _descriptor: Arc::new(descriptor),
             })
         }
@@ -1867,11 +1866,8 @@ fn bwrap_request(
             append_usr_merge_aliases(&mut bwrap_arguments, paths);
             if let Some(https_broker) = https_broker {
                 bwrap_arguments.extend([
-                    OsString::from("--dir"),
-                    OsString::from(SANDBOX_HTTPS_BROKER_DIRECTORY),
-                    OsString::from("--ro-bind"),
-                    https_broker.bind_source.as_os_str().to_owned(),
-                    OsString::from(SANDBOX_HTTPS_BROKER_SOCKET),
+                    OsString::from("--preserve-fds"),
+                    OsString::from(https_broker.descriptor.saturating_sub(2).to_string()),
                 ]);
             }
         }
@@ -1916,13 +1912,16 @@ fn bwrap_request(
         context.launcher.as_os_str().to_owned(),
         OsString::from(SANDBOX_DISPATCH_PROGRAM),
     ]);
-    let https_broker = matches!(
-        profile.mounts,
+    let https_broker_descriptor = match profile.mounts {
         SandboxMountProfile::RunnerRestricted {
-            https_broker: Some(_),
+            https_broker: Some(https_broker),
             ..
-        }
-    );
+        } => Some(https_broker.descriptor),
+        SandboxMountProfile::DaemonLocal
+        | SandboxMountProfile::RunnerRestricted {
+            https_broker: None, ..
+        } => None,
+    };
     bwrap_arguments.extend([
         OsString::from("--chdir"),
         OsString::from(sandbox_directory),
@@ -1930,7 +1929,7 @@ fn bwrap_request(
         OsString::from("HOME"),
         OsString::from(SANDBOX_WORKSPACE),
     ]);
-    if https_broker {
+    if https_broker_descriptor.is_some() {
         bwrap_arguments.extend([
             OsString::from("--setenv"),
             OsString::from("HTTPS_PROXY"),
@@ -1943,13 +1942,16 @@ fn bwrap_request(
     bwrap_arguments.extend([
         OsString::from("--"),
         OsString::from(SANDBOX_DISPATCH_PROGRAM),
-        OsString::from(if https_broker {
+        OsString::from(if https_broker_descriptor.is_some() {
             "--dispatch-with-https-proxy"
         } else {
             "--dispatch"
         }),
-        OsString::from(invocation.program),
     ]);
+    if let Some(descriptor) = https_broker_descriptor {
+        bwrap_arguments.push(OsString::from(descriptor.to_string()));
+    }
+    bwrap_arguments.push(OsString::from(invocation.program));
     bwrap_arguments.extend(invocation.arguments.iter().map(OsString::from));
     ProcessRequest {
         program: bubblewrap_program.as_os_str().to_owned(),
@@ -4769,7 +4771,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn runner_restricted_https_bridge_binds_only_the_pinned_socket_and_proxy_mode()
+    async fn runner_restricted_https_bridge_passes_only_the_pinned_descriptor_and_proxy_mode()
     -> Result<(), Box<dyn Error>> {
         let workspace = ReplacementWorkspace::new()?;
         let read_only = ReplacementWorkspace::new()?;
@@ -4802,32 +4804,33 @@ mod tests {
             OsString::from("https_proxy"),
             OsString::from(SANDBOX_HTTPS_PROXY),
         ];
-        let dispatch_arguments = [
-            OsString::from("--"),
-            OsString::from(SANDBOX_DISPATCH_PROGRAM),
-            OsString::from("--dispatch-with-https-proxy"),
-            OsString::from("fixture-program"),
-        ];
-
         let result = command_runner.try_run(arguments).await?;
         let requests = observation.recorded_requests();
         let request = requests
             .first()
             .ok_or_else(|| std::io::Error::other("one requested process"))?;
-        let broker_bind = request
+        let preserved_descriptors = request
             .arguments
-            .windows(3)
-            .find(|arguments| {
-                arguments[0] == "--ro-bind" && arguments[2] == SANDBOX_HTTPS_BROKER_SOCKET
-            })
-            .ok_or_else(|| std::io::Error::other("one HTTPS broker bind"))?;
+            .windows(2)
+            .find(|arguments| arguments[0] == "--preserve-fds")
+            .ok_or_else(|| std::io::Error::other("one preserved HTTPS broker descriptor"))?;
+        let preserved_descriptors = preserved_descriptors[1].to_string_lossy().parse::<i32>()?;
+        let broker_descriptor = preserved_descriptors + 2;
+        let dispatch_arguments = [
+            OsString::from("--"),
+            OsString::from(SANDBOX_DISPATCH_PROGRAM),
+            OsString::from("--dispatch-with-https-proxy"),
+            OsString::from(broker_descriptor.to_string()),
+            OsString::from("fixture-program"),
+        ];
 
+        assert!(broker_descriptor >= 3);
         assert!(
-            broker_bind[1]
-                .to_string_lossy()
-                .starts_with("/proc/self/fd/")
+            !request
+                .arguments
+                .iter()
+                .any(|argument| argument == broker_socket.as_os_str())
         );
-        assert_ne!(broker_bind[1], broker_socket.as_os_str());
         assert!(
             request
                 .arguments
