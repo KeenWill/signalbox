@@ -1390,12 +1390,44 @@ where
                                 ));
                             }
                         }
+                        Message::ResultRecorded(recorded) => {
+                            if self
+                                .serve_message(state, Message::ResultRecorded(recorded))
+                                .await?
+                                .is_some()
+                            {
+                                return Err(RunnerConnectionError::Violation(
+                                    ProtocolViolation::UnexpectedFrame {
+                                        expected: MessageKind::Heartbeat,
+                                        received,
+                                    },
+                                ));
+                            }
+                        }
                         Message::Shutdown(shutdown)
-                            if shutdown.reason == ShutdownReason::DaemonShutdown
-                                && shutdown.connection_epoch == self.connection_epoch =>
+                            if shutdown.reason == ShutdownReason::DaemonShutdown =>
                         {
-                            deferred_shutdown = Some(ConnectionEnd::DaemonShutdown {
-                                connection_epoch: shutdown.connection_epoch,
+                            let outcome = self
+                                .serve_message(state, Message::Shutdown(shutdown))
+                                .await?
+                                .ok_or(RunnerConnectionError::Violation(
+                                    ProtocolViolation::UnexpectedFrame {
+                                        expected: MessageKind::Heartbeat,
+                                        received,
+                                    },
+                                ))?;
+                            deferred_shutdown = Some(match outcome {
+                                ServeOutcome::ConnectionEnded(end) => end,
+                                ServeOutcome::DispatchReady(_)
+                                | ServeOutcome::WorkspaceReleaseReady(_)
+                                | ServeOutcome::ShutdownReady => {
+                                    return Err(RunnerConnectionError::Violation(
+                                        ProtocolViolation::UnexpectedFrame {
+                                            expected: MessageKind::Heartbeat,
+                                            received,
+                                        },
+                                    ));
+                                }
                             });
                         }
                         _ => {
@@ -4289,6 +4321,226 @@ mod tests {
             outcome,
             ServeOutcome::ConnectionEnded(ConnectionEnd::DaemonShutdown {
                 connection_epoch: epoch,
+            })
+        );
+        assert_eq!(
+            state.reconnect_inventory().workspace_operation,
+            Some(WorkspaceOperation::Release {
+                correlation,
+                phase: ReleasePhase::ReleaseCompleted,
+            })
+        );
+    }
+
+    /// INV-011 / INV-024: cleanup serving consumes an exact retained-result
+    /// acknowledgement without cancelling the accepted release cleanup.
+    #[tokio::test]
+    async fn inv011_inv024_workspace_cleanup_serves_result_acknowledgement() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let release_correlation = release_correlation();
+        let result_correlation = retained_lease_correlation();
+        record_terminal_result_fixture(&mut state);
+        let (complete_cleanup, cleanup_completed) = tokio::sync::oneshot::channel();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the release");
+            let release = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the release reaches a serving boundary")
+                .expect("the release produces a cleanup handoff")
+                .into_workspace_release_ready()
+                .expect("the accepted release forms the cleanup handoff");
+            let cleanup = async {
+                cleanup_completed
+                    .await
+                    .expect("the result acknowledgement leaves cleanup live");
+                Ok::<(), ()>(())
+            };
+            connection
+                .release_while_serving(&mut state, release, cleanup)
+                .await
+                .expect("cleanup completes after the result acknowledgement");
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_result_directives(DirectiveAction::Await),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::WorkspaceRelease(WorkspaceRelease {
+                    correlation: release_correlation.clone(),
+                }),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::ResultRecorded(ResultRecorded {
+                    correlation: result_correlation,
+                }),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Heartbeat(Heartbeat {
+                    sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                    last_accepted_peer_sequence: NO_ACCEPTED_PEER_SEQUENCE,
+                }),
+            )
+            .await;
+            let acknowledgement = receive_hub_message(&mut hub_io).await;
+            let observed_state = state_root(&parent);
+            assert_eq!(observed_state.reconnect_inventory().result, None);
+            assert_eq!(observed_state.reconnect_inventory().lease, None);
+            assert_eq!(
+                observed_state.reconnect_inventory().workspace_operation,
+                Some(WorkspaceOperation::Release {
+                    correlation: release_correlation.clone(),
+                    phase: ReleasePhase::ReleaseAccepted,
+                })
+            );
+            complete_cleanup
+                .send(())
+                .expect("cleanup remains live after acknowledgement");
+            let released = receive_hub_message(&mut hub_io).await;
+            (acknowledgement, released)
+        };
+        let ((), (acknowledgement, released)) = tokio::join!(runner, hub);
+
+        assert_eq!(
+            acknowledgement,
+            Message::HeartbeatAck(HeartbeatAck {
+                challenge_sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                runner_sequence: positive(FIRST_RUNNER_SEQUENCE),
+                lease_phase: None,
+                workspace_phase: Some(HeartbeatWorkspacePhase::ReleaseAccepted {
+                    correlation: release_correlation.clone(),
+                }),
+            })
+        );
+        assert_eq!(
+            released,
+            Message::WorkspaceReleased(WorkspaceReleased {
+                correlation: release_correlation.clone(),
+            })
+        );
+        assert_eq!(state.reconnect_inventory().result, None);
+        assert_eq!(state.reconnect_inventory().lease, None);
+        assert_eq!(
+            state.reconnect_inventory().workspace_operation,
+            Some(WorkspaceOperation::Release {
+                correlation: release_correlation,
+                phase: ReleasePhase::ReleaseCompleted,
+            })
+        );
+    }
+
+    /// INV-011 / INV-024: cleanup serving rejects a stale daemon epoch while
+    /// retaining cleanup until the accepted release reaches a durable result.
+    #[tokio::test]
+    async fn inv011_inv024_workspace_cleanup_rejects_stale_shutdown_before_projection() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let correlation = release_correlation();
+        let stale_epoch = positive(CONNECTION_EPOCH + 1);
+        let (complete_cleanup, cleanup_completed) = tokio::sync::oneshot::channel();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the release");
+            let release = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the release reaches a serving boundary")
+                .expect("the release produces a cleanup handoff")
+                .into_workspace_release_ready()
+                .expect("the accepted release forms the cleanup handoff");
+            let cleanup = async {
+                cleanup_completed
+                    .await
+                    .expect("stale shutdown leaves cleanup live");
+                Ok::<(), ()>(())
+            };
+            connection
+                .release_while_serving(&mut state, release, cleanup)
+                .await
+                .expect("cleanup reaches its durable result after stale shutdown");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the retained stale shutdown end is returned")
+                .expect("stale shutdown terminates serving after cleanup")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::WorkspaceRelease(WorkspaceRelease {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Shutdown(Shutdown {
+                    connection_epoch: stale_epoch,
+                    reason: ShutdownReason::DaemonShutdown,
+                }),
+            )
+            .await;
+            let rejected = receive_hub_message(&mut hub_io).await;
+            complete_cleanup
+                .send(())
+                .expect("cleanup remains live after stale shutdown rejection");
+            let released = receive_hub_message(&mut hub_io).await;
+            (rejected, released)
+        };
+        let (outcome, (rejected, released)) = tokio::join!(runner, hub);
+
+        assert_eq!(
+            rejected,
+            Message::Rejected(Rejected {
+                offending_kind: MessageKind::Shutdown.to_string(),
+                available_correlation: AvailableCorrelation::ConnectionEpoch(stale_epoch),
+                code: RejectionCode::StaleConnection,
+            })
+        );
+        assert_eq!(
+            released,
+            Message::WorkspaceReleased(WorkspaceReleased {
+                correlation: correlation.clone(),
+            })
+        );
+        assert_eq!(
+            outcome,
+            ServeOutcome::ConnectionEnded(ConnectionEnd::StaleConnectionRejected {
+                connection_epoch: stale_epoch,
             })
         );
         assert_eq!(
