@@ -291,11 +291,10 @@ pub enum RepoWatchTargetedRefreshV1 {
 /// hydration cannot have observed.
 ///
 /// Asking and recording are separate because only a hydration that reached the
-/// provider makes a later one redundant. A refresh can fail before its fetch or
-/// before its commit, and the delivery that asked for it is then either left
-/// pending for a later drain or already terminal; recording the ask rather than
-/// the landing would leave the page suppressing a hydration that never
-/// happened. Success alone is not enough either, which is why [`record_issued`]
+/// provider makes a later one redundant. A refresh that fails before its fetch
+/// or before its commit leaves its delivery pending for a later drain, so
+/// recording the ask rather than the landing would leave the page suppressing a
+/// hydration that never happened. Success alone is not enough either, which is why [`record_issued`]
 /// takes the whole submission: the runtime merges every refresh naming one pull
 /// request into a single request carrying the strictest head guard among them,
 /// and a targeted poll whose guard no longer matches the provider head discards

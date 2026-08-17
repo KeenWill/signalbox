@@ -631,6 +631,27 @@ impl PostgresRepoWatchWebhookStore {
         Ok(RepoWatchWebhookTerminalOutcome::Recorded)
     }
 
+    /// Whether one delivery already carries a terminal disposition.
+    ///
+    /// A commit whose result was lost leaves the caller unable to tell whether
+    /// it landed. This read settles that without writing anything, so it cannot
+    /// itself be ambiguous.
+    pub async fn terminal_disposition_exists(
+        &self,
+        key: RepoWatchWebhookDeliveryKey,
+    ) -> Result<bool, RepoWatchWebhookStoreError> {
+        let recorded = sqlx::query_scalar::<_, i64>(
+            "SELECT 1
+               FROM repo_watch_webhook_disposition
+              WHERE hook_id = $1 AND delivery_id = $2",
+        )
+        .bind(Decimal::from(key.hook_id.get()))
+        .bind(key.delivery_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(recorded.is_some())
+    }
+
     /// Deletes exact bodies whose deliveries have been terminal for at least seven days.
     ///
     /// Delivery identities and digests remain in their permanent tombstone rows.
