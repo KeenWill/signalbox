@@ -245,22 +245,33 @@ from changing an already-committed batch.
 content identity for a normalized event occurrence. It is a 32-byte SHA-256
 digest whose length-framed input begins with
 `signalbox/repo-watch/event-content-identity/v1`, then includes the repository,
-event version, canonical target and complete event payload, a separately
-domain-separated source-independent stream identity, and the stream's positive
-occurrence sequence. The stream identity is closed by event kind. Recurring PR
-lifecycle, mergeability, head, label, thread, branch-advance, and reaction
-streams name the PR and their kind-specific label, thread, branch, or reaction
-members. Check runs are recurring too, naming their provider run identity and
-completion generation: a completed run edited back to an earlier conclusion
-restates that conclusion's facts exactly, so only an advancing occurrence
-sequence keeps the restored event's identity distinct from the first, and
-without it the commit would coalesce the restored conclusion away rather than
-announce it. Immutable check-suite facts name their provider identity and
-completion generation; reviews name their provider review identity; workflow
-facts name branch, workflow identity, run identity, and attempt. The normalized
-review observation has no submitted-time member, so version one assumes the
-provider review identity alone uniquely identifies that immutable submission.
-The random `RepoWatchEventId` is deliberately excluded from the digest.
+event version, canonical target and the identifying members of the event
+payload, a separately domain-separated source-independent stream identity, and
+the stream's positive occurrence sequence. Identifying is narrower than
+complete: the exclusions below are part of the contract, and a second producer
+deriving this identity excludes exactly the same members, because hashing either
+one derives a different identity for the same fact and defeats the
+cross-producer coalescing this identity exists to enable. The stream identity is
+closed by event kind. Recurring PR lifecycle, mergeability, head, label, thread,
+branch-advance, and reaction streams name the PR and their kind-specific label,
+thread, branch, or reaction members. Check runs are recurring too, naming their
+provider run identity and completion generation: a completed run edited back to
+an earlier conclusion restates that conclusion's facts exactly, so only an
+advancing occurrence sequence keeps the restored event's identity distinct from
+the first, and without it the commit would coalesce the restored conclusion away
+rather than announce it. Immutable check-suite facts name their provider
+identity and completion generation; reviews name their provider review identity;
+workflow facts name branch, workflow identity, run identity, and attempt. The
+normalized review observation has no submitted-time member, so version one
+assumes the provider review identity alone uniquely identifies that immutable
+submission. Two payload members are excluded from the digest, and only these
+two. The random `RepoWatchEventId` is excluded because a re-derivation of one
+occurrence mints a fresh candidate. The workflow display name is excluded
+because it is rule-visible payload rather than an identifying member: the differ
+suppresses a re-observed run attempt on members the stream identity already
+names, and a provider can rename a workflow under all of them, so hashing the
+name would mint a new identity for a run that leaves the observation and returns
+after a rename. Both remain in the event payload that rules read.
 
 **Implemented behavior.** A later equal fact on a recurring stream advances its
 sequence and therefore has a different content identity. Equal normalized facts
@@ -268,8 +279,14 @@ derived from an equal cursor frontier have the same content identity even when
 their candidate UUIDs differ. Persistence rejects duplicate UUID or content
 identity members within one batch, and the relational store uniquely constrains
 `(content_identity_version, content_identity)` across batches. Exact replay
-compares the cursor candidate, UUID-bearing event values, and content
-identities.
+compares the cursor candidate and accounts for every requested occurrence: one
+the replayed generation stored is compared on its whole UUID-bearing event value
+and its content identity, and one that generation coalesced is required to be
+durable in an earlier generation under the same content identity and identified
+content. A coalesced occurrence's own candidate UUID is not compared, because it
+was never written — the fact it restates is durable under the UUID of the
+occurrence that first recorded it, so a request whose occurrences are all
+coalesced replays on candidate and content identity alone.
 
 **Implemented behavior.** The version-one cursor reader remains compatible with
 the earlier version-one workflow record that lacked a workflow-definition ID. It
@@ -791,14 +808,21 @@ what bounds a peer that keeps dripping bytes, since each byte received restarts
 that deadline. The daemon serves HTTP/1 directly for this reason: the head
 ceilings sit on the connection builder, below any router.
 
-Each hook admits at most 3,000 deliveries in each 60-second window, charged only
-once a delivery has proved the shared secret. Nothing is charged before
-verification: a budget keyed on the hook a request claims is a lever the
-attacker holds and GitHub does not, and spending it with forged signatures would
-reject the deliveries it exists to protect. Unauthenticated cost is bounded by
-resources instead. These are hard safety ceilings, not configuration knobs. The
-listener does not grant GitHub-originated data process-protocol authority,
-session authority, or polling credentials.
+Each hook admits at most 3,000 deliveries in any rolling 60-second window,
+charged only once a delivery has proved the shared secret. Admissions are
+counted in ten-second buckets and attributed to the bucket they land in, so a
+burst is counted where it happened: a window that simply reset would admit a
+full allowance on either side of its boundary, and smoothing an assumed even
+distribution would still under-count a burst arriving at a window edge. One
+bucket more than the window spans is kept and counted whole, so the bucket
+straddling the edge is never dropped while part of it is still inside the
+trailing minute. Both choices err toward refusing rather than admitting. Nothing
+is charged before verification: a budget keyed on the hook a request claims is a
+lever the attacker holds and GitHub does not, and spending it with forged
+signatures would reject the deliveries it exists to protect. Unauthenticated
+cost is bounded by resources instead. These are hard safety ceilings, not
+configuration knobs. The listener does not grant GitHub-originated data
+process-protocol authority, session authority, or polling credentials.
 
 **Implemented behavior.** A verified delivery is durably admitted before the
 listener returns `202 Accepted`. `repo_watch_webhook_delivery` keeps the unique
@@ -821,18 +845,22 @@ than allowed to overshoot, so a page retains no more than that ceiling. One
 drain visits a bounded number of pending pages and then re-arms that same wake,
 so a sustained stream is accelerated without holding the worker past an overdue
 full poll. A terminal commit whose result is lost in transit is resolved by
-re-recording the same request, which reports the row already terminal or records
-it now, rather than leaving a durable disposition the shadow never accounted
-for. A delivery whose processing fails is deferred for the rest of that drain
-rather than failing it, so one persistently unprocessable receipt cannot pin the
-head of the queue and starve every later one; the attempt still reports the
-first such failure. A webhook-enabled shadow wake may also preempt the read-only
-provider sweep of an in-flight complete poll, without resetting that poll's
-deadline, so the durable delivery drains before bounded reconciliation resumes.
-A signature-valid delivery whose event or action is outside the mapped set,
-including a broadly subscribed `workflow_job`, is still acknowledged
-successfully and is cheaply logged and recorded as ignored rather than treated
-as an intake failure.
+reading whether the row is already terminal, which cannot itself be ambiguous:
+if it is, the delivery counts as recorded and the shadow advances; if it is not,
+the record is re-attempted a bounded number of times before the delivery is left
+pending for the next drain. If every settling read is itself unavailable, the
+shadow is discarded rather than trusted, because a disposition may have landed
+without being reflected in that baseline. A durable disposition the shadow never
+accounted for is what this avoids. A delivery whose processing fails is deferred
+for the rest of that drain rather than failing it, so one persistently
+unprocessable receipt cannot pin the head of the queue and starve every later
+one; the attempt still reports the first such failure. A signature-valid
+delivery whose event or action is outside the mapped set, including a broadly
+subscribed `workflow_job`, is still acknowledged successfully and is cheaply
+logged and recorded as ignored rather than treated as an intake failure.
+A webhook-enabled shadow wake may also preempt the read-only provider sweep of
+an in-flight complete poll, without resetting that poll's deadline, so the
+durable delivery drains before bounded reconciliation resumes.
 
 **Implemented behavior.** A drain page attempts every loaded delivery even when
 one delivery fails. Each failure is logged at warning level with the delivery
@@ -841,47 +869,59 @@ carrying the first such cause, whichever attempt performed it — a startup drai
 a wake, a retry, or a full poll. A delivery that fails before its terminal
 disposition is recorded remains pending, and its successful page peers still
 reach terminal state: a targeted refresh the provider will not serve is one such
-failure, because that query runs before anything is recorded. A delivery whose
-disposition is already durable when a later step fails — the targeted commit, or
-the dispatch work that follows it — is terminal and is not loaded again. The
-repository task schedules a new drain attempt after five seconds without waiting
-for a full poll, another delivery, or a restart. Consecutive failures double
-that delay to a five-minute ceiling and a success returns it to five seconds, so
-a delivery that cannot be projected costs bounded repeated work rather than a
-fixed five-second loop. Only the drain advances that delay: an attempt whose
-drain succeeded and whose dispatch work then failed returns it to five seconds,
-and one that failed before reaching the drain arms a retry at the current delay
-without advancing it, so unrelated dispatch failures cannot grow the delay,
-suppress admission wakes, or make polls omit their drain steps while projection
-is healthy. Such a retry always lands in the future: leaving an owed deadline in
-the past would select the same attempt again immediately, because the retry
-precedes the poll. A poll's own drain runs at most once per attempt — the step
-after the poll is skipped when the step before it failed — so work already known
-to be failing waits for that delay rather than repeating inside one attempt. A
-failed full poll schedules that retry only when none is already owed, an
-admission wake is suppressed while one is, and a full poll omits both of its
-drain steps while one is, so neither a rapidly failing poll nor an authenticated
-replay stream can defer or bypass the backoff; a suppressed wake coalesces and
-is observed by the attempt that follows the retry. A poll taken during a backoff
-window can therefore advance the cursor past a pending delivery's transition,
-which that delivery then records as duplicate state — accepted as a bounded
-shadow-mode fidelity loss against an unbounded repetition of work already
-failing. An overdue retry is taken ahead of an overdue poll, and a full poll
-that outlasts its own interval schedules the next one a whole interval from
-completion; without both, a poll deadline that is always already elapsed would
-win every scheduling decision and starve durable webhook work for as long as
-polling kept failing. An independent per-repository observer checks durable
-pending work every thirty seconds, reading delivery identity and receipt time
-only and never the admitted body. That cadence is anchored, so a slow inspection
-does not push the next one out by its own duration, and the inspection is
-bounded at ten seconds so a connection pool exhausted by wedged repositories
-produces a closed timeout cause rather than silence; once the oldest delivery
-has remained undispositioned for one minute it emits an error-level stall signal
-with the repository, delivery identity, receipt sequence, pending age, and
-closed stall cause. Because the observer is not the serialized drain task, a
-task wedged in polling, projection, disposition, or dispatch cannot silence that
-signal, and the observer's own inspection is cancelled by shutdown so an
-unresponsive database cannot hold daemon termination.
+failure, because that query runs before anything is recorded. A targeted commit
+runs before the disposition is recorded, so its failure leaves the delivery
+pending too. A delivery whose disposition is already durable when a later step
+fails — the dispatch work that follows it — is terminal and is not loaded again;
+that failure carries the same delivery identity and closed cause at warning
+level, recorded where it happens because the delivery never reaches the drain
+page's deferral record. The repository task schedules a new drain attempt after
+five seconds without waiting for a full poll, another delivery, or a restart.
+Consecutive failures double that delay to a five-minute ceiling and a success
+returns it to five seconds, so a delivery that cannot be projected costs bounded
+repeated work rather than a fixed five-second loop. Only the drain advances that
+delay: an attempt whose drain succeeded and whose dispatch work then failed
+returns it to five seconds and keeps a retry armed there, because that work runs
+only from a later attempt and the delivery that would have woken one is already
+terminal, and one that failed before reaching the drain arms a retry at the
+current delay without advancing it, so unrelated dispatch failures cannot grow
+the delay, suppress admission wakes, or make polls omit their drain steps while
+projection is healthy. Taking a retry spends its deadline, so an attempt that
+then fails before its drain arms a fresh one rather than selecting itself again
+immediately, which the retry's priority over polling would otherwise cause. A
+deadline that expired while some other attempt ran is left expired, so the next
+pass takes it at once rather than having it pushed out again by a poll that
+keeps failing slowly. A poll whose pre-poll drain failed does not repeat it: the
+step after the poll is skipped, so work already known to be failing waits for
+that delay rather than repeating inside one attempt. A pre-poll drain that
+succeeded is still followed by the post-poll one, which is what catches
+deliveries admitted while the poll was running. A failed full poll schedules
+that retry only when none is already owed, an admission wake is suppressed while
+one is, and a full poll omits both of its drain steps while one is, so neither a
+rapidly failing poll nor an authenticated replay stream can defer or bypass the
+backoff; a suppressed wake coalesces and is observed by the attempt that follows
+the retry. A poll taken during a backoff window therefore commits a cursor that
+a delivery still pending does not reflect. The shadow baseline that delivery
+seeded is marked superseded but retained, because replacement waits for an empty
+pending page, so its retry projects against that baseline rather than reseeding
+from the advanced cursor — the accepted cost is that divergence, taken against
+an unbounded repetition of work already failing. An overdue retry is taken ahead
+of an overdue poll, and a full poll that outlasts its own interval schedules the
+next one a whole interval from completion; without both, a poll deadline that is
+always already elapsed would win every scheduling decision and starve durable
+webhook work for as long as polling kept failing. An independent per-repository
+observer checks durable pending work every thirty seconds, reading delivery
+identity and receipt time only and never the admitted body. That cadence is
+anchored, so a slow inspection does not push the next one out by its own
+duration, and the inspection is bounded at ten seconds so a connection pool
+exhausted by wedged repositories produces a closed timeout cause rather than
+silence; once the oldest delivery has remained undispositioned for one minute it
+emits an error-level stall signal with the repository, delivery identity,
+receipt sequence, pending age, and closed stall cause. Because the observer is
+not the serialized drain task, a task wedged in polling, projection,
+disposition, or dispatch cannot silence that signal, and the observer's own
+inspection is cancelled by shutdown so an unresponsive database cannot hold
+daemon termination.
 
 **Implemented behavior.** Shadow mode never inserts a webhook-produced row into
 `repo_watch_event` and never mutates the cursor from a payload-derived patch.
@@ -917,26 +957,28 @@ cancel the reconciliation sweep, so one delivery whose targeted request keeps
 failing cannot abort every scheduled poll. A poll that observes the same
 transition as an already-admitted delivery cannot advance the cursor past it and
 leave the delivery applying to state that already contains it. A delivery's
-targeted provider queries run before anything is recorded, so a transient
-provider failure leaves it pending and retryable rather than terminal with a
-query that never ran; its terminal disposition is then recorded before the
-resulting cursor commit, so a failure between those two cannot make a retry
-re-derive projections against a cursor that has already moved past them. On
-daemon restart the baseline is re-seeded from the durable cursor, which is the
-same complete reconciliation a full poll performs. The divergence a re-seeding
-leaves is accepted rather than removed: a delivery projected against a freshly
-seeded baseline records `cross_drain_shadow_gap` on its projections, so the gap
-is explained in the parity view instead of being carried by a durable shadow
-cursor. `repo_watch_webhook_projection` records each resulting version-one
-content identity and event kind, and the cause of any divergence the producing
-delivery already knows, while `repo_watch_webhook_disposition` atomically
-records projected, duplicate-state, superseded, ignored, or quarantined terminal
-disposition. Shadow mode reserves no committed disposition and no resulting
-cursor generation: the schema refuses both, so the durable shape a later write
-mode would need is left to the ruling that authorizes it. The
-`repo_watch_webhook_parity` view joins those identities to version-one
-poll-produced `repo_watch_event` rows since that repository's first shadow
-receipt and reports `matched`, `webhook_only`, `poll_only`, or
+targeted provider queries and the cursor commit they produce both complete
+before anything is recorded, so a transient provider or commit failure leaves
+the delivery pending and the whole step is retried, rather than terminal with
+work that never landed. Recording after the commit is safe because projections
+are derived from the repository task shadow baseline, which a targeted commit
+does not replace: a retry reproduces the same projections even though the cursor
+has moved. The shadow advances only once the disposition is durable, so the two
+never disagree. On daemon restart the baseline is re-seeded from the durable
+cursor, which is the same complete reconciliation a full poll performs. The
+divergence a re-seeding leaves is accepted rather than removed: a delivery
+projected against a freshly seeded baseline records `cross_drain_shadow_gap` on
+its projections, so the gap is explained in the parity view instead of being
+carried by a durable shadow cursor. `repo_watch_webhook_projection` records each
+resulting version-one content identity and event kind, and the cause of any
+divergence the producing delivery already knows, while
+`repo_watch_webhook_disposition` atomically records projected, duplicate-state,
+superseded, ignored, or quarantined terminal disposition. Shadow mode reserves
+no committed disposition and no resulting cursor generation: the schema refuses
+both, so the durable shape a later write mode would need is left to the ruling
+that authorizes it. The `repo_watch_webhook_parity` view joins those identities
+to version-one poll-produced `repo_watch_event` rows since that repository's
+first shadow receipt and reports `matched`, `webhook_only`, `poll_only`, or
 `not_directly_mapped`, each divergent row alongside a `cause` drawn from one
 closed vocabulary: `compressed_transition`, `context_drift`, `poll_only_family`,
 and `cross_drain_shadow_gap`. A delivery records the cause it knows beside its
@@ -965,8 +1007,10 @@ the baseline; an equal generation still replaces, which is how a conclusion edit
 arrives. A workflow completion whose branch head is already gone is superseded,
 because polling projects workflow runs only for the heads it queries and could
 never reproduce it. A delivered run adopts the workflow name retained state
-already carries for that workflow identity, since polling names a run from the
-workflows endpoint's current name and the occurrence identity hashes it. A
+already carries for that workflow identity. The occurrence identity deliberately
+excludes that mutable display name, so this is not what keeps the two sources
+matching; it keeps the shadow observation equal to the one polling stores, so a
+rename cannot make an otherwise duplicate delivery look like a changed fact. A
 completed check run rerequested under the same provider identity carries a new
 completion generation or conclusion, which the differ treats as a new observable
 completion, so the retained run is replaced under the same head guard. GitHub

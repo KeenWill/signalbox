@@ -45,6 +45,8 @@ const REPO_WATCH_EVENT_CONTENT_IDENTITY_DOMAIN_V1: &[u8] =
     b"signalbox/repo-watch/event-content-identity/v1";
 const REPO_WATCH_EVENT_STREAM_IDENTITY_DOMAIN_V1: &[u8] =
     b"signalbox/repo-watch/event-stream-identity/v1";
+const REPO_WATCH_EVENT_IDENTIFIED_CONTENT_DOMAIN_V1: &[u8] =
+    b"signalbox/repo-watch/event-identified-content/v1";
 /// Largest number of recurring occurrence streams one repository's frontier may
 /// carry.
 ///
@@ -64,6 +66,7 @@ const REPO_WATCH_EVENT_STREAM_IDENTITY_DOMAIN_V1: &[u8] =
 /// an occurrence number, which mints a content identity that collides with an
 /// already-durable one, so the differ stops rather than emit an identity that
 /// does not identify its occurrence.
+// numeric-bound: ceiling - caps one repository's resident and durable occurrence frontier
 const MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS: usize = 1_000_000;
 
 /// A source-independent SHA-256 identity for one normalized event occurrence.
@@ -267,6 +270,7 @@ pub enum RepoWatchPullRequestLifecycle {
     Merged,
 }
 
+// numeric-bound: tunable - admits the provider check-generation text this accepts
 const MAX_CHECK_COMPLETION_GENERATION_BYTES: usize = 64;
 
 /// Opaque provider generation for one completed check execution.
@@ -903,8 +907,15 @@ enum RepoWatchDifferFailure {
 ///
 /// Lets a caller classify a derivation failure without reading `Display` text.
 /// The two carry different operational meaning: event construction indicates a
-/// differ defect on one observation, while an identity-frontier failure recurs
-/// on every later comparison for that repository until the frontier changes.
+/// differ defect on one observation, while an identity-frontier failure is a
+/// property of the frontier the comparison ran against.
+///
+/// An identity-frontier failure is not by itself permanent, and a caller must
+/// not retire a repository on one. `StreamLimit` refuses only a comparison that
+/// introduces a stream the frontier has never counted; streams already counted
+/// keep advancing at the ceiling, so a later observation adding no new stream
+/// succeeds. `SequenceExhausted` is terminal for the single stream that
+/// exhausted it, not for the repository.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchDifferFailureKind {
     /// The differ assembled an event the domain rejects.
@@ -1727,12 +1738,51 @@ fn repo_watch_event_stream_identity_v1(key: RepoWatchEventStreamKeyV1<'_>) -> [u
     hash.finish()
 }
 
+/// Whether two events frame identical identifying content.
+///
+/// **This is not identity equality, and equal identities are its precondition.**
+/// The identity digest frames this content and then the stream identity and the
+/// occurrence sequence, so two occurrences of one recurring fact — a label
+/// added, removed, and added again under an unchanged context — frame equal
+/// identified content while carrying different identities. Deciding to coalesce
+/// on this alone would discard a genuine later occurrence.
+///
+/// Its use is to confirm that two occurrences *already known to share an
+/// identity* agree on the content that identity is derived from. Storage looks
+/// an occurrence up by content identity first and only then asks this, which is
+/// the order that makes the answer meaningful.
+///
+/// Both sides come from `hash_identified_content`, the same framing the identity
+/// is computed over, so this cannot disagree with the digest about which members
+/// identify a fact: the random `RepoWatchEventId` and a workflow's mutable
+/// display name are excluded from both.
+pub fn repo_watch_events_have_equal_identified_content(
+    left: &RepoWatchEvent,
+    right: &RepoWatchEvent,
+) -> bool {
+    repo_watch_event_identified_content_v1(left) == repo_watch_event_identified_content_v1(right)
+}
+
+fn repo_watch_event_identified_content_v1(event: &RepoWatchEvent) -> [u8; 32] {
+    let mut hash = RepoWatchIdentityHasher::new(REPO_WATCH_EVENT_IDENTIFIED_CONTENT_DOMAIN_V1);
+    hash_identified_content(&mut hash, event);
+    hash.finish()
+}
+
 fn repo_watch_event_content_identity_v1(
     event: &RepoWatchEvent,
     stream_identity: [u8; 32],
     sequence: NonZeroU64,
 ) -> RepoWatchEventContentIdentityV1 {
     let mut hash = RepoWatchIdentityHasher::new(REPO_WATCH_EVENT_CONTENT_IDENTITY_DOMAIN_V1);
+    hash_identified_content(&mut hash, event);
+    hash.frame(&stream_identity);
+    hash.u64(sequence.get());
+    RepoWatchEventContentIdentityV1::from_bytes(hash.finish())
+}
+
+/// Frames every member of an event that identifies the fact it states.
+fn hash_identified_content(hash: &mut RepoWatchIdentityHasher, event: &RepoWatchEvent) {
     hash.text(event.repository().as_str());
     hash.u64(1);
     match event.target() {
@@ -1760,10 +1810,7 @@ fn repo_watch_event_content_identity_v1(
         }
         RepoWatchEventTarget::Branch => hash.text("branch"),
     }
-    hash_event_kind(&mut hash, event.kind());
-    hash.frame(&stream_identity);
-    hash.u64(sequence.get());
-    RepoWatchEventContentIdentityV1::from_bytes(hash.finish())
+    hash_event_kind(hash, event.kind());
 }
 
 fn hash_event_kind(hash: &mut RepoWatchIdentityHasher, kind: &RepoWatchEventKindV1) {
@@ -1786,13 +1833,22 @@ fn hash_event_kind(hash: &mut RepoWatchIdentityHasher, kind: &RepoWatchEventKind
             hash.text(name.as_str());
             hash.text(check_conclusion_discriminator(*conclusion));
         }
+        // The workflow display name is deliberately excluded. It is
+        // rule-visible payload, not an identifying member: the differ
+        // suppresses a re-observed run attempt by branch, workflow identity,
+        // run identity, and attempt, every one of which the stream identity
+        // already names, and a provider can rename a workflow under all of
+        // them. Hashing the name would mint a new identity for a run that
+        // leaves the observation and returns after a rename, and commit
+        // coalescing could no longer recognize the occurrence already durable
+        // for it. Runs sharing a display name stay distinct through the
+        // workflow identity in the stream.
         RepoWatchEventKindV1::BranchWorkflowRunCompleted {
             branch,
-            workflow,
+            workflow: _,
             conclusion,
         } => {
             hash.text(branch.as_str());
-            hash.text(workflow.as_str());
             hash.text(check_conclusion_discriminator(*conclusion));
         }
         RepoWatchEventKindV1::ReviewSubmitted {
@@ -3470,6 +3526,53 @@ mod tests {
         Ok(())
     }
 
+    /// Equal identified content is not identity equality. A label added,
+    /// removed, and added again restates the first fact exactly, so the two
+    /// occurrences frame equal content, and only the advancing occurrence
+    /// sequence separates their identities. A caller that coalesced on content
+    /// alone would discard the second addition.
+    #[test]
+    fn equal_identified_content_is_not_identity_equality() -> Result<(), Box<dyn Error>> {
+        let ready = label(LABEL_READY)?;
+        let without = observation(
+            vec![pull_request(PullRequestFacts {
+                labels: Vec::new(),
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let with = observation(
+            vec![pull_request(PullRequestFacts {
+                labels: vec![ready.clone()],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let added = derive_occurrences(Some(&without), &with, &mut frontier, 1)?;
+        let removed = derive_occurrences(Some(&with), &without, &mut frontier, 10)?;
+        let added_again = derive_occurrences(Some(&without), &with, &mut frontier, 20)?;
+
+        assert_eq!(added.len(), 1);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(added_again.len(), 1);
+        assert!(repo_watch_events_have_equal_identified_content(
+            added[0].event(),
+            added_again[0].event()
+        ));
+        assert_ne!(
+            added[0].content_identity(),
+            added_again[0].content_identity(),
+            "a repeated label must advance its occurrence sequence"
+        );
+        Ok(())
+    }
+
     #[test]
     fn label_changes_emit_current_context_facts() -> Result<(), Box<dyn Error>> {
         let old_label = label(LABEL_OLD)?;
@@ -3718,6 +3821,123 @@ mod tests {
         let events = derive(Some(&previous), &current)?;
 
         assert!(events.is_empty());
+        Ok(())
+    }
+
+    /// A completed run that leaves the observation and returns after its
+    /// workflow is renamed is the same run: provider identities and attempt are
+    /// unchanged, and the differ already suppresses re-emission on exactly those
+    /// members. Its content identity has to survive the rename, or commit
+    /// coalescing cannot recognize the occurrence already durable for it and the
+    /// run is recorded and dispatched a second time.
+    #[test]
+    fn renamed_workflow_run_reappearance_restates_its_content_identity()
+    -> Result<(), Box<dyn Error>> {
+        let absent = observation(Vec::new(), Vec::new(), Vec::new(), Vec::new())?;
+        let named = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let renamed = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                RENAMED_WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let recorded = derive_occurrences(Some(&absent), &named, &mut frontier, 1)?;
+        // The branch is deleted and recreated, and the workflow is renamed
+        // while the run is out of the observation.
+        let returned = derive_occurrences(Some(&absent), &renamed, &mut frontier, 10)?;
+
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(returned.len(), 1);
+        assert_eq!(
+            recorded[0].content_identity(),
+            returned[0].content_identity(),
+            "a renamed workflow's reappearing run must restate its identity"
+        );
+        // The rename is still visible to rules through the event payload.
+        assert_ne!(recorded[0].event().kind(), returned[0].event().kind());
+        Ok(())
+    }
+
+    /// Storage coalesces on this equivalence, so it has to agree with the
+    /// identity: a renamed workflow's reappearing run restates its identity and
+    /// must therefore state the same fact, while a different conclusion is a
+    /// different fact under both.
+    #[test]
+    fn equal_identified_content_agrees_with_the_identity_under_one_sequence()
+    -> Result<(), Box<dyn Error>> {
+        let absent = observation(Vec::new(), Vec::new(), Vec::new(), Vec::new())?;
+        let named = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let renamed = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                RENAMED_WORKFLOW_NAME,
+                CheckConclusion::Success,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let failed = observation(
+            Vec::new(),
+            vec![workflow_run_for(
+                WORKFLOW_RUN_ID,
+                WORKFLOW_ID,
+                WORKFLOW_NAME,
+                CheckConclusion::Failure,
+            )?],
+            Vec::new(),
+            Vec::new(),
+        )?;
+        let mut frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let first = derive_occurrences(Some(&absent), &named, &mut frontier, 1)?;
+        let after_rename = derive_occurrences(Some(&absent), &renamed, &mut frontier, 10)?;
+        let after_failure = derive_occurrences(Some(&absent), &failed, &mut frontier, 20)?;
+
+        assert!(repo_watch_events_have_equal_identified_content(
+            first[0].event(),
+            after_rename[0].event()
+        ));
+        assert_eq!(
+            first[0].content_identity(),
+            after_rename[0].content_identity()
+        );
+        assert!(!repo_watch_events_have_equal_identified_content(
+            first[0].event(),
+            after_failure[0].event()
+        ));
+        assert_ne!(
+            first[0].content_identity(),
+            after_failure[0].content_identity()
+        );
         Ok(())
     }
 
