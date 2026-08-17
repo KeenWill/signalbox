@@ -16,9 +16,10 @@ use signalbox_application::{
     PinnedRunnerDispatchRequest, PinnedRunnerReplacementIdentities, PinnedRunnerReplacementOutcome,
     PinnedRunnerReplacementTransaction, PromotePendingRunnerOutcome,
     ReplaceLostRunnerBeforePinOutcome, RunnerLeaseClaimRequest, RunnerLeaseResultRequest,
-    RunnerOperationFailureDetail, RunnerReadyManifestDigest, RunnerReplacementProvisioningOutcome,
-    RunnerWorkspaceCleanupFailure, RunnerWorkspaceReadyReceipt,
-    RunnerWorkspaceReleaseAcknowledgement, ToolDefinition, ToolInputSchema,
+    RunnerOperationFailureDetail, RunnerOperationFailureDetailInput, RunnerReadyManifestDigest,
+    RunnerReplacementProvisioningOutcome, RunnerWorkspaceCleanupFailure,
+    RunnerWorkspaceReadyReceipt, RunnerWorkspaceReleaseAcknowledgement, ToolDefinition,
+    ToolInputSchema,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -293,11 +294,11 @@ impl WorkspaceReleaseProjectionFixture {
             self.candidate.placement_revision(),
             self.candidate.runner(),
             self.candidate.manifest_id(),
-            RunnerOperationFailureDetail::try_new(
-                String::from(CLEANUP_FAILURE_CODE),
-                String::from(CLEANUP_FAILURE_MESSAGE),
-                String::from(CLEANUP_FAILURE_PAYLOAD),
-            )
+            RunnerOperationFailureDetail::try_new(RunnerOperationFailureDetailInput {
+                code: String::from(CLEANUP_FAILURE_CODE),
+                message: String::from(CLEANUP_FAILURE_MESSAGE),
+                payload_json: String::from(CLEANUP_FAILURE_PAYLOAD),
+            })
             .expect("the fixture cleanup-failure detail is valid"),
         )
     }
@@ -24353,11 +24354,11 @@ async fn s32_inv044_workspace_cleanup_failure_rejects_unequal_replay() -> Result
         fixture.candidate.placement_revision(),
         fixture.candidate.runner(),
         fixture.candidate.manifest_id(),
-        RunnerOperationFailureDetail::try_new(
-            String::from(CLEANUP_FAILURE_CODE),
-            String::from("another cleanup failure"),
-            String::from(CLEANUP_FAILURE_PAYLOAD),
-        )?,
+        RunnerOperationFailureDetail::try_new(RunnerOperationFailureDetailInput {
+            code: String::from(CLEANUP_FAILURE_CODE),
+            message: String::from("another cleanup failure"),
+            payload_json: String::from(CLEANUP_FAILURE_PAYLOAD),
+        })?,
     );
 
     let rejected = fixture
@@ -24522,6 +24523,17 @@ async fn s32_inv044_workspace_cleanup_failure_readback_rejects_noncanonical_json
         .execute(&mut *corruption)
         .await?;
     corruption.commit().await?;
+
+    let suppressed = fixture
+        .store
+        .load_workspace_release(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await
+        .expect_err("pending-release loading rejects noncanonical failure detail");
+
+    assert_store_corruption(suppressed, RunnerProtocolCorruption::InvalidEncoding);
 
     let rejected = fixture
         .store

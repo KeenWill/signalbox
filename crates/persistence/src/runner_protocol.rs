@@ -3657,7 +3657,11 @@ impl RunnerProtocolStore {
                         retirement_loss_connection_event_ordinal,
                     failure.runner_id AS failure_runner_id,
                     failure.release_manifest_id AS failure_manifest_id,
+                    failure.operation_kind AS failure_operation_kind,
                     failure.category_kind AS failure_category_kind,
+                    failure.detail_code AS failure_detail_code,
+                    failure.detail_message AS failure_detail_message,
+                    failure.detail_payload_json AS failure_detail_payload_json,
                     retired.event_kind AS retired_event_kind,
                     retired.state_kind AS retired_state_kind,
                     retired.loss_source_kind AS retired_loss_source_kind,
@@ -3686,7 +3690,7 @@ impl RunnerProtocolStore {
                  ON retirement_loss.enrollment_id = retirement.enrollment_id
                 AND retirement_loss.loss_epoch = retirement.loss_epoch
                LEFT JOIN runner_operation_failure AS failure
-                 ON failure.operation_kind = 'workspace_release'
+                 ON failure.operation_kind = $3
                 AND failure.release_session_id = release.session_id
                 AND failure.release_placement_revision =
                     release.placement_revision
@@ -3711,6 +3715,9 @@ impl RunnerProtocolStore {
         )
         .bind(session.into_uuid())
         .bind(Decimal::from(placement_revision.get()))
+        .bind(runner_operation_failure_operation_to_str(
+            RunnerOperationFailureOperationStorageKind::WorkspaceRelease,
+        ))
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
@@ -3746,9 +3753,19 @@ impl RunnerProtocolStore {
             || retirement_loss_connection_event_ordinal.is_some();
         let failure_runner: Option<Uuid> = row.decode_column("failure_runner_id")?;
         let failure_manifest: Option<Uuid> = row.decode_column("failure_manifest_id")?;
+        let failure_operation: Option<String> = row.decode_column("failure_operation_kind")?;
         let failure_category: Option<String> = row.decode_column("failure_category_kind")?;
-        let has_failure =
-            failure_runner.is_some() || failure_manifest.is_some() || failure_category.is_some();
+        let failure_detail_code: Option<String> = row.decode_column("failure_detail_code")?;
+        let failure_detail_message: Option<String> = row.decode_column("failure_detail_message")?;
+        let failure_detail_payload_json: Option<String> =
+            row.decode_column("failure_detail_payload_json")?;
+        let has_failure = failure_runner.is_some()
+            || failure_manifest.is_some()
+            || failure_operation.is_some()
+            || failure_category.is_some()
+            || failure_detail_code.is_some()
+            || failure_detail_message.is_some()
+            || failure_detail_payload_json.is_some();
         if usize::from(has_acknowledgement) + usize::from(has_retirement) + usize::from(has_failure)
             > 1
         {
@@ -3765,10 +3782,25 @@ impl RunnerProtocolStore {
         if has_failure {
             if failure_runner != Some(runner.into_uuid())
                 || failure_manifest != Some(manifest.into_uuid())
-                || failure_category.as_deref() != Some("workspace_cleanup_failed")
+                || failure_operation
+                    .as_deref()
+                    .and_then(runner_operation_failure_operation_from_str)
+                    != Some(RunnerOperationFailureOperationStorageKind::WorkspaceRelease)
+                || failure_category
+                    .as_deref()
+                    .and_then(runner_operation_failure_category_from_str)
+                    != Some(RunnerOperationFailureCategoryStorageKind::WorkspaceCleanupFailed)
             {
                 return Err(RunnerProtocolCorruption::CrossWiredReference.into());
             }
+            RunnerOperationFailureDetail::try_new(RunnerOperationFailureDetailInput {
+                code: failure_detail_code.ok_or(RunnerProtocolCorruption::CrossWiredReference)?,
+                message: failure_detail_message
+                    .ok_or(RunnerProtocolCorruption::CrossWiredReference)?,
+                payload_json: failure_detail_payload_json
+                    .ok_or(RunnerProtocolCorruption::CrossWiredReference)?,
+            })
+            .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
             return Ok(None);
         }
         if has_retirement {
@@ -3932,7 +3964,8 @@ impl RunnerProtocolStore {
                     release.session_id AS release_session_id,
                     release.state_kind,
                     retirement.session_id AS retirement_session_id,
-                    failure.release_session_id AS failure_session_id
+                    failure.release_session_id AS failure_session_id,
+                    failure.operation_kind AS failure_operation_kind
                FROM runner_workspace_release_acknowledgement AS acknowledgement
                LEFT JOIN runner_workspace_release AS release
                  ON release.session_id = acknowledgement.session_id
@@ -3944,7 +3977,7 @@ impl RunnerProtocolStore {
                 AND retirement.placement_revision =
                     acknowledgement.placement_revision
                LEFT JOIN runner_operation_failure AS failure
-                 ON failure.operation_kind = 'workspace_release'
+                 ON failure.operation_kind = $3
                 AND failure.release_session_id = acknowledgement.session_id
                 AND failure.release_placement_revision =
                     acknowledgement.placement_revision
@@ -3953,11 +3986,26 @@ impl RunnerProtocolStore {
         )
         .bind(session.into_uuid())
         .bind(Decimal::from(placement_revision.get()))
+        .bind(runner_operation_failure_operation_to_str(
+            RunnerOperationFailureOperationStorageKind::WorkspaceRelease,
+        ))
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
             return Ok(None);
         };
+        let failure_session: Option<Uuid> = row.decode_column("failure_session_id")?;
+        let failure_operation: Option<String> = row.decode_column("failure_operation_kind")?;
+        let has_failure = failure_session.is_some() || failure_operation.is_some();
+        if has_failure
+            && (failure_session.is_none()
+                || failure_operation
+                    .as_deref()
+                    .and_then(runner_operation_failure_operation_from_str)
+                    != Some(RunnerOperationFailureOperationStorageKind::WorkspaceRelease))
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
         if row.decode_column::<Option<Uuid>>("release_session_id")? != Some(session.into_uuid())
             || row
                 .decode_column::<Option<String>>("state_kind")?
@@ -3966,9 +4014,7 @@ impl RunnerProtocolStore {
             || row
                 .decode_column::<Option<Uuid>>("retirement_session_id")?
                 .is_some()
-            || row
-                .decode_column::<Option<Uuid>>("failure_session_id")?
-                .is_some()
+            || has_failure
         {
             return Err(RunnerProtocolCorruption::CrossWiredReference.into());
         }
@@ -3998,6 +4044,7 @@ impl RunnerProtocolStore {
                     release.state_kind,
                     acknowledgement.session_id AS acknowledgement_session_id,
                     failure.release_session_id AS failure_session_id,
+                    failure.operation_kind AS failure_operation_kind,
                     loss.connection_epoch AS loss_connection_epoch,
                     loss.connection_event_ordinal AS loss_connection_event_ordinal
                FROM runner_workspace_release_loss_retirement AS retirement
@@ -4012,7 +4059,7 @@ impl RunnerProtocolStore {
                 AND acknowledgement.placement_revision =
                     retirement.placement_revision
                LEFT JOIN runner_operation_failure AS failure
-                 ON failure.operation_kind = 'workspace_release'
+                 ON failure.operation_kind = $3
                 AND failure.release_session_id = retirement.session_id
                 AND failure.release_placement_revision =
                     retirement.placement_revision
@@ -4021,6 +4068,9 @@ impl RunnerProtocolStore {
         )
         .bind(session.into_uuid())
         .bind(Decimal::from(placement_revision.get()))
+        .bind(runner_operation_failure_operation_to_str(
+            RunnerOperationFailureOperationStorageKind::WorkspaceRelease,
+        ))
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
@@ -4039,6 +4089,18 @@ impl RunnerProtocolStore {
         let connection_event_ordinal =
             NonZeroU64::new(decode_u64(row.decode_column("connection_event_ordinal")?)?)
                 .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let failure_session: Option<Uuid> = row.decode_column("failure_session_id")?;
+        let failure_operation: Option<String> = row.decode_column("failure_operation_kind")?;
+        let has_failure = failure_session.is_some() || failure_operation.is_some();
+        if has_failure
+            && (failure_session.is_none()
+                || failure_operation
+                    .as_deref()
+                    .and_then(runner_operation_failure_operation_from_str)
+                    != Some(RunnerOperationFailureOperationStorageKind::WorkspaceRelease))
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
         if row.decode_column::<Option<Uuid>>("release_session_id")? != Some(session.into_uuid())
             || row.decode_column::<Option<Uuid>>("release_runner_id")? != Some(runner.into_uuid())
             || row.decode_column::<Option<Uuid>>("release_manifest_id")?
@@ -4054,9 +4116,7 @@ impl RunnerProtocolStore {
             || row
                 .decode_column::<Option<Uuid>>("acknowledgement_session_id")?
                 .is_some()
-            || row
-                .decode_column::<Option<Uuid>>("failure_session_id")?
-                .is_some()
+            || has_failure
             || row.decode_column::<Option<Decimal>>("loss_connection_epoch")?
                 != Some(Decimal::from(connection_epoch.get()))
             || row.decode_column::<Option<Decimal>>("loss_connection_event_ordinal")?
@@ -10322,7 +10382,7 @@ async fn retire_workspace_releases_for_connection_loss(
             AND NOT EXISTS (
                 SELECT 1
                   FROM runner_operation_failure AS failure
-                 WHERE failure.operation_kind = 'workspace_release'
+                 WHERE failure.operation_kind = $6
                    AND failure.release_session_id = release.session_id
                    AND failure.release_placement_revision =
                         release.placement_revision
@@ -10333,6 +10393,9 @@ async fn retire_workspace_releases_for_connection_loss(
     .bind(Decimal::from(loss.connection_epoch().get()))
     .bind(Decimal::from(loss.loss_epoch().get()))
     .bind(Decimal::from(loss.connection_event_ordinal()))
+    .bind(runner_operation_failure_operation_to_str(
+        RunnerOperationFailureOperationStorageKind::WorkspaceRelease,
+    ))
     .execute(&mut **transaction)
     .await?;
     Ok(())
