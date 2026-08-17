@@ -76,7 +76,7 @@ impl FileMediaProvider for ArchiveProvider {
             if kind.matches_probe(&bytes) {
                 Ok(ProcessorProbeOutput::Candidate {
                     media_type: String::from(kind.media_type()),
-                    strength: kind.probe_strength(),
+                    strength: kind.probe_strength(&bytes),
                 })
             } else {
                 Ok(ProcessorProbeOutput::NoMatch)
@@ -130,7 +130,7 @@ impl FileMediaProvider for ArchiveProvider {
         Box::pin(async move {
             let kind = require_reader(reader)?;
             require_active(cancellation)?;
-            if request.file.detected_media_type().as_str() != kind.media_type() {
+            if request.detected_media_type.as_str() != kind.media_type() {
                 return Err(ProcessorFailure::Protocol);
             }
             if !empty_options(&request.options) {
@@ -255,9 +255,10 @@ impl ArchiveKind {
         }
     }
 
-    const fn probe_strength(self) -> ProbeStrength {
+    fn probe_strength(self, bytes: &[u8]) -> ProbeStrength {
         match self {
             Self::Tar => ProbeStrength::StructuralCandidate,
+            Self::Zip if !zip_signature_at_start(bytes) => ProbeStrength::StructuralCandidate,
             Self::Zip | Self::Gzip | Self::Zstd => ProbeStrength::Strong,
         }
     }
@@ -389,6 +390,7 @@ fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
 
 fn enumerate_tar(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
     let mut archive = tar::Archive::new(Cursor::new(bytes));
+    archive.set_ignore_zeros(true);
     let mut entries = Vec::new();
     let mut total = 0_u64;
     let archive_entries = archive.entries().map_err(|_| ArchiveIssue::Malformed)?;
@@ -458,8 +460,7 @@ fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
 }
 
 fn enumerate_zstd(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
-    let frame = zstd_frame_after_skippable_frames(bytes)?;
-    if zstd::zstd_safe::get_dict_id_from_frame(frame).is_some() {
+    if zstd_frames_have_dictionary(bytes)? {
         return Err(ArchiveIssue::UnsupportedDictionary);
     }
     let mut decoder =
@@ -557,6 +558,10 @@ fn zip_header(bytes: &[u8]) -> bool {
         .any(|window| window == b"PK\x03\x04" || window == b"PK\x05\x06")
 }
 
+fn zip_signature_at_start(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06")
+}
+
 fn zstd_header(bytes: &[u8]) -> bool {
     let Some(magic) = bytes.get(..4) else {
         return false;
@@ -565,20 +570,40 @@ fn zstd_header(bytes: &[u8]) -> bool {
     magic == 0xfd2f_b528 || (0x184d_2a50..=0x184d_2a5f).contains(&magic)
 }
 
-fn zstd_frame_after_skippable_frames(mut bytes: &[u8]) -> Result<&[u8], ArchiveIssue> {
-    loop {
+fn zstd_frames_have_dictionary(mut bytes: &[u8]) -> Result<bool, ArchiveIssue> {
+    let mut saw_frame = false;
+    while !bytes.is_empty() {
         let magic = bytes.get(..4).ok_or(ArchiveIssue::Malformed)?;
         let magic = u32::from_le_bytes([magic[0], magic[1], magic[2], magic[3]]);
-        if !(0x184d_2a50..=0x184d_2a5f).contains(&magic) {
-            return Ok(bytes);
+        if (0x184d_2a50..=0x184d_2a5f).contains(&magic) {
+            let length = bytes.get(4..8).ok_or(ArchiveIssue::Malformed)?;
+            let length = usize::try_from(u32::from_le_bytes([
+                length[0], length[1], length[2], length[3],
+            ]))
+            .map_err(|_| ArchiveIssue::Malformed)?;
+            let next = 8_usize.checked_add(length).ok_or(ArchiveIssue::Malformed)?;
+            bytes = bytes.get(next..).ok_or(ArchiveIssue::Malformed)?;
+            saw_frame = true;
+            continue;
         }
-        let length = bytes.get(4..8).ok_or(ArchiveIssue::Malformed)?;
-        let length = usize::try_from(u32::from_le_bytes([
-            length[0], length[1], length[2], length[3],
-        ]))
-        .map_err(|_| ArchiveIssue::Malformed)?;
-        let next = 8_usize.checked_add(length).ok_or(ArchiveIssue::Malformed)?;
-        bytes = bytes.get(next..).ok_or(ArchiveIssue::Malformed)?;
+        if magic != 0xfd2f_b528 {
+            return Err(ArchiveIssue::Malformed);
+        }
+        if zstd::zstd_safe::get_dict_id_from_frame(bytes).is_some() {
+            return Ok(true);
+        }
+        let length = zstd::zstd_safe::find_frame_compressed_size(bytes)
+            .map_err(|_| ArchiveIssue::Malformed)?;
+        if length == 0 {
+            return Err(ArchiveIssue::Malformed);
+        }
+        bytes = bytes.get(length..).ok_or(ArchiveIssue::Malformed)?;
+        saw_frame = true;
+    }
+    if saw_frame {
+        Ok(false)
+    } else {
+        Err(ArchiveIssue::Malformed)
     }
 }
 

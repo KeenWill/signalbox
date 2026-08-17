@@ -102,6 +102,16 @@ async fn generated_tar_validates_and_enumerates() -> Result<(), Box<dyn Error>> 
 }
 
 #[tokio::test]
+async fn concatenated_tar_segments_are_all_inspected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::concatenated_tar_with_hostile_second_segment()?)
+            .await?,
+        "hostile_entry_name",
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn zip_with_preamble_validates_and_enumerates() -> Result<(), Box<dyn Error>> {
     assert_valid_inventory(valid_inventory(ArchiveFixture::zip_with_preamble()?).await?);
     Ok(())
@@ -129,6 +139,14 @@ async fn generated_gzip_validates_and_enumerates() -> Result<(), Box<dyn Error>>
 }
 
 #[tokio::test]
+async fn zip_signature_in_gzip_extra_does_not_create_ambiguity() -> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(
+        valid_inventory(ArchiveFixture::gzip_with_zip_signature_in_extra()?).await?,
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn latin1_gzip_filename_is_decoded_before_validation() -> Result<(), Box<dyn Error>> {
     assert_valid_inventory(valid_inventory(ArchiveFixture::latin1_named_gzip()?).await?);
     Ok(())
@@ -144,6 +162,23 @@ async fn generated_zstd_validates_and_enumerates() -> Result<(), Box<dyn Error>>
 async fn zstd_with_leading_skippable_frame_validates_and_enumerates() -> Result<(), Box<dyn Error>>
 {
     assert_valid_inventory(valid_inventory(ArchiveFixture::zstd_with_skippable_frame()?).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn zip_signature_in_zstd_skippable_frame_does_not_create_ambiguity()
+-> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(
+        valid_inventory(ArchiveFixture::zstd_with_zip_signature_in_skippable_frame()?).await?,
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn zstd_stream_with_only_skippable_frames_validates() -> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(
+        valid_inventory(ArchiveFixture::zstd_with_only_skippable_frames()).await?,
+    );
     Ok(())
 }
 
@@ -188,6 +223,16 @@ async fn dictionary_dependent_zstd_is_a_typed_unsupported_inspection() -> Result
 {
     assert_malformed(
         malformed_inspection(ArchiveFixture::dictionary_zstd()?).await?,
+        "unsupported_dictionary",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn later_dictionary_dependent_zstd_frame_is_typed_unsupported() -> Result<(), Box<dyn Error>>
+{
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::concatenated_dictionary_zstd()?).await?,
         "unsupported_dictionary",
     );
     Ok(())

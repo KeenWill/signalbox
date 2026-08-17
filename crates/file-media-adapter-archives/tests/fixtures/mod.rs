@@ -70,6 +70,17 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn concatenated_tar_with_hostile_second_segment() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = tar_file("docs/readme.txt", PAYLOAD)?;
+        bytes.extend_from_slice(&tar_file("host\\payload", PAYLOAD)?);
+        Ok(Self {
+            bytes,
+            media_type: "application/x-tar",
+            expected_format: "tar",
+            expected_name: "docs/readme.txt",
+        })
+    }
+
     pub fn empty_tar() -> Self {
         Self {
             bytes: vec![0; 1_024],
@@ -100,6 +111,17 @@ impl ArchiveFixture {
     pub fn gzip() -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             bytes: gzip_bytes("payload.txt", PAYLOAD)?,
+            media_type: "application/gzip",
+            expected_format: "gzip",
+            expected_name: "payload.txt",
+        })
+    }
+
+    pub fn gzip_with_zip_signature_in_extra() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = gzip_bytes("payload.txt", PAYLOAD)?;
+        insert_gzip_extra(&mut bytes, b"PK\x03\x04")?;
+        Ok(Self {
+            bytes,
             media_type: "application/gzip",
             expected_format: "gzip",
             expected_name: "payload.txt",
@@ -141,11 +163,43 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn zstd_with_zip_signature_in_skippable_frame() -> Result<Self, Box<dyn Error>> {
+        let compressed = zstd::stream::encode_all(PAYLOAD, 1)?;
+        let mut bytes = b"\x50\x2a\x4d\x18\x04\x00\x00\x00PK\x03\x04".to_vec();
+        bytes.extend_from_slice(&compressed);
+        Ok(Self {
+            bytes,
+            media_type: "application/zstd",
+            expected_format: "zstd",
+            expected_name: "content",
+        })
+    }
+
+    pub fn zstd_with_only_skippable_frames() -> Self {
+        Self {
+            bytes: b"\x50\x2a\x4d\x18\x00\x00\x00\x00".to_vec(),
+            media_type: "application/zstd",
+            expected_format: "zstd",
+            expected_name: "content",
+        }
+    }
+
     pub fn dictionary_zstd() -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             // This frame header declares dictionary ID 1. Classification occurs before
             // dictionary-less decompression.
             bytes: b"\x28\xb5\x2f\xfd\x21\x01\x00".to_vec(),
+            media_type: "application/zstd",
+            expected_format: "zstd",
+            expected_name: "content",
+        })
+    }
+
+    pub fn concatenated_dictionary_zstd() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = zstd::stream::encode_all(PAYLOAD, 1)?;
+        bytes.extend_from_slice(b"\x28\xb5\x2f\xfd\x21\x01\x00");
+        Ok(Self {
+            bytes,
             media_type: "application/zstd",
             expected_format: "zstd",
             expected_name: "content",
@@ -431,6 +485,17 @@ fn gzip_bytes(name: &str, body: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
         .write(Vec::new(), Compression::fast());
     encoder.write_all(body)?;
     Ok(encoder.finish()?)
+}
+
+fn insert_gzip_extra(bytes: &mut Vec<u8>, extra: &[u8]) -> Result<(), Box<dyn Error>> {
+    let flags = bytes.get_mut(3).ok_or("GZIP fixture flags absent")?;
+    *flags |= 0x04;
+    let length = u16::try_from(extra.len())?.to_le_bytes();
+    let mut field = Vec::with_capacity(2 + extra.len());
+    field.extend_from_slice(&length);
+    field.extend_from_slice(extra);
+    bytes.splice(10..10, field);
+    Ok(())
 }
 
 fn set_encryption_flags(bytes: &mut [u8]) -> Result<(), Box<dyn Error>> {
