@@ -342,7 +342,7 @@ mod linux {
         };
         for inherited_descriptor in inherited_descriptors {
             if inherited_descriptor > 2 && inherited_descriptor != broker_descriptor_number {
-                rustix::io::close(inherited_descriptor);
+                let _ = nix::unistd::close(inherited_descriptor);
             }
         }
         let broker = PathBuf::from(format!("/proc/self/fd/{}", broker_descriptor_number));
