@@ -9,6 +9,9 @@ transition into runner recovery was verified against this PR
 The active-tail predecessor-steering correction was verified against this PR
 (`agent/daemon-ops-overnight`).
 
+Tool-attempt reconciliation predecessor replay was verified against this PR
+(`agent/tool-reconciliation-origin-replay`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
