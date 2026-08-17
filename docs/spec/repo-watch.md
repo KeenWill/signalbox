@@ -842,13 +842,12 @@ pending for the next drain. If every settling read is itself unavailable, the
 shadow is discarded rather than trusted, because a disposition may have landed
 without being reflected in that baseline. A durable disposition the shadow never
 accounted for is what this avoids. A delivery whose processing fails is deferred
-for the rest of that drain
-rather than failing it, so one persistently unprocessable receipt cannot pin the
-head of the queue and starve every later one; the attempt still reports the
-first such failure. A signature-valid delivery whose event or action is outside
-the mapped set, including a broadly subscribed `workflow_job`, is still
-acknowledged successfully and is cheaply logged and recorded as ignored rather
-than treated as an intake failure.
+for the rest of that drain rather than failing it, so one persistently
+unprocessable receipt cannot pin the head of the queue and starve every later
+one; the attempt still reports the first such failure. A signature-valid
+delivery whose event or action is outside the mapped set, including a broadly
+subscribed `workflow_job`, is still acknowledged successfully and is cheaply
+logged and recorded as ignored rather than treated as an intake failure.
 
 **Implemented behavior.** A drain page attempts every loaded delivery even when
 one delivery fails. Each failure is logged at warning level with the delivery
