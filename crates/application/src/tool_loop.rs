@@ -730,10 +730,12 @@ pub enum ToolExecutionServiceOutcome {
 }
 
 const fn is_fatal_executor_failure_class(failure: OperatorFailureClass) -> bool {
-    matches!(
-        failure,
-        OperatorFailureClass::FailClosedCorruption | OperatorFailureClass::CallerOrHubBug
-    )
+    match failure {
+        OperatorFailureClass::FailClosedCorruption | OperatorFailureClass::CallerOrHubBug => true,
+        OperatorFailureClass::Infrastructure { .. } | OperatorFailureClass::IdentityCollision => {
+            false
+        }
+    }
 }
 
 /// Failure annotated with the exact tool orchestration stage.
