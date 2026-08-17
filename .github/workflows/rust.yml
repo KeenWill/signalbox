@@ -42,6 +42,8 @@ jobs:
         run: python3 scripts/check_docs_consistency.py
       - name: Check migration version uniqueness
         run: python3 scripts/check_migration_versions.py
+      - name: Check numeric bound declarations
+        run: python3 scripts/check_numeric_bounds.py
       - name: Check user vocabulary
         run: python3 scripts/check_user_vocabulary.py
       # Gates normally: the tree satisfies this today, so the step can only
@@ -94,6 +96,8 @@ jobs:
         run: python3 scripts/test_check_domain_spine.py
       - name: Test migration version checker
         run: python3 scripts/test_check_migration_versions.py
+      - name: Test numeric bound checker
+        run: python3 scripts/test_check_numeric_bounds.py
       - name: Test panic-gate checker
         run: python3 scripts/test_check_panic_gate.py
       # The checker's own tests gate normally: report-only describes what the
@@ -301,7 +305,7 @@ jobs:
   postgres-integration-build:
     name: postgres-integration (build)
     runs-on: ubuntu-latest
-    # Generous by design: this job now absorbs all four suites' compilation,
+    # Generous by design: this job now absorbs all five suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
     timeout-minutes: 35
@@ -366,6 +370,13 @@ jobs:
           path: ${{ runner.temp }}/persistence.tar.zst
           if-no-files-found: error
           retention-days: 1
+      - name: Upload the program-runtime archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-integration-archive-program-runtime
+          path: ${{ runner.temp }}/program-runtime.tar.zst
+          if-no-files-found: error
+          retention-days: 1
       - name: Upload the signalboxd archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -396,11 +407,11 @@ jobs:
   # one runner per shard, so a suite declaring one shard costs one runner and
   # still travels the same archive-and-partition path a sharded suite does.
   # Persistence, runner, and signalboxd are sharded according to their measured
-  # test-execution cost. Terminal-client remains whole because it finishes in
-  # about a minute.
+  # test-execution cost. Program-runtime and terminal-client remain whole
+  # because each finishes in about a minute.
   #
   # Runner cost, stated plainly: this asks for more runners than the matrix it
-  # replaces. The run matrix currently expands to eleven shards after the one
+  # replaces. The run matrix currently expands to twelve shards after the one
   # shared build. The shards compile nothing and run for minutes; the build's
   # single cache key replaces the old per-suite keys that evicted one another.
   postgres-integration-run:

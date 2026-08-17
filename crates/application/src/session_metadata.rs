@@ -231,6 +231,7 @@ pub struct SessionMetadataListQuery {
 
 impl SessionMetadataListQuery {
     /// Maximum exact required tags in one list filter.
+    // numeric-bound: ceiling - protects filter memory and matching work
     pub const MAX_REQUIRED_TAGS: usize = 256;
 
     /// Constructs the ordinary first page of the default interactive view.
