@@ -642,12 +642,16 @@ association, since B has its own `ConfiguredInstructionRootId` — while durable
 aliases and authority-qualified eligibility entries written for A still carry
 that reference. Authority-qualified pairs would become ambiguous, and
 root-removal revalidation would read B's live reference as authority to reread
-A's path. Startup therefore rejects assigning a reference that any retained
-registration, alias, or eligibility entry still names, whatever root it is
-offered for, and the reservation is released only when the last of that evidence
-is gone. No present parser admits the table form; the bare-string form above is
-what this build accepts, and a root without a reference cannot become
-provider-visible.
+A's path. Startup therefore rejects a reference that retained evidence still
+names when it is offered for any root other than the one owning the persisted
+association, and the reservation is released only when the last of that evidence
+is gone. The exception for the owning root is not a weakening: re-presenting its
+own reference is what an ordinary restart does, and is exactly the stability the
+rule above demands, so rejecting it would stop configured-root discovery from
+surviving its first restart. What the reservation forbids is a reference moving
+to a different root while evidence written under the first still names it. No
+present parser admits the table form; the bare-string form above is what this
+build accepts, and a root without a reference cannot become provider-visible.
 
 No present configuration, template, or runtime surface materializes either
 identity. Both belong to the registration slice rather than to the later

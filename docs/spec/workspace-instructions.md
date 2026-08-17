@@ -847,6 +847,17 @@ validated on the way out, so a reader that matches on it is matching a
 specification rather than parsing a sentence, which is the property free-text
 detail would have lost.
 
+The sixth reason, `invalid_arguments`, is the one that does not join them, and
+it needs its own mapping because it resolves before approval and so leaves no
+attempt for the bridge to read a kind and detail from. It maps to `kind` of
+`invalid_arguments` with `detail` of JSON null. That is the honest projection:
+the request never named a bundle, so there is no execution to report and no
+reason token that would say anything the kind does not already say. Pairing it
+with `execution_failed` would claim the tool ran, and inventing a sixth detail
+token would make a reader parse a value carrying no information. Every provider
+therefore replays one exact object for a malformed instruction read, whichever
+implementation produced it.
+
 Identity strings are the lowercase hyphenated form everywhere. Byte lengths,
 counts, ordinals, and truncation boundaries are JSON numbers — unsigned decimal
 integers without leading zeroes — in tool results exactly as in the canonical
@@ -887,18 +898,21 @@ The result's sixth top-level member is `untrusted`, the delimited region defined
 above. Its JSON object has one member, `items`, an array in the same canonical
 order as the trusted `items`. Each element is one closed object whose members
 are exactly `bundle_id` and `display_name`, plus `source`, plus `scope` for an
-`agent_document`, plus `description` and `description_bytes` when a description
-is present. Repeating `bundle_id` there is deliberate: it makes the
-correspondence checkable rather than positional, so a truncated or reordered
-region cannot silently attach one bundle's description to another's identity.
+`agent_document`, plus `description` when a description is present, plus
+`description_bytes` only when that description was shortened. Repeating
+`bundle_id` there is deliberate: it makes the correspondence checkable rather
+than positional, so a truncated or reordered region cannot silently attach one
+bundle's description to another's identity.
 
 An optional member is omitted entirely when absent rather than emitted as null,
 which is the opposite rule from `next_cursor` and deliberate: item objects vary
 in shape by kind and by what registration actually holds, while the page
 envelope must not. When a description was shortened, `description` is the
-shortened text and `description_bytes` its full byte length, which is how a
-reader tells truncation from a naturally short description without a third
-member.
+shortened text and `description_bytes` its full byte length; a naturally short
+description carries no `description_bytes` at all. Its presence is therefore the
+truncation signal, which is how a reader tells the two apart without a third
+member — and why it must not be emitted for an untruncated description, where it
+would carry no information while still changing the page's canonical size.
 
 Two implementations following this emit the same bytes for one snapshot —
 including the region's fixed label and delimiters, which count against the bound
