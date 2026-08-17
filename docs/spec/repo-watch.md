@@ -145,12 +145,16 @@ reaches or exceeds the interval cannot hold that cadence, and starts a fresh
 interval from its own completion rather than following immediately: a poll
 deadline left in the past would win every scheduling decision the repository
 task makes and starve the durable webhook drain. A webhook wake serializes with
-the same repository task, but preempts an in-flight complete poll so admitted
-durable work cannot wait behind that slow sweep. The task joins the cancelled
-poll's spawned fetches, invalidates its partial pull-request freshness, drains
-webhook work, and resumes the still-due complete poll. The wake does not reset
-the full-poll deadline; a failed or unavailable webhook endpoint therefore loses
-acceleration, not reconciliation.
+the same repository task, but may preempt the read-only provider sweep of an
+in-flight complete poll so admitted durable work cannot wait behind that slow
+sweep. Rule activation, dispatch, webhook projection, and cursor commit remain
+outside that cancellation region. The task joins the cancelled poll's spawned
+fetches, invalidates its partial pull-request freshness, drains webhook work,
+and resumes the still-due complete poll without another preemption. A drain
+retry in backoff suppresses preemption, and the original cycle start remains the
+cadence anchor. The wake therefore loses acceleration when its endpoint is
+failed or unavailable, while reconciliation remains bounded and cannot be
+starved by a sustained stream.
 
 **Implemented behavior.** One attempt fetches up to eight open pull requests
 concurrently. The fetch sequence within a single pull request stays ordered, and
