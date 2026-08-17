@@ -136,11 +136,16 @@ history to explain, only a request that was never admissible. The projection
 renders it through the same provider-visible error object as any other typed
 failure, so no new result shape reaches a provider. A request resolved this way
 is not undecided, so the batch is not parked behind it and proposal order
-continues at the next request. Why this rather than deciding approval first: a
-delegated decision needs evidence the daemon can only build for a bundle the
-session may see, so asking a judge about an inadmissible request would mean
-either exposing metadata the session is not entitled to or sending an
-evidence-free prompt. No present family declares such a check.
+continues at the next request. It is resolved for the continuation boundary too:
+it projects one `ToolInadmissible` result entry in proposal order, and it
+satisfies the batch-complete condition that creates the fresh continuation turn
+attempt. A batch whose only proposal is inadmissible therefore still prepares
+its next model call rather than stalling with nothing to project. Why this
+rather than deciding approval first: a delegated decision needs evidence the
+daemon can only build for a bundle the session may see, so asking a judge about
+an inadmissible request would mean either exposing metadata the session is not
+entitled to or sending an evidence-free prompt. No present family declares such
+a check.
 
 ## Approval policy and decision sources
 
@@ -638,11 +643,18 @@ Semantic tool-result entries contain references only:
 - `ToolClosed { request }` references a request closed because its turn ended
   before it could complete ordinary execution, whether it remained undecided or
   was approved but not yet attempted. A crash-lost attempt has durable
-  `KnownFailed` evidence and therefore uses `ToolExecutionResult`.
+  `KnownFailed` evidence and therefore uses `ToolExecutionResult`. **Committed
+  unimplemented functionality.** A fourth entry, `ToolInadmissible { request }`,
+  references a request resolved `closed_inadmissible` by the pre-approval check
+  above. It references the request because that resolution mints no attempt,
+  exactly as `ToolDenied` does, and the request row already carries the family's
+  typed reason. No present family declares such a check, so no present
+  transaction emits this entry.
 
 No result entry copies output, error detail, or denial reason. Attempt evidence
 commits as soon as execution ends, independently of semantic projection. Once
-every request in the batch is executed or denied, one continuation transaction:
+every request in the batch is executed, denied, or closed inadmissible, one
+continuation transaction:
 
 1. appends exactly one result entry per request in proposal order;
 2. consumes every pending steering input in ascending acceptance position and
