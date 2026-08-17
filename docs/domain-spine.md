@@ -285,6 +285,7 @@ impl ProgramJournal {
         run: ProgramRunId,
         entries: Vec<JournalEntry>,
     ) -> Result<Self, ProgramJournalError>;
+    pub fn terminal_delivery(&self) -> Option<&DeliveryFrame>;
     // accessors: run(), entries()
 }
 
