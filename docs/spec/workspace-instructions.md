@@ -676,11 +676,12 @@ failure would strand the wait.
 
 Eligibility is proved before approval is resolved, not after. The owning loop
 resolves a request's approval before creating and executing the attempt, so a
-`bundle_id` outside the session's eligibility snapshot would otherwise reach
-judge preparation with no evidence to build from — leaving an implementation to
-expose metadata for a bundle the session may not see, or to invent an
-evidence-free judge request. Neither is acceptable, so this is the family's
-declared
+`bundle_id` outside the turn's effective eligibility view — the frozen snapshot
+as narrowed by any recovery revocation, not the snapshot alone — would otherwise
+reach judge preparation with no evidence to build from — leaving an
+implementation to expose metadata for a bundle the session may not see, or to
+invent an evidence-free judge request. Neither is acceptable, so this is the
+family's declared
 [pre-approval admissibility check](tool-loop.md#intra-turn-rounds-and-request-batches):
 the request resolves through the owning request-level transition before
 approval, carrying the typed `not_eligible` reason and creating no approval
@@ -775,11 +776,11 @@ its session from the trusted tool-dispatch correlation.
   changed sequence changes with it. Any other shape is `InvalidArguments`; a
   well-formed cursor naming another snapshot is the typed stale-cursor failure,
   which is a request outcome rather than an argument error. A cursor naming the
-  current snapshot is accepted only when its ordinal is at most `total`;
-  anything greater is that same stale-cursor failure. The bound is `total`
-  rather than `total - 1` so that the ordinal one past the last item is accepted
-  and yields an empty page instead of an error. A page that exhausts the
-  snapshot never emits that cursor, though: a response whose returned items
+  current effective view is accepted only when its ordinal is at most that
+  view's `total`; anything greater is that same stale-cursor failure. The bound
+  is `total` rather than `total - 1` so that the ordinal one past the last item
+  is accepted and yields an empty page instead of an error. A page that exhausts
+  the snapshot never emits that cursor, though: a response whose returned items
   reach `total` is complete and returns `next_cursor` of null, including when
   the final page is exactly full, so no caller is ever sent back for an empty
   page it could not have needed. Ordinal `total` is therefore reachable only
@@ -851,20 +852,21 @@ For the same reason the `instructions_list` success value is one closed object,
 not a field inventory. Its members are exactly `items`, `total`,
 `first_ordinal`, `returned`, `next_cursor`, and `untrusted`, serialized under
 the compact canonical rules above with keys sorted by raw ASCII bytes. `items`
-is an array in canonical order. `total` is the snapshot's item count and
-`returned` the length of `items`, both JSON numbers; `first_ordinal` is the
-zero-based ordinal the page started at — the ordinal the request's cursor named,
-or zero when the cursor was absent. Defining it by the request rather than by
-the first returned item keeps it total: an empty page, which is what the default
-empty eligibility snapshot returns and therefore the most common initial state,
-reports the ordinal it started at with `returned` of zero rather than inventing
-a value for an item that does not exist. The returned ordinal range is those two
-numbers rather than a nested object or a pair, and the remaining count is
-`total - first_ordinal - returned` rather than a sixth member, since a derivable
-value that is also transmitted is a value two implementations can disagree
-about. `next_cursor` is the token string, or JSON `null` when enumeration is
-complete — present and null, never omitted, so the object's key set never
-varies.
+is an array in canonical order. `total` is the effective view's item count — the
+snapshot's, less any entries revoked for this turn, so that it counts exactly
+what enumeration can return — and `returned` the length of `items`, both JSON
+numbers; `first_ordinal` is the zero-based ordinal the page started at — the
+ordinal the request's cursor named, or zero when the cursor was absent. Defining
+it by the request rather than by the first returned item keeps it total: an
+empty page, which is what the default empty eligibility snapshot returns and
+therefore the most common initial state, reports the ordinal it started at with
+`returned` of zero rather than inventing a value for an item that does not
+exist. The returned ordinal range is those two numbers rather than a nested
+object or a pair, and the remaining count is `total - first_ordinal - returned`
+rather than a sixth member, since a derivable value that is also transmitted is
+a value two implementations can disagree about. `next_cursor` is the token
+string, or JSON `null` when enumeration is complete — present and null, never
+omitted, so the object's key set never varies.
 
 The trusted envelope and the untrusted strings are split by *level*, not
 duplicated: an item never carries a repository-controlled member directly, and
