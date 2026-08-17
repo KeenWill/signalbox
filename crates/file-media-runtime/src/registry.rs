@@ -4,9 +4,10 @@ use crate::{
     BoundedMetadata, CanonicalMediaType, FileInspection, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProviderDeclaration, FileMediaProviderReadRequest,
     FileMediaProviderValidationRequest, FileReadRequest, FileReadResult, InspectionRequest,
-    ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadAccessPattern, ReadContinuation, ReadViewBounds, ReaderDeclaration, ReaderIdentity,
-    ReasonCode, StreamingTextFallback, ValidatedFile, ValidationEvidence, VerifiedBlobSource,
+    MAX_READ_OPTIONS_BYTES, ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadAccessPattern, ReadContinuation, ReadViewBounds,
+    ReaderDeclaration, ReaderIdentity, ReasonCode, StreamingTextFallback, ValidatedFile,
+    ValidationEvidence, VerifiedBlobSource,
 };
 
 const MAX_REGISTRY_PROVIDERS: usize = 256;
@@ -384,7 +385,10 @@ impl FileMediaRegistry {
         source: &dyn VerifiedBlobSource,
         cancellation: &dyn crate::CancellationSignal,
     ) -> Result<FileReadResult, FileMediaFailure> {
-        if !request.options.is_object() {
+        if !request.options.is_object()
+            || serde_json::to_vec(&request.options)
+                .is_err_or(|encoded| encoded.len() > MAX_READ_OPTIONS_BYTES)
+        {
             return Err(FileMediaFailure::InvalidViewArguments);
         }
         let inspection = self

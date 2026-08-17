@@ -48,6 +48,8 @@ pub const MAX_WORKER_CPU_SECONDS: u64 = 60;
 pub const MAX_WORKER_WALL_SECONDS: u64 = 120;
 /// Maximum isolated worker descendants. Threads remain permitted.
 pub const MAX_WORKER_DESCENDANTS: u32 = 0;
+/// Maximum kernel tasks available to one isolated worker process tree.
+pub const MAX_WORKER_TASKS: u64 = 64;
 /// Maximum file descriptors available to an isolated worker.
 pub const MAX_WORKER_FILE_DESCRIPTORS: u64 = 32;
 /// Maximum retained diagnostic bytes from an isolated worker.
