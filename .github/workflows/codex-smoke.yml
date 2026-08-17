@@ -146,7 +146,7 @@ jobs:
     # when a newer push supersedes the *same* ref. A concurrent real exchange
     # costs a small fraction of a cent; required-check integrity is worth more
     # than serializing that spend.
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 20
     env:
       # Keeps the CLI's credential store inside the job's workspace instead of
@@ -159,6 +159,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
       # The runner image ships Node, and the pinned package is a thin launcher
       # around a prebuilt native binary, so no Node toolchain setup is needed.
