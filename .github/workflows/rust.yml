@@ -42,6 +42,8 @@ jobs:
         run: python3 scripts/check_docs_consistency.py
       - name: Check migration version uniqueness
         run: python3 scripts/check_migration_versions.py
+      - name: Check numeric bound declarations
+        run: python3 scripts/check_numeric_bounds.py
       - name: Check user vocabulary
         run: python3 scripts/check_user_vocabulary.py
       # Gates normally: the tree satisfies this today, so the step can only
@@ -94,6 +96,8 @@ jobs:
         run: python3 scripts/test_check_domain_spine.py
       - name: Test migration version checker
         run: python3 scripts/test_check_migration_versions.py
+      - name: Test numeric bound checker
+        run: python3 scripts/test_check_numeric_bounds.py
       - name: Test panic-gate checker
         run: python3 scripts/test_check_panic_gate.py
       # The checker's own tests gate normally: report-only describes what the
