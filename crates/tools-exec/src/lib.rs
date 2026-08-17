@@ -55,6 +55,9 @@ mod process;
 #[cfg(target_os = "linux")]
 mod supervisor_protocol;
 
+/// Maximum simultaneous HTTPS tunnels admitted by each composed enforcement layer.
+pub const MAX_HTTPS_PROXY_TUNNELS: usize = 8;
+
 pub use diagnostics::{
     CARGO_DIAGNOSTICS_NAME, CargoDiagnostic, CargoDiagnosticRecords, CargoDiagnosticSpan,
     CargoDiagnosticsArguments, CargoDiagnosticsCommand, CargoDiagnosticsExecution,
