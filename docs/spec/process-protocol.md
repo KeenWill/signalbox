@@ -2992,5 +2992,6 @@ later client-form choices are cataloged under
 [Client scope](../open-questions.md#client-scope). Richer metadata query
 language and creation-derived visibility are cataloged under
 [Session organization, visibility, and retention](../open-questions.md#session-organization-visibility-and-retention).
-Presentation of future graded approval judgments remains owner-gated under
+Presentation of future graded approval judgments requires acceptance through the
+foundation-decision process tracked under
 [Graded approval judging](../open-questions.md#graded-approval-judging).
