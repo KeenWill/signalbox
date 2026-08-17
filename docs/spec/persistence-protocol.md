@@ -754,11 +754,10 @@ Representation rules, all enforced in the schema:
   retains one immutable unowned-release proof under the same exact correlation
   when connection-loss propagation retires a pending release. Release admission
   and cursor advancement serialize on the matching loss cursor, while completion
-  and loss retirement serialize on the release row and are mutually exclusive.
-  **Committed unimplemented functionality.** No present production transaction
-  inserts the pending release or records cleanup refusal; those transitions must
-  consume this exact representation rather than presenting
-  `RunnerWorkspaceReleaseCandidate` as cleanup authority.
+  loss retirement, and cleanup refusal serialize on the release row and are
+  mutually exclusive. No present production transaction inserts the pending
+  release; that transition must consume this exact representation rather than
+  presenting `RunnerWorkspaceReleaseCandidate` as cleanup authority.
 - Migration `202608110028` retains one immutable repository-replacement
   workspace receipt under its single-use provisioning authorization. The row
   preserves the successor revision, runner, stable manifest identity,

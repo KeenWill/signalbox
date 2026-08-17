@@ -161,7 +161,8 @@ BEGIN
     SELECT * INTO release
       FROM runner_workspace_release
      WHERE session_id = NEW.release_session_id
-       AND placement_revision = NEW.release_placement_revision;
+       AND placement_revision = NEW.release_placement_revision
+       FOR UPDATE;
 
     IF NEW.operation_kind <> 'workspace_release'
        OR NEW.category_kind <> 'workspace_cleanup_failed'
@@ -224,7 +225,8 @@ BEGIN
     SELECT * INTO release
       FROM runner_workspace_release
      WHERE session_id = NEW.session_id
-       AND placement_revision = NEW.placement_revision;
+       AND placement_revision = NEW.placement_revision
+       FOR UPDATE;
 
     IF release.state_kind IS DISTINCT FROM 'pending'
        OR release.runner_id IS DISTINCT FROM NEW.runner_id
@@ -267,7 +269,8 @@ BEGIN
     SELECT * INTO release
       FROM runner_workspace_release
      WHERE session_id = NEW.session_id
-       AND placement_revision = NEW.placement_revision;
+       AND placement_revision = NEW.placement_revision
+       FOR UPDATE;
     SELECT * INTO loss
       FROM runner_connection_loss_epoch
      WHERE enrollment_id = NEW.enrollment_id
