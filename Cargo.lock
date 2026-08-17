@@ -3371,6 +3371,7 @@ dependencies = [
 name = "signalbox-runner"
 version = "0.0.0"
 dependencies = [
+ "expect-test",
  "rustix",
  "serde",
  "serde_json",

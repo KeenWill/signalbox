@@ -888,13 +888,40 @@ credentials = {{}}
         let configuration = RunnerConfiguration::read(&configuration_path)
             .expect("the filesystem-backed runner configuration is valid");
 
-        assert_eq!(
-            configuration.exec_supervisor_executable(),
-            supervisor
-                .canonicalize()
-                .expect("the supervisor fixture canonicalizes")
-        );
         assert_eq!(configuration.read_only_paths(), [canonical_read_only]);
+    }
+
+    #[test]
+    fn configuration_read_returns_the_canonical_exec_supervisor_path() {
+        let parent = TempDir::new().expect("a temporary configuration root exists");
+        let root = fs::canonicalize(parent.path()).expect("the temporary root canonicalizes");
+        let supervisor = fs::canonicalize(
+            std::env::current_exe().expect("the test executable path is available"),
+        )
+        .expect("the supervisor fixture canonicalizes");
+        let supervisor_alias = root.join("signalbox-exec-supervisor-alias");
+        symlink(&supervisor, &supervisor_alias).expect("the supervisor fixture alias exists");
+        let configuration_path = root.join("runner.toml");
+        let document = EMPTY_CONFIGURATION
+            .replace(
+                "/run/user/1000/signalbox-runner.sock",
+                &root.join("runner.sock").display().to_string(),
+            )
+            .replace(
+                "/var/lib/signalbox-runner",
+                &root.join("runner-state").display().to_string(),
+            )
+            .replace(
+                "/usr/local/bin/signalbox-exec-supervisor",
+                &supervisor_alias.display().to_string(),
+            )
+            .replace("/usr/bin/bwrap", &supervisor.display().to_string());
+        fs::write(&configuration_path, document).expect("the runner configuration exists");
+
+        let configuration = RunnerConfiguration::read(&configuration_path)
+            .expect("the filesystem-backed runner configuration is valid");
+
+        assert_eq!(configuration.exec_supervisor_executable(), supervisor);
     }
 
     #[test]
@@ -972,7 +999,7 @@ credentials = {{}}
         let error = RunnerConfiguration::read(&configuration_path)
             .expect_err("a nonexecutable bubblewrap path fails closed");
 
-        assert_eq!(error.to_string(), "runner bubblewrap path is invalid");
+        expect![["runner bubblewrap path is invalid"]].assert_eq(&error.to_string());
     }
 
     #[test]
