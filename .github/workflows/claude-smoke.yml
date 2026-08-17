@@ -163,7 +163,7 @@ jobs:
     # when a newer push supersedes the *same* ref. A concurrent real exchange
     # costs a small fraction of a cent; required-check integrity is worth more
     # than serializing that spend.
-    runs-on: signalbox
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       SIGNALBOX_CLAUDE_SMOKE_EXECUTABLE: >-
