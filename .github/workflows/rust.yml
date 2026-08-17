@@ -156,12 +156,13 @@ jobs:
             exit 1
           }
   rust-checks:
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -300,7 +301,7 @@ jobs:
   # checks the sources out and passes `--workspace-remap`.
   postgres-integration-build:
     name: postgres-integration (build)
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     # Generous by design: this job now absorbs all five suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
@@ -311,6 +312,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
       # First, so a malformed manifest fails before any compilation. The run
       # job expands this into its shard matrix, which is why adding a shard is
