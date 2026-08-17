@@ -238,6 +238,17 @@ async fn partial_mp4_header_at_metadata_cutoff_is_an_accepted_truncated_tail()
 }
 
 #[tokio::test]
+async fn partial_mp4_extended_header_at_metadata_cutoff_is_an_accepted_truncated_tail()
+-> Result<(), Box<dyn Error>> {
+    let source =
+        VideoFixture::large_mp4_with_partial_extended_header_at_metadata_cutoff().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
 async fn header_only_avc1_sample_entry_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(VideoFixture::header_only_avc1_mp4(), "malformed_video").await
 }
@@ -294,6 +305,24 @@ async fn iso6_mp4_brand_validates() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn space_padded_mp4_brand_validates() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_space_padded_brand().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn hevc_mp4_video_sample_entry_validates() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::hevc_mp4().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
 async fn webm_track_without_mandatory_fields_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::webm_track_missing_number_and_codec(),
@@ -342,9 +371,29 @@ async fn fragmented_mp4_uses_movie_extends_duration() -> Result<(), Box<dyn Erro
 }
 
 #[tokio::test]
+async fn fragmented_mp4_without_movie_extends_duration_reports_unavailable_duration()
+-> Result<(), Box<dyn Error>> {
+    let fixture = VideoFixture::fragmented_mp4_without_movie_extends_duration();
+    let (inspection, body) = inspect_and_read_metadata(fixture).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert_eq!(body["duration_milliseconds"], serde_json::Value::Null);
+    Ok(())
+}
+
+#[tokio::test]
 async fn mp4_video_track_without_sample_description_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_video_track_without_sample_description(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn mp4_track_with_split_media_evidence_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_track_with_split_media_evidence(),
         "malformed_video",
     )
     .await

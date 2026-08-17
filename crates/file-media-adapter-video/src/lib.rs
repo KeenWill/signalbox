@@ -415,16 +415,19 @@ fn parse_mp4(bytes: &[u8], source_complete: bool) -> Result<VideoMetadata, Video
     let profile = state.brand.ok_or(VideoIssue::Malformed)?;
     let timescale = state.movie_timescale.ok_or(VideoIssue::Malformed)?;
     let duration = if state.fragmented && state.movie_duration == Some(0) {
-        state.fragment_duration.ok_or(VideoIssue::Malformed)?
+        state.fragment_duration
     } else {
-        state.movie_duration.ok_or(VideoIssue::Malformed)?
+        state.movie_duration
     };
-    let duration_milliseconds = u128::from(duration)
-        .checked_mul(1000)
-        .ok_or(VideoIssue::Structure)?
-        / u128::from(timescale);
-    let duration_milliseconds =
-        u64::try_from(duration_milliseconds).map_err(|_| VideoIssue::Structure)?;
+    let duration_milliseconds = duration
+        .map(|duration| {
+            let milliseconds = u128::from(duration)
+                .checked_mul(1000)
+                .ok_or(VideoIssue::Structure)?
+                / u128::from(timescale);
+            u64::try_from(milliseconds).map_err(|_| VideoIssue::Structure)
+        })
+        .transpose()?;
     if !state.movie_seen || state.video_tracks == 0 {
         return Err(VideoIssue::Malformed);
     }
@@ -447,6 +450,7 @@ fn parse_mp4_boxes(
     }
     let mut cursor = 0_usize;
     let mut track_evidence = Mp4TrackEvidence::default();
+    let mut media_seen = false;
     while cursor < bytes.len() {
         let (box_type, payload, consumed) = match mp4_box_at(bytes, cursor) {
             Ok(parsed) => parsed,
@@ -484,6 +488,10 @@ fn parse_mp4_boxes(
                 }
             }
             MP4_MDIA if scope == Mp4Scope::Track => {
+                if media_seen {
+                    return Err(VideoIssue::Malformed);
+                }
+                media_seen = true;
                 track_evidence.include(parse_mp4_boxes(
                     payload,
                     depth + 1,
@@ -591,7 +599,7 @@ fn mp4_box_extends_beyond(bytes: &[u8], cursor: usize) -> bool {
             return false;
         };
         let Some(extended) = bytes.get(cursor + 8..extended_end) else {
-            return false;
+            return available >= 8 && available < 16;
         };
         let size = u64::from_be_bytes([
             extended[0],
@@ -612,10 +620,15 @@ fn parse_ftyp(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
     if state.brand.is_some() || !supported_ftyp(payload) {
         return Err(VideoIssue::Malformed);
     }
-    let brand = payload.get(..4).ok_or(VideoIssue::Malformed)?;
-    if !brand.iter().all(u8::is_ascii_graphic) {
-        return Err(VideoIssue::Malformed);
-    }
+    let major_brand = payload.get(..4).ok_or(VideoIssue::Malformed)?;
+    let brand = if supported_mp4_brand(major_brand) {
+        major_brand
+    } else {
+        payload[8..]
+            .chunks_exact(4)
+            .find(|brand| supported_mp4_brand(brand))
+            .ok_or(VideoIssue::Malformed)?
+    };
     state.brand = Some(String::from_utf8(brand.to_vec()).map_err(|_| VideoIssue::Malformed)?);
     Ok(())
 }
@@ -733,8 +746,8 @@ fn parse_stsd(payload: &[u8], state: &mut Mp4State) -> Result<bool, VideoIssue> 
         if box_type == *b"encv" || box_type == *b"enca" {
             return Err(VideoIssue::Encrypted);
         }
-        if box_type == *b"avc1" {
-            parse_avc1_sample_entry(entry_payload, state)?;
+        if let Some(configuration_type) = visual_sample_entry_configuration(box_type) {
+            parse_visual_sample_entry(entry_payload, configuration_type, state)?;
             video_sample_entry_seen = true;
         }
         cursor = cursor.checked_add(consumed).ok_or(VideoIssue::Structure)?;
@@ -745,9 +758,22 @@ fn parse_stsd(payload: &[u8], state: &mut Mp4State) -> Result<bool, VideoIssue> 
     Ok(video_sample_entry_seen)
 }
 
-fn parse_avc1_sample_entry(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
+fn visual_sample_entry_configuration(box_type: [u8; 4]) -> Option<[u8; 4]> {
+    match box_type {
+        [b'a', b'v', b'c', b'1'] | [b'a', b'v', b'c', b'3'] => Some(*b"avcC"),
+        [b'h', b'v', b'c', b'1'] | [b'h', b'e', b'v', b'1'] => Some(*b"hvcC"),
+        [b'a', b'v', b'0', b'1'] => Some(*b"av1C"),
+        [b'v', b'p', b'0', b'8'] | [b'v', b'p', b'0', b'9'] => Some(*b"vpcC"),
+        _ => None,
+    }
+}
+
+fn parse_visual_sample_entry(
+    payload: &[u8],
+    configuration_type: [u8; 4],
+    state: &mut Mp4State,
+) -> Result<(), VideoIssue> {
     const VISUAL_SAMPLE_ENTRY_BYTES: usize = 78;
-    const AVC_CONFIGURATION_BYTES: usize = 7;
 
     let children = payload
         .get(VISUAL_SAMPLE_ENTRY_BYTES..)
@@ -760,10 +786,12 @@ fn parse_avc1_sample_entry(payload: &[u8], state: &mut Mp4State) -> Result<(), V
         if state.nodes > MAX_NODES {
             return Err(VideoIssue::Structure);
         }
-        if box_type == *b"avcC" {
-            if configuration_seen
-                || configuration.len() < AVC_CONFIGURATION_BYTES
-                || configuration.first() != Some(&1)
+        if box_type == configuration_type {
+            if configuration_seen || configuration.is_empty() {
+                return Err(VideoIssue::Malformed);
+            }
+            if configuration_type == *b"avcC"
+                && (configuration.len() < 7 || configuration.first() != Some(&1))
             {
                 return Err(VideoIssue::Malformed);
             }
