@@ -752,8 +752,9 @@ Representation rules, all enforced in the schema:
   recorded terminal. Typed readback rejoins the complete release correlation
   instead of trusting acknowledgement columns alone. Migration `202608140102`
   retains one immutable unowned-release proof under the same exact correlation
-  when connection-loss propagation retires a pending release. Completion and
-  loss retirement serialize on the release row and are mutually exclusive.
+  when connection-loss propagation retires a pending release. Release admission
+  and cursor advancement serialize on the matching loss cursor, while completion
+  and loss retirement serialize on the release row and are mutually exclusive.
   **Committed unimplemented functionality.** No present production transaction
   inserts the pending release or records cleanup refusal; those transitions must
   consume this exact representation rather than presenting
