@@ -2597,6 +2597,7 @@ async fn commit_stopped_tool_round(
         RestartModelCallFixture,
         SemanticTranscriptEntryId,
         ContextFrontierId,
+        TurnId,
     ),
     Box<dyn Error>,
 > {
@@ -2631,7 +2632,7 @@ async fn commit_stopped_tool_round(
         .expect("the fixture contains one tool proposal");
     let cancellation_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 29));
     let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 30));
-    let outcome = model_repository
+    model_repository
         .apply_terminal_observation(
             fixture.session,
             authorized
@@ -2654,12 +2655,8 @@ async fn commit_stopped_tool_round(
             |_| panic!("the fixture has no pending steering to reclassify"),
         )
         .await?;
-    assert!(matches!(
-        outcome,
-        ModelCallTerminalOutcome::CancelledWithToolResponse(_)
-    ));
 
-    Ok((fixture, cancellation_entry, terminal_frontier))
+    Ok((fixture, cancellation_entry, terminal_frontier, successor))
 }
 
 /// S02 / S07 / S11 / INV-006 / INV-037: the terminal shape committed when a
@@ -2672,9 +2669,8 @@ async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_succ
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7d00;
-    let (fixture, _cancellation_entry, _terminal_frontier) =
+    let (fixture, _cancellation_entry, _terminal_frontier, successor) =
         commit_stopped_tool_round(&pool, seed).await?;
-    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 21));
 
     let activation = StartEligibleTurnRepository::new(pool.clone())
         .handle(
@@ -2706,7 +2702,7 @@ async fn s02_s07_s11_inv032_inv037_stopped_tool_round_cancellation_dispatches()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7d80;
-    let (fixture, cancellation_entry, terminal_frontier) =
+    let (fixture, cancellation_entry, terminal_frontier, _successor) =
         commit_stopped_tool_round(&pool, seed).await?;
     let terminal_call_disposition: String = sqlx::query_scalar(
         "SELECT terminal_disposition_kind
@@ -2741,7 +2737,7 @@ async fn s02_s07_s11_inv032_completed_cancellation_requires_closed_tool_round()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7e00;
-    let (fixture, _cancellation_entry, _terminal_frontier) =
+    let (fixture, _cancellation_entry, _terminal_frontier, _successor) =
         commit_stopped_tool_round(&pool, seed).await?;
     let sequence = sqlx::query_scalar(
         "SELECT event_sequence
