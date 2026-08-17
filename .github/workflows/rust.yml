@@ -253,17 +253,16 @@ jobs:
   domain-instruction-counts:
     name: Domain instruction counts (report only)
     continue-on-error: true
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
-      - name: Install Valgrind
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes valgrind
+      # The pinned Signalbox runner image includes Valgrind, so this public-repo
+      # job needs neither root access nor an unpinned package installation.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
