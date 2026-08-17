@@ -6891,6 +6891,10 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     ChildWaitReconciliation(TransactionError),
     ChildWaitMismatch,
     CrashClassification(TransactionError),
+    RecoveredFatalExecutorFailure {
+        failure_class: OperatorFailureClass,
+        cause_code: &'static str,
+    },
     Continuation(TransactionError),
     CatalogDrift,
 }
