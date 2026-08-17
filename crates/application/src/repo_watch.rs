@@ -66,6 +66,7 @@ const REPO_WATCH_EVENT_IDENTIFIED_CONTENT_DOMAIN_V1: &[u8] =
 /// an occurrence number, which mints a content identity that collides with an
 /// already-durable one, so the differ stops rather than emit an identity that
 /// does not identify its occurrence.
+// numeric-bound: ceiling - caps one repository's resident and durable occurrence frontier
 const MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS: usize = 1_000_000;
 
 /// A source-independent SHA-256 identity for one normalized event occurrence.
@@ -269,6 +270,7 @@ pub enum RepoWatchPullRequestLifecycle {
     Merged,
 }
 
+// numeric-bound: tunable - admits the provider check-generation text this accepts
 const MAX_CHECK_COMPLETION_GENERATION_BYTES: usize = 64;
 
 /// Opaque provider generation for one completed check execution.
@@ -905,8 +907,15 @@ enum RepoWatchDifferFailure {
 ///
 /// Lets a caller classify a derivation failure without reading `Display` text.
 /// The two carry different operational meaning: event construction indicates a
-/// differ defect on one observation, while an identity-frontier failure recurs
-/// on every later comparison for that repository until the frontier changes.
+/// differ defect on one observation, while an identity-frontier failure is a
+/// property of the frontier the comparison ran against.
+///
+/// An identity-frontier failure is not by itself permanent, and a caller must
+/// not retire a repository on one. `StreamLimit` refuses only a comparison that
+/// introduces a stream the frontier has never counted; streams already counted
+/// keep advancing at the ceiling, so a later observation adding no new stream
+/// succeeds. `SequenceExhausted` is terminal for the single stream that
+/// exhausted it, not for the repository.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchDifferFailureKind {
     /// The differ assembled an event the domain rejects.
