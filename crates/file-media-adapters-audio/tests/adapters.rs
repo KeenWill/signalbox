@@ -58,6 +58,29 @@ async fn ogg_opus_detects_validates_and_reads_metadata() -> Result<(), Box<dyn E
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn isolated_worker_validates_audio_larger_than_one_broker_range() -> Result<(), Box<dyn Error>>
+{
+    let source = MemorySource::new(fixtures::wav_larger_than_one_broker_range()?);
+
+    let inspection = support::inspect_sandboxed(&source, "audio/wav").await?;
+    support::assert_validated_media(inspection, "audio/wav");
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_declared_audio_candidate_is_unknown() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(b"not audio bytes".to_vec());
+
+    let inspection = support::inspect(&source, "audio/wav").await?;
+    assert!(matches!(
+        inspection,
+        signalbox_file_media_runtime::FileInspection::Unknown { .. }
+    ));
+    Ok(())
+}
+
 #[tokio::test]
 async fn wav_truncation_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_reason(

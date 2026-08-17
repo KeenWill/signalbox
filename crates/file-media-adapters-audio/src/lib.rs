@@ -63,9 +63,7 @@ impl AdapterFormat {
             Self::Wav => {
                 prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WAVE".as_slice())
             }
-            Self::Mp3 => {
-                prefix.starts_with(b"ID3") || prefix.get(..4).is_some_and(valid_mp3_frame_header)
-            }
+            Self::Mp3 => mp3_signature(prefix),
             Self::Flac => prefix.starts_with(b"fLaC"),
             Self::OggOpus => {
                 prefix.starts_with(b"OggS")
@@ -75,6 +73,38 @@ impl AdapterFormat {
             }
         }
     }
+}
+
+fn mp3_signature(prefix: &[u8]) -> bool {
+    let audio = if prefix.starts_with(b"ID3") {
+        let Some(header) = prefix.get(..10) else {
+            return false;
+        };
+        if header[6..10].iter().any(|byte| byte & 0x80 != 0) {
+            return false;
+        }
+        let Some(tag_length) = header[6..10].iter().try_fold(0_usize, |length, byte| {
+            length
+                .checked_mul(128)
+                .and_then(|value| value.checked_add(usize::from(*byte)))
+        }) else {
+            return false;
+        };
+        let footer_length = if header[5] & 0x10 == 0 { 0 } else { 10 };
+        let Some(audio_offset) = 10_usize
+            .checked_add(tag_length)
+            .and_then(|value| value.checked_add(footer_length))
+        else {
+            return false;
+        };
+        let Some(audio) = prefix.get(audio_offset..) else {
+            return false;
+        };
+        audio
+    } else {
+        prefix
+    };
+    audio.get(..4).is_some_and(valid_mp3_frame_header)
 }
 
 fn valid_mp3_frame_header(bytes: &[u8]) -> bool {
@@ -100,6 +130,14 @@ mod tests {
         let aac_adts_header = [0xff, 0xf1, 0x50, 0x80];
 
         assert!(!AdapterFormat::Mp3.matches_signature(&aac_adts_header));
+    }
+
+    #[test]
+    fn mp3_probe_rejects_aac_adts_after_id3_metadata() {
+        let mut id3_prefixed_aac = b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec();
+        id3_prefixed_aac.extend_from_slice(&[0xff, 0xf1, 0x50, 0x80]);
+
+        assert!(!AdapterFormat::Mp3.matches_signature(&id3_prefixed_aac));
     }
 }
 

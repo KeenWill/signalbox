@@ -5,7 +5,7 @@ use opus_rs::OpusDecoder;
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
     ProbeStrength, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, VerifiedBlobSource,
+    ProcessorValidationOutput, ValidationEvidence, VerifiedBlobSource,
 };
 use symphonia::{
     core::{
@@ -53,11 +53,15 @@ pub(crate) async fn inspect(
         return Err(ProcessorFailure::Protocol);
     }
     let Some(bytes) = source::read_complete(source, cancellation).await? else {
-        return Ok(malformed(format, "source_too_large"));
+        return Ok(validation_failure(
+            format,
+            request.evidence,
+            "source_too_large",
+        ));
     };
     let metadata = match decode(format, &bytes) {
         Ok(metadata) => metadata,
-        Err(reason) => return Ok(malformed(format, reason)),
+        Err(reason) => return Ok(validation_failure(format, request.evidence, reason)),
     };
     Ok(ProcessorValidationOutput::Validated {
         media_type: String::from(format.media_type()),
@@ -281,6 +285,12 @@ fn valid_opus_tags(bytes: &[u8]) -> bool {
     let Some(comment_count_offset) = 12_usize.checked_add(vendor_length) else {
         return false;
     };
+    let Some(vendor) = bytes.get(12..comment_count_offset) else {
+        return false;
+    };
+    if std::str::from_utf8(vendor).is_err() {
+        return false;
+    }
     let Some(comment_count_bytes) = bytes
         .get(comment_count_offset..comment_count_offset.saturating_add(4))
         .and_then(|value| <[u8; 4]>::try_from(value).ok())
@@ -312,7 +322,10 @@ fn valid_opus_tags(bytes: &[u8]) -> bool {
         let Some(next) = data_offset.checked_add(length) else {
             return false;
         };
-        if bytes.get(data_offset..next).is_none() {
+        let Some(comment) = bytes.get(data_offset..next) else {
+            return false;
+        };
+        if std::str::from_utf8(comment).is_err() {
             return false;
         }
         offset = next;
@@ -367,6 +380,18 @@ fn malformed(format: AdapterFormat, reason: &str) -> ProcessorValidationOutput {
     }
 }
 
+fn validation_failure(
+    format: AdapterFormat,
+    evidence: ValidationEvidence,
+    reason: &str,
+) -> ProcessorValidationOutput {
+    if evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated {
+        ProcessorValidationOutput::NoMatch
+    } else {
+        malformed(format, reason)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_opus_head, valid_opus_tags};
@@ -376,6 +401,27 @@ mod tests {
         let mut tags = b"OpusTags".to_vec();
         tags.extend_from_slice(&0_u32.to_le_bytes());
         tags.extend_from_slice(&1_u32.to_le_bytes());
+
+        assert!(!valid_opus_tags(&tags));
+    }
+
+    #[test]
+    fn opus_tags_rejects_an_invalid_utf8_vendor() {
+        let mut tags = b"OpusTags".to_vec();
+        tags.extend_from_slice(&1_u32.to_le_bytes());
+        tags.push(0xff);
+        tags.extend_from_slice(&0_u32.to_le_bytes());
+
+        assert!(!valid_opus_tags(&tags));
+    }
+
+    #[test]
+    fn opus_tags_rejects_an_invalid_utf8_comment() {
+        let mut tags = b"OpusTags".to_vec();
+        tags.extend_from_slice(&0_u32.to_le_bytes());
+        tags.extend_from_slice(&1_u32.to_le_bytes());
+        tags.extend_from_slice(&1_u32.to_le_bytes());
+        tags.push(0xff);
 
         assert!(!valid_opus_tags(&tags));
     }

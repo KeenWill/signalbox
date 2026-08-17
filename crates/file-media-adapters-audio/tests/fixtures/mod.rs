@@ -57,6 +57,10 @@ pub(crate) fn truncated(format: FixtureFormat) -> Result<Vec<u8>, Box<dyn Error>
     Ok(bytes)
 }
 
+pub(crate) fn wav_larger_than_one_broker_range() -> Result<Vec<u8>, Box<dyn Error>> {
+    wav(192_000, 600_000)
+}
+
 pub(crate) fn malformed(format: FixtureFormat) -> Vec<u8> {
     match format {
         FixtureFormat::Wav => b"RIFF\x04\x00\x00\x00WAVE".to_vec(),

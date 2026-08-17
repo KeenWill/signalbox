@@ -1,13 +1,15 @@
-use std::{error::Error, num::NonZeroU64, sync::Arc};
+use std::{error::Error, num::NonZeroU64, path::PathBuf, sync::Arc};
 
 use signalbox_file_media_adapters_audio::{AudioFamilyProvider, audio_family_declaration};
+use signalbox_file_media_processor_runtime::{SandboxedFileMediaProcessor, WorkerBinding};
 use signalbox_file_media_runtime::{
     AttachmentKind, CancellationSignal, DeclaredMediaType, FileDigest, FileInspection,
-    FileMediaCeilings, FileMediaFailure, FileMediaProcessor, FileMediaProcessorFuture,
-    FileMediaProvider, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    FileMediaRegistry, FileReadRequest, FileReadResult, FileUse, InspectionRequest, NeverCancelled,
-    ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadViewName, ReaderIdentity, SourceReadError, SourceReadFuture, VerifiedBlobSource,
+    FileMediaCeilings, FileMediaFailure, FileMediaProcessCeilings, FileMediaProcessor,
+    FileMediaProcessorFuture, FileMediaProvider, FileMediaProviderReadRequest,
+    FileMediaProviderValidationRequest, FileMediaRegistry, FileReadRequest, FileReadResult,
+    FileUse, InspectionRequest, NeverCancelled, ProcessorIsolation, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadViewName, ReaderIdentity, SourceReadError,
+    SourceReadFuture, VerifiedBlobSource,
 };
 
 pub(crate) struct MemorySource {
@@ -142,6 +144,37 @@ pub(crate) async fn inspect(
     Ok(registry()?
         .inspect(
             &DirectProcessor::provider(),
+            InspectionRequest {
+                source: source.file_use(media_type)?,
+                visible_part: None,
+            },
+            source,
+            &NeverCancelled,
+        )
+        .await?)
+}
+
+pub(crate) async fn inspect_sandboxed(
+    source: &MemorySource,
+    media_type: &str,
+) -> Result<FileInspection, Box<dyn Error>> {
+    let declaration = audio_family_declaration().map_err(|error| error.to_string())?;
+    let worker = PathBuf::from(env!("CARGO_BIN_EXE_signalbox-file-media-audio-worker"));
+    let binding = WorkerBinding::try_new(worker, declaration)?;
+    let processor = SandboxedFileMediaProcessor::try_new(
+        "/usr/bin/bwrap",
+        vec![binding],
+        FileMediaProcessCeilings::version_one(),
+    )?;
+    if processor.verify_isolation().await != ProcessorIsolation::Available {
+        if std::env::var_os("CI").is_some() {
+            return Err("CI requires the real audio worker sandbox".into());
+        }
+        return inspect(source, media_type).await;
+    }
+    Ok(registry()?
+        .inspect(
+            &processor,
             InspectionRequest {
                 source: source.file_use(media_type)?,
                 visible_part: None,

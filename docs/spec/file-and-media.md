@@ -133,7 +133,7 @@ untrusted until the daemon-side registry sanitizer admits it.
 
 | Family | Canonical types                                      | Detection and validation                                                                        | Views                                               | Decoder choice                                                                                                 |
 | ------ | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| Audio  | `audio/wav`, `audio/mpeg`, `audio/flac`, `audio/ogg` | Strong signatures followed by full decode under a 64 MiB hard whole-source memory ceiling plus channel, rate, and presented-duration bounds | Bounded channel count and sample rate as `metadata` | Feature-limited pure-Rust Symphonia for WAV/MP3/FLAC; pure-Rust `ogg` and `opus-rs` for Ogg/Opus, all isolated |
+| Audio  | `audio/wav`, `audio/mpeg`, `audio/flac`, `audio/ogg` | Strong signatures followed by full decode under a 64 MiB hard whole-source memory ceiling plus channel, rate, and presented-duration bounds | Bounded channel count and sample rate as `metadata` | Feature-limited pure-Rust Symphonia for WAV/MP3/FLAC; pure-Rust `ogg` and `opus-rs` for Ogg/Opus, all isolated                         |
 
 ## Processor and durable media boundary
 
