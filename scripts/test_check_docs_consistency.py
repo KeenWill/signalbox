@@ -78,7 +78,7 @@ def write_manifest_workflow(root: Path, *names: str) -> None:
         ' --partition "count:$PARTITION/$PARTITIONS"'
         ' --run-ignored only -E "$FILTER"\n'
         "  postgres-integration-build:\n"
-        "    runs-on: ubuntu-latest\n"
+        "    runs-on: signalbox\n"
         "    steps:\n"
         "      - run: python3 scripts/postgres_integration_suites.py --matrix\n"
         "      - run: python3 scripts/postgres_integration_suites.py"
@@ -957,7 +957,7 @@ class DocsConsistencyTests(unittest.TestCase):
             ' --partition "count:$PARTITION/$PARTITIONS"'
             ' --run-ignored only -E "$FILTER"\n'
             "  postgres-integration-build:\n"
-            "    runs-on: ubuntu-latest\n"
+            "    runs-on: signalbox\n"
             "    steps:\n"
             "      - uses: actions/upload-artifact@v7\n"
             "        with:\n"
