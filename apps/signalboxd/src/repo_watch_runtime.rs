@@ -381,11 +381,23 @@ enum PollAttemptWait<T> {
     Webhook,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookPollInterrupt {
+    Enabled,
+    Suppressed,
+}
+
+impl WebhookPollInterrupt {
+    const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
 async fn await_poll_or_interrupt<F>(
     poll: F,
     shutdown: &mut watch::Receiver<bool>,
     webhook_work: &mut Option<watch::Receiver<()>>,
-    allow_webhook_interrupt: bool,
+    webhook_interrupt: WebhookPollInterrupt,
 ) -> PollAttemptWait<F::Output>
 where
     F: Future,
@@ -399,7 +411,7 @@ where
                 PollAttemptWait::Continue
             }
         }
-        admitted = receive_webhook_work(webhook_work), if allow_webhook_interrupt => {
+        admitted = receive_webhook_work(webhook_work), if webhook_interrupt.is_enabled() => {
             if admitted {
                 PollAttemptWait::Webhook
             } else {
@@ -868,11 +880,15 @@ impl RepositoryWatchTask {
                 RepositoryWatchWake::Poll => {
                     let cycle_started = Instant::now();
                     let drain = webhook_retry.poll_drain();
+                    let webhook_interrupt = match webhook_retry.is_backing_off() {
+                        true => WebhookPollInterrupt::Suppressed,
+                        false => WebhookPollInterrupt::Enabled,
+                    };
                     let outcome = self
                         .run_preemptible_attempt_until_shutdown(
                             drain,
                             &mut shutdown,
-                            !webhook_retry.is_backing_off(),
+                            webhook_interrupt,
                         )
                         .await;
                     let (drain, result) = match outcome {
@@ -1081,7 +1097,7 @@ impl RepositoryWatchTask {
         &mut self,
         drain: WebhookDrain,
         shutdown: &mut watch::Receiver<bool>,
-        allow_webhook_interrupt: bool,
+        webhook_interrupt: WebhookPollInterrupt,
     ) -> PollAttemptWait<Result<(), RepositoryWatchAttemptError>> {
         self.poller.begin_attempt();
         match drain {
@@ -1100,13 +1116,17 @@ impl RepositoryWatchTask {
                 return PollAttemptWait::Completed(Err(error));
             }
         };
+        let webhook_interrupt = match &accelerated {
+            Ok(()) => webhook_interrupt,
+            Err(_) => WebhookPollInterrupt::Suppressed,
+        };
 
         let mut webhook_work = self.webhook_work.take();
         let outcome = await_poll_or_interrupt(
             self.prepare_complete_poll(),
             shutdown,
             &mut webhook_work,
-            allow_webhook_interrupt && accelerated.is_ok(),
+            webhook_interrupt,
         )
         .await;
         self.webhook_work = webhook_work;
@@ -4561,12 +4581,12 @@ mod tests {
         RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
         RepositoryWatchWake, ResourceKey, ReviewState, TargetedPullRequest, Url,
         UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY, WEBHOOK_DRAIN_RETRY_MAX_DELAY,
-        WebhookDrain, WebhookDrainRetry, WorkflowName, WorkflowResponse, await_poll_or_interrupt,
-        derive_repo_watch_events, dispatch_context_json, inspect_webhook_drain,
-        next_cadence_deadline, next_repository_wake, normalize_checks_outcome,
-        normalize_pull_request_context, object_id, observe_webhook_work_before_drain,
-        owed_dispatch_context_json_parts, rule_activation_error, run_until_shutdown,
-        supervise_repository_tasks, targeted_pull_requests,
+        WebhookDrain, WebhookDrainRetry, WebhookPollInterrupt, WorkflowName, WorkflowResponse,
+        await_poll_or_interrupt, derive_repo_watch_events, dispatch_context_json,
+        inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
+        normalize_checks_outcome, normalize_pull_request_context, object_id,
+        observe_webhook_work_before_drain, owed_dispatch_context_json_parts, rule_activation_error,
+        run_until_shutdown, supervise_repository_tasks, targeted_pull_requests,
     };
     use signalbox_application::{
         InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
@@ -6675,7 +6695,7 @@ mod tests {
             std::future::pending::<()>(),
             &mut shutdown,
             &mut webhook_work,
-            true,
+            WebhookPollInterrupt::Enabled,
         )
         .await;
 
@@ -6689,9 +6709,13 @@ mod tests {
         let (_shutdown_sender, mut shutdown) = watch::channel(false);
         const COMPLETION: u8 = 7;
 
-        let outcome =
-            await_poll_or_interrupt(async { COMPLETION }, &mut shutdown, &mut webhook_work, true)
-                .await;
+        let outcome = await_poll_or_interrupt(
+            async { COMPLETION },
+            &mut shutdown,
+            &mut webhook_work,
+            WebhookPollInterrupt::Enabled,
+        )
+        .await;
 
         assert!(matches!(outcome, PollAttemptWait::Completed(COMPLETION)));
     }
@@ -6708,7 +6732,7 @@ mod tests {
             async { COMPLETION },
             &mut shutdown,
             &mut webhook_work,
-            false,
+            WebhookPollInterrupt::Suppressed,
         )
         .await;
 
