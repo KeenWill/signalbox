@@ -1164,9 +1164,9 @@ impl RepositoryWatchTask {
         )
         .map_err(|error| match error.kind() {
             RepoWatchDifferFailureKind::EventConstruction => RepositoryWatchAttemptError::Differ,
-            // The frontier refuses on every later comparison too, so the cause
-            // code has to say the frontier stopped this repository rather than
-            // leave it indistinguishable from a one-observation differ defect.
+            // Its own cause code, because the frontier and a differ defect call
+            // for different operator responses. The attempt stays retryable: a
+            // later observation introducing no new stream still succeeds.
             RepoWatchDifferFailureKind::IdentityFrontier => {
                 tracing::error!(
                     repository = %self.repository.as_str(),
