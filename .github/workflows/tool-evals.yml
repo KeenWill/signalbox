@@ -171,11 +171,11 @@ jobs:
       matrix:
         include:
           - family: git
-            runner: signalbox
+            runner: signalbox-docker
           - family: workspace
-            runner: signalbox
+            runner: signalbox-docker
           - family: web
-            runner: signalbox
+            runner: signalbox-docker
           - family: exec
             runner: ubuntu-latest
     runs-on: ${{ matrix.runner }}
