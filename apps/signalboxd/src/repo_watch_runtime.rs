@@ -433,15 +433,24 @@ impl WebhookDrainRetry {
         }
     }
 
-    /// Schedules a retry only when none is already owed.
+    /// Ensures a retry is owed at a deadline that has not already passed,
+    /// without counting a drain failure.
     ///
-    /// A failed full poll may never have reached the drain, so it must not
-    /// push an already-earned retry further out: with a poll interval shorter
-    /// than the current delay, every failure would reschedule the deadline and
-    /// the retry would never come due at all.
-    fn ensure_scheduled(&mut self) {
-        if self.deadline.is_none() {
-            self.schedule();
+    /// Two failures reach here and neither is the drain's: a full poll that
+    /// never got to the drain, and an attempt that failed before it. The delay
+    /// therefore does not advance — only consecutive drain failures may move
+    /// it — and an already-earned future deadline is left alone, because a poll
+    /// interval shorter than the delay would otherwise push the retry out on
+    /// every failure until it never came due.
+    ///
+    /// An owed deadline that has already elapsed still has to move. The retry
+    /// arm precedes the poll arm, so leaving one in the past means the same
+    /// attempt is selected again immediately, and the task spins on the failing
+    /// dependency instead of waiting the delay out.
+    fn ensure_owed(&mut self, now: Instant) {
+        match self.deadline {
+            Some(deadline) if deadline > now => {}
+            _ => self.deadline = Some(now + self.delay()),
         }
     }
 
@@ -904,7 +913,7 @@ impl RepositoryWatchTask {
                         }
                         Err(error) => {
                             if self.webhook_work.is_some() {
-                                webhook_retry.ensure_scheduled();
+                                webhook_retry.ensure_owed(Instant::now());
                             }
                             tracing::warn!(
                                 repository = %self.repository.as_str(),
@@ -1000,7 +1009,7 @@ impl RepositoryWatchTask {
                 );
             }
             WebhookAttemptOutcome::FailedBeforeDrain(error) => {
-                webhook_retry.ensure_scheduled();
+                webhook_retry.ensure_owed(Instant::now());
                 tracing::error!(
                     repository = %self.repository.as_str(),
                     trigger = trigger.as_str(),
@@ -1141,7 +1150,10 @@ impl RepositoryWatchTask {
         prepared: PreparedCompletePoll,
     ) -> Result<(), RepositoryWatchAttemptError> {
         self.commit_complete_poll(prepared).await?;
-        if drain == WebhookDrain::Run {
+        // A failed pre-poll drain already earns backoff. Do not spend the same
+        // provider and database work twice inside this attempt before that
+        // backoff can take effect.
+        if drain == WebhookDrain::Run && accelerated.is_ok() {
             self.process_webhook_deliveries().await?;
         }
         accelerated?;
@@ -6398,33 +6410,48 @@ mod tests {
         assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_DELAY);
     }
 
-    /// A failed full poll may never have reached the drain, so it must not
-    /// push an already-earned retry further out: with a poll interval shorter
-    /// than the current delay, every failure would reschedule the deadline and
-    /// the retry would never come due.
+    /// A failure that is not the drain's must not push an already-earned retry
+    /// further out: with a poll interval shorter than the current delay, every
+    /// failure would reschedule the deadline and the retry would never come
+    /// due.
     #[tokio::test(start_paused = true)]
-    async fn a_failed_poll_never_defers_a_retry_that_is_already_owed() {
+    async fn a_failure_before_the_drain_never_defers_a_retry_that_is_already_owed() {
         let mut retry = WebhookDrainRetry::default();
         retry.update_after(&drain_failure());
         retry.update_after(&drain_failure());
         let owed = retry.deadline;
 
-        retry.ensure_scheduled();
+        retry.ensure_owed(Instant::now());
 
         assert_eq!(retry.deadline, owed);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_failed_poll_schedules_a_retry_when_none_is_owed() {
-        let scheduled_at = Instant::now();
+    async fn a_failure_before_the_drain_arms_a_retry_when_none_is_owed() {
+        let armed_at = Instant::now();
         let mut retry = WebhookDrainRetry::default();
 
-        retry.ensure_scheduled();
+        retry.ensure_owed(armed_at);
 
-        assert_eq!(
-            retry.deadline,
-            Some(scheduled_at + WEBHOOK_DRAIN_RETRY_DELAY)
-        );
+        assert_eq!(retry.deadline, Some(armed_at + WEBHOOK_DRAIN_RETRY_DELAY));
+    }
+
+    /// The retry arm precedes the poll arm, so an owed deadline left in the
+    /// past selects the same attempt again immediately and the task spins on
+    /// whatever failed before the drain.
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_before_the_drain_moves_an_elapsed_retry_forward() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
+        let earned = retry.delay();
+        tokio::time::advance(WEBHOOK_DRAIN_RETRY_DELAY).await;
+        let now = Instant::now();
+        assert_eq!(retry.deadline, Some(now));
+
+        retry.ensure_owed(now);
+
+        assert_eq!(retry.deadline, Some(now + earned));
+        assert_eq!(retry.delay(), earned);
     }
 
     #[tokio::test(start_paused = true)]
