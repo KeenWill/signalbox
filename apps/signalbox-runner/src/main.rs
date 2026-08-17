@@ -115,7 +115,7 @@ async fn run(
                     let execution = execute_dispatch(
                         execution_programs.clone(),
                         configuration.read_only_paths().to_vec(),
-                        configuration.runner_root().to_owned(),
+                        state.duplicate_directory(),
                         configuration.allowed_network_hosts().to_vec(),
                         dispatch.correlation().clone(),
                         dispatch.normalized_arguments().clone(),
@@ -199,7 +199,7 @@ fn release_private_workspace(
 async fn execute_dispatch(
     process_runner: TokioProcessRunner,
     read_only_paths: Vec<std::path::PathBuf>,
-    runner_root: std::path::PathBuf,
+    runner_root: io::Result<std::fs::File>,
     allowed_network_hosts: Vec<signalbox_runner::AllowedNetworkHost>,
     correlation: signalbox_runner_wire::LeaseCorrelation,
     normalized_arguments: serde_json::Value,
@@ -219,7 +219,16 @@ async fn execute_dispatch(
             };
         }
     };
-    let endpoint = match DispatchHttpsEndpoint::bind(&runner_root, correlation.lease_id) {
+    let runner_root = match runner_root {
+        Ok(runner_root) => runner_root,
+        Err(_) => {
+            return TerminalResult::KnownFailure {
+                error_kind: ExecutionErrorKind::ExecutionFailed,
+                detail: None,
+            };
+        }
+    };
+    let endpoint = match DispatchHttpsEndpoint::bind(runner_root, correlation.lease_id) {
         Ok(endpoint) => endpoint,
         Err(_) => {
             return TerminalResult::KnownFailure {
