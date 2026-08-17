@@ -1611,10 +1611,10 @@ mod tests {
         }
     }
 
-    fn inventory_with_ready() -> ReconnectInventory {
+    fn inventory_with_ready(ready: &WorkspaceReady) -> ReconnectInventory {
         ReconnectInventory {
             workspace_operation: Some(WorkspaceOperation::Provision {
-                correlation: provision_correlation(),
+                correlation: ready.correlation.clone(),
                 phase: ProvisionPhase::ReadyUnrecorded,
             }),
             ..ReconnectInventory::default()
@@ -2068,7 +2068,10 @@ mod tests {
 
         let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
 
-        assert_eq!(reopened.reconnect_inventory(), &inventory_with_ready());
+        assert_eq!(
+            reopened.reconnect_inventory(),
+            &inventory_with_ready(&ready)
+        );
         assert_eq!(reopened.retained_workspace_ready(), Some(&ready));
     }
 
@@ -2121,7 +2124,8 @@ mod tests {
         root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
             .expect("the operation journal is created");
         drop(root);
-        replace_operation_journal(&path, inventory_with_ready());
+        let ready = workspace_ready();
+        replace_operation_journal(&path, inventory_with_ready(&ready));
 
         let error = RunnerStateRoot::open(&path)
             .expect_err("a ready correlation without its full payload fails closed");
@@ -2168,10 +2172,11 @@ mod tests {
         root.record_workspace_ready(workspace_ready())
             .expect("the complete ready payload is durable");
         drop(root);
-        let mut cross_wired = workspace_ready();
+        let ready = workspace_ready();
+        let mut cross_wired = ready.clone();
         cross_wired.correlation.authorization_id =
             CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_AUTHORIZATION_UUID + 1));
-        replace_operation_document(&path, inventory_with_ready(), Some(cross_wired));
+        replace_operation_document(&path, inventory_with_ready(&ready), Some(cross_wired));
 
         let error = RunnerStateRoot::open(&path)
             .expect_err("the full payload must match the reconnect correlation");
@@ -2198,7 +2203,7 @@ mod tests {
             error,
             RunnerStateError::OperationCorrelationMismatch
         ));
-        assert_eq!(root.reconnect_inventory(), &inventory_with_ready());
+        assert_eq!(root.reconnect_inventory(), &inventory_with_ready(&ready));
         assert_eq!(root.retained_workspace_ready(), Some(&ready));
     }
 
