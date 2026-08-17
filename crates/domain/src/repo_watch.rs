@@ -1730,6 +1730,13 @@ impl RepoWatchRuleIdentityField {
 pub struct RepoWatchRuleIdentityFieldDigest([u8; 32]);
 
 impl RepoWatchRuleIdentityFieldDigest {
+    /// The digest bytes covering this field's configured value.
+    ///
+    /// Persistence stores them as one fixed-width chunk of a rule's durable
+    /// fingerprint and compares chunks positionally, so these bytes are a
+    /// stored identity rather than an in-process hash: they reveal nothing
+    /// about the value they cover, and changing how they are derived
+    /// invalidates every fingerprint already recorded.
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
