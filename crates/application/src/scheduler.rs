@@ -36,8 +36,11 @@ use crate::{
 ///
 /// The composition root may supply another nonzero interval after validating
 /// deployment configuration through [`ReconciliationSweepInterval::try_new`].
+// numeric-bound: tunable - controls the baseline reconciliation cadence
 const BASELINE_RECONCILIATION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+// numeric-bound: tunable - controls baseline scheduler nudge backpressure
 const BASELINE_NUDGE_BUFFER_CAPACITY: usize = 1_024;
+// numeric-bound: tunable - controls baseline reconciliation concurrency
 const BASELINE_MAX_IN_FLIGHT_PASSES: usize = 16;
 
 /// A validated nonzero reconciliation-sweep interval.
