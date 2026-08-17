@@ -143,9 +143,14 @@ foundation change; it cannot be hidden inside a reader registration.
 ## Detection and validation
 
 Detection operates on `VerifiedBlobSource`: length plus asynchronous prefix,
-suffix, and exact-range reads backed directly by catalog-selected replicas and
-the blob layer's full verification rules. It does not call the process protocol,
-decode base64, expose paths, or hand store credentials to a worker.
+suffix, and exact-range reads backed by one request-local immutable snapshot.
+The broker creates that snapshot while performing the blob layer's initial full
+verification traversal, makes it read-only before any probe runs, and serves all
+later probe and reader ranges from that exact verified generation. It deletes
+the snapshot after the request and never exposes its path to a worker. This
+preserves verification across range reads even for filesystem replicas and S3
+replicas without immutable version tokens. Detection does not call the process
+protocol, decode base64, expose paths, or hand store credentials to a worker.
 
 Each provider registers bounded probes returning:
 
@@ -161,18 +166,21 @@ Detection follows one fixed algorithm:
 
 01. Start the inspection-wide 120-second wall deadline before source
     verification. Verify source digest and length through ordinary replica
-    traversal. Verification performs at most one complete traversal bounded by
-    the catalog's authenticated `byte_length`; those integrity bytes use the
-    blob layer's traversal accounting and process-wide traversal admission, not
-    the reader-work ceiling. Exhausting the wall deadline returns
-    `ProcessorTimedOut`. Ordinary blob traversal's longer deadline cannot extend
-    the inspection deadline. Missing, corrupt, unavailable, or no-longer-visible
-    sources propagate as `BlobMissing`, `BlobCorrupt`, `BlobUnavailable`, or
-    `BlobNotVisible` before candidate selection.
+    traversal while materializing the immutable request-local snapshot.
+    Verification performs at most one complete traversal bounded by the
+    catalog's authenticated `byte_length`; those integrity bytes use the blob
+    layer's traversal accounting and process-wide traversal admission, not the
+    reader-work ceiling. Every later source range is served from the completed
+    snapshot and cannot observe another replica generation. Exhausting the wall
+    deadline returns `ProcessorTimedOut`. Ordinary blob traversal's longer
+    deadline cannot extend the inspection deadline. Missing, corrupt,
+    unavailable, or no-longer-visible sources propagate as `BlobMissing`,
+    `BlobCorrupt`, `BlobUnavailable`, or `BlobNotVisible` before candidate
+    selection.
 02. Run relevant probes in isolation under both their provider limits and the
-    same inspection-wide deadline, plus the request-wide
-    probe-count, concurrency, memory, CPU, range, and probe-source-byte budgets
-    below. Exceeding any probe-specific request-wide budget is
+    same inspection-wide deadline, plus the request-wide probe-count,
+    concurrency, memory, CPU, range, and probe-source-byte budgets below.
+    Exceeding any probe-specific request-wide budget is
     `ProcessorFailed { reason_code: probe_budget_exceeded }`; an inspection
     never schedules additional probes after that boundary. Failure to reserve or
     start a worker propagates as `ProcessorUnavailable`; none of these source or
@@ -290,11 +298,13 @@ cancellable, and truncated worker output is never success.
 
 Registry construction rejects duplicate identities or exact MIME owners,
 duplicate view names, non-object schemas, unsupported output kinds, absent or
-above-process limits, unbounded access/output, or unavailable isolation. It also
+above-process limits, unbounded access/output, or unavailable isolation. Every
+view declares its maximum range count and cumulative reader-source bytes; the
+registry rejects either value above the common per-read ceilings below. It also
 computes the complete worst-case detection schedule for every possible declared
 type and rejects a snapshot that could require more than 32 probes. No runtime
-prefilter may omit a byte probe based on declared type or filename. Image
-views must bound dimensions, pixels, and bytes; audio views duration, samples,
+prefilter may omit a byte probe based on declared type or filename. Image views
+must bound dimensions, pixels, and bytes; audio views duration, samples,
 channels, and bytes; structured views nesting, nodes, strings, and bytes. Each
 provider has at most 64 views, and registry construction encodes the worst-case
 successful `file_inspect` projection, including provider metadata and all
@@ -339,8 +349,10 @@ view's declared presentation-byte ceiling, computes length and digest while
 streaming, and is never interpreted as a control frame.
 
 The broker checks every range against source length, the provider declaration,
-cumulative source bytes, range count, and cancellation before store I/O. The
-supervisor enforces finite resident memory, CPU, wall time, descendants,
+the common per-read maximum of 4,096 ranges and 1,073,741,824 cumulative source
+bytes, and cancellation before snapshot I/O. Crossing either boundary returns
+`SourceTooLarge { maximum_bytes: 1073741824 }` and supplies no further bytes.
+The supervisor enforces finite resident memory, CPU, wall time, descendants,
 descriptors, and output. Before spawning, it atomically reserves one slot and
 the declared memory limit from a process-wide pool of four workers and 2 GiB;
 unavailable capacity returns `ProcessorUnavailable` without spawning or reading
@@ -410,22 +422,22 @@ the exact `ReaderIdentity` returned by `file_inspect`. The permission default is
 observable authenticated store reads and publish a generated artifact. On an
 initial request, `options` is the provider object and `continuation` is null. On
 a continuation request, `options` is null and `continuation` is the cursor from
-the preceding result. The cursor is an opaque authenticated token that references
-process-local state containing the original normalized options and next semantic
-position; it does not embed either value. The permission check reuses the
-`blob_read` rendered-frontier allow-set before the executor boundary. An initial
-request must reauthorize the exact currently visible stub identified by its
-digest and selector. A continuation request must present a live authenticated
-cursor from the currently visible preceding result; its bound digest and
-selector must still identify an exact stub in the current allow-set. Falling out
-of the rendered frontier invalidates either authority; a remembered digest,
-selector, or cursor grants no access. The executor repeats inspection after
-authorization; it never trusts model-supplied type evidence. The result must
-select the exact supplied reader identity and revision, or the initial request
-returns `ReaderRevisionUnavailable` instead of executing a view with changed
-semantics. The selected view must exist on that revision, the initial `options`
-must validate against its registered object schema, and a continuation must bind
-the same digest, selector, reader identity, and view.
+the preceding result. The cursor is an opaque authenticated token that
+references process-local state containing the original normalized options and
+next semantic position; it does not embed either value. The permission check
+reuses the `blob_read` rendered-frontier allow-set before the executor boundary.
+An initial request must reauthorize the exact currently visible stub identified
+by its digest and selector. A continuation request must present a live
+authenticated cursor from the currently visible preceding result; its bound
+digest and selector must still identify an exact stub in the current allow-set.
+Falling out of the rendered frontier invalidates either authority; a remembered
+digest, selector, or cursor grants no access. The executor repeats inspection
+after authorization; it never trusts model-supplied type evidence. The result
+must select the exact supplied reader identity and revision, or the initial
+request returns `ReaderRevisionUnavailable` instead of executing a view with
+changed semantics. The selected view must exist on that revision, the initial
+`options` must validate against its registered object schema, and a continuation
+must bind the same digest, selector, reader identity, and view.
 
 - `Text` returns admitted UTF-8 with truncation and continuation facts.
 - `Structured` returns canonical compact JSON with the same facts.
@@ -541,6 +553,7 @@ may lower but never raise these process ceilings:
 | Aggregate probe ranges / source bytes   | 64 / 1,048,576         |
 | Aggregate probe memory / CPU / wall     | 1 GiB / 120 s / 120 s  |
 | Source verification traversals / bytes  | 1 / exact byte length  |
+| Per-read ranges / cumulative source     | 4,096 / 1,073,741,824  |
 | Control frame / text-or-JSON body       | 1,048,576 / 786,432    |
 | Views / complete inspection JSON        | 64 / 786,432 bytes     |
 | Structured depth / nodes                | 64 / 100,000           |
@@ -557,15 +570,15 @@ may lower but never raise these process ceilings:
 | Worker descendants                      | 0                      |
 | Process worker slots / reserved memory  | 4 / 2 GiB              |
 
-A stored blob may remain multi-gigabyte. Inspection may verify it with one
-deadline-bounded full traversal whose byte bound is its authenticated length;
-probe and reader work remain under their smaller fixed ceilings. A compatible
-reader streams it under a finite cumulative source-work limit; a whole-decode
-view may return
-`SourceTooLarge` without invalidating the blob. Text/structure stops before the
-first complete semantic unit that would cross output bounds; a single oversized
-unit returns `OutputUnitTooLarge`, never partial UTF-8 or JSON. Image and audio
-limits are checked before decode allocation.
+A stored blob may remain multi-gigabyte. Inspection may verify it into one
+immutable request-local snapshot with a deadline-bounded full traversal whose
+byte bound is its authenticated length; probe and reader work remain under their
+smaller fixed ceilings. A compatible reader can stream bounded regions from it,
+but no one read may consume more than 1,073,741,824 source bytes; a whole-decode
+view may return `SourceTooLarge` without invalidating the blob. Text/structure
+stops before the first complete semantic unit that would cross output bounds; a
+single oversized unit returns `OutputUnitTooLarge`, never partial UTF-8 or JSON.
+Image and audio limits are checked before decode allocation.
 
 Per-turn governance adds durable typed-read count and source-work reservations.
 One tool request charges once before authorization and is never refunded or
@@ -604,8 +617,9 @@ Processor failure is operator failure, not malformed evidence unless a complete
 authenticated failure frame arrived before exit. Telemetry follows the owning
 identity-and-commands contract exactly: it may use only daemon-minted aggregate
 identifiers plus the closed tool-name and error-classification tokens. It never
-records a blob digest, reader identity, bytes, extracted text, filename, declared
-type, parser message, stderr, path, credential, or content-derived identifier.
+records a blob digest, reader identity, bytes, extracted text, filename,
+declared type, parser message, stderr, path, credential, or content-derived
+identifier.
 
 ## Existing blob wire and trust boundary
 
@@ -646,6 +660,12 @@ One shared suite proves every provider and isolation implementation:
 - source visibility, missing, corruption, availability, worker-startup, and
   process-wide worker-capacity failures preserve their exact closed variants
   before candidate selection;
+- filesystem and unversioned-S3 fixtures mutate the selected replica after the
+  verification traversal and prove every probe/read range still observes only
+  the completed verified snapshot;
+- declarations above 4,096 reader ranges or 1,073,741,824 reader-source bytes
+  are rejected, and runtime exhaustion returns `SourceTooLarge` without another
+  source byte;
 - crash, cancellation, timeout, memory/output kill, or framing defect produces
   no partial success;
 - workers lack network, credentials, database, path, and second-digest access;
