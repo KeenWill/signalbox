@@ -301,6 +301,14 @@ mod linux {
         if arguments.len() < 2 {
             return ExitCode::FAILURE;
         }
+        // The relay must retain the broker descriptor while the target runs.
+        // Refuse to expose that descriptor through this supervisor's procfs
+        // entry to its same-UID child.
+        if rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+            .is_err()
+        {
+            return ExitCode::FAILURE;
+        }
         let Ok(descriptor) = parse_u64(arguments.remove(0)) else {
             return ExitCode::FAILURE;
         };

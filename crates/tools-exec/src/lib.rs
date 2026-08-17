@@ -32,7 +32,7 @@
 //! unshares the cgroup namespace, drops every capability, creates fresh runtime
 //! directories, and mounts only caller-supplied pinned read-only identities.
 //! Its optional HTTPS-bridge constructor additionally pins one Unix socket,
-//! bind-mounts only that socket at a fixed runtime path, and starts the
+//! hands its descriptor to a procfs-inaccessible supervisor, and starts that
 //! supervisor's bounded loopback-to-Unix proxy mode. The caller still owns
 //! socket creation, the host-side broker, and the whole-tunnel deadline.
 //! Neither profile imposes resource limits, seccomp, or landlock policy.
