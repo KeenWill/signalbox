@@ -2686,6 +2686,9 @@ are outside this cluster-delivery policy:
 
 ## Open edges
 
+- [Graded approval judging](../open-questions.md#graded-approval-judging) owns
+  the unresolved configuration actor-audit decision for future graded
+  thresholds.
 - Selection-key retargeting across a restart is not prevented by code:
   reconstitution's `CallTargetMismatch` cross-check fails closed only for a
   session with a live stored call; for everything else, not retargeting a

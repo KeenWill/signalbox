@@ -1989,6 +1989,9 @@ surface provides it.
 
 ## Open edges
 
+- [Graded approval judging](../open-questions.md#graded-approval-judging) owns
+  the unresolved durable audit shape for graded approval-judge calls and
+  decisions.
 - Deferred outbox retention, pruning, and multiple-daemon fan-out are cataloged
   in [open questions](../open-questions.md#protocols-and-persistence).
 - Attempt continuation is presently admitted only for the tool-loop
