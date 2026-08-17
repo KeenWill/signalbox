@@ -240,14 +240,15 @@ derived from an equal cursor frontier have the same content identity even when
 their candidate UUIDs differ. Persistence rejects duplicate UUID or content
 identity members within one batch, and the relational store uniquely constrains
 `(content_identity_version, content_identity)` across batches. Exact replay
-compares the cursor candidate and accounts for every requested occurrence: one
-the replayed generation stored is compared on its whole UUID-bearing event value
-and its content identity, and one that generation coalesced is required to be
-durable in an earlier generation under the same content identity and identified
-content. A coalesced occurrence's own candidate UUID is not compared, because it
-was never written — the fact it restates is durable under the UUID of the
-occurrence that first recorded it, so a request whose occurrences are all
-coalesced replays on candidate and content identity alone.
+compares the cursor candidate and accounts for every requested occurrence. If
+the replayed generation stored the occurrence, the stored event's whole
+UUID-bearing value and content identity are compared. If that generation
+coalesced the occurrence, it must be durable in an earlier generation under the
+same content identity and identified content. A coalesced occurrence's own
+candidate UUID is neither persisted nor compared, because the fact it restates
+is durable under the UUID of the occurrence that first recorded it, so a request
+whose occurrences are all coalesced replays on candidate and content identity
+alone.
 
 **Implemented behavior.** The version-one cursor reader remains compatible with
 the earlier version-one workflow record that lacked a workflow-definition ID. It

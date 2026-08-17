@@ -10661,7 +10661,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
-| application: repo_watch                            | 40 (incl. 4 traits)   |
+| application: repo_watch                            | 38 (+2 free fn) (incl. 4 traits) |
 | application: review_orchestration                  | 37 (incl. 2 traits)   |
 | application: review_workflow                       | 9 (incl. 2 traits)    |
 | application: session_metadata                      | 12 (incl. 4 traits)   |
@@ -10672,4 +10672,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **259 (+1 free fn)**  |
+| **signalbox-application total**                    | **257 (+3 free fn)**  |
