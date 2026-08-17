@@ -845,28 +845,45 @@ impl RepositoryWatchTask {
                 RepositoryWatchWake::Poll => {
                     let cycle_started = Instant::now();
                     let drain = webhook_retry.poll_drain();
+                    let mut drained = None;
                     let Some(result) =
-                        run_until_shutdown(&mut shutdown, self.run_attempt(drain)).await
+                        run_until_shutdown(&mut shutdown, self.run_attempt(drain, &mut drained))
+                            .await
                     else {
                         // A cancelled full poll may own spawned PR fetches.
                         self.poller.drain_fetches().await;
                         return;
                     };
                     let metrics = self.poller.attempt_metrics();
+                    // A drain a poll performed decides the backoff exactly as one
+                    // a wake or a retry performed does. Reading only the poll's
+                    // own result would erase that: a dispatch failure after
+                    // terminal state would arm a retry with nothing left to
+                    // drain, and a projection failure would not be counted.
+                    match drained {
+                        Some(
+                            WebhookDrainOutcome::Drained
+                            | WebhookDrainOutcome::DispatchFailedAfterTerminal(_),
+                        ) => webhook_retry.update_after(&Ok(())),
+                        Some(WebhookDrainOutcome::ProjectionFailed(error)) => {
+                            webhook_retry.update_after(&Err(error));
+                        }
+                        // The poll deferred its drain to an owed retry, or
+                        // failed before reaching it.
+                        None => {
+                            if result.is_err() && self.webhook_work.is_some() {
+                                webhook_retry.arm_if_unowed(Instant::now());
+                            }
+                        }
+                    }
                     match &result {
                         Ok(()) => {
-                            if drain == WebhookDrain::Run {
-                                webhook_retry.update_after(&result);
-                            }
                             tracing::debug!(
                                 repository = %self.repository.as_str(),
                                 "repository-watch polling attempt completed"
                             );
                         }
                         Err(error) => {
-                            if self.webhook_work.is_some() {
-                                webhook_retry.arm_if_unowed(Instant::now());
-                            }
                             tracing::warn!(
                                 repository = %self.repository.as_str(),
                                 cause_code = error.cause_code(),
@@ -987,9 +1004,14 @@ impl RepositoryWatchTask {
     /// The drain is a step of this attempt, so running it while the backoff is
     /// owed would repeat at the poll cadence exactly the work the backoff
     /// exists to space out. The owed retry performs it instead.
+    /// Reports the drain it performed through `drained`, so the caller can
+    /// apply it to the backoff. A poll's own result cannot stand in for it:
+    /// polling fails for reasons the drain never saw, and a drain can fail
+    /// after every delivery it visited reached terminal state.
     async fn run_attempt(
         &mut self,
         drain: WebhookDrain,
+        drained: &mut Option<WebhookDrainOutcome>,
     ) -> Result<(), RepositoryWatchAttemptError> {
         self.poller.begin_attempt();
         let result = async {
@@ -1008,20 +1030,23 @@ impl RepositoryWatchTask {
             // a retry already owes the drain: gating only one would leave the
             // other repeating the owed work at the poll cadence, which is what
             // the backoff exists to bound. The accepted cost is that a poll
-            // taken during a backoff window can advance the cursor past a
-            // pending delivery's transition, which that delivery then records as
-            // duplicate state — a bounded fidelity loss in shadow mode, against
-            // an unbounded repetition of work already known to be failing.
+            // taken during a backoff window commits a cursor a still-pending
+            // delivery does not reflect; the shadow that delivery seeded is
+            // superseded but retained until the pending page is empty, so its
+            // retry projects against that baseline rather than the advanced
+            // cursor. That divergence is taken against an unbounded repetition
+            // of work already known to be failing.
             //
             // The pre-poll failure is reported but not propagated here:
             // acceleration failing must not cancel the reconciliation sweep, or
             // one delivery whose targeted request keeps failing would abort
             // every scheduled poll.
             let accelerated = match drain {
-                WebhookDrain::Run => match self.process_webhook_deliveries().await.failure() {
-                    Some(error) => Err(error),
-                    None => Ok(()),
-                },
+                WebhookDrain::Run => {
+                    let outcome = self.process_webhook_deliveries().await;
+                    *drained = Some(outcome);
+                    outcome.failure().map_or(Ok(()), Err)
+                }
                 WebhookDrain::Deferred => Ok(()),
             };
             if let Err(error) = &accelerated {
@@ -1036,11 +1061,12 @@ impl RepositoryWatchTask {
             // has just failed would spend the same provider and database work
             // twice inside one attempt, ahead of the backoff that exists to
             // space exactly that work out.
-            if drain == WebhookDrain::Run
-                && accelerated.is_ok()
-                && let Some(error) = self.process_webhook_deliveries().await.failure()
-            {
-                return Err(error);
+            if drain == WebhookDrain::Run && accelerated.is_ok() {
+                let outcome = self.process_webhook_deliveries().await;
+                *drained = Some(outcome);
+                if let Some(error) = outcome.failure() {
+                    return Err(error);
+                }
             }
             accelerated?;
             self.process_cutoffs().await?;
@@ -6660,13 +6686,18 @@ mod tests {
         let deferring = ScriptedServer::start(complete_typed_observation_responses()).await;
         let mut fixture = webhook_task_against(&pool, deferring.base_url.clone()).await?;
 
+        let mut deferred_drain = None;
         fixture
             .task
-            .run_attempt(WebhookDrain::Deferred)
+            .run_attempt(WebhookDrain::Deferred, &mut deferred_drain)
             .await
             .expect("the polling attempt itself succeeds");
 
         deferring.finish().await;
+        assert_eq!(
+            deferred_drain, None,
+            "a deferred poll reports no drain for the backoff to read"
+        );
         assert!(
             !webhook_disposition_exists(&webhook_store, admission.key()).await?,
             "a poll must leave a pending delivery to the retry that owes it"
@@ -6675,13 +6706,15 @@ mod tests {
         let draining = ScriptedServer::start(complete_typed_observation_responses()).await;
         let mut owed_nothing = webhook_task_against(&pool, draining.base_url.clone()).await?;
 
+        let mut performed_drain = None;
         owed_nothing
             .task
-            .run_attempt(WebhookDrain::Run)
+            .run_attempt(WebhookDrain::Run, &mut performed_drain)
             .await
             .expect("the polling attempt drains when no retry is owed");
 
         draining.finish().await;
+        assert_eq!(performed_drain, Some(WebhookDrainOutcome::Drained));
         assert!(webhook_disposition_exists(&webhook_store, admission.key()).await?);
         Ok(())
     }

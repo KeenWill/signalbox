@@ -843,20 +843,21 @@ carrying the first such cause, whichever attempt performed it — a startup drai
 a wake, a retry, or a full poll. A delivery that fails before its terminal
 disposition is recorded remains pending, and its successful page peers still
 reach terminal state: a targeted refresh the provider will not serve is one such
-failure, because that query runs before anything is recorded. A delivery whose
-disposition is already durable when a later step fails — the targeted commit, or
-the dispatch work that follows it — is terminal and is not loaded again. The
-repository task schedules a new drain attempt after five seconds without waiting
-for a full poll, another delivery, or a restart. Consecutive failures double
-that delay to a five-minute ceiling and a success returns it to five seconds, so
-a delivery that cannot be projected costs bounded repeated work rather than a
-fixed five-second loop. Only the drain advances that delay: an attempt whose
-drain succeeded and whose dispatch work then failed returns it to five seconds,
-and one that failed before reaching the drain arms a retry at the current delay
-without advancing it, so unrelated dispatch failures cannot grow the delay,
-suppress admission wakes, or make polls omit their drain steps while projection
-is healthy. Taking a retry spends its deadline, so an attempt that then fails
-before its drain arms a fresh one rather than selecting itself again
+failure, because that query runs before anything is recorded. A targeted commit
+runs before the disposition is recorded, so its failure leaves the delivery
+pending too. A delivery whose disposition is already durable when a later step
+fails — the dispatch work that follows it — is terminal and is not loaded again.
+The repository task schedules a new drain attempt after five seconds without
+waiting for a full poll, another delivery, or a restart. Consecutive failures
+double that delay to a five-minute ceiling and a success returns it to five
+seconds, so a delivery that cannot be projected costs bounded repeated work
+rather than a fixed five-second loop. Only the drain advances that delay: an
+attempt whose drain succeeded and whose dispatch work then failed returns it to
+five seconds, and one that failed before reaching the drain arms a retry at the
+current delay without advancing it, so unrelated dispatch failures cannot grow
+the delay, suppress admission wakes, or make polls omit their drain steps while
+projection is healthy. Taking a retry spends its deadline, so an attempt that
+then fails before its drain arms a fresh one rather than selecting itself again
 immediately, which the retry's priority over polling would otherwise cause. A
 deadline that expired while some other attempt ran is left expired, so the next
 pass takes it at once rather than having it pushed out again by a poll that
