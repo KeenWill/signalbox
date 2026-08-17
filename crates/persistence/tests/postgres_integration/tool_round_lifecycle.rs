@@ -1514,20 +1514,20 @@ async fn inv006_inv025_inv029_inv037_replays_reclassified_tool_reconciliation_pr
         .await?;
 
     let pending_steering = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 35));
+    let steering_command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 36));
+    let steering_session = fixture.session;
+    let steering_input = SubmitInput::new(
+        steering_command,
+        steering_session,
+        UserContent::try_text(String::from("steer while the tool attempt is ambiguous"))
+            .expect("test steering content is admitted"),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: fixture.turn,
+        },
+    );
     assert!(matches!(
         SubmitInputRepository::new(pool.clone())
-            .handle(
-                input_with_delivery(
-                    seed + 36,
-                    seed + 1,
-                    "steer while the tool attempt is ambiguous",
-                    DeliveryRequest::NextSafePoint {
-                        expected_active_turn: fixture.turn,
-                    },
-                ),
-                pending_steering,
-                None,
-            )
+            .handle(steering_input, pending_steering, None)
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
             SubmitInputAppliedResult::PendingSteering(_)
@@ -1549,18 +1549,22 @@ async fn inv006_inv025_inv029_inv037_replays_reclassified_tool_reconciliation_pr
     );
 
     let successor = TurnId::from_uuid(Uuid::from_u128(seed + 30));
+    let interrupt_command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 28));
+    let interrupt_session = fixture.session;
+    let interrupt_input = SubmitInput::new(
+        interrupt_command,
+        interrupt_session,
+        UserContent::try_text(String::from("stop ambiguous tool"))
+            .expect("test interrupt content is admitted"),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: fixture.turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
     let interrupt = SubmitInputRepository::new(pool.clone())
         .handle(
-            input_with_delivery(
-                seed + 28,
-                seed + 1,
-                "stop ambiguous tool",
-                DeliveryRequest::Interrupt {
-                    expected_active_turn: fixture.turn,
-                    descendant_scope: DescendantTerminationScope::ParentAlone,
-                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-                },
-            ),
+            interrupt_input,
             AcceptedInputId::from_uuid(Uuid::from_u128(seed + 29)),
             Some(successor),
         )
