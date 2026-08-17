@@ -94,6 +94,11 @@ path = "tests/outbox_decode_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]
+name = "program_journal_postgres"
+path = "tests/program_journal_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
 name = "postgres_integration"
 path = "tests/postgres_integration/main.rs"
 required-features = ["postgres-integration"]
