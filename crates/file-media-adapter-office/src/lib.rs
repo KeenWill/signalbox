@@ -1,6 +1,7 @@
 //! Bounded Open XML interpretation inside the supervised file-media worker.
 
 use std::{
+    collections::HashSet,
     error::Error,
     io::{Cursor, Read},
     num::NonZeroU64,
@@ -8,6 +9,7 @@ use std::{
     str::FromStr,
 };
 
+use flate2::read::DeflateDecoder;
 use quick_xml::{Reader, events::Event};
 use signalbox_file_media_runtime::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider,
@@ -42,6 +44,8 @@ const XML_MALFORMED: &str = "xml_malformed";
 const ZIP_PREFIX_BYTES: u64 = 4;
 const ZIP_SUFFIX_BYTES: u64 = 65_536;
 const VALIDATION_SOURCE_BYTES: u64 = 262_144;
+const CONTENT_TYPES_COMPRESSED_BYTES: u64 = 64 * 1024;
+const LOCAL_HEADER_BYTES: u64 = 30;
 const READ_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
 const SOURCE_CHUNK_BYTES: u64 = 256 * 1024;
 const MAX_ENTRIES: usize = 10_000;
@@ -50,6 +54,12 @@ const MAX_TOTAL_EXPANDED_BYTES: u64 = 16 * 1024 * 1024;
 const TEXT_OUTPUT_BYTES: usize = 768 * 1024;
 const METADATA_OUTPUT_BYTES: usize = 16 * 1024;
 const CONTENT_TYPES: &str = "[Content_Types].xml";
+const DOCX_MAIN_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
+const XLSX_MAIN_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
+const PPTX_MAIN_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml";
 
 /// Macro-free Office Open XML adapter registered in its dedicated worker.
 #[derive(Clone, Copy, Debug, Default)]
@@ -80,10 +90,18 @@ impl FileMediaProvider for OfficeProvider {
             let kind = require_reader(reader)?;
             let inventory = match read_central_inventory(source, cancellation).await {
                 Ok(inventory) => inventory,
-                Err(CentralReadError::Validation(_)) => return Ok(ProcessorProbeOutput::NoMatch),
+                Err(CentralReadError::Validation { issue, kinds }) => {
+                    if kinds.contains(&kind) {
+                        return Ok(ProcessorProbeOutput::RecognizedMalformed {
+                            media_type: String::from(kind.media_type()),
+                            reason_code: String::from(issue.reason()),
+                        });
+                    }
+                    return Ok(ProcessorProbeOutput::NoMatch);
+                }
                 Err(CentralReadError::Processor(error)) => return Err(error),
             };
-            if inventory.kind() == Some(kind) {
+            if inventory.kinds.contains(&kind) {
                 Ok(ProcessorProbeOutput::Candidate {
                     media_type: String::from(kind.media_type()),
                     strength: ProbeStrength::StructuralCandidate,
@@ -108,7 +126,9 @@ impl FileMediaProvider for OfficeProvider {
             }
             let inventory = match read_central_inventory(source, cancellation).await {
                 Ok(inventory) => inventory,
-                Err(CentralReadError::Validation(issue)) => return Ok(issue.validation(kind)),
+                Err(CentralReadError::Validation { issue, .. }) => {
+                    return Ok(issue.validation(kind));
+                }
                 Err(CentralReadError::Processor(error)) => return Err(error),
             };
             if inventory.encrypted {
@@ -116,7 +136,7 @@ impl FileMediaProvider for OfficeProvider {
                     media_type: String::from(kind.media_type()),
                 });
             }
-            if inventory.kind() != Some(kind) {
+            if !inventory.kinds.contains(&kind) {
                 return Ok(malformed_validation(kind, MALFORMED_REASON));
             }
             validated_output(kind, request.evidence, &inventory)
@@ -132,7 +152,7 @@ impl FileMediaProvider for OfficeProvider {
     ) -> FileMediaProviderFuture<'a, ProcessorReadOutput> {
         Box::pin(async move {
             let kind = require_reader(reader)?;
-            if request.file.detected_media_type().as_str() != kind.media_type() {
+            if request.detected_media_type.as_str() != kind.media_type() {
                 return Err(ProcessorFailure::Protocol);
             }
             if !empty_options(&request.options) {
@@ -211,7 +231,7 @@ fn reader_declaration(
         probe: ProbeDeclaration::new(
             ZIP_PREFIX_BYTES,
             ZIP_SUFFIX_BYTES,
-            3,
+            5,
             VALIDATION_SOURCE_BYTES,
         ),
         views: vec![text_view, metadata_view],
@@ -259,25 +279,32 @@ impl OfficeKind {
             Self::Pptx => "ppt/presentation.xml",
         }
     }
+
+    const fn main_content_type(self) -> &'static str {
+        match self {
+            Self::Docx => DOCX_MAIN_CONTENT_TYPE,
+            Self::Xlsx => XLSX_MAIN_CONTENT_TYPE,
+            Self::Pptx => PPTX_MAIN_CONTENT_TYPE,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CentralEntry {
+    name: String,
+    compression: u16,
+    compressed_bytes: u64,
+    expanded_bytes: u64,
+    local_offset: u64,
 }
 
 #[derive(Debug)]
 struct CentralInventory {
     entries: usize,
     expanded_bytes: u64,
-    names: Vec<String>,
+    entries_by_name: Vec<CentralEntry>,
+    kinds: Vec<OfficeKind>,
     encrypted: bool,
-}
-
-impl CentralInventory {
-    fn kind(&self) -> Option<OfficeKind> {
-        if !self.names.iter().any(|name| name == CONTENT_TYPES) {
-            return None;
-        }
-        [OfficeKind::Docx, OfficeKind::Xlsx, OfficeKind::Pptx]
-            .into_iter()
-            .find(|kind| self.names.iter().any(|name| name == kind.marker()))
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -286,6 +313,12 @@ enum ValidationIssue {
 }
 
 impl ValidationIssue {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::Malformed(reason) => reason,
+        }
+    }
+
     fn validation(self, kind: OfficeKind) -> ProcessorValidationOutput {
         match self {
             Self::Malformed(reason) => malformed_validation(kind, reason),
@@ -295,13 +328,19 @@ impl ValidationIssue {
 
 #[derive(Debug)]
 enum CentralReadError {
-    Validation(ValidationIssue),
+    Validation {
+        issue: ValidationIssue,
+        kinds: Vec<OfficeKind>,
+    },
     Processor(ProcessorFailure),
 }
 
 impl From<ValidationIssue> for CentralReadError {
     fn from(issue: ValidationIssue) -> Self {
-        Self::Validation(issue)
+        Self::Validation {
+            issue,
+            kinds: Vec::new(),
+        }
     }
 }
 
@@ -363,77 +402,346 @@ async fn read_central_inventory(
         )
         .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
     if central_end > eocd_absolute
-        || central_size > VALIDATION_SOURCE_BYTES - ZIP_SUFFIX_BYTES - ZIP_PREFIX_BYTES
+        || central_size
+            > VALIDATION_SOURCE_BYTES
+                - ZIP_SUFFIX_BYTES
+                - ZIP_PREFIX_BYTES
+                - LOCAL_HEADER_BYTES
+                - CONTENT_TYPES_COMPRESSED_BYTES
     {
         return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
     }
     let central = read_range(source, central_offset, central_size).await?;
     require_active(cancellation)?;
-    parse_central_directory(&central, entries).map_err(Into::into)
+    let mut inventory = parse_central_directory(&central, entries).map_err(|error| {
+        CentralReadError::Validation {
+            issue: error.issue,
+            kinds: error.kinds,
+        }
+    })?;
+    let recognized = marker_kinds(&inventory.entries_by_name);
+    let content_types = read_content_types(source, cancellation, &inventory)
+        .await
+        .map_err(|issue| CentralReadError::Validation {
+            issue,
+            kinds: recognized.clone(),
+        })?;
+    inventory.kinds =
+        validate_content_types(&content_types, &inventory.entries_by_name).map_err(|issue| {
+            CentralReadError::Validation {
+                issue,
+                kinds: recognized,
+            }
+        })?;
+    Ok(inventory)
+}
+
+#[derive(Debug)]
+struct CentralParseError {
+    issue: ValidationIssue,
+    kinds: Vec<OfficeKind>,
 }
 
 fn parse_central_directory(
     bytes: &[u8],
     expected_entries: usize,
-) -> Result<CentralInventory, ValidationIssue> {
+) -> Result<CentralInventory, CentralParseError> {
     let mut offset = 0_usize;
-    let mut names = Vec::with_capacity(expected_entries);
+    let mut entries_by_name = Vec::with_capacity(expected_entries);
+    let mut names = HashSet::with_capacity(expected_entries);
     let mut expanded_bytes = 0_u64;
+    let mut decoded_bytes = 0_u64;
     let mut encrypted = false;
     while offset < bytes.len() {
-        let fixed = bytes
-            .get(offset..offset.saturating_add(46))
-            .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
-        if fixed.get(0..4) != Some(b"PK\x01\x02") {
-            return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+        let parsed = parse_central_entry(bytes, offset).map_err(|issue| CentralParseError {
+            issue,
+            kinds: marker_kinds(&entries_by_name),
+        })?;
+        let entry = parsed.entry;
+        let mut recognized = marker_kinds(&entries_by_name);
+        if let Some(kind) = kind_for_marker(&entry.name)
+            && !recognized.contains(&kind)
+        {
+            recognized.push(kind);
         }
-        let flags = le_u16(fixed, 8)?;
+        if !names.insert(entry.name.clone()) {
+            return Err(CentralParseError {
+                issue: ValidationIssue::Malformed(MALFORMED_REASON),
+                kinds: recognized,
+            });
+        }
+        validate_entry_name(&entry.name).map_err(|issue| CentralParseError {
+            issue,
+            kinds: recognized.clone(),
+        })?;
+        if ((parsed.external_attributes >> 16) & 0o170_000) == 0o120_000 {
+            return Err(CentralParseError {
+                issue: ValidationIssue::Malformed(SYMLINK_ENTRY),
+                kinds: recognized,
+            });
+        }
+        if recursive_container_name(&entry.name) {
+            return Err(CentralParseError {
+                issue: ValidationIssue::Malformed(RECURSIVE_CONTAINER),
+                kinds: recognized,
+            });
+        }
+        let flags = parsed.flags;
         encrypted |= flags & 1 != 0;
-        let expanded_entry_bytes = u64::from(le_u32(fixed, 24)?);
-        if expanded_entry_bytes > MAX_ENTRY_BYTES {
-            return Err(ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT));
+        expanded_bytes =
+            expanded_bytes
+                .checked_add(entry.expanded_bytes)
+                .ok_or(CentralParseError {
+                    issue: ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT),
+                    kinds: recognized.clone(),
+                })?;
+        if decoded_entry_name(&entry.name) {
+            if entry.expanded_bytes > MAX_ENTRY_BYTES {
+                return Err(CentralParseError {
+                    issue: ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT),
+                    kinds: recognized,
+                });
+            }
+            decoded_bytes =
+                decoded_bytes
+                    .checked_add(entry.expanded_bytes)
+                    .ok_or(CentralParseError {
+                        issue: ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT),
+                        kinds: recognized.clone(),
+                    })?;
+            if decoded_bytes > MAX_TOTAL_EXPANDED_BYTES {
+                return Err(CentralParseError {
+                    issue: ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT),
+                    kinds: recognized,
+                });
+            }
         }
-        expanded_bytes = expanded_bytes
-            .checked_add(expanded_entry_bytes)
-            .ok_or(ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT))?;
-        if expanded_bytes > MAX_TOTAL_EXPANDED_BYTES {
-            return Err(ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT));
-        }
-        let name_length = usize::from(le_u16(fixed, 28)?);
-        let extra_length = usize::from(le_u16(fixed, 30)?);
-        let comment_length = usize::from(le_u16(fixed, 32)?);
-        let record_length = 46_usize
-            .checked_add(name_length)
-            .and_then(|value| value.checked_add(extra_length))
-            .and_then(|value| value.checked_add(comment_length))
-            .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
-        let record = bytes
-            .get(offset..offset.saturating_add(record_length))
-            .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
-        let name = std::str::from_utf8(&record[46..46 + name_length])
-            .map_err(|_| ValidationIssue::Malformed(HOSTILE_ENTRY_NAME))?;
-        validate_entry_name(name)?;
-        let external_attributes = le_u32(fixed, 38)?;
-        if ((external_attributes >> 16) & 0o170_000) == 0o120_000 {
-            return Err(ValidationIssue::Malformed(SYMLINK_ENTRY));
-        }
-        if recursive_container_name(name) {
-            return Err(ValidationIssue::Malformed(RECURSIVE_CONTAINER));
-        }
-        names.push(String::from(name));
-        offset = offset
-            .checked_add(record_length)
-            .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+        entries_by_name.push(entry);
+        offset = parsed.next_offset;
     }
-    if names.len() != expected_entries {
-        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+    if entries_by_name.len() != expected_entries {
+        return Err(CentralParseError {
+            issue: ValidationIssue::Malformed(MALFORMED_REASON),
+            kinds: marker_kinds(&entries_by_name),
+        });
     }
     Ok(CentralInventory {
-        entries: names.len(),
+        entries: entries_by_name.len(),
         expanded_bytes,
-        names,
+        entries_by_name,
+        kinds: Vec::new(),
         encrypted,
     })
+}
+
+struct ParsedCentralEntry {
+    entry: CentralEntry,
+    flags: u16,
+    external_attributes: u32,
+    next_offset: usize,
+}
+
+fn parse_central_entry(bytes: &[u8], offset: usize) -> Result<ParsedCentralEntry, ValidationIssue> {
+    let fixed = bytes
+        .get(offset..offset.saturating_add(46))
+        .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+    if fixed.get(0..4) != Some(b"PK\x01\x02") {
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+    }
+    let name_length = usize::from(le_u16(fixed, 28)?);
+    let extra_length = usize::from(le_u16(fixed, 30)?);
+    let comment_length = usize::from(le_u16(fixed, 32)?);
+    let record_length = 46_usize
+        .checked_add(name_length)
+        .and_then(|value| value.checked_add(extra_length))
+        .and_then(|value| value.checked_add(comment_length))
+        .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+    let record = bytes
+        .get(offset..offset.saturating_add(record_length))
+        .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+    let name = std::str::from_utf8(&record[46..46 + name_length])
+        .map_err(|_| ValidationIssue::Malformed(HOSTILE_ENTRY_NAME))?;
+    let next_offset = offset
+        .checked_add(record_length)
+        .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+    Ok(ParsedCentralEntry {
+        entry: CentralEntry {
+            name: String::from(name),
+            compression: le_u16(fixed, 10)?,
+            compressed_bytes: u64::from(le_u32(fixed, 20)?),
+            expanded_bytes: u64::from(le_u32(fixed, 24)?),
+            local_offset: u64::from(le_u32(fixed, 42)?),
+        },
+        flags: le_u16(fixed, 8)?,
+        external_attributes: le_u32(fixed, 38)?,
+        next_offset,
+    })
+}
+
+fn decoded_entry_name(name: &str) -> bool {
+    name == CONTENT_TYPES || name.ends_with(".xml")
+}
+
+fn kind_for_marker(name: &str) -> Option<OfficeKind> {
+    [OfficeKind::Docx, OfficeKind::Xlsx, OfficeKind::Pptx]
+        .into_iter()
+        .find(|kind| name == kind.marker())
+}
+
+fn marker_kinds(entries: &[CentralEntry]) -> Vec<OfficeKind> {
+    [OfficeKind::Docx, OfficeKind::Xlsx, OfficeKind::Pptx]
+        .into_iter()
+        .filter(|kind| entries.iter().any(|entry| entry.name == kind.marker()))
+        .collect()
+}
+
+async fn read_content_types(
+    source: &dyn VerifiedBlobSource,
+    cancellation: &dyn CancellationSignal,
+    inventory: &CentralInventory,
+) -> Result<Vec<u8>, ValidationIssue> {
+    let entry = inventory
+        .entries_by_name
+        .iter()
+        .find(|entry| entry.name == CONTENT_TYPES)
+        .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+    if entry.compressed_bytes == 0
+        || entry.compressed_bytes > CONTENT_TYPES_COMPRESSED_BYTES
+        || entry.expanded_bytes > MAX_ENTRY_BYTES
+    {
+        return Err(ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT));
+    }
+    require_active(cancellation).map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+    let local = read_range(source, entry.local_offset, LOCAL_HEADER_BYTES)
+        .await
+        .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+    if local.get(0..4) != Some(b"PK\x03\x04") || le_u16(&local, 8)? != entry.compression {
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+    }
+    let name_length = u64::from(le_u16(&local, 26)?);
+    let extra_length = u64::from(le_u16(&local, 28)?);
+    let data_offset = entry
+        .local_offset
+        .checked_add(LOCAL_HEADER_BYTES)
+        .and_then(|value| value.checked_add(name_length))
+        .and_then(|value| value.checked_add(extra_length))
+        .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+    let compressed = read_range(source, data_offset, entry.compressed_bytes)
+        .await
+        .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+    let bytes = match entry.compression {
+        0 => compressed,
+        8 => {
+            let mut decoded = Vec::new();
+            DeflateDecoder::new(Cursor::new(compressed))
+                .take(MAX_ENTRY_BYTES + 1)
+                .read_to_end(&mut decoded)
+                .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+            decoded
+        }
+        _ => return Err(ValidationIssue::Malformed(MALFORMED_REASON)),
+    };
+    if u64::try_from(bytes.len()).ok() != Some(entry.expanded_bytes)
+        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ENTRY_BYTES
+    {
+        return Err(ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT));
+    }
+    Ok(bytes)
+}
+
+fn validate_content_types(
+    bytes: &[u8],
+    entries: &[CentralEntry],
+) -> Result<Vec<OfficeKind>, ValidationIssue> {
+    let mut reader = Reader::from_reader(Cursor::new(bytes));
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut depth = 0_usize;
+    let mut saw_root = false;
+    let mut kinds = Vec::new();
+    loop {
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?
+        {
+            Event::Start(start) => {
+                if depth == 0 {
+                    if saw_root || local_name(start.name().as_ref()) != b"Types" {
+                        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+                    }
+                    saw_root = true;
+                } else if depth == 1 && local_name(start.name().as_ref()) == b"Override" {
+                    collect_content_type_kind(&reader, &start, entries, &mut kinds)?;
+                }
+                depth = depth
+                    .checked_add(1)
+                    .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+            }
+            Event::Empty(empty)
+                if depth == 1 && local_name(empty.name().as_ref()) == b"Override" =>
+            {
+                collect_content_type_kind(&reader, &empty, entries, &mut kinds)?;
+            }
+            Event::Empty(empty) if depth == 0 => {
+                if saw_root || local_name(empty.name().as_ref()) != b"Types" {
+                    return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+                }
+                saw_root = true;
+            }
+            Event::End(_) => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
+            }
+            Event::DocType(_) | Event::GeneralRef(_) => {
+                return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+            }
+            Event::Eof if saw_root && depth == 0 => break,
+            Event::Eof => return Err(ValidationIssue::Malformed(MALFORMED_REASON)),
+            _ => {}
+        }
+        buffer.clear();
+    }
+    kinds.sort_by_key(|kind| kind.reader());
+    kinds.dedup();
+    if kinds.is_empty() {
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+    }
+    Ok(kinds)
+}
+
+fn collect_content_type_kind(
+    reader: &Reader<Cursor<&[u8]>>,
+    element: &quick_xml::events::BytesStart<'_>,
+    entries: &[CentralEntry],
+    kinds: &mut Vec<OfficeKind>,
+) -> Result<(), ValidationIssue> {
+    let mut part_name = None;
+    let mut content_type = None;
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+        let value = attribute
+            .decode_and_unescape_value(reader.decoder())
+            .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+        match local_name(attribute.key.as_ref()) {
+            b"PartName" => part_name = Some(value.into_owned()),
+            b"ContentType" => content_type = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    let (Some(part_name), Some(content_type)) = (part_name, content_type) else {
+        return Ok(());
+    };
+    for kind in [OfficeKind::Docx, OfficeKind::Xlsx, OfficeKind::Pptx] {
+        let expected_part = format!("/{}", kind.marker());
+        if part_name == expected_part
+            && content_type == kind.main_content_type()
+            && entries.iter().any(|entry| entry.name == kind.marker())
+        {
+            kinds.push(kind);
+        }
+    }
+    Ok(())
 }
 
 fn validate_entry_name(name: &str) -> Result<(), ValidationIssue> {
@@ -465,24 +773,30 @@ fn validate_archive<R: Read + std::io::Seek>(
     if archive.len() > MAX_ENTRIES {
         return Err(ReadIssue::Expansion(ENTRY_COUNT_LIMIT));
     }
-    let mut total = 0_u64;
+    let mut decoded_total = 0_u64;
+    let mut names = HashSet::with_capacity(archive.len());
     let mut has_content_types = false;
     let mut has_marker = false;
     for index in 0..archive.len() {
         let file = archive.by_index_raw(index).map_err(|_| ReadIssue::Failed)?;
         let name = file.name();
         validate_entry_name(name).map_err(|_| ReadIssue::Failed)?;
+        if !names.insert(String::from(name)) {
+            return Err(ReadIssue::Failed);
+        }
         if recursive_container_name(name) || is_symlink(file.unix_mode()) || file.encrypted() {
             return Err(ReadIssue::Failed);
         }
-        if file.size() > MAX_ENTRY_BYTES {
-            return Err(ReadIssue::Expansion(DECOMPRESSED_SIZE_LIMIT));
-        }
-        total = total
-            .checked_add(file.size())
-            .ok_or(ReadIssue::Expansion(DECOMPRESSED_SIZE_LIMIT))?;
-        if total > MAX_TOTAL_EXPANDED_BYTES {
-            return Err(ReadIssue::Expansion(DECOMPRESSED_SIZE_LIMIT));
+        if decoded_entry_name(name) {
+            if file.size() > MAX_ENTRY_BYTES {
+                return Err(ReadIssue::Expansion(DECOMPRESSED_SIZE_LIMIT));
+            }
+            decoded_total = decoded_total
+                .checked_add(file.size())
+                .ok_or(ReadIssue::Expansion(DECOMPRESSED_SIZE_LIMIT))?;
+            if decoded_total > MAX_TOTAL_EXPANDED_BYTES {
+                return Err(ReadIssue::Expansion(DECOMPRESSED_SIZE_LIMIT));
+            }
         }
         has_content_types |= name == CONTENT_TYPES;
         has_marker |= name == kind.marker();
@@ -574,12 +888,19 @@ fn extract_xml_text(bytes: &[u8]) -> Result<String, XmlIssue> {
     let mut output = String::new();
     let mut element_depth = 0_usize;
     let mut text_depth = 0_usize;
+    let mut saw_root = false;
     loop {
         match reader
             .read_event_into(&mut buffer)
             .map_err(|_| XmlIssue::Malformed)?
         {
             Event::Start(start) => {
+                if element_depth == 0 {
+                    if saw_root {
+                        return Err(XmlIssue::Malformed);
+                    }
+                    saw_root = true;
+                }
                 element_depth = element_depth.checked_add(1).ok_or(XmlIssue::Malformed)?;
                 if local_name(start.name().as_ref()) == b"t" {
                     text_depth = text_depth.checked_add(1).ok_or(XmlIssue::Malformed)?;
@@ -596,6 +917,12 @@ fn extract_xml_text(bytes: &[u8]) -> Result<String, XmlIssue> {
                 }
             }
             Event::Empty(empty) => {
+                if element_depth == 0 {
+                    if saw_root {
+                        return Err(XmlIssue::Malformed);
+                    }
+                    saw_root = true;
+                }
                 let qualified_name = empty.name();
                 let name = local_name(qualified_name.as_ref());
                 if name == b"tab" {
@@ -621,7 +948,7 @@ fn extract_xml_text(bytes: &[u8]) -> Result<String, XmlIssue> {
                 append_xml_text(&mut output, value)?;
             }
             Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
-            Event::Eof if element_depth == 0 && text_depth == 0 => break,
+            Event::Eof if saw_root && element_depth == 0 && text_depth == 0 => break,
             Event::Eof => return Err(XmlIssue::Malformed),
             _ => {}
         }

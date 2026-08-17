@@ -165,8 +165,35 @@ async fn locked_docx_is_terminal_without_a_password_channel() -> Result<(), Box<
 }
 
 #[tokio::test]
+async fn macro_enabled_docx_is_not_accepted_as_macro_free_docx() -> Result<(), Box<dyn Error>> {
+    assert_malformed(OfficeFixture::macro_enabled_docx()?).await
+}
+
+#[tokio::test]
+async fn package_with_docx_and_xlsx_main_parts_is_ambiguous() -> Result<(), Box<dyn Error>> {
+    let source = OfficeFixture::mixed_docx_xlsx()?.into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Ambiguous);
+    Ok(())
+}
+
+#[tokio::test]
 async fn zip_slip_shaped_entry_is_a_typed_malformed_inspection() -> Result<(), Box<dyn Error>> {
     assert_malformed(OfficeFixture::zip_slip_docx()?).await
+}
+
+#[tokio::test]
+async fn recognized_zip_slip_docx_with_generic_declaration_remains_malformed()
+-> Result<(), Box<dyn Error>> {
+    let fixture = OfficeFixture::zip_slip_docx()?;
+    let expected_reason = fixture.expected_reason()?;
+    let source = fixture.into_unknown_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
+    assert_eq!(malformed_reason(&inspection)?, expected_reason);
+    Ok(())
 }
 
 #[tokio::test]
@@ -183,6 +210,12 @@ async fn recursive_office_container_is_a_typed_malformed_inspection() -> Result<
 #[tokio::test]
 async fn compressed_expansion_bomb_is_a_typed_bounded_failure() -> Result<(), Box<dyn Error>> {
     assert_malformed(OfficeFixture::expansion_bomb_docx()?).await
+}
+
+#[tokio::test]
+async fn large_opaque_office_part_does_not_consume_xml_expansion_budget()
+-> Result<(), Box<dyn Error>> {
+    assert_valid_text(OfficeFixture::large_opaque_part_docx()?).await
 }
 
 #[tokio::test]
@@ -203,6 +236,42 @@ async fn malformed_part_xml_fails_without_partial_output() -> Result<(), Box<dyn
 
     assert_eq!(result, Err(FileMediaFailure::ProcessorFailed));
     Ok(())
+}
+
+#[tokio::test]
+async fn empty_part_xml_fails_without_partial_output() -> Result<(), Box<dyn Error>> {
+    let source = OfficeFixture::empty_xml_docx()?.into_source()?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "text",
+        serde_json::json!({}),
+    )
+    .await;
+
+    assert_eq!(result, Err(FileMediaFailure::ProcessorFailed));
+    Ok(())
+}
+
+#[tokio::test]
+async fn multiple_root_part_xml_fails_without_partial_output() -> Result<(), Box<dyn Error>> {
+    let source = OfficeFixture::multiple_roots_docx()?.into_source()?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "text",
+        serde_json::json!({}),
+    )
+    .await;
+
+    assert_eq!(result, Err(FileMediaFailure::ProcessorFailed));
+    Ok(())
+}
+
+#[tokio::test]
+async fn duplicate_office_part_name_is_a_typed_malformed_inspection() -> Result<(), Box<dyn Error>>
+{
+    assert_malformed(OfficeFixture::duplicate_document_part_docx()?).await
 }
 
 #[tokio::test]

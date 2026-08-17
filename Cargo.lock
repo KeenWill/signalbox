@@ -3285,6 +3285,7 @@ dependencies = [
 name = "signalbox-file-media-adapter-office"
 version = "0.0.0"
 dependencies = [
+ "flate2",
  "quick-xml",
  "serde_json",
  "signalbox-file-media-processor-runtime",
