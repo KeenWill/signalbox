@@ -6,10 +6,10 @@
 use std::{cmp, env, error::Error, ffi::OsString, fmt, io, process::ExitCode, time::Duration};
 
 use signalbox_runner::{
-    ArgumentError, ConnectionEnd, DispatchHttpsEndpoint, EnrollmentOutcome, HttpsBroker,
-    ProtocolViolation, RunnerConfiguration, RunnerConfigurationError, RunnerConfigurationPath,
-    RunnerConnection, RunnerConnectionError, RunnerStateError, RunnerStateRoot, ServeOutcome,
-    SocketConnectError, connect_verified,
+    ArgumentError, ConnectionEnd, DispatchHttpsEndpoint, DispatchHttpsError, EnrollmentOutcome,
+    HttpsBroker, ProtocolViolation, RunnerConfiguration, RunnerConfigurationError,
+    RunnerConfigurationPath, RunnerConnection, RunnerConnectionError, RunnerStateError,
+    RunnerStateRoot, ServeOutcome, SocketConnectError, connect_verified,
 };
 use signalbox_runner_wire::{ExecutionErrorKind, SandboxProfile, TerminalResult};
 use signalbox_tools_exec::{ExecArguments, SandboxedCommandRunner, TokioProcessRunner};
@@ -50,6 +50,12 @@ async fn run(
         RunnerConfiguration::read(path.as_path()).map_err(RunnerDaemonError::Configuration)?;
     let mut state =
         RunnerStateRoot::open(configuration.runner_root()).map_err(RunnerDaemonError::State)?;
+    DispatchHttpsEndpoint::reclaim_stale(
+        state
+            .duplicate_directory()
+            .map_err(RunnerDaemonError::EndpointRoot)?,
+    )
+    .map_err(RunnerDaemonError::EndpointReclamation)?;
     // Keep both pinned executable identities live across every connection epoch.
     let execution_programs = TokioProcessRunner::try_new_with_bubblewrap(
         configuration.exec_supervisor_executable(),
@@ -393,6 +399,8 @@ enum RunnerDaemonError {
     Argument(ArgumentError),
     Configuration(RunnerConfigurationError),
     ExecutionPrograms,
+    EndpointRoot(io::Error),
+    EndpointReclamation(DispatchHttpsError),
     State(RunnerStateError),
     Socket(SocketConnectError),
     Connection(RunnerConnectionError),
@@ -407,6 +415,8 @@ impl fmt::Display for RunnerDaemonError {
             Self::Argument(_) => "runner arguments are invalid",
             Self::Configuration(_) => "runner configuration is invalid",
             Self::ExecutionPrograms => "runner execution programs are unavailable",
+            Self::EndpointRoot(_) => "runner HTTPS endpoint root is unavailable",
+            Self::EndpointReclamation(_) => "runner HTTPS endpoint reclamation failed",
             Self::State(_) => "runner durable state is unavailable",
             Self::Socket(_) => "runner socket is unavailable",
             Self::Connection(_) => "runner connection failed",
@@ -422,6 +432,8 @@ impl Error for RunnerDaemonError {
         match self {
             Self::Argument(error) => Some(error),
             Self::Configuration(error) => Some(error),
+            Self::EndpointRoot(error) => Some(error),
+            Self::EndpointReclamation(error) => Some(error),
             Self::State(error) => Some(error),
             Self::Socket(error) => Some(error),
             Self::Connection(error) => Some(error),
