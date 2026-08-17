@@ -316,7 +316,7 @@ class ArchivePlanTests(unittest.TestCase):
 AGREEING_WORKFLOW = """
 jobs:
   postgres-integration-run:
-    runs-on: ubuntu-latest
+    runs-on: signalbox-docker
     strategy:
       matrix: ${{ fromJSON(needs.postgres-integration-build.outputs.matrix) }}
     steps:
@@ -330,7 +330,7 @@ jobs:
           --partition "count:$PARTITION/$PARTITIONS"
           --run-ignored only --no-fail-fast -E "$FILTER"
   postgres-integration-build:
-    runs-on: signalbox
+    runs-on: signalbox-docker
     steps:
       - run: python3 scripts/postgres_integration_suites.py --archive-plan
       - run: python3 scripts/postgres_integration_suites.py --matrix
@@ -697,24 +697,27 @@ class WorkflowAgreementTests(unittest.TestCase):
             [],
         )
 
-    def test_run_job_leaving_hosted_ubuntu_is_reported(self) -> None:
+    def test_run_job_leaving_signalbox_docker_is_reported(self) -> None:
         failures = self.disagreements(
-            AGREEING_WORKFLOW.replace("ubuntu-latest", "windows-latest")
+            AGREEING_WORKFLOW.replace(
+                "  postgres-integration-run:\n    runs-on: signalbox-docker\n",
+                "  postgres-integration-run:\n    runs-on: windows-latest\n",
+            )
         )
 
         self.assertEqual(len(failures), 1)
         self.assertIn("windows-latest", failures[0])
 
-    def test_build_job_leaving_signalbox_is_reported(self) -> None:
+    def test_build_job_leaving_signalbox_docker_is_reported(self) -> None:
         failures = self.disagreements(
             AGREEING_WORKFLOW.replace(
-                "  postgres-integration-build:\n    runs-on: signalbox\n",
+                "  postgres-integration-build:\n    runs-on: signalbox-docker\n",
                 "  postgres-integration-build:\n    runs-on: ubuntu-latest\n",
             )
         )
 
         self.assertEqual(len(failures), 1)
-        self.assertIn("signalbox", failures[0])
+        self.assertIn("signalbox-docker", failures[0])
 
     def test_naming_the_reader_without_running_it_is_not_an_invocation(self) -> None:
         # `echo python3 scripts/…py --matrix` contains the reader and the mode
@@ -883,10 +886,10 @@ class WorkflowAgreementTests(unittest.TestCase):
             [],
         )
 
-    def test_an_integration_job_leaving_ubuntu_is_reported(self) -> None:
+    def test_an_integration_job_leaving_signalbox_docker_is_reported(self) -> None:
         failures = self.disagreements(
             AGREEING_WORKFLOW.replace(
-                "  postgres-integration-run:\n    runs-on: ubuntu-latest\n",
+                "  postgres-integration-run:\n    runs-on: signalbox-docker\n",
                 "  postgres-integration-run:\n    runs-on: macos-latest\n",
             )
         )

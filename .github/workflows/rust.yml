@@ -301,7 +301,7 @@ jobs:
   # checks the sources out and passes `--workspace-remap`.
   postgres-integration-build:
     name: postgres-integration (build)
-    runs-on: signalbox
+    runs-on: signalbox-docker
     # Generous by design: this job now absorbs all five suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
@@ -397,9 +397,11 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # GitHub-hosted Ubuntu runners provide Docker. Each test below starts its own
-  # pinned PostgreSQL container through testcontainers, so the four runner CPUs
-  # can execute isolated tests concurrently without sharing database state.
+  # The dedicated Docker fleet gives each shard an isolated DinD daemon. The
+  # build and run jobs share the same runner image and absolute work-path shape,
+  # which keeps paths embedded in nextest archives valid across their pods.
+  # Each test starts its own pinned PostgreSQL container through testcontainers,
+  # so four test processes can run without sharing database state.
   #
   # The matrix is generated from `.github/postgres-integration-suites.toml`:
   # one runner per shard, so a suite declaring one shard costs one runner and
@@ -417,7 +419,7 @@ jobs:
       postgres-integration
       (${{ matrix.suite }} ${{ matrix.partition }}/${{ matrix.partitions }})
     needs: postgres-integration-build
-    runs-on: ubuntu-latest
+    runs-on: signalbox-docker
     # Measured against the shards rather than guessed. The former three
     # persistence partitions were balanced but had grown to roughly 8m15s each;
     # runner took about eight minutes whole, and signalboxd about five. The
@@ -441,6 +443,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
       - name: Install cargo-nextest
         uses: taiki-e/install-action@b27e114ddbae5cc01df19a22cf70a124d5177567 # v2.86.0

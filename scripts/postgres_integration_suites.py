@@ -121,8 +121,8 @@ WORKSPACE_SELECTORS = ("--workspace", "--all")
 AGGREGATE_JOB = "postgres-integration"
 RUN_JOB = "postgres-integration-run"
 BUILD_JOB = "postgres-integration-build"
-BUILD_RUNNER = "signalbox"
-RUN_RUNNER = "ubuntu-latest"
+BUILD_RUNNER = "signalbox-docker"
+RUN_RUNNER = "signalbox-docker"
 # A step or job that may fail without failing anything above it. The archived
 # run carrying this would let every shard fail while the matrix job reports
 # success and the aggregate's assertion passes.
@@ -788,11 +788,10 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
                 f"take that value from the matrix {MANIFEST} generates"
             )
 
-    # The compile-only build is the expensive part and belongs on the dedicated
-    # Signalbox fleet. The run shards execute untrusted tests with Docker-backed
-    # PostgreSQL, so they remain isolated on GitHub-hosted Ubuntu. Check each job
-    # independently: treating both Linux labels as one set would erase that
-    # security boundary.
+    # The build and run shards must share the dedicated Docker fleet's image and
+    # absolute work-path shape: nextest archives retain paths from compilation,
+    # and every shard needs an isolated Docker daemon for PostgreSQL. Check each
+    # job independently so either half cannot drift to another environment.
     expected_targets = {
         BUILD_JOB: BUILD_RUNNER,
         RUN_JOB: RUN_RUNNER,
