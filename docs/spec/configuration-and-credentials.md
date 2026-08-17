@@ -503,15 +503,15 @@ fail-closed:
   `version = 1` fails startup.
 - At least one `[[adapter_mappings]]` entry is required. Each entry gives one
   exact `model_family`, the build-provided `adapter`, and the non-secret
-  `credential_pool` whose members may authenticate that family. The committed
-  workspace-instruction slice adds the all-or-none
-  `workspace_instruction_transport = "typed_system"` and positive `u32`
-  `workspace_instruction_capacity_bytes` fields owned below; omission of both
-  means unsupported. The pool must name one declared `[[credential_pools]]`
-  entry, and every member of that pool must carry the mapping's adapter.
-  Duplicate families, an adapter this daemon build does not provide, an
-  undeclared pool, and an adapter disagreement between a mapping and its pool
-  are typed startup failures. Nothing is inferred from model spelling.
+  `credential_pool` whose members may authenticate that family. Those three are
+  the whole of the implemented entry: the workspace-instruction capability
+  fields are specified only in their committed-unimplemented block below, since
+  no present parser admits them and an operator writing them here would receive
+  an unknown-field startup failure. The pool must name one declared
+  `[[credential_pools]]` entry, and every member of that pool must carry the
+  mapping's adapter. Duplicate families, an adapter this daemon build does not
+  provide, an undeclared pool, and an adapter disagreement between a mapping and
+  its pool are typed startup failures. Nothing is inferred from model spelling.
 - At least one `[[credential_profiles]]` entry is required. Each exact `name`
   carries the build-provided `adapter` it authenticates, one closed
   `billing_kind` (`api_metered` or `subscription`), and one closed `delivery`
