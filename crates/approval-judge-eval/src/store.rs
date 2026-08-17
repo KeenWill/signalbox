@@ -312,6 +312,8 @@ pub enum CorpusStoreCorruption {
     CaseCountMismatch,
     /// Registration and content digests differ.
     CorpusDigestMismatch,
+    /// The durable replay sequence differs from its stored identity.
+    ReplayDigestMismatch,
     /// A durable case row key differs from the identity in its JSON payload.
     CaseIdMismatch,
     /// The logical key already names different metadata or cases.
@@ -348,6 +350,9 @@ impl fmt::Display for CorpusStoreCorruption {
             }
             Self::CorpusDigestMismatch => {
                 formatter.write_str("registration digest does not match stored cases")
+            }
+            Self::ReplayDigestMismatch => {
+                formatter.write_str("stored replay order does not match its durable digest")
             }
             Self::CaseIdMismatch => {
                 formatter.write_str("stored case identity does not match its row key")

@@ -76,7 +76,9 @@ import is idempotent, while reusing a suite name and version for different
 metadata or cases fails closed. Enumeration returns suite name, author-chosen
 version, corpus format version, digest, case count, and one source descriptor:
 repository identity plus path, database-native, or a blob digest reference with
-byte length and optional instance-local store binding.
+byte length and optional instance-local store binding. Database registrations
+also bind the case-identifier replay sequence with an order-sensitive digest, so
+reordering durable case rows fails closed independently of the logical digest.
 
 A version-one portable manifest names its own format version, suite name, corpus
 version, corpus format version, and tagged case source. Repository sources carry

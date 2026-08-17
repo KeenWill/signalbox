@@ -176,6 +176,7 @@ pub fn load_manifest_corpus(path: impl AsRef<Path>) -> Result<LoadedManifestCorp
 
 /// Computes the version-one logical corpus digest owned by the evaluation spec.
 pub fn corpus_digest(corpus: &ApprovalJudgeCorpus) -> Result<Sha256Digest, ManifestError> {
+    validate_digest_corpus(corpus)?;
     validate_unique_case_ids(&corpus.cases)?;
     let mut cases: Vec<_> = corpus.cases.iter().collect();
     cases.sort_by(|left, right| left.id.as_bytes().cmp(right.id.as_bytes()));
@@ -194,6 +195,7 @@ pub fn corpus_digest(corpus: &ApprovalJudgeCorpus) -> Result<Sha256Digest, Manif
 
 /// Computes canonical per-case integrity in case-identifier order.
 pub fn case_integrity(corpus: &ApprovalJudgeCorpus) -> Result<Vec<CaseIntegrity>, ManifestError> {
+    validate_digest_corpus(corpus)?;
     validate_unique_case_ids(&corpus.cases)?;
     let mut cases: Vec<_> = corpus.cases.iter().collect();
     cases.sort_by(|left, right| left.id.as_bytes().cmp(right.id.as_bytes()));
@@ -281,6 +283,15 @@ fn validate_identity_component(field: &'static str, value: &str) -> Result<(), M
     validate_bounded_text(field, value, MAX_IDENTITY_BYTES)
 }
 
+fn validate_digest_corpus(corpus: &ApprovalJudgeCorpus) -> Result<(), ManifestError> {
+    if corpus.format_version != CORPUS_FORMAT_VERSION {
+        return Err(ManifestError::UnsupportedCorpusVersion {
+            observed: corpus.format_version,
+        });
+    }
+    crate::validate_corpus(corpus).map_err(ManifestError::Corpus)
+}
+
 pub(crate) fn validate_registration_metadata(
     key: &CorpusKey,
     source: &CorpusSourceDescriptor,
@@ -333,13 +344,10 @@ fn validate_blob_store(value: &str) -> Result<(), ManifestError> {
 
 fn portable_relative_path(value: &str) -> Result<PathBuf, ManifestError> {
     let path = Path::new(value);
-    let bytes = value.as_bytes();
-    let has_windows_drive_prefix =
-        bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
     if value.is_empty()
         || value.contains('\\')
-        || has_windows_drive_prefix
         || path.is_absolute()
+        || !value.split('/').all(portable_path_component)
         || path
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
@@ -347,6 +355,25 @@ fn portable_relative_path(value: &str) -> Result<PathBuf, ManifestError> {
         return Err(ManifestError::NonPortablePath(value.to_owned()));
     }
     Ok(path.to_path_buf())
+}
+
+fn portable_path_component(component: &str) -> bool {
+    let has_invalid_character = component
+        .bytes()
+        .any(|byte| matches!(byte, b'<' | b'>' | b':' | b'\"' | b'|' | b'?' | b'*'));
+    let stem = component.split('.').next().unwrap_or_default();
+    let uppercase_stem = stem.to_ascii_uppercase();
+    let is_reserved_device = matches!(uppercase_stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || uppercase_stem.strip_prefix("COM").is_some_and(|suffix| {
+            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        })
+        || uppercase_stem.strip_prefix("LPT").is_some_and(|suffix| {
+            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        });
+    !component.is_empty()
+        && !component.ends_with(['.', ' '])
+        && !has_invalid_character
+        && !is_reserved_device
 }
 
 fn validate_unique_case_ids(cases: &[ApprovalJudgeCase]) -> Result<(), ManifestError> {
@@ -526,8 +553,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CORPUS_MANIFEST_VERSION, CorpusManifest, ManifestCaseSource, decode_manifest,
-        load_manifest_corpus,
+        CORPUS_MANIFEST_VERSION, CorpusManifest, ManifestCaseSource, case_integrity, corpus_digest,
+        decode_manifest, load_manifest_corpus,
     };
     use crate::CorpusSourceDescriptor;
 
@@ -707,6 +734,72 @@ mod tests {
             decode_manifest(&encoded).expect_err("a Windows drive-prefixed path is never portable");
 
         assert!(error.to_string().contains("not a portable relative path"));
+    }
+
+    #[test]
+    fn repository_manifest_rejects_windows_invalid_component_characters() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        manifest["case_source"]["path"] =
+            serde_json::Value::String(String::from("corpora/cases:data.json"));
+        let encoded = serde_json::to_vec(&manifest).expect("the modified manifest serializes");
+
+        let error = decode_manifest(&encoded)
+            .expect_err("a platform-specific component character is rejected");
+
+        assert!(error.to_string().contains("not a portable relative path"));
+    }
+
+    #[test]
+    fn repository_manifest_rejects_windows_reserved_device_names() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        manifest["case_source"]["path"] =
+            serde_json::Value::String(String::from("corpora/CON.json"));
+        let encoded = serde_json::to_vec(&manifest).expect("the modified manifest serializes");
+
+        let error =
+            decode_manifest(&encoded).expect_err("a Windows reserved device component is rejected");
+
+        assert!(error.to_string().contains("not a portable relative path"));
+    }
+
+    #[test]
+    fn repository_manifest_rejects_windows_trailing_component_dots() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        manifest["case_source"]["path"] =
+            serde_json::Value::String(String::from("corpora/cases./data.json"));
+        let encoded = serde_json::to_vec(&manifest).expect("the modified manifest serializes");
+
+        let error = decode_manifest(&encoded)
+            .expect_err("a component with a platform-specific trailing dot is rejected");
+
+        assert!(error.to_string().contains("not a portable relative path"));
+    }
+
+    #[test]
+    fn corpus_digest_rejects_unsupported_corpus_versions() {
+        let mut corpus = crate::decode_corpus(include_bytes!("../corpora/seed-v1.json"))
+            .expect("the seed corpus is valid");
+        corpus.format_version = crate::CORPUS_FORMAT_VERSION + 1;
+
+        let error = corpus_digest(&corpus)
+            .expect_err("the version-one digest helper rejects unsupported content");
+
+        assert!(error.to_string().contains("unsupported"));
+    }
+
+    #[test]
+    fn case_integrity_rejects_unsupported_corpus_versions() {
+        let mut corpus = crate::decode_corpus(include_bytes!("../corpora/seed-v1.json"))
+            .expect("the seed corpus is valid");
+        corpus.format_version = crate::CORPUS_FORMAT_VERSION + 1;
+
+        let error = case_integrity(&corpus)
+            .expect_err("the version-one case helper rejects unsupported content");
+
+        assert!(error.to_string().contains("unsupported"));
     }
 
     fn manifest_source(manifest: &CorpusManifest) -> CorpusSourceDescriptor {

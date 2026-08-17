@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
 use signalbox_persistence::mapping::{
     EvaluationCorpusSourceStorageKind, evaluation_corpus_source_from_str,
     evaluation_corpus_source_to_str,
@@ -46,6 +47,7 @@ impl DatabaseCorpusStore {
         corpus: &ApprovalJudgeCorpus,
     ) -> Result<CorpusRegistration, CorpusStoreError> {
         validate_registration(&registration, corpus)?;
+        let replay_sha256 = replay_digest(corpus)?;
         let case_count = i64::try_from(registration.case_count()).map_err(|_| {
             CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::CaseCountOutOfRange)
         })?;
@@ -57,16 +59,17 @@ impl DatabaseCorpusStore {
         let mut transaction = self.pool.begin().await?;
         let inserted = sqlx::query(
             "INSERT INTO evaluation_corpus (
-                corpus_name, corpus_version, format_version, corpus_digest, case_count,
-                source_kind, source_repository, source_path, source_blob_store,
+                corpus_name, corpus_version, format_version, corpus_digest, replay_digest,
+                case_count, source_kind, source_repository, source_path, source_blob_store,
                 source_blob_digest, source_blob_byte_length
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::numeric)
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::numeric)
              ON CONFLICT (corpus_name, corpus_version) DO NOTHING",
         )
         .bind(&registration.key().name)
         .bind(&registration.key().version)
         .bind(format_version)
         .bind(registration.corpus_sha256().as_bytes().as_slice())
+        .bind(replay_sha256.as_bytes().as_slice())
         .bind(case_count)
         .bind(source_kind)
         .bind(repository)
@@ -121,7 +124,7 @@ impl DatabaseCorpusStore {
         key: &CorpusKey,
     ) -> Result<CorpusRegistration, CorpusStoreError> {
         let row = sqlx::query(
-            "SELECT corpus_name, corpus_version, format_version, corpus_digest, case_count,
+            "SELECT corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
                     source_kind, source_repository, source_path, source_blob_store,
                     source_blob_digest, source_blob_byte_length::text AS source_blob_byte_length
                FROM evaluation_corpus
@@ -139,7 +142,7 @@ impl DatabaseCorpusStore {
 
     async fn enumerate_owned(&self) -> Result<Vec<CorpusRegistration>, CorpusStoreError> {
         let rows = sqlx::query(
-            "SELECT corpus_name, corpus_version, format_version, corpus_digest, case_count,
+            "SELECT corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
                     source_kind, source_repository, source_path, source_blob_store,
                     source_blob_digest, source_blob_byte_length::text AS source_blob_byte_length
                FROM evaluation_corpus
@@ -158,7 +161,7 @@ impl DatabaseCorpusStore {
 
     async fn load_owned(&self, key: &CorpusKey) -> Result<ApprovalJudgeCorpus, CorpusStoreError> {
         let row = sqlx::query(
-            "SELECT corpus_name, corpus_version, format_version, corpus_digest, case_count,
+            "SELECT corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
                     source_kind, source_repository, source_path, source_blob_store,
                     source_blob_digest, source_blob_byte_length::text AS source_blob_byte_length
                FROM evaluation_corpus
@@ -223,6 +226,12 @@ fn validate_registration(
     registration: &CorpusRegistration,
     corpus: &ApprovalJudgeCorpus,
 ) -> Result<(), CorpusStoreError> {
+    if matches!(
+        registration.source(),
+        CorpusSourceDescriptor::BlobReference { .. }
+    ) {
+        return Err(CorpusStoreError::BlobBackendUnavailable);
+    }
     let count = u64::try_from(corpus.cases.len()).map_err(|_| {
         CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::CaseCountOutOfRange)
     })?;
@@ -250,6 +259,24 @@ fn validate_registration(
         ));
     }
     Ok(())
+}
+
+fn replay_digest(corpus: &ApprovalJudgeCorpus) -> Result<Sha256Digest, CorpusStoreError> {
+    const REPLAY_DIGEST_DOMAIN: &[u8] = b"signalbox-eval-corpus-replay-v1\0";
+    let count = u64::try_from(corpus.cases.len()).map_err(|_| {
+        CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::CaseCountOutOfRange)
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(REPLAY_DIGEST_DOMAIN);
+    hasher.update(count.to_be_bytes());
+    for case in &corpus.cases {
+        let length = u64::try_from(case.id.len()).map_err(|_| {
+            CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::CaseCountOutOfRange)
+        })?;
+        hasher.update(length.to_be_bytes());
+        hasher.update(case.id.as_bytes());
+    }
+    Ok(Sha256Digest::from_bytes(hasher.finalize().into()))
 }
 
 type EncodedSource<'a> = (
@@ -298,6 +325,7 @@ struct StoredRegistration {
     key: CorpusKey,
     format_version: u32,
     corpus_sha256: Sha256Digest,
+    replay_sha256: Sha256Digest,
     case_count: u64,
     source: CorpusSourceDescriptor,
 }
@@ -309,6 +337,7 @@ fn decode_registration(
     let version: String = row.try_get("corpus_version")?;
     let format_version: i32 = row.try_get("format_version")?;
     let corpus_digest: Vec<u8> = row.try_get("corpus_digest")?;
+    let replay_digest: Vec<u8> = row.try_get("replay_digest")?;
     let case_count: i64 = row.try_get("case_count")?;
     let source_kind: String = row.try_get("source_kind")?;
     let source = match evaluation_corpus_source_from_str(&source_kind) {
@@ -349,6 +378,7 @@ fn decode_registration(
         key: CorpusKey { name, version },
         format_version,
         corpus_sha256: decode_digest(&corpus_digest)?,
+        replay_sha256: decode_digest(&replay_digest)?,
         case_count,
         source,
     })
@@ -373,6 +403,11 @@ fn registration_from_stored(
     if registration.corpus_sha256() != stored.corpus_sha256 {
         return Err(CorpusStoreError::CorruptRegistration(
             CorpusStoreCorruption::CorpusDigestMismatch,
+        ));
+    }
+    if replay_digest(corpus)? != stored.replay_sha256 {
+        return Err(CorpusStoreError::CorruptRegistration(
+            CorpusStoreCorruption::ReplayDigestMismatch,
         ));
     }
     Ok(registration)

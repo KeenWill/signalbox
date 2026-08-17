@@ -8,8 +8,9 @@
 use std::{error::Error, path::Path};
 
 use signalbox_approval_judge_eval::{
-    ApprovalDisposition, ApprovalJudgeCorpus, CorpusKey, CorpusRegistration, CorpusStore,
-    DatabaseCorpusStore, DiskCorpusStore, score_corpus,
+    ApprovalDisposition, ApprovalJudgeCorpus, CorpusKey, CorpusRegistration,
+    CorpusSourceDescriptor, CorpusStore, DatabaseCorpusStore, DiskCorpusStore, Sha256Digest,
+    score_corpus,
 };
 use signalbox_domain::{
     DirectModelSelection, ModelCallId, ProviderModelIdentity, ResolvedProviderTarget,
@@ -209,6 +210,84 @@ async fn stored_case_identity_must_match_its_row_key() -> Result<(), Box<dyn Err
     Ok(())
 }
 
+#[tokio::test]
+async fn direct_put_rejects_unverified_blob_registration() -> Result<(), Box<dyn Error>> {
+    let disk = DiskCorpusStore::open(seed_manifest_path())?;
+    let registration = disk
+        .enumerate()
+        .await?
+        .into_iter()
+        .next()
+        .expect("the seed store has one registration");
+    let corpus = disk.load(registration.key()).await?;
+    let blob_registration = CorpusRegistration::new(
+        CorpusKey {
+            name: String::from("unverified-blob"),
+            version: String::from("v1"),
+        },
+        CorpusSourceDescriptor::BlobReference {
+            store: None,
+            digest: Sha256Digest::from_bytes([0_u8; 32]),
+            byte_length: 1,
+        },
+        &corpus,
+    )?;
+    let pool = PgPoolOptions::new().connect_lazy("postgres://localhost/signalbox_eval_corpus")?;
+    let database = DatabaseCorpusStore::new(pool);
+
+    let error = database
+        .put(blob_registration, &corpus)
+        .await
+        .expect_err("blob metadata is rejected before database access");
+
+    assert!(error.to_string().contains("no blob corpus backend"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stored_replay_order_must_match_its_durable_digest() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let disk = DiskCorpusStore::open(seed_manifest_path())?;
+    let registration = disk
+        .enumerate()
+        .await?
+        .into_iter()
+        .next()
+        .expect("the seed store has one registration");
+    let database = DatabaseCorpusStore::new(pool.clone());
+    database.import_manifest(seed_manifest_path()).await?;
+    sqlx::query(
+        "UPDATE evaluation_corpus_case
+            SET replay_position = replay_position + 10
+          WHERE corpus_name = $1 AND corpus_version = $2",
+    )
+    .bind(&registration.key().name)
+    .bind(&registration.key().version)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE evaluation_corpus_case
+            SET replay_position = 12 - replay_position
+          WHERE corpus_name = $1 AND corpus_version = $2",
+    )
+    .bind(&registration.key().name)
+    .bind(&registration.key().version)
+    .execute(&pool)
+    .await?;
+
+    let error = database
+        .load(registration.key())
+        .await
+        .expect_err("reordered durable cases fail their replay identity");
+
+    assert!(error.to_string().contains("replay order"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 async fn insert_blob_registration(
     pool: &PgPool,
     corpus_version: &str,
@@ -216,14 +295,16 @@ async fn insert_blob_registration(
     blob_byte_length: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     let corpus_digest = [0_u8; 32];
+    let replay_digest = [0_u8; 32];
     sqlx::query(
         "INSERT INTO evaluation_corpus (
-            corpus_name, corpus_version, format_version, corpus_digest, case_count,
+            corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
             source_kind, source_blob_digest, source_blob_byte_length
-         ) VALUES ('constraint-fixture', $1, 1, $2, 0, 'blob_reference', $3, $4::numeric)",
+         ) VALUES ('constraint-fixture', $1, 1, $2, $3, 0, 'blob_reference', $4, $5::numeric)",
     )
     .bind(corpus_version)
     .bind(corpus_digest.as_slice())
+    .bind(replay_digest.as_slice())
     .bind(blob_digest)
     .bind(blob_byte_length)
     .execute(pool)

@@ -5,6 +5,7 @@ CREATE TABLE evaluation_corpus (
     corpus_version text COLLATE "C" NOT NULL,
     format_version integer NOT NULL,
     corpus_digest bytea NOT NULL,
+    replay_digest bytea NOT NULL,
     case_count bigint NOT NULL,
     source_kind text COLLATE "C" NOT NULL,
     source_repository text,
@@ -24,6 +25,8 @@ CREATE TABLE evaluation_corpus (
         CHECK (format_version > 0),
     CONSTRAINT evaluation_corpus_digest_sha256
         CHECK (octet_length(corpus_digest) = 32),
+    CONSTRAINT evaluation_corpus_replay_digest_sha256
+        CHECK (octet_length(replay_digest) = 32),
     CONSTRAINT evaluation_corpus_case_count_nonnegative
         CHECK (case_count >= 0),
     CONSTRAINT evaluation_corpus_source_kind_closed
