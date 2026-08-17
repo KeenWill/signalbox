@@ -411,9 +411,9 @@ the sweep (INV-007).
   panicked pass is logged and retried by a later hint or sweep; nothing is lost
   because the rows are the queue. A pass about to perform attachment store I/O
   first tries the blob contract's separate attachment-preparation permit without
-  waiting. If none is
-  immediately available, the pass relinquishes its scheduler-pass capacity,
-  ends, and leaves only the durable `Prepared` row for a later sweep. After
+  waiting. If none is immediately available, the pass relinquishes its
+  scheduler-pass capacity, ends, and leaves only the durable `Prepared` row for
+  a later sweep. After
   acquiring a permit, its task remains in flight for per-session deduplication
   but relinquishes the scheduler-pass slot during store I/O; after successful
   verification it reacquires a slot before send authorization and its guarded
