@@ -1241,9 +1241,12 @@ where
                         (Ok(_), RetainedCrashCause::CorrelationMismatch) => {
                             Err(ToolExecutionServiceError::ExecutorCorrelationMismatch)
                         }
-                        (Err(error), _) => {
-                            Err(ToolExecutionServiceError::CrashClassification(error))
-                        }
+                        (
+                            Err(error),
+                            RetainedCrashCause::PriorProcess
+                            | RetainedCrashCause::Executor(_)
+                            | RetainedCrashCause::CorrelationMismatch,
+                        ) => Err(ToolExecutionServiceError::CrashClassification(error)),
                     };
                 }
             }
