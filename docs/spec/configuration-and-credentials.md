@@ -2439,9 +2439,9 @@ credential presence is never consulted (INV-008):
   bullet; it is recorded because it constrains what the implementing child may
   do, and the paragraph below states a requirement on that child rather than
   current behavior. Once workspace-instruction admission exists, every
-  origin-creating acceptance transaction resolves an alias against the live
-  immutable catalog and rejects the origin before freezing it when the target
-  that will actually serve the turn lacks typed-system transport or byte
+  origin-creating acceptance transaction resolves the frozen selection against
+  the live immutable catalog and rejects the origin before freezing it when the
+  target that will actually serve the turn lacks typed-system transport or byte
   capacity for the session's complete retained region. The check belongs to
   origin acceptance as such, not to `SubmitInput`: goal attach, goal resume, and
   scheduler continuation mint accepted origins without a `SubmitInput` call, and

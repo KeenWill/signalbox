@@ -120,9 +120,13 @@ declares the pre-approval admissibility check below — closed inadmissible.
 
 **Committed unimplemented functionality — pre-approval admissibility.** A family
 may declare that a request is inadmissible on evidence available before any
-approval decision, and the instruction family declares two: arguments that do
-not decode to its schema, and a bundle outside the effective eligibility view,
-both specified by
+approval decision, and where a family declares one it takes precedence over the
+ordinary path for the same condition: an argument-schema failure for such a
+family resolves here, request-level and with no attempt, rather than through the
+prepared-attempt `KnownFailed` route that families without the declaration use.
+The two cannot both run, and the declared check is the earlier of them. The
+instruction family declares two: arguments that do not decode to its schema, and
+a bundle outside the effective eligibility view, both specified by
 [workspace instructions](workspace-instructions.md#enumeration-preview-and-admission).
 Such a request resolves before approval through a request-level transition that
 mints no attempt: it records a fourth durable logical resolution,
@@ -603,7 +607,8 @@ scope.
 An interrupt against a tool recovery wait does not reinterpret or erase the
 ambiguous attempt. It materializes exactly one reference-only result per request
 in proposal order: completed or known-failed attempts use `ToolExecutionResult`,
-denials use `ToolDenied`, and the ambiguous request plus any request without an
+denials use `ToolDenied`, requests already resolved `closed_inadmissible` keep
+`ToolInadmissible`, and the ambiguous request plus any request without an
 ordinary result use `ToolClosed`. The turn then terminalizes as
 `ReconciliationRequired` on that prefix-extending frontier, with the exact tool
 attempt as its ambiguity set and the applied-interrupt proof. Logical closure
@@ -676,12 +681,13 @@ manifest must eventually commit or roll back together.
 When at least one request entered execution, the continuation turn attempt
 already entered `Running` during tool authorization. It owns the new `Prepared`
 call without moving backward; send authorization advances only the call to
-`InFlight` and leaves the attempt `Running`. A denial-only batch never
-authorized an effect, so its continuation attempt remains `Prepared` while it
-owns the new `Prepared` call. Reconstitution and the deferred database assertion
-admit `(Running, Prepared)` or `(Prepared, Prepared)` only for a
-continuation-chain attempt whose exact call frontier contains the current
-batch's complete durable result evidence.
+`InFlight` and leaves the attempt `Running`. A batch that authorized no effect
+at all — denials only, inadmissible requests only, or any mixture of the two,
+since neither kind creates an attempt — leaves its continuation attempt
+`Prepared` while it owns the new `Prepared` call. Reconstitution and the
+deferred database assertion admit `(Running, Prepared)` or
+`(Prepared, Prepared)` only for a continuation-chain attempt whose exact call
+frontier contains the current batch's complete durable result evidence.
 
 Those effects commit or roll back together (INV-036). A newly prepared call ends
 the invocation and is reloaded before provider capability preparation,
@@ -704,17 +710,26 @@ and ensure one model-controlled response or chain cannot retain the progressing
 slot indefinitely.
 
 If an applied stop terminalizes before continuation, the same materialization
-algorithm appends results for executed and denied requests, closes every request
-that did not complete ordinary execution as `ToolClosed` in proposal order, then
-appends the proof-bearing terminal marker. The consumed result projection is
-bound to the interrupted turn: reusing this turn's current frontier identity is
-not sufficient, and a projection prepared for another turn cannot terminalize
-this turn with foreign request results even when the yielded source frontier
-matches. A prepared or effect-free crash loss that fails the turn uses that same
-proposal-ordered materialization before `TurnFailed`; the crash-lost
-`KnownFailed` attempt becomes `ToolExecutionResult`, while every other request
-without an ordinary result becomes `ToolClosed`. A request can therefore never
-remain an open logical dependency behind a terminal turn (INV-006).
+algorithm appends results for executed, denied, and already-inadmissible
+requests, closes every remaining request that did not complete ordinary
+execution as `ToolClosed` in proposal order, then appends the proof-bearing
+terminal marker. The consumed result projection is bound to the interrupted
+turn: reusing this turn's current frontier identity is not sufficient, and a
+projection prepared for another turn cannot terminalize this turn with foreign
+request results even when the yielded source frontier matches. A prepared or
+effect-free crash loss that fails the turn uses that same proposal-ordered
+materialization before `TurnFailed`; the crash-lost `KnownFailed` attempt
+becomes `ToolExecutionResult`, while every other request without an ordinary
+result becomes `ToolClosed`. A request can therefore never remain an open
+logical dependency behind a terminal turn (INV-006).
+
+**Committed unimplemented functionality.** A request already resolved
+`closed_inadmissible` is never reclassified by any of these paths. It has a
+durable resolution and a typed reason before the interrupt or crash arrives, and
+because it deliberately has no attempt it would otherwise fall into the
+`ToolClosed` fallback and lose both — reporting a request that was refused on
+its own terms as one the turn ran out of time for. Its result entry is
+`ToolInadmissible` wherever these algorithms name a materialization.
 
 ## Approval waits and restart
 
