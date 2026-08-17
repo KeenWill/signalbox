@@ -23,7 +23,7 @@ use signalbox_persistence::runner_protocol::{
     RunnerConnectionState, RunnerConnectionTransition, RunnerConnectionTransitionEffect,
     RunnerConnectionTransitionOutcome, RunnerEnrollmentAuthority, RunnerEnrollmentDisposition,
     RunnerEnrollmentRequestFailure, RunnerProtocolStore, RunnerProtocolStoreError,
-    RunnerRegistrationRevision,
+    RunnerRegistrationRevision, StoredRunnerWorkspaceRelease,
 };
 use signalbox_runner_wire::{
     Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Directive, DirectiveAction,
@@ -33,13 +33,14 @@ use signalbox_runner_wire::{
     Registered, Rejected, RejectionCode, ReleaseCorrelation, ReleasePhase, ReplacementPending,
     ResultFrame, Resume, Resumed, SandboxProfile, Shutdown, ShutdownReason,
     WorkspaceFailureCorrelation, WorkspaceOperation, WorkspaceReady, WorkspaceRecorded,
-    WorkspaceReleaseRecorded, WorkspaceReleased, advertisement_digest, decode_line, encode_line,
+    WorkspaceRelease, WorkspaceReleaseRecorded, WorkspaceReleased, advertisement_digest,
+    decode_line, encode_line,
 };
 use sqlx::PgPool;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
     net::{UnixStream, unix::OwnedReadHalf, unix::OwnedWriteHalf},
-    sync::{Mutex, watch},
+    sync::{Mutex, OwnedMutexGuard, watch},
     task::{JoinError, JoinSet},
     time::{MissedTickBehavior, interval, timeout},
 };
@@ -341,11 +342,18 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
     ) -> RunnerRegistrationFuture<'_, RunnerConnectionTransitionOutcome>;
 }
 
-/// Durable resume receipt plus any canonical claimed lease to replay.
+/// Durable resume receipt plus any canonical claimed lease or release to replay.
 #[derive(Debug)]
 pub struct RunnerResumeAccepted {
     response: Resumed,
     claimed_lease: Option<RunnerLease>,
+    workspace_release: Option<PendingWorkspaceReleaseReplay>,
+}
+
+#[derive(Debug)]
+struct PendingWorkspaceReleaseReplay {
+    correlation: ReleaseCorrelation,
+    _registration_admission: Option<OwnedMutexGuard<()>>,
 }
 
 impl RunnerResumeAccepted {
@@ -354,7 +362,20 @@ impl RunnerResumeAccepted {
         Self {
             response,
             claimed_lease,
+            workspace_release: None,
         }
+    }
+
+    fn with_workspace_release(
+        mut self,
+        correlation: Option<ReleaseCorrelation>,
+        registration_admission: Option<OwnedMutexGuard<()>>,
+    ) -> Self {
+        self.workspace_release = correlation.map(|correlation| PendingWorkspaceReleaseReplay {
+            correlation,
+            _registration_admission: registration_admission,
+        });
+        self
     }
 
     /// Returns the opened physical connection epoch.
@@ -367,9 +388,15 @@ impl RunnerResumeAccepted {
         self.response.registration_revision
     }
 
-    /// Separates the wire receipt from its optional claimed-lease replay.
-    pub fn into_parts(self) -> (Resumed, Option<RunnerLease>) {
-        (self.response, self.claimed_lease)
+    /// Separates the wire receipt from its optional lease and release replays.
+    fn into_parts(
+        self,
+    ) -> (
+        Resumed,
+        Option<RunnerLease>,
+        Option<PendingWorkspaceReleaseReplay>,
+    ) {
+        (self.response, self.claimed_lease, self.workspace_release)
     }
 }
 
@@ -624,7 +651,7 @@ impl PostgresRunnerRegistrationService {
         &self,
         request: Resume,
     ) -> Result<RunnerResumeAccepted, RunnerRegistrationFailure> {
-        let _admission = self.registration_admission.lock().await;
+        let admission = self.registration_admission.clone().lock_owned().await;
         let correlation = AvailableCorrelation::Enrollment(request.request_id);
         if request.digest_version != DIGEST_VERSION {
             return Err(RunnerRegistrationFailure::new(
@@ -661,7 +688,7 @@ impl PostgresRunnerRegistrationService {
             RunnerId::from_uuid(request.runner_id.into_uuid()),
             RunnerAuthenticationId::from_uuid(request.authentication_id.into_uuid()),
         );
-        let (directives, claimed_correlation) = match resume_operation {
+        let (directives, claimed_correlation, pending_workspace_release) = match resume_operation {
             ResumeOperation::RetainedResult(result) => {
                 let result = RunnerDispatchWireAdapter::result_request(result).map_err(|_| {
                     RunnerRegistrationFailure::new(
@@ -701,6 +728,7 @@ impl PostgresRunnerRegistrationService {
                             code,
                         )
                     })?,
+                    None,
                     None,
                 )
             }
@@ -748,6 +776,7 @@ impl PostgresRunnerRegistrationService {
                         )
                     })?,
                     (action == DirectiveAction::Await).then_some(claimed),
+                    None,
                 )
             }
             ResumeOperation::ReadyWorkspace(workspace_correlation) => {
@@ -765,30 +794,36 @@ impl PostgresRunnerRegistrationService {
                         )
                     })?,
                     None,
+                    None,
                 )
             }
             ResumeOperation::WorkspaceRelease {
                 correlation: release_correlation,
                 phase,
             } => {
-                let action = self
+                let decision = self
                     .workspace_release_resume_action(&release_correlation, phase, identities)
                     .await
                     .map_err(|error| {
                         store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
                     })?;
                 (
-                    workspace_release_directives(&request.inventory, action).map_err(|code| {
-                        RunnerRegistrationFailure::new(
-                            RunnerInboundFrameKind::Resume,
-                            correlation.clone(),
-                            code,
-                        )
-                    })?,
+                    workspace_release_directives(&request.inventory, decision.action).map_err(
+                        |code| {
+                            RunnerRegistrationFailure::new(
+                                RunnerInboundFrameKind::Resume,
+                                correlation.clone(),
+                                code,
+                            )
+                        },
+                    )?,
                     None,
+                    decision
+                        .pending
+                        .map(|pending| (release_correlation, pending)),
                 )
             }
-            ResumeOperation::Empty => (ReconnectDirectives::default(), None),
+            ResumeOperation::Empty => (ReconnectDirectives::default(), None, None),
         };
         let previous_registration_revision = match self
             .store
@@ -870,7 +905,78 @@ impl PostgresRunnerRegistrationService {
             ),
             None => None,
         };
-        Ok(RunnerResumeAccepted::new(response, claimed_lease))
+        let workspace_release = match pending_workspace_release {
+            Some((correlation, pending)) => {
+                let current = match self
+                    .store
+                    .load_workspace_release(pending.session(), pending.placement_revision())
+                    .await
+                {
+                    Ok(current) => current,
+                    Err(error) => {
+                        let failure = store_failure(
+                            RunnerInboundFrameKind::Resume,
+                            AvailableCorrelation::Release(correlation.clone()),
+                            error,
+                        );
+                        self.terminalize_opened_resume_connection(
+                            receipt.enrollment().enrollment(),
+                            connection.epoch(),
+                            RunnerConnectionTransition::TransportClosed,
+                            AvailableCorrelation::Release(correlation),
+                        )
+                        .await?;
+                        return Err(failure);
+                    }
+                };
+                if current != Some(pending) {
+                    let failure = RunnerRegistrationFailure::new(
+                        RunnerInboundFrameKind::Resume,
+                        AvailableCorrelation::Release(correlation.clone()),
+                        RejectionCode::CorrelationMismatch,
+                    );
+                    self.terminalize_opened_resume_connection(
+                        receipt.enrollment().enrollment(),
+                        connection.epoch(),
+                        RunnerConnectionTransition::ProtocolFailure,
+                        AvailableCorrelation::Release(correlation),
+                    )
+                    .await?;
+                    return Err(failure);
+                }
+                Some(correlation)
+            }
+            None => None,
+        };
+        let workspace_release_admission = workspace_release.is_some().then_some(admission);
+        Ok(RunnerResumeAccepted::new(response, claimed_lease)
+            .with_workspace_release(workspace_release, workspace_release_admission))
+    }
+
+    async fn terminalize_opened_resume_connection(
+        &self,
+        enrollment: RunnerEnrollmentId,
+        epoch: RunnerConnectionEpoch,
+        transition: RunnerConnectionTransition,
+        correlation: AvailableCorrelation,
+    ) -> Result<(), RunnerRegistrationFailure> {
+        let effect = self
+            .store
+            .transition_connection_with_effect(enrollment, epoch, transition)
+            .await
+            .map_err(|error| store_failure(RunnerInboundFrameKind::Resume, correlation, error))?;
+        if let RunnerConnectionTransitionEffect::Applied(applied) = effect {
+            log_connection_transition(applied, transition);
+        }
+        self.propagate_pending_connection_losses()
+            .await
+            .map_err(|error| {
+                store_failure(
+                    RunnerInboundFrameKind::Resume,
+                    AvailableCorrelation::None,
+                    error,
+                )
+            })
     }
 
     async fn workspace_release_resume_action(
@@ -878,7 +984,7 @@ impl PostgresRunnerRegistrationService {
         correlation: &ReleaseCorrelation,
         phase: ReleasePhase,
         identities: IssuedRunnerEnrollmentIdentities,
-    ) -> Result<DirectiveAction, RunnerProtocolStoreError> {
+    ) -> Result<WorkspaceReleaseResumeDecision, RunnerProtocolStoreError> {
         let session = SessionId::from_uuid(correlation.session_id.into_uuid());
         let placement_revision =
             RunnerGeneration::try_from_u64(correlation.placement_revision.get()).ok_or(
@@ -887,7 +993,10 @@ impl PostgresRunnerRegistrationService {
         let runner = RunnerId::from_uuid(correlation.runner_id.into_uuid());
         let manifest = WorkspaceManifestId::from_uuid(correlation.manifest_id.into_uuid());
         if runner != identities.runner() {
-            return Ok(DirectiveAction::FailStale);
+            return Ok(WorkspaceReleaseResumeDecision::new(
+                DirectiveAction::FailStale,
+                None,
+            ));
         }
         if let Some(release) = self
             .store
@@ -897,7 +1006,9 @@ impl PostgresRunnerRegistrationService {
             let is_exact = release.runner() == runner
                 && release.manifest_id() == manifest
                 && release.enrollment() == identities.enrollment();
-            return Ok(workspace_release_pending_action(phase, is_exact));
+            let action = workspace_release_pending_action(phase, is_exact);
+            let pending = (action == DirectiveAction::Await).then_some(release);
+            return Ok(WorkspaceReleaseResumeDecision::new(action, pending));
         }
         let recorded = self
             .store
@@ -906,7 +1017,10 @@ impl PostgresRunnerRegistrationService {
         let is_exact = recorded.is_some_and(|recorded| {
             recorded.runner() == runner && recorded.manifest_id() == manifest
         });
-        Ok(workspace_release_recorded_action(phase, is_exact))
+        Ok(WorkspaceReleaseResumeDecision::new(
+            workspace_release_recorded_action(phase, is_exact),
+            None,
+        ))
     }
 
     async fn advertise_durably(
@@ -1179,6 +1293,18 @@ enum ResumeOperation {
         correlation: ReleaseCorrelation,
         phase: ReleasePhase,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WorkspaceReleaseResumeDecision {
+    action: DirectiveAction,
+    pending: Option<StoredRunnerWorkspaceRelease>,
+}
+
+impl WorkspaceReleaseResumeDecision {
+    const fn new(action: DirectiveAction, pending: Option<StoredRunnerWorkspaceRelease>) -> Self {
+        Self { action, pending }
+    }
 }
 
 fn classify_resume_inventory(
@@ -2337,7 +2463,7 @@ where
                     let attachment = broker
                         .attach(connection_address(context)?)
                         .map_err(RunnerProtocolRuntimeError::Broker)?;
-                    let (response, claimed_lease) = accepted.into_parts();
+                    let (response, claimed_lease, workspace_release) = accepted.into_parts();
                     if let Err(error) =
                         write_message(&mut writer, Message::Resumed(Box::new(response))).await
                     {
@@ -2372,6 +2498,33 @@ where
                             return Ok(());
                         }
                         write_message(&mut writer, dispatch).await?;
+                    }
+                    if let Some(workspace_release) = workspace_release {
+                        if !transition_is_current(
+                            &service,
+                            context,
+                            RunnerConnectionTransition::Observe,
+                        )
+                        .await?
+                        {
+                            return Ok(());
+                        }
+                        if let Err(error) = write_message(
+                            &mut writer,
+                            Message::WorkspaceRelease(WorkspaceRelease {
+                                correlation: workspace_release.correlation,
+                            }),
+                        )
+                        .await
+                        {
+                            transition_is_current(
+                                &service,
+                                context,
+                                RunnerConnectionTransition::TransportClosed,
+                            )
+                            .await?;
+                            return Err(error);
+                        }
                     }
                     (context, attachment)
                 }
@@ -3690,6 +3843,57 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct WorkspaceReleaseResumeService {
+        response: Resumed,
+        correlation: ReleaseCorrelation,
+        lifecycle: PostgresRunnerRegistrationService,
+    }
+
+    impl RunnerRegistrationService for WorkspaceReleaseResumeService {
+        fn enroll(
+            &self,
+            request: Enroll,
+        ) -> RunnerRegistrationFuture<'_, RunnerEnrollmentAccepted> {
+            Box::pin(std::future::ready(Err(RunnerRegistrationFailure::enroll(
+                AvailableCorrelation::Enrollment(request.request_id),
+                RejectionCode::Unavailable,
+            ))))
+        }
+
+        fn resume(&self, _request: Resume) -> RunnerRegistrationFuture<'_, RunnerResumeAccepted> {
+            Box::pin(std::future::ready(Ok(RunnerResumeAccepted::new(
+                self.response.clone(),
+                None,
+            )
+            .with_workspace_release(Some(self.correlation.clone()), None))))
+        }
+
+        fn advertise(
+            &self,
+            _connection_enrollment: CanonicalUuid,
+            request: Advertise,
+            _epoch: PositiveU64,
+        ) -> RunnerRegistrationFuture<'_, Registered> {
+            Box::pin(std::future::ready(Err(
+                RunnerRegistrationFailure::advertise(
+                    AvailableCorrelation::Registration(request.registration_revision),
+                    RejectionCode::Unavailable,
+                ),
+            )))
+        }
+
+        fn transition_connection(
+            &self,
+            enrollment: CanonicalUuid,
+            epoch: PositiveU64,
+            transition: RunnerConnectionTransition,
+        ) -> RunnerRegistrationFuture<'_, RunnerConnectionTransitionOutcome> {
+            self.lifecycle
+                .transition_connection(enrollment, epoch, transition)
+        }
+    }
+
     fn identity(value: u128) -> CanonicalUuid {
         CanonicalUuid::from_uuid(uuid::Uuid::from_u128(value))
     }
@@ -5002,6 +5206,97 @@ mod tests {
 
         served.expect("the closed runner connection completes");
         assert_eq!(observed, Message::Enrolled(response));
+    }
+
+    /// INV-024: an accepted release reconnect receives its resume receipt
+    /// before the exact canonical workspace-release redelivery.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn inv024_accepted_release_resume_redelivers_after_the_receipt() {
+        let (_container, _database_url, store) = postgres_store().await;
+        let lifecycle = PostgresRunnerRegistrationService::new(store, []);
+        let advertisement = empty_advertisement();
+        let enrolled = lifecycle
+            .enroll(Enroll {
+                request_id: identity(1),
+                digest_version: DIGEST_VERSION,
+                advertisement: advertisement.clone(),
+            })
+            .await
+            .expect("the fixture runner enrolls before reconnecting");
+        let opened = lifecycle
+            .resume(Resume {
+                request_id: enrolled.request_id(),
+                digest_version: DIGEST_VERSION,
+                enrollment_id: enrolled.enrollment_id(),
+                runner_id: enrolled.runner_id(),
+                authentication_id: enrolled.authentication_id(),
+                advertisement: advertisement.clone(),
+                prior_registration_revision: enrolled.registration_revision(),
+                inventory: ReconnectInventory::default(),
+            })
+            .await
+            .expect("the fixture successor epoch opens durably");
+        let mut correlation = workspace_released().correlation;
+        correlation.runner_id = enrolled.runner_id();
+        let inventory = ReconnectInventory {
+            workspace_operation: Some(WorkspaceOperation::Release {
+                correlation: correlation.clone(),
+                phase: ReleasePhase::ReleaseAccepted,
+            }),
+            ..ReconnectInventory::default()
+        };
+        let response = Resumed {
+            registration_revision: opened.registration_revision(),
+            connection_epoch: opened.connection_epoch(),
+            directives: workspace_release_directives(&inventory, DirectiveAction::Await)
+                .expect("the accepted release inventory admits its await directive"),
+        };
+        let service = WorkspaceReleaseResumeService {
+            response: response.clone(),
+            correlation: correlation.clone(),
+            lifecycle,
+        };
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let served = serve_connection(server, service, shutdown);
+        let runner = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::Resume(Box::new(Resume {
+                    request_id: enrolled.request_id(),
+                    digest_version: DIGEST_VERSION,
+                    enrollment_id: enrolled.enrollment_id(),
+                    runner_id: enrolled.runner_id(),
+                    authentication_id: enrolled.authentication_id(),
+                    advertisement,
+                    prior_registration_revision: response.registration_revision,
+                    inventory,
+                })),
+            )
+            .await
+            .expect("the accepted release reconnect is sent");
+            let receipt = read_frame(&mut reader)
+                .await
+                .expect("the resume receipt is received")
+                .message;
+            let release = read_frame(&mut reader)
+                .await
+                .expect("the workspace release is redelivered")
+                .message;
+            (receipt, release)
+        };
+
+        let (served, (receipt, release)) = tokio::join!(served, runner);
+
+        served.expect("the accepted release connection closes cleanly");
+        assert_eq!(receipt, Message::Resumed(Box::new(response)));
+        assert_eq!(
+            release,
+            Message::WorkspaceRelease(WorkspaceRelease { correlation })
+        );
     }
 
     #[tokio::test]
