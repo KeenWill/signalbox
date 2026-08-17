@@ -683,6 +683,22 @@ where
                 }
                 let (receipt, pending_message) = if defer_registration {
                     let first = receive_message(&mut io).await?;
+                    if let Message::Shutdown(shutdown) = &first
+                        && shutdown.reason == ShutdownReason::DaemonShutdown
+                        && shutdown.connection_epoch == resumed.connection_epoch
+                    {
+                        return Ok(Self {
+                            io,
+                            receipt,
+                            advertisement: advertisement.clone(),
+                            pending_message: Some(first),
+                            outcome: EnrollmentOutcome::Resumed,
+                            connection_epoch: resumed.connection_epoch,
+                            heartbeat: None,
+                            claimed_capability: None,
+                            pending_offer: None,
+                        });
+                    }
                     let (recorded, pending_message) = match first {
                         Message::WorkspaceRecorded(recorded) => (recorded, None),
                         Message::Rejected(rejected) => return Err(rejected_error(rejected)),
@@ -3311,6 +3327,70 @@ mod tests {
             .expect("the retained fixture remains enrolled");
 
         assert!(matches!(failed, RunnerConnectionError::PeerClosed));
+        assert_eq!(ready, Message::WorkspaceReady(expected_ready.clone()));
+        assert_eq!(
+            receipt.registration_revision(),
+            positive(INITIAL_REGISTRATION_REVISION)
+        );
+        assert_eq!(state.reconnect_inventory(), &retained);
+        assert_eq!(state.retained_workspace_ready(), Some(&expected_ready));
+    }
+
+    #[tokio::test]
+    async fn s32_daemon_shutdown_while_awaiting_ready_ack_is_consumed_cleanly() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_workspace_ready(&parent);
+        let retained = state.reconnect_inventory().clone();
+        let expected_ready = workspace_ready();
+        let advertisement = empty_advertisement();
+        let resumed_revision = positive(INITIAL_REGISTRATION_REVISION + 1);
+        let connection_epoch = positive(CONNECTION_EPOCH);
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("daemon shutdown completes the pending establishment boundary");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the pending daemon shutdown is consumed")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: resumed_revision,
+                    connection_epoch,
+                    directives: retained_workspace_directives(DirectiveAction::Resend),
+                })),
+            )
+            .await;
+            let ready = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Shutdown(Shutdown {
+                    connection_epoch,
+                    reason: ShutdownReason::DaemonShutdown,
+                }),
+            )
+            .await;
+            ready
+        };
+        let (outcome, ready) = tokio::join!(runner, hub);
+        let receipt = state
+            .state()
+            .receipt()
+            .expect("the prior registration remains durable");
+
+        assert_eq!(
+            outcome,
+            Some(ServeOutcome::ConnectionEnded(
+                ConnectionEnd::DaemonShutdown { connection_epoch }
+            ))
+        );
         assert_eq!(ready, Message::WorkspaceReady(expected_ready.clone()));
         assert_eq!(
             receipt.registration_revision(),
