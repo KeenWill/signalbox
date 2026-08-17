@@ -1562,6 +1562,7 @@ fn remaining_interrupt_grace(grace: Duration, deadline: tokio::time::Instant) ->
 /// so a leader stuck in uninterruptible kernel I/O cannot hang the exchange
 /// past its deadline. On timeout the child is left for its drop guard, which
 /// re-signals the group, rather than blocking indefinitely.
+// numeric-bound: ceiling - protects exchange latency from an uninterruptible child
 const POST_KILL_REAP_BOUND: Duration = Duration::from_secs(5);
 
 async fn force_kill(child: &mut SupervisedChild) {

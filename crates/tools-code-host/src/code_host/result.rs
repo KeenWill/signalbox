@@ -8,9 +8,13 @@ use serde_json::{Value, json};
 
 use super::arguments::{CodeHostFilePath, valid_opaque_id, valid_revision};
 
+// numeric-bound: tunable - controls retained code-host result text
 pub(super) const MAX_RESULT_TEXT_BYTES: usize = 64 * 1024;
+// numeric-bound: tunable - the result URL length this tool advertises accepting
 const MAX_RESULT_URL_BYTES: usize = 8 * 1024;
+// numeric-bound: tunable - controls retained paginated result items
 pub(super) const MAX_RESULT_ITEMS: usize = 100;
+// numeric-bound: ceiling - protects tool transport memory from encoded results
 pub(super) const MAX_ENCODED_RESULT_BYTES: usize = 512 * 1024;
 
 /// Whether a bounded code-host result exhausted its source.
