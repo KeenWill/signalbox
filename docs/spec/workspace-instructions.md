@@ -509,27 +509,31 @@ would leave U+000D inside heading text and defeat fence-close recognition. It
 recognizes only ATX headings: zero through three leading ASCII spaces, one
 through six `#` bytes, then end of line or one ASCII space or tab. The returned
 heading records are in source order and contain the one-based line number,
-level, and heading text cleaned in this exact order: remove leading spaces or
-tabs, then remove trailing spaces or tabs, then remove an optional closing run
-of `#` bytes preceded by at least one space or tab, then remove the spaces or
-tabs that preceded that run. Order is specified because it is observable —
-`# foo ###   ` yields `foo`, whereas stripping the run before the trailing
-whitespace would leave `foo ` — and two different strings change the canonical
-preview JSON and can move the heading cutoff. A closing run not preceded by
-whitespace is heading text, not a closing run, and is kept. A heading text
-longer than 512 UTF-8 bytes is shortened to the unique longest UTF-8 prefix
-whose byte length does not exceed 512, by the same rule descriptions use, and
-reports its full byte length and truncation boundary. Setext headings, headings
-inside fenced blocks, and other Markdown constructs are not interpreted. Fence
-recognition uses this version-one state machine over the normalized lines.
-Outside a fence, zero through three leading ASCII spaces followed by at least
-three identical backticks or tildes opens a fence. The remainder of a backtick
-opener must contain no backtick; the remainder of a tilde opener is ignored.
-State retains the marker byte and opening run length. Inside a fence, only zero
-through three leading ASCII spaces, a run of the retained marker at least as
-long as the opener, and then only ASCII spaces or tabs closes it. Every other
-line remains fenced. EOF does not close an unmatched fence, so all later
-apparent headings remain excluded.
+level, and heading text cleaned from the content after the opening run and its
+separator, in this exact order: remove trailing spaces or tabs; then, if what
+remains is entirely a run of `#` bytes or ends in a run of `#` bytes immediately
+preceded by a space or tab, remove that run together with the spaces or tabs
+immediately before it; then remove leading spaces or tabs. Order is specified
+because it is observable — `# foo ###   ` yields `foo`, whereas stripping the
+run before the trailing whitespace would leave `foo ` — and two different
+strings change the canonical preview JSON and can move the heading cutoff.
+Leading whitespace is removed last for the same reason: it is part of the
+evidence that a trailing run is a closing run, so `#  ###` yields an empty
+heading rather than the text `###`, which is what stripping it first would have
+produced. Outside those two shapes a run of `#` bytes is heading text, not a
+closing run, and is kept. A heading text longer than 512 UTF-8 bytes is
+shortened to the unique longest UTF-8 prefix whose byte length does not exceed
+512, by the same rule descriptions use, and reports its full byte length and
+truncation boundary. Setext headings, headings inside fenced blocks, and other
+Markdown constructs are not interpreted. Fence recognition uses this version-one
+state machine over the normalized lines. Outside a fence, zero through three
+leading ASCII spaces followed by at least three identical backticks or tildes
+opens a fence. The remainder of a backtick opener must contain no backtick; the
+remainder of a tilde opener is ignored. State retains the marker byte and
+opening run length. Inside a fence, only zero through three leading ASCII
+spaces, a run of the retained marker at least as long as the opener, and then
+only ASCII spaces or tabs closes it. Every other line remains fenced. EOF does
+not close an unmatched fence, so all later apparent headings remain excluded.
 
 Preview returns at most 128 heading records and at most 65,536 encoded result
 bytes using the compact canonical JSON rules of `instructions_list`. It stops
