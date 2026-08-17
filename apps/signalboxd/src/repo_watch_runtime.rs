@@ -873,23 +873,22 @@ impl RepositoryWatchTask {
             outcome_code.map(str::to_owned),
         )
         .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
-        match self
-            .webhook_store
-            .record_terminal(pending.key(), &request)
-            .await
-        {
-            Ok(_) => Ok(()),
-            // A commit whose result was lost in transit may already be durable,
-            // and the delivery would then never be loaded again. Re-recording
-            // the exact same request resolves which happened: it reports the
-            // row already terminal, or records it now.
-            Err(RepoWatchWebhookStoreError::CommitAmbiguous(_)) => self
+        loop {
+            match self
                 .webhook_store
                 .record_terminal(pending.key(), &request)
                 .await
-                .map(|_| ())
-                .map_err(|_| RepositoryWatchAttemptError::Persistence),
-            Err(_) => Err(RepositoryWatchAttemptError::Persistence),
+            {
+                Ok(_) => return Ok(()),
+                // A commit whose result was lost in transit may already be
+                // durable, and the delivery would then never be loaded again.
+                // Re-record the exact same request until PostgreSQL returns a
+                // definitive outcome: either the row is already terminal or
+                // this attempt records it. Another lost commit response is
+                // still ambiguous and must not strand the in-memory shadow.
+                Err(RepoWatchWebhookStoreError::CommitAmbiguous(_)) => {}
+                Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
+            }
         }
     }
 

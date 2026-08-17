@@ -541,8 +541,8 @@ async fn admit_webhook(
     }
     let body_digest: [u8; 32] = Sha256::digest(&body).into();
     // The admission owns its own copy, so the received buffer is released before
-    // the persistence await rather than doubling what the budget accounts for
-    // across it.
+    // the persistence await. The budget reserves both representations because
+    // they coexist during this conversion even though no await separates them.
     let exact_body = body.to_vec();
     drop(body);
     let admission = match RepoWatchWebhookAdmission::try_new(
@@ -609,8 +609,18 @@ where
 }
 
 /// How much of the shared body-memory budget one request must reserve.
+///
+/// The received `Bytes` and the admission-owned `Vec` coexist while exact bytes
+/// are copied between them, so both representations count against the hard
+/// aggregate ceiling.
 fn body_budget_granules(bytes: usize) -> u32 {
-    u32::try_from(bytes.div_ceil(WEBHOOK_BODY_BUDGET_GRANULE_BYTES).max(1)).unwrap_or(u32::MAX)
+    u32::try_from(
+        bytes
+            .div_ceil(WEBHOOK_BODY_BUDGET_GRANULE_BYTES)
+            .max(1)
+            .saturating_mul(2),
+    )
+    .unwrap_or(u32::MAX)
 }
 
 const fn rejected_http_status(error: WebhookHttpRejection) -> StatusCode {
@@ -1518,11 +1528,11 @@ mod tests {
     }
 
     #[test]
-    fn body_budget_reserves_one_granule_per_declared_chunk() {
-        assert_eq!(body_budget_granules(0), 1);
-        assert_eq!(body_budget_granules(1), 1);
-        assert_eq!(body_budget_granules(64 * 1024), 1);
-        assert_eq!(body_budget_granules(64 * 1024 + 1), 2);
+    fn body_budget_reserves_both_body_representations() {
+        assert_eq!(body_budget_granules(0), 2);
+        assert_eq!(body_budget_granules(1), 2);
+        assert_eq!(body_budget_granules(64 * 1024), 2);
+        assert_eq!(body_budget_granules(64 * 1024 + 1), 4);
     }
 
     #[test]
