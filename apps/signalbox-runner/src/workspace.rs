@@ -402,6 +402,9 @@ impl RunnerWorkspaceStore {
         )
         .map_err(RunnerWorkspaceError::Io)
         .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        validate_directory(&self.root, SESSIONS_DIRECTORY, &sessions)
+            .map_err(RunnerWorkspaceError::Io)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         validate_directory(&sessions, &session_name, &session)
             .map_err(RunnerWorkspaceError::Io)
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
@@ -1580,6 +1583,33 @@ mod tests {
             })
             .await
             .expect_err("an open session directory cannot publish a repository");
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::Io(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_rechecks_sessions_permissions_before_publish() {
+        let (_parent, state) = fixture_root();
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(&repository_request(), |target| async move {
+                let sessions = target
+                    .path()
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .and_then(std::path::Path::parent)
+                    .expect("the repository fixture has a sessions ancestor");
+                fs::set_permissions(sessions, fs::Permissions::from_mode(OPEN_DIRECTORY_MODE))?;
+                Ok::<Recovery, std::io::Error>(Recovery::Commit {
+                    revision: "2".repeat(40),
+                })
+            })
+            .await
+            .expect_err("an open sessions directory cannot publish a repository");
 
         assert!(matches!(
             failure,
