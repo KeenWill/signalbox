@@ -24,9 +24,9 @@ const SOCKET_FILE: &str = "h";
 /// Sanitized failure while preparing or serving one dispatch-scoped endpoint.
 #[derive(Debug)]
 pub enum DispatchHttpsError {
-    /// The owner-private endpoint directory could not be prepared.
+    /// The effective-user-private endpoint directory could not be prepared.
     Directory(io::Error),
-    /// The supplied runner root was not the owner-private directory contract.
+    /// The supplied runner root was not the effective-user-private directory contract.
     InvalidRoot,
     /// The exact Unix listener could not be bound.
     Bind(io::Error),
@@ -71,7 +71,7 @@ pub struct DispatchHttpsEndpoint {
 }
 
 impl DispatchHttpsEndpoint {
-    /// Binds the endpoint beneath the already-validated owner-private runner root.
+    /// Binds the endpoint beneath the already-validated effective-user-private runner root.
     pub fn bind(root: File, lease_id: CanonicalUuid) -> Result<Self, DispatchHttpsError> {
         let root_metadata = root.metadata().map_err(DispatchHttpsError::Directory)?;
         if !root_metadata.is_dir()
@@ -201,7 +201,7 @@ mod tests {
             .tempdir()
             .expect("the endpoint fixture root is created");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
-            .expect("the endpoint fixture root is owner-private");
+            .expect("the endpoint fixture root is effective-user-private");
         root
     }
 
@@ -262,7 +262,7 @@ mod tests {
         let renamed = parent.path().join("renamed-runner-root");
         fs::create_dir(&original).expect("the endpoint fixture root is created");
         fs::set_permissions(&original, fs::Permissions::from_mode(DIRECTORY_MODE))
-            .expect("the endpoint fixture root is owner-private");
+            .expect("the endpoint fixture root is effective-user-private");
         let root = File::open(&original).expect("the endpoint fixture root descriptor opens");
         fs::rename(&original, &renamed).expect("the endpoint fixture root path is renamed");
 
@@ -279,7 +279,7 @@ mod tests {
         let root_path = parent.path().join("long-component-".repeat(12));
         fs::create_dir(&root_path).expect("the long endpoint fixture root is created");
         fs::set_permissions(&root_path, fs::Permissions::from_mode(DIRECTORY_MODE))
-            .expect("the long endpoint fixture root is owner-private");
+            .expect("the long endpoint fixture root is effective-user-private");
         let root = File::open(&root_path).expect("the long fixture root descriptor opens");
 
         let endpoint =

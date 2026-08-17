@@ -1750,7 +1750,7 @@ proves a TLS tunnel to the checked host; it does not claim visibility into the
 encrypted application protocol.
 
 For every generic exec-family restricted dispatch, the runner creates one
-owner-private Unix socket below its locked state root, pins that exact socket in
+effective-user-private Unix socket below its locked state root, pins that exact socket in
 the sandbox request, and serves accepted namespace-local proxy connections
 through the runner-owned broker under the exec timeout. The host endpoint and
 its directory are removed when execution finishes, broker serving fails, or the
