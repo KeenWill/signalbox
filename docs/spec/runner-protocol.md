@@ -25,6 +25,9 @@ session transcript and frontier mechanics remain owned by
 remain owned by [tool loop](tool-loop.md). Invariant tags cite
 [the invariant test index](../invariants.md).
 
+The connection-loss persistence transaction was verified against this PR
+(`agent/runner-loss-session-transaction`).
+
 The registration-only executable slice is verified through PR #376
 (`agent/runner-daemon`). It adds the dedicated local listener, durable
 idempotent enrollment receipts, exact resume and replacement-advertisement
@@ -1211,15 +1214,17 @@ replacement event; their dedicated command-authorized transactions must
 revalidate, under the runner lock order, that the supplied registration's
 enrollment remains active, its connection remains live, and its revision remains
 enrollment-owned current. Profile replacement remains a placement-local
-operation and revalidates the enrollment and current registration under lock.
-Every appended record advances the current-placement head in the same
-transaction. Reconstitution reads the current record with its exact validated
-registration and tool inventory. The loaded persistence wrapper retains that
-historical registration and its durable revision so a caller can reconcile
-against newer availability without reconstructing or guessing the pinned
-evidence. **Committed unimplemented functionality.** The dedicated
-reconciliation transaction will consume that evidence when it persists
-`RunnerLost`; the generic snapshot writer does not presently install loss.
+operation and revalidates the enrollment and current registration under lock. If
+a live lease predates one or more profile replacements, later loss preserves
+that lease's pinned event as its admission evidence and authenticates the loss
+revision through the uninterrupted profile-only successor chain. Every appended
+record advances the current-placement head in the same transaction.
+Reconstitution reads the current record with its exact validated registration
+and tool inventory. The loaded persistence wrapper retains that historical
+registration and its durable revision so a caller can reconcile against newer
+availability without reconstructing or guessing the pinned evidence. The
+connection-loss propagation transaction consumes that evidence when it persists
+`RunnerLost`; the generic snapshot writer does not install loss.
 
 Runner loss is an application-visible typed session state. A pinned placement
 becomes `RunnerLost`; an unpinned placement whose exact-identity selector names
