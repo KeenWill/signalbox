@@ -550,7 +550,7 @@ impl RunnerStateRoot {
                 });
             }
         };
-        validate_operation_journal_owner(&state, &inventory, ready_workspace.as_ref())?;
+        validate_operation_journal_authority(&state, &inventory, ready_workspace.as_ref())?;
         Ok(Self {
             directory,
             state,
@@ -562,6 +562,12 @@ impl RunnerStateRoot {
     /// Borrows the exact current in-memory copy of fsynced state.
     pub const fn state(&self) -> &RunnerState {
         &self.state
+    }
+
+    /// Duplicates the validated, process-locked root descriptor for one dispatch.
+    #[doc(hidden)]
+    pub fn duplicate_directory(&self) -> io::Result<File> {
+        self.directory.try_clone()
     }
 
     /// Borrows the exact current in-memory copy of the fsynced operation slots.
@@ -1083,7 +1089,7 @@ impl RunnerStateRoot {
     }
 }
 
-fn validate_operation_journal_owner(
+fn validate_operation_journal_authority(
     state: &RunnerState,
     inventory: &ReconnectInventory,
     ready_workspace: Option<&WorkspaceReady>,

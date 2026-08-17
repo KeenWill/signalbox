@@ -8,6 +8,8 @@ use std::{
     io::{self, Read, Write},
     os::unix::ffi::{OsStrExt as _, OsStringExt as _},
     os::unix::fs::{MetadataExt as _, PermissionsExt as _},
+    os::unix::io::AsRawFd as _,
+    rc::Rc,
 };
 
 use rustix::{
@@ -94,6 +96,8 @@ impl PrivateWorkspaceRequest {
 pub enum RunnerWorkspaceError {
     /// A descriptor-relative filesystem operation failed.
     Io(io::Error),
+    /// The private-root request names an unsupported sandbox profile.
+    UnsupportedSandboxProfile,
     /// Existing workspace facts conflict with the requested placement.
     ManifestConflict,
     /// The protected manifest document is malformed or has the wrong identity.
@@ -108,6 +112,9 @@ impl fmt::Display for RunnerWorkspaceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Io(_) => "runner workspace storage failed",
+            Self::UnsupportedSandboxProfile => {
+                "runner private workspace requires the restricted sandbox profile"
+            }
             Self::ManifestConflict => "runner workspace manifest conflicts with the request",
             Self::CorruptManifest => "runner workspace manifest is corrupt",
             Self::ManifestTooLarge => "runner workspace manifest exceeds its byte bound",
@@ -120,7 +127,10 @@ impl Error for RunnerWorkspaceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(source) | Self::CommitAmbiguous(source) => Some(source),
-            Self::ManifestConflict | Self::CorruptManifest | Self::ManifestTooLarge => None,
+            Self::UnsupportedSandboxProfile
+            | Self::ManifestConflict
+            | Self::CorruptManifest
+            | Self::ManifestTooLarge => None,
         }
     }
 }
@@ -141,6 +151,9 @@ impl RunnerWorkspaceStore {
         &self,
         request: &PrivateWorkspaceRequest,
     ) -> Result<ReadyManifest, RunnerWorkspaceError> {
+        if request.sandbox_profile() != SandboxProfile::WorkspaceRestricted {
+            return Err(RunnerWorkspaceError::UnsupportedSandboxProfile);
+        }
         let sessions = open_or_create_directory(&self.root, SESSIONS_DIRECTORY)?;
         let session_name = request.session().to_string();
         let session = open_or_create_directory(&sessions, &session_name)?;
@@ -491,14 +504,37 @@ impl DirectoryIdentity {
 
 enum RemovalStep {
     Inspect {
-        parent_path: Vec<OsString>,
+        parent_path: RemovalPath,
         name: OsString,
     },
     ScanDirectory {
-        path: Vec<OsString>,
+        path: RemovalPath,
         identity: DirectoryIdentity,
         preserve_manifest: bool,
     },
+}
+
+#[derive(Clone, Default)]
+struct RemovalPath(Option<Rc<RemovalPathNode>>);
+
+struct RemovalPathNode {
+    parent: RemovalPath,
+    component: OsString,
+}
+
+impl RemovalPath {
+    fn pushed(&self, component: OsString) -> Self {
+        Self(Some(Rc::new(RemovalPathNode {
+            parent: self.clone(),
+            component,
+        })))
+    }
+
+    fn split_last(&self) -> Option<(&OsStr, &Self)> {
+        self.0
+            .as_deref()
+            .map(|node| (node.component.as_os_str(), &node.parent))
+    }
 }
 
 fn remove_open_directory_tree(
@@ -509,7 +545,7 @@ fn remove_open_directory_tree(
 ) -> Result<(), RunnerWorkspaceError> {
     let identity = DirectoryIdentity::from_file(&directory)?;
     let mut steps = vec![RemovalStep::ScanDirectory {
-        path: Vec::new(),
+        path: RemovalPath::default(),
         identity,
         preserve_manifest,
     }];
@@ -522,10 +558,8 @@ fn remove_open_directory_tree(
                 if FileType::from_raw_mode(status.st_mode) == FileType::Directory {
                     let child = open_removal_directory(&parent_directory, &name)?;
                     let identity = DirectoryIdentity::from_file(&child)?;
-                    let mut path = parent_path;
-                    path.push(name);
                     steps.push(RemovalStep::ScanDirectory {
-                        path,
+                        path: parent_path.pushed(name),
                         identity,
                         preserve_manifest: false,
                     });
@@ -577,26 +611,43 @@ fn remove_open_directory_tree(
     Ok(())
 }
 
-fn open_removal_path(root: &File, path: &[OsString]) -> Result<File, RunnerWorkspaceError> {
+fn open_removal_path(root: &File, path: &RemovalPath) -> Result<File, RunnerWorkspaceError> {
+    let mut reversed = Vec::new();
+    let mut node = path.0.as_deref();
+    while let Some(component) = node {
+        reversed.push(component.component.as_os_str());
+        node = component.parent.0.as_deref();
+    }
     let mut current = root.try_clone().map_err(RunnerWorkspaceError::Io)?;
-    for component in path {
+    for component in reversed.into_iter().rev() {
         current = open_removal_directory(&current, component)?;
     }
     Ok(current)
 }
 
 fn open_removal_directory(parent: &File, name: &OsStr) -> Result<File, RunnerWorkspaceError> {
-    let status = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
-    if FileType::from_raw_mode(status.st_mode) != FileType::Directory
-        || status.st_uid != geteuid().as_raw()
+    let pinned = openat(
+        parent,
+        name,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(rustix_io)?;
+    let pinned = File::from(pinned);
+    let pinned_identity = DirectoryIdentity::from_file(&pinned)?;
+    let metadata = pinned.metadata().map_err(RunnerWorkspaceError::Io)?;
+    if !metadata.is_dir()
+        || metadata.uid() != geteuid().as_raw()
+        || !pinned_identity.names(parent, name)?
     {
         return Err(RunnerWorkspaceError::ManifestConflict);
     }
+    let pinned_path = format!("/proc/self/fd/{}", pinned.as_raw_fd());
     chmodat(
-        parent,
-        name,
+        rustix::fs::CWD,
+        pinned_path.as_str(),
         Mode::RUSR | Mode::WUSR | Mode::XUSR,
-        AtFlags::SYMLINK_NOFOLLOW,
+        AtFlags::empty(),
     )
     .map_err(rustix_io)?;
     let descriptor = openat(
@@ -606,9 +657,10 @@ fn open_removal_directory(parent: &File, name: &OsStr) -> Result<File, RunnerWor
         Mode::empty(),
     )
     .map_err(rustix_io)?;
+    fchmod(&descriptor, Mode::RUSR | Mode::WUSR | Mode::XUSR).map_err(rustix_io)?;
     let directory = File::from(descriptor);
     let identity = DirectoryIdentity::from_file(&directory)?;
-    if !identity.names(parent, name)? {
+    if identity != pinned_identity || !identity.names(parent, name)? {
         return Err(RunnerWorkspaceError::ManifestConflict);
     }
     Ok(directory)
@@ -649,7 +701,7 @@ fn read_manifest(directory: &File) -> Result<WorkspaceManifest, RunnerWorkspaceE
     let descriptor = openat(
         directory,
         MANIFEST_FILE,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map_err(rustix_io)?;
@@ -718,9 +770,7 @@ fn write_manifest(
         let _ = unlinkat(directory, temporary_name.as_str(), AtFlags::empty());
         return Err(rustix_io(error));
     }
-    directory
-        .sync_all()
-        .map_err(RunnerWorkspaceError::CommitAmbiguous)
+    directory.sync_all().map_err(RunnerWorkspaceError::Io)
 }
 
 fn rustix_io(error: rustix::io::Errno) -> RunnerWorkspaceError {
@@ -742,10 +792,7 @@ mod tests {
 
     use crate::{EnrollmentAuthority, EnrollmentReceipt, RunnerStateRoot};
 
-    use super::{
-        DOCUMENT_MODE, MANIFEST_FILE, PrivateWorkspaceRequest, RunnerWorkspaceError,
-        TRASH_DIRECTORY,
-    };
+    use super::{MANIFEST_FILE, PrivateWorkspaceRequest, RunnerWorkspaceError, TRASH_DIRECTORY};
 
     const SESSION: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e1;
     const RUNNER: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e2;
@@ -755,6 +802,7 @@ mod tests {
     const ENROLLMENT: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e4;
     const AUTHENTICATION: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e5;
     const OPEN_DIRECTORY_MODE: u32 = 0o750;
+    const EXPECTED_DOCUMENT_MODE: u32 = 0o600;
     const EXPECTED_RELATIVE_PATH: &str = "sessions/018f6f10-0000-7000-8000-0000000000e1/3/work";
 
     fn fixture_root() -> (TempDir, RunnerStateRoot) {
@@ -842,7 +890,30 @@ mod tests {
         assert!(prepared.manifest.credential_profile.is_none());
         assert!(prepared.manifest.recovery.is_none());
         assert!(placement.join("work").is_dir());
-        assert_eq!(manifest_mode, DOCUMENT_MODE);
+        assert_eq!(manifest_mode, EXPECTED_DOCUMENT_MODE);
+    }
+
+    #[test]
+    fn private_root_rejects_ambient_profile_before_creating_storage() {
+        let (parent, state) = fixture_root();
+        let ambient = PrivateWorkspaceRequest::new(
+            CanonicalUuid::from_uuid(Uuid::from_u128(SESSION)),
+            PositiveU64::try_new(PLACEMENT_REVISION)
+                .expect("the fixture placement revision is positive"),
+            CanonicalUuid::from_uuid(Uuid::from_u128(RUNNER)),
+            SandboxProfile::Ambient,
+        );
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_private_root(&ambient)
+            .expect_err("an ambient private workspace is not admissible");
+
+        assert!(matches!(
+            failure,
+            RunnerWorkspaceError::UnsupportedSandboxProfile
+        ));
+        assert!(!parent.path().join("runner-state").join("sessions").exists());
     }
 
     #[test]

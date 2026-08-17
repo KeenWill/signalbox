@@ -71,7 +71,7 @@ the durable transactions before acknowledgement is re-verified through this PR
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
 contract was re-verified through PR #322 (`agent/docs-discipline`; pinned and
-pinned-loss request mismatches). Owner-private storage of the one retained lease
+pinned-loss request mismatches). Effective-user-private storage of the one retained lease
 and its monotonic fsynced phases is re-verified through this PR
 (`agent/runner-operation-journal`). Matching terminal-result retention and
 atomic acknowledgement clearing are re-verified through this PR
@@ -1697,7 +1697,7 @@ before both the availability probe and dispatch, recreates standard usr-merge
 aliases only when their targets are inside the configured mounts, and derives
 `PATH` only from configured mounts. The proof-only generic exec-family runner
 composes that constructor and advertises `WorkspaceRestricted`. Resource limits
-remain separate work, with first-release resource limits still owner-gated in
+remain separate work, with first-release resource limits still user-gated in
 [open questions](../open-questions.md#identity-credentials-and-resource-governance).
 
 Confinement is defined over that writable root, which need not be a repository.
@@ -1752,7 +1752,7 @@ proves a TLS tunnel to the checked host; it does not claim visibility into the
 encrypted application protocol.
 
 For every generic exec-family restricted dispatch, the runner creates one
-owner-private Unix socket below its locked state root, pins that exact socket in
+effective-user-private Unix socket below its locked state root, pins that exact socket in
 the sandbox request, and serves accepted namespace-local proxy connections
 through the runner-owned broker under the exec timeout. The host endpoint and
 its directory are removed when execution finishes, broker serving fails, or the
@@ -1947,6 +1947,11 @@ persistence transaction implements that staging port.
 authorization, receipt consumption into replacement terminalization, and a
 runner filesystem producer for the initial ready frame remain absent.
 
+**Committed unimplemented functionality.** The repository provisioning, clone,
+and cleanup contract in the following paragraphs remains absent. No present
+runner surface provides it; future implementations must remain compatible with
+these constraints.
+
 `WorkspaceRequirement::RepositoryWorktree` is satisfiable only when the selected
 validated registration advertises `WorkspaceCapability::WorktreePerSession` and
 the repository key resolves in checked runner configuration to a credential-free
@@ -2052,6 +2057,11 @@ absence is not a fifth lifecycle token.
 admission will advance the protected manifest to `active`. No live protocol path
 connects an inbound release to the private-root cleanup adapter, no repository
 cleanup adapter exists, and no startup scanner resumes the accepted journal.
+
+**Committed unimplemented functionality.** The guarded Git invocation contract
+in the following paragraphs remains absent. No present runner surface provides
+repository Git execution; future implementations must preserve these
+constraints.
 
 Every Git invocation, in provisioning and in every Git tool alike, runs with its
 effective configuration forced by the runner rather than validated after the
@@ -2159,6 +2169,11 @@ reach is the structural answer that would retire the class instead of
 enumerating it, and it is recorded as a design question under
 [tool safety](../open-questions.md#tool-safety) rather than settled here.
 
+**Committed unimplemented functionality.** The release, deletion, and startup
+reconciliation contract in the remaining paragraphs of this section remains
+absent. No present runner filesystem adapter or startup scanner provides it;
+future implementations must preserve these constraints.
+
 A daemon release is accepted only for an exact retired placement revision —
 either superseded by replacement or terminal `RunnerAbandoned` — after no live
 lease or unacknowledged result remains. The session itself need not be terminal
@@ -2170,7 +2185,7 @@ workspace manifest. The candidate binds the session, exact retired placement
 revision, cleanup-owning runner, and protected manifest identity. It is not
 cleanup authority: the consuming durable transaction must still authenticate the
 exact retired predecessor against the current placement head, the empty lease
-and result boundary, and the live owner connection. A plain exact directory has
+and result boundary, and the live cleanup-authority connection. A plain exact directory has
 no manifest and produces no candidate.
 
 A release exists only for a workspace the runner itself created: a provisioned
