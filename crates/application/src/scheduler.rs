@@ -40,11 +40,11 @@ use crate::{
 const BASELINE_RECONCILIATION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 // numeric-bound: tunable - controls baseline scheduler nudge backpressure
 const BASELINE_NUDGE_BUFFER_CAPACITY: usize = 1_024;
-// numeric-bound: safety ceiling for concurrent authoritative scheduler passes
 /// Hard safety ceiling for concurrent authoritative scheduler passes.
 ///
 /// This bounds simultaneous provider, tool, and database pressure. Deployment
 /// configuration may lower or pause admission but cannot raise this ceiling.
+// numeric-bound: ceiling - limits concurrent authoritative scheduler passes
 const SCHEDULER_PASS_ADMISSION_HARD_CEILING: usize = 16;
 
 /// Returns the hard safety ceiling for concurrent authoritative passes.
