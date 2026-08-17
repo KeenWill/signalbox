@@ -56,8 +56,8 @@ implementing stack. The following related questions also require owner rulings:
 - **Corpus governance.** Approval corpora follow the identity, admitted storage
   forms, digest, and cross-storage reproducibility contract owned by
   [evaluation system](spec/eval-system.md#corpus-and-expectations). Which
-  admitted storage form this corpus uses remains undecided, together with access,
-  redaction, retention, and deletion rules.
+  admitted storage form this corpus uses remains undecided, together with
+  access, redaction, retention, and deletion rules.
 
 - **Promotion bounds.** The maximum false-allow rate, minimum acceptable
   improvement, minimum labeled case count, required slices, and statistical
