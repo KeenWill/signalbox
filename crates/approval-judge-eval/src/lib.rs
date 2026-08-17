@@ -38,7 +38,7 @@ pub struct ApprovalJudgeCorpus {
 pub struct ApprovalJudgeCase {
     /// Stable logical identity, also used to derive the replay request id.
     pub id: String,
-    /// Exact tool-request and authority context rendered for the judge.
+    /// Tool-request and authority context admitted by the daemon renderer.
     pub request: ApprovalJudgeRequestContext,
     /// Labeled binary-judge disposition.
     pub expected: ApprovalDisposition,
@@ -46,13 +46,13 @@ pub struct ApprovalJudgeCase {
     pub label_provenance: String,
 }
 
-/// The exact request fields and frozen authority context used by replay.
+/// Request fields and frozen authority context used by replay.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalJudgeRequestContext {
     /// Exact tool name.
     pub tool: String,
-    /// Exact provider argument text, whether canonical JSON or undecodable.
+    /// Provider argument text normalized by the daemon request renderer.
     pub arguments: String,
     /// Commissioned goal shown to the judge, when present.
     pub commissioned_goal: Option<String>,
@@ -125,6 +125,11 @@ pub fn decode_corpus(bytes: &[u8]) -> Result<ApprovalJudgeCorpus, CorpusLoadErro
                 id: case.id.clone(),
             });
         }
+        if case.label_provenance.trim().is_empty() {
+            return Err(CorpusLoadError::MissingLabelProvenance {
+                id: case.id.clone(),
+            });
+        }
     }
     Ok(corpus)
 }
@@ -153,6 +158,11 @@ pub enum CorpusLoadError {
         /// Repeated case identity.
         id: String,
     },
+    /// A case does not identify the source of its expected label.
+    MissingLabelProvenance {
+        /// Case without meaningful label provenance.
+        id: String,
+    },
 }
 
 impl fmt::Display for CorpusLoadError {
@@ -174,6 +184,9 @@ impl fmt::Display for CorpusLoadError {
             Self::DuplicateCaseId { id } => {
                 write!(formatter, "corpus case id {id} appears more than once")
             }
+            Self::MissingLabelProvenance { id } => {
+                write!(formatter, "corpus case {id} has no label provenance")
+            }
         }
     }
 }
@@ -185,7 +198,8 @@ impl Error for CorpusLoadError {
             Self::Json(source) => Some(source),
             Self::UnsupportedFormatVersion { .. }
             | Self::EmptyCorpus
-            | Self::DuplicateCaseId { .. } => None,
+            | Self::DuplicateCaseId { .. }
+            | Self::MissingLabelProvenance { .. } => None,
         }
     }
 }
@@ -208,6 +222,11 @@ pub async fn score_corpus(
     for case in &corpus.cases {
         if !case_ids.insert(case.id.as_str()) {
             return Err(ScoreError::DuplicateCaseId {
+                id: case.id.clone(),
+            });
+        }
+        if case.label_provenance.trim().is_empty() {
+            return Err(ScoreError::MissingLabelProvenance {
                 id: case.id.clone(),
             });
         }
@@ -379,6 +398,11 @@ pub enum ScoreError {
         /// Repeated case identity.
         id: String,
     },
+    /// A case does not identify the source of its expected label.
+    MissingLabelProvenance {
+        /// Case without meaningful label provenance.
+        id: String,
+    },
     /// One case failed admission or replay.
     Case {
         /// Logical identity of the failed case.
@@ -394,7 +418,7 @@ impl ScoreError {
     pub fn case_id(&self) -> Option<&str> {
         match self {
             Self::UnsupportedFormatVersion { .. } | Self::EmptyCorpus => None,
-            Self::DuplicateCaseId { id } => Some(id),
+            Self::DuplicateCaseId { id } | Self::MissingLabelProvenance { id } => Some(id),
             Self::Case { case_id, .. } => Some(case_id),
         }
     }
@@ -411,6 +435,9 @@ impl fmt::Display for ScoreError {
             Self::DuplicateCaseId { id } => {
                 write!(formatter, "corpus case id {id} appears more than once")
             }
+            Self::MissingLabelProvenance { id } => {
+                write!(formatter, "corpus case {id} has no label provenance")
+            }
             Self::Case { case_id, source } => write!(
                 formatter,
                 "approval-judge replay failed for case {case_id}: {source}"
@@ -424,7 +451,8 @@ impl Error for ScoreError {
         match self {
             Self::UnsupportedFormatVersion { .. }
             | Self::EmptyCorpus
-            | Self::DuplicateCaseId { .. } => None,
+            | Self::DuplicateCaseId { .. }
+            | Self::MissingLabelProvenance { .. } => None,
             Self::Case { source, .. } => Some(source.as_ref()),
         }
     }
@@ -432,6 +460,7 @@ impl Error for ScoreError {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use signalbox_domain::{
         DirectModelSelection, ModelCallId, ProviderModelIdentity, ResolvedProviderTarget,
     };
@@ -476,8 +505,8 @@ mod tests {
 
         let error = decode_corpus(&encoded).expect_err("a duplicate case id is rejected");
 
-        assert!(error.to_string().contains(&duplicate_id));
-        assert!(error.to_string().contains("appears more than once"));
+        expect![["corpus case id synthetic-read-source-file appears more than once"]]
+            .assert_eq(&error.to_string());
     }
 
     #[tokio::test]
@@ -665,8 +694,36 @@ mod tests {
             .await
             .expect_err("the scoring boundary rejects duplicate case ids");
 
-        assert!(error.to_string().contains(&duplicate_id));
-        assert!(error.to_string().contains("appears more than once"));
+        expect![["corpus case id synthetic-read-source-file appears more than once"]]
+            .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn corpus_case_without_label_provenance_fails_closed() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        corpus.cases[0].label_provenance = String::from(" \t ");
+        let encoded = serde_json::to_vec(&corpus).expect("the provenance fixture serializes");
+
+        let error = decode_corpus(&encoded).expect_err("blank label provenance is rejected");
+
+        expect![["corpus case synthetic-read-source-file has no label provenance"]]
+            .assert_eq(&error.to_string());
+    }
+
+    #[tokio::test]
+    async fn scoring_rejects_directly_constructed_case_without_label_provenance() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let missing_provenance_case_id = corpus.cases[0].id.clone();
+        corpus.cases[0].label_provenance.clear();
+        let (model, binding) = fixture_model([]);
+
+        let error = score_corpus(&model, &binding, &corpus)
+            .await
+            .expect_err("the scoring boundary rejects missing label provenance");
+
+        assert_eq!(error.case_id(), Some(missing_provenance_case_id.as_str()));
     }
 
     #[tokio::test]
