@@ -63,6 +63,8 @@ unborn-branch arm, its canonical manifest digest, and durable readback are
 verified against this PR (`agent/runner-unborn-workspace-recovery`).
 Descriptor-relative private-root publication and exact ready-manifest replay are
 verified against this PR (`agent/runner-workspace-filesystem-producer`).
+Journal-authorized private-root trash publication, deletion, and exact replay
+are verified against this PR (`agent/runner-private-workspace-release`).
 Established-connection routing of those inbound claim and result frames through
 the durable transactions before acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
@@ -1908,11 +1910,11 @@ canonical ready-manifest digest. Reopening the store authenticates and replays
 that same ready manifest instead of creating another root.
 
 **Committed unimplemented functionality.** No live protocol path invokes the
-private-root producer or places its result into the retained ready frame. No
-present runner provisions or deletes a repository workspace, no present daemon
-producer constructs a workspace operation, and startup staging/leak
-reconciliation remains absent. The typed `RecoveryUnavailable` seam therefore
-remains on live workspace operations.
+private-root producer or cleanup adapter, and no path places a produced ready
+manifest into the retained ready frame. No present runner provisions or deletes
+a repository workspace, no present daemon producer constructs a workspace
+operation, and startup staging/leak reconciliation remains absent. The typed
+`RecoveryUnavailable` seam therefore remains on live workspace operations.
 
 The application receipt boundary accepts complete already-validated
 repository-workspace manifest facts without deriving an execution working
@@ -2041,11 +2043,21 @@ records no credential path or value. The same runner state root durably spools
 one unacknowledged terminal result, one unacknowledged workspace release, and
 one unacknowledged operation failure per the serial wire protocol.
 
+The durable state adapter fsyncs one exact `release_accepted` journal fact
+before returning its opaque deletion proof. For a private root, the filesystem
+adapter consumes that proof, authenticates the exact protected manifest,
+advances a `ready` or `active` manifest to `releasing`, atomically publishes the
+placement below `trash/` without replacing an existing entry, fsyncs both
+parents, and deletes by descriptor-relative traversal. A symlink is unlinked as
+an entry and never followed. Cleanup supports at most 256 nested directories
+below the placement and fails closed before descending further. Exact replay
+resumes the authenticated releasing trash entry or accepts the already-absent
+placement as completed deletion; absence is not a fifth lifecycle token.
+
 **Committed unimplemented functionality.** Durable `workspace_recorded`
-admission will advance the protected manifest to `active`; an accepted release
-will advance it to `releasing` before the trash rename; and deletion will be
-represented by absence rather than a fifth lifecycle token. No present
-filesystem adapter supplies those later transitions.
+admission will advance the protected manifest to `active`. No live protocol path
+connects an inbound release to the private-root cleanup adapter, no repository
+cleanup adapter exists, and no startup scanner resumes the accepted journal.
 
 **Committed unimplemented functionality.** The guarded Git invocation contract
 in the following paragraphs remains absent. No present runner surface provides
@@ -2158,10 +2170,12 @@ reach is the structural answer that would retire the class instead of
 enumerating it, and it is recorded as a design question under
 [tool safety](../open-questions.md#tool-safety) rather than settled here.
 
-**Committed unimplemented functionality.** The release, deletion, and startup
-reconciliation contract in the remaining paragraphs of this section remains
-absent. No present runner filesystem adapter or startup scanner provides it;
-future implementations must preserve these constraints.
+**Committed unimplemented functionality.** Live release composition,
+repository cleanup, and startup reconciliation in the remaining paragraphs
+remain absent. No present live protocol path invokes the private-root filesystem
+adapter, no repository cleanup adapter exists, and no startup scanner resumes
+accepted cleanup; future implementations must preserve the remaining
+constraints.
 
 A daemon release is accepted only for an exact retired placement revision —
 either superseded by replacement or terminal `RunnerAbandoned` — after no live
@@ -2212,32 +2226,24 @@ durable record that is redelivered after every restart and that nothing can ever
 clear — the leak this design already accepts, converted into a queue entry that
 outlives it.
 
-For a workspace it did create, the runner journals the release before it does
-anything irreversible, following the same acknowledge-and-journal pattern that
-provisioning and results already use. It first fsyncs a `release_accepted`
-journal entry carrying the complete release correlation below its state root;
-only then does it mark release in the manifest, atomically rename the placement
-below `trash/`, fsync, and delete it by descriptor-relative traversal that
-unlinks symlinks instead of following them. It advances the same entry to
-`release_completed` after the deletion and resends `workspace_released` until
-the daemon durably admits it and replies `workspace_release_recorded`; that
-acknowledgement lets the runner discard the journaled release and free its
-single workspace-operation slot. A crash anywhere in the interval therefore
-resumes from the journal rather than from a manifest the runner may already have
-deleted: `release_accepted` resumes the deletion and then reports,
-`release_completed` resends the correlation, and a daemon restart cannot leave a
-resent release without a boundary — exactly as for a retained result. A release
-whose rename or deletion keeps failing does not hold that journal indefinitely:
-the runner reports the `workspace_cleanup_failed` operation failure above, whose
-`operation_failure_recorded` acknowledgement retires that journaled release
-together with the failure and frees the slot, and the surviving placement is
-reported as a `cleanup_failed` leak. Startup resumes deletion for trash proven
-by a manifest or by a retained release entry, and may remove staging whose
-manifest proves it was never published. It reconciles every ready or active
-manifest with the daemon before execution and reports every unknown,
+The state and filesystem adapters enforce the irreversible boundary locally: the
+accepted journal precedes the private-root trash rename and deletion, the same
+journal can then advance to `release_completed`, and the existing heartbeat and
+acknowledgement adapters retain or clear that exact correlation. Deletion replay
+therefore uses the journal rather than a manifest the runner may already have
+deleted.
+
+**Committed unimplemented functionality.** The live runner does not yet compose
+those adapters for an inbound `workspace_release`, send `workspace_released`
+after cleanup, or translate a cleanup error into `workspace_cleanup_failed`.
+Repository-workspace cleanup also remains absent. When composed, a cleanup
+failure's `operation_failure_recorded` acknowledgement retires the accepted
+release and failure together and frees the slot. Startup will resume deletion
+for trash proven by a manifest or retained release entry, may remove staging
+whose manifest proves it was never published, and will report every unknown,
 retired-but-present, conflicting, or otherwise unreconciled workspace as a typed
-leak. It never silently deletes a reported leak. This startup report is visible
-even when no session can be resumed.
+leak. It will never silently delete a reported leak, and the report remains
+visible even when no session can be resumed.
 
 ## Open edges
 
