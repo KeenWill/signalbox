@@ -2055,9 +2055,10 @@ adapter consumes that proof, authenticates the exact protected manifest,
 advances a `ready` or `active` manifest to `releasing`, atomically publishes the
 placement below `trash/` without replacing an existing entry, fsyncs both
 parents, and deletes by descriptor-relative traversal. A symlink is unlinked as
-an entry and never followed. Exact replay resumes the authenticated releasing
-trash entry or accepts the already-absent placement as completed deletion;
-absence is not a fifth lifecycle token.
+an entry and never followed. Cleanup supports at most 256 nested directories
+below the placement and fails closed before descending further. Exact replay
+resumes the authenticated releasing trash entry or accepts the already-absent
+placement as completed deletion; absence is not a fifth lifecycle token.
 
 **Committed unimplemented functionality.** Durable `workspace_recorded`
 admission will advance the protected manifest to `active`. The top-level runner
@@ -2176,10 +2177,12 @@ reach is the structural answer that would retire the class instead of
 enumerating it, and it is recorded as a design question under
 [tool safety](../open-questions.md#tool-safety) rather than settled here.
 
-**Committed unimplemented functionality.** The release, deletion, and startup
-reconciliation contract in the remaining paragraphs of this section remains
-absent. No present runner filesystem adapter or startup scanner provides it;
-future implementations must preserve these constraints.
+**Committed unimplemented functionality.** Live release composition,
+repository cleanup, and startup reconciliation in the remaining paragraphs
+remain absent. No present live protocol path invokes the private-root filesystem
+adapter, no repository cleanup adapter exists, and no startup scanner resumes
+accepted cleanup; future implementations must preserve the remaining
+constraints.
 
 A daemon release is accepted only for an exact retired placement revision —
 either superseded by replacement or terminal `RunnerAbandoned` — after no live

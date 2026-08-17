@@ -8,7 +8,6 @@ use std::{
     io::{self, Read, Write},
     os::unix::ffi::{OsStrExt as _, OsStringExt as _},
     os::unix::fs::{MetadataExt as _, PermissionsExt as _},
-    os::unix::io::AsRawFd as _,
     rc::Rc,
 };
 
@@ -35,6 +34,7 @@ const MAXIMUM_MANIFEST_BYTES: u64 = 16 * 1024;
 const SESSIONS_DIRECTORY: &str = "sessions";
 const PRIVATE_WORKSPACE_DIRECTORY: &str = "work";
 const REMOVAL_BATCH_SIZE: usize = 64;
+const MAXIMUM_REMOVAL_DEPTH: usize = 256;
 const TRASH_DIRECTORY: &str = "trash";
 
 /// Complete durable facts needed to prepare one repository-free managed root.
@@ -520,14 +520,23 @@ struct RemovalPath(Option<Rc<RemovalPathNode>>);
 struct RemovalPathNode {
     parent: RemovalPath,
     component: OsString,
+    depth: usize,
 }
 
 impl RemovalPath {
-    fn pushed(&self, component: OsString) -> Self {
-        Self(Some(Rc::new(RemovalPathNode {
+    fn pushed(&self, component: OsString) -> Result<Self, RunnerWorkspaceError> {
+        let depth = self.0.as_deref().map_or(1, |node| node.depth + 1);
+        if depth > MAXIMUM_REMOVAL_DEPTH {
+            return Err(RunnerWorkspaceError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "workspace cleanup depth exceeds the supported maximum",
+            )));
+        }
+        Ok(Self(Some(Rc::new(RemovalPathNode {
             parent: self.clone(),
             component,
-        })))
+            depth,
+        }))))
     }
 
     fn split_last(&self) -> Option<(&OsStr, &Self)> {
@@ -559,7 +568,7 @@ fn remove_open_directory_tree(
                     let child = open_removal_directory(&parent_directory, &name)?;
                     let identity = DirectoryIdentity::from_file(&child)?;
                     steps.push(RemovalStep::ScanDirectory {
-                        path: parent_path.pushed(name),
+                        path: parent_path.pushed(name)?,
                         identity,
                         preserve_manifest: false,
                     });
@@ -642,12 +651,11 @@ fn open_removal_directory(parent: &File, name: &OsStr) -> Result<File, RunnerWor
     {
         return Err(RunnerWorkspaceError::ManifestConflict);
     }
-    let pinned_path = format!("/proc/self/fd/{}", pinned.as_raw_fd());
     chmodat(
-        rustix::fs::CWD,
-        pinned_path.as_str(),
+        &pinned,
+        OsStr::new(""),
         Mode::RUSR | Mode::WUSR | Mode::XUSR,
-        AtFlags::empty(),
+        AtFlags::EMPTY_PATH,
     )
     .map_err(rustix_io)?;
     let descriptor = openat(
