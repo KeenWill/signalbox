@@ -69,6 +69,14 @@ const PROCESS_CAPTURE_BYTES_LIMIT: usize = 1024 * 1024;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded direct-command arguments";
 pub(crate) const BWRAP_PROGRAM: &str = "/usr/bin/bwrap";
 const SANDBOX_WORKSPACE: &str = "/workspace";
+#[cfg(target_os = "linux")]
+/// Hard safety ceiling keeping an untrusted workspace marker read bounded well
+/// above Git's single-line administration path.
+const GIT_DIRECTORY_MARKER_MAX_BYTES: u64 = 4 * 1024;
+#[cfg(target_os = "linux")]
+const GIT_DIRECTORY_MARKER_PREFIX: &str = "gitdir: ";
+#[cfg(target_os = "linux")]
+const GIT_ADMINISTRATION_MARKER: &str = ".git";
 const SANDBOX_DISPATCH_PROGRAM: &str = "/signalbox-exec-dispatch";
 const SANDBOX_FALLBACK_PATH: &str = "/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 pub(crate) const SANDBOX_DISPATCH_MARKER: &[u8] = b"signalbox-exec:dispatched\n";
@@ -1155,17 +1163,64 @@ impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner
         let relative_working_directory = ".";
         #[cfg(not(target_os = "linux"))]
         let relative_working_directory = arguments.working_directory.as_str();
-        let request = direct_request(
+        let mut request = direct_request(
             execution_root,
             relative_working_directory,
             &arguments,
             EXEC_CAPTURE_BYTES,
         );
+        #[cfg(target_os = "linux")]
+        let git_administration = pin_sandbox_linked_worktree_administration(
+            &self.workspace_identity,
+            &execution_directory,
+            &arguments.program,
+        );
+        #[cfg(target_os = "linux")]
+        if let Some(administration) = &git_administration {
+            request.environment.insert(
+                OsString::from("GIT_DIR"),
+                administration.bind_source.as_os_str().to_owned(),
+            );
+            request.environment.insert(
+                OsString::from("GIT_WORK_TREE"),
+                execution_directory.bind_source.as_os_str().to_owned(),
+            );
+        }
         process_result(
             ExecutionConfinement::Unsandboxed,
             self.runner.run(request).await,
         )
     }
+}
+
+#[cfg(target_os = "linux")]
+fn pin_sandbox_linked_worktree_administration(
+    workspace: &WorkspaceIdentity,
+    working_directory: &WorkspaceDirectoryIdentity,
+    program: &str,
+) -> Option<WorkspaceDirectoryIdentity> {
+    if Path::new(program).file_name()? != "git" {
+        return None;
+    }
+    let marker_path = working_directory
+        .bind_source
+        .join(GIT_ADMINISTRATION_MARKER);
+    let metadata = std::fs::symlink_metadata(&marker_path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > GIT_DIRECTORY_MARKER_MAX_BYTES {
+        return None;
+    }
+    let marker = std::fs::read_to_string(marker_path).ok()?;
+    let target = marker.strip_prefix(GIT_DIRECTORY_MARKER_PREFIX)?;
+    let target = target.strip_suffix('\n').unwrap_or(target);
+    if target.contains('\r') || target.contains('\n') {
+        return None;
+    }
+    let relative = Path::new(target).strip_prefix(SANDBOX_WORKSPACE).ok()?;
+    let relative = relative.to_str()?;
+    workspace
+        .pin_relative_directory(relative)
+        .and_then(WorkspaceDirectoryIdentity::inherit)
+        .ok()
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -2766,6 +2821,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     const TEST_SANDBOX_BIND_DESCRIPTOR: i32 = 90;
     const TEST_SANDBOX_WORKSPACE_ROOT: &str = "/fixture/workspace";
+    #[cfg(target_os = "linux")]
+    const SANDBOX_LINKED_WORKTREE_DIRECTORY: &str = "linked";
+    #[cfg(target_os = "linux")]
+    const SANDBOX_LINKED_ADMINISTRATION_RELATIVE: &str = ".git/worktrees/linked";
+    #[cfg(target_os = "linux")]
+    const SANDBOX_LINKED_ADMINISTRATION_PATH: &str = "/workspace/.git/worktrees/linked";
     const ISOLATION_FIXTURE_TIMEOUT: Duration = Duration::from_secs(30);
 
     #[cfg(target_os = "linux")]
@@ -3842,6 +3903,60 @@ mod tests {
                 .starts_with(Path::new("/proc/self/fd"))
         );
         assert_ne!(request.working_directory, workspace.path);
+        Ok(())
+    }
+
+    /// A linked worktree created inside the sandbox records its administration
+    /// directory below `/workspace`. Direct Git execution on the host pins the
+    /// corresponding directory below the injected root instead of handing Git
+    /// that sandbox-only absolute path.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unsandboxed_git_pins_a_sandbox_linked_worktree_marker() -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let worktree = workspace.path.join(SANDBOX_LINKED_WORKTREE_DIRECTORY);
+        let administration = workspace.path.join(SANDBOX_LINKED_ADMINISTRATION_RELATIVE);
+        std::fs::create_dir_all(&worktree)?;
+        std::fs::create_dir_all(&administration)?;
+        std::fs::write(
+            worktree.join(GIT_ADMINISTRATION_MARKER),
+            format!("{GIT_DIRECTORY_MARKER_PREFIX}{SANDBOX_LINKED_ADMINISTRATION_PATH}\n"),
+        )?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_process(b"complete"),
+        );
+        let observation = runner.clone();
+        let mut command_runner = UnsandboxedCommandRunner::try_new(runner, &workspace.path)?;
+        let arguments = ExecArguments {
+            program: String::from("/usr/bin/git"),
+            arguments: vec![String::from("status")],
+            working_directory: String::from(SANDBOX_LINKED_WORKTREE_DIRECTORY),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.execute(arguments).await;
+        let requests = observation.recorded_requests();
+        let request = requests
+            .first()
+            .ok_or_else(|| std::io::Error::other("one direct process request"))?;
+        let git_directory = request
+            .environment
+            .get(std::ffi::OsStr::new("GIT_DIR"))
+            .ok_or_else(|| std::io::Error::other("pinned Git administration directory"))?;
+        let git_work_tree = request
+            .environment
+            .get(std::ffi::OsStr::new("GIT_WORK_TREE"))
+            .ok_or_else(|| std::io::Error::other("pinned Git worktree"))?;
+
+        assert_eq!(result.outcome, successful_process(b"complete").outcome);
+        assert!(Path::new(git_directory).starts_with("/proc/self/fd"));
+        assert_ne!(
+            git_directory,
+            std::ffi::OsStr::new(SANDBOX_LINKED_ADMINISTRATION_PATH)
+        );
+        assert_ne!(git_directory, git_work_tree);
+        assert_eq!(Path::new(git_work_tree), request.working_directory);
         Ok(())
     }
 
