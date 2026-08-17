@@ -905,8 +905,15 @@ enum RepoWatchDifferFailure {
 ///
 /// Lets a caller classify a derivation failure without reading `Display` text.
 /// The two carry different operational meaning: event construction indicates a
-/// differ defect on one observation, while an identity-frontier failure recurs
-/// on every later comparison for that repository until the frontier changes.
+/// differ defect on one observation, while an identity-frontier failure is a
+/// property of the frontier the comparison ran against.
+///
+/// An identity-frontier failure is not by itself permanent, and a caller must
+/// not retire a repository on one. `StreamLimit` refuses only a comparison that
+/// introduces a stream the frontier has never counted; streams already counted
+/// keep advancing at the ceiling, so a later observation adding no new stream
+/// succeeds. `SequenceExhausted` is terminal for the single stream that
+/// exhausted it, not for the repository.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchDifferFailureKind {
     /// The differ assembled an event the domain rejects.

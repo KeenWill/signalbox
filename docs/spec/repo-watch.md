@@ -206,27 +206,33 @@ from changing an already-committed batch.
 content identity for a normalized event occurrence. It is a 32-byte SHA-256
 digest whose length-framed input begins with
 `signalbox/repo-watch/event-content-identity/v1`, then includes the repository,
-event version, canonical target and complete event payload, a separately
-domain-separated source-independent stream identity, and the stream's positive
-occurrence sequence. The stream identity is closed by event kind. Recurring PR
-lifecycle, mergeability, head, label, thread, branch-advance, and reaction
-streams name the PR and their kind-specific label, thread, branch, or reaction
-members. Check runs are recurring too, naming their provider run identity and
-completion generation: a completed run edited back to an earlier conclusion
-restates that conclusion's facts exactly, so only an advancing occurrence
-sequence keeps the restored event's identity distinct from the first, and
-without it the commit would coalesce the restored conclusion away rather than
-announce it. Immutable check-suite facts name their provider identity and
-completion generation; reviews name their provider review identity; workflow
-facts name branch, workflow identity, run identity, and attempt. The normalized
-review observation has no submitted-time member, so version one assumes the
-provider review identity alone uniquely identifies that immutable submission.
-The random `RepoWatchEventId` is deliberately excluded from the digest, and so
-is the workflow display name: it is rule-visible payload rather than an
-identifying member, the differ suppresses a re-observed run attempt on members
-the stream identity already names, and a provider can rename a workflow under
-all of them, so hashing the name would mint a new identity for a run that leaves
-the observation and returns after a rename.
+event version, canonical target and the identifying members of the event
+payload, a separately domain-separated source-independent stream identity, and
+the stream's positive occurrence sequence. Identifying is narrower than
+complete: the exclusions below are part of the contract, and a second producer
+deriving this identity excludes exactly the same members, because hashing either
+one derives a different identity for the same fact and defeats the
+cross-producer coalescing this identity exists to enable. The stream identity is
+closed by event kind. Recurring PR lifecycle, mergeability, head, label, thread,
+branch-advance, and reaction streams name the PR and their kind-specific label,
+thread, branch, or reaction members. Check runs are recurring too, naming their
+provider run identity and completion generation: a completed run edited back to
+an earlier conclusion restates that conclusion's facts exactly, so only an
+advancing occurrence sequence keeps the restored event's identity distinct from
+the first, and without it the commit would coalesce the restored conclusion away
+rather than announce it. Immutable check-suite facts name their provider
+identity and completion generation; reviews name their provider review identity;
+workflow facts name branch, workflow identity, run identity, and attempt. The
+normalized review observation has no submitted-time member, so version one
+assumes the provider review identity alone uniquely identifies that immutable
+submission. Two payload members are excluded from the digest, and only these
+two. The random `RepoWatchEventId` is excluded because a re-derivation of one
+occurrence mints a fresh candidate. The workflow display name is excluded
+because it is rule-visible payload rather than an identifying member: the differ
+suppresses a re-observed run attempt on members the stream identity already
+names, and a provider can rename a workflow under all of them, so hashing the
+name would mint a new identity for a run that leaves the observation and returns
+after a rename. Both remain in the event payload that rules read.
 
 **Implemented behavior.** A later equal fact on a recurring stream advances its
 sequence and therefore has a different content identity. Equal normalized facts
