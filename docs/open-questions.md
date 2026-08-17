@@ -76,8 +76,7 @@ implementing stack. The following related questions also require owner rulings:
   whole-population promotion claims.
 
 - **Shadow budget.** The graded shadow sampling fraction, provider-cost ceiling,
-  concurrency, and retention duration remain open. They block production shadow
-  traffic, not the offline dual-subject harness.
+  concurrency, and retention duration for production shadow traffic remain open.
 
 - **Configuration actor audit.** Whether source-control and deployment audit are
   sufficient provenance for threshold changes, or Signalbox needs an
