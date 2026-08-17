@@ -1,6 +1,6 @@
 //! Data-only SVG interpretation inside the supervised file-media worker.
 
-use std::{error::Error, num::NonZeroU64, str::FromStr};
+use std::{borrow::Cow, error::Error, num::NonZeroU64, str::FromStr};
 
 use quick_xml::{
     NsReader,
@@ -31,13 +31,21 @@ const EXTERNAL_REFERENCE_REASON: &str = "external_reference";
 const NESTED_SVG_REASON: &str = "nested_svg";
 const STRUCTURE_LIMIT_REASON: &str = "structure_limit";
 const SOURCE_SIZE_REASON: &str = "source_size_limit";
+/// Hard safety ceiling bounding parser work during structural recognition.
 const PROBE_BYTES: u64 = 65_536;
+/// Hard safety ceiling bounding memory and CPU consumed by full SVG parsing.
 const SOURCE_BYTES: u64 = 256 * 1024;
+/// Hard safety ceiling bounding memory retained for extracted text.
 const TEXT_OUTPUT_BYTES: usize = 128 * 1024;
+/// Hard safety ceiling bounding serialized structured output.
 const METADATA_OUTPUT_BYTES: usize = 16 * 1024;
+/// Hard safety ceiling preventing adversarial nesting from exhausting the stack.
 const MAX_DEPTH: usize = 128;
+/// Hard safety ceiling bounding per-document element processing.
 const MAX_ELEMENTS: usize = 10_000;
+/// Hard safety ceiling bounding aggregate attribute processing.
 const MAX_ATTRIBUTES: usize = 50_000;
+/// Hard safety ceiling bounding allocation and scanning for one attribute value.
 const MAX_ATTRIBUTE_BYTES: usize = 4_096;
 
 /// SVG adapter registered in the dedicated worker catalog.
@@ -386,25 +394,16 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                     return Err(ParseIssue::Malformed);
                 }
                 let decoded = reference.decode().map_err(|_| ParseIssue::Malformed)?;
-                let value = match decoded.as_ref() {
-                    "amp" => "&",
-                    "lt" => "<",
-                    "gt" => ">",
-                    "apos" => "'",
-                    "quot" => "\"",
-                    _ => return Err(ParseIssue::Malformed),
-                };
+                let value = decode_reference(decoded.as_ref())?;
                 if mode.collects_text() && text_depth > 0 {
-                    append_text(&mut parsed.text, value)?;
+                    append_text(&mut parsed.text, &value)?;
                 }
             }
             (_, Event::Decl(declaration))
                 if !root_seen && !declaration_seen && !prolog_event_seen =>
             {
                 declaration_seen = true;
-                if !declaration_uses_utf8(&declaration).map_err(|_| ParseIssue::Malformed)? {
-                    return Err(ParseIssue::Malformed);
-                }
+                validate_declaration(&declaration)?;
             }
             (_, Event::Comment(comment)) => {
                 if comment.as_ref().windows(2).any(|window| window == b"--") {
@@ -434,6 +433,9 @@ fn inspect_element(
     root_seen: bool,
 ) -> Result<(), ParseIssue> {
     if depth == 0 && root_seen {
+        return Err(ParseIssue::Malformed);
+    }
+    if matches!(namespace, ResolveResult::Unbound) {
         return Err(ParseIssue::Malformed);
     }
     let binding = element.local_name();
@@ -478,7 +480,7 @@ fn inspect_element(
         if !has_only_xml10_characters(value) {
             return Err(ParseIssue::Malformed);
         }
-        if key.starts_with(b"on") || key == b"style" {
+        if event_handler_attribute(key) || key == b"style" {
             return Err(ParseIssue::ActiveContent);
         }
         if key == b"href"
@@ -544,6 +546,93 @@ fn resource_capable_attribute(name: &[u8]) -> bool {
             | b"marker-start"
             | b"marker-mid"
             | b"marker-end"
+    )
+}
+
+fn event_handler_attribute(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"onabort"
+            | b"onactivate"
+            | b"onbegin"
+            | b"oncancel"
+            | b"oncanplay"
+            | b"oncanplaythrough"
+            | b"onchange"
+            | b"onclick"
+            | b"onclose"
+            | b"oncopy"
+            | b"oncuechange"
+            | b"oncut"
+            | b"ondblclick"
+            | b"ondrag"
+            | b"ondragend"
+            | b"ondragenter"
+            | b"ondragexit"
+            | b"ondragleave"
+            | b"ondragover"
+            | b"ondragstart"
+            | b"ondrop"
+            | b"ondurationchange"
+            | b"onemptied"
+            | b"onend"
+            | b"onended"
+            | b"onerror"
+            | b"onfocus"
+            | b"onfocusin"
+            | b"onfocusout"
+            | b"oninput"
+            | b"oninvalid"
+            | b"onkeydown"
+            | b"onkeypress"
+            | b"onkeyup"
+            | b"onload"
+            | b"onloadeddata"
+            | b"onloadedmetadata"
+            | b"onloadstart"
+            | b"onmousedown"
+            | b"onmouseenter"
+            | b"onmouseleave"
+            | b"onmousemove"
+            | b"onmouseout"
+            | b"onmouseover"
+            | b"onmouseup"
+            | b"onmousewheel"
+            | b"onpause"
+            | b"onplay"
+            | b"onplaying"
+            | b"onpointercancel"
+            | b"onpointerdown"
+            | b"onpointerenter"
+            | b"onpointerleave"
+            | b"onpointermove"
+            | b"onpointerout"
+            | b"onpointerover"
+            | b"onpointerup"
+            | b"onprogress"
+            | b"onratechange"
+            | b"onrepeat"
+            | b"onreset"
+            | b"onresize"
+            | b"onscroll"
+            | b"onseeked"
+            | b"onseeking"
+            | b"onselect"
+            | b"onshow"
+            | b"onstalled"
+            | b"onsubmit"
+            | b"onsuspend"
+            | b"ontimeupdate"
+            | b"ontoggle"
+            | b"ontouchcancel"
+            | b"ontouchend"
+            | b"ontouchmove"
+            | b"ontouchstart"
+            | b"onunload"
+            | b"onvolumechange"
+            | b"onwaiting"
+            | b"onwheel"
+            | b"onzoom"
     )
 }
 
@@ -686,6 +775,104 @@ fn declaration_uses_utf8(declaration: &BytesDecl<'_>) -> Result<bool, ()> {
             || encoding.as_ref().eq_ignore_ascii_case(b"utf8")),
         Some(Err(_)) => Err(()),
     }
+}
+
+fn validate_declaration(declaration: &BytesDecl<'_>) -> Result<(), ParseIssue> {
+    let mut input = declaration.as_ref();
+    input = input.strip_prefix(b"xml").ok_or(ParseIssue::Malformed)?;
+    if !input.first().is_some_and(u8::is_ascii_whitespace) {
+        return Err(ParseIssue::Malformed);
+    }
+
+    let mut attributes = Vec::new();
+    while !input.is_empty() {
+        input = trim_ascii_start(input);
+        if input.is_empty() {
+            break;
+        }
+        let name_end = input
+            .iter()
+            .position(|byte| byte.is_ascii_whitespace() || *byte == b'=')
+            .ok_or(ParseIssue::Malformed)?;
+        let name = &input[..name_end];
+        input = trim_ascii_start(&input[name_end..]);
+        input = input.strip_prefix(b"=").ok_or(ParseIssue::Malformed)?;
+        input = trim_ascii_start(input);
+        let quote = *input.first().ok_or(ParseIssue::Malformed)?;
+        if quote != b'\'' && quote != b'"' {
+            return Err(ParseIssue::Malformed);
+        }
+        input = &input[1..];
+        let value_end = input
+            .iter()
+            .position(|byte| *byte == quote)
+            .ok_or(ParseIssue::Malformed)?;
+        attributes.push((name, &input[..value_end]));
+        input = &input[value_end + 1..];
+        if !input.is_empty() && !input.first().is_some_and(u8::is_ascii_whitespace) {
+            return Err(ParseIssue::Malformed);
+        }
+    }
+
+    let Some((version_name, version)) = attributes.first() else {
+        return Err(ParseIssue::Malformed);
+    };
+    if *version_name != b"version" || *version != b"1.0" {
+        return Err(ParseIssue::Malformed);
+    }
+    let mut index = 1;
+    if let Some((name, encoding)) = attributes.get(index)
+        && *name == b"encoding"
+    {
+        if !encoding.eq_ignore_ascii_case(b"utf-8") && !encoding.eq_ignore_ascii_case(b"utf8") {
+            return Err(ParseIssue::Malformed);
+        }
+        index += 1;
+    }
+    if let Some((name, standalone)) = attributes.get(index) {
+        if *name != b"standalone" || !matches!(*standalone, b"yes" | b"no") {
+            return Err(ParseIssue::Malformed);
+        }
+        index += 1;
+    }
+    if index != attributes.len() {
+        return Err(ParseIssue::Malformed);
+    }
+    Ok(())
+}
+
+fn trim_ascii_start(mut input: &[u8]) -> &[u8] {
+    while input.first().is_some_and(u8::is_ascii_whitespace) {
+        input = &input[1..];
+    }
+    input
+}
+
+fn decode_reference(reference: &str) -> Result<Cow<'_, str>, ParseIssue> {
+    let builtin = match reference {
+        "amp" => Some("&"),
+        "lt" => Some("<"),
+        "gt" => Some(">"),
+        "apos" => Some("'"),
+        "quot" => Some("\""),
+        _ => None,
+    };
+    if let Some(value) = builtin {
+        return Ok(Cow::Borrowed(value));
+    }
+    let codepoint = if let Some(hexadecimal) = reference.strip_prefix("#x") {
+        u32::from_str_radix(hexadecimal, 16).map_err(|_| ParseIssue::Malformed)?
+    } else if let Some(decimal) = reference.strip_prefix('#') {
+        decimal.parse::<u32>().map_err(|_| ParseIssue::Malformed)?
+    } else {
+        return Err(ParseIssue::Malformed);
+    };
+    let character = char::from_u32(codepoint).ok_or(ParseIssue::Malformed)?;
+    let mut encoded = [0; 4];
+    if !has_only_xml10_characters(character.encode_utf8(&mut encoded)) {
+        return Err(ParseIssue::Malformed);
+    }
+    Ok(Cow::Owned(character.to_string()))
 }
 
 fn has_only_xml10_characters(value: &str) -> bool {
