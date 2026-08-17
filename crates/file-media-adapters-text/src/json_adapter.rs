@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
     ProbeStrength, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
@@ -35,12 +36,36 @@ fn has_json_structure(prefix: &[u8]) -> bool {
         (b'{', Some(_)) => rest.iter().enumerate().any(|(index, byte)| {
             *byte == b':' && serde_json::from_slice::<String>(&rest[..index]).is_ok()
         }),
-        (b'[', Some(_)) => rest.iter().enumerate().any(|(index, byte)| {
-            matches!(*byte, b',' | b']')
-                && serde_json::from_slice::<serde_json::Value>(&rest[..index]).is_ok()
-        }),
+        (b'[', Some(_)) => has_array_structure(rest),
         _ => false,
     }
+}
+
+fn has_array_structure(rest: &[u8]) -> bool {
+    let Some(first_end) = parse_value_prefix(rest) else {
+        return false;
+    };
+    let after_first = trim_ascii_start(&rest[first_end..]);
+    match after_first.split_first() {
+        Some((b']', _)) => true,
+        Some((b',', after_comma)) => {
+            let after_comma = trim_ascii_start(after_comma);
+            let Some(second_end) = parse_value_prefix(after_comma) else {
+                return false;
+            };
+            matches!(
+                trim_ascii_start(&after_comma[second_end..]).first(),
+                Some(b',') | Some(b']')
+            )
+        }
+        _ => false,
+    }
+}
+
+fn parse_value_prefix(bytes: &[u8]) -> Option<usize> {
+    let mut values = serde_json::Deserializer::from_slice(bytes).into_iter::<serde_json::Value>();
+    values.next()?.ok()?;
+    Some(values.byte_offset())
 }
 
 fn trim_ascii_start(bytes: &[u8]) -> &[u8] {
@@ -66,7 +91,7 @@ pub(crate) async fn inspect(
         Ok(text) => text,
         Err(reason) => return Ok(validation_failure(request.evidence, reason)),
     };
-    if serde_json::from_str::<serde_json::Value>(&text).is_err() {
+    if parse_json(&text).is_err() {
         return Ok(validation_failure(request.evidence, "malformed_json"));
     }
     Ok(ProcessorValidationOutput::Validated {
@@ -90,8 +115,7 @@ pub(crate) async fn read(
         });
     };
     let text = source::checked_utf8(bytes).map_err(|_| ProcessorFailure::Failed)?;
-    let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| ProcessorFailure::Failed)?;
+    let value = parse_json(&text).map_err(|_| ProcessorFailure::Failed)?;
     if json_depth(&value, 1) > MAX_STRUCTURED_DEPTH {
         return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
             limit_kind: String::from("depth_limit_exceeded"),
@@ -106,6 +130,15 @@ pub(crate) async fn read(
         truncated: false,
         cursor: None,
     })
+}
+
+fn parse_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    deserializer.disable_recursion_limit();
+    let value =
+        serde_json::Value::deserialize(serde_stacker::Deserializer::new(&mut deserializer))?;
+    deserializer.end()?;
+    Ok(value)
 }
 
 fn json_depth(value: &serde_json::Value, depth: u32) -> u32 {

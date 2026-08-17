@@ -38,6 +38,14 @@ pub(crate) fn json_beyond_structured_depth() -> Vec<u8> {
     format!("{}0{}", "[".repeat(64), "]".repeat(64)).into_bytes()
 }
 
+pub(crate) fn json_beyond_serde_recursion_limit() -> Vec<u8> {
+    format!("{{\"value\":{}0{}}}", "[".repeat(128), "]".repeat(128)).into_bytes()
+}
+
+pub(crate) fn bracketed_numeric_csv() -> Vec<u8> {
+    b"[1,2\n3,4\n".to_vec()
+}
+
 pub(crate) fn csv_table() -> Vec<u8> {
     b"name,value\nalpha,1\nbeta,2\n".to_vec()
 }

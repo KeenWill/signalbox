@@ -26,6 +26,7 @@ const JSON_MEDIA_TYPE: &str = "application/json";
 const CSV_MEDIA_TYPE: &str = "text/csv";
 const TEXT_VIEW_NAME: &str = "text";
 const STRUCTURED_VIEW_NAME: &str = "structured";
+const PROBE_PREFIX_BYTES: u64 = 4_096;
 
 /// Maximum bytes one text-family adapter reads or returns.
 pub const MAX_TEXT_FAMILY_BYTES: u64 = 131_072;
@@ -157,7 +158,7 @@ fn reader(
         reader: FileReaderName::try_new(name)?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(media_type)?],
-        probe: ProbeDeclaration::new(4_096, 1, 2, MAX_TEXT_FAMILY_BYTES),
+        probe: ProbeDeclaration::new(PROBE_PREFIX_BYTES, 1, 2, MAX_TEXT_FAMILY_BYTES),
         views: vec![view],
         reason_codes,
         streaming_text_fallback: fallback,

@@ -160,6 +160,38 @@ async fn json_read_reports_the_declared_depth_limit() -> Result<(), Box<dyn Erro
 }
 
 #[tokio::test]
+async fn deeply_nested_valid_json_reports_the_declared_depth_limit() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::json_beyond_serde_recursion_limit());
+    let expected = ReasonCode::try_new("depth_limit_exceeded")?;
+
+    let inspection = support::inspect(&source, "application/json").await?;
+    support::assert_validated_media(inspection, "application/json");
+    let result = support::read(
+        &source,
+        "application/json",
+        "structured",
+        &DirectProcessor::provider(),
+    )
+    .await;
+    assert_eq!(
+        result,
+        Err(FileMediaFailure::ExpansionLimitExceeded {
+            limit_kind: expected
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bracketed_numeric_csv_is_not_ambiguous_with_json() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::bracketed_numeric_csv());
+
+    let inspection = support::inspect(&source, "text/csv").await?;
+    support::assert_validated_media(inspection, "text/csv");
+    Ok(())
+}
+
+#[tokio::test]
 async fn csv_detects_validates_and_returns_headers_and_rows() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::csv_table());
     let expected = fixtures::csv_table_value();

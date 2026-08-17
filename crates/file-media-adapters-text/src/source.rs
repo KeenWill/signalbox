@@ -1,6 +1,6 @@
 use signalbox_file_media_runtime::{CancellationSignal, ProcessorFailure, VerifiedBlobSource};
 
-use crate::MAX_TEXT_FAMILY_BYTES;
+use crate::{MAX_TEXT_FAMILY_BYTES, PROBE_PREFIX_BYTES};
 
 pub(crate) async fn read_complete(
     source: &dyn VerifiedBlobSource,
@@ -31,7 +31,7 @@ pub(crate) async fn read_probe_prefix(
     }
     let length = source
         .byte_length()
-        .min(std::num::NonZeroU64::new(4_096).ok_or(ProcessorFailure::Failed)?);
+        .min(std::num::NonZeroU64::new(PROBE_PREFIX_BYTES).ok_or(ProcessorFailure::Failed)?);
     source
         .read_range(0, length)
         .await
