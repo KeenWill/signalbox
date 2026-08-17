@@ -1367,26 +1367,6 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
     repository
         .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
         .await?;
-    let pending_steering = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 35));
-    assert!(matches!(
-        SubmitInputRepository::new(pool.clone())
-            .handle(
-                input_with_delivery(
-                    seed + 36,
-                    seed + 1,
-                    "steer while the tool attempt is ambiguous",
-                    DeliveryRequest::NextSafePoint {
-                        expected_active_turn: fixture.turn,
-                    },
-                ),
-                pending_steering,
-                None,
-            )
-            .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::PendingSteering(_)
-        ))
-    ));
     let mut recovery_ids = FixedStartupScanIds::new([], []);
     assert_ambiguous_tool_recovery(
         PostgresStartupScanRepository::new(pool.clone())
@@ -1460,19 +1440,6 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
             outbox_event_count: 1,
         }
     );
-    let reclassified_steering: (String, bool) = sqlx::query_as(
-        "SELECT disposition_kind, origin_turn_id IS NOT NULL
-           FROM accepted_input
-          WHERE accepted_input_id = $1",
-    )
-    .bind(pending_steering.into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(
-        reclassified_steering,
-        (String::from("reclassified_as_turn_origin"), true,),
-    );
-
     let snapshot = ProcessReadRepository::new(pool.clone())
         .read_transcript(fixture.session)
         .await?
@@ -1488,6 +1455,133 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
         "the tool reconciliation event must not block dispatch"
     );
 
+    assert_eq!(
+        activated_turn(
+            StartEligibleTurnRepository::new(pool.clone())
+                .handle(
+                    fixture.session,
+                    AcceptedInputTurnActivationIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 34)),
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
+                        TurnAttemptId::from_uuid(Uuid::from_u128(seed + 33)),
+                    ),
+                )
+                .await?,
+        ),
+        successor
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-006 / INV-025 / INV-029 / INV-037: eligibility replays pending
+/// steering reclassified behind an interrupted ambiguous tool attempt without
+/// requiring that reconciliation predecessor to own a model call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv006_inv025_inv029_inv037_replays_reclassified_tool_reconciliation_predecessor()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x74e0;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "external-tool", "{}").await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let issuing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 23));
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 24)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || issuing_attempt,
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 25));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+
+    let pending_steering = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 35));
+    assert!(matches!(
+        SubmitInputRepository::new(pool.clone())
+            .handle(
+                input_with_delivery(
+                    seed + 36,
+                    seed + 1,
+                    "steer while the tool attempt is ambiguous",
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: fixture.turn,
+                    },
+                ),
+                pending_steering,
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+
+    let mut recovery_ids = FixedStartupScanIds::new([], []);
+    assert_ambiguous_tool_recovery(
+        PostgresStartupScanRepository::new(pool.clone())
+            .recover(
+                fixture.session,
+                signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 27)),
+                ),
+                &mut recovery_ids,
+            )
+            .await?,
+    );
+
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 30));
+    let interrupt = SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                seed + 28,
+                seed + 1,
+                "stop ambiguous tool",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 29)),
+            Some(successor),
+        )
+        .await?;
+    assert!(matches!(
+        interrupt,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+
+    let reclassified_steering: (String, bool) = sqlx::query_as(
+        "SELECT disposition_kind, origin_turn_id IS NOT NULL
+           FROM accepted_input
+          WHERE accepted_input_id = $1",
+    )
+    .bind(pending_steering.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        reclassified_steering,
+        (String::from("reclassified_as_turn_origin"), true,),
+    );
     assert_eq!(
         activated_turn(
             StartEligibleTurnRepository::new(pool.clone())
