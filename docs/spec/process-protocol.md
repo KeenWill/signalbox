@@ -2544,10 +2544,10 @@ kind. A convergence line prints `non_green_count` beside the comma-joined
 `non_green` field, so an empty inventory cannot collide with a check literally
 named `none`. Durations use compact day, hour, minute, and second units.
 Process-derived text uses terminal-safe field escaping unless `--raw-output` is
-selected.
-The final `model_usage=omitted` line states that no cheap status aggregate is
-available: model usage crosses this protocol only inside each complete session
-transcript, and `status` does not issue one transcript read per session.
+selected. The final `model_usage=omitted` line states that no cheap status
+aggregate is available: model usage crosses this protocol only inside each
+complete session transcript, and `status` does not issue one transcript read per
+session.
 
 `list` remains the complete unfiltered summary sequence. `search` is the
 separate verb for `list_session_metadata`, whose filters, bounded page, and
