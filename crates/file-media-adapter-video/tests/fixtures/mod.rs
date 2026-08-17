@@ -226,7 +226,15 @@ impl VideoFixture {
         movie_header[12..16].copy_from_slice(&MP4_TIMESCALE.to_be_bytes());
         let mut handler = vec![0_u8; 24];
         handler[8..12].copy_from_slice(b"vide");
-        let media = mp4_box(*b"mdia", &mp4_box(*b"hdlr", &handler));
+        let mut sample_description = vec![0_u8; 8];
+        sample_description[4..8].copy_from_slice(&1_u32.to_be_bytes());
+        sample_description.extend_from_slice(&avc1_sample_entry());
+        let sample_table = mp4_box(*b"stbl", &mp4_box(*b"stsd", &sample_description));
+        let media_information = mp4_box(*b"minf", &sample_table);
+        let media = mp4_box(
+            *b"mdia",
+            &[mp4_box(*b"hdlr", &handler), media_information].concat(),
+        );
         let track = mp4_box(*b"trak", &media);
         let mut fragment_duration = vec![0_u8; 8];
         fragment_duration[4..8].copy_from_slice(&MP4_DURATION_UNITS.to_be_bytes());
@@ -234,6 +242,21 @@ impl VideoFixture {
         let movie = mp4_box(
             *b"moov",
             &[mp4_box(*b"mvhd", &movie_header), track, movie_extends].concat(),
+        );
+        Self::new(FixtureKind::Mp4, [ftyp(), movie].concat())
+    }
+
+    pub fn mp4_video_track_without_sample_description() -> Self {
+        let mut movie_header = vec![0_u8; 100];
+        movie_header[12..16].copy_from_slice(&MP4_TIMESCALE.to_be_bytes());
+        movie_header[16..20].copy_from_slice(&MP4_DURATION_UNITS.to_be_bytes());
+        let mut handler = vec![0_u8; 24];
+        handler[8..12].copy_from_slice(b"vide");
+        let media = mp4_box(*b"mdia", &mp4_box(*b"hdlr", &handler));
+        let track = mp4_box(*b"trak", &media);
+        let movie = mp4_box(
+            *b"moov",
+            &[mp4_box(*b"mvhd", &movie_header), track].concat(),
         );
         Self::new(FixtureKind::Mp4, [ftyp(), movie].concat())
     }
@@ -257,6 +280,43 @@ impl VideoFixture {
         );
         let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
         Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn webm_with_duplicate_tracks_elements() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let first_tracks = ebml_element(
+            &[0x16, 0x54, 0xae, 0x6b],
+            &webm_track_entry_with_number(1, ContentProtection::Clear),
+        );
+        let second_tracks = ebml_element(
+            &[0x16, 0x54, 0xae, 0x6b],
+            &webm_track_entry_with_number(2, ContentProtection::Clear),
+        );
+        let segment = ebml_element(
+            &[0x18, 0x53, 0x80, 0x67],
+            &[info, first_tracks, second_tracks].concat(),
+        );
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn large_webm_with_partial_header_at_metadata_cutoff() -> Self {
+        let header = ebml_header();
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let tracks = ebml_element(
+            &[0x16, 0x54, 0xae, 0x6b],
+            &webm_track_entry(ContentProtection::Clear),
+        );
+        let fixed_bytes = header.len() + 5 + info.len() + tracks.len() + 1;
+        let filler_payload_bytes = METADATA_BYTES - fixed_bytes - 4;
+        let filler = ebml_element(&[0xec], &vec![0_u8; filler_payload_bytes]);
+        let mut bytes = header;
+        bytes.extend_from_slice(&[0x18, 0x53, 0x80, 0x67, 0xff]);
+        bytes.extend_from_slice(&info);
+        bytes.extend_from_slice(&tracks);
+        bytes.extend_from_slice(&filler);
+        bytes.push(0x1f);
+        Self::new(FixtureKind::Webm, bytes)
+            .with_reported_byte_length(u64::try_from(METADATA_BYTES + 64).unwrap_or(u64::MAX))
     }
 
     pub fn webm_with_unknown_sized_final_cluster() -> Self {
@@ -381,7 +441,11 @@ fn webm_info(duration: Option<f64>) -> Vec<u8> {
 }
 
 fn webm_track_entry(protection: ContentProtection) -> Vec<u8> {
-    let track_number = ebml_element(&[0xd7], &[1]);
+    webm_track_entry_with_number(1, protection)
+}
+
+fn webm_track_entry_with_number(number: u8, protection: ContentProtection) -> Vec<u8> {
+    let track_number = ebml_element(&[0xd7], &[number]);
     let track_type = ebml_element(&[0x83], &[1]);
     let codec_id = ebml_element(&[0x86], b"V_VP9");
     let encryption = match protection {

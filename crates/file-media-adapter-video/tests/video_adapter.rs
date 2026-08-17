@@ -342,6 +342,34 @@ async fn fragmented_mp4_uses_movie_extends_duration() -> Result<(), Box<dyn Erro
 }
 
 #[tokio::test]
+async fn mp4_video_track_without_sample_description_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_video_track_without_sample_description(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn partial_webm_header_at_metadata_cutoff_is_an_accepted_truncated_tail()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::large_webm_with_partial_header_at_metadata_cutoff().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn duplicate_webm_tracks_elements_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_duplicate_tracks_elements(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn hostile_view_arguments_are_typed_and_content_silent() -> Result<(), Box<dyn Error>> {
     let source = VideoFixture::ordinary_mp4().into_source()?;
     let result = read(
