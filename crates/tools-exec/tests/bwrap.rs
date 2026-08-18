@@ -150,7 +150,7 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
         program: String::from("sh"),
         arguments: vec![
             String::from("-c"),
-            format!("test -n \"${SYNTHETIC_ENVIRONMENT_NAME}\""),
+            format!("test \"${SYNTHETIC_ENVIRONMENT_NAME}\" = {SYNTHETIC_ENVIRONMENT_VALUE:?}"),
         ],
         working_directory: String::from("."),
         timeout_seconds: 5,
