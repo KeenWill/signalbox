@@ -22,6 +22,10 @@ The `AlwaysConfirm` interaction with an explicitly configured approval posture â
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
 
+The application handoff from a runner-selected prepared attempt to its durable
+offer boundary is re-verified through this PR
+(`agent/tool-loop-runner-offer-handoff`).
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
@@ -472,16 +476,26 @@ evidence and is `KnownFailed`. Output admission applies the existing size,
 U+0000, credential-redaction, and correlation checks before durable semantic
 projection.
 
+After successful preflight, a prepared request whose frozen locus is not the
+daemon crosses the application `RunnerToolOffer` port before any local dispatch
+authorization or executor call. The port consumes the exact session, turn,
+physical attempt, and frozen runner selector and returns a receipt carrying that
+same request plus the committed lease. A mismatched receipt fails closed. A
+committed offer yields the stage; a later pass that observes the runner-owned
+attempt already `InFlight` yields it to the lease state machine instead of
+classifying local-executor crash loss. Compositions that do not install this
+port use the fail-closed unavailable implementation.
+
 If the authorization commit acknowledgement is ambiguous, execution does not
 begin from the returned error. While retaining the dispatch gate and exact
-request, the application rereads the attempt under the scheduler lock.
-`Prepared` proves non-consumption and returns the infrastructure failure. For a
-daemon locus, `InFlight` restores the exact authorization fence and may enter
-the executor. For a runner locus, it must also load the exact offered or claimed
-lease and resume only the corresponding wire phase; bare attempt state never
-permits execution. An inconclusive reread retains that authority state for
-another identical reread, so neither retry nor crash classification can be
-inferred from a lost commit response.
+request, the application rereads the owning durable boundary. `Prepared` proves
+non-consumption and returns the infrastructure failure. For a daemon locus,
+`InFlight` restores the exact authorization fence and may enter the executor.
+For a runner locus, the offer port must return the exact offered receipt and the
+adapter must establish the corresponding lease rather than treating bare attempt
+state as execution authority. An inconclusive reread retains that authority
+state and dispatch permit for another identical reread, so neither retry nor
+crash classification can be inferred from a lost commit response.
 
 A process-shared turn-keyed dispatch gate orders immediate interrupts against
 physical-attempt checkpointing, prepared-attempt preflight, the authorize â†’

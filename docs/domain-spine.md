@@ -7015,6 +7015,48 @@ pub trait ToolExecutor {
         Self: Send;
 }
 
+pub struct RunnerToolOfferRequest { /* private */ }
+impl RunnerToolOfferRequest {
+    pub fn try_new(
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        execution_locus: SelectedToolExecutionLocus,
+    ) -> Option<Self>;
+    // accessors: session(), turn(), attempt(), execution_locus()
+}
+
+pub struct RunnerToolOfferReceipt { /* private */ }
+impl RunnerToolOfferReceipt {
+    pub const fn new(request: RunnerToolOfferRequest, lease: RunnerLeaseId) -> Self;
+    // accessors: request(), lease()
+}
+
+pub enum RunnerToolOfferStatus {
+    Prepared,
+    Offered(RunnerToolOfferReceipt),
+}
+
+pub struct RunnerToolOfferError { /* private */ }
+impl RunnerToolOfferError {
+    pub const fn new(class: OperatorFailureClass, cause_code: &'static str) -> Self;
+}
+// Copy; impl Display + std::error::Error + ClassifyOperatorFailure
+
+pub trait RunnerToolOffer {
+    fn offer(
+        &mut self,
+        request: RunnerToolOfferRequest,
+    ) -> impl Future<Output = Result<RunnerToolOfferReceipt, RunnerToolOfferError>> + Send;
+    fn reread(
+        &mut self,
+        request: &RunnerToolOfferRequest,
+    ) -> impl Future<Output = Result<RunnerToolOfferStatus, RunnerToolOfferError>> + Send;
+}
+
+pub struct UnavailableRunnerToolOffer;
+// Copy + Default; impl RunnerToolOffer
+
 pub trait ToolApprovalIdGenerator {
     fn next_tool_turn_attempt_id(&mut self) -> TurnAttemptId;
 }
@@ -7054,6 +7096,8 @@ pub enum ToolExecutionServiceOutcome {
     ChildWaitResumed(TurnAttemptId),
     ChildWaitParked(ChildWait),
     AttemptCheckpointed(ToolAttemptId),
+    RunnerOfferCommitted(RunnerLeaseId),
+    RunnerExecutionPending(ToolAttemptId),
     PreflightFailed(Box<EndedToolAttempt>),
     ObservationCommitted(Box<EndedToolAttempt>),
     ObservationAlreadyCommitted(ToolAttemptId),
@@ -7072,6 +7116,13 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     },
     AuthorizationReconciliation(TransactionError),
     PreflightCommit(TransactionError),
+    RunnerOffer(RunnerToolOfferError),
+    RunnerOfferReread {
+        offer_error: RunnerToolOfferError,
+        reread_error: RunnerToolOfferError,
+    },
+    RunnerOfferReconciliation(RunnerToolOfferError),
+    RunnerOfferCorrelationMismatch,
     Executor(ExecutorError),
     ExecutorCrashClassification {
         executor_error: ExecutorError,
@@ -7091,9 +7142,15 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
 }
 // impl Display + std::error::Error + ClassifyOperatorFailure (bounded)
 
-pub struct ToolExecutionService<Ids, Transaction, Catalog, Executor> { /* private */ }
+pub struct ToolExecutionService<
+    Ids,
+    Transaction,
+    Catalog,
+    Executor,
+    Runner = UnavailableRunnerToolOffer,
+> { /* private */ }
 impl<Ids, Transaction, Catalog, Executor>
-    ToolExecutionService<Ids, Transaction, Catalog, Executor>
+    ToolExecutionService<Ids, Transaction, Catalog, Executor, UnavailableRunnerToolOffer>
 {
     pub const fn new(
         ids: Ids,
@@ -7120,14 +7177,23 @@ impl<Ids, Transaction, Catalog, Executor>
         InProcessToolDispatchGate,
         Option<RetainedToolExecutionState>,
     );
+    pub fn with_runner_tool_offer<Runner>(
+        self,
+        runner: Runner,
+    ) -> ToolExecutionService<Ids, Transaction, Catalog, Executor, Runner>;
+}
+impl<Ids, Transaction, Catalog, Executor, Runner>
+    ToolExecutionService<Ids, Transaction, Catalog, Executor, Runner>
+{
     pub const fn retained_state(&self) -> Option<&RetainedToolExecutionState>;
 }
 impl<
         Ids: ToolExecutionIdGenerator + Send,
         Transaction: ToolExecutionTransaction,
         Catalog: ToolCatalog,
-        Executor: ToolExecutor,
-    > ToolExecutionService<Ids, Transaction, Catalog, Executor>
+        Executor: ToolExecutor + Send,
+        Runner: RunnerToolOffer + Send,
+    > ToolExecutionService<Ids, Transaction, Catalog, Executor, Runner>
 {
     pub async fn execute(
         &mut self,
@@ -11055,7 +11121,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)    |
 | application: load_session                          | 2 (incl. 1 trait)     |
 | application: model_execution                       | 34 (incl. 8 traits)   |
-| application: tool_loop                             | 26 (incl. 5 traits)   |
+| application: tool_loop                             | 32 (incl. 6 traits)   |
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
@@ -11070,4 +11136,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **288 (+1 free fn)**  |
+| **signalbox-application total**                    | **294 (+1 free fn)**  |

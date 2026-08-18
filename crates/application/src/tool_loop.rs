@@ -18,12 +18,13 @@ use signalbox_domain::{
     ChildWait, CorrelatedToolAttemptObservation, CurrentToolAttemptState,
     DangerousToolAutoApproval, DecideToolRequest, DelegationWait, EndedToolAttempt,
     FailedModelCallTurn, FailedModelCallTurnIdentities, InitialToolApproval, IssuedExecutorFence,
-    ModelCallId, NormalizedToolArguments, PreparedDecideToolRequest, SemanticTranscriptEntryId,
-    SessionId, ToolApprovalPosture, ToolArgumentsKind, ToolAttemptCrashOutcome,
-    ToolAttemptDispatchCorrelation, ToolAttemptId, ToolAttemptObservation, ToolBatch,
-    ToolBatchPhase, ToolDispatchAuthority, ToolEffectClass, ToolExecutionError,
-    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest,
-    ToolRequestId, ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
+    ModelCallId, NormalizedToolArguments, PreparedDecideToolRequest, RunnerLeaseId,
+    SelectedToolExecutionLocus, SemanticTranscriptEntryId, SessionId, ToolApprovalPosture,
+    ToolArgumentsKind, ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId,
+    ToolAttemptObservation, ToolBatch, ToolBatchPhase, ToolDispatchAuthority, ToolEffectClass,
+    ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName,
+    ToolPermissionDefault, ToolRequest, ToolRequestId, ToolResultContent, ToolResultText,
+    ToolResultTextFailure, TurnAttemptId, TurnId,
 };
 
 /// Canonical JSON object used as a model-facing argument schema.
@@ -519,6 +520,158 @@ pub trait ToolExecutor {
     }
 }
 
+/// One prepared attempt and its frozen non-daemon execution locus.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerToolOfferRequest {
+    session: SessionId,
+    turn: TurnId,
+    attempt: ToolAttemptId,
+    execution_locus: SelectedToolExecutionLocus,
+}
+
+impl RunnerToolOfferRequest {
+    /// Admits only a runner-selected durable request.
+    pub fn try_new(
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        execution_locus: SelectedToolExecutionLocus,
+    ) -> Option<Self> {
+        (!matches!(execution_locus, SelectedToolExecutionLocus::Daemon)).then_some(Self {
+            session,
+            turn,
+            attempt,
+            execution_locus,
+        })
+    }
+
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the active logical turn.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Returns the prepared physical attempt.
+    pub const fn attempt(&self) -> ToolAttemptId {
+        self.attempt
+    }
+
+    /// Borrows the frozen runner selection.
+    pub const fn execution_locus(&self) -> &SelectedToolExecutionLocus {
+        &self.execution_locus
+    }
+}
+
+/// Exact request correlation returned after a durable runner offer commits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerToolOfferReceipt {
+    request: RunnerToolOfferRequest,
+    lease: RunnerLeaseId,
+}
+
+/// Durable state observed after an ambiguously acknowledged runner offer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RunnerToolOfferStatus {
+    /// Storage proves the physical attempt remains prepared and unoffered.
+    Prepared,
+    /// Storage returns the exact durable offer receipt.
+    Offered(RunnerToolOfferReceipt),
+}
+
+impl RunnerToolOfferReceipt {
+    /// Binds the adapter result to the exact application request it consumed.
+    pub const fn new(request: RunnerToolOfferRequest, lease: RunnerLeaseId) -> Self {
+        Self { request, lease }
+    }
+
+    /// Borrows the consumed application request.
+    pub const fn request(&self) -> &RunnerToolOfferRequest {
+        &self.request
+    }
+
+    /// Returns the durably offered lease identity.
+    pub const fn lease(&self) -> RunnerLeaseId {
+        self.lease
+    }
+}
+
+/// Sanitized failure from the runner offer boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunnerToolOfferError {
+    class: OperatorFailureClass,
+    cause_code: &'static str,
+}
+
+impl RunnerToolOfferError {
+    /// Retains only the shared failure class and a static safe cause token.
+    pub const fn new(class: OperatorFailureClass, cause_code: &'static str) -> Self {
+        Self { class, cause_code }
+    }
+}
+
+impl fmt::Display for RunnerToolOfferError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("runner tool offer failed")
+    }
+}
+
+impl Error for RunnerToolOfferError {}
+
+impl ClassifyOperatorFailure for RunnerToolOfferError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        self.class
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        self.cause_code
+    }
+}
+
+/// Durable runner offer boundary selected before any local executor authority.
+pub trait RunnerToolOffer {
+    /// Commits and attempts delivery of one exact runner-selected attempt.
+    fn offer(
+        &mut self,
+        request: RunnerToolOfferRequest,
+    ) -> impl Future<Output = Result<RunnerToolOfferReceipt, RunnerToolOfferError>> + Send;
+
+    /// Establishes whether an ambiguously acknowledged offer committed.
+    fn reread(
+        &mut self,
+        request: &RunnerToolOfferRequest,
+    ) -> impl Future<Output = Result<RunnerToolOfferStatus, RunnerToolOfferError>> + Send;
+}
+
+/// Default fail-closed runner boundary for daemon-only tool-loop composition.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnavailableRunnerToolOffer;
+
+impl RunnerToolOffer for UnavailableRunnerToolOffer {
+    fn offer(
+        &mut self,
+        _request: RunnerToolOfferRequest,
+    ) -> impl Future<Output = Result<RunnerToolOfferReceipt, RunnerToolOfferError>> + Send {
+        std::future::ready(Err(RunnerToolOfferError::new(
+            OperatorFailureClass::CallerOrHubBug,
+            "runner_tool_offer_unavailable",
+        )))
+    }
+
+    fn reread(
+        &mut self,
+        _request: &RunnerToolOfferRequest,
+    ) -> impl Future<Output = Result<RunnerToolOfferStatus, RunnerToolOfferError>> + Send {
+        std::future::ready(Err(RunnerToolOfferError::new(
+            OperatorFailureClass::CallerOrHubBug,
+            "runner_tool_offer_unavailable",
+        )))
+    }
+}
+
 /// Supplies UUIDv7 candidates for approval progression.
 pub trait ToolApprovalIdGenerator {
     /// Generates a fresh continuation turn-attempt candidate.
@@ -630,6 +783,12 @@ pub struct RetainedToolExecutionState {
 }
 
 enum RetainedToolExecutionStateKind {
+    RunnerOfferNonConsumption {
+        offer: RunnerToolOfferRequest,
+        request: ToolRequest,
+        prepared: signalbox_domain::CurrentToolAttempt,
+        dispatch_permit: InProcessToolDispatchPermit,
+    },
     AuthorizationNonConsumption {
         session: SessionId,
         turn: TurnId,
@@ -672,6 +831,9 @@ impl fmt::Debug for RetainedToolExecutionState {
             .field(
                 "stage",
                 &match &self.state {
+                    RetainedToolExecutionStateKind::RunnerOfferNonConsumption { .. } => {
+                        "runner_offer_non_consumption"
+                    }
                     RetainedToolExecutionStateKind::AuthorizationNonConsumption { .. } => {
                         "authorization_non_consumption"
                     }
@@ -705,6 +867,10 @@ pub enum ToolExecutionServiceOutcome {
     ChildWaitParked(ChildWait),
     /// A fresh attempt checkpoint committed; execution waits for another pass.
     AttemptCheckpointed(ToolAttemptId),
+    /// A runner offer committed and now awaits claim or terminal evidence.
+    RunnerOfferCommitted(RunnerLeaseId),
+    /// An existing runner attempt remains owned by its durable lease state machine.
+    RunnerExecutionPending(ToolAttemptId),
     /// Pure preflight closed one attempt with typed error evidence.
     PreflightFailed(Box<EndedToolAttempt>),
     /// One executor observation committed durably.
@@ -739,6 +905,19 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     AuthorizationReconciliation(TransactionError),
     /// A local preflight error could not commit.
     PreflightCommit(TransactionError),
+    /// The selected runner offer boundary refused before returning authority.
+    RunnerOffer(RunnerToolOfferError),
+    /// An ambiguous runner offer and its immediate durable reread both failed.
+    RunnerOfferReread {
+        /// Original ambiguously acknowledged offer failure.
+        offer_error: RunnerToolOfferError,
+        /// Failure to establish whether the offer committed.
+        reread_error: RunnerToolOfferError,
+    },
+    /// A later pass could not reconcile retained runner-offer evidence.
+    RunnerOfferReconciliation(RunnerToolOfferError),
+    /// The runner offer receipt named another application request.
+    RunnerOfferCorrelationMismatch,
     /// Executor work produced no trustworthy evidence.
     Executor(ExecutorError),
     /// Executor work failed and its required crash classification also failed.
@@ -799,6 +978,19 @@ where
             }
             Self::PreflightCommit(error) => {
                 write!(formatter, "tool preflight evidence commit failed: {error}")
+            }
+            Self::RunnerOffer(error) => write!(formatter, "runner tool offer failed: {error}"),
+            Self::RunnerOfferReread { reread_error, .. } => {
+                write!(formatter, "runner tool offer reread failed: {reread_error}")
+            }
+            Self::RunnerOfferReconciliation(error) => {
+                write!(
+                    formatter,
+                    "runner tool offer reconciliation failed: {error}"
+                )
+            }
+            Self::RunnerOfferCorrelationMismatch => {
+                formatter.write_str("runner tool offer named another application request")
             }
             Self::Executor(error) => write!(formatter, "tool executor failed: {error}"),
             Self::ExecutorCrashClassification {
@@ -872,11 +1064,14 @@ where
             | Self::Continuation(error) => Some(error),
             Self::AuthorizationReread { reread_error, .. } => Some(reread_error),
             Self::Executor(error) => Some(error),
+            Self::RunnerOffer(error) | Self::RunnerOfferReconciliation(error) => Some(error),
+            Self::RunnerOfferReread { reread_error, .. } => Some(reread_error),
             Self::ExecutorCrashClassification {
                 classification_error,
                 ..
             } => Some(classification_error),
             Self::ExecutorCorrelationMismatch
+            | Self::RunnerOfferCorrelationMismatch
             | Self::DurableCompletionMismatch
             | Self::ChildWaitMismatch
             | Self::CatalogDrift => None,
@@ -906,11 +1101,16 @@ where
             | Self::Continuation(error) => error.operator_failure_class(),
             Self::AuthorizationReread { reread_error, .. } => reread_error.operator_failure_class(),
             Self::Executor(error) => error.operator_failure_class(),
+            Self::RunnerOffer(error) | Self::RunnerOfferReconciliation(error) => {
+                error.operator_failure_class()
+            }
+            Self::RunnerOfferReread { reread_error, .. } => reread_error.operator_failure_class(),
             Self::ExecutorCrashClassification {
                 classification_error,
                 ..
             } => classification_error.operator_failure_class(),
             Self::ExecutorCorrelationMismatch
+            | Self::RunnerOfferCorrelationMismatch
             | Self::DurableCompletionMismatch
             | Self::ChildWaitMismatch
             | Self::CatalogDrift => OperatorFailureClass::CallerOrHubBug,
@@ -925,6 +1125,10 @@ where
             Self::AuthorizationReread { .. } => "tool_attempt_authorization_reread",
             Self::AuthorizationReconciliation(_) => "tool_attempt_authorization_reconciliation",
             Self::PreflightCommit(_) => "tool_preflight_commit",
+            Self::RunnerOffer(_) => "runner_tool_offer",
+            Self::RunnerOfferReread { .. } => "runner_tool_offer_reread",
+            Self::RunnerOfferReconciliation(_) => "runner_tool_offer_reconciliation",
+            Self::RunnerOfferCorrelationMismatch => "runner_tool_offer_correlation_mismatch",
             Self::Executor(_) => "tool_executor",
             Self::ExecutorCrashClassification { .. } => "tool_executor_crash_classification",
             Self::ExecutorCorrelationMismatch => "tool_executor_correlation_mismatch",
@@ -945,17 +1149,24 @@ where
 }
 
 /// Coordinates one serialized tool-loop stage.
-pub struct ToolExecutionService<Ids, Transaction, Catalog, Executor> {
+pub struct ToolExecutionService<
+    Ids,
+    Transaction,
+    Catalog,
+    Executor,
+    Runner = UnavailableRunnerToolOffer,
+> {
     ids: Ids,
     transaction: Transaction,
     catalog: Catalog,
     executor: Executor,
+    runner: Runner,
     gate: InProcessToolDispatchGate,
     retained_state: Option<RetainedToolExecutionState>,
 }
 
 impl<Ids, Transaction, Catalog, Executor>
-    ToolExecutionService<Ids, Transaction, Catalog, Executor>
+    ToolExecutionService<Ids, Transaction, Catalog, Executor, UnavailableRunnerToolOffer>
 {
     /// Composes application identities, transactions, catalog, and executor.
     pub const fn new(
@@ -970,6 +1181,7 @@ impl<Ids, Transaction, Catalog, Executor>
             transaction,
             catalog,
             executor,
+            runner: UnavailableRunnerToolOffer,
             gate,
             retained_state: None,
         }
@@ -989,6 +1201,7 @@ impl<Ids, Transaction, Catalog, Executor>
             transaction,
             catalog,
             executor,
+            runner: UnavailableRunnerToolOffer,
             gate,
             retained_state,
         }
@@ -1015,18 +1228,40 @@ impl<Ids, Transaction, Catalog, Executor>
         )
     }
 
+    /// Installs the runner offer boundary without changing local executor authority.
+    pub fn with_runner_tool_offer<Runner>(
+        self,
+        runner: Runner,
+    ) -> ToolExecutionService<Ids, Transaction, Catalog, Executor, Runner> {
+        ToolExecutionService {
+            ids: self.ids,
+            transaction: self.transaction,
+            catalog: self.catalog,
+            executor: self.executor,
+            runner,
+            gate: self.gate,
+            retained_state: self.retained_state,
+        }
+    }
+}
+
+impl<Ids, Transaction, Catalog, Executor, Runner>
+    ToolExecutionService<Ids, Transaction, Catalog, Executor, Runner>
+{
     /// Borrows same-incarnation executor evidence awaiting reconciliation.
     pub const fn retained_state(&self) -> Option<&RetainedToolExecutionState> {
         self.retained_state.as_ref()
     }
 }
 
-impl<Ids, Transaction, Catalog, Executor> ToolExecutionService<Ids, Transaction, Catalog, Executor>
+impl<Ids, Transaction, Catalog, Executor, Runner>
+    ToolExecutionService<Ids, Transaction, Catalog, Executor, Runner>
 where
     Ids: ToolExecutionIdGenerator + Send,
     Transaction: ToolExecutionTransaction,
     Catalog: ToolCatalog,
     Executor: ToolExecutor + Send,
+    Runner: RunnerToolOffer + Send,
 {
     /// Runs at most one attempt preparation, executor effect, crash
     /// classification, or continuation checkpoint for an authoritative hint.
@@ -1040,6 +1275,31 @@ where
     > {
         if let Some(retained) = self.retained_state.take() {
             match retained.state {
+                RetainedToolExecutionStateKind::RunnerOfferNonConsumption {
+                    offer,
+                    request,
+                    prepared,
+                    dispatch_permit,
+                } => match self.runner.reread(&offer).await {
+                    Ok(RunnerToolOfferStatus::Prepared) => {
+                        drop(dispatch_permit);
+                        return self.execute_prepared(request, prepared).await;
+                    }
+                    Ok(RunnerToolOfferStatus::Offered(receipt)) => {
+                        return runner_offer_outcome(&offer, receipt);
+                    }
+                    Err(error) => {
+                        self.retained_state = Some(RetainedToolExecutionState {
+                            state: RetainedToolExecutionStateKind::RunnerOfferNonConsumption {
+                                offer,
+                                request,
+                                prepared,
+                                dispatch_permit,
+                            },
+                        });
+                        return Err(ToolExecutionServiceError::RunnerOfferReconciliation(error));
+                    }
+                },
                 RetainedToolExecutionStateKind::AuthorizationNonConsumption {
                     session,
                     turn,
@@ -1234,6 +1494,14 @@ where
                         {
                             return Ok(ToolExecutionServiceOutcome::NoWork);
                         }
+                        if !matches!(
+                            request.execution_locus(),
+                            SelectedToolExecutionLocus::Daemon
+                        ) {
+                            return Ok(ToolExecutionServiceOutcome::RunnerExecutionPending(
+                                current.attempt(),
+                            ));
+                        }
                         self.classify_crash_loss(
                             current.session(),
                             current.turn(),
@@ -1364,6 +1632,48 @@ where
             )));
         }
         let definition = definition.ok_or(ToolExecutionServiceError::CatalogDrift)?;
+        if let Some(offer_request) = RunnerToolOfferRequest::try_new(
+            prepared.session(),
+            prepared.turn(),
+            prepared.attempt(),
+            request.execution_locus().clone(),
+        ) {
+            let receipt = match self.runner.offer(offer_request.clone()).await {
+                Ok(receipt) => receipt,
+                Err(error)
+                    if matches!(
+                        error.operator_failure_class(),
+                        OperatorFailureClass::Infrastructure {
+                            commit_ambiguous: true
+                        }
+                    ) =>
+                {
+                    match self.runner.reread(&offer_request).await {
+                        Ok(RunnerToolOfferStatus::Prepared) => {
+                            drop(dispatch_permit);
+                            return Err(ToolExecutionServiceError::RunnerOffer(error));
+                        }
+                        Ok(RunnerToolOfferStatus::Offered(receipt)) => receipt,
+                        Err(reread_error) => {
+                            self.retained_state = Some(RetainedToolExecutionState {
+                                state: RetainedToolExecutionStateKind::RunnerOfferNonConsumption {
+                                    offer: offer_request,
+                                    request,
+                                    prepared,
+                                    dispatch_permit,
+                                },
+                            });
+                            return Err(ToolExecutionServiceError::RunnerOfferReread {
+                                offer_error: error,
+                                reread_error,
+                            });
+                        }
+                    }
+                }
+                Err(error) => return Err(ToolExecutionServiceError::RunnerOffer(error)),
+            };
+            return runner_offer_outcome(&offer_request, receipt);
+        }
         let authorized = match self
             .transaction
             .authorize_attempt(prepared.session(), prepared.turn(), prepared.attempt())
@@ -1798,6 +2108,20 @@ const fn tool_attempt_signal(observation: &ToolAttemptObservation) -> ToolAttemp
     }
 }
 
+/// Authenticates one durable runner-offer receipt against its application request.
+fn runner_offer_outcome<TransactionError, ExecutorError>(
+    request: &RunnerToolOfferRequest,
+    receipt: RunnerToolOfferReceipt,
+) -> Result<ToolExecutionServiceOutcome, ToolExecutionServiceError<TransactionError, ExecutorError>>
+{
+    if receipt.request() != request {
+        return Err(ToolExecutionServiceError::RunnerOfferCorrelationMismatch);
+    }
+    Ok(ToolExecutionServiceOutcome::RunnerOfferCommitted(
+        receipt.lease(),
+    ))
+}
+
 /// Records the point at which authorized tool work leaves application control.
 ///
 /// A durable attempt without this event is waiting to dispatch; an attempt with
@@ -1920,11 +2244,11 @@ mod tests {
     use signalbox_domain::{
         ChildRelationshipPolicy, DelegatedSpawnRequest, DelegationAwaitRequest, DelegationEvent,
         DelegationEventOrdinal, DelegationProvenance, DelegationWaitMode,
-        ResolvedContextFrontierReconstitutionInput, SessionDelegationReconstitutionInput,
-        ToolApprovalResolutionReconstitutionInput, ToolAttemptReconstitutionInput,
-        ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
-        ToolBatchReconstitutionInput, ToolDecisionSource, ToolDispatchGeneration,
-        ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        ResolvedContextFrontierReconstitutionInput, RunnerGeneration, RunnerId,
+        SessionDelegationReconstitutionInput, ToolApprovalResolutionReconstitutionInput,
+        ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+        ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDecisionSource,
+        ToolDispatchGeneration, ToolRequestOrdinal, ToolRequestReconstitutionInput,
     };
     use uuid::Uuid;
 
@@ -1961,7 +2285,18 @@ mod tests {
         )
     }
 
-    fn request_with_seed(arguments: &str, seed: u128) -> ToolRequest {
+    fn exact_runner_locus() -> SelectedToolExecutionLocus {
+        SelectedToolExecutionLocus::ExactRunner {
+            runner: RunnerId::from_uuid(Uuid::from_u128(60)),
+            registration_revision: RunnerGeneration::one(),
+        }
+    }
+
+    fn request_with_seed_at_locus(
+        arguments: &str,
+        seed: u128,
+        execution_locus: SelectedToolExecutionLocus,
+    ) -> ToolRequest {
         ToolRequestReconstitutionInput::new(
             ToolRequestId::from_uuid(Uuid::from_u128(seed + 4)),
             SessionId::from_uuid(Uuid::from_u128(seed + 1)),
@@ -1972,6 +2307,7 @@ mod tests {
             NormalizedToolArguments::try_from_provider_text(arguments.to_owned())
                 .expect("fixture arguments fit the admission bound"),
         )
+        .with_execution_locus(execution_locus)
         .into_request()
     }
 
@@ -1981,7 +2317,41 @@ mod tests {
         state: ToolAttemptReconstitutionState,
         seed: u128,
     ) -> (ToolBatch, ToolAttemptId) {
-        let request = request_with_seed(arguments, seed);
+        batch_with_attempt_state_at_locus(
+            arguments,
+            effect,
+            state,
+            seed,
+            SelectedToolExecutionLocus::Daemon,
+        )
+    }
+
+    fn batch_with_attempt_state_at_locus(
+        arguments: &str,
+        effect: ToolEffectClass,
+        state: ToolAttemptReconstitutionState,
+        seed: u128,
+        execution_locus: SelectedToolExecutionLocus,
+    ) -> (ToolBatch, ToolAttemptId) {
+        batch_with_attempt_state_at_locus_and_issuance(
+            arguments,
+            effect,
+            state,
+            seed,
+            execution_locus,
+            Vec::new(),
+        )
+    }
+
+    fn batch_with_attempt_state_at_locus_and_issuance(
+        arguments: &str,
+        effect: ToolEffectClass,
+        state: ToolAttemptReconstitutionState,
+        seed: u128,
+        execution_locus: SelectedToolExecutionLocus,
+        runner_authorized_attempts: Vec<ToolAttemptId>,
+    ) -> (ToolBatch, ToolAttemptId) {
+        let request = request_with_seed_at_locus(arguments, seed, execution_locus);
         let attempt_id = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 6));
         let turn_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 5));
         let approval = ToolApprovalResolutionReconstitutionInput::policy_auto(request.id())
@@ -2016,9 +2386,25 @@ mod tests {
             vec![attempt],
             ToolBatchPhaseReconstitutionInput::Executing { turn_attempt },
         )
+        .with_runner_authorized_attempts(runner_authorized_attempts)
         .reconstitute()
         .expect("tool fixture batch is correlated");
         (batch, attempt_id)
+    }
+
+    fn runner_in_flight_batch(
+        arguments: &str,
+        effect: ToolEffectClass,
+    ) -> (ToolBatch, ToolAttemptId) {
+        let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(6));
+        batch_with_attempt_state_at_locus_and_issuance(
+            arguments,
+            effect,
+            ToolAttemptReconstitutionState::InFlight,
+            0,
+            exact_runner_locus(),
+            vec![attempt],
+        )
     }
 
     fn prepared_batch(arguments: &str, effect: ToolEffectClass) -> (ToolBatch, ToolAttemptId) {
@@ -2428,6 +2814,85 @@ mod tests {
         calls: usize,
     }
 
+    struct RecordingRunnerToolOffer {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        lease: RunnerLeaseId,
+    }
+
+    impl RunnerToolOffer for RecordingRunnerToolOffer {
+        async fn offer(
+            &mut self,
+            request: RunnerToolOfferRequest,
+        ) -> Result<RunnerToolOfferReceipt, RunnerToolOfferError> {
+            self.events.lock().expect("event lock").push("runner_offer");
+            Ok(RunnerToolOfferReceipt::new(request, self.lease))
+        }
+
+        async fn reread(
+            &mut self,
+            _request: &RunnerToolOfferRequest,
+        ) -> Result<RunnerToolOfferStatus, RunnerToolOfferError> {
+            panic!("the accepted runner offer is not reread")
+        }
+    }
+
+    struct CrossWiredRunnerToolOffer {
+        request: RunnerToolOfferRequest,
+        lease: RunnerLeaseId,
+    }
+
+    struct AmbiguousRunnerToolOffer {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        rereads: VecDeque<Result<RunnerToolOfferStatus, RunnerToolOfferError>>,
+    }
+
+    impl RunnerToolOffer for AmbiguousRunnerToolOffer {
+        async fn offer(
+            &mut self,
+            _request: RunnerToolOfferRequest,
+        ) -> Result<RunnerToolOfferReceipt, RunnerToolOfferError> {
+            self.events.lock().expect("event lock").push("runner_offer");
+            Err(RunnerToolOfferError::new(
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true,
+                },
+                "runner_offer_commit_ambiguous",
+            ))
+        }
+
+        async fn reread(
+            &mut self,
+            _request: &RunnerToolOfferRequest,
+        ) -> Result<RunnerToolOfferStatus, RunnerToolOfferError> {
+            self.events
+                .lock()
+                .expect("event lock")
+                .push("runner_reread");
+            self.rereads
+                .pop_front()
+                .expect("the fixture supplies one runner offer reread")
+        }
+    }
+
+    impl RunnerToolOffer for CrossWiredRunnerToolOffer {
+        async fn offer(
+            &mut self,
+            _request: RunnerToolOfferRequest,
+        ) -> Result<RunnerToolOfferReceipt, RunnerToolOfferError> {
+            Ok(RunnerToolOfferReceipt::new(
+                self.request.clone(),
+                self.lease,
+            ))
+        }
+
+        async fn reread(
+            &mut self,
+            _request: &RunnerToolOfferRequest,
+        ) -> Result<RunnerToolOfferStatus, RunnerToolOfferError> {
+            panic!("the cross-wired runner offer is not reread")
+        }
+    }
+
     struct FixedEvidenceExecutor {
         evidence: Option<CorrelatedToolExecutorEvidence>,
     }
@@ -2757,6 +3222,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn current_attempt_fixture_returns_the_named_physical_attempt() {
+        let (batch, attempt) = prepared_batch("{}", ToolEffectClass::EffectFree);
+
+        assert_eq!(current_attempt_fixture(&batch).attempt(), attempt);
+    }
+
+    #[test]
+    fn runner_offer_request_rejects_daemon_execution_locus() {
+        assert_eq!(
+            RunnerToolOfferRequest::try_new(
+                SessionId::from_uuid(Uuid::from_u128(1)),
+                TurnId::from_uuid(Uuid::from_u128(2)),
+                ToolAttemptId::from_uuid(Uuid::from_u128(3)),
+                SelectedToolExecutionLocus::Daemon,
+            ),
+            None
+        );
+    }
+
     /// INV-024 / INV-027: an approved unknown request closes with typed
     /// preflight evidence before authorization or executor entry.
     #[tokio::test]
@@ -2807,6 +3292,391 @@ mod tests {
         let (_, _, _, executor, _, _) = service.into_parts();
         assert_eq!(executor.calls, 0);
         assert_eq!(*events.lock().expect("event lock"), ["preflight"]);
+    }
+
+    /// INV-024 / INV-043: a runner-selected request crosses the runner offer
+    /// boundary before local authorization and never enters the local executor.
+    #[tokio::test]
+    async fn inv024_inv043_runner_request_commits_offer_without_local_authority() {
+        let (batch, _) = batch_with_attempt_state_at_locus(
+            "{}",
+            ToolEffectClass::EffectFree,
+            ToolAttemptReconstitutionState::Prepared,
+            0,
+            exact_runner_locus(),
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let transaction = FakeTransaction {
+            prepared: current_attempt_fixture(&batch),
+            batch: batch.clone(),
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let lease = RunnerLeaseId::from_uuid(Uuid::from_u128(61));
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            RecordingExecutor {
+                events: Arc::clone(&events),
+                calls: 0,
+            },
+            InProcessToolDispatchGate::default(),
+        )
+        .with_runner_tool_offer(RecordingRunnerToolOffer {
+            events: Arc::clone(&events),
+            lease,
+        });
+
+        let outcome = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect("the runner offer commits");
+
+        assert_eq!(
+            outcome,
+            ToolExecutionServiceOutcome::RunnerOfferCommitted(lease)
+        );
+        assert_eq!(*events.lock().expect("event lock"), ["runner_offer"]);
+    }
+
+    /// INV-024 / INV-043: composition without a runner-offer adapter refuses a
+    /// runner-selected request before local authorization or executor entry.
+    #[tokio::test]
+    async fn inv024_inv043_runner_request_fails_closed_without_offer_adapter() {
+        let (batch, _) = batch_with_attempt_state_at_locus(
+            "{}",
+            ToolEffectClass::EffectFree,
+            ToolAttemptReconstitutionState::Prepared,
+            0,
+            exact_runner_locus(),
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let transaction = FakeTransaction {
+            prepared: current_attempt_fixture(&batch),
+            batch: batch.clone(),
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            RecordingExecutor {
+                events: Arc::clone(&events),
+                calls: 0,
+            },
+            InProcessToolDispatchGate::default(),
+        );
+
+        let error = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect_err("runner execution requires an installed offer adapter");
+
+        assert_eq!(error.operator_failure_cause_code(), "runner_tool_offer");
+        assert!(events.lock().expect("event lock").is_empty());
+    }
+
+    /// INV-011 / INV-024 / INV-043: an in-flight runner attempt belongs to its
+    /// lease state machine and is never classified as a lost local execution.
+    #[tokio::test]
+    async fn inv011_inv024_inv043_runner_in_flight_attempt_remains_pending() {
+        let (batch, attempt) = runner_in_flight_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let transaction = FakeTransaction {
+            prepared: current_attempt_fixture(&batch),
+            batch: batch.clone(),
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            NoToolCatalog,
+            RecordingExecutor {
+                events: Arc::clone(&events),
+                calls: 0,
+            },
+            InProcessToolDispatchGate::default(),
+        );
+
+        let outcome = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect("the runner attempt remains lease-owned");
+
+        assert_eq!(
+            outcome,
+            ToolExecutionServiceOutcome::RunnerExecutionPending(attempt)
+        );
+        assert!(events.lock().expect("event lock").is_empty());
+    }
+
+    /// INV-011 / INV-024: a runner offer receipt cannot substitute another
+    /// application request after its durable boundary returns.
+    #[tokio::test]
+    async fn inv011_inv024_runner_offer_rejects_cross_wired_receipt() {
+        let (batch, _) = batch_with_attempt_state_at_locus(
+            "{}",
+            ToolEffectClass::EffectFree,
+            ToolAttemptReconstitutionState::Prepared,
+            0,
+            exact_runner_locus(),
+        );
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let transaction = FakeTransaction {
+            prepared: current_attempt_fixture(&batch),
+            batch: batch.clone(),
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let foreign = RunnerToolOfferRequest::try_new(
+            SessionId::from_uuid(Uuid::from_u128(70)),
+            TurnId::from_uuid(Uuid::from_u128(71)),
+            ToolAttemptId::from_uuid(Uuid::from_u128(72)),
+            exact_runner_locus(),
+        )
+        .expect("the foreign fixture is runner selected");
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            RecordingExecutor { events, calls: 0 },
+            InProcessToolDispatchGate::default(),
+        )
+        .with_runner_tool_offer(CrossWiredRunnerToolOffer {
+            request: foreign,
+            lease: RunnerLeaseId::from_uuid(Uuid::from_u128(73)),
+        });
+
+        let error = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect_err("a foreign runner offer receipt is rejected");
+
+        assert!(matches!(
+            error,
+            ToolExecutionServiceError::RunnerOfferCorrelationMismatch
+        ));
+    }
+
+    /// INV-011 / INV-024 / INV-037: ambiguous offer acknowledgement is reread
+    /// before the application accepts the lease as durably committed.
+    #[tokio::test]
+    async fn inv011_inv024_inv037_runner_offer_accepts_committed_reread() {
+        let (batch, attempt) = batch_with_attempt_state_at_locus(
+            "{}",
+            ToolEffectClass::EffectFree,
+            ToolAttemptReconstitutionState::Prepared,
+            0,
+            exact_runner_locus(),
+        );
+        let expected_offer = RunnerToolOfferRequest::try_new(
+            batch.session(),
+            batch.turn(),
+            attempt,
+            exact_runner_locus(),
+        )
+        .expect("the fixture request is runner selected");
+        let lease = RunnerLeaseId::from_uuid(Uuid::from_u128(74));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let transaction = FakeTransaction {
+            prepared: current_attempt_fixture(&batch),
+            batch: batch.clone(),
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let runner = AmbiguousRunnerToolOffer {
+            events: Arc::clone(&events),
+            rereads: VecDeque::from([Ok(RunnerToolOfferStatus::Offered(
+                RunnerToolOfferReceipt::new(expected_offer, lease),
+            ))]),
+        };
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            RecordingExecutor {
+                events: Arc::clone(&events),
+                calls: 0,
+            },
+            InProcessToolDispatchGate::default(),
+        )
+        .with_runner_tool_offer(runner);
+
+        let outcome = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect("the committed runner offer reread is accepted");
+
+        assert_eq!(
+            outcome,
+            ToolExecutionServiceOutcome::RunnerOfferCommitted(lease)
+        );
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["runner_offer", "runner_reread"]
+        );
+    }
+
+    /// INV-011 / INV-024 / INV-037: failure to reread an ambiguous offer keeps
+    /// the exact request and retries only durable reconciliation.
+    #[tokio::test]
+    async fn inv011_inv024_inv037_runner_offer_retains_failed_reread() {
+        let (batch, attempt) = batch_with_attempt_state_at_locus(
+            "{}",
+            ToolEffectClass::EffectFree,
+            ToolAttemptReconstitutionState::Prepared,
+            0,
+            exact_runner_locus(),
+        );
+        let expected_offer = RunnerToolOfferRequest::try_new(
+            batch.session(),
+            batch.turn(),
+            attempt,
+            exact_runner_locus(),
+        )
+        .expect("the fixture request is runner selected");
+        let lease = RunnerLeaseId::from_uuid(Uuid::from_u128(75));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let transaction = FakeTransaction {
+            prepared: current_attempt_fixture(&batch),
+            batch: batch.clone(),
+            events: Arc::clone(&events),
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+            load_results: VecDeque::new(),
+            allow_crash_classification: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let runner = AmbiguousRunnerToolOffer {
+            events: Arc::clone(&events),
+            rereads: VecDeque::from([
+                Err(RunnerToolOfferError::new(
+                    OperatorFailureClass::Infrastructure {
+                        commit_ambiguous: false,
+                    },
+                    "runner_offer_reread_unavailable",
+                )),
+                Ok(RunnerToolOfferStatus::Offered(RunnerToolOfferReceipt::new(
+                    expected_offer,
+                    lease,
+                ))),
+            ]),
+        };
+        let gate = InProcessToolDispatchGate::default();
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            RecordingExecutor {
+                events: Arc::clone(&events),
+                calls: 0,
+            },
+            gate.clone(),
+        )
+        .with_runner_tool_offer(runner);
+
+        let first = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect_err("the first runner offer reread is unavailable");
+        let gate_blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            gate.acquire(batch.turn()),
+        )
+        .await;
+        let retried = service
+            .execute(batch.session(), batch.turn())
+            .await
+            .expect("the retained runner offer reconciles");
+
+        assert!(matches!(
+            first,
+            ToolExecutionServiceError::RunnerOfferReread { .. }
+        ));
+        assert!(gate_blocked.is_err());
+        assert!(service.retained_state().is_none());
+        assert_eq!(
+            retried,
+            ToolExecutionServiceOutcome::RunnerOfferCommitted(lease)
+        );
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["runner_offer", "runner_reread", "runner_reread"]
+        );
     }
 
     /// What one execution against a possibly drifted catalog produced.

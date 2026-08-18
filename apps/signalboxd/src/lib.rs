@@ -1511,6 +1511,8 @@ where
                             }
                         }
                         ToolExecutionServiceOutcome::ChildWaitParked(_)
+                        | ToolExecutionServiceOutcome::RunnerOfferCommitted(_)
+                        | ToolExecutionServiceOutcome::RunnerExecutionPending(_)
                         | ToolExecutionServiceOutcome::AwaitingRecovery(_)
                         | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => {
                             return Ok(());

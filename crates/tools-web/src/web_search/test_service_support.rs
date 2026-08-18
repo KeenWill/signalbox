@@ -598,6 +598,8 @@ pub(super) fn committed_tool_attempt_end(
         | ToolExecutionServiceOutcome::AwaitingApproval(_)
         | ToolExecutionServiceOutcome::AwaitingRecovery(_)
         | ToolExecutionServiceOutcome::AttemptCheckpointed(_)
+        | ToolExecutionServiceOutcome::RunnerOfferCommitted(_)
+        | ToolExecutionServiceOutcome::RunnerExecutionPending(_)
         | ToolExecutionServiceOutcome::PreflightFailed(_)
         | ToolExecutionServiceOutcome::ObservationAlreadyCommitted(_)
         | ToolExecutionServiceOutcome::CrashClassified(_)

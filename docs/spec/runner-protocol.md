@@ -26,8 +26,10 @@ this PR (`agent/runner-initial-dispatch-transaction`). Closed initial-pin and
 existing-pin offer dispatch composition is re-verified through this PR
 (`agent/runner-dispatch-application-composition`). Durable lease-claim admission
 is re-verified through this PR (`agent/runner-lease-claim-transaction`). The
-atomic claimed-lease and physical-attempt result boundary is re-verified through
-this PR (`agent/runner-lease-result-transaction`). Immutable normalized dispatch
+application tool-loop handoff for a runner-selected prepared attempt is
+re-verified through this PR (`agent/tool-loop-runner-offer-handoff`). The atomic
+claimed-lease and physical-attempt result boundary is re-verified through this
+PR (`agent/runner-lease-result-transaction`). Immutable normalized dispatch
 arguments on every lease and its durable readback are re-verified through this
 PR (`agent/runner-lease-argument-binding`). Exact daemon projection of sealed
 lease facts into `lease_offer`, `lease_claimed`, `dispatch`, and
@@ -245,16 +247,17 @@ transaction, then it projects the returned canonical offered lease, uses the
 transaction-returned enrollment only to resolve the then-current connected
 route, and hands the frame to the broker. Both requests supply the selected
 runner and registration revision from the executable-tool snapshot; neither can
-substitute an enrollment identity for that frozen locus. No tool-loop locus
-invokes the dispatcher yet. Inbound workspace and operation-failure frames
-remain unimplemented and fail closed. Inbound `lease_claim` and `result` instead
-take the durable boundaries described under
+substitute an enrollment identity for that frozen locus. The application
+tool-loop now crosses a typed runner-offer port for a runner-selected prepared
+attempt before any local executor authority. No production daemon composition
+implements that port or invokes the dispatcher yet. Inbound workspace and
+operation-failure frames remain unimplemented and fail closed. Inbound
+`lease_claim` and `result` instead take the durable boundaries described under
 [runner leases](#effect-classes-and-runner-leases).
 
-**Committed unimplemented functionality.** No present tool-loop locus invokes
-the durable offer producer, and no runner surface serves the following
-lease/dispatch state machine. The established daemon connection does already
-implement the durable claim and result boundaries in steps 2 and 4. The
+**Committed unimplemented functionality.** No runner surface serves the
+following lease/dispatch state machine. The established daemon connection does
+already implement the durable claim and result boundaries in steps 2 and 4. The
 remaining surfaces stay compatible with the complete state machine:
 
 1. The daemon sends `lease_offer` with the complete lease correlation and
@@ -776,9 +779,9 @@ selected runner authority, and placement in the runner lock order, authenticates
 either a distinct live successor or the registration-loss-only same-runner
 exception, and returns the original durable stage on equal replay. A
 workspace-free placement returns `NotApplicable` without claiming the command,
-so its later terminal transaction remains the sole owner. The runner provisions
-and spools `workspace_ready` under that limited authority. Only a later
-transaction can activate the pending enrollment: it rechecks the lost
+so its later terminal transaction remains the sole terminal authority. The
+runner provisions and spools `workspace_ready` under that limited authority.
+Only a later transaction can activate the pending enrollment: it rechecks the lost
 predecessor and connected candidate, consumes the exact workspace receipt,
 revokes the predecessor, constructs the active enrollment and validated
 registration from the exact pending facts, and installs the successor placement,
