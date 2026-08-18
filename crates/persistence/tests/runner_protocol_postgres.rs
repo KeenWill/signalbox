@@ -20457,3 +20457,59 @@ async fn s32_inv032_inv044_runner_outbox_insert_rejects_cross_wired_source()
     drop(pool);
     Ok(())
 }
+
+/// INV-032 / INV-044: an exact-runner placement stored before enrollment uses
+/// the same runner-identity fallback during projection that selected its page.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_loss_transaction_projects_pre_enrollment_session()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    let session = placement.session();
+    store.store_placement(&placement, None, None).await?;
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the exact runner loss owns its propagation cursor");
+
+    assert_eq!(
+        store
+            .propagate_connection_loss_session(loss, session)
+            .await?,
+        RunnerConnectionLossSessionDisposition::Applied {
+            state: DispatchedRunnerState::RunnerLostBeforePin,
+            interrupted_tool_attempt: None,
+        }
+    );
+    assert_eq!(
+        store
+            .load_placement(session)
+            .await?
+            .expect("the loss projection remains readable")
+            .placement()
+            .state(),
+        &SessionRunnerPlacementState::RunnerLostBeforePin(RunnerLostBeforePin::from_stored(
+            expected_enrollment.runner(),
+        ))
+    );
+    drop(pool);
+    Ok(())
+}

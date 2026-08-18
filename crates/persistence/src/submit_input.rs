@@ -2456,14 +2456,12 @@ pub(crate) async fn load_scheduling_projection(
 
         let accepting_command: Option<Uuid> = row.try_get("accepting_command_id")?;
         let goal_generation: Option<Decimal> = row.try_get("goal_generation")?;
+        // A command and a goal generation are no longer exclusive. A dispatched
+        // work turn is bound to the generation it runs under while keeping the
+        // submit command that accepted its tagged context, so the command is
+        // what reconstitutes the input and the generation rides alongside it.
         let (accepted_lifecycle, origin_delivery, origin_configuration, binding) =
             if let Some(accepting_command) = accepting_command {
-                if goal_generation.is_some() {
-                    return Err(SubmitInputCorruption::Inconsistent(
-                        "scheduling input correlation",
-                    )
-                    .into());
-                }
                 let accepting_command =
                     durable_command_id_from_uuid(accepting_command).map_err(|_| {
                         SubmitInputCorruption::Inconsistent("accepting command identity")
@@ -6884,7 +6882,11 @@ fn decode_stored_turn_origin_provenance(
     let command: Option<Uuid> = row.try_get("origin_command_id")?;
     let generation: Option<Decimal> = row.try_get("origin_goal_generation")?;
     match (command, generation) {
-        (Some(command), None) => {
+        // A bound dispatch turn carries both: the command accepted its tagged
+        // context and the generation records the authority it runs under. The
+        // command is what reconstitutes the origin, so it decides the shape and
+        // the generation rides alongside it.
+        (Some(command), _) => {
             let command_id = durable_command_id_from_uuid(command)
                 .map_err(|_| SubmitInputCorruption::Inconsistent("turn origin command identity"))?;
             Ok((
@@ -6937,9 +6939,8 @@ fn decode_stored_turn_origin_provenance(
                 None,
             ))
         }
-        (Some(_), Some(_)) | (None, None) => {
-            Err(SubmitInputCorruption::Inconsistent("turn origin provenance").into())
-        }
+        // Neither a command nor a generation names no origin at all.
+        (None, None) => Err(SubmitInputCorruption::Inconsistent("turn origin provenance").into()),
     }
 }
 

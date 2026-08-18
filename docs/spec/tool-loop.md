@@ -22,6 +22,13 @@ The `AlwaysConfirm` interaction with an explicitly configured approval posture �
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
 
+The change-request-scoped thread mutation contracts and their pre-dispatch
+ownership confirmation are verified through this PR (`agent/thread-ownership`).
+
+The daemon blob-read declarations below are the foundation proposal from PR #553
+(`agent/blob-storage-foundation`) and become verified with its implementing
+child stack.
+
 This page specifies the implemented daemon-owned tool subsystem as verified
 against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 `signalboxd` name this page states for the catalog-wiring composition root was
@@ -286,6 +293,8 @@ The workstation-facing registry is daemon-local and process-lifetime immutable.
 The daemon composes it from these implemented families:
 
 - basic tools (`current_time`, `echo`, and `session_status_update`);
+- blob-read tools (`blob_metadata` and `blob_read`) when blob storage is
+  configured;
 - web fetch and search;
 - code-host and mapped GitHub pull-request tools;
 - mapped workspace read and mutation tools;
@@ -817,6 +826,25 @@ tools:
 - `echo` requires exactly one `text` string and returns the same canonical
   compact `{"text": ...}` object. Its permission default is `Auto` and its
   effect class is `EffectFree`: execution observes no external state.
+- `blob_metadata`, as owned by the
+  [blob-read tool contract](blob-storage.md#attachment-visibility-and-model-reads),
+  requires exactly one canonical blob `digest`. It returns text containing
+  compact JSON with that `digest`, canonical-decimal-string `byte_length`, and
+  canonical-decimal-string `replica_count`. Its permission default is `Auto` and
+  its effect class is `EffectFree`.
+- `blob_read`, as owned by the
+  [blob-read tool contract](blob-storage.md#attachment-visibility-and-model-reads),
+  requires exactly one canonical blob `digest` plus `offset_bytes` and
+  `length_bytes` as canonical decimal-u64 strings. Length is 1 through 524,288
+  bytes; checked offset plus length must lie within the blob. It returns text
+  containing compact JSON with the `digest`, `offset_bytes`, and canonical
+  padded `bytes_base64`. Its permission default is `Auto` and its effect class
+  is conservatively `ExternalEffect`: recorded failover can issue an
+  authenticated S3 GET observable to the object-store operator even when the
+  selected replica for another execution is local. After its non-waiting
+  direct-read admission, the scheduler releases pass capacity during store
+  traversal and reacquires it before correlated result commit or crash-loss
+  classification, as owned by the blob contract.
 - `web_fetch` requires exactly one absolute HTTP(S) `url` no longer than 8 KiB.
   User information, fragments, and direct non-public IP destinations are
   invalid. Before dispatch, its canonical origin must satisfy the
@@ -865,6 +893,34 @@ tools:
   acknowledgement returns `Ambiguous` evidence. Metadata value and replacement
   mechanics remain owned by
   [sessions-and-transcript](sessions-and-transcript.md#session-metadata-and-list-projection).
+
+Both blob tools authorize only digests present in attachment stubs in the
+rendered frontier for the issuing turn, under the owning
+[blob-read tool contract](blob-storage.md#attachment-visibility-and-model-reads).
+The read declaration's requested decoded length and one logical-read unit are
+charged once by tool-request identity to durable per-turn counters before
+authorization; replay never charges twice. Before authorization, a digest absent
+from the rendered frontier closes the `Prepared` attempt as
+`KnownFailed(InvalidArguments)` with exact fixed detail `blob_not_visible`; a
+reservation that would exceed 2,097,152 bytes closes it the same way with exact
+fixed detail `blob_turn_byte_budget_exceeded`, and a reservation that would
+exceed 64 logical reads closes it with exact fixed detail
+`blob_turn_read_count_exceeded`. Any closure resolves the logical request,
+crosses no executor or store boundary, leaves previously charged bytes charged,
+and permits the next model round. A successful reservation is not refunded by a
+later denial or failure. Store I/O occurs only after durable authorization. An
+individual missing, corrupt, or unavailable replica falls through to the next
+recorded candidate. Only after no candidate verifies does the read become
+trustworthy content-silent `ExecutionFailed` evidence with the respective exact
+fixed detail `blob_missing`, `blob_corrupt`, or `blob_unavailable`. Any
+unavailable candidate takes precedence; otherwise any readable candidate that
+fails verification selects `blob_corrupt`, and `blob_missing` applies only when
+every candidate is absent. It resolves the logical request and permits the next
+model round rather than entering the effect-free crash-loss path or failing the
+turn; a later request may retry `blob_unavailable` within the remaining per-turn
+budget. The compact result must also fit the ordinary 1 MiB text-result bound;
+admission accounts for JSON and base64 overhead rather than producing a result
+that the ordinary result boundary would reject.
 
 For both web tools, an explicit shipped `Human` posture supersedes the
 declaration's `Confirm` default and the session blanket, so a request parks for
@@ -960,10 +1016,35 @@ The declarations and compact result objects are:
   the first 100 threads and, within each, the first 100 comments. A thread
   carries opaque id, resolution and outdated posture, path, optional line,
   comments, and `comments_truncated`; the outer result carries `truncated`.
-- `change_request_thread_reply` accepts an opaque `thread_id` and nonempty
-  `body`; it returns the created comment node id and URL.
-- `change_request_thread_resolve` accepts one opaque `thread_id`; it returns
-  that identity and the acknowledged resolution posture.
+- `change_request_thread_reply` accepts `repository`, `number`, an opaque
+  `thread_id`, and nonempty `body`; it returns the created comment node id and
+  URL. The named change request is the mutation's authority target: an opaque
+  thread identity alone is globally scoped, so without these coordinates neither
+  an approval decision over the arguments nor the executor could tell a thread
+  in the granted change request from one anywhere else the credential reaches.
+  Before dispatching the mutation, the GitHub adapter resolves the thread node
+  and confirms the code host places it inside exactly that change request. A
+  thread the code host does not place there — including an identity that
+  resolves to no node or to a node of another type — fails closed with the fixed
+  semantic detail
+  `requested review thread was not found in the named change request`, and no
+  mutation request is dispatched. Node absence is definitive only when every
+  error beside the evaluated null carries the code host's typed not-found
+  classification, or none accompanies it; any other field error proves nothing
+  about the thread and reports the undispatched mutation instead. The repository
+  comparison follows the code host's case-insensitive repository addressing; the
+  number must match exactly. Ownership-check failures keep read classification:
+  an infrastructure failure during the confirmation reports that the mutation
+  was never dispatched and is never commit-ambiguous. A review thread never
+  moves between change requests, so the confirmation cannot be invalidated
+  between the two requests. The confirmation and the mutation share the
+  transport's single 30-second exchange budget: the mutation receives only the
+  time the confirmation left, and exhaustion before dispatch reports the
+  undispatched mutation.
+- `change_request_thread_resolve` accepts `repository`, `number`, and one opaque
+  `thread_id` under the same pre-dispatch ownership confirmation as
+  `change_request_thread_reply`; it returns that thread identity and the
+  acknowledged resolution posture.
 - `change_request_ci_job_log` accepts `repository` and a positive `job_id`; it
   returns that id, at most 64 KiB of lossy UTF-8 log text, and `truncated`.
 - `change_request_rerun_failed_jobs` accepts `repository` and a positive

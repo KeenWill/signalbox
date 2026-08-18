@@ -10,8 +10,9 @@ instead. The mirror covers the public type and function surface of
 comments, no tests, no bodies. Any pull request that adds, removes, or changes a
 public item in either crate must update this file in the same change;
 `AGENTS.md` carries that rule, and CI (`scripts/check_domain_spine.py`) fails
-when an exported name is missing here or an inventory count disagrees with
-source.
+when an exported name or a listed type's public method is missing here, when a
+declaration outlives its source counterpart, or when an inventory count
+disagrees with source.
 
 Conventions used below:
 
@@ -54,7 +55,7 @@ impl <Identity> {
 }
 ```
 
-The twenty-seven identities defined in `lib.rs`:
+The twenty-eight identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -74,6 +75,7 @@ pub struct RunnerId(/* private */);
 pub struct RunnerAuthenticationId(/* private */);
 pub struct RunnerLeaseId(/* private */);
 pub struct WorkspaceManifestId(/* private */);
+pub struct ProgramRunId(/* private */);
 pub struct ReviewTargetId(/* private */);
 pub struct ReviewRunId(/* private */);
 pub struct ReviewPassId(/* private */);
@@ -100,6 +102,227 @@ pub enum Actor {
     Model { turn: TurnId },
     Recovery,
     Tool { request: ToolRequestId },
+}
+```
+
+## domain: blob
+
+```rust
+pub struct BlobDigest(/* private [u8; 32] */);
+impl BlobDigest {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+    pub fn digest(bytes: &[u8]) -> Self;
+}
+
+pub enum BlobDigestParseFailure {
+    MissingSha256Prefix,
+    InvalidLength,
+    InvalidHex,
+}
+
+pub struct BlobDigestParseError { /* private */ }
+impl BlobDigestParseError {
+    // accessors: rejected(), failure()
+}
+```
+
+## domain: program_journal
+
+```rust
+pub struct JournalPosition(/* private NonZeroU64 */);
+pub struct RequestOrdinal(/* private NonZeroU64 */);
+pub struct DeliveryOrdinal(/* private NonZeroU64 */);
+pub struct ScopeOrdinal(/* private NonZeroU64 */);
+
+pub struct InlineFramePayload { /* private */ }
+impl InlineFramePayload {
+    pub fn new(bytes: impl Into<Box<[u8]>>) -> Self;
+    // accessor: as_bytes()
+}
+
+pub enum ProgramCapability {
+    Time,
+    Random,
+    Sleep,
+    Subscribe,
+    Session,
+    Judge,
+    ExecStage,
+    Corpus,
+    EvalRecord,
+    Blob,
+    Register,
+}
+
+pub enum ScopeOperation {
+    Open,
+    Close,
+}
+
+pub struct ScopeRequest { /* private */ }
+impl ScopeRequest {
+    pub const fn new(
+        operation: ScopeOperation,
+        scope: ScopeOrdinal,
+        parent: Option<ScopeOrdinal>,
+    ) -> Self;
+    // accessors: operation(), scope(), parent()
+}
+
+pub struct EffectRequest { /* private */ }
+impl EffectRequest {
+    pub fn new(
+        capability: ProgramCapability,
+        method: String,
+        payload: InlineFramePayload,
+    ) -> Self;
+    // accessors: capability(), method(), payload()
+}
+
+pub enum RequestKind {
+    Now(InlineFramePayload),
+    Random(InlineFramePayload),
+    Sleep(InlineFramePayload),
+    AwaitEvent(InlineFramePayload),
+    Effect(EffectRequest),
+    Scope(ScopeRequest),
+    Terminal(InlineFramePayload),
+}
+
+pub struct RequestFrame { /* private */ }
+impl RequestFrame {
+    pub const fn new(
+        ordinal: RequestOrdinal,
+        scope: Option<ScopeOrdinal>,
+        kind: RequestKind,
+    ) -> Self;
+    // accessors: ordinal(), scope(), kind()
+}
+
+pub enum RejectReason {
+    OutstandingRequests,
+}
+
+pub enum FaultCause {
+    Timeout,
+    Memory,
+    Nondeterminism,
+    ProgramError,
+    ContractRetired,
+    JournalBound,
+    PayloadTooLarge,
+}
+
+pub enum ProgramFault {
+    Timeout(InlineFramePayload),
+    Memory(InlineFramePayload),
+    Nondeterminism {
+        expected: RequestFrame,
+        observed: RequestFrame,
+    },
+    ProgramError(InlineFramePayload),
+    ContractRetired(InlineFramePayload),
+    JournalBound(InlineFramePayload),
+    PayloadTooLarge(InlineFramePayload),
+}
+impl ProgramFault {
+    // accessors: cause(), evidence()
+}
+
+pub enum FaultEvidenceRef<'a> {
+    Ordinary(&'a InlineFramePayload),
+    Nondeterminism {
+        expected: &'a RequestFrame,
+        observed: &'a RequestFrame,
+    },
+}
+
+pub enum DeliveryKind {
+    Answer {
+        resolves: RequestOrdinal,
+        payload: InlineFramePayload,
+    },
+    Wake {
+        resolves: RequestOrdinal,
+        payload: InlineFramePayload,
+    },
+    Reject {
+        resolves: RequestOrdinal,
+        reason: RejectReason,
+    },
+    Cancel {
+        resolves: RequestOrdinal,
+        payload: InlineFramePayload,
+    },
+    RunCancel(InlineFramePayload),
+    Fault(ProgramFault),
+}
+impl DeliveryKind {
+    // accessor: resolves()
+}
+
+pub struct DeliveryFrame { /* private */ }
+impl DeliveryFrame {
+    pub const fn new(ordinal: DeliveryOrdinal, kind: DeliveryKind) -> Self;
+    // accessors: ordinal(), kind()
+}
+
+pub enum JournalFrame {
+    Request(RequestFrame),
+    Delivery(DeliveryFrame),
+}
+
+pub struct JournalEntry { /* private */ }
+impl JournalEntry {
+    pub const fn new(position: JournalPosition, frame: JournalFrame) -> Self;
+    // accessors: position(), frame()
+}
+
+pub struct ProgramJournal { /* private */ }
+impl ProgramJournal {
+    pub fn try_new(
+        run: ProgramRunId,
+        entries: Vec<JournalEntry>,
+    ) -> Result<Self, ProgramJournalError>;
+    // accessors: run(), entries()
+}
+
+pub enum ProgramJournalError {
+    NoncontiguousPosition,
+    NoncontiguousRequestOrdinal,
+    NoncontiguousDeliveryOrdinal,
+    UnknownResolvedRequest,
+    RequestResolvedTwice,
+    OrdinalExhausted,
+}
+
+pub enum ReplayInstruction {
+    AwaitRequest,
+    Deliver(DeliveryFrame),
+    Live,
+}
+
+pub enum ReplayedRequest {
+    Matched,
+    DeliveryPending,
+    Live,
+}
+
+pub struct NondeterminismError { /* private */ }
+impl NondeterminismError {
+    pub fn into_fault(self) -> ProgramFault;
+    // accessors: run(), expected(), observed()
+}
+
+pub struct ReplayCursor { /* private */ }
+impl ReplayCursor {
+    pub fn new(journal: ProgramJournal) -> Self;
+    pub fn next_instruction(&mut self) -> ReplayInstruction;
+    pub fn submit_request(
+        &mut self,
+        observed: RequestFrame,
+    ) -> Result<ReplayedRequest, NondeterminismError>;
 }
 ```
 
@@ -4607,6 +4830,7 @@ pub struct ToolDenialReason(/* private */);
 impl ToolDenialReason {
     pub const MAX_UTF8_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, ToolDenialReasonError>;
+    pub fn from_rationale(rationale: &ToolDecisionRationale) -> Option<Self>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> String;
 }
@@ -4631,7 +4855,10 @@ impl ToolApprovalResolution {
 pub struct ToolApprovalResolutionReconstitutionInput { /* private */ }
 impl ToolApprovalResolutionReconstitutionInput {
     pub const fn user_command(command: PreparedDecideToolRequest) -> Self;
-    pub fn delegate(approval: DelegateToolApproval) -> Self;
+    pub fn delegate(
+        approval: DelegateToolApproval,
+        stored_denial_reason: Option<ToolDenialReason>,
+    ) -> Self;
     pub const fn policy_auto(request: ToolRequestId) -> Self;
     pub const fn session_blanket(
         request: ToolRequestId,
@@ -6973,16 +7200,6 @@ pub enum RepoWatchSingletonKey {
     Repository { repository: RepositorySlug },
 }
 
-pub struct RepoWatchDispatchGoal { /* private */ }
-impl RepoWatchDispatchGoal {
-    pub const fn new(
-        command: GoalUserCommand,
-        accepted_input: AcceptedInputId,
-        turn: TurnId,
-    ) -> Self;
-    // accessors: command(), accepted_input(), turn()
-}
-
 pub struct RepoWatchPreparedDispatchAction { /* private */ }
 impl RepoWatchPreparedDispatchAction {
     // accessors: action(), prepared_session(), goal()
@@ -6996,7 +7213,7 @@ impl RepoWatchPreparedDispatchAction {
         TurnId,
         SemanticTranscriptEntryId,
         ContextFrontierId,
-        RepoWatchDispatchGoal,
+        GoalUserCommand,
     );
 }
 
@@ -7020,6 +7237,7 @@ pub enum RepoWatchRuleEvaluation {
 pub enum RepoWatchRuleEvaluationOutcome {
     Inactive,
     NotMatched,
+    TargetClosed,
     Occupied,
     Cooldown,
     Dispatched {
@@ -10351,8 +10569,10 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types          |
 | -------------------------------------------------- | --------------------- |
-| domain: lib.rs identities                          | 27                    |
+| domain: lib.rs identities                          | 28                    |
 | domain: actor                                      | 1                     |
+| domain: blob                                       | 3                     |
+| domain: program_journal                            | 25                    |
 | domain: imported_conversation                      | 32 (+5 free fn)       |
 | domain: session_template                           | 6                     |
 | domain: session_placement                          | 18                    |
@@ -10389,7 +10609,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **771 (+12 free fn)** |
+| **signalbox-domain total**                         | **800 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
@@ -10402,7 +10622,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: operator_failure                      | 2 (incl. 1 trait)     |
 | application: session_delegation                    | 1 (incl. 1 trait)     |
 | application: replace_session_defaults              | 5 (incl. 1 trait)     |
-| application: repo_watch                            | 34 (incl. 4 traits)   |
+| application: repo_watch                            | 33 (incl. 4 traits)   |
 | application: review_orchestration                  | 37 (incl. 2 traits)   |
 | application: review_workflow                       | 9 (incl. 2 traits)    |
 | application: session_metadata                      | 12 (incl. 4 traits)   |

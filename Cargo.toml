@@ -4,6 +4,8 @@ members = [
     "apps/signalbox-runner",
     "apps/signalboxd",
     "crates/application",
+    "crates/blob-store",
+    "crates/blob-store-filesystem",
     "crates/egress-transport",
     "crates/conversation-import-claude-code",
     "crates/conversation-import-codex",
@@ -54,3 +56,9 @@ todo = "deny"
 unimplemented = "deny"
 unreachable = "deny"
 unwrap_used = "deny"
+
+# Dev builds carry only file/line debug info: panic backtraces stay readable
+# while target directories shrink roughly in half. Restore the default
+# (`debug = 2`) if full interactive-debugger support is ever needed.
+[profile.dev]
+debug = "line-tables-only"
