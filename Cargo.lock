@@ -3377,6 +3377,7 @@ dependencies = [
  "signalbox-domain",
  "signalbox-persistence",
  "signalbox-runner-wire",
+ "signalbox-test-bin",
  "signalbox-tools-exec",
  "signalboxd",
  "sqlx",
