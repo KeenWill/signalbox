@@ -6,6 +6,8 @@
 //! strings appear only as retained detail inside an already-classified
 //! variant, never as the thing that decides the variant.
 
+use std::time::{Duration, SystemTime};
+
 use crate::message::AssistantPart;
 use crate::target::ProviderReportedModel;
 use crate::usage::TokenUsage;
@@ -77,6 +79,27 @@ pub struct ExchangeFacts {
     /// the `request-id` response header), when observed.
     pub provider_request_id: Option<ProviderRequestId>,
     pub http_status: Option<u16>,
+    /// Provider-directed minimum delay before another availability attempt.
+    ///
+    /// HTTP adapters decode `Retry-After`; process adapters populate this only
+    /// when their typed protocol surface exposes an equivalent duration. The
+    /// value contains no provider prose and is safe to persist as policy
+    /// evidence.
+    pub retry_after: Option<Duration>,
+}
+
+/// Decodes the HTTP `Retry-After` grammar into a delay from `now`.
+///
+/// Both the decimal delay-seconds form and the HTTP-date form are admitted.
+/// A past date becomes zero delay; malformed or non-UTF-8 header material is
+/// absent evidence rather than a guessed interval.
+pub fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
+    if let Ok(seconds) = value.trim().parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    httpdate::parse_http_date(value)
+        .ok()
+        .map(|deadline| deadline.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
 /// A provider-issued request identifier, retained verbatim for support and
@@ -236,6 +259,9 @@ pub struct ProviderErrorEvidence {
     /// error (docs/spec/runtime-substrate.md: each adapter owns an
     /// exhaustive, mutually exclusive native mapping).
     pub kind: ProviderErrorKind,
+    /// Typed protocol proof that this error ended before any successful
+    /// response stream could have been accepted.
+    pub non_acceptance_proven: bool,
     /// The provider's native error material, retained verbatim as evidence.
     /// Classification never reads it.
     pub native: NativeErrorFacts,
@@ -468,5 +494,32 @@ impl TransportFacts {
         Self {
             detail: detail.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use super::parse_retry_after;
+
+    #[test]
+    fn retry_after_accepts_delay_seconds_and_http_date() {
+        let now = UNIX_EPOCH + Duration::from_secs(784_111_777);
+        assert_eq!(parse_retry_after("23", now), Some(Duration::from_secs(23)));
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:49:57 GMT", now),
+            Some(Duration::from_secs(20))
+        );
+    }
+
+    #[test]
+    fn retry_after_rejects_malformed_values_and_saturates_past_dates() {
+        let now = UNIX_EPOCH + Duration::from_secs(784_111_777);
+        assert_eq!(parse_retry_after("soon", now), None);
+        assert_eq!(
+            parse_retry_after("Sun, 06 Nov 1994 08:49:00 GMT", now),
+            Some(Duration::ZERO)
+        );
     }
 }

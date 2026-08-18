@@ -8,6 +8,10 @@ pub const MAX_PROBE_SUFFIX_BYTES: u64 = 65_536;
 pub const MAX_PROBE_RANGES: u32 = 16;
 /// Hard safety ceiling; bounds aggregate probe reads to protect broker resources.
 pub const MAX_PROBE_CUMULATIVE_BYTES: u64 = 262_144;
+/// Hard safety ceiling; bounds one view's aggregate source I/O.
+pub const MAX_READ_SOURCE_BYTES: u64 = 1_073_741_824;
+/// Hard safety ceiling; bounds one random-access view's range fan-out.
+pub const MAX_READ_RANGES: u32 = 4_096;
 /// Hard safety ceiling; bounds one processor frame to protect daemon memory.
 pub const MAX_PROCESSOR_FRAME_BYTES: usize = 1_048_576;
 /// Hard safety ceiling; bounds serialized read options before processor framing.
@@ -66,6 +70,10 @@ pub struct FileMediaCeilings {
     pub probe_ranges: u32,
     /// Maximum cumulative probe bytes.
     pub probe_cumulative_bytes: u64,
+    /// Maximum cumulative source bytes for one read view.
+    pub read_source_bytes: u64,
+    /// Maximum exact ranges for one random-access read view.
+    pub read_ranges: u32,
     /// Maximum result body bytes.
     pub text_or_json_bytes: usize,
     /// Maximum structured nesting.
@@ -104,6 +112,8 @@ impl FileMediaCeilings {
             probe_suffix_bytes: MAX_PROBE_SUFFIX_BYTES,
             probe_ranges: MAX_PROBE_RANGES,
             probe_cumulative_bytes: MAX_PROBE_CUMULATIVE_BYTES,
+            read_source_bytes: MAX_READ_SOURCE_BYTES,
+            read_ranges: MAX_READ_RANGES,
             text_or_json_bytes: MAX_TEXT_OR_JSON_BYTES,
             structured_depth: MAX_STRUCTURED_DEPTH,
             structured_nodes: MAX_STRUCTURED_NODES,
@@ -131,6 +141,10 @@ impl FileMediaCeilings {
             && candidate.probe_ranges <= self.probe_ranges
             && candidate.probe_cumulative_bytes > 0
             && candidate.probe_cumulative_bytes <= self.probe_cumulative_bytes
+            && candidate.read_source_bytes > 0
+            && candidate.read_source_bytes <= self.read_source_bytes
+            && candidate.read_ranges > 0
+            && candidate.read_ranges <= self.read_ranges
             && candidate.text_or_json_bytes > 0
             && candidate.text_or_json_bytes <= self.text_or_json_bytes
             && candidate.structured_depth > 0

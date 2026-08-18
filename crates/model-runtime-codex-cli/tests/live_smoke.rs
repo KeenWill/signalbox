@@ -1448,6 +1448,7 @@ fn decoded_response_accepts_completion() {
     let exchange = ExchangeFacts {
         provider_request_id: Some(ProviderRequestId::new(FIXTURE_THREAD_ID)),
         http_status: None,
+        retry_after: None,
     };
     let usage = TokenUsage {
         input_tokens: Some(FIXTURE_INPUT_TOKENS),
@@ -1473,6 +1474,7 @@ fn decoded_response_accepts_refusal_without_completion_material() {
     let exchange = ExchangeFacts {
         provider_request_id: Some(ProviderRequestId::new(FIXTURE_THREAD_ID)),
         http_status: None,
+        retry_after: None,
     };
     let usage = TokenUsage {
         input_tokens: Some(FIXTURE_INPUT_TOKENS),
@@ -1506,6 +1508,7 @@ fn decoded_response_rejects_an_unexpected_terminal_variant() {
         exchange: ExchangeFacts {
             provider_request_id: Some(ProviderRequestId::new(FIXTURE_THREAD_ID)),
             http_status: None,
+            retry_after: None,
         },
         reported_model: None,
         finish_reported: None,
