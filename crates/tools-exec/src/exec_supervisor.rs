@@ -342,7 +342,7 @@ mod linux {
             if inherited_descriptor > 2 && inherited_descriptor != broker_descriptor_number {
                 // SAFETY: these descriptor numbers were enumerated from this single-threaded
                 // supervisor after the directory iterator was dropped, and the retained broker
-                // descriptor is excluded above. No owner remains to close an inherited descriptor.
+                // descriptor is excluded above. No live handle remains for an inherited descriptor.
                 unsafe {
                     rustix::io::close(inherited_descriptor);
                 }
