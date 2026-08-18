@@ -104,7 +104,7 @@ and verifies requests but knows nothing about tunnels or exposure providers. The
 reference deployment exposes public path `/github/webhooks` through Tailscale
 Funnel `--set-path`, which strips that prefix; its configured local path is
 therefore `/`. The reference secret file is
-`/home/wkg/.config/signalbox/github-webhook-secret`. Public reachability and its
+`/etc/signalbox/github-webhook-secret`. Public reachability and its
 availability belong to deployment, not to the daemon.
 
 ## Poll transport and differ

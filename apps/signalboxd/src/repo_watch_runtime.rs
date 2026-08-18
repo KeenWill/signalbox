@@ -565,9 +565,10 @@ impl RepositoryWatchTask {
             // the cursor past them, and every one of them would then apply to
             // state that already contains it and record nothing.
             //
-            // Its failure is reported but not propagated: acceleration failing
-            // must not cancel the reconciliation sweep, or one delivery whose
-            // targeted request keeps failing would abort every scheduled poll.
+            // Its failure is reported only after the whole sweep completes:
+            // acceleration failing must not cancel the poll or the trailing
+            // cutoff and dispatch steps, or one delivery whose targeted
+            // request keeps failing would abort every scheduled poll.
             let accelerated = self.process_webhook_deliveries().await;
             if let Err(error) = &accelerated {
                 tracing::warn!(
@@ -578,9 +579,9 @@ impl RepositoryWatchTask {
             }
             self.poll_and_commit().await?;
             self.process_webhook_deliveries().await?;
-            accelerated?;
             self.process_cutoffs().await?;
-            self.process_dispatches().await
+            self.process_dispatches().await?;
+            accelerated
         }
         .await;
         if result.is_err() {
@@ -2161,7 +2162,7 @@ impl GitHubRepositoryPoller {
         let state = RepoWatchRepositoryState::try_new(state)
             .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
         Ok(RepoWatchObservation::new(
-            previous.signal_reviewers().to_vec(),
+            self.signal_reviewers.clone(),
             state,
         ))
     }

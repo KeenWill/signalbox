@@ -269,6 +269,9 @@ pub enum RepoWatchWebhookParityCauseV1 {
     /// A hashed context field differed between the two sources.
     ContextDrift,
     /// An event family polling produces and webhooks are not designed to.
+    ///
+    /// Derived by the parity view for poll-side rows only; the projection
+    /// store's constraint rejects it, since no delivery carries this cause.
     PollOnlyFamily,
     /// The shadow baseline was re-seeded between the two occurrences.
     CrossDrainShadowGap,

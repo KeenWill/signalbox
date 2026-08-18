@@ -321,7 +321,7 @@ allowed_origins = [
 # poll_interval_seconds = 60
 # credential_file = "/run/credentials/repository-watch-namespace-project"
 # webhook_hook_id = 123456789
-# webhook_secret_file = "/home/wkg/.config/signalbox/github-webhook-secret"
+# webhook_secret_file = "/etc/signalbox/github-webhook-secret"
 #
 # [[repository_watch.rules]]
 # id = "merge-forward-on-base-advance"
