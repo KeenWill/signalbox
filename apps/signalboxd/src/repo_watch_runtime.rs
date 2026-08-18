@@ -5081,6 +5081,7 @@ mod tests {
     const PULL_NUMBER: u64 = 7;
     const BASE_ADVANCE_EVENT_ID: u128 = 72;
     const HEAD_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const MISMATCHING_HEAD_SHA: &str = "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef";
     const OWED_EVENT_HEAD_SHA: &str = "dddddddddddddddddddddddddddddddddddddddd";
     const OWED_MATCH_COUNT: u64 = 51;
     const CHANGED_LISTED_HEAD_SHA: &str = "cccccccccccccccccccccccccccccccccccccccc";
@@ -6944,6 +6945,20 @@ mod tests {
         observation
     }
 
+    fn refreshed_targeted_poll(
+        result: TargetedPolledRepository,
+    ) -> (RepoWatchObservation, Vec<RepoWatchConvergenceAssessment>) {
+        match result {
+            TargetedPolledRepository::Refreshed {
+                observation,
+                convergence,
+            } => (observation, convergence),
+            TargetedPolledRepository::Superseded => {
+                panic!("matching targeted refresh must produce an observation")
+            }
+        }
+    }
+
     fn review_only_blocked_assessment() -> RepoWatchConvergenceAssessment {
         RepoWatchConvergenceAssessment::try_new(RepoWatchConvergenceAssessmentInput {
             number: PullRequestNumber::new(
@@ -7101,13 +7116,7 @@ mod tests {
             .expect("targeted refresh succeeds");
 
         server.finish().await;
-        let TargetedPolledRepository::Refreshed {
-            observation,
-            convergence,
-        } = refreshed
-        else {
-            panic!("matching targeted refresh must produce an observation");
-        };
+        let (observation, convergence) = refreshed_targeted_poll(refreshed);
         assert_eq!(observation, previous);
         assert_eq!(convergence.len(), 1);
         assert_eq!(convergence[0].number().get(), PULL_NUMBER);
@@ -7123,7 +7132,7 @@ mod tests {
                 NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
             ),
             expected_head: Some(
-                CommitSha::try_new(String::from("beefbeefbeefbeefbeefbeefbeefbeefbeefbeef"))
+                CommitSha::try_new(String::from(MISMATCHING_HEAD_SHA))
                     .expect("fixture head SHA is canonical"),
             ),
         };
@@ -7167,13 +7176,7 @@ mod tests {
             .expect("targeted refresh succeeds");
 
         server.finish().await;
-        let TargetedPolledRepository::Refreshed {
-            observation,
-            convergence,
-        } = refreshed
-        else {
-            panic!("matching targeted refresh must produce an observation");
-        };
+        let (observation, convergence) = refreshed_targeted_poll(refreshed);
         assert_eq!(observation, candidate);
         assert_eq!(convergence.len(), 1);
         assert_eq!(convergence[0].number().get(), PULL_NUMBER);
