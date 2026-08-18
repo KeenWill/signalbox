@@ -44,17 +44,25 @@ const REST_BASE_URL: &str = "https://api.github.com/";
 const GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const USER_AGENT_VALUE: &str = "signalboxd";
 const API_VERSION: &str = "2026-03-10";
+// numeric-bound: tunable - controls the ordinary GitHub exchange wait
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+// numeric-bound: tunable - controls the largest GitHub JSON response accepted
 const MAX_JSON_RESPONSE_BYTES: usize = 512 * 1024;
+// numeric-bound: not-a-bound - fixed maximum JSON escape expansion
 const MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE: usize = 6;
 // A standard contents entry can repeat a path in `name`, `path`, four URL
 // fields, and the three `_links` fields. A symlink `target` is blob material,
 // and `submodule_git_url` is only a legacy kind marker; admit and budget both
 // separately instead of treating either as a path.
+// numeric-bound: not-a-bound - fixed GitHub contents response path-field count
 const MAX_REPOSITORY_CONTENTS_PATH_FIELDS_PER_ENTRY: usize = 9;
+// numeric-bound: tunable - the symlink target length this client accepts
 const MAX_REPOSITORY_SYMLINK_TARGET_BYTES: usize = 4 * 1024;
+// numeric-bound: tunable - the submodule URL length this client accepts
 const MAX_REPOSITORY_SUBMODULE_URL_BYTES: usize = 8 * 1024;
+// numeric-bound: ceiling - budgets per-entry JSON overhead in the response ceiling
 const MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES: usize = 8 * 1024;
+// numeric-bound: ceiling - protects memory while listing oversized directories
 const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = (MAX_OBSERVED_DIRECTORY_ENTRIES + 1)
     * (MAX_FILE_PATH_BYTES
         * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
@@ -64,13 +72,18 @@ const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = (MAX_OBSERVED_DIRECTORY_EN
         + MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES);
 const DEFAULT_ACCEPT: &str = "application/vnd.github+json";
 const COMMIT_SHA_ACCEPT: &str = "application/vnd.github.sha";
+// numeric-bound: not-a-bound - a 40-character commit SHA plus one optional newline
 const MAX_COMMIT_SHA_RESPONSE_BYTES: usize = 41;
 const CONTENTS_OBJECT_ACCEPT: &str = "application/vnd.github.object+json";
 const BLOB_RAW_ACCEPT: &str = "application/vnd.github.raw+json";
+// numeric-bound: tunable - controls retained CI job-log detail
 const MAX_JOB_LOG_BYTES: usize = 64 * 1024;
+// numeric-bound: tunable - the redirect location length this client accepts
 const MAX_REDIRECT_URL_BYTES: usize = 8 * 1024;
 const PAGE_SIZE: &str = "100";
+// numeric-bound: not-a-bound - 100 per page across GitHub's 3,000-file exposure
 const MAX_CHANGED_FILE_PAGES: u16 = 30;
+// numeric-bound: tunable - controls stack-comparison concurrency at the code host
 const MAX_STACK_COMPARISONS_IN_FLIGHT: usize = 8;
 
 const REVIEW_THREADS_QUERY: &str = r#"
