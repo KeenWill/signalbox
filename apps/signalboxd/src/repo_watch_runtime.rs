@@ -6864,7 +6864,7 @@ mod tests {
         let mut deferred_drain = None;
         fixture
             .task
-            .run_attempt(WebhookDrain::Deferred, &mut deferred_drain)
+            .run_attempt(WebhookDrain::Deferred, &mut deferred_drain, &mut None)
             .await
             .expect("the polling attempt itself succeeds");
 
@@ -6884,7 +6884,7 @@ mod tests {
         let mut performed_drain = None;
         owed_nothing
             .task
-            .run_attempt(WebhookDrain::Run, &mut performed_drain)
+            .run_attempt(WebhookDrain::Run, &mut performed_drain, &mut None)
             .await
             .expect("the polling attempt drains when no retry is owed");
 
