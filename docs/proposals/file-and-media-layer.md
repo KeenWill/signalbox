@@ -501,16 +501,16 @@ including siblings for tools outside this file-media layer. It starts from the
 pinned target and current frontier, reserves mandatory continuation-call framing
 and output capacity once for the batch, and cumulatively reserves each sibling's
 complete maximum rendered result. Existing tools use the finite durable-result
-and rendered-projection bound from their registered tool contract; a tool with no
-finite target projection cannot be admitted in the batch. File-media tools use
-the registry-bounded inspection projection, the selected text or structured view
-bound, or the rich-reference projection and media bounds below. A request that
-cannot obtain its cumulative reservation returns `OutputUnitTooLarge`, performs
-no external I/O, and commits no result or continuation state. Reservations for
-admitted siblings remain charged until their completion transactions consume the
-actual result and release unused capacity, so independently fitting siblings can
-never overfill the combined continuation call. Automatic compaction and
-completion order are not admission mechanisms.
+and rendered-projection bound from their registered tool contract; a tool with
+no finite target projection cannot be admitted in the batch. File-media tools
+use the registry-bounded inspection projection, the selected text or structured
+view bound, or the rich-reference projection and media bounds below. A request
+that cannot obtain its cumulative reservation returns `OutputUnitTooLarge`,
+performs no external I/O, and commits no result or continuation state.
+Reservations for admitted siblings remain charged until their completion
+transactions consume the actual result and release unused capacity, so
+independently fitting siblings can never overfill the combined continuation
+call. Automatic compaction and completion order are not admission mechanisms.
 
 Pagination uses a common opaque authenticated cursor of at most 1,024 bytes. The
 cursor is only a random token for bounded process-local state; it does not embed
@@ -558,10 +558,10 @@ artifact, after clean producer exit and before registration, the broker runs the
 complete relevant-probe classification and selection algorithm over the
 completed staged bytes under the ordinary output-validation isolation and
 resource bounds. The result must uniquely select the declared emitted canonical
-type and its registered output `ReaderIdentity`; ambiguity, another selected type
-or reader, or any failed relevant probe discards the staged output and commits no
-reference. The broker then validates once with that uniquely selected output
-reader. Derived output admits only `StrongSignature` or
+type and its registered output `ReaderIdentity`; ambiguity, another selected
+type or reader, or any failed relevant probe discards the staged output and
+commits no reference. The broker then validates once with that uniquely selected
+output reader. Derived output admits only `StrongSignature` or
 `StructuralValidation`; a producer's type claim, length, or digest is not
 validation evidence. Both evidence values are content-silent and protected by
 durable-result integrity, so preparation authenticates the evidence for the
