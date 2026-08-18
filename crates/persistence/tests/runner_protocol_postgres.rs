@@ -2459,6 +2459,26 @@ async fn drop_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<(), s
     Ok(())
 }
 
+async fn install_offer_registration_compatibility_column(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         ADD COLUMN offer_registration_revision numeric(20, 0)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn drop_offer_registration_compatibility_column(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         DROP COLUMN offer_registration_revision",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// The `creation_cause` a fixture writes.
 ///
 /// `202608110001_user_role_storage_vocabulary` renamed the stored value, so a
@@ -6699,6 +6719,7 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
     MIGRATOR
         .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
         .await?;
+    install_offer_registration_compatibility_column(&pool).await?;
     let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
@@ -6709,6 +6730,7 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
         connection.epoch(),
     )
     .await?;
+    drop_offer_registration_compatibility_column(&pool).await?;
     let refusal = migrate(&pool)
         .await
         .expect_err("legacy placement history has no exact loss baseline");
@@ -8103,6 +8125,7 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(&pool).await?;
+    install_offer_registration_compatibility_column(&pool).await?;
     let (store, _, registration, pin) = prepared_pin_fixture_with_authorization(
         &pool,
         authorized,
@@ -8112,6 +8135,7 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
     )
     .await?;
     store.store_pin(&pin, &registration).await?;
+    drop_offer_registration_compatibility_column(&pool).await?;
     drop_pre_loss_fence_compatibility_tables(&pool).await?;
     let refusal = migrate(&pool)
         .await
@@ -18997,7 +19021,7 @@ async fn s31_inv043_later_lease_event_rejects_cross_wired_dispatch_fence()
         .expect("the exact lease fence claims");
     let cross_wired = lease_with_cross_wired_dispatch(&claimed, registration.registration());
     let rejected = store
-        .store_lease(&cross_wired)
+        .store_claimed_lease_projection_for_test(&cross_wired)
         .await
         .expect_err("a later event must match every canonical dispatch-fence field");
 
@@ -22885,6 +22909,7 @@ async fn s31_inv043_first_generation_requires_null_predecessor() -> Result<(), B
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
+             offer_registration_revision,
              credential_profile_name,
              credential_grant_lineage_origin_ordinal,
              credential_grant_revision, credential_approval_kind,
@@ -22892,6 +22917,7 @@ async fn s31_inv043_first_generation_requires_null_predecessor() -> Result<(), B
          SELECT $2, 1, attempt_id, session_id, runner_id,
                 tool_name, effect_class, placement_event_ordinal,
                 registration_enrollment_id, registration_revision,
+                offer_registration_revision,
                 credential_profile_name,
                 credential_grant_lineage_origin_ordinal,
                 credential_grant_revision, credential_approval_kind, 0
