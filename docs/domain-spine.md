@@ -2314,6 +2314,7 @@ impl NonEmptyUnicodeText {
 pub enum NonEmptyUnicodeTextFailure {
     Empty,
     ContainsNull,
+    TooLong,
 }
 
 pub struct NonEmptyUnicodeTextError { /* private */ }
@@ -2322,12 +2323,77 @@ impl NonEmptyUnicodeTextError {
     // accessors: failure(), value()
 }
 
-pub enum UserContent {
-    Text { value: NonEmptyUnicodeText },
+pub enum AttachmentKind {
+    Image,
+    Document,
+    File,
 }
-impl UserContent {
+
+pub struct DeclaredMediaType(/* private String */);
+impl DeclaredMediaType {
+    pub fn try_new(value: String) -> Result<Self, DeclaredMediaTypeError>;
+    // accessors: as_str()
+}
+
+pub enum DeclaredMediaTypeFailure {
+    Empty,
+    TooLong,
+    NotVisibleAscii,
+}
+
+pub struct DeclaredMediaTypeError { /* private */ }
+impl DeclaredMediaTypeError {
+    // accessors: failure(), value()
+}
+
+pub struct AttachmentDisplayFilename(/* private String */);
+impl AttachmentDisplayFilename {
+    pub fn try_new(value: String) -> Result<Self, AttachmentDisplayFilenameError>;
+    // accessors: as_str()
+}
+
+pub enum AttachmentDisplayFilenameFailure {
+    Empty,
+    TooLong,
+    ReservedBasename,
+    ContainsPathSeparator,
+    ContainsNull,
+}
+
+pub struct AttachmentDisplayFilenameError { /* private */ }
+impl AttachmentDisplayFilenameError {
+    // accessors: failure(), value()
+}
+
+pub enum UserContentPart {
+    Text {
+        value: NonEmptyUnicodeText,
+    },
+    Attachment {
+        digest: BlobDigest,
+        kind: AttachmentKind,
+        media_type: DeclaredMediaType,
+        display_filename: Option<AttachmentDisplayFilename>,
+    },
+}
+impl UserContentPart {
     pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
-    // accessors: text()
+}
+
+pub struct UserContent { /* private */ }
+impl UserContent {
+    pub const MAX_TEXT_BYTES: usize;
+    pub fn try_parts(parts: Vec<UserContentPart>) -> Result<Self, UserContentError>;
+    pub fn into_parts(self) -> Vec<UserContentPart>;
+    pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
+    // accessors: parts(), single_text()
+}
+
+pub enum UserContentError {
+    Empty,
+    TooManyParts,
+    AdjacentTextParts,
+    TextTooLarge,
 }
 ```
 
