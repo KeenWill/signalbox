@@ -44,6 +44,7 @@ DECLARE
     enrollment runner_enrollment%ROWTYPE;
     connection_head runner_connection_authority_head%ROWTYPE;
     connection runner_connection_event%ROWTYPE;
+    head_connection runner_connection_event%ROWTYPE;
 BEGIN
     SELECT * INTO release
       FROM runner_workspace_release
@@ -73,6 +74,11 @@ BEGIN
      WHERE enrollment_id = release.enrollment_id
        AND connection_epoch = release.connection_epoch
        AND event_ordinal = release.connection_event_ordinal;
+    SELECT * INTO head_connection
+      FROM runner_connection_event
+     WHERE enrollment_id = connection_head.enrollment_id
+       AND connection_epoch = connection_head.connection_epoch
+       AND event_ordinal = connection_head.connection_event_ordinal;
 
     IF release.state_kind IS DISTINCT FROM 'pending'
        OR release.runner_id IS DISTINCT FROM NEW.runner_id
@@ -108,9 +114,8 @@ BEGIN
        OR enrollment.state_kind IS DISTINCT FROM 'active'
        OR connection_head.connection_epoch IS DISTINCT FROM
             release.connection_epoch
-       OR connection_head.connection_event_ordinal IS DISTINCT FROM
-            release.connection_event_ordinal
        OR connection.state_kind IS DISTINCT FROM 'connected'
+       OR head_connection.state_kind IS DISTINCT FROM 'connected'
        OR EXISTS (
             SELECT 1
               FROM runner_connection_loss_epoch AS loss

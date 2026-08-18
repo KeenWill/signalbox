@@ -3755,6 +3755,37 @@ impl RunnerProtocolStore {
             RunnerDomainError::CorrelationMismatch,
         ))?;
         lock_runner_session_scheduler(&mut transaction, acknowledgement.session()).await?;
+        let recorded = sqlx::query(
+            "SELECT release.runner_id AS release_runner_id,
+                    release.manifest_id AS release_manifest_id,
+                    acknowledgement.runner_id, acknowledgement.manifest_id
+               FROM runner_workspace_release AS release
+               JOIN runner_workspace_release_acknowledgement AS acknowledgement
+                 ON acknowledgement.session_id = release.session_id
+                AND acknowledgement.placement_revision = release.placement_revision
+              WHERE release.session_id = $1 AND release.placement_revision = $2
+              FOR UPDATE OF release",
+        )
+        .bind(acknowledgement.session().into_uuid())
+        .bind(Decimal::from(acknowledgement.placement_revision().get()))
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(recorded) = recorded {
+            let release_runner = runner_id(recorded.decode_column("release_runner_id")?);
+            let release_manifest =
+                WorkspaceManifestId::from_uuid(recorded.decode_column("release_manifest_id")?);
+            let replay = RunnerWorkspaceReleaseAcknowledgement::new(
+                acknowledgement.session(),
+                acknowledgement.placement_revision(),
+                runner_id(recorded.decode_column("runner_id")?),
+                WorkspaceManifestId::from_uuid(recorded.decode_column("manifest_id")?),
+            );
+            if release_runner != replay.runner() || release_manifest != replay.manifest_id() {
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+            }
+            transaction.rollback().await?;
+            return exact_workspace_release_acknowledgement_replay(acknowledgement, replay);
+        }
         sqlx::query(RUNNER_ENROLLMENT)
             .bind(release_enrollment)
             .fetch_optional(&mut *transaction)
@@ -3789,8 +3820,8 @@ impl RunnerProtocolStore {
                     enrollment.runner_id AS enrollment_runner_id,
                     enrollment.state_kind AS enrollment_state_kind,
                     connection_head.connection_epoch AS head_connection_epoch,
-                    connection_head.connection_event_ordinal AS head_connection_event_ordinal,
                     connection.state_kind AS connection_state_kind,
+                    head_connection.state_kind AS head_connection_state_kind,
                     current_placement.event_ordinal AS current_placement_event_ordinal
                FROM runner_workspace_release AS release
                JOIN runner_session_placement_record AS retired
@@ -3810,6 +3841,10 @@ impl RunnerProtocolStore {
                  ON connection.enrollment_id = release.enrollment_id
                 AND connection.connection_epoch = release.connection_epoch
                 AND connection.event_ordinal = release.connection_event_ordinal
+               JOIN runner_connection_event AS head_connection
+                 ON head_connection.enrollment_id = connection_head.enrollment_id
+                AND head_connection.connection_epoch = connection_head.connection_epoch
+                AND head_connection.event_ordinal = connection_head.connection_event_ordinal
               WHERE release.session_id = $1 AND release.placement_revision = $2
               FOR UPDATE OF release",
         )
@@ -3826,8 +3861,6 @@ impl RunnerProtocolStore {
             decode_u64(release.decode_column("successor_placement_event_ordinal")?)?;
         let stored_enrollment: Uuid = release.decode_column("enrollment_id")?;
         let stored_connection_epoch: Decimal = release.decode_column("connection_epoch")?;
-        let stored_connection_event_ordinal: Decimal =
-            release.decode_column("connection_event_ordinal")?;
         let successor_revision =
             decode_runner_generation(release.decode_column("successor_revision")?)?;
         let expected_successor_revision = acknowledgement
@@ -3857,9 +3890,8 @@ impl RunnerProtocolStore {
             || release.decode_column::<Uuid>("enrollment_runner_id")? != stored_runner.into_uuid()
             || release.decode_column::<String>("enrollment_state_kind")? != "active"
             || release.decode_column::<Decimal>("head_connection_epoch")? != stored_connection_epoch
-            || release.decode_column::<Decimal>("head_connection_event_ordinal")?
-                != stored_connection_event_ordinal
             || release.decode_column::<String>("connection_state_kind")? != "connected"
+            || release.decode_column::<String>("head_connection_state_kind")? != "connected"
             || decode_u64(release.decode_column("current_placement_event_ordinal")?)?
                 != successor_placement_event_ordinal
             || successor_placement_event_ordinal
