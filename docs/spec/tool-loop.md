@@ -36,8 +36,10 @@ runner-protocol batch reconstitution through PR #260
 (`agent/runner-protocol-domain`). Atomic runner lease/attempt result admission
 is verified through this PR (`agent/runner-lease-result-transaction`). The
 closed selected-locus value and its durable request storage are verified against
-this PR (`agent/tool-request-execution-locus`). Template-derived blanket
-creation was verified through PR #311 (`agent/session-templates-spec`), and the
+this PR (`agent/tool-request-execution-locus`). Runner lease admission against
+that canonical selected locus is verified against this PR
+(`agent/runner-initial-dispatch-transaction`). Template-derived blanket creation
+was verified through PR #311 (`agent/session-templates-spec`), and the
 exact-origin `web_fetch` egress policy and complete bounded file-patch lookup
 through PR #330 (`agent/audit-verified-fixes`). The exact-revision
 repository-read extension is verified through PR #348

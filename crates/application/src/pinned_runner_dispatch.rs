@@ -69,6 +69,60 @@ pub struct PinnedRunnerLeaseOffer {
     lease: RunnerLease,
 }
 
+/// Exact prepared attempt and frozen runner locus selected for the first pin.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InitialRunnerDispatchRequest {
+    session: SessionId,
+    turn: TurnId,
+    attempt: ToolAttemptId,
+    runner: RunnerId,
+    registration_revision: RunnerGeneration,
+}
+
+impl InitialRunnerDispatchRequest {
+    /// Binds one prepared attempt to an exact pre-pin runner registration.
+    pub const fn new(
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        runner: RunnerId,
+        registration_revision: RunnerGeneration,
+    ) -> Self {
+        Self {
+            session,
+            turn,
+            attempt,
+            runner,
+            registration_revision,
+        }
+    }
+
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the active logical turn.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Returns the prepared physical attempt.
+    pub const fn attempt(&self) -> ToolAttemptId {
+        self.attempt
+    }
+
+    /// Returns the exact selected runner.
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+
+    /// Returns the frozen registration revision.
+    pub const fn registration_revision(&self) -> RunnerGeneration {
+        self.registration_revision
+    }
+}
+
 impl PinnedRunnerLeaseOffer {
     /// Binds one committed lease to the enrollment that authorized it.
     pub const fn new(enrollment: RunnerEnrollmentId, lease: RunnerLease) -> Self {
@@ -120,11 +174,53 @@ pub trait PinnedRunnerDispatchTransaction {
     ) -> impl Future<Output = Result<PinnedRunnerLeaseOffer, Self::Error>> + Send;
 }
 
+/// Atomic durable authorization for a workspace-free exact-directory first pin.
+pub trait InitialRunnerDispatchTransaction {
+    /// Adapter-specific transaction failure.
+    type Error;
+
+    /// Atomically pins the placement, marks the attempt in flight, and offers its lease.
+    fn authorize_initial(
+        &mut self,
+        request: InitialRunnerDispatchRequest,
+        lease: RunnerLeaseId,
+    ) -> impl Future<Output = Result<PinnedRunnerLeaseOffer, Self::Error>> + Send;
+}
+
 /// Allocates a lease identity and delegates the complete durable transition.
 #[derive(Debug)]
 pub struct PinnedRunnerDispatchService<Transaction, Ids> {
     transaction: Transaction,
     ids: Ids,
+}
+
+/// Allocates lease identities for the exact-directory initial-pin transaction.
+#[derive(Debug)]
+pub struct InitialRunnerDispatchService<Transaction, Ids> {
+    transaction: Transaction,
+    ids: Ids,
+}
+
+impl<Transaction, Ids> InitialRunnerDispatchService<Transaction, Ids> {
+    /// Uses the supplied durable boundary and lease-identity source.
+    pub const fn new(transaction: Transaction, ids: Ids) -> Self {
+        Self { transaction, ids }
+    }
+}
+
+impl<Transaction, Ids> InitialRunnerDispatchService<Transaction, Ids>
+where
+    Transaction: InitialRunnerDispatchTransaction,
+    Ids: RunnerLeaseIdGenerator,
+{
+    /// Authorizes one exact initial runner dispatch.
+    pub async fn execute(
+        &mut self,
+        request: InitialRunnerDispatchRequest,
+    ) -> Result<PinnedRunnerLeaseOffer, Transaction::Error> {
+        let lease = self.ids.next_lease_id();
+        self.transaction.authorize_initial(request, lease).await
+    }
 }
 
 impl<Transaction, Ids> PinnedRunnerDispatchService<Transaction, Ids> {
@@ -159,8 +255,10 @@ mod tests {
     use uuid::{Uuid, Variant, Version};
 
     use super::{
-        PinnedRunnerDispatchRequest, PinnedRunnerDispatchService, PinnedRunnerDispatchTransaction,
-        PinnedRunnerLeaseOffer, RunnerLeaseIdGenerator, UuidV7RunnerLeaseIdGenerator,
+        InitialRunnerDispatchRequest, InitialRunnerDispatchService,
+        InitialRunnerDispatchTransaction, PinnedRunnerDispatchRequest, PinnedRunnerDispatchService,
+        PinnedRunnerDispatchTransaction, PinnedRunnerLeaseOffer, RunnerLeaseIdGenerator,
+        UuidV7RunnerLeaseIdGenerator,
     };
 
     const SESSION: u128 = 1;
@@ -197,8 +295,33 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct RejectingInitialTransaction;
+
+    impl InitialRunnerDispatchTransaction for RejectingInitialTransaction {
+        type Error = &'static str;
+
+        fn authorize_initial(
+            &mut self,
+            _request: InitialRunnerDispatchRequest,
+            _lease: RunnerLeaseId,
+        ) -> impl Future<Output = Result<PinnedRunnerLeaseOffer, Self::Error>> + Send {
+            ready(Err("initial rejected"))
+        }
+    }
+
     fn request() -> PinnedRunnerDispatchRequest {
         PinnedRunnerDispatchRequest::new(
+            SessionId::from_uuid(Uuid::from_u128(SESSION)),
+            TurnId::from_uuid(Uuid::from_u128(TURN)),
+            ToolAttemptId::from_uuid(Uuid::from_u128(ATTEMPT)),
+            RunnerId::from_uuid(Uuid::from_u128(RUNNER)),
+            RunnerGeneration::one(),
+        )
+    }
+
+    fn initial_request() -> InitialRunnerDispatchRequest {
+        InitialRunnerDispatchRequest::new(
             SessionId::from_uuid(Uuid::from_u128(SESSION)),
             TurnId::from_uuid(Uuid::from_u128(TURN)),
             ToolAttemptId::from_uuid(Uuid::from_u128(ATTEMPT)),
@@ -217,6 +340,21 @@ mod tests {
         );
 
         assert_eq!(service.execute(request()).await, Err("rejected"));
+    }
+
+    #[tokio::test]
+    async fn initial_service_propagates_the_transaction_refusal() {
+        let mut service = InitialRunnerDispatchService::new(
+            RejectingInitialTransaction,
+            ScriptedIds {
+                leases: VecDeque::from([RunnerLeaseId::from_uuid(Uuid::from_u128(LEASE))]),
+            },
+        );
+
+        assert_eq!(
+            service.execute(initial_request()).await,
+            Err("initial rejected")
+        );
     }
 
     #[test]
