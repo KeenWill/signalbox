@@ -2047,6 +2047,7 @@ where
                 let context = ConnectionContext {
                     enrollment: response.enrollment_id(),
                     runner: response.runner_id(),
+                    registration_revision: response.registration_revision(),
                     epoch: response.connection_epoch(),
                 };
                 let attachment = broker
@@ -2076,6 +2077,7 @@ where
                     let context = ConnectionContext {
                         enrollment,
                         runner,
+                        registration_revision: accepted.registration_revision(),
                         epoch: accepted.connection_epoch(),
                     };
                     let attachment = broker
@@ -2659,12 +2661,14 @@ fn lease_correlation_matches_connection(
 
 fn workspace_ready_matches_connection(ready: &WorkspaceReady, context: ConnectionContext) -> bool {
     ready.correlation.runner_id == context.runner
+        && ready.correlation.registration_revision == context.registration_revision
 }
 
 #[derive(Clone, Copy)]
 struct ConnectionContext {
     enrollment: CanonicalUuid,
     runner: CanonicalUuid,
+    registration_revision: PositiveU64,
     epoch: PositiveU64,
 }
 
@@ -3880,21 +3884,39 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv044_workspace_ready_frames_are_bound_to_the_established_runner_identity() {
+    fn s32_inv044_workspace_ready_frames_require_exact_connection_authority() {
         let ready = repository_workspace_ready();
         let matching_context = ConnectionContext {
             enrollment: identity(2),
             runner: identity(ARBITRARY_PROVISION_RUNNER_ID_SEED),
+            registration_revision: ready.correlation.registration_revision,
             epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
         };
-        let foreign_context = ConnectionContext {
+        let foreign_runner_context = ConnectionContext {
             enrollment: identity(2),
             runner: identity(3),
+            registration_revision: ready.correlation.registration_revision,
+            epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
+        };
+        let foreign_revision_context = ConnectionContext {
+            enrollment: identity(2),
+            runner: identity(ARBITRARY_PROVISION_RUNNER_ID_SEED),
+            registration_revision: PositiveU64::try_new(
+                ready.correlation.registration_revision.get() + 1,
+            )
+            .expect("the foreign fixture registration revision is positive"),
             epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
         };
 
         assert!(workspace_ready_matches_connection(&ready, matching_context));
-        assert!(!workspace_ready_matches_connection(&ready, foreign_context));
+        assert!(!workspace_ready_matches_connection(
+            &ready,
+            foreign_runner_context
+        ));
+        assert!(!workspace_ready_matches_connection(
+            &ready,
+            foreign_revision_context
+        ));
     }
 
     #[test]
@@ -4025,11 +4047,15 @@ mod tests {
         let matching_context = ConnectionContext {
             enrollment: identity(2),
             runner: identity(1),
+            registration_revision: PositiveU64::try_new(1)
+                .expect("the fixture registration revision is positive"),
             epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
         };
         let foreign_context = ConnectionContext {
             enrollment: identity(2),
             runner: identity(3),
+            registration_revision: PositiveU64::try_new(1)
+                .expect("the fixture registration revision is positive"),
             epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
         };
         let correlation = canonical_lease_correlation();
@@ -4534,6 +4560,7 @@ mod tests {
         let context = ConnectionContext {
             enrollment: response.enrollment_id,
             runner: response.runner_id,
+            registration_revision: response.registration_revision,
             epoch: response.connection_epoch,
         };
         let service = EnrollmentService { response };
