@@ -23990,6 +23990,274 @@ async fn s32_inv044_workspace_release_acknowledgement_readback_rejects_corruptio
     Ok(())
 }
 
+/// S32 / INV-044: loss propagation atomically retires an exact pending
+/// workspace release as unowned and removes it from redelivery.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_release_connection_loss_retirement_round_trips()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .store_workspace_release_projection_for_test(
+            &fixture.candidate,
+            fixture.retired_placement_event_ordinal,
+            fixture.successor_placement_event_ordinal,
+            fixture.enrollment,
+            fixture.connection_epoch,
+            fixture.connection_event_ordinal,
+        )
+        .await?;
+    fixture
+        .store
+        .transition_connection(
+            fixture.enrollment,
+            fixture.connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = fixture
+        .store
+        .load_current_connection_loss(fixture.enrollment)
+        .await?
+        .expect("the cleanup-owning connection loss reads back");
+
+    fixture
+        .store
+        .propagate_connection_loss_session(loss, fixture.candidate.session())
+        .await?;
+    let retirement = fixture
+        .store
+        .load_workspace_release_loss_retirement(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await?
+        .expect("the unowned release retirement reads back");
+    let pending = fixture
+        .store
+        .load_workspace_release(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await?;
+
+    assert_eq!(retirement.session(), fixture.candidate.session());
+    assert_eq!(
+        retirement.placement_revision(),
+        fixture.candidate.placement_revision()
+    );
+    assert_eq!(retirement.runner(), fixture.candidate.runner());
+    assert_eq!(retirement.manifest_id(), fixture.candidate.manifest_id());
+    assert_eq!(retirement.loss(), loss);
+    assert_eq!(pending, None);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: a later placement head cannot hide an unowned pending
+/// release from the exact connection-loss cursor that must retire it.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_release_loss_retirement_survives_placement_change()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .store_workspace_release_projection_for_test(
+            &fixture.candidate,
+            fixture.retired_placement_event_ordinal,
+            fixture.successor_placement_event_ordinal,
+            fixture.enrollment,
+            fixture.connection_epoch,
+            fixture.connection_event_ordinal,
+        )
+        .await?;
+    fixture
+        .store
+        .transition_connection(
+            fixture.enrollment,
+            fixture.connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = fixture
+        .store
+        .load_current_connection_loss(fixture.enrollment)
+        .await?
+        .expect("the cleanup-owning connection loss reads back");
+    append_runner_lost_projection(&pool, fixture.candidate.session()).await?;
+    let premature_completion = fixture
+        .store
+        .complete_connection_loss_propagation(loss)
+        .await
+        .expect_err("cursor completion cannot skip the independent release subject");
+    let page = fixture
+        .store
+        .load_connection_loss_propagation_page(loss)
+        .await?;
+
+    let disposition = fixture
+        .store
+        .propagate_connection_loss_session(loss, fixture.candidate.session())
+        .await?;
+    let retirement = fixture
+        .store
+        .load_workspace_release_loss_retirement(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await?
+        .expect("the superseded placement still yields unowned release evidence");
+
+    assert_eq!(page.sessions(), &[fixture.candidate.session()]);
+    assert_eq!(
+        disposition,
+        RunnerConnectionLossSessionDisposition::Superseded
+    );
+    assert_store_check_violation(premature_completion);
+    assert_eq!(retirement.loss(), loss);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: typed unowned-release readback independently rejects a
+/// terminal event that no longer names its exact durable connection loss.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_release_loss_retirement_readback_rejects_corruption()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .store_workspace_release_projection_for_test(
+            &fixture.candidate,
+            fixture.retired_placement_event_ordinal,
+            fixture.successor_placement_event_ordinal,
+            fixture.enrollment,
+            fixture.connection_epoch,
+            fixture.connection_event_ordinal,
+        )
+        .await?;
+    fixture
+        .store
+        .transition_connection(
+            fixture.enrollment,
+            fixture.connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = fixture
+        .store
+        .load_current_connection_loss(fixture.enrollment)
+        .await?
+        .expect("the cleanup-owning connection loss reads back");
+    fixture
+        .store
+        .propagate_connection_loss_session(loss, fixture.candidate.session())
+        .await?;
+    let mut corruption = pool.begin().await?;
+    sqlx::raw_sql("ALTER TABLE runner_workspace_release_loss_retirement DISABLE TRIGGER ALL")
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_workspace_release_loss_retirement
+            SET connection_event_ordinal = connection_event_ordinal + 1
+          WHERE session_id = $1 AND placement_revision = $2",
+    )
+    .bind(fixture.candidate.session().into_uuid())
+    .bind(Decimal::from(fixture.candidate.placement_revision().get()))
+    .execute(&mut *corruption)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE runner_workspace_release_loss_retirement ENABLE TRIGGER ALL")
+        .execute(&mut *corruption)
+        .await?;
+    corruption.commit().await?;
+
+    let rejected = fixture
+        .store
+        .load_workspace_release_loss_retirement(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await
+        .expect_err("typed readback rejects the corrupted loss event");
+
+    assert_store_corruption(rejected, RunnerProtocolCorruption::CrossWiredReference);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: relational guards forbid completion and connection loss
+/// from becoming terminal proofs for the same workspace release.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_release_loss_retirement_rejects_completed_release()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .store_workspace_release_projection_for_test(
+            &fixture.candidate,
+            fixture.retired_placement_event_ordinal,
+            fixture.successor_placement_event_ordinal,
+            fixture.enrollment,
+            fixture.connection_epoch,
+            fixture.connection_event_ordinal,
+        )
+        .await?;
+    let acknowledgement = RunnerWorkspaceReleaseAcknowledgement::new(
+        fixture.candidate.session(),
+        fixture.candidate.placement_revision(),
+        fixture.candidate.runner(),
+        fixture.candidate.manifest_id(),
+    );
+    fixture
+        .store
+        .record_workspace_release_acknowledgement(acknowledgement)
+        .await?;
+    fixture
+        .store
+        .transition_connection(
+            fixture.enrollment,
+            fixture.connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = fixture
+        .store
+        .load_current_connection_loss(fixture.enrollment)
+        .await?
+        .expect("the cleanup-owning connection loss reads back");
+
+    let rejected = sqlx::query(
+        "INSERT INTO runner_workspace_release_loss_retirement
+            (session_id, placement_revision, runner_id, manifest_id,
+             enrollment_id, connection_epoch, loss_epoch,
+             connection_event_ordinal)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(fixture.candidate.session().into_uuid())
+    .bind(Decimal::from(fixture.candidate.placement_revision().get()))
+    .bind(fixture.candidate.runner().into_uuid())
+    .bind(fixture.candidate.manifest_id().into_uuid())
+    .bind(fixture.enrollment.into_uuid())
+    .bind(Decimal::from(loss.connection_epoch().get()))
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .bind(Decimal::from(loss.connection_event_ordinal()))
+    .execute(&pool)
+    .await
+    .expect_err("a completed release cannot also retire for connection loss");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
 /// S32 / INV-012 / INV-044: one atomic command claim authenticates and stores
 /// the exact pinned replacement provisioning stage, and equal replay returns
 /// the first single-use identity.
