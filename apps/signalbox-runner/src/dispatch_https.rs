@@ -2,27 +2,31 @@
 
 use std::{
     error::Error,
-    fmt, fs, io,
-    os::unix::fs::{DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, PermissionsExt as _},
+    fmt, fs,
+    fs::File,
+    io,
+    os::fd::AsRawFd as _,
+    os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
 };
 
+use rustix::fs::{AtFlags, Mode, OFlags, mkdirat, openat, unlinkat};
 use signalbox_runner_wire::CanonicalUuid;
+use signalbox_tools_exec::MAX_HTTPS_PROXY_TUNNELS;
 use tokio::{net::UnixListener, sync::oneshot, task::JoinSet, time::Instant};
 
 use crate::HttpsBroker;
 
 const DIRECTORY_MODE: u32 = 0o700;
 const PERMISSION_MASK: u32 = 0o7777;
-const SOCKET_FILE: &str = "https-broker.sock";
-const MAXIMUM_TUNNELS: usize = 8;
+const SOCKET_FILE: &str = "h";
 
 /// Sanitized failure while preparing or serving one dispatch-scoped endpoint.
 #[derive(Debug)]
 pub enum DispatchHttpsError {
-    /// The owner-private endpoint directory could not be prepared.
+    /// The effective-user-private endpoint directory could not be prepared.
     Directory(io::Error),
-    /// The supplied runner root was not the owner-private directory contract.
+    /// The supplied runner root was not the effective-user-private directory contract.
     InvalidRoot,
     /// The exact Unix listener could not be bound.
     Bind(io::Error),
@@ -60,42 +64,60 @@ impl Error for DispatchHttpsError {
 #[derive(Debug)]
 pub struct DispatchHttpsEndpoint {
     listener: UnixListener,
-    directory: PathBuf,
+    root: File,
+    directory: File,
+    directory_name: String,
     socket: PathBuf,
 }
 
 impl DispatchHttpsEndpoint {
-    /// Binds the endpoint beneath the already-validated owner-private runner root.
-    pub fn bind(runner_root: &Path, lease_id: CanonicalUuid) -> Result<Self, DispatchHttpsError> {
-        let root_metadata =
-            fs::symlink_metadata(runner_root).map_err(DispatchHttpsError::Directory)?;
+    /// Binds the endpoint beneath the already-validated effective-user-private runner root.
+    pub fn bind(root: File, lease_id: CanonicalUuid) -> Result<Self, DispatchHttpsError> {
+        let root_metadata = root.metadata().map_err(DispatchHttpsError::Directory)?;
         if !root_metadata.is_dir()
             || root_metadata.uid() != rustix::process::geteuid().as_raw()
             || root_metadata.permissions().mode() & PERMISSION_MASK != DIRECTORY_MODE
         {
             return Err(DispatchHttpsError::InvalidRoot);
         }
-        let directory = runner_root.join(format!("dispatch-{lease_id}"));
-        let mut builder = fs::DirBuilder::new();
-        builder.mode(DIRECTORY_MODE);
-        builder
-            .create(&directory)
-            .map_err(DispatchHttpsError::Directory)?;
-        let socket = directory.join(SOCKET_FILE);
+        let directory_name = format!("d-{lease_id}");
+        mkdirat(&root, directory_name.as_str(), Mode::RWXU)
+            .map_err(|error| DispatchHttpsError::Directory(rustix_error(error)))?;
+        let directory = match openat(
+            &root,
+            directory_name.as_str(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(directory) => File::from(directory),
+            Err(error) => {
+                let _ = unlinkat(&root, directory_name.as_str(), AtFlags::REMOVEDIR);
+                return Err(DispatchHttpsError::Directory(rustix_error(error)));
+            }
+        };
+        let socket = PathBuf::from(format!(
+            "/proc/{}/fd/{}/{directory_name}/{SOCKET_FILE}",
+            std::process::id(),
+            root.as_raw_fd(),
+        ));
         let listener = match UnixListener::bind(&socket) {
             Ok(listener) => listener,
             Err(source) => {
-                let _ = fs::remove_dir(&directory);
+                let _ = unlinkat(&root, directory_name.as_str(), AtFlags::REMOVEDIR);
                 return Err(DispatchHttpsError::Bind(source));
             }
         };
         let endpoint = Self {
             listener,
+            root,
             directory,
+            directory_name,
             socket,
         };
-        let directory_metadata =
-            fs::symlink_metadata(&endpoint.directory).map_err(DispatchHttpsError::Directory)?;
+        let directory_metadata = endpoint
+            .directory
+            .metadata()
+            .map_err(DispatchHttpsError::Directory)?;
         let socket_metadata =
             fs::symlink_metadata(&endpoint.socket).map_err(DispatchHttpsError::Bind)?;
         if !directory_metadata.is_dir()
@@ -129,7 +151,7 @@ impl DispatchHttpsEndpoint {
                         return Err(DispatchHttpsError::TunnelTask);
                     }
                 }
-                accepted = self.listener.accept(), if tunnels.len() < MAXIMUM_TUNNELS => {
+                accepted = self.listener.accept(), if tunnels.len() < MAX_HTTPS_PROXY_TUNNELS => {
                     let (client, _) = accepted.map_err(DispatchHttpsError::Accept)?;
                     let broker = broker.clone();
                     tunnels.spawn(async move {
@@ -146,14 +168,18 @@ impl DispatchHttpsEndpoint {
 
 impl Drop for DispatchHttpsEndpoint {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.socket);
-        let _ = fs::remove_dir(&self.directory);
+        let _ = unlinkat(&self.directory, SOCKET_FILE, AtFlags::empty());
+        let _ = unlinkat(&self.root, self.directory_name.as_str(), AtFlags::REMOVEDIR);
     }
+}
+
+fn rustix_error(error: rustix::io::Errno) -> io::Error {
+    io::Error::from_raw_os_error(error.raw_os_error())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt as _, time::Duration};
+    use std::{fs, fs::File, os::unix::fs::PermissionsExt as _, time::Duration};
 
     use signalbox_runner_wire::CanonicalUuid;
     use tempfile::TempDir;
@@ -175,8 +201,12 @@ mod tests {
             .tempdir()
             .expect("the endpoint fixture root is created");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
-            .expect("the endpoint fixture root is owner-private");
+            .expect("the endpoint fixture root is effective-user-private");
         root
+    }
+
+    fn root_descriptor(root: &TempDir) -> File {
+        File::open(root.path()).expect("the endpoint fixture root descriptor opens")
     }
 
     #[test]
@@ -188,7 +218,7 @@ mod tests {
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o750))
             .expect("the endpoint fixture root is deliberately group-readable");
         let error = DispatchHttpsEndpoint::bind(
-            root.path(),
+            root_descriptor(&root),
             CanonicalUuid::from_uuid(Uuid::from_u128(LEASE)),
         )
         .expect_err("a group-readable root cannot hold the dispatch endpoint");
@@ -200,16 +230,14 @@ mod tests {
     async fn endpoint_is_private_and_removed_on_drop() {
         let root = private_root();
         let endpoint = DispatchHttpsEndpoint::bind(
-            root.path(),
+            root_descriptor(&root),
             CanonicalUuid::from_uuid(Uuid::from_u128(LEASE)),
         )
         .expect("the dispatch endpoint binds");
         let socket = endpoint.socket_path().to_owned();
-        let directory = socket
-            .parent()
-            .expect("the dispatch endpoint has a private directory")
-            .to_owned();
-        let mode = fs::metadata(&directory)
+        let mode = endpoint
+            .directory
+            .metadata()
             .expect("the dispatch directory is inspectable")
             .permissions()
             .mode()
@@ -219,14 +247,53 @@ mod tests {
         assert!(socket.exists());
         drop(endpoint);
         assert!(!socket.exists());
-        assert!(!directory.exists());
+        assert!(
+            fs::read_dir(root.path())
+                .expect("the endpoint fixture root remains inspectable")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_binds_after_the_runner_root_path_is_renamed() {
+        let parent = TempDir::new().expect("the endpoint fixture parent is created");
+        let original = parent.path().join("runner-root");
+        let renamed = parent.path().join("renamed-runner-root");
+        fs::create_dir(&original).expect("the endpoint fixture root is created");
+        fs::set_permissions(&original, fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the endpoint fixture root is effective-user-private");
+        let root = File::open(&original).expect("the endpoint fixture root descriptor opens");
+        fs::rename(&original, &renamed).expect("the endpoint fixture root path is renamed");
+
+        let endpoint =
+            DispatchHttpsEndpoint::bind(root, CanonicalUuid::from_uuid(Uuid::from_u128(LEASE)))
+                .expect("the endpoint binds through the retained root descriptor");
+
+        assert!(endpoint.socket_path().exists());
+    }
+
+    #[tokio::test]
+    async fn endpoint_socket_path_is_bounded_for_a_long_runner_root() {
+        let parent = TempDir::new().expect("the endpoint fixture parent is created");
+        let root_path = parent.path().join("long-component-".repeat(12));
+        fs::create_dir(&root_path).expect("the long endpoint fixture root is created");
+        fs::set_permissions(&root_path, fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the long endpoint fixture root is effective-user-private");
+        let root = File::open(&root_path).expect("the long fixture root descriptor opens");
+
+        let endpoint =
+            DispatchHttpsEndpoint::bind(root, CanonicalUuid::from_uuid(Uuid::from_u128(LEASE)))
+                .expect("the bounded dispatch endpoint binds");
+
+        assert!(endpoint.socket_path().as_os_str().len() < 108);
     }
 
     #[tokio::test]
     async fn endpoint_routes_a_connect_request_into_the_checked_broker() {
         let root = private_root();
         let endpoint = DispatchHttpsEndpoint::bind(
-            root.path(),
+            root_descriptor(&root),
             CanonicalUuid::from_uuid(Uuid::from_u128(LEASE)),
         )
         .expect("the dispatch endpoint binds");

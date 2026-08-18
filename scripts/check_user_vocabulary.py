@@ -214,7 +214,7 @@ ALLOWLIST = (
     Allowance(
         "Unix file-owner and permission semantics",
         re.compile(
-            r"^(?:apps/signalbox-runner/src/(?:configuration|protocol|state)[.]rs|"
+            r"^(?:apps/signalbox-runner/src/(?:configuration|dispatch_https|protocol|state|workspace)[.]rs|"
             r"apps/signalboxd/src/(?:local_socket|runner_protocol_runtime)[.]rs|"
             r"apps/signalboxd/tests/process_substrate[.]rs|"
             r"crates/model-runtime-(?:claude|codex)-cli/tests/live_smoke[.]rs|"
