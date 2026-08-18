@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
+    num::NonZeroU64,
 };
 
 use rust_decimal::Decimal;
@@ -15,7 +16,8 @@ use signalbox_domain::{
     DescendantTerminationScope, DurableCommandId, FrozenAliasDefinition, GoalUserAction,
     GoalUserCommand, ModelAlias, RepoWatchActionV1, RepoWatchDispatchId, RepoWatchEvent,
     RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
-    RepoWatchRule, RepoWatchRuleId, RepoWatchRuleVersion, RepositorySlug, SessionId,
+    RepoWatchRule, RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleVersion,
+    RepositorySlug, SessionId,
 };
 use sqlx::{Acquire, PgPool, Postgres, Row, Transaction, types::Uuid};
 
@@ -34,6 +36,47 @@ use crate::{
 
 const CONFIGURATION_LOCK: &str = "repo-watch\u{1f}configuration";
 
+struct ConfiguredRuleIdentity {
+    content_digest: [u8; 32],
+    field_digests: Vec<(RepoWatchRuleIdentityField, [u8; 32])>,
+}
+
+impl ConfiguredRuleIdentity {
+    fn from_rule(rule: &RepoWatchRule) -> Self {
+        Self {
+            content_digest: *rule.content_digest().as_bytes(),
+            field_digests: rule
+                .identity_field_digests()
+                .into_iter()
+                .map(|(field, digest)| (field, *digest.as_bytes()))
+                .collect(),
+        }
+    }
+
+    fn encoded_field_digests(&self) -> Vec<u8> {
+        self.field_digests
+            .iter()
+            .flat_map(|(_, digest)| digest.iter().copied())
+            .collect()
+    }
+
+    fn changed_field(
+        &self,
+        stored: &[u8],
+    ) -> Result<Option<RepoWatchRuleIdentityField>, RepoWatchDispatchRepositoryError> {
+        if stored.len() != self.field_digests.len() * 32 {
+            return Err(RepoWatchDispatchRepositoryError::Corruption(
+                "stored rule field fingerprints have an invalid length",
+            ));
+        }
+        Ok(self
+            .field_digests
+            .iter()
+            .zip(stored.chunks_exact(32))
+            .find_map(|((field, configured), stored)| (configured != stored).then_some(*field)))
+    }
+}
+
 /// Database or durable-shape failure while evaluating one repository-watch rule.
 #[derive(Debug)]
 pub enum RepoWatchDispatchRepositoryError {
@@ -51,6 +94,12 @@ pub enum RepoWatchDispatchRepositoryError {
     ChangedRuleIdentity {
         rule_id: RepoWatchRuleId,
         rule_version: RepoWatchRuleVersion,
+        field: RepoWatchRuleIdentityField,
+    },
+    RegressedRuleVersion {
+        rule_id: RepoWatchRuleId,
+        rule_version: RepoWatchRuleVersion,
+        latest_version: RepoWatchRuleVersion,
     },
     Corruption(&'static str),
 }
@@ -83,11 +132,24 @@ impl fmt::Display for RepoWatchDispatchRepositoryError {
             Self::ChangedRuleIdentity {
                 rule_id,
                 rule_version,
+                field,
             } => write!(
                 formatter,
-                "repository-watch rule {} version {} changed without a new identity",
+                "repository-watch rule {} version {} field `{}` changed without a version bump",
                 rule_id.as_str(),
-                rule_version.get()
+                rule_version.get(),
+                field.configuration_path()
+            ),
+            Self::RegressedRuleVersion {
+                rule_id,
+                rule_version,
+                latest_version,
+            } => write!(
+                formatter,
+                "repository-watch rule {} version {} is below its highest recorded version {}",
+                rule_id.as_str(),
+                rule_version.get(),
+                latest_version.get()
             ),
             Self::Corruption(reason) => {
                 write!(
@@ -110,6 +172,7 @@ impl Error for RepoWatchDispatchRepositoryError {
             Self::GoalCutoff(error) => Some(error),
             Self::ReusedRuleIdentity { .. }
             | Self::ChangedRuleIdentity { .. }
+            | Self::RegressedRuleVersion { .. }
             | Self::Corruption(_) => None,
         }
     }
@@ -398,8 +461,84 @@ impl PostgresRepoWatchDispatchStore {
             .collect::<BTreeSet<_>>();
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, CONFIGURATION_LOCK).await?;
-        let active_repositories: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT activation.repository
+        retire_unconfigured_repositories(&mut transaction, &configured).await?;
+        commit(transaction).await
+    }
+
+    /// Reports whether the complete configured repository set is admissible.
+    ///
+    /// The transaction is always discarded, so startup can refuse an
+    /// inadmissible configuration in its Configuration phase — before either
+    /// local socket binds — while leaving the durable revision history
+    /// untouched. A daemon whose later startup construction fails has then
+    /// consumed no revision, and restoring the previous configuration is still
+    /// admitted rather than refused as identity reuse.
+    pub async fn validate_configured_rules(
+        &self,
+        repositories: &[RepositorySlug],
+        configured: &[RepoWatchRule],
+    ) -> Result<(), RepoWatchDispatchRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        lock_text(&mut transaction, CONFIGURATION_LOCK).await?;
+        let admission = admit_configured_rules(&mut transaction, repositories, configured).await;
+        transaction.rollback().await?;
+        admission
+    }
+
+    /// Commits the complete configured repository set, resolving ambiguity.
+    ///
+    /// Every watched repository is admitted together, so a refusal anywhere in
+    /// the set leaves no deactivation and no activation behind. Startup calls
+    /// this only after every other fallible construction has succeeded, so the
+    /// revisions it consumes belong to a daemon that reaches its runtime.
+    ///
+    /// A lost commit response leaves the durable outcome unknown, which the
+    /// caller must not guess. The resolution is a read-only reread of the
+    /// active set, which commits nothing and so cannot itself become
+    /// ambiguous: it answers the only question the outcome turned on. Either
+    /// the admission is already applied, so the commit won and startup
+    /// proceeds, or it is not, so the commit never landed, no revision was
+    /// consumed, and startup fails with the previous configuration still
+    /// admissible. One reread therefore settles the ambiguity instead of
+    /// leaving another unknown commit outcome behind; only an unreachable
+    /// database defeats it, and the next start rereads again.
+    pub async fn reconcile_configured_rules(
+        &self,
+        repositories: &[RepositorySlug],
+        configured: &[RepoWatchRule],
+    ) -> Result<(), RepoWatchDispatchRepositoryError> {
+        match self.commit_configured_rules(repositories, configured).await {
+            Err(RepoWatchDispatchRepositoryError::CommitAmbiguous(error)) => {
+                if self.admission_is_applied(repositories, configured).await? {
+                    return Ok(());
+                }
+                Err(RepoWatchDispatchRepositoryError::CommitAmbiguous(error))
+            }
+            outcome => outcome,
+        }
+    }
+
+    /// Whether the durable active set already equals the configured admission.
+    ///
+    /// Read-only by construction, so resolving an ambiguous commit never adds
+    /// another commit boundary to be ambiguous about.
+    async fn admission_is_applied(
+        &self,
+        repositories: &[RepositorySlug],
+        configured: &[RepoWatchRule],
+    ) -> Result<bool, RepoWatchDispatchRepositoryError> {
+        let mut expected = BTreeSet::new();
+        for repository in repositories {
+            for rule in configured {
+                expected.insert((
+                    repository.as_str().to_owned(),
+                    rule.id().as_str().to_owned(),
+                    stored_rule_version(rule.version())?,
+                ));
+            }
+        }
+        let rows = sqlx::query(
+            "SELECT activation.repository, activation.rule_id, activation.rule_version
                FROM repo_watch_rule_activation AS activation
               WHERE NOT EXISTS (
                     SELECT 1
@@ -407,39 +546,38 @@ impl PostgresRepoWatchDispatchStore {
                      WHERE deactivation.repository = activation.repository
                        AND deactivation.rule_id = activation.rule_id
                        AND deactivation.rule_version = activation.rule_version
-              )
-              ORDER BY activation.repository",
+              )",
         )
-        .fetch_all(&mut *transaction)
+        .fetch_all(&self.pool)
         .await?;
-        for repository in active_repositories {
-            if configured.contains(repository.as_str()) {
-                continue;
-            }
-            lock_text(&mut transaction, &repository).await?;
-            sqlx::query(
-                "INSERT INTO repo_watch_rule_deactivation
-                    (repository, rule_id, rule_version)
-                 SELECT activation.repository, activation.rule_id, activation.rule_version
-                   FROM repo_watch_rule_activation AS activation
-                  WHERE activation.repository = $1
-                    AND NOT EXISTS (
-                        SELECT 1
-                          FROM repo_watch_rule_deactivation AS deactivation
-                         WHERE deactivation.repository = activation.repository
-                           AND deactivation.rule_id = activation.rule_id
-                           AND deactivation.rule_version = activation.rule_version
-                    )
-                 ON CONFLICT DO NOTHING",
-            )
-            .bind(repository)
-            .execute(&mut *transaction)
-            .await?;
+        let mut active = BTreeSet::new();
+        for row in rows {
+            active.insert((
+                row.try_get::<String, _>("repository")?,
+                row.try_get::<String, _>("rule_id")?,
+                row.try_get::<i64, _>("rule_version")?,
+            ));
+        }
+        Ok(active == expected)
+    }
+
+    /// Admits the configured repository set in one committed transaction.
+    async fn commit_configured_rules(
+        &self,
+        repositories: &[RepositorySlug],
+        configured: &[RepoWatchRule],
+    ) -> Result<(), RepoWatchDispatchRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        lock_text(&mut transaction, CONFIGURATION_LOCK).await?;
+        if let Err(error) = admit_configured_rules(&mut transaction, repositories, configured).await
+        {
+            transaction.rollback().await?;
+            return Err(error);
         }
         commit(transaction).await
     }
 
-    /// Reconciles the configured rule set before its repository task polls.
+    /// Reconciles one repository's configured rule set before its task polls.
     pub async fn reconcile_rules(
         &self,
         repository: &RepositorySlug,
@@ -447,98 +585,11 @@ impl PostgresRepoWatchDispatchStore {
     ) -> Result<(), RepoWatchDispatchRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, CONFIGURATION_LOCK).await?;
-        lock_text(&mut transaction, repository.as_str()).await?;
-        let configured = configured
-            .iter()
-            .map(|rule| {
-                Ok((
-                    (
-                        rule.id().as_str().to_owned(),
-                        stored_rule_version(rule.version())?,
-                    ),
-                    *rule.content_digest().as_bytes(),
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>, RepoWatchDispatchRepositoryError>>()?;
-        let configured_identities = configured.keys().cloned().collect::<BTreeSet<_>>();
-        let existing = sqlx::query(
-            "SELECT activation.rule_id, activation.rule_version, activation.rule_digest,
-                    deactivation.rule_id IS NOT NULL AS deactivated
-               FROM repo_watch_rule_activation AS activation
-               LEFT JOIN repo_watch_rule_deactivation AS deactivation
-                 USING (repository, rule_id, rule_version)
-              WHERE activation.repository = $1",
-        )
-        .bind(repository.as_str())
-        .fetch_all(&mut *transaction)
-        .await?;
-        let mut historical = BTreeSet::new();
-        let mut active = BTreeSet::new();
-        for row in existing {
-            let identity = (row.try_get("rule_id")?, row.try_get("rule_version")?);
-            historical.insert(identity.clone());
-            if !row.try_get::<bool, _>("deactivated")? {
-                let stored_digest: Vec<u8> = row.try_get("rule_digest")?;
-                if configured
-                    .get(&identity)
-                    .is_some_and(|digest| stored_digest.as_slice() != digest)
-                {
-                    transaction.rollback().await?;
-                    return Err(RepoWatchDispatchRepositoryError::ChangedRuleIdentity {
-                        rule_id: RepoWatchRuleId::try_new(identity.0).map_err(|_| {
-                            RepoWatchDispatchRepositoryError::Corruption("stored rule identifier")
-                        })?,
-                        rule_version: RepoWatchRuleVersion::V1,
-                    });
-                }
-                active.insert(identity);
-            }
-        }
-        for (rule_id, rule_version) in active.difference(&configured_identities) {
-            sqlx::query(
-                "INSERT INTO repo_watch_rule_deactivation
-                    (repository, rule_id, rule_version)
-                 VALUES ($1, $2, $3)",
-            )
-            .bind(repository.as_str())
-            .bind(rule_id)
-            .bind(rule_version)
-            .execute(&mut *transaction)
-            .await?;
-        }
-        for (rule_id, rule_version) in configured_identities.difference(&active) {
-            if historical.contains(&(rule_id.clone(), *rule_version)) {
-                transaction.rollback().await?;
-                return Err(RepoWatchDispatchRepositoryError::ReusedRuleIdentity {
-                    rule_id: RepoWatchRuleId::try_new(rule_id.clone()).map_err(|_| {
-                        RepoWatchDispatchRepositoryError::Corruption("stored rule identifier")
-                    })?,
-                    rule_version: RepoWatchRuleVersion::V1,
-                });
-            }
-            sqlx::query(
-                "INSERT INTO repo_watch_rule_activation
-                (repository, rule_id, rule_version, rule_digest,
-                 after_cursor_generation, after_event_ordinal)
-             SELECT $1, $2, $3, $4, tail.cursor_generation, tail.event_ordinal
-               FROM (VALUES (true)) AS seed(present)
-               LEFT JOIN LATERAL (
-                    SELECT cursor_generation, event_ordinal
-                      FROM repo_watch_event
-                     WHERE repository = $1
-                     ORDER BY cursor_generation DESC, event_ordinal DESC
-                     LIMIT 1
-               ) AS tail ON seed.present
-                 ON CONFLICT DO NOTHING",
-            )
-            .bind(repository.as_str())
-            .bind(rule_id)
-            .bind(rule_version)
-            .bind(configured.get(&(rule_id.clone(), *rule_version)).ok_or(
-                RepoWatchDispatchRepositoryError::Corruption("configured rule digest missing"),
-            )?)
-            .execute(&mut *transaction)
-            .await?;
+        if let Err(error) =
+            reconcile_repository_rules(&mut transaction, repository.as_str(), configured).await
+        {
+            transaction.rollback().await?;
+            return Err(error);
         }
         commit(transaction).await
     }
@@ -1128,6 +1179,256 @@ impl StoredSingletonKey {
     }
 }
 
+/// Reconciles every configured repository and retires the rest.
+///
+/// The caller owns the transaction, so the same admission decision serves both
+/// the validating pass that discards it and the committing pass that keeps it.
+async fn admit_configured_rules(
+    transaction: &mut Transaction<'_, Postgres>,
+    repositories: &[RepositorySlug],
+    configured: &[RepoWatchRule],
+) -> Result<(), RepoWatchDispatchRepositoryError> {
+    let ordered = repositories
+        .iter()
+        .map(|repository| repository.as_str())
+        .collect::<BTreeSet<_>>();
+    for repository in &ordered {
+        reconcile_repository_rules(transaction, repository, configured).await?;
+    }
+    retire_unconfigured_repositories(transaction, &ordered).await
+}
+
+/// Retires every active repository absent from the configured set.
+///
+/// The caller owns the transaction and its configuration lock, so retirement
+/// commits with the rule admission it accompanies or with neither.
+async fn retire_unconfigured_repositories(
+    transaction: &mut Transaction<'_, Postgres>,
+    configured: &BTreeSet<&str>,
+) -> Result<(), RepoWatchDispatchRepositoryError> {
+    let active_repositories: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT activation.repository
+           FROM repo_watch_rule_activation AS activation
+          WHERE NOT EXISTS (
+                SELECT 1
+                  FROM repo_watch_rule_deactivation AS deactivation
+                 WHERE deactivation.repository = activation.repository
+                   AND deactivation.rule_id = activation.rule_id
+                   AND deactivation.rule_version = activation.rule_version
+          )
+          ORDER BY activation.repository",
+    )
+    .fetch_all(&mut **transaction)
+    .await?;
+    for repository in active_repositories {
+        if configured.contains(repository.as_str()) {
+            continue;
+        }
+        lock_text(transaction, &repository).await?;
+        // Removing a repository retires its rules through this path rather
+        // than through `reconcile_repository_rules`, so the same stored-shape
+        // validation runs here before any deactivation is appended.
+        let unfingerprinted: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                   FROM repo_watch_rule_activation AS activation
+                  WHERE activation.repository = $1
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_rule_deactivation AS deactivation
+                         WHERE deactivation.repository = activation.repository
+                           AND deactivation.rule_id = activation.rule_id
+                           AND deactivation.rule_version = activation.rule_version
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_rule_field_fingerprint AS fingerprint
+                         WHERE fingerprint.repository = activation.repository
+                           AND fingerprint.rule_id = activation.rule_id
+                           AND fingerprint.rule_version = activation.rule_version
+                    )
+             )",
+        )
+        .bind(&repository)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if unfingerprinted {
+            return Err(RepoWatchDispatchRepositoryError::Corruption(
+                "active repository-watch rule activation has no field fingerprints",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO repo_watch_rule_deactivation
+                (repository, rule_id, rule_version)
+             SELECT activation.repository, activation.rule_id, activation.rule_version
+               FROM repo_watch_rule_activation AS activation
+              WHERE activation.repository = $1
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_rule_deactivation AS deactivation
+                     WHERE deactivation.repository = activation.repository
+                       AND deactivation.rule_id = activation.rule_id
+                       AND deactivation.rule_version = activation.rule_version
+                )
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(repository)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Reconciles one repository's configured rules inside an open transaction.
+///
+/// Every refusal returns before the caller commits, so the caller decides
+/// whether the surrounding admission survives.
+async fn reconcile_repository_rules(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &str,
+    configured: &[RepoWatchRule],
+) -> Result<(), RepoWatchDispatchRepositoryError> {
+    lock_text(transaction, repository).await?;
+    let configured = configured
+        .iter()
+        .map(|rule| {
+            Ok((
+                (
+                    rule.id().as_str().to_owned(),
+                    stored_rule_version(rule.version())?,
+                ),
+                ConfiguredRuleIdentity::from_rule(rule),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, RepoWatchDispatchRepositoryError>>()?;
+    let configured_identities = configured.keys().cloned().collect::<BTreeSet<_>>();
+    let existing = sqlx::query(
+        "SELECT activation.rule_id, activation.rule_version, activation.rule_digest,
+                fingerprint.rule_field_digests,
+                deactivation.rule_id IS NOT NULL AS deactivated
+           FROM repo_watch_rule_activation AS activation
+           LEFT JOIN repo_watch_rule_deactivation AS deactivation
+             USING (repository, rule_id, rule_version)
+           LEFT JOIN repo_watch_rule_field_fingerprint AS fingerprint
+             USING (repository, rule_id, rule_version)
+          WHERE activation.repository = $1",
+    )
+    .bind(repository)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut historical = BTreeSet::new();
+    let mut latest_versions: BTreeMap<String, i64> = BTreeMap::new();
+    let mut active = BTreeSet::new();
+    for row in existing {
+        let identity: (String, i64) = (row.try_get("rule_id")?, row.try_get("rule_version")?);
+        historical.insert(identity.clone());
+        latest_versions
+            .entry(identity.0.clone())
+            .and_modify(|latest| *latest = (*latest).max(identity.1))
+            .or_insert(identity.1);
+        if row.try_get::<bool, _>("deactivated")? {
+            continue;
+        }
+        let stored_digest: Vec<u8> = row.try_get("rule_digest")?;
+        // An activation the configured set omits is still retired against its
+        // stored shape, so this precedes the configured lookup. The column's
+        // length is a database CHECK, leaving absence as the only defect this
+        // read can observe.
+        let Some(stored_field_digests) = row.try_get::<Option<Vec<u8>>, _>("rule_field_digests")?
+        else {
+            return Err(RepoWatchDispatchRepositoryError::Corruption(
+                "active repository-watch rule activation has no field fingerprints",
+            ));
+        };
+        if let Some(configured_rule) = configured.get(&identity) {
+            let changed_field = configured_rule.changed_field(&stored_field_digests)?;
+            if stored_digest.as_slice() != configured_rule.content_digest.as_slice() {
+                let field = changed_field.ok_or(RepoWatchDispatchRepositoryError::Corruption(
+                    "rule digest changed while every field fingerprint remained equal",
+                ))?;
+                return Err(RepoWatchDispatchRepositoryError::ChangedRuleIdentity {
+                    rule_id: stored_rule_id(&identity.0)?,
+                    rule_version: decoded_rule_version(identity.1)?,
+                    field,
+                });
+            }
+            if changed_field.is_some() {
+                return Err(RepoWatchDispatchRepositoryError::Corruption(
+                    "rule field fingerprint changed while its complete digest remained equal",
+                ));
+            }
+        }
+        active.insert(identity);
+    }
+    for (rule_id, rule_version) in active.difference(&configured_identities) {
+        sqlx::query(
+            "INSERT INTO repo_watch_rule_deactivation
+                (repository, rule_id, rule_version)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(repository)
+        .bind(rule_id)
+        .bind(rule_version)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    for (rule_id, rule_version) in configured_identities.difference(&active) {
+        if historical.contains(&(rule_id.clone(), *rule_version)) {
+            return Err(RepoWatchDispatchRepositoryError::ReusedRuleIdentity {
+                rule_id: stored_rule_id(rule_id)?,
+                rule_version: decoded_rule_version(*rule_version)?,
+            });
+        }
+        if let Some(latest) = latest_versions
+            .get(rule_id)
+            .copied()
+            .filter(|latest| rule_version < latest)
+        {
+            return Err(RepoWatchDispatchRepositoryError::RegressedRuleVersion {
+                rule_id: stored_rule_id(rule_id)?,
+                rule_version: decoded_rule_version(*rule_version)?,
+                latest_version: decoded_rule_version(latest)?,
+            });
+        }
+        let configured_rule = configured.get(&(rule_id.clone(), *rule_version)).ok_or(
+            RepoWatchDispatchRepositoryError::Corruption("configured rule identity missing"),
+        )?;
+        sqlx::query(
+            "INSERT INTO repo_watch_rule_activation
+            (repository, rule_id, rule_version, rule_digest,
+             after_cursor_generation, after_event_ordinal)
+         SELECT $1, $2, $3, $4, tail.cursor_generation, tail.event_ordinal
+           FROM (VALUES (true)) AS seed(present)
+           LEFT JOIN LATERAL (
+                SELECT cursor_generation, event_ordinal
+                  FROM repo_watch_event
+                 WHERE repository = $1
+                 ORDER BY cursor_generation DESC, event_ordinal DESC
+                 LIMIT 1
+           ) AS tail ON seed.present
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(repository)
+        .bind(rule_id)
+        .bind(rule_version)
+        .bind(configured_rule.content_digest.as_slice())
+        .execute(&mut **transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO repo_watch_rule_field_fingerprint
+                (repository, rule_id, rule_version, rule_field_digests)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(repository)
+        .bind(rule_id)
+        .bind(rule_version)
+        .bind(configured_rule.encoded_field_digests())
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
 async fn lock_text(
     transaction: &mut Transaction<'_, Postgres>,
     key: &str,
@@ -1460,4 +1761,22 @@ pub(crate) fn stored_rule_version(
 ) -> Result<i64, RepoWatchDispatchRepositoryError> {
     i64::try_from(version.get())
         .map_err(|_| RepoWatchDispatchRepositoryError::Corruption("rule version exceeds storage"))
+}
+
+fn decoded_rule_version(
+    version: i64,
+) -> Result<RepoWatchRuleVersion, RepoWatchDispatchRepositoryError> {
+    u64::try_from(version)
+        .ok()
+        .and_then(NonZeroU64::new)
+        .and_then(RepoWatchRuleVersion::new)
+        .ok_or(RepoWatchDispatchRepositoryError::Corruption(
+            "stored rule version is invalid",
+        ))
+}
+
+fn stored_rule_id(rule_id: &str) -> Result<RepoWatchRuleId, RepoWatchDispatchRepositoryError> {
+    RepoWatchRuleId::try_new(rule_id.to_owned()).map_err(|_| {
+        RepoWatchDispatchRepositoryError::Corruption("stored rule identifier is invalid")
+    })
 }

@@ -187,10 +187,10 @@ pub use repo_watch::{
     RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchLabelMatcher,
     RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
     RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId,
-    RepoWatchRuleValidationError, RepoWatchRuleVersion, RepoWatchSingletonScope,
-    RepoWatchTemplateContextDeclaration, RepoWatchTemplateContextDeclarationError,
-    RepoWatchTextError, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId,
-    WorkflowName,
+    RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest, RepoWatchRuleValidationError,
+    RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
+    RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepoWatchWorkflowRunAttempt,
+    RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
 };
 pub use review_workflow::{
     ReviewChangeRequestNumber, ReviewConfidence, ReviewConfidenceError, ReviewEventOrdinal,
@@ -300,6 +300,7 @@ pub use submit_input::{
     SubmitInputAppliedPendingSteeringReconstitutionInput, SubmitInputAppliedResult,
     SubmitInputAppliedTurnOriginReconstitutionInput, SubmitInputDirectTurnOriginConstructionInput,
     SubmitInputInterruptedModelCallReconciliationConstructionInput,
+    SubmitInputInterruptedToolReconciliationConstructionInput,
     SubmitInputPendingSteeringAppliedResult, SubmitInputPreparationError,
     SubmitInputPreparationFailure, SubmitInputReclassifiedTurnOriginConstructionInput,
     SubmitInputReconstitutionError, SubmitInputReconstitutionFailure,

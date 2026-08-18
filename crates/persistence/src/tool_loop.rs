@@ -1670,40 +1670,50 @@ async fn load_tool_round_result_window(
     trailing_member_count: Decimal,
 ) -> Result<Option<(Decimal, Decimal)>, ToolLoopRepositoryError> {
     let candidate_rounds = sqlx::query(
-        "SELECT round.producing_model_call_id,
-                boundary.member_count AS boundary_member_count,
-                round.request_count
-           FROM tool_round AS round
-           JOIN context_frontier AS boundary
-             ON boundary.owning_session_id = round.session_id
-            AND boundary.context_frontier_id = round.boundary_frontier_id
-           JOIN context_frontier AS terminal
-             ON terminal.owning_session_id = round.session_id
-            AND terminal.context_frontier_id = $3
-          WHERE round.session_id = $1
-            AND round.turn_id = $2
-            AND round.boundary_kind = 'continuing'
-            AND terminal.member_count =
-                    boundary.member_count + round.request_count + $4
-            AND NOT EXISTS (
-                SELECT 1
-                  FROM context_frontier_member AS boundary_member
-                  LEFT JOIN context_frontier_member AS terminal_member
-                    ON terminal_member.owning_session_id =
-                            boundary_member.owning_session_id
-                   AND terminal_member.context_frontier_id = $3
-                   AND terminal_member.member_position =
-                            boundary_member.member_position
-                   AND terminal_member.source_session_id =
-                            boundary_member.source_session_id
-                   AND terminal_member.semantic_entry_id =
-                            boundary_member.semantic_entry_id
-                 WHERE boundary_member.owning_session_id = round.session_id
-                   AND boundary_member.context_frontier_id =
-                            round.boundary_frontier_id
-                   AND terminal_member.semantic_entry_id IS NULL
+        "WITH candidate_round AS MATERIALIZED (
+            SELECT round.producing_model_call_id,
+                   round.session_id,
+                   round.boundary_frontier_id,
+                   boundary.member_count AS boundary_member_count,
+                   round.request_count
+              FROM tool_round AS round
+              JOIN context_frontier AS boundary
+                ON boundary.owning_session_id = round.session_id
+               AND boundary.context_frontier_id = round.boundary_frontier_id
+              JOIN context_frontier AS terminal
+                ON terminal.owning_session_id = round.session_id
+               AND terminal.context_frontier_id = $3
+             WHERE round.session_id = $1
+               AND round.turn_id = $2
+               AND round.boundary_kind = 'continuing'
+               AND terminal.member_count =
+                       boundary.member_count + round.request_count + $4
+         ), terminal_member AS MATERIALIZED (
+            SELECT member_position,
+                   source_session_id,
+                   semantic_entry_id
+              FROM context_frontier_member
+             WHERE owning_session_id = $1
+               AND context_frontier_id = $3
+         )
+         SELECT candidate.producing_model_call_id,
+                candidate.boundary_member_count,
+                candidate.request_count
+           FROM candidate_round AS candidate
+          WHERE NOT EXISTS (
+                (SELECT member_position,
+                        source_session_id,
+                        semantic_entry_id
+                   FROM context_frontier_member
+                  WHERE owning_session_id = candidate.session_id
+                    AND context_frontier_id = candidate.boundary_frontier_id)
+                EXCEPT
+                (SELECT member_position,
+                        source_session_id,
+                        semantic_entry_id
+                   FROM terminal_member)
             )
-          ORDER BY round.producing_model_call_id",
+          ORDER BY candidate.producing_model_call_id",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
