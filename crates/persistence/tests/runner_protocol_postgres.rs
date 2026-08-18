@@ -2143,12 +2143,6 @@ async fn migrated_unconnected_later_lease_fixture(
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(pool).await?;
-    sqlx::query(
-        "ALTER TABLE runner_lease_generation
-         ADD COLUMN offer_registration_revision numeric(20, 0)",
-    )
-    .execute(pool)
-    .await?;
     let (store, expected_enrollment, registration, pin) = prepared_pin_fixture_with_authorization(
         pool,
         authorized,
@@ -18176,7 +18170,7 @@ async fn s31_inv043_later_lease_event_rejects_cross_wired_dispatch_fence()
         .expect("the exact lease fence claims");
     let cross_wired = lease_with_cross_wired_dispatch(&claimed, registration.registration());
     let rejected = store
-        .store_lease(&cross_wired)
+        .store_claimed_lease_projection_for_test(&cross_wired)
         .await
         .expect_err("a later event must match every canonical dispatch-fence field");
 
