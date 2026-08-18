@@ -61,6 +61,13 @@ pub(crate) fn complete_json_prefix_followed_outside_probe() -> Vec<u8> {
     bytes
 }
 
+pub(crate) fn json_with_scalar_split_at_probe_boundary() -> Vec<u8> {
+    let mut bytes = br#"{"padding":""#.to_vec();
+    bytes.extend_from_slice(&vec![b'a'; 4_095 - bytes.len()]);
+    bytes.extend_from_slice("β\",\"value\":1}".as_bytes());
+    bytes
+}
+
 pub(crate) fn deeply_nested_json_within_source_ceiling() -> Vec<u8> {
     format!("{}0{}", "[".repeat(60_000), "]".repeat(60_000)).into_bytes()
 }
@@ -105,6 +112,13 @@ pub(crate) fn csv_with_partial_third_probe_record() -> Vec<u8> {
     bytes.extend_from_slice(b",1\nthird,\"");
     bytes.extend_from_slice(&[b'b'; 100]);
     bytes.extend_from_slice(b"\"\n");
+    bytes
+}
+
+pub(crate) fn csv_with_scalar_split_at_probe_boundary() -> Vec<u8> {
+    let mut bytes = b"h1,h2\nv1,v2\nthird,".to_vec();
+    bytes.extend_from_slice(&vec![b'a'; 4_095 - bytes.len()]);
+    bytes.extend_from_slice("β\n".as_bytes());
     bytes
 }
 

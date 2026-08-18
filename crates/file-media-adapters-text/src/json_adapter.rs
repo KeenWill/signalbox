@@ -1,13 +1,14 @@
 use serde::Deserialize;
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    MAX_OBSERVED_CONTAINER_ENTRIES, ProbeStrength, ProcessorFailure, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ValidationEvidence, VerifiedBlobSource,
+    MAX_OBSERVED_CONTAINER_ENTRIES, MAX_STRUCTURED_DEPTH, ProbeStrength, ProcessorFailure,
+    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ValidationEvidence,
+    VerifiedBlobSource,
 };
 
-use crate::{JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, options_are_empty, source};
-
-pub(crate) const MAX_STRUCTURED_DEPTH: u32 = 64;
+use crate::{
+    JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, STRUCTURED_VIEW_NAME, options_are_empty, source,
+};
 
 pub(crate) async fn probe(
     source: &dyn VerifiedBlobSource,
@@ -28,7 +29,7 @@ pub(crate) async fn probe(
 
 fn has_json_structure(prefix: &[u8], complete: bool) -> bool {
     let prefix = trim_ascii_start(prefix);
-    let Ok(text) = std::str::from_utf8(prefix) else {
+    let Some(text) = source::probe_utf8(prefix) else {
         return false;
     };
     if complete {
@@ -64,6 +65,18 @@ pub(crate) async fn inspect(
         return Err(ProcessorFailure::Protocol);
     }
     let Some(bytes) = source::read_complete(source, cancellation).await? else {
+        let declared_candidate = match request.evidence {
+            ValidationEvidence::DeclaredCandidateStructurallyValidated => true,
+            ValidationEvidence::StrongSignature
+            | ValidationEvidence::StructuralValidation
+            | ValidationEvidence::StreamingTextValidation => false,
+        };
+        if declared_candidate {
+            let prefix = source::read_probe_prefix(source, cancellation).await?;
+            if has_complete_json_value_prefix(&prefix) {
+                return Ok(malformed("source_too_large"));
+            }
+        }
         return Ok(validation_failure(request.evidence, "source_too_large"));
     };
     let text = match source::checked_utf8(bytes) {
@@ -85,7 +98,7 @@ pub(crate) async fn read(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorReadOutput, ProcessorFailure> {
-    if request.view.as_str() != "structured" || !options_are_empty(&request.options) {
+    if request.view.as_str() != STRUCTURED_VIEW_NAME || !options_are_empty(&request.options) {
         return Ok(ProcessorReadOutput::InvalidViewArguments);
     }
     let Some(bytes) = source::read_complete(source, cancellation).await? else {
@@ -126,6 +139,19 @@ fn validate_json(text: &str) -> Result<(), serde_json::Error> {
     deserializer.disable_recursion_limit();
     serde::de::IgnoredAny::deserialize(serde_stacker::Deserializer::new(&mut deserializer))?;
     deserializer.end()
+}
+
+fn has_complete_json_value_prefix(prefix: &[u8]) -> bool {
+    let prefix = trim_ascii_start(prefix);
+    if !matches!(prefix.first(), Some(b'{' | b'[')) {
+        return false;
+    }
+    let Some(text) = source::probe_utf8(prefix) else {
+        return false;
+    };
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    deserializer.disable_recursion_limit();
+    serde::de::IgnoredAny::deserialize(serde_stacker::Deserializer::new(&mut deserializer)).is_ok()
 }
 
 fn parse_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {

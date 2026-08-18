@@ -10,11 +10,11 @@ use std::{error::Error, str::FromStr};
 use signalbox_file_media_runtime::{
     CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider, FileMediaProviderDeclaration,
     FileMediaProviderFuture, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    FileReaderName, FileReaderProviderName, FileReaderRevision, MAX_STRUCTURED_NODES,
-    ProbeDeclaration, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
-    ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
-    StreamingTextFallback, VerifiedBlobSource,
+    FileReaderName, FileReaderProviderName, FileReaderRevision, MAX_STRUCTURED_DEPTH,
+    MAX_STRUCTURED_NODES, ProbeDeclaration, ProcessorFailure, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds,
+    ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity,
+    ReasonCode, StreamingTextFallback, VerifiedBlobSource,
 };
 
 const PROVIDER_NAME: &str = "signalbox_text";
@@ -25,8 +25,8 @@ const READER_REVISION: &str = "v1";
 const TEXT_MEDIA_TYPE: &str = "text/plain";
 const JSON_MEDIA_TYPE: &str = "application/json";
 const CSV_MEDIA_TYPE: &str = "text/csv";
-const TEXT_VIEW_NAME: &str = "text";
-const STRUCTURED_VIEW_NAME: &str = "structured";
+pub(crate) const TEXT_VIEW_NAME: &str = "text";
+pub(crate) const STRUCTURED_VIEW_NAME: &str = "structured";
 // Tunable effective ceiling; bounds detection I/O while retaining useful structure evidence.
 const PROBE_PREFIX_BYTES: u64 = 4_096;
 
@@ -193,7 +193,7 @@ fn structured_view(description: &str) -> Result<ReadViewDeclaration, Box<dyn Err
         ReadViewBounds::Structured {
             source_bytes: MAX_TEXT_FAMILY_BYTES,
             output_bytes: MAX_TEXT_FAMILY_BYTES as usize,
-            depth: json_adapter::MAX_STRUCTURED_DEPTH,
+            depth: MAX_STRUCTURED_DEPTH,
             nodes: MAX_STRUCTURED_NODES,
             string_bytes: MAX_TEXT_FAMILY_BYTES as usize,
         },

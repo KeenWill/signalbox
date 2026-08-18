@@ -38,6 +38,16 @@ pub(crate) async fn read_probe_prefix(
         .map_err(|_| ProcessorFailure::Failed)
 }
 
+pub(crate) fn probe_utf8(bytes: &[u8]) -> Option<&str> {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Some(text),
+        Err(error) if error.error_len().is_none() => {
+            std::str::from_utf8(&bytes[..error.valid_up_to()]).ok()
+        }
+        Err(_) => None,
+    }
+}
+
 pub(crate) fn checked_utf8(bytes: Vec<u8>) -> Result<String, &'static str> {
     let text = String::from_utf8(bytes).map_err(|_| "invalid_utf8")?;
     if text.contains('\0') {

@@ -4,7 +4,7 @@ use signalbox_file_media_runtime::{
     ValidationEvidence, VerifiedBlobSource,
 };
 
-use crate::{MAX_TEXT_FAMILY_BYTES, TEXT_MEDIA_TYPE, options_are_empty, source};
+use crate::{MAX_TEXT_FAMILY_BYTES, TEXT_MEDIA_TYPE, TEXT_VIEW_NAME, options_are_empty, source};
 
 pub(crate) async fn probe(
     _source: &dyn VerifiedBlobSource,
@@ -60,7 +60,7 @@ pub(crate) async fn read(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorReadOutput, ProcessorFailure> {
-    if request.view.as_str() != "text" || !options_are_empty(&request.options) {
+    if request.view.as_str() != TEXT_VIEW_NAME || !options_are_empty(&request.options) {
         return Ok(ProcessorReadOutput::InvalidViewArguments);
     }
     let Some(bytes) = source::read_complete(source, cancellation).await? else {

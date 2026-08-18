@@ -235,6 +235,15 @@ async fn complete_json_prefix_without_eof_uses_text_fallback() -> Result<(), Box
 }
 
 #[tokio::test]
+async fn json_probe_handles_a_utf8_scalar_split_at_its_boundary() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::json_with_scalar_split_at_probe_boundary());
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_declared_mismatch(inspection, "text/plain", "application/json");
+    Ok(())
+}
+
+#[tokio::test]
 async fn deeply_nested_json_is_structurally_probed() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::json_beyond_serde_recursion_limit());
 
@@ -372,6 +381,15 @@ async fn comma_bearing_prose_uses_the_text_fallback() -> Result<(), Box<dyn Erro
 #[tokio::test]
 async fn csv_probe_ignores_a_partial_trailing_record() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::csv_with_partial_third_probe_record());
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_declared_mismatch(inspection, "text/plain", "text/csv");
+    Ok(())
+}
+
+#[tokio::test]
+async fn csv_probe_handles_a_utf8_scalar_split_at_its_boundary() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::csv_with_scalar_split_at_probe_boundary());
 
     let inspection = support::inspect(&source, "text/plain").await?;
     support::assert_declared_mismatch(inspection, "text/plain", "text/csv");

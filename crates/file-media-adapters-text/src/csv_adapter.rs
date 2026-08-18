@@ -4,7 +4,9 @@ use signalbox_file_media_runtime::{
     ProcessorValidationOutput, ValidationEvidence, VerifiedBlobSource,
 };
 
-use crate::{CSV_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, options_are_empty, source};
+use crate::{
+    CSV_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, STRUCTURED_VIEW_NAME, options_are_empty, source,
+};
 
 // Hard safety ceiling preventing one record from causing runaway allocation.
 const MAX_COLUMNS: usize = 256;
@@ -16,9 +18,7 @@ pub(crate) async fn probe(
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorProbeOutput, ProcessorFailure> {
     let prefix = source::read_probe_prefix(source, cancellation).await?;
-    let candidate = std::str::from_utf8(&prefix)
-        .ok()
-        .is_some_and(has_record_structure);
+    let candidate = source::probe_utf8(&prefix).is_some_and(has_record_structure);
     if candidate {
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(CSV_MEDIA_TYPE),
@@ -64,7 +64,7 @@ pub(crate) async fn read(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorReadOutput, ProcessorFailure> {
-    if request.view.as_str() != "structured" || !options_are_empty(&request.options) {
+    if request.view.as_str() != STRUCTURED_VIEW_NAME || !options_are_empty(&request.options) {
         return Ok(ProcessorReadOutput::InvalidViewArguments);
     }
     let Some(bytes) = source::read_complete(source, cancellation).await? else {
