@@ -161,6 +161,8 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "itoa",
  "matchit",
  "memchr",
@@ -169,6 +171,7 @@ dependencies = [
  "pin-project-lite",
  "serde_core",
  "sync_wrapper",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",
@@ -3665,6 +3668,8 @@ name = "signalbox-application"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "serde_json",
+ "sha2 0.11.0",
  "signalbox-domain",
  "tokio",
  "tracing",
@@ -4165,8 +4170,13 @@ dependencies = [
 name = "signalboxd"
 version = "0.0.0"
 dependencies = [
+ "axum",
  "expect-test",
  "git2",
+ "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
