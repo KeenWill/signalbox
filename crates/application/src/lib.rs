@@ -55,11 +55,12 @@ pub use list_conversations::{
 pub use load_session::{LoadSessionService, SessionReader};
 pub use model_execution::{
     AttemptDispatchGate, AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
-    CommitModelCallObservationTransaction, FailPreparedModelCallTransaction,
-    InProcessAttemptDispatchGate, InProcessAttemptDispatchPermit, ModelCallAuthorizationReread,
-    ModelCallCapabilityPreparation, ModelCallCredentialReference, ModelCallExecutionError,
-    ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelCallInputTokenCount, ModelCallInputTokenCounter, ModelCallProvider,
+    AvailabilitySuccessorOutcome, CommitModelCallObservationTransaction,
+    CredentialPoolExhaustedOutcome, FailPreparedModelCallTransaction, InProcessAttemptDispatchGate,
+    InProcessAttemptDispatchPermit, ModelCallAuthorizationReread, ModelCallCapabilityPreparation,
+    ModelCallCredentialReference, ModelCallExecutionError, ModelCallExecutionIdGenerator,
+    ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallInputTokenCount,
+    ModelCallInputTokenCounter, ModelCallObservationCommitOutcome, ModelCallProvider,
     ModelCallTerminalIdentityCandidates, ModelConversationMessage, ModelFrontierRenderingError,
     ModelToolResultContent, PrepareModelCallOutcome, PrepareModelCallTransaction,
     PreparedModelCallFailureCause, PreparedModelOperation, RetainedCapabilityFailureStatus,

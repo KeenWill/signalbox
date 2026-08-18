@@ -27,6 +27,10 @@ bulk-ingest resource bounds are verified against this implementing change
 The terminal upload command and PostgreSQL/socket lifecycle proofs are verified
 against this implementing change (`agent/blob-storage-upload-terminal`).
 
+Bounded direct metadata and range reads, replica fallback classification,
+non-waiting process admission, and the terminal read commands are verified
+against this implementing change (`agent/blob-storage-read-wire`).
+
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
 configuration and routing, the ingest and read lifecycle, the blob wire

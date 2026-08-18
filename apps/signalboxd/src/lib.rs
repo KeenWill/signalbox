@@ -36,6 +36,8 @@ use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepos
 use tokio::sync::watch;
 
 use tracing::Instrument;
+pub mod approval_judge_eval;
+mod blob_read_runtime;
 mod blob_storage_configuration;
 mod blob_storage_runtime;
 mod blob_upload_runtime;
@@ -936,8 +938,13 @@ where
                     Err(error) => return Err(RetainedModelExecutionError::Primary(error)),
                 };
                 match outcome {
-                    ModelCallExecutionOutcome::Checkpointed(_) => continue,
+                    ModelCallExecutionOutcome::RetryBackoff(delay) => {
+                        tokio::time::sleep(delay).await;
+                    }
+                    ModelCallExecutionOutcome::Checkpointed(_)
+                    | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
                     ModelCallExecutionOutcome::NoWork
+                    | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
@@ -1516,7 +1523,8 @@ where
                         }
                         ToolExecutionServiceOutcome::ChildWaitParked(_)
                         | ToolExecutionServiceOutcome::AwaitingRecovery(_)
-                        | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => {
+                        | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_)
+                        | ToolExecutionServiceOutcome::ContinuationPoolExhausted(_) => {
                             return Ok(());
                         }
                     }
@@ -1538,8 +1546,13 @@ where
                     }
                 };
                 match model_outcome {
-                    ModelCallExecutionOutcome::Checkpointed(_) => {}
+                    ModelCallExecutionOutcome::RetryBackoff(delay) => {
+                        tokio::time::sleep(delay).await;
+                    }
+                    ModelCallExecutionOutcome::Checkpointed(_)
+                    | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => {}
                     ModelCallExecutionOutcome::TargetUnavailable(_)
+                    | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
                     | ModelCallExecutionOutcome::ToolRoundLimitReached(_)
@@ -1689,8 +1702,13 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                     Err(error) => return Err(RetainedModelExecutionError::Primary(error)),
                 };
                 match outcome {
-                    ModelCallExecutionOutcome::Checkpointed(_) => continue,
+                    ModelCallExecutionOutcome::RetryBackoff(delay) => {
+                        tokio::time::sleep(delay).await;
+                    }
+                    ModelCallExecutionOutcome::Checkpointed(_)
+                    | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
                     ModelCallExecutionOutcome::NoWork
+                    | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)

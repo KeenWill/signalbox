@@ -40,7 +40,7 @@ pub enum RepoWatchPullRequestLifecycle {
     Merged,
 }
 
-// numeric-bound: ceiling - protects durable check generations from provider-sized input
+// numeric-bound: tunable - admits the provider check-generation text this accepts
 const MAX_CHECK_COMPLETION_GENERATION_BYTES: usize = 64;
 
 /// Opaque provider generation for one completed check execution.
@@ -728,11 +728,18 @@ fn derive_pull_request_events(
             ids,
             events,
         )?;
-        if previous.is_none() {
-            return Ok(());
-        }
     }
     let Some(previous) = previous else {
+        if let Some(previous_repository) = repository_comparison.previous {
+            derive_base_advanced_event(
+                repository,
+                previous_repository,
+                repository_comparison.current,
+                current,
+                ids,
+                events,
+            )?;
+        }
         return Ok(());
     };
     if previous.context().head_sha() != context.head_sha() {
@@ -1295,6 +1302,7 @@ pub enum RepoWatchRuleEvaluation {
 pub enum RepoWatchRuleEvaluationOutcome {
     Inactive,
     NotMatched,
+    TargetClosed,
     Occupied,
     Cooldown,
     Dispatched {
@@ -2676,6 +2684,42 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0].kind(),
+            &RepoWatchEventKindV1::BaseAdvanced {
+                branch: expected_branch,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn newly_observed_pull_request_emits_base_advance() -> Result<(), Box<dyn Error>> {
+        let previous = observation(
+            Vec::new(),
+            Vec::new(),
+            vec![branch_head(INITIAL_BASE_HEAD)?],
+            Vec::new(),
+        )?;
+        let current_pull_request = pull_request(PullRequestFacts::matching(PULL_REQUEST_NUMBER))?;
+        let expected_branch = current_pull_request.context().base_branch().clone();
+        let current = observation(
+            vec![current_pull_request],
+            Vec::new(),
+            vec![branch_head(CHANGED_BASE_HEAD)?],
+            Vec::new(),
+        )?;
+
+        let events = derive(Some(&previous), &current)?;
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].kind(), &RepoWatchEventKindV1::PullRequestOpened);
+        assert_eq!(
+            events[1].kind(),
+            &RepoWatchEventKindV1::MergeableStateChanged {
+                current: MergeableState::Mergeable,
+            }
+        );
+        assert_eq!(
+            events[2].kind(),
             &RepoWatchEventKindV1::BaseAdvanced {
                 branch: expected_branch,
             }

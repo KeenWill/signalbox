@@ -15,10 +15,10 @@ use super::{RepositoryLineRange, RepositoryListDirectoryArguments, RepositoryRea
 // numeric-bound: tunable - controls retained repository-file content
 pub(super) const MAX_REPOSITORY_FILE_CONTENT_BYTES: usize = MAX_RESULT_TEXT_BYTES;
 /// Maximum source bytes inspected to serve one requested line range.
-// numeric-bound: ceiling - protects scan memory from oversized repository files
+// numeric-bound: tunable - the ranged-read size this tool advertises serving
 pub(super) const MAX_REPOSITORY_FILE_SCAN_BYTES: usize = 1024 * 1024;
 /// Maximum entries GitHub can expose through one contents response.
-// numeric-bound: ceiling - protects directory memory and provider pagination
+// numeric-bound: not-a-bound - GitHub's fixed contents-endpoint entry exposure
 pub(super) const MAX_OBSERVED_DIRECTORY_ENTRIES: usize = 1_000;
 // numeric-bound: not-a-bound - fixed maximum UTF-8 continuation width
 const MAX_UTF8_BOUNDARY_DISCARD_BYTES: usize = 3;
