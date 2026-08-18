@@ -13,6 +13,7 @@ use std::{
 };
 
 use rust_decimal::Decimal;
+use signalbox_application::scheduler_pass_admission_cap;
 use signalbox_domain::{
     AnthropicServiceTier, BranchName, CheckConclusion, CodexCliServiceTier, DirectModelSelection,
     FastMode, FastModeOverlay, FastModeSupport, FrozenAliasDefinition, LabelName, MergeableState,
@@ -107,7 +108,6 @@ pub const CLAUDE_CLI_CREDENTIAL_REFERENCE: &str = "claude-subscription-primary";
 const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
 const MAX_REPOSITORY_WATCH_RULES: usize = 128;
 const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
-
 /// One provider-availability cause a pool trigger can react to.
 ///
 /// Only these three carry proof that the request was not accepted, so only they
@@ -668,6 +668,7 @@ pub struct HubModelConfiguration {
     approval_judge_selection: Option<DirectModelSelection>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
+    scheduler_max_in_flight_passes: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -711,6 +712,7 @@ impl HubModelConfiguration {
                 "approval_judge",
                 "repository_watch",
                 "blob_storage",
+                "scheduler",
             ],
         )?;
         if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
@@ -759,6 +761,8 @@ impl HubModelConfiguration {
         let blob_storage =
             BlobStorageConfiguration::parse(document.get("blob_storage"), minimum_blob_bytes)
                 .map_err(|_| HubModelConfigurationError::InvalidBlobStorageConfiguration)?;
+        let scheduler_max_in_flight_passes =
+            parse_scheduler_max_in_flight_passes(document.get("scheduler"))?;
         let web_fetch_egress_policy = document
             .get("web_fetch")
             .map(|item| {
@@ -1315,6 +1319,7 @@ impl HubModelConfiguration {
             approval_judge_selection,
             repository_watch,
             blob_storage,
+            scheduler_max_in_flight_passes,
         })
     }
 
@@ -1711,6 +1716,11 @@ impl HubModelConfiguration {
     /// Returns the complete watch configuration, or absence when no task starts.
     pub const fn repository_watch(&self) -> Option<&RepositoryWatchConfiguration> {
         self.repository_watch.as_ref()
+    }
+
+    /// Returns the deployment override for concurrent scheduler passes.
+    pub const fn scheduler_max_in_flight_passes(&self) -> Option<usize> {
+        self.scheduler_max_in_flight_passes
     }
 
     /// Resolves one configured alias to the immutable definition frozen at
@@ -2661,6 +2671,26 @@ fn parse_daemon_tool_settings(
     Ok(Some(executable))
 }
 
+fn parse_scheduler_max_in_flight_passes(
+    item: Option<&Item>,
+) -> Result<Option<usize>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(None);
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidSchedulerConfiguration)?;
+    reject_unknown_fields(table, &["max_in_flight_passes"])
+        .map_err(|_| HubModelConfigurationError::InvalidSchedulerConfiguration)?;
+    let limit = table
+        .get("max_in_flight_passes")
+        .and_then(Item::as_integer)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value <= scheduler_pass_admission_cap())
+        .ok_or(HubModelConfigurationError::InvalidSchedulerConfiguration)?;
+    Ok(Some(limit))
+}
+
 fn parse_git_identity(
     item: Option<&Item>,
 ) -> Result<Option<GitIdentity>, HubModelConfigurationError> {
@@ -3372,6 +3402,8 @@ pub enum HubModelConfigurationError {
     InvalidConversationImportLimit,
     /// The optional blob-store registry or its routes were malformed.
     InvalidBlobStorageConfiguration,
+    /// The optional scheduler pass-admission table was malformed or unsafe.
+    InvalidSchedulerConfiguration,
     /// The optional web-fetch table was malformed or named an invalid origin.
     InvalidWebFetchPolicy,
     /// The optional version-one repository-watch section was malformed.
@@ -3561,6 +3593,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidBlobStorageConfiguration => {
                 "model configuration contains invalid blob-storage settings"
+            }
+            Self::InvalidSchedulerConfiguration => {
+                "model configuration contains invalid scheduler settings"
             }
             Self::InvalidWebFetchPolicy => {
                 "model configuration contains an invalid web_fetch egress policy"
@@ -3773,7 +3808,7 @@ mod tests {
         HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES,
         MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage, UnknownSessionModel,
         absolute_search_entries, credential_bytes, resolved_mcp_bridge_reference,
-        validate_alias_count, validate_model_count,
+        scheduler_pass_admission_cap, validate_alias_count, validate_model_count,
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
@@ -5284,6 +5319,72 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         assert_eq!(
             HubModelConfiguration::parse(&configured).err(),
             Some(HubModelConfigurationError::InvalidConversationImportLimit)
+        );
+    }
+
+    #[test]
+    fn scheduler_pass_limit_is_optional() {
+        let configuration = HubModelConfiguration::parse(CONFIGURATION)
+            .expect("the fixture configuration is valid");
+
+        assert_eq!(configuration.scheduler_max_in_flight_passes(), None);
+    }
+
+    #[test]
+    fn scheduler_pass_limit_accepts_a_bounded_override() {
+        let configured_limit = scheduler_pass_admission_cap();
+        let configured = CONFIGURATION.replace(
+            "[compaction]",
+            &format!("[scheduler]\nmax_in_flight_passes = {configured_limit}\n\n[compaction]"),
+        );
+        let configuration = HubModelConfiguration::parse(&configured)
+            .expect("the bounded scheduler override is valid");
+
+        assert_eq!(
+            configuration.scheduler_max_in_flight_passes(),
+            Some(configured_limit)
+        );
+    }
+
+    #[test]
+    fn scheduler_pass_limit_accepts_zero_as_an_explicit_pause() {
+        let configured_limit = 0;
+        let paused = CONFIGURATION.replace(
+            "[compaction]",
+            &format!("[scheduler]\nmax_in_flight_passes = {configured_limit}\n\n[compaction]"),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&paused)
+                .expect("the paused scheduler setting is valid")
+                .scheduler_max_in_flight_passes(),
+            Some(configured_limit)
+        );
+    }
+
+    #[test]
+    fn scheduler_pass_limit_rejects_an_excessive_value() {
+        let configured = CONFIGURATION.replace(
+            "[compaction]",
+            "[scheduler]\nmax_in_flight_passes = 17\n\n[compaction]",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
+        );
+    }
+
+    #[test]
+    fn scheduler_pass_limit_rejects_an_unknown_field() {
+        let configured = CONFIGURATION.replace(
+            "[compaction]",
+            "[scheduler]\nmax_in_flight_passes = 4\nextra = 1\n\n[compaction]",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
         );
     }
 
