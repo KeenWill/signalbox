@@ -879,25 +879,29 @@ wake it. An attempt that failed before reaching the drain arms a retry at the
 current delay without advancing it, so unrelated dispatch failures cannot grow
 the projection delay. Taking a retry spends its deadline, so an attempt that
 then fails before its drain arms a fresh one rather than selecting itself again
-immediately, which the retry's priority over polling would otherwise cause. A
-deadline that expired while some other attempt ran is left expired, so the next
-pass takes it at once rather than having it pushed out again by a poll that
-keeps failing slowly. A poll whose pre-poll drain failed does not repeat it: the
-step after the poll is skipped, so work already known to be failing waits for
-that delay rather than repeating inside one attempt. A pre-poll drain that
-succeeded is still followed by the post-poll one, which is what catches
-deliveries admitted while the poll was running. A failed full poll schedules
-that retry only when none is already owed, an admission wake is suppressed while
-one is, and a full poll omits both of its drain steps while one is, so neither a
-rapidly failing poll nor an authenticated replay stream can defer or bypass the
-backoff; a suppressed wake coalesces and is observed by the attempt that follows
-the retry. A poll taken during a backoff window therefore commits a cursor that
-a delivery still pending does not reflect. The shadow baseline that delivery
-seeded is marked superseded but retained, because replacement waits for an empty
-pending page, so its retry projects against that baseline rather than reseeding
-from the advanced cursor — the accepted cost is that divergence, taken against
-an unbounded repetition of work already failing. An overdue retry is taken ahead
-of an overdue poll, and a full poll that outlasts its own interval schedules the
+immediately, which the retry's priority over polling would otherwise cause. That
+fresh deadline keeps the kind the spent one had: the attempt that failed before
+its drain says nothing about projection, so a follow-up whose trailing work
+failed again stays a follow-up rather than becoming backoff that suppresses
+admission wakes and poll drains while projection is healthy. A deadline that
+expired while some other attempt ran is left expired, so the next pass takes it
+at once rather than having it pushed out again by a poll that keeps failing
+slowly. A poll whose pre-poll drain failed does not repeat it: the step after
+the poll is skipped, so work already known to be failing waits for that delay
+rather than repeating inside one attempt. A pre-poll drain that succeeded is
+still followed by the post-poll one, which is what catches deliveries admitted
+while the poll was running. A failed full poll schedules that retry only when
+none is already owed, an admission wake is suppressed while one is, and a full
+poll omits both of its drain steps while one is, so neither a rapidly failing
+poll nor an authenticated replay stream can defer or bypass the backoff; a
+suppressed wake coalesces and is observed by the attempt that follows the retry.
+A poll taken during a backoff window therefore commits a cursor that a delivery
+still pending does not reflect. The shadow baseline that delivery seeded is
+marked superseded but retained, because replacement waits for an empty pending
+page, so its retry projects against that baseline rather than reseeding from the
+advanced cursor — the accepted cost is that divergence, taken against an
+unbounded repetition of work already failing. An overdue retry is taken ahead of
+an overdue poll, and a full poll that outlasts its own interval schedules the
 next one a whole interval from completion; without both, a poll deadline that is
 always already elapsed would win every scheduling decision and starve durable
 webhook work for as long as polling kept failing. An independent per-repository

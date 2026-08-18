@@ -399,12 +399,15 @@ impl WebhookDrainRetry {
     /// Whether projection backoff is currently in force.
     ///
     /// A dispatch follow-up also owns a deadline, but it must not suppress
-    /// admission wakes or make a full poll omit healthy drain work.
+    /// admission wakes or make a full poll omit healthy drain work. The
+    /// deadline is what makes a kind in force: a spent one is retained only so
+    /// that rearming can restore it.
     const fn is_backing_off(&self) -> bool {
-        matches!(
-            self.deadline_kind,
-            Some(WebhookRetryDeadlineKind::DrainBackoff)
-        )
+        self.deadline.is_some()
+            && matches!(
+                self.deadline_kind,
+                Some(WebhookRetryDeadlineKind::DrainBackoff)
+            )
     }
 
     /// What a full polling attempt should do about its own drain step.
@@ -438,10 +441,11 @@ impl WebhookDrainRetry {
     /// retry arm precedes the poll arm, and the delay would never be waited
     /// out. What follows decides the next deadline: a drain failure advances
     /// it, a success clears the backoff, and a failure before the drain arms it
-    /// again at the same delay.
+    /// again at the same delay and the same kind. The kind is therefore
+    /// retained rather than dropped; the absent deadline is what marks the
+    /// retry as spent.
     fn consume(&mut self) {
         self.deadline = None;
-        self.deadline_kind = None;
     }
 
     /// Arms a retry when none is owed, without counting a drain failure.
@@ -456,10 +460,19 @@ impl WebhookDrainRetry {
     /// let a poll interval shorter than the delay push the retry out on every
     /// slow failure and starve the drain indefinitely, which is the starvation
     /// the retry arm's priority exists to prevent.
+    ///
+    /// A deadline the retry arm just spent keeps its kind. The attempt that
+    /// followed it failed before its drain, so it says nothing about
+    /// projection: a follow-up whose trailing work failed again would otherwise
+    /// rearm as backoff and begin suppressing admission wakes and poll drains
+    /// while projection was healthy, which is exactly what the two kinds exist
+    /// to keep apart.
     fn arm_if_unowed(&mut self, now: Instant) {
         if self.deadline.is_none() {
             self.deadline = Some(now + self.delay());
-            self.deadline_kind = Some(WebhookRetryDeadlineKind::DrainBackoff);
+            self.deadline_kind = self
+                .deadline_kind
+                .or(Some(WebhookRetryDeadlineKind::DrainBackoff));
         }
     }
 
@@ -6573,6 +6586,39 @@ mod tests {
 
         assert_eq!(retry.deadline, Some(armed_at + WEBHOOK_DRAIN_RETRY_DELAY));
         assert_eq!(retry.poll_drain(), WebhookDrain::Run);
+    }
+
+    /// The work a follow-up owes runs before the drain, so failing it again is
+    /// the same trailing failure rather than a projection one. Rearming as
+    /// backoff would start suppressing admission wakes and poll drains on the
+    /// strength of a failure that never reached projection.
+    #[tokio::test(start_paused = true)]
+    async fn a_follow_up_that_failed_again_rearms_as_a_follow_up() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.arm_follow_up(Instant::now());
+        retry.consume();
+        let rearmed_at = Instant::now();
+
+        retry.arm_if_unowed(rearmed_at);
+
+        assert_eq!(retry.deadline, Some(rearmed_at + WEBHOOK_DRAIN_RETRY_DELAY));
+        assert!(!retry.is_backing_off());
+        assert_eq!(retry.poll_drain(), WebhookDrain::Run);
+    }
+
+    /// The other side of the same rearm: a spent backoff whose attempt failed
+    /// before reaching the drain is still owed that drain, so the poll must go
+    /// on leaving it to the retry.
+    #[tokio::test(start_paused = true)]
+    async fn a_backoff_that_failed_before_its_drain_rearms_as_backoff() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
+        retry.consume();
+
+        retry.arm_if_unowed(Instant::now());
+
+        assert!(retry.is_backing_off());
+        assert_eq!(retry.poll_drain(), WebhookDrain::Deferred);
     }
 
     /// The retry arm precedes the poll arm, so a deadline left owed once its
