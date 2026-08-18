@@ -33,7 +33,8 @@ against this PR (`agent/runner-replacement-provisioning-transaction`). The exact
 lease-offer registration and execution-placement reconstitution facts are
 verified against this PR (`agent/runner-lease-domain-correlation`). Existing-pin
 attempt-and-offer atomicity is verified against this PR
-(`agent/runner-pinned-dispatch-transaction`).
+(`agent/runner-pinned-dispatch-transaction`). Durable lease-claim admission is
+verified against this PR (`agent/runner-lease-claim-transaction`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -1105,17 +1106,23 @@ Locks per transaction, in acquisition order:
   order above. Dispatch through an existing pin revalidates the caller's frozen
   enrollment and registration revision, derives the tool only from the canonical
   approved request, and commits its `InFlight` attempt and offered lease in one
-  transaction. A stale registration rolls back both facts. **Committed
-  unimplemented functionality.** No present transaction performs the initial
-  dispatch boundary that consumes a workspace receipt when present and stores
-  pin, grant, `InFlight` attempt, and offered lease together. Claim and result
-  admission likewise have no present transaction; their future implementations
-  must retain this lock order and commit before acknowledgement. Claim locks the
-  session scheduler first, followed by enrollment, runner, registration, and
-  lease. Result admission takes the session scheduler first, then the applicable
-  runner and lease rows without acquiring an earlier omitted lock, and commits
-  the checked terminal attempt observation and claimed-lease completion
-  together.
+  transaction. A stale registration rolls back both facts. Claim locks the
+  session scheduler first, followed by enrollment, runner connection/loss,
+  current registration, and lease. It loads the canonical offer, checks the
+  complete immutable correlation, commits the claimed lease, and returns that
+  canonical value for acknowledgement. A compatible later registration may
+  preserve an offer, so claim serializes on the current registration head
+  without replacing the offer's immutable registration revision. Claim and
+  connection loss therefore serialize, and the winner determines whether an
+  execution capability exists. The generic lease-projection writer refuses to
+  originate a claimed state. **Committed unimplemented functionality.** No
+  present transaction performs the initial dispatch boundary that consumes a
+  workspace receipt when present and stores pin, grant, `InFlight` attempt, and
+  offered lease together. Result admission likewise has no present transaction;
+  its future implementation takes the session scheduler first, then the
+  applicable runner and lease rows without acquiring an earlier omitted lock,
+  and commits the checked terminal attempt observation and claimed-lease
+  completion together before acknowledgement.
 
 - **Runner loss**: one short transaction locks only the current connection/loss
   head, advances a positive durable loss epoch, and thereby makes every trigger
