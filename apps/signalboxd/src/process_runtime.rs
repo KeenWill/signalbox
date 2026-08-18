@@ -127,8 +127,9 @@ use signalbox_persistence::{
         ProcessModelSelection, ProcessProviderModelCallFailureCause, ProcessReadError,
         ProcessReadRepository, ProcessReconciliationOperation, ProcessRunnerConnectionHealth,
         ProcessRunnerProjection, ProcessRunnerProjectionState, ProcessSessionDefaultsRead,
-        ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptModelCallUsage,
-        ProcessTranscriptTurn, ProcessTurnState,
+        ProcessToolExecution, ProcessToolExecutionResultDisposition, ProcessTranscriptEntry,
+        ProcessTranscriptItem, ProcessTranscriptModelCallUsage, ProcessTranscriptTurn,
+        ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRejectionOnlyOutcome,
@@ -198,9 +199,9 @@ use signalbox_process_protocol::{
     SessionPlacement as WireSessionPlacement, SettingOverlay as WireSettingOverlay,
     SystemPromptMember, SystemPromptText, ToolApprovalEventDecider as WireToolApprovalEventDecider,
     ToolApprovalEventDecision as WireToolApprovalEventDecision, ToolBatchState, ToolDecision,
-    TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
-    TurnModelSettingsSnapshot as WireTurnModelSettingsSnapshot, TurnState, UsageProvenance,
-    content_fragments, decode_client_line, encode_server_line,
+    TranscriptEntry, TranscriptRunnerExecutionOutcome, TranscriptTextEntry, TranscriptToolApproval,
+    TranscriptToolExecution, TurnModelSettingsSnapshot as WireTurnModelSettingsSnapshot, TurnState,
+    UsageProvenance, content_fragments, decode_client_line, encode_server_line,
     recover_bounded_client_protocol_version, recover_bounded_client_request_id,
 };
 use signalbox_tools_sessions::{AwaitSessionPortOutcome, DeliveredChildResult};
@@ -11651,9 +11652,51 @@ where
             entry,
             request,
             attempt,
-            disposition: _,
+            disposition,
+            execution,
             content,
         } => {
+            let execution = match execution {
+                ProcessToolExecution::Daemon => TranscriptToolExecution::Daemon {},
+                ProcessToolExecution::Runner {
+                    runner,
+                    lease,
+                    placement_revision,
+                    lease_generation,
+                    working_directory,
+                    sandbox,
+                } => TranscriptToolExecution::Runner {
+                    runner_id: wire_uuid(runner.into_uuid()),
+                    lease_id: wire_uuid(lease.into_uuid()),
+                    placement_revision: WireRunnerPlacementRevision::try_new(
+                        placement_revision.get(),
+                    )
+                    .ok_or(ProcessConnectionError::EncodeInvariant)?,
+                    lease_generation: PositiveCanonicalU64::try_new(lease_generation.get())
+                        .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
+                    working_directory: working_directory
+                        .as_ref()
+                        .map(|directory| {
+                            WireRunnerWorkingDirectory::try_new(directory.as_str().to_owned())
+                                .map_err(|_| ProcessConnectionError::EncodeInvariant)
+                        })
+                        .transpose()?,
+                    sandbox_profile: match sandbox {
+                        DomainRunnerSandboxProfile::Ambient => WireRunnerSandboxProfile::Ambient,
+                        DomainRunnerSandboxProfile::WorkspaceRestricted => {
+                            WireRunnerSandboxProfile::WorkspaceRestricted
+                        }
+                    },
+                    outcome: match disposition {
+                        ProcessToolExecutionResultDisposition::Completed => {
+                            TranscriptRunnerExecutionOutcome::Succeeded
+                        }
+                        ProcessToolExecutionResultDisposition::KnownFailed => {
+                            TranscriptRunnerExecutionOutcome::KnownFailed
+                        }
+                    },
+                },
+            };
             write_message(
                 writer,
                 version,
@@ -11665,6 +11708,7 @@ where
                     entry: TranscriptEntry::ToolExecutionResult {
                         tool_request_id: wire_uuid(request.into_uuid()),
                         tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                        execution,
                         content: content.clone(),
                     },
                 },

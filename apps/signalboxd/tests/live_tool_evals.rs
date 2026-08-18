@@ -69,8 +69,8 @@ use signalbox_persistence::{
     model_execution::PostgresModelCallRepository,
     process_read::{
         ProcessFailedModelCallDisposition, ProcessProviderModelCallFailureCause,
-        ProcessReadRepository, ProcessToolExecutionResultDisposition, ProcessTranscriptEntry,
-        ProcessTurnState,
+        ProcessReadRepository, ProcessToolExecution, ProcessToolExecutionResultDisposition,
+        ProcessTranscriptEntry, ProcessTurnState,
     },
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
@@ -11824,6 +11824,7 @@ fn synthetic_tool_result(
         request: ToolRequestId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_REQUEST_ID)),
         attempt: ToolAttemptId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_ATTEMPT_ID)),
         disposition,
+        execution: ProcessToolExecution::Daemon,
         content: String::from("synthetic tool result"),
     }
 }

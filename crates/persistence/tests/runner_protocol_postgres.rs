@@ -72,7 +72,7 @@ use signalbox_persistence::{
     },
     process_read::{
         ProcessReadRepository, ProcessRunnerConnectionHealth, ProcessRunnerProjectionState,
-        ProcessTranscriptEntry,
+        ProcessToolExecution, ProcessToolExecutionResultDisposition, ProcessTranscriptEntry,
     },
     runner_promotion::PromotePendingRunnerRepository,
     runner_protocol::{
@@ -2458,12 +2458,6 @@ async fn migrated_unconnected_later_lease_fixture(
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(pool).await?;
-    sqlx::query(
-        "ALTER TABLE runner_lease_generation
-         ADD COLUMN offer_registration_revision numeric(20, 0)",
-    )
-    .execute(pool)
-    .await?;
     let (store, expected_enrollment, registration, pin) = prepared_pin_fixture_with_authorization(
         pool,
         authorized,
@@ -2554,6 +2548,12 @@ async fn migrated_unconnected_later_lease_fixture(
 
 async fn install_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         ADD COLUMN offer_registration_revision numeric(20, 0)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
         "CREATE TABLE runner_connection_authority_head (
             enrollment_id uuid PRIMARY KEY,
             connection_epoch numeric(20, 0) NOT NULL
@@ -2579,6 +2579,12 @@ async fn drop_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<(), s
     sqlx::query("DROP TABLE runner_connection_authority_head")
         .execute(pool)
         .await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         DROP COLUMN offer_registration_revision",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -18758,6 +18764,124 @@ async fn s31_inv011_inv021_inv043_runner_result_commits_attempt_and_lease_once()
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_runner_result_process_projection_carries_closed_execution_evidence()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, claimed) = stored_claimed_pinned_dispatch_fixture(&pool).await?;
+    let correlation = claimed.correlation();
+    let result = ToolResultText::try_new("runner complete".to_owned())
+        .expect("the fixture runner result is bounded");
+    store
+        .commit_lease_result(RunnerLeaseResultRequest::new(
+            correlation.clone(),
+            ToolAttemptObservation::Completed {
+                result: ToolResultContent::Text(result.clone()),
+            },
+        ))
+        .await?;
+    let entry = SemanticTranscriptEntryId::from_uuid(uuid(0xc001));
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             tool_result_attempt_id)
+         VALUES ($1, $2, 'tool_execution_result', $3)",
+    )
+    .bind(correlation.dispatch.session().into_uuid())
+    .bind(entry.into_uuid())
+    .bind(correlation.dispatch.attempt().into_uuid())
+    .execute(&pool)
+    .await?;
+    let source = signalbox_domain::SemanticTranscriptEntryRef::from_source(
+        correlation.dispatch.session(),
+        entry,
+    );
+    let loaded = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(&[1], &[source])
+        .await?;
+
+    assert_eq!(
+        loaded.as_ref(),
+        &[ProcessTranscriptEntry::ToolExecutionResult {
+            entry_index: 0,
+            source_session: correlation.dispatch.session(),
+            entry,
+            request: correlation.dispatch.request(),
+            attempt: correlation.dispatch.attempt(),
+            disposition: ProcessToolExecutionResultDisposition::Completed,
+            execution: ProcessToolExecution::Runner {
+                runner: correlation.runner,
+                lease: correlation.lease,
+                placement_revision: correlation.placement_revision,
+                lease_generation: correlation.generation,
+                working_directory: None,
+                sandbox: correlation.sandbox,
+            },
+            content: result.as_str().to_owned(),
+        }]
+    );
+    drop(pool);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_runner_result_process_projection_rejects_incomplete_lease_evidence()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, claimed) = stored_claimed_pinned_dispatch_fixture(&pool).await?;
+    let correlation = claimed.correlation();
+    let result = ToolResultText::try_new("runner complete".to_owned())
+        .expect("the fixture runner result is bounded");
+    store
+        .commit_lease_result(RunnerLeaseResultRequest::new(
+            correlation.clone(),
+            ToolAttemptObservation::Completed {
+                result: ToolResultContent::Text(result),
+            },
+        ))
+        .await?;
+    let entry = SemanticTranscriptEntryId::from_uuid(uuid(0xc002));
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             tool_result_attempt_id)
+         VALUES ($1, $2, 'tool_execution_result', $3)",
+    )
+    .bind(correlation.dispatch.session().into_uuid())
+    .bind(entry.into_uuid())
+    .bind(correlation.dispatch.attempt().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_current_lease_event DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "DELETE FROM runner_current_lease_event
+          WHERE lease_id = $1 AND generation = $2",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .execute(&pool)
+    .await?;
+    let source = signalbox_domain::SemanticTranscriptEntryRef::from_source(
+        correlation.dispatch.session(),
+        entry,
+    );
+    let rejected = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(&[1], &[source])
+        .await
+        .expect_err("a bound runner attempt requires its completed lease evidence");
+
+    assert_eq!(
+        rejected.to_string(),
+        "process read has inconsistent runner execution evidence"
+    );
+    drop(pool);
+    Ok(())
+}
+
 /// INV-011 / INV-034 / INV-043: retained terminal evidence commits under the
 /// authenticated resume identity before a changed advertisement advances its
 /// registration and starts availability reconciliation.
@@ -18939,7 +19063,7 @@ async fn s31_inv011_inv021_inv043_runner_result_commits_known_failure() -> Resul
     let expected_error = ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None);
     let completion = store
         .commit_lease_result(RunnerLeaseResultRequest::new(
-            correlation,
+            correlation.clone(),
             ToolAttemptObservation::KnownFailed {
                 error: expected_error.clone(),
             },
@@ -18954,6 +19078,25 @@ async fn s31_inv011_inv021_inv043_runner_result_commits_known_failure() -> Resul
         .bind(completion.attempt().attempt().into_uuid())
         .fetch_one(&pool)
         .await?;
+    let entry = SemanticTranscriptEntryId::from_uuid(uuid(0xc003));
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             tool_result_attempt_id)
+         VALUES ($1, $2, 'tool_execution_result', $3)",
+    )
+    .bind(correlation.dispatch.session().into_uuid())
+    .bind(entry.into_uuid())
+    .bind(correlation.dispatch.attempt().into_uuid())
+    .execute(&pool)
+    .await?;
+    let source = signalbox_domain::SemanticTranscriptEntryRef::from_source(
+        correlation.dispatch.session(),
+        entry,
+    );
+    let loaded = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(&[1], &[source])
+        .await?;
 
     assert_eq!(completion.lease().state(), RunnerLeaseState::Completed);
     assert_eq!(
@@ -18965,6 +19108,26 @@ async fn s31_inv011_inv021_inv043_runner_result_commits_known_failure() -> Resul
     assert_eq!(disposition, "known_failed");
     assert_eq!(error_kind.as_deref(), Some("execution_failed"));
     assert_eq!(result_text, None);
+    assert_eq!(
+        loaded.as_ref(),
+        &[ProcessTranscriptEntry::ToolExecutionResult {
+            entry_index: 0,
+            source_session: correlation.dispatch.session(),
+            entry,
+            request: correlation.dispatch.request(),
+            attempt: correlation.dispatch.attempt(),
+            disposition: ProcessToolExecutionResultDisposition::KnownFailed,
+            execution: ProcessToolExecution::Runner {
+                runner: correlation.runner,
+                lease: correlation.lease,
+                placement_revision: correlation.placement_revision,
+                lease_generation: correlation.generation,
+                working_directory: None,
+                sandbox: correlation.sandbox,
+            },
+            content: String::from(r#"{"error":{"detail":null,"kind":"execution_failed"}}"#,),
+        }]
+    );
     drop(pool);
     Ok(())
 }
@@ -23134,14 +23297,14 @@ async fn s31_inv043_first_generation_requires_null_predecessor() -> Result<(), B
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name,
+             offer_registration_revision, credential_profile_name,
              credential_grant_lineage_origin_ordinal,
              credential_grant_revision, credential_approval_kind,
              predecessor_generation)
          SELECT $2, 1, attempt_id, session_id, runner_id,
                 tool_name, effect_class, placement_event_ordinal,
                 registration_enrollment_id, registration_revision,
-                credential_profile_name,
+                offer_registration_revision, credential_profile_name,
                 credential_grant_lineage_origin_ordinal,
                 credential_grant_revision, credential_approval_kind, 0
            FROM runner_lease_generation

@@ -5147,6 +5147,42 @@ impl ImportedTextPreview {
     }
 }
 
+/// Closed terminal classification for one runner-produced tool result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptRunnerExecutionOutcome {
+    /// The runner returned admitted result content.
+    Succeeded,
+    /// The runner returned definitive typed failure evidence.
+    KnownFailed,
+}
+
+/// Closed execution locus and evidence carried by one tool result.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TranscriptToolExecution {
+    /// The daemon-local executor produced the result.
+    Daemon {},
+    /// One exact runner lease produced the result.
+    Runner {
+        /// Runner that executed the lease.
+        runner_id: CanonicalUuid,
+        /// Logical lease identity.
+        lease_id: CanonicalUuid,
+        /// Positive placement revision under which execution occurred.
+        placement_revision: RunnerPlacementRevision,
+        /// Positive lease fence generation that completed.
+        lease_generation: PositiveCanonicalU64,
+        /// User-selected directory, null when the placement selected runner default.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        working_directory: Option<RunnerWorkingDirectory>,
+        /// Exact sandbox profile pinned by the placement.
+        sandbox_profile: RunnerSandboxProfile,
+        /// Closed terminal outcome reached by the durable attempt.
+        outcome: TranscriptRunnerExecutionOutcome,
+    },
+}
+
 /// Non-text semantic transcript entry.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -5246,6 +5282,8 @@ pub enum TranscriptEntry {
         tool_request_id: CanonicalUuid,
         /// Exact physical tool attempt.
         tool_attempt_id: CanonicalUuid,
+        /// Closed daemon-local or runner execution evidence.
+        execution: TranscriptToolExecution,
         /// Exact provider-visible result content.
         content: String,
     },
@@ -8441,7 +8479,8 @@ mod tests {
         RunnerSandboxProfile, RunnerStateTransitionState, RunnerWorkingDirectory, ServerFrame,
         ServerMessage, ServiceTier, SessionEvent, SessionMetadata, SettingOverlay,
         SystemPromptMember, SystemPromptText, ToolApprovalEventDecider, ToolApprovalEventDecision,
-        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval,
+        ToolBatchState, ToolDecision, TranscriptEntry, TranscriptRunnerExecutionOutcome,
+        TranscriptTextEntry, TranscriptToolApproval, TranscriptToolExecution,
         TurnModelSettingsSnapshot, TurnState, UsageProvenance, decode_client_line,
         decode_server_line, encode_client_line, encode_server_line, validate_adjustments,
     };
@@ -8458,6 +8497,61 @@ mod tests {
 
     fn uuid(value: u128) -> CanonicalUuid {
         CanonicalUuid::from_uuid(Uuid::from_u128(value))
+    }
+
+    #[test]
+    fn tool_execution_result_serializes_closed_daemon_execution() {
+        let entry = TranscriptEntry::ToolExecutionResult {
+            tool_request_id: uuid(1),
+            tool_attempt_id: uuid(2),
+            execution: TranscriptToolExecution::Daemon {},
+            content: String::from("ok"),
+        };
+
+        assert_eq!(
+            serde_json::to_string(&entry).expect("the closed transcript entry serializes"),
+            r#"{"type":"tool_execution_result","tool_request_id":"00000000-0000-0000-0000-000000000001","tool_attempt_id":"00000000-0000-0000-0000-000000000002","execution":{"type":"daemon"},"content":"ok"}"#
+        );
+    }
+
+    #[test]
+    fn tool_execution_result_round_trips_closed_runner_execution() {
+        let entry = TranscriptEntry::ToolExecutionResult {
+            tool_request_id: uuid(1),
+            tool_attempt_id: uuid(2),
+            execution: TranscriptToolExecution::Runner {
+                runner_id: uuid(3),
+                lease_id: uuid(4),
+                placement_revision: RunnerPlacementRevision::try_new(5)
+                    .expect("the fixture placement revision is positive"),
+                lease_generation: PositiveCanonicalU64::try_new(6)
+                    .expect("the fixture lease generation is positive"),
+                working_directory: Some(
+                    RunnerWorkingDirectory::try_new(String::from("workspace/project"))
+                        .expect("the fixture working directory is valid"),
+                ),
+                sandbox_profile: RunnerSandboxProfile::WorkspaceRestricted,
+                outcome: TranscriptRunnerExecutionOutcome::Succeeded,
+            },
+            content: String::from("ok"),
+        };
+        let encoded =
+            serde_json::to_string(&entry).expect("the closed transcript entry serializes");
+        let decoded: TranscriptEntry =
+            serde_json::from_str(&encoded).expect("the closed transcript entry deserializes");
+
+        assert_eq!(decoded, entry);
+        assert_eq!(
+            encoded,
+            r#"{"type":"tool_execution_result","tool_request_id":"00000000-0000-0000-0000-000000000001","tool_attempt_id":"00000000-0000-0000-0000-000000000002","execution":{"type":"runner","runner_id":"00000000-0000-0000-0000-000000000003","lease_id":"00000000-0000-0000-0000-000000000004","placement_revision":"5","lease_generation":"6","working_directory":"workspace/project","sandbox_profile":"workspace-restricted","outcome":"succeeded"},"content":"ok"}"#
+        );
+    }
+
+    #[test]
+    fn runner_execution_rejects_missing_required_nullable_directory() {
+        let malformed = r#"{"type":"tool_execution_result","tool_request_id":"00000000-0000-0000-0000-000000000001","tool_attempt_id":"00000000-0000-0000-0000-000000000002","execution":{"type":"runner","runner_id":"00000000-0000-0000-0000-000000000003","lease_id":"00000000-0000-0000-0000-000000000004","placement_revision":"5","lease_generation":"6","sandbox_profile":"workspace-restricted","outcome":"succeeded"},"content":"ok"}"#;
+
+        assert!(serde_json::from_str::<TranscriptEntry>(malformed).is_err());
     }
 
     /// Arbitrary distinct identities whose field names preserve delegation wire roles.

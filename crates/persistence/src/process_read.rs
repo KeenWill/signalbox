@@ -13,11 +13,12 @@ use signalbox_domain::{
     DirectModelSelection, FrozenAliasDefinition, FrozenModelSelection, ImportedConversationId,
     ImportedSourceAttestation, ImportedTranscriptContent, ImportedTranscriptEntryId, ModelAlias,
     ModelCallId, ModelSelectionRequest, ProviderModelIdentity, ResolvedProviderTarget,
-    RunnerCapabilityClass, RunnerGeneration, RunnerId, RunnerSandboxProfile, RunnerSelector,
-    RunnerWorkingDirectory, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
-    SessionReadScopeDecision, SessionReadScopeRefusal, ToolApprovalDecider, ToolApprovalDecision,
-    ToolAttemptId, ToolDecisionRationale, ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId,
-    TurnModelSettingsResolved, VersionedSessionPlacement, WorkspaceRepositoryKey,
+    RunnerCapabilityClass, RunnerGeneration, RunnerId, RunnerLeaseId, RunnerSandboxProfile,
+    RunnerSelector, RunnerWorkingDirectory, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
+    SessionId, SessionReadScopeDecision, SessionReadScopeRefusal, ToolApprovalDecider,
+    ToolApprovalDecision, ToolAttemptId, ToolDecisionRationale, ToolDenialReason, ToolRequestId,
+    TurnAttemptId, TurnId, TurnModelSettingsResolved, VersionedSessionPlacement,
+    WorkspaceRepositoryKey,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -821,6 +822,28 @@ pub enum ProcessToolExecutionResultDisposition {
     KnownFailed,
 }
 
+/// Closed execution locus and evidence carried by one tool result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProcessToolExecution {
+    /// The daemon-local executor produced the result.
+    Daemon,
+    /// One exact runner lease produced the result.
+    Runner {
+        /// Runner that executed the lease.
+        runner: RunnerId,
+        /// Logical lease identity.
+        lease: RunnerLeaseId,
+        /// Positive placement revision under which execution occurred.
+        placement_revision: RunnerGeneration,
+        /// Positive lease fence generation that completed.
+        lease_generation: RunnerGeneration,
+        /// User-selected directory, absent when the placement selected runner default.
+        working_directory: Option<RunnerWorkingDirectory>,
+        /// Exact sandbox profile pinned by the placement.
+        sandbox: RunnerSandboxProfile,
+    },
+}
+
 /// One ordered member of the latest authoritative semantic frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessTranscriptEntry {
@@ -1005,6 +1028,8 @@ pub enum ProcessTranscriptEntry {
         attempt: ToolAttemptId,
         /// Typed terminal outcome of the exact physical attempt.
         disposition: ProcessToolExecutionResultDisposition,
+        /// Closed daemon-local or runner execution evidence.
+        execution: ProcessToolExecution,
         /// Exact provider-visible result content.
         content: String,
     },
@@ -1871,6 +1896,13 @@ impl ProcessReadRepository {
                 result_attempt.result_text AS result_text,
                 result_attempt.error_kind AS result_error_kind,
                 result_attempt.error_detail AS result_error_detail,
+                result_runner_binding.lease_id AS result_runner_bound_lease_id,
+                result_runner_execution.lease_id AS result_runner_lease_id,
+                result_runner_execution.generation AS result_runner_lease_generation,
+                result_runner_execution.runner_id AS result_runner_id,
+                result_runner_execution.placement_revision AS result_runner_placement_revision,
+                result_runner_execution.requested_working_directory AS result_runner_working_directory,
+                result_runner_execution.requested_sandbox_profile AS result_runner_sandbox_profile,
                 transcript_approval.decision_kind AS transcript_decision_kind,
                 transcript_approval.decision_source AS transcript_decision_source,
                 transcript_approval.denial_reason AS transcript_denial_reason,
@@ -1897,6 +1929,31 @@ impl ProcessReadRepository {
                LEFT JOIN tool_attempt AS result_attempt
                  ON result_attempt.session_id = entry.source_session_id
                 AND result_attempt.attempt_id = entry.tool_result_attempt_id
+               LEFT JOIN runner_physical_attempt_lease_binding AS result_runner_binding
+                 ON result_runner_binding.attempt_id = result_attempt.attempt_id
+               LEFT JOIN LATERAL (
+                    SELECT generation.lease_id,
+                           generation.generation,
+                           generation.runner_id,
+                           placement.placement_revision,
+                           placement.requested_working_directory,
+                           placement.requested_sandbox_profile
+                      FROM runner_lease_generation AS generation
+                      JOIN runner_current_lease_event AS current_event
+                        ON current_event.lease_id = generation.lease_id
+                       AND current_event.generation = generation.generation
+                      JOIN runner_lease_event AS lease_event
+                        ON lease_event.lease_id = current_event.lease_id
+                       AND lease_event.generation = current_event.generation
+                       AND lease_event.event_ordinal = current_event.event_ordinal
+                       AND lease_event.state_kind = 'completed'
+                      JOIN runner_session_placement_record AS placement
+                        ON placement.session_id = generation.session_id
+                       AND placement.event_ordinal = generation.placement_event_ordinal
+                       AND placement.pinned_runner_id = generation.runner_id
+                     WHERE generation.lease_id = result_runner_binding.lease_id
+                       AND generation.attempt_id = result_attempt.attempt_id
+               ) AS result_runner_execution ON TRUE
                LEFT JOIN tool_request AS transcript_request
                  ON transcript_request.session_id = entry.source_session_id
                 AND transcript_request.request_id = COALESCE(
@@ -4239,6 +4296,13 @@ async fn open_transcript_entry_cursor(
             result_attempt.result_text AS result_text,
             result_attempt.error_kind AS result_error_kind,
             result_attempt.error_detail AS result_error_detail,
+            result_runner_binding.lease_id AS result_runner_bound_lease_id,
+            result_runner_execution.lease_id AS result_runner_lease_id,
+            result_runner_execution.generation AS result_runner_lease_generation,
+            result_runner_execution.runner_id AS result_runner_id,
+            result_runner_execution.placement_revision AS result_runner_placement_revision,
+            result_runner_execution.requested_working_directory AS result_runner_working_directory,
+            result_runner_execution.requested_sandbox_profile AS result_runner_sandbox_profile,
             transcript_approval.decision_kind AS transcript_decision_kind,
             transcript_approval.decision_source AS transcript_decision_source,
             transcript_approval.denial_reason AS transcript_denial_reason,
@@ -4264,6 +4328,31 @@ async fn open_transcript_entry_cursor(
            LEFT JOIN tool_attempt AS result_attempt
              ON result_attempt.session_id = entry.source_session_id
             AND result_attempt.attempt_id = entry.tool_result_attempt_id
+           LEFT JOIN runner_physical_attempt_lease_binding AS result_runner_binding
+             ON result_runner_binding.attempt_id = result_attempt.attempt_id
+           LEFT JOIN LATERAL (
+                SELECT generation.lease_id,
+                       generation.generation,
+                       generation.runner_id,
+                       placement.placement_revision,
+                       placement.requested_working_directory,
+                       placement.requested_sandbox_profile
+                  FROM runner_lease_generation AS generation
+                  JOIN runner_current_lease_event AS current_event
+                    ON current_event.lease_id = generation.lease_id
+                   AND current_event.generation = generation.generation
+                  JOIN runner_lease_event AS lease_event
+                    ON lease_event.lease_id = current_event.lease_id
+                   AND lease_event.generation = current_event.generation
+                   AND lease_event.event_ordinal = current_event.event_ordinal
+                   AND lease_event.state_kind = 'completed'
+                  JOIN runner_session_placement_record AS placement
+                    ON placement.session_id = generation.session_id
+                   AND placement.event_ordinal = generation.placement_event_ordinal
+                   AND placement.pinned_runner_id = generation.runner_id
+                 WHERE generation.lease_id = result_runner_binding.lease_id
+                   AND generation.attempt_id = result_attempt.attempt_id
+           ) AS result_runner_execution ON TRUE
            LEFT JOIN tool_request AS transcript_request
              ON transcript_request.session_id = entry.source_session_id
             AND transcript_request.request_id = COALESCE(
@@ -4437,6 +4526,16 @@ fn decode_transcript_entry(
     let result_text: Option<String> = row.try_get("result_text")?;
     let result_error_kind: Option<String> = row.try_get("result_error_kind")?;
     let result_error_detail: Option<String> = row.try_get("result_error_detail")?;
+    let result_runner_bound_lease: Option<Uuid> = row.try_get("result_runner_bound_lease_id")?;
+    let result_runner_lease: Option<Uuid> = row.try_get("result_runner_lease_id")?;
+    let result_runner_lease_generation: Option<Decimal> =
+        row.try_get("result_runner_lease_generation")?;
+    let result_runner: Option<Uuid> = row.try_get("result_runner_id")?;
+    let result_runner_placement_revision: Option<Decimal> =
+        row.try_get("result_runner_placement_revision")?;
+    let result_runner_working_directory: Option<String> =
+        row.try_get("result_runner_working_directory")?;
+    let result_runner_sandbox: Option<String> = row.try_get("result_runner_sandbox_profile")?;
     let transcript_decision_kind: Option<String> = row.try_get("transcript_decision_kind")?;
     let transcript_denial_reason: Option<String> = row.try_get("transcript_denial_reason")?;
     let delegated_task_spawning_request: Option<Uuid> =
@@ -4916,6 +5015,60 @@ fn decode_transcript_entry(
                 );
             }
         };
+        let execution = match (
+            result_runner_bound_lease,
+            result_runner_lease,
+            result_runner_lease_generation,
+            result_runner,
+            result_runner_placement_revision,
+            result_runner_sandbox.as_deref(),
+        ) {
+            (None, None, None, None, None, None) if result_runner_working_directory.is_none() => {
+                ProcessToolExecution::Daemon
+            }
+            (
+                Some(bound_lease),
+                Some(lease),
+                Some(lease_generation),
+                Some(runner),
+                Some(placement_revision),
+                Some(sandbox),
+            ) if bound_lease == lease => ProcessToolExecution::Runner {
+                runner: RunnerId::from_uuid(runner),
+                lease: RunnerLeaseId::from_uuid(lease),
+                placement_revision: RunnerGeneration::try_from_u64(decode_positive(
+                    placement_revision,
+                    "runner execution placement revision",
+                )?)
+                .ok_or(ProcessReadCorruption::InvalidOrdinal(
+                    "runner execution placement revision",
+                ))?,
+                lease_generation: RunnerGeneration::try_from_u64(decode_positive(
+                    lease_generation,
+                    "runner execution lease generation",
+                )?)
+                .ok_or(ProcessReadCorruption::InvalidOrdinal(
+                    "runner execution lease generation",
+                ))?,
+                working_directory: result_runner_working_directory
+                    .map(RunnerWorkingDirectory::try_new)
+                    .transpose()
+                    .map_err(|_| {
+                        ProcessReadCorruption::Inconsistent("runner execution working directory")
+                    })?,
+                sandbox: runner_sandbox_from_str(sandbox).ok_or_else(|| {
+                    ProcessReadCorruption::Unsupported {
+                        field: "runner execution sandbox profile",
+                        value: sandbox.to_owned(),
+                    }
+                })?,
+            },
+            _ => {
+                return Err(
+                    ProcessReadCorruption::Inconsistent("runner execution evidence").into(),
+                );
+            }
+        };
         if origin.is_some()
             || steering_source_turn.is_some()
             || failed_turn.is_some()
@@ -4940,6 +5093,7 @@ fn decode_transcript_entry(
             request: ToolRequestId::from_uuid(request),
             attempt: ToolAttemptId::from_uuid(attempt),
             disposition,
+            execution,
             content,
         });
     }
