@@ -51,8 +51,11 @@ replacement `workspace_ready` receipt under its exact durable authority is
 verified against this PR (`agent/runner-workspace-ready-admission`). Live
 established-connection routing of that frame through durable receipt admission,
 followed by exact `workspace_recorded` projection, is verified against this PR
-(`agent/daemon-runner-workspace-ready-routing`). Established-connection routing
-of those inbound claim and result frames through the durable transactions before
+(`agent/daemon-runner-workspace-ready-routing`). Daemon-side authenticated
+resume classification of one retained `ready_unrecorded` workspace and its
+fail-closed directive is verified against this PR
+(`agent/runner-workspace-ready-resume`). Established-connection routing of those
+inbound claim and result frames through the durable transactions before
 acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
@@ -980,7 +983,15 @@ exact pair of an `execution_may_have_started` lease phase and matching retained
 terminal result: it authenticates and commits terminal evidence before any
 registration mutation, then directs both items to `discard_as_recorded`.
 Canonical stale terminal evidence instead receives `fail_stale` for both items.
-Every other nonempty inventory shape remains rejected. Stored identity mismatch,
+One otherwise-empty repository provisioning inventory at `ready_unrecorded` is
+structurally admitted but receives `fail_stale`: its durable provisioning
+authority names the prior connection event, and no present resume transaction
+reauthorizes the new connection to resend that payload. **Committed
+unimplemented functionality.** The runner does not yet retain the complete ready
+manifest beside this correlation or consume the directive, and the daemon does
+not yet provide that durable reauthorization, so this recovery arm does not make
+provisioning restartable. Every other nonempty inventory shape remains rejected.
+Stored identity mismatch,
 revocation, a future revision, or a stale revision paired with changed
 availability fails closed. Equal availability returns the current durable
 revision; changed availability at the current revision atomically appends its
