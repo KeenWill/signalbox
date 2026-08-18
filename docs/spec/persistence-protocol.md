@@ -637,7 +637,7 @@ Representation rules, all enforced in the schema:
   Equal replay returns the first authorization or refusal; unequal reuse returns
   a command conflict. A workspace-free or pre-pin placement rolls the claim back
   and returns `NotApplicable`, leaving the workspace-free replacement port as
-  the only command owner. That port currently claims only a pinned loss whose
+  the only command claimant. That port currently claims only a pinned loss whose
   request names an exact directory and no workspace; it returns a nonterminal
   stage without appending any relocation facts, while equal provisioning replay
   recognizes that command as outside its repository-backed locus. Migration
