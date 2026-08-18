@@ -28,6 +28,10 @@ bind is verified against this PR (`agent/per-session-workspaces`).
 The change-request-scoped thread mutation contracts and their pre-dispatch
 ownership confirmation are verified through this PR (`agent/thread-ownership`).
 
+The automatic tool-round saturation terminal contract is verified through this
+PR (`agent/tool-round-saturation`) at implementation ref
+`e3324597071041bb192c315855304805d6fa6f4e`.
+
 The daemon blob-read declarations below are the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with its implementing
 child stack.
@@ -632,10 +636,13 @@ so every multi-request batch counts once and inherited tool history from earlier
 turns does not count. After the thirty-second batch resolves, the ordinary
 continuation transaction still projects all results and creates its fresh
 `Prepared` call; model execution closes that checkpoint as `KnownFailed` before
-provider capability preparation or send. The normal known-failure boundary then
-fails the turn honestly. These durable-content bounds avoid wall-clock policy
-and ensure one model-controlled response or chain cannot retain the progressing
-slot indefinitely.
+provider capability preparation or send. At that enforcement site it emits a
+warning carrying the limit and observed round count, and the guarded pre-send
+closure carries `ToolRoundLimitReached`. The terminal event consequently uses
+`tool_round_limit_reached`, distinct from `capability_known_failure` (INV-061).
+These durable-content bounds avoid wall-clock policy and ensure one
+model-controlled response or chain cannot retain the progressing slot
+indefinitely.
 
 If an applied stop terminalizes before continuation, the same materialization
 algorithm appends results for executed and denied requests, closes every request

@@ -10875,7 +10875,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
-| application: model_execution                       | 35 (incl. 8 traits)              |
+| application: model_execution                       | 36 (incl. 8 traits)              |
 | application: tool_loop                             | 26 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
 | application: session_delegation                    | 1 (incl. 1 trait)                |
@@ -10892,4 +10892,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
-| **signalbox-application total**                    | **275 (+5 free fn)**             |
+| **signalbox-application total**                    | **276 (+5 free fn)**             |
