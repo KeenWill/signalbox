@@ -92,9 +92,10 @@ nothing may become load-bearing about its in-tree location. Per the pre-alpha
 rule in `AGENTS.md`, no compatibility machinery attends any of this: corpus
 formats and storage may change freely until first durable deployment.
 
-**Committed unimplemented functionality.** No present surface checks
-expectations. Expectations are one typed grammar over three check kinds —
-closed-vocabulary labels, typed numeric constraints (exact-within-tolerance,
+**Committed unimplemented functionality.** No present general substrate surface
+checks the expectation grammar described below. That grammar spans three check
+kinds — closed-vocabulary labels, typed numeric constraints
+(exact-within-tolerance,
 range, count, boolean), and reference-artifact comparisons by named continuous
 metric with thresholds — declared per case, each check optional. A case with a
 missing reference degrades that check to `unmeasured` and never loses its row. A
