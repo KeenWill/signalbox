@@ -501,8 +501,11 @@ impl InputContent {
     }
 }
 
+// numeric-bound: ceiling - bounds retained parts in one user input
 const MAX_USER_INPUT_PARTS: usize = 256;
+// numeric-bound: ceiling - bounds aggregate retained user text
 const MAX_USER_INPUT_TEXT_BYTES: usize = 1_048_576;
+// numeric-bound: ceiling - bounds retained attachment metadata fields
 const MAX_USER_ATTACHMENT_METADATA_BYTES: usize = 255;
 
 /// Closed semantic kind declared for one user attachment on the wire.
@@ -535,6 +538,7 @@ pub enum UserInputPart {
         /// Exact visible-ASCII media-type declaration.
         media_type: String,
         /// Optional display basename, explicitly null when absent.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
         display_filename: Option<String>,
     },
 }
@@ -7688,21 +7692,26 @@ impl ServerMessage {
             }
             Self::TranscriptTurn {
                 turn_id,
-                model_settings: Some(settings),
+                model_settings,
                 state,
                 ..
             } => {
-                settings.validate()?;
-                if settings.turn_id != *turn_id
-                    || (matches!(
-                        state,
-                        TurnState::Queued {
-                            accepted_input_id,
-                            ..
-                        } if settings.accepted_input_id != *accepted_input_id
-                    ))
-                {
-                    return Err(FrameValidationError::ModelSettingsShape);
+                if let TurnState::Queued { content, .. } = state {
+                    content.validate()?;
+                }
+                if let Some(settings) = model_settings {
+                    settings.validate()?;
+                    if settings.turn_id != *turn_id
+                        || (matches!(
+                            state,
+                            TurnState::Queued {
+                                accepted_input_id,
+                                ..
+                            } if settings.accepted_input_id != *accepted_input_id
+                        ))
+                    {
+                        return Err(FrameValidationError::ModelSettingsShape);
+                    }
                 }
             }
             Self::TranscriptEntry {
@@ -9471,6 +9480,18 @@ mod tests {
             )
         );
         Ok(())
+    }
+
+    /// INV-012 / INV-060: attachment display filenames are required-nullable
+    /// in both directions of the version-one wire.
+    #[test]
+    fn inv012_inv060_attachment_requires_display_filename_member() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"1","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png"}],"expected_defaults_version":"1","model_settings":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png"}]}}}"#,
+        );
     }
 
     #[test]
@@ -16007,6 +16028,26 @@ mod tests {
 
         assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
+    }
+
+    /// INV-012: queued user content is validated before a server frame can be
+    /// encoded, including when no model-settings snapshot is present.
+    #[test]
+    fn inv012_transcript_turn_rejects_invalid_queued_content_before_encoding() {
+        let result = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::Queued {
+                    accepted_input_id: uuid(2),
+                    content: UserInputContent::from_parts(Vec::new()),
+                },
+            },
+        );
+
+        assert_eq!(result, Err(FrameValidationError::UserContentShape));
     }
 
     /// INV-033: queued turn settings evidence belongs to the accepted input

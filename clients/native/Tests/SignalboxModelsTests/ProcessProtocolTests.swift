@@ -132,6 +132,8 @@ final class ProcessProtocolTests: XCTestCase {
     )
   }
 
+  /// INV-012 / INV-060: multipart decoding preserves ordered attachment
+  /// metadata and structural replay equality.
   func testUserInputContentPreservesOrderedAttachmentMetadata() throws {
     let content = try SignalboxUserInputContent(validating: [
       .text("before"),
