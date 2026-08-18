@@ -10,8 +10,8 @@ pub use configuration::{
 };
 pub use protocol::{
     ConnectionEnd, EnrollmentOutcome, MessageKind, ProtocolViolation, RecoveryGap,
-    RecoveryUnavailable, RunnerConnection, RunnerConnectionError, ServeOutcome, SocketConnectError,
-    connect_verified,
+    RecoveryUnavailable, RunnerConnection, RunnerConnectionError, RunnerDispatchReady,
+    ServeOutcome, SocketConnectError, connect_verified,
 };
 pub use state::{
     EnrollmentAuthority, EnrollmentReceipt, RunnerState, RunnerStateError, RunnerStateRoot,

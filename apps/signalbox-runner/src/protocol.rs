@@ -12,11 +12,11 @@ use std::{
 use rustix::process::geteuid;
 use signalbox_runner_wire::{
     Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, DetailName,
-    Digest, DirectiveAction, Enroll, FailureCategory, FailureDetail, Frame, FrameError, Heartbeat,
-    HeartbeatAck, LeaseCorrelation, LeasePhaseKind, MAX_FRAME_BYTES, Message, OperationCorrelation,
-    OperationFailed, OperationFailure, PositiveU64, ReconnectDirectives, ReconnectInventory,
-    Registered, Rejected, RejectionCode, Resume, Shutdown, ShutdownReason, ValueError,
-    advertisement_digest, decode_line, encode_line,
+    Digest, DirectiveAction, Dispatch, Enroll, FailureCategory, FailureDetail, Frame, FrameError,
+    Heartbeat, HeartbeatAck, LeaseClaimed, LeaseCorrelation, LeasePhase, LeasePhaseKind,
+    MAX_FRAME_BYTES, Message, OperationCorrelation, OperationFailed, OperationFailure, PositiveU64,
+    ReconnectDirectives, ReconnectInventory, Registered, Rejected, RejectionCode, Resume, Shutdown,
+    ShutdownReason, ValueError, advertisement_digest, decode_line, encode_line,
 };
 use tokio::{
     io::{
@@ -276,12 +276,33 @@ pub enum ConnectionEnd {
 }
 
 /// One serial serving-loop boundary observed without cancelling an outbound frame.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum ServeOutcome {
     /// The daemon supplied a clean terminal order.
     ConnectionEnded(ConnectionEnd),
     /// Local shutdown is ready at a boundary with no in-flight write.
     ShutdownReady,
+    /// Canonical claim and dispatch reached the local executor boundary.
+    DispatchReady(Box<RunnerDispatchReady>),
+}
+
+/// One canonical claimed dispatch that crossed the serial protocol gate.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RunnerDispatchReady {
+    correlation: LeaseCorrelation,
+    normalized_arguments: serde_json::Value,
+}
+
+impl RunnerDispatchReady {
+    /// Borrows the complete immutable lease and physical-attempt correlation.
+    pub const fn correlation(&self) -> &LeaseCorrelation {
+        &self.correlation
+    }
+
+    /// Borrows the daemon's canonical normalized argument object.
+    pub const fn normalized_arguments(&self) -> &serde_json::Value {
+        &self.normalized_arguments
+    }
 }
 
 /// Closed local recovery gap; no wire recovery facts are fabricated.
@@ -355,6 +376,8 @@ pub enum ProtocolViolation {
     RunnerSequenceExhausted,
     FailureAcknowledgementMismatch,
     ResultAcknowledgementMismatch,
+    LeaseAcknowledgementMismatch,
+    DispatchMismatch,
     InvalidShutdownReason,
     PendingRegistrationMutation,
     ConnectionCorrelationMismatch,
@@ -426,6 +449,12 @@ impl fmt::Display for ProtocolViolation {
             }
             Self::ResultAcknowledgementMismatch => {
                 formatter.write_str("result acknowledgement correlation differs")
+            }
+            Self::LeaseAcknowledgementMismatch => {
+                formatter.write_str("claimed-lease acknowledgement correlation differs")
+            }
+            Self::DispatchMismatch => {
+                formatter.write_str("dispatch correlation differs from the claimed capability")
             }
             Self::InvalidShutdownReason => {
                 formatter.write_str("daemon sent a shutdown frame with runner reason")
@@ -528,6 +557,8 @@ pub struct RunnerConnection<S> {
     outcome: EnrollmentOutcome,
     connection_epoch: PositiveU64,
     heartbeat: Option<HeartbeatExchange>,
+    claimed_capability: Option<LeaseCorrelation>,
+    handed_off_capability: Option<LeaseCorrelation>,
 }
 
 #[derive(Clone)]
@@ -637,6 +668,8 @@ where
             outcome,
             connection_epoch,
             heartbeat: None,
+            claimed_capability: None,
+            handed_off_capability: None,
         })
     }
 
@@ -725,10 +758,10 @@ where
     pub async fn serve(
         &mut self,
         state: &mut RunnerStateRoot,
-    ) -> Result<ConnectionEnd, RunnerConnectionError> {
+    ) -> Result<ServeOutcome, RunnerConnectionError> {
         loop {
-            if let Some(end) = self.serve_one(state).await? {
-                return Ok(end);
+            if let Some(outcome) = self.serve_one(state).await? {
+                return Ok(outcome);
             }
         }
     }
@@ -748,8 +781,8 @@ where
                 message = receive_message(&mut self.io) => message?,
                 () = &mut shutdown => return Ok(ServeOutcome::ShutdownReady),
             };
-            if let Some(end) = self.serve_message(state, message).await? {
-                return Ok(ServeOutcome::ConnectionEnded(end));
+            if let Some(outcome) = self.serve_message(state, message).await? {
+                return Ok(outcome);
             }
         }
     }
@@ -758,7 +791,7 @@ where
     pub async fn serve_one(
         &mut self,
         state: &mut RunnerStateRoot,
-    ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
+    ) -> Result<Option<ServeOutcome>, RunnerConnectionError> {
         let message = receive_message(&mut self.io).await?;
         self.serve_message(state, message).await
     }
@@ -767,7 +800,7 @@ where
         &mut self,
         state: &mut RunnerStateRoot,
         message: Message,
-    ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
+    ) -> Result<Option<ServeOutcome>, RunnerConnectionError> {
         match message {
             Message::Heartbeat(challenge) => {
                 let acknowledgement = self.heartbeat_acknowledgement(challenge, state)?;
@@ -778,9 +811,11 @@ where
                 if shutdown.reason == ShutdownReason::DaemonShutdown
                     && shutdown.connection_epoch == self.connection_epoch =>
             {
-                Ok(Some(ConnectionEnd::DaemonShutdown {
-                    connection_epoch: shutdown.connection_epoch,
-                }))
+                Ok(Some(ServeOutcome::ConnectionEnded(
+                    ConnectionEnd::DaemonShutdown {
+                        connection_epoch: shutdown.connection_epoch,
+                    },
+                )))
             }
             Message::Shutdown(shutdown) if shutdown.reason == ShutdownReason::DaemonShutdown => {
                 send_message(
@@ -794,9 +829,11 @@ where
                     }),
                 )
                 .await?;
-                Ok(Some(ConnectionEnd::StaleConnectionRejected {
-                    connection_epoch: shutdown.connection_epoch,
-                }))
+                Ok(Some(ServeOutcome::ConnectionEnded(
+                    ConnectionEnd::StaleConnectionRejected {
+                        connection_epoch: shutdown.connection_epoch,
+                    },
+                )))
             }
             Message::Shutdown(_) => Err(RunnerConnectionError::Violation(
                 ProtocolViolation::InvalidShutdownReason,
@@ -843,6 +880,64 @@ where
                 )
                 .await?;
                 Ok(None)
+            }
+            Message::LeaseClaimed(LeaseClaimed { correlation }) => {
+                let lease = state.reconnect_inventory().lease.as_ref().ok_or(
+                    RunnerConnectionError::Violation(
+                        ProtocolViolation::LeaseAcknowledgementMismatch,
+                    ),
+                )?;
+                if lease.correlation != correlation
+                    || !matches!(
+                        lease.phase,
+                        LeasePhaseKind::WaitingDispatch | LeasePhaseKind::DispatchReceived
+                    )
+                    || state.reconnect_inventory().result.is_some()
+                    || self
+                        .claimed_capability
+                        .as_ref()
+                        .is_some_and(|current| current != &correlation)
+                    || self
+                        .handed_off_capability
+                        .as_ref()
+                        .is_some_and(|handed_off| handed_off == &correlation)
+                {
+                    return Err(RunnerConnectionError::Violation(
+                        ProtocolViolation::LeaseAcknowledgementMismatch,
+                    ));
+                }
+                self.claimed_capability = Some(correlation);
+                Ok(None)
+            }
+            Message::Dispatch(Dispatch {
+                correlation,
+                normalized_arguments,
+            }) => {
+                if self.claimed_capability.as_ref() != Some(&correlation) {
+                    return Err(RunnerConnectionError::Violation(
+                        ProtocolViolation::DispatchMismatch,
+                    ));
+                }
+                state
+                    .record_lease_phase(LeasePhase {
+                        correlation: correlation.clone(),
+                        phase: LeasePhaseKind::DispatchReceived,
+                    })
+                    .map_err(|error| match error {
+                        RunnerStateError::InvalidTransition
+                        | RunnerStateError::OperationCorrelationMismatch => {
+                            RunnerConnectionError::Violation(ProtocolViolation::DispatchMismatch)
+                        }
+                        other => RunnerConnectionError::State(other),
+                    })?;
+                self.claimed_capability = None;
+                self.handed_off_capability = Some(correlation.clone());
+                Ok(Some(ServeOutcome::DispatchReady(Box::new(
+                    RunnerDispatchReady {
+                        correlation,
+                        normalized_arguments,
+                    },
+                ))))
             }
             Message::ResultRecorded(recorded) => {
                 self.validate_connection_correlation(
@@ -1485,6 +1580,13 @@ mod tests {
         }
     }
 
+    fn retained_dispatch() -> Dispatch {
+        Dispatch {
+            correlation: retained_lease_correlation(),
+            normalized_arguments: serde_json::json!({ "program": "true" }),
+        }
+    }
+
     fn retained_failure_directives(
         failure: &OperationFailure,
         action: DirectiveAction,
@@ -2018,6 +2120,311 @@ mod tests {
         assert!(matches!(
             rejected,
             RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
+        ));
+        assert_eq!(state.reconnect_inventory(), &retained);
+    }
+
+    /// INV-011 / INV-024 / INV-043: canonical claim acknowledgement and
+    /// dispatch replay advance waiting-dispatch to one sealed executor handoff.
+    #[tokio::test]
+    async fn s31_inv011_inv024_inv043_waiting_dispatch_replay_reaches_executor_boundary() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let advertisement = advertisement_with_exec_tool();
+        let mut state = enrolled_state_for(&parent, &advertisement);
+        let correlation = retained_lease_correlation();
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: correlation.clone(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        let dispatch = retained_dispatch();
+        let expected = ServeOutcome::DispatchReady(Box::new(RunnerDispatchReady {
+            correlation: correlation.clone(),
+            normalized_arguments: dispatch.normalized_arguments.clone(),
+        }));
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume accepts the exact retained lease");
+            connection
+                .serve_until_shutdown(&mut state, std::future::pending())
+                .await
+                .expect("canonical replay reaches the executor boundary")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_lease_directives(DirectiveAction::Await),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::LeaseClaimed(LeaseClaimed {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::Dispatch(dispatch)).await;
+        };
+        let (outcome, ()) = tokio::join!(runner, hub);
+
+        assert_eq!(outcome, expected);
+        assert_eq!(
+            state.reconnect_inventory().lease,
+            Some(LeasePhase {
+                correlation,
+                phase: LeasePhaseKind::DispatchReceived,
+            })
+        );
+    }
+
+    /// INV-011 / INV-024 / INV-043: replay of an already fsynced dispatch is
+    /// idempotent and yields the same single executor handoff.
+    #[tokio::test]
+    async fn s31_inv011_inv024_inv043_dispatch_received_replay_reaches_executor_boundary() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let advertisement = advertisement_with_exec_tool();
+        let mut state = enrolled_state_for(&parent, &advertisement);
+        let correlation = retained_lease_correlation();
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: correlation.clone(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: correlation.clone(),
+                phase: LeasePhaseKind::DispatchReceived,
+            })
+            .expect("the dispatch-received phase is durable");
+        let retained = state.reconnect_inventory().clone();
+        let dispatch = retained_dispatch();
+        let expected = Some(ServeOutcome::DispatchReady(Box::new(RunnerDispatchReady {
+            correlation: correlation.clone(),
+            normalized_arguments: dispatch.normalized_arguments.clone(),
+        })));
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume accepts the exact retained lease");
+            let claimed = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the canonical claim acknowledgement is accepted");
+            let ready = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the canonical dispatch replay is accepted");
+            (claimed, ready)
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_lease_directives(DirectiveAction::Await),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::LeaseClaimed(LeaseClaimed { correlation }),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::Dispatch(dispatch)).await;
+        };
+        let ((claimed, ready), ()) = tokio::join!(runner, hub);
+
+        assert_eq!(claimed, None);
+        assert_eq!(ready, expected);
+        assert_eq!(state.reconnect_inventory(), &retained);
+    }
+
+    /// INV-011 / INV-024 / INV-043: dispatch alone cannot substitute for the
+    /// canonical claimed capability on the successor connection.
+    #[tokio::test]
+    async fn s31_inv011_inv024_inv043_dispatch_without_claim_replay_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let advertisement = advertisement_with_exec_tool();
+        let mut state = enrolled_state_for(&parent, &advertisement);
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: retained_lease_correlation(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        let retained = state.reconnect_inventory().clone();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume accepts the exact retained lease");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect_err("dispatch without its claimed capability fails closed")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_lease_directives(DirectiveAction::Await),
+                })),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::Dispatch(retained_dispatch())).await;
+        };
+        let (error, ()) = tokio::join!(runner, hub);
+
+        assert!(matches!(
+            error,
+            RunnerConnectionError::Violation(ProtocolViolation::DispatchMismatch)
+        ));
+        assert_eq!(state.reconnect_inventory(), &retained);
+    }
+
+    /// INV-011 / INV-024 / INV-043: consuming the claimed capability for one
+    /// dispatch handoff prevents an equal claim replay from re-arming a second
+    /// handoff on the same connection.
+    #[tokio::test]
+    async fn s31_inv011_inv024_inv043_equal_dispatch_replay_has_one_handoff() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let advertisement = advertisement_with_exec_tool();
+        let mut state = enrolled_state_for(&parent, &advertisement);
+        let correlation = retained_lease_correlation();
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: correlation.clone(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        let dispatch = retained_dispatch();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume accepts the exact retained lease");
+            let claimed = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the canonical claim acknowledgement is accepted");
+            let ready = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the first canonical dispatch is accepted");
+            let repeated_claim = connection
+                .serve_one(&mut state)
+                .await
+                .expect_err("an equal claim cannot re-arm the handed-off capability");
+            (claimed, ready, repeated_claim)
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_lease_directives(DirectiveAction::Await),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::LeaseClaimed(LeaseClaimed { correlation }),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::Dispatch(dispatch)).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::LeaseClaimed(LeaseClaimed { correlation }),
+            )
+            .await;
+        };
+        let ((claimed, ready, repeated_claim), ()) = tokio::join!(runner, hub);
+
+        assert_eq!(claimed, None);
+        assert!(matches!(ready, Some(ServeOutcome::DispatchReady(_))));
+        assert!(matches!(
+            repeated_claim,
+            RunnerConnectionError::Violation(ProtocolViolation::LeaseAcknowledgementMismatch)
+        ));
+    }
+
+    /// INV-011 / INV-024 / INV-043: a claim acknowledgement for another lease
+    /// cannot acquire the occupied journal slot's execution capability.
+    #[tokio::test]
+    async fn s31_inv011_inv024_inv043_cross_wired_claim_replay_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let advertisement = advertisement_with_exec_tool();
+        let mut state = enrolled_state_for(&parent, &advertisement);
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: retained_lease_correlation(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        let retained = state.reconnect_inventory().clone();
+        let mut foreign = retained_lease_correlation();
+        foreign.lease_id = CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_OTHER_LEASE_UUID));
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume accepts the exact retained lease");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect_err("another lease acknowledgement fails closed")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_lease_directives(DirectiveAction::Await),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::LeaseClaimed(LeaseClaimed {
+                    correlation: foreign,
+                }),
+            )
+            .await;
+        };
+        let (error, ()) = tokio::join!(runner, hub);
+
+        assert!(matches!(
+            error,
+            RunnerConnectionError::Violation(ProtocolViolation::LeaseAcknowledgementMismatch)
         ));
         assert_eq!(state.reconnect_inventory(), &retained);
     }
@@ -2978,9 +3385,11 @@ mod tests {
 
         assert_eq!(
             outcome,
-            Some(ConnectionEnd::DaemonShutdown {
-                connection_epoch: positive(CONNECTION_EPOCH),
-            })
+            Some(ServeOutcome::ConnectionEnded(
+                ConnectionEnd::DaemonShutdown {
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                }
+            ))
         );
     }
 
@@ -3042,9 +3451,9 @@ mod tests {
 
         assert_eq!(
             end,
-            ConnectionEnd::StaleConnectionRejected {
+            ServeOutcome::ConnectionEnded(ConnectionEnd::StaleConnectionRejected {
                 connection_epoch: stale_epoch,
-            }
+            })
         );
         assert_eq!(
             rejected,
