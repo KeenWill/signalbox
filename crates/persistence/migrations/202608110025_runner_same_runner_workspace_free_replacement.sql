@@ -147,7 +147,9 @@ BEGIN
        AND entry.runner_placement_revision = pointer.placement_revision
        AND entry.runner_placement_event_ordinal = NEW.placement_event_ordinal
      WHERE pointer.session_id = NEW.session_id
-       AND pointer.placement_revision = NEW.placement_revision;
+       AND pointer.placement_revision = NEW.placement_revision
+       AND pointer.semantic_entry_id = stage.boundary_entry_id
+       AND pointer.context_frontier_id = stage.boundary_frontier_id;
 
     IF request.command_id IS NULL
        OR request.session_id IS DISTINCT FROM NEW.session_id

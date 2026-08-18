@@ -3355,9 +3355,25 @@ impl RunnerProtocolStore {
         evidence.prior_runner = Some(prior_runner);
         evidence.new_runner = target_authority.runner();
         let selected_is_prior = selected_runner == prior_runner;
+        if checked_same_runner && !selected_is_prior {
+            let rejection = RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+                session: command.session(),
+                target: command.replacement(),
+                reason: RunnerReplacementTargetUnavailableReason::PendingRequestMismatch,
+            };
+            insert_replacement_provisioning_rejection(
+                transaction.as_mut(),
+                command,
+                rejection,
+                evidence,
+            )
+            .await?;
+            return Ok(PinnedRunnerReplacementOutcome::Recorded(
+                PinnedRunnerReplacementResult::Rejected(rejection),
+            ));
+        }
         if (!checked_same_runner && selected_is_prior)
-            || (checked_same_runner
-                && (!selected_is_prior || lost.source() != RunnerPlacementLossSource::Registration))
+            || (checked_same_runner && lost.source() != RunnerPlacementLossSource::Registration)
         {
             let rejection = RunnerReplacementProvisioningRejection::ReplacementSameRunner {
                 session: command.session(),
@@ -3465,8 +3481,29 @@ impl RunnerProtocolStore {
                 None,
                 None,
             )
-        }
-        .map_err(RunnerProtocolStoreError::Domain)?;
+        };
+        let replacement = match replacement {
+            Ok(replacement) => replacement,
+            Err(error) if replacement_target_is_unavailable(&error) => {
+                let rejection =
+                    RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+                        session: command.session(),
+                        target: command.replacement(),
+                        reason: RunnerReplacementTargetUnavailableReason::NotAdvertised,
+                    };
+                insert_replacement_provisioning_rejection(
+                    transaction.as_mut(),
+                    command,
+                    rejection,
+                    evidence,
+                )
+                .await?;
+                return Ok(PinnedRunnerReplacementOutcome::Recorded(
+                    PinnedRunnerReplacementResult::Rejected(rejection),
+                ));
+            }
+            Err(error) => return Err(RunnerProtocolStoreError::Domain(error)),
+        };
         let next_event_ordinal = current_event_ordinal
             .checked_add(1)
             .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
