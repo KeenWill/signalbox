@@ -13,11 +13,13 @@ use rustix::process::geteuid;
 use signalbox_runner_wire::{
     Advertise, Advertisement, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, DetailName,
     Digest, DirectiveAction, Dispatch, EffectClass, Enroll, FailureCategory, FailureDetail, Frame,
-    FrameError, Heartbeat, HeartbeatAck, LeaseClaim, LeaseClaimed, LeaseCorrelation, LeaseOffer,
-    LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES, Message, OperationCorrelation, OperationFailed,
-    OperationFailure, PositiveU64, ReconnectDirectives, ReconnectInventory, Registered, Rejected,
-    RejectionCode, ResultFrame, Resume, SandboxProfile, Shutdown, ShutdownReason, TerminalResult,
-    ValueError, advertisement_digest, decode_line, encode_line,
+    FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase, LeaseClaim, LeaseClaimed,
+    LeaseCorrelation, LeaseOffer, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES, Message,
+    OperationCorrelation, OperationFailed, OperationFailure, PositiveU64, ReconnectDirectives,
+    ReconnectInventory, Registered, Rejected, RejectionCode, ReleasePhase, ResultFrame, Resume,
+    SandboxProfile, Shutdown, ShutdownReason, TerminalResult, ValueError,
+    WorkspaceFailureCorrelation, WorkspaceOperation, advertisement_digest, decode_line,
+    encode_line,
 };
 use tokio::{
     io::{
@@ -390,6 +392,7 @@ pub enum ProtocolViolation {
     },
     RunnerSequenceExhausted,
     FailureAcknowledgementMismatch,
+    WorkspaceAcknowledgementMismatch,
     ResultAcknowledgementMismatch,
     LeaseAcknowledgementMismatch,
     DispatchMismatch,
@@ -462,6 +465,9 @@ impl fmt::Display for ProtocolViolation {
             }
             Self::FailureAcknowledgementMismatch => {
                 formatter.write_str("operation-failure acknowledgement correlation differs")
+            }
+            Self::WorkspaceAcknowledgementMismatch => {
+                formatter.write_str("workspace acknowledgement correlation differs")
             }
             Self::ResultAcknowledgementMismatch => {
                 formatter.write_str("result acknowledgement correlation differs")
@@ -1008,27 +1014,54 @@ where
                     })?;
                 Ok(None)
             }
-            Message::OperationFailureRecorded(recorded) => {
-                let OperationCorrelation::LeaseOffer(correlation) = &recorded.correlation else {
+            Message::WorkspaceReleaseRecorded(recorded) => {
+                if recorded.correlation.runner_id != self.receipt.runner_id() {
                     return Err(RunnerConnectionError::Violation(
-                        ProtocolViolation::FailureAcknowledgementMismatch,
+                        ProtocolViolation::ConnectionCorrelationMismatch,
                     ));
-                };
-                self.validate_connection_correlation(
-                    correlation.runner_id,
-                    correlation.registration_revision,
-                )?;
+                }
                 state
-                    .acknowledge_lease_offer_failure(&recorded.correlation)
+                    .acknowledge_workspace_release(&recorded.correlation)
                     .map_err(|error| match error {
                         RunnerStateError::InvalidTransition
                         | RunnerStateError::OperationCorrelationMismatch => {
                             RunnerConnectionError::Violation(
-                                ProtocolViolation::FailureAcknowledgementMismatch,
+                                ProtocolViolation::WorkspaceAcknowledgementMismatch,
                             )
                         }
                         other => RunnerConnectionError::State(other),
                     })?;
+                Ok(None)
+            }
+            Message::OperationFailureRecorded(recorded) => {
+                match &recorded.correlation {
+                    OperationCorrelation::LeaseOffer(correlation) => {
+                        self.validate_connection_correlation(
+                            correlation.runner_id,
+                            correlation.registration_revision,
+                        )?;
+                        state.acknowledge_lease_offer_failure(&recorded.correlation)
+                    }
+                    OperationCorrelation::Release(correlation)
+                        if correlation.runner_id == self.receipt.runner_id() =>
+                    {
+                        state.acknowledge_workspace_release_failure(correlation)
+                    }
+                    OperationCorrelation::Release(_) | OperationCorrelation::Provision(_) => {
+                        return Err(RunnerConnectionError::Violation(
+                            ProtocolViolation::FailureAcknowledgementMismatch,
+                        ));
+                    }
+                }
+                .map_err(|error| match error {
+                    RunnerStateError::InvalidTransition
+                    | RunnerStateError::OperationCorrelationMismatch => {
+                        RunnerConnectionError::Violation(
+                            ProtocolViolation::FailureAcknowledgementMismatch,
+                        )
+                    }
+                    other => RunnerConnectionError::State(other),
+                })?;
                 Ok(None)
             }
             Message::Rejected(rejected) => Err(rejected_error(rejected)),
@@ -1098,12 +1131,13 @@ where
                 lease.correlation.registration_revision,
             )?;
         }
+        let workspace_phase = heartbeat_workspace_phase(state.reconnect_inventory());
         let acknowledgement = HeartbeatAck {
             challenge_sequence: challenge.sequence,
             runner_sequence: PositiveU64::try_new(runner_sequence)
                 .map_err(RunnerConnectionError::InvalidLocalFrame)?,
             lease_phase,
-            workspace_phase: None,
+            workspace_phase,
         };
         self.heartbeat = Some(HeartbeatExchange {
             challenge,
@@ -1184,6 +1218,29 @@ where
                 }
             }
         }
+    }
+}
+
+fn heartbeat_workspace_phase(inventory: &ReconnectInventory) -> Option<HeartbeatWorkspacePhase> {
+    if let Some(OperationFailure {
+        correlation: OperationCorrelation::Release(correlation),
+        ..
+    }) = inventory.operation_failure.as_ref()
+    {
+        return Some(HeartbeatWorkspacePhase::FailureUnrecorded {
+            correlation: WorkspaceFailureCorrelation::Release(correlation.clone()),
+        });
+    }
+    match inventory.workspace_operation.as_ref() {
+        Some(WorkspaceOperation::Release { correlation, phase }) => Some(match phase {
+            ReleasePhase::ReleaseAccepted => HeartbeatWorkspacePhase::ReleaseAccepted {
+                correlation: correlation.clone(),
+            },
+            ReleasePhase::ReleaseCompleted => HeartbeatWorkspacePhase::ReleaseCompleted {
+                correlation: correlation.clone(),
+            },
+        }),
+        Some(WorkspaceOperation::Provision { .. }) | None => None,
     }
 }
 
@@ -1508,8 +1565,9 @@ mod tests {
     use signalbox_runner_wire::{
         DetailName, EffectClass, Enrolled, FailureCategory, FailureDetail, LeaseCorrelation,
         LeaseOffer, LeasePhase, LeasePhaseKind, OperationFailureRecorded, ReconnectDirectives,
-        ResultBounds, ResultRecorded, Resumed, RetainedResult, SandboxProfile, Shutdown,
-        TerminalResult, WireToolName, WorkingDirectory, WorkspaceProvision,
+        ReleaseCorrelation, ResultBounds, ResultRecorded, Resumed, RetainedResult, SandboxProfile,
+        Shutdown, TerminalResult, WireToolName, WorkingDirectory, WorkspaceProvision,
+        WorkspaceReleaseRecorded,
     };
 
     use super::*;
@@ -1533,6 +1591,8 @@ mod tests {
     const ARBITRARY_TOOL_REQUEST_UUID: u128 = 0x800;
     const ARBITRARY_TOOL_ATTEMPT_UUID: u128 = 0x900;
     const ARBITRARY_ISSUING_TURN_ATTEMPT_UUID: u128 = 0xa00;
+    const ARBITRARY_MANIFEST_UUID: u128 = 0xb00;
+    const ARBITRARY_OTHER_MANIFEST_UUID: u128 = 0xb01;
     const INITIAL_REGISTRATION_REVISION: u64 = 1;
     const NEXT_REGISTRATION_REVISION: u64 = 2;
     const FIRST_CHALLENGE_SEQUENCE: u64 = 7;
@@ -1603,6 +1663,29 @@ mod tests {
             tool_attempt_id: identity(ARBITRARY_TOOL_ATTEMPT_UUID),
             issuing_turn_attempt_id: identity(ARBITRARY_ISSUING_TURN_ATTEMPT_UUID),
             tool_dispatch_generation: positive(1),
+        }
+    }
+
+    fn release_correlation() -> ReleaseCorrelation {
+        ReleaseCorrelation {
+            session_id: identity(ARBITRARY_SESSION_UUID),
+            placement_revision: positive(1),
+            runner_id: identity(ARBITRARY_RUNNER_UUID),
+            manifest_id: identity(ARBITRARY_MANIFEST_UUID),
+        }
+    }
+
+    fn release_failure() -> OperationFailure {
+        OperationFailure {
+            correlation: OperationCorrelation::Release(release_correlation()),
+            category: FailureCategory::WorkspaceCleanupFailed,
+            detail: FailureDetail::try_new(
+                DetailName::try_new("fixture-cleanup".to_owned())
+                    .expect("the fixture detail code is valid"),
+                String::from("the synthetic cleanup failed"),
+                serde_json::json!({}),
+            )
+            .expect("the fixture failure detail is bounded"),
         }
     }
 
@@ -3107,6 +3190,133 @@ mod tests {
         );
     }
 
+    /// INV-011 / INV-024: heartbeat progress repeats the exact fsynced release
+    /// phase instead of inferring cleanup progress from process memory.
+    #[tokio::test]
+    async fn inv011_inv024_heartbeat_reports_the_current_workspace_release_phase() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before heartbeat");
+            state
+                .record_workspace_release_phase(
+                    release_correlation(),
+                    ReleasePhase::ReleaseAccepted,
+                )
+                .expect("the accepted release is durable");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the heartbeat is served")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Heartbeat(Heartbeat {
+                    sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                    last_accepted_peer_sequence: NO_ACCEPTED_PEER_SEQUENCE,
+                }),
+            )
+            .await;
+            receive_hub_message(&mut hub_io).await
+        };
+        let (outcome, acknowledgement) = tokio::join!(runner, hub);
+
+        assert_eq!(outcome, None);
+        assert_eq!(
+            acknowledgement,
+            Message::HeartbeatAck(HeartbeatAck {
+                challenge_sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                runner_sequence: positive(FIRST_RUNNER_SEQUENCE),
+                lease_phase: None,
+                workspace_phase: Some(HeartbeatWorkspacePhase::ReleaseAccepted {
+                    correlation: release_correlation(),
+                }),
+            })
+        );
+    }
+
+    /// INV-011 / INV-024: a retained cleanup failure supersedes the accepted
+    /// phase in heartbeat progress with its exact unrecorded-failure boundary.
+    #[tokio::test]
+    async fn inv011_inv024_heartbeat_reports_the_workspace_release_failure() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before heartbeat");
+            state
+                .record_workspace_release_phase(
+                    release_correlation(),
+                    ReleasePhase::ReleaseAccepted,
+                )
+                .expect("the accepted release is durable");
+            state
+                .record_workspace_release_failure(release_failure())
+                .expect("the cleanup failure is durable");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the heartbeat is served")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Heartbeat(Heartbeat {
+                    sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                    last_accepted_peer_sequence: NO_ACCEPTED_PEER_SEQUENCE,
+                }),
+            )
+            .await;
+            receive_hub_message(&mut hub_io).await
+        };
+        let (outcome, acknowledgement) = tokio::join!(runner, hub);
+
+        assert_eq!(outcome, None);
+        assert_eq!(
+            acknowledgement,
+            Message::HeartbeatAck(HeartbeatAck {
+                challenge_sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                runner_sequence: positive(FIRST_RUNNER_SEQUENCE),
+                lease_phase: None,
+                workspace_phase: Some(HeartbeatWorkspacePhase::FailureUnrecorded {
+                    correlation: WorkspaceFailureCorrelation::Release(release_correlation()),
+                }),
+            })
+        );
+    }
+
     #[tokio::test]
     async fn heartbeat_rejects_a_lease_phase_from_another_registration() {
         let parent = TempDir::new().expect("a temporary parent is available");
@@ -3209,6 +3419,178 @@ mod tests {
             send_hub_message(
                 &mut hub_io,
                 Message::ResultRecorded(ResultRecorded { correlation }),
+            )
+            .await;
+        };
+        let (outcome, ()) = tokio::join!(runner, hub);
+
+        assert_eq!(outcome, None);
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    /// INV-011 / INV-024: the live exact acknowledgement clears one completed
+    /// workspace release through the serving loop.
+    #[tokio::test]
+    async fn inv011_inv024_exact_workspace_release_acknowledgement_clears_retained_slot() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let correlation = release_correlation();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the acknowledgement");
+            state
+                .record_workspace_release_phase(
+                    release_correlation(),
+                    ReleasePhase::ReleaseAccepted,
+                )
+                .expect("the accepted release is durable");
+            state
+                .record_workspace_release_phase(
+                    release_correlation(),
+                    ReleasePhase::ReleaseCompleted,
+                )
+                .expect("the completed release is durable");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the exact release acknowledgement is consumed")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::WorkspaceReleaseRecorded(WorkspaceReleaseRecorded { correlation }),
+            )
+            .await;
+        };
+        let (outcome, ()) = tokio::join!(runner, hub);
+
+        assert_eq!(outcome, None);
+        assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    #[tokio::test]
+    async fn another_workspace_release_acknowledgement_preserves_retained_slot() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let mut foreign = release_correlation();
+        foreign.manifest_id = identity(ARBITRARY_OTHER_MANIFEST_UUID);
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the acknowledgement");
+            state
+                .record_workspace_release_phase(
+                    release_correlation(),
+                    ReleasePhase::ReleaseAccepted,
+                )
+                .expect("the accepted release is durable");
+            state
+                .record_workspace_release_phase(
+                    release_correlation(),
+                    ReleasePhase::ReleaseCompleted,
+                )
+                .expect("the completed release is durable");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect_err("another manifest cannot acknowledge the retained release")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::WorkspaceReleaseRecorded(WorkspaceReleaseRecorded {
+                    correlation: foreign,
+                }),
+            )
+            .await;
+        };
+        let (error, ()) = tokio::join!(runner, hub);
+
+        assert!(matches!(
+            error,
+            RunnerConnectionError::Violation(ProtocolViolation::WorkspaceAcknowledgementMismatch)
+        ));
+        assert_eq!(
+            state.reconnect_inventory().workspace_operation,
+            Some(WorkspaceOperation::Release {
+                correlation: release_correlation(),
+                phase: ReleasePhase::ReleaseCompleted,
+            })
+        );
+    }
+
+    /// INV-011 / INV-024: the exact cleanup-failure acknowledgement atomically
+    /// clears both the failure and its accepted release through the serving loop.
+    #[tokio::test]
+    async fn inv011_inv024_exact_workspace_failure_acknowledgement_clears_both_slots() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let correlation = OperationCorrelation::Release(release_correlation());
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the acknowledgement");
+            state
+                .record_workspace_release_phase(
+                    release_correlation(),
+                    ReleasePhase::ReleaseAccepted,
+                )
+                .expect("the accepted release is durable");
+            state
+                .record_workspace_release_failure(release_failure())
+                .expect("the cleanup failure is durable");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the exact failure acknowledgement is consumed")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::OperationFailureRecorded(OperationFailureRecorded { correlation }),
             )
             .await;
         };
