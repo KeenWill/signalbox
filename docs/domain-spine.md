@@ -2169,6 +2169,9 @@ pub enum UserContentPart {
         display_filename: Option<AttachmentDisplayFilename>,
     },
 }
+impl UserContentPart {
+    pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
+}
 pub struct UserContent { /* private Vec<UserContentPart> */ }
 impl UserContent {
     pub const MAX_TEXT_BYTES: usize; // 1_048_576
