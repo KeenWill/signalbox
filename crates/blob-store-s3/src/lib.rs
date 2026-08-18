@@ -67,7 +67,7 @@ pub struct S3BlobStore {
     bucket: Bucket,
     credentials_file: PathBuf,
     client: Client,
-    publication_locks: [AsyncMutex<()>; PUBLICATION_LOCK_STRIPES],
+    publication_locks: Box<[AsyncMutex<()>; PUBLICATION_LOCK_STRIPES]>,
     namespace_marker: Option<NamespaceMarker>,
 }
 
@@ -155,7 +155,7 @@ impl S3BlobStore {
             bucket,
             credentials_file,
             client,
-            publication_locks: std::array::from_fn(|_| AsyncMutex::new(())),
+            publication_locks: Box::new(std::array::from_fn(|_| AsyncMutex::new(()))),
             namespace_marker: None,
         })
     }
