@@ -2458,12 +2458,6 @@ async fn migrated_unconnected_later_lease_fixture(
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(pool).await?;
-    sqlx::query(
-        "ALTER TABLE runner_lease_generation
-         ADD COLUMN offer_registration_revision numeric(20, 0)",
-    )
-    .execute(pool)
-    .await?;
     let (store, expected_enrollment, registration, pin) = prepared_pin_fixture_with_authorization(
         pool,
         authorized,
@@ -2554,6 +2548,12 @@ async fn migrated_unconnected_later_lease_fixture(
 
 async fn install_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         ADD COLUMN offer_registration_revision numeric(20, 0)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
         "CREATE TABLE runner_connection_authority_head (
             enrollment_id uuid PRIMARY KEY,
             connection_epoch numeric(20, 0) NOT NULL
@@ -2579,6 +2579,12 @@ async fn drop_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<(), s
     sqlx::query("DROP TABLE runner_connection_authority_head")
         .execute(pool)
         .await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         DROP COLUMN offer_registration_revision",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -23291,14 +23297,14 @@ async fn s31_inv043_first_generation_requires_null_predecessor() -> Result<(), B
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name,
+             offer_registration_revision, credential_profile_name,
              credential_grant_lineage_origin_ordinal,
              credential_grant_revision, credential_approval_kind,
              predecessor_generation)
          SELECT $2, 1, attempt_id, session_id, runner_id,
                 tool_name, effect_class, placement_event_ordinal,
                 registration_enrollment_id, registration_revision,
-                credential_profile_name,
+                offer_registration_revision, credential_profile_name,
                 credential_grant_lineage_origin_ordinal,
                 credential_grant_revision, credential_approval_kind, 0
            FROM runner_lease_generation
