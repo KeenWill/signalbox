@@ -51,9 +51,11 @@ atomic acknowledgement clearing are re-verified through this PR
 (`agent/runner-result-journal`), and live exact acknowledgement consumption is
 re-verified through this PR (`agent/runner-result-acknowledgement`). Exact
 heartbeat projection of the current journaled lease phase is re-verified through
-this PR (`agent/runner-heartbeat-lease-phase`). The placement loss-source,
-pre-pin replacement and abandonment state shapes, and append-only
-reconstitution-history contract are re-verified through this PR
+this PR (`agent/runner-heartbeat-lease-phase`). Daemon pre-resume admission of
+the exact execution-possible lease and retained terminal-result pair is
+re-verified through this PR (`agent/daemon-retained-result-resume-runtime`). The
+placement loss-source, pre-pin replacement and abandonment state shapes, and
+append-only reconstitution-history contract are re-verified through this PR
 (`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
 daemon-authoritative catalog validation, runner leases, the independent
 session-composition axes, session placement and affinity, credential-profile
@@ -117,9 +119,10 @@ registration, the `signalbox-runner` binary, explicit credential/repository
 availability, and heartbeat liveness exchange with durable connection epochs,
 shutdown, suspect, and loss facts. Its fatal stale-shutdown close, complete
 rejection correlations, and lifecycle observability are re-verified through PR
-#382 (`agent/runner-honesty`). Recovery inventory, workspaces, leases,
-execution, and model calls remain unimplemented as labeled below. Remote
-transport and dynamic policy stay under [Open edges](#open-edges).
+#382 (`agent/runner-honesty`). The daemon admits the narrow retained-result
+recovery inventory described below; runner-originated nonempty inventory,
+workspaces, execution, and model calls remain unimplemented as labeled below.
+Remote transport and dynamic policy stay under [Open edges](#open-edges).
 
 The additive persisted `AlwaysConfirm` declaration vocabulary is verified
 through PR #366 (`agent/exec-tools`). The runner workstation-registry
@@ -821,13 +824,19 @@ authorization and receipt rather than inventing a second claim. No database
 transaction remains open across runner I/O.
 
 Later connections send `resume` with the request identity, all three issued
-identities, prior registration revision, complete advertisement, and an empty
-reconnect inventory. Stored identity mismatch, revocation, a future revision, or
-a stale revision paired with changed availability fails closed. Equal
-availability returns the current durable revision; changed availability at the
-current revision atomically appends its immediate successor before reply. No
-application credential, bearer token, or proof exchange exists in the same-host
-version; remote authentication remains a separate open decision.
+identities, prior registration revision, complete advertisement, and reconnect
+inventory. The present runner sends empty inventory. The daemon also admits the
+exact pair of an `execution_may_have_started` lease phase and matching retained
+terminal result: it authenticates and commits terminal evidence before any
+registration mutation, then directs both items to `discard_as_recorded`.
+Canonical stale terminal evidence instead receives `fail_stale` for both items.
+Every other nonempty inventory shape remains rejected. Stored identity mismatch,
+revocation, a future revision, or a stale revision paired with changed
+availability fails closed. Equal availability returns the current durable
+revision; changed availability at the current revision atomically appends its
+immediate successor before reply. No application credential, bearer token, or
+proof exchange exists in the same-host version; remote authentication remains a
+separate open decision.
 
 A second live connection for the same registration receives a fresh epoch. The
 prior connection's later advertisement, heartbeat acknowledgement, shutdown, or
