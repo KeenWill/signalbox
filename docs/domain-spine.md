@@ -7501,6 +7501,7 @@ pub enum RepoWatchWebhookIgnoredReasonV1 {
     NonBranchPush,
     ForeignWorkflowRepository,
     AbsentWorkflowHeadRepository,
+    AbsentWorkflowHeadBranch,
 }
 
 pub enum RepoWatchWebhookMappingV1 {

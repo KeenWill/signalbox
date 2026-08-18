@@ -814,6 +814,7 @@ pub enum RepoWatchWebhookIgnoredReasonV1 {
     NonBranchPush,
     ForeignWorkflowRepository,
     AbsentWorkflowHeadRepository,
+    AbsentWorkflowHeadBranch,
 }
 
 /// Mapping disposition for one signature-valid admitted delivery.
@@ -1133,11 +1134,19 @@ fn map_workflow_run(
             RepoWatchWebhookIgnoredReasonV1::ForeignWorkflowRepository,
         ));
     }
+    let Some(head_branch) = optional_text_at(run, &["head_branch"], "workflow_run.head_branch")?
+    else {
+        return Ok(RepoWatchWebhookMappingV1::Ignored(
+            RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadBranch,
+        ));
+    };
+    let head_branch = BranchName::try_new(head_branch.to_owned())
+        .map_err(|_| RepoWatchWebhookMappingError::InvalidField("workflow_run.head_branch"))?;
     let run = RepoWatchWorkflowRunObservation::new(
         object_id_at(run, &["id"], "workflow_run.id")?,
         object_id_at(run, &["workflow_id"], "workflow_run.workflow_id")?,
         workflow_attempt_at(run, &["run_attempt"], "workflow_run.run_attempt")?,
-        branch_at(run, &["head_branch"], "workflow_run.head_branch")?,
+        head_branch,
         WorkflowName::try_new(string_at(run, &["name"], "workflow_run.name")?.to_owned())
             .map_err(|_| RepoWatchWebhookMappingError::InvalidField("workflow_run.name"))?,
         check_conclusion(string_at(run, &["conclusion"], "workflow_run.conclusion")?)?,
@@ -1929,6 +1938,37 @@ mod tests {
             mapping,
             RepoWatchWebhookMappingV1::Ignored(
                 RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadRepository
+            )
+        );
+    }
+
+    #[test]
+    fn completed_workflow_run_with_absent_head_branch_is_ignored() {
+        let payload = format!(
+            r#"{{
+                "action":"completed",
+                "repository":{{"full_name":"{REPOSITORY}"}},
+                "workflow_run":{{
+                    "id":{MAPPED_WORKFLOW_RUN},
+                    "workflow_id":{MAPPED_WORKFLOW},
+                    "run_attempt":{MAPPED_WORKFLOW_ATTEMPT},
+                    "head_branch":null,
+                    "head_repository":{{"full_name":"{REPOSITORY}"}},
+                    "name":"continuous-integration",
+                    "conclusion":"failure"
+                }}
+            }}"#
+        );
+        let mapping = map_repo_watch_webhook_delivery_v1(
+            &delivery("workflow_run", Some("completed")),
+            payload.as_bytes(),
+        )
+        .expect("a deleted source ref is not an error");
+
+        assert_eq!(
+            mapping,
+            RepoWatchWebhookMappingV1::Ignored(
+                RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadBranch
             )
         );
     }

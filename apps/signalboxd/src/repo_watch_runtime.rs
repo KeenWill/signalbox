@@ -964,6 +964,11 @@ impl RepositoryWatchTask {
         disposition: RepoWatchWebhookDisposition,
         outcome_code: Option<&str>,
     ) -> Result<(), RepositoryWatchAttemptError> {
+        // Only a projected record is followed by a shadow advance, so only its
+        // uncertain durability can leave the baseline silently missing a
+        // delivery. Records that change no shadow fact keep the accumulated
+        // baseline even when their settlement stays unknown.
+        let advances_shadow = matches!(disposition, RepoWatchWebhookDisposition::Projected);
         let request = RepoWatchWebhookTerminalRequest::try_new(
             projections,
             disposition,
@@ -1003,11 +1008,14 @@ impl RepositoryWatchTask {
             }
         }
         // Every attempt was ambiguous or unreadable, so whether a disposition
-        // is durable is unknown. The shadow is discarded rather than trusted:
-        // if one did land, this delivery will never be loaded again, and a
-        // baseline that silently missed it would supersede its dependents. The
-        // next delivery re-seeds from the cursor and records the gap.
-        self.webhook_shadow = None;
+        // is durable is unknown. A projected record's shadow is discarded
+        // rather than trusted: if one did land, this delivery will never be
+        // loaded again, and a baseline that silently missed it would supersede
+        // its dependents. The next delivery re-seeds from the cursor and
+        // records the gap.
+        if advances_shadow {
+            self.webhook_shadow = None;
+        }
         Err(RepositoryWatchAttemptError::Persistence)
     }
 
@@ -1030,24 +1038,33 @@ impl RepositoryWatchTask {
         if targets.is_empty() {
             return Ok(PreparedTargetedRefreshOutcome::NoTargets);
         }
-        // A refresh naming no pull request the cursor carries is never sent, so
-        // it must not be recorded as a query that happened.
-        let queried = refreshes
-            .iter()
-            .filter(|refresh| refresh_reaches_a_target(refresh, &targets))
-            .cloned()
-            .collect::<Vec<_>>();
         let mut event_identity_frontier = cursor.candidate().event_identity_frontier().clone();
-        let observation = match self
+        let (observation, superseded_targets) = match self
             .poller
             .poll_targeted_pull_requests_against_cursor(cursor.candidate().observation(), &targets)
             .await?
         {
-            TargetedPollOutcome::Observation(observation) => observation,
+            TargetedPollOutcome::Observation {
+                observation,
+                superseded_targets,
+            } => (observation, superseded_targets),
             TargetedPollOutcome::SupersededTarget => {
                 return Ok(PreparedTargetedRefreshOutcome::SupersededTarget);
             }
         };
+        // A refresh naming no pull request the cursor carries is never sent,
+        // and one reaching only targets the provider proved stale never landed,
+        // so neither is recorded as a query that happened.
+        let applied_targets = targets
+            .iter()
+            .filter(|target| !superseded_targets.contains(&target.number))
+            .cloned()
+            .collect::<Vec<_>>();
+        let queried = refreshes
+            .iter()
+            .filter(|refresh| refresh_reaches_a_target(refresh, &applied_targets))
+            .cloned()
+            .collect::<Vec<_>>();
         let events = derive_repo_watch_events(
             &self.repository,
             Some(cursor.candidate().observation()),
@@ -1313,11 +1330,14 @@ struct TargetedPullRequest {
 }
 
 /// One targeted refresh that has been fetched and derived but not committed.
-/// What a targeted poll produced: a reconciled observation, or proof that a
-/// targeted head is already stale.
+/// What a targeted poll produced: a reconciled observation alongside any
+/// targets the provider proved stale, or proof that every target moved.
 #[derive(Debug, PartialEq)]
 enum TargetedPollOutcome {
-    Observation(RepoWatchObservation),
+    Observation {
+        observation: RepoWatchObservation,
+        superseded_targets: Vec<PullRequestNumber>,
+    },
     SupersededTarget,
 }
 
@@ -1534,6 +1554,7 @@ const fn webhook_ignored_reason_code(reason: RepoWatchWebhookIgnoredReasonV1) ->
         RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadRepository => {
             "absent_workflow_head_repository"
         }
+        RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadBranch => "absent_workflow_head_branch",
     }
 }
 
@@ -2201,6 +2222,7 @@ impl GitHubRepositoryPoller {
             workflow_runs: previous.state().workflow_runs().to_vec(),
             branch_heads: previous.state().branch_heads().to_vec(),
         };
+        let mut superseded_targets = Vec::new();
         for target in targets {
             let retained_index = state
                 .pull_requests
@@ -2216,27 +2238,34 @@ impl GitHubRepositoryPoller {
                 .as_ref()
                 .is_some_and(|expected| fetched.state.context().head_sha() != expected)
             {
-                // The provider has already moved past the head this delivery
-                // describes, so the caller must record the delivery superseded
-                // rather than commit retained state and project stale facts.
+                // The provider has already moved past the head this target
+                // expected. A multi-target refresh keeps reconciling the
+                // targets that still match; the caller drops this one so
+                // retained state is never committed as if it were fetched.
                 tracing::debug!(
                     repository = %self.repository.as_str(),
                     pull_request = target.number.get(),
                     "targeted repository refresh was superseded before its response"
                 );
-                return Ok(TargetedPollOutcome::SupersededTarget);
+                superseded_targets.push(target.number);
+                continue;
             }
             match retained_index {
                 Some(index) => state.pull_requests[index] = fetched.state,
                 None => state.pull_requests.push(fetched.state),
             }
         }
+        if superseded_targets.len() == targets.len() {
+            // Every target moved: nothing this delivery hydrated is current,
+            // so the caller records the whole delivery superseded.
+            return Ok(TargetedPollOutcome::SupersededTarget);
+        }
         let state = RepoWatchRepositoryState::try_new(state)
             .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        Ok(TargetedPollOutcome::Observation(RepoWatchObservation::new(
-            self.signal_reviewers.clone(),
-            state,
-        )))
+        Ok(TargetedPollOutcome::Observation {
+            observation: RepoWatchObservation::new(self.signal_reviewers.clone(), state),
+            superseded_targets,
+        })
     }
 
     async fn poll_complete(
@@ -5535,7 +5564,13 @@ mod tests {
             .expect("targeted refresh succeeds");
 
         server.finish().await;
-        assert_eq!(refreshed, TargetedPollOutcome::Observation(previous));
+        assert_eq!(
+            refreshed,
+            TargetedPollOutcome::Observation {
+                observation: previous,
+                superseded_targets: Vec::new(),
+            }
+        );
     }
 
     #[tokio::test]

@@ -970,17 +970,17 @@ check run; completed check suite; completed workflow run; branch push, create,
 advance, and delete as represented by GitHub's `push` payload; and ping. Review
 dismissal and ping are mapped no-change. Tag pushes, the separate `create` and
 `delete` event families, foreign-repository workflow heads, completed workflow
-runs whose head repository is absent, and every other signature-valid event or
-action are ignored successfully. Guards make stale head, lifecycle, branch,
-workflow-attempt, and immutable-provider facts superseded or duplicate rather
-than allowing regression. A rerequested check run replaces the retained
-completion only when its provider completion generation is no older, so a
-delayed original completion is superseded instead of regressing the baseline; an
-equal generation still replaces, which is how a conclusion edit arrives. A
-workflow completion whose branch head is already gone is superseded, because
-polling projects workflow runs only for the heads it queries and could never
-reproduce it. A delivered run adopts the workflow name retained state already
-carries for that workflow identity. The occurrence identity deliberately
+runs whose head repository or head branch is absent, and every other
+signature-valid event or action are ignored successfully. Guards make stale
+head, lifecycle, branch, workflow-attempt, and immutable-provider facts
+superseded or duplicate rather than allowing regression. A rerequested check run
+replaces the retained completion only when its provider completion generation is
+no older, so a delayed original completion is superseded instead of regressing
+the baseline; an equal generation still replaces, which is how a conclusion edit
+arrives. A workflow completion whose branch head is already gone is superseded,
+because polling projects workflow runs only for the heads it queries and could
+never reproduce it. A delivered run adopts the workflow name retained state
+already carries for that workflow identity. The occurrence identity deliberately
 excludes that mutable display name, so this is not what keeps the two sources
 matching; it keeps the shadow observation equal to the one polling stores, so a
 rename cannot make an otherwise duplicate delivery look like a changed fact. A
