@@ -3183,6 +3183,7 @@ impl RunnerProtocolStore {
                     command.target_pending_request_id,
                     placement.event_kind AS placement_event_kind,
                     placement.state_kind AS placement_state_kind,
+                    placement.workspace_manifest_id AS predecessor_manifest_id,
                     placement.lost_runner_id,
                     placement.loss_source_kind,
                     placement.loss_registration_revision,
@@ -3332,6 +3333,8 @@ impl RunnerProtocolStore {
                     .map(CredentialProfileName::as_str)
             || row.decode_column::<String>("placement_event_kind")? != "runner_lost"
             || row.decode_column::<String>("placement_state_kind")? != "runner_lost"
+            || row.decode_column::<Option<Uuid>>("predecessor_manifest_id")?
+                == Some(manifest.into_uuid())
             || row.decode_column::<Uuid>("registration_runner_id")? != runner.into_uuid()
             || row.decode_column::<String>("connection_state_kind")? != "connected"
             || relative_path.as_str() != expected_relative_path

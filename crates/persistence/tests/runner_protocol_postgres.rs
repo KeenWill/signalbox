@@ -23070,7 +23070,10 @@ async fn s32_inv044_replacement_workspace_receipt_round_trips() -> Result<(), Bo
     assert_eq!(loaded.manifest_digest(), fixture.manifest_digest);
     assert_eq!(loaded.repository(), expected_repository);
     assert_eq!(loaded.canonical_clone_url_digest(), expected_clone_digest);
-    assert_eq!(loaded.credential_profile(), None);
+    assert_eq!(
+        loaded.credential_profile(),
+        fixture.workspace.credential_profile.as_ref()
+    );
     assert_eq!(loaded.sandbox(), fixture.workspace.sandbox);
     assert_eq!(
         loaded.working_directory(),
