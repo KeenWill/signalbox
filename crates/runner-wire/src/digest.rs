@@ -316,18 +316,24 @@ impl WorkspaceManifest {
         lifecycle: ManifestLifecycle,
         workspace: &ProvisionedWorkspace,
     ) -> Result<Self, ValueError> {
-        let recovery = workspace.recovery.as_ref().map(|value| match value {
-            WorkspaceRecovery::Commit { revision } => Recovery::Commit {
-                revision: revision.as_str().to_owned(),
-            },
-            WorkspaceRecovery::Branch { name, revision } => Recovery::Branch {
-                name: BranchName::try_new(name.as_str().to_owned())?,
-                revision: revision.as_str().to_owned(),
-            },
-            WorkspaceRecovery::UnbornBranch { name } => Recovery::UnbornBranch {
-                name: BranchName::try_new(name.as_str().to_owned())?,
-            },
-        });
+        let recovery = workspace
+            .recovery
+            .as_ref()
+            .map(|value| {
+                Ok(match value {
+                    WorkspaceRecovery::Commit { revision } => Recovery::Commit {
+                        revision: revision.as_str().to_owned(),
+                    },
+                    WorkspaceRecovery::Branch { name, revision } => Recovery::Branch {
+                        name: BranchName::try_new(name.as_str().to_owned())?,
+                        revision: revision.as_str().to_owned(),
+                    },
+                    WorkspaceRecovery::UnbornBranch { name } => Recovery::UnbornBranch {
+                        name: BranchName::try_new(name.as_str().to_owned())?,
+                    },
+                })
+            })
+            .transpose()?;
         let manifest = Self {
             lifecycle,
             manifest_id: CanonicalUuid::from_uuid(workspace.manifest_id.into_uuid()),
