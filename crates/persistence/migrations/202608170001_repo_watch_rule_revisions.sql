@@ -60,8 +60,17 @@ ALTER TABLE repo_watch_dispatch_obligation
 -- The per-field digests of an activation recorded before this migration cannot
 -- be reconstructed from its aggregate rule digest, so this change invalidates
 -- every such activation. Retire them once here rather than carrying a
--- fingerprint-absent shape in the daemon: the operator increments `version`
--- once, and the new revision activates after the current event tail.
+-- fingerprint-absent shape in the daemon.
+--
+-- OPERATOR ACTION REQUIRED ON THE FIRST BOOT AFTER THIS MIGRATION: increment
+-- `version` once for every configured repository-watch rule, including every
+-- rule whose semantics did not change. Retiring an activation retires its
+-- (rule ID, revision) pair, so reconciliation refuses the unchanged pair as
+-- identity reuse and the daemon fails in its Configuration phase, before
+-- either local socket binds, reporting that field `version` reuses a retired
+-- value and must be incremented to a higher revision. Each bumped revision
+-- activates after the current event tail and stays joined to the retired
+-- revision's evaluations, dispatches, and sessions by its rule ID.
 INSERT INTO repo_watch_rule_deactivation (repository, rule_id, rule_version)
 SELECT activation.repository, activation.rule_id, activation.rule_version
   FROM repo_watch_rule_activation AS activation

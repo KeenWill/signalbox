@@ -616,8 +616,14 @@ active activation lacks fingerprints and the daemon carries no path for that
 shape; a missing fingerprint under any non-deactivated activation is storage
 corruption, checked before reconciliation compares that activation against
 configuration, retires it as an unconfigured rule, or retires it because its
-whole repository left configuration. The operator increments `version` once on
-that first upgraded boot.
+whole repository left configuration. Retiring an activation retires its
+`(rule ID, revision)` pair, so the first boot after that migration refuses every
+configured rule at its recorded revision as identity reuse, including every rule
+whose semantics did not change, and fails in the Configuration phase before
+either local socket binds. The operator increments `version` once for each
+configured rule on that first upgraded boot; no fingerprint backfill can stand
+in for the bump, because the retained aggregate digest does not carry the
+per-field digests the new revision records.
 
 **Implemented behavior.** A higher revision under the same rule ID is a
 replacement. Reconciliation appends deactivation of the active old revision and
