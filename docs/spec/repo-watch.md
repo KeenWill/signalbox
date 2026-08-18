@@ -17,12 +17,19 @@ from the watcher.
 four-pull-request repository-watch stack. The version-one domain vocabulary and
 validation shapes were verified against PR #430 (`agent/repo-watch-spec`). The
 persistence and rule-dispatch behavior below is verified against PR #446
-(`agent/repo-watch-dispatch`). The polling and differ behavior below is verified
-against this PR (`agent/repo-watch-poll-performance`). The provider members the
-poller adopts as check-suite and check-run completion generations are verified
-against PR #541 (`fix/check-run-updated-at`). The goal a dispatch commissions
-with its session, and the binding of the dispatched work turn to that goal's
-generation, are verified against this PR (`agent/commission-binding`).
+(`agent/repo-watch-dispatch`). The polling and differ behavior below, the goal a
+dispatch commissions with its session, the binding of the dispatched work turn
+to that goal's generation, and the occupied-refusal obligation and collapsed
+current-state delivery are verified against PR #812
+(`agent/repo-watch-dispatch-loop`). The request-envelope behavior is verified
+against this PR (`agent/daemon-ops-overnight`). Runtime-relevance release,
+held-slot diagnostics, and terminal-target cutoff are also verified against this
+PR. The provider members the poller adopts as check-suite and check-run
+completion generations are verified against PR #541
+(`fix/check-run-updated-at`). Eager merge-forward dispatch is verified against
+PR #886 (`agent/eager-merge-forward`). Requeue after non-converged dispatch
+termination is verified against this PR
+(`agent/dispatch-requeue-on-invalidation`).
 
 ## Configuration and credential boundary
 
@@ -101,9 +108,42 @@ the projection, while a next relation beyond that bound fails the poll. Because
 a `304` can omit changed pagination metadata, a cached full terminal page
 conservatively probes one bounded successor; the cap page is reread
 unconditionally so that probe never manufactures page 101. A failed, rejected,
-partial, or unparseable poll submits no persistence candidate. The next poll
-occurs after the per-repository interval; version one has no webhook fallback
-and no speculative second polling transport.
+partial, or unparseable poll submits no persistence candidate. The
+per-repository interval is measured start to start, so a cadence does not drift
+by the duration of its own attempt; attempts never overlap, and an attempt that
+reaches or exceeds the interval is followed immediately by the next. Version one
+has no webhook fallback and no speculative second polling transport.
+
+**Implemented behavior.** One attempt fetches up to eight open pull requests
+concurrently. The fetch sequence within a single pull request stays ordered, and
+the fetched pull requests are ordered by number before comparison, so
+concurrency cannot reorder a baseline. A single attempt may transfer up to 768
+MiB of response bytes; what one poller retains between attempts is bounded
+separately and lower, because retention is per watched repository and therefore
+multiplies by the configured repository count.
+
+**Implemented behavior.** An attempt may reuse the committed detail and settled
+check baseline for an open pull request, but only when every one of the
+following holds: the open pull request listing reports both an `updated_at`
+identical to the one recorded when that baseline was fetched and a head SHA
+identical to the committed pull-request context; the recorded fetch reached the
+durable cursor, so an attempt that failed before committing cannot authorize
+reuse of the stale baseline it never replaced; that fetch observed every check
+suite and check run in a terminal state and a known mergeable state, because
+neither a check completion nor the provider's background mergeability
+calculation moves `updated_at`; and the pull request has been reused fewer than
+four consecutive attempts, which bounds how long another check or detail fact
+that never moves either listing member can go unobserved. Reviews and threads
+are re-fetched on every attempt and replace their prior projections before
+comparison, so a delayed detail/check refresh cannot absorb or defer review
+dispatch signals. Reactions are likewise re-fetched on every attempt because a
+reaction does not move `updated_at` at all; with no configured signal reviewer
+there is nothing a reaction can trigger, so the poller issues no reaction
+request. A pull request absent from the open listing is never reused. Cached
+resources survive the same bounded number of untouched attempts, so reuse does
+not discard the validators that keep the following full fetch conditional. The
+freshness record is process-local, like the conditional-request cache, so a
+restarted daemon re-fetches every pull request.
 
 **Implemented behavior.** Check-suite and check-run requests explicitly select
 all attempts and follow bounded result pages. Check runs are enumerated through
@@ -325,7 +365,10 @@ tagged action variants. Version one ships exactly one configured variant,
 
 **Implemented behavior.** When a fact matches, every configured action produces
 one emitted `dispatch_session { template, params }` action in list order, where
-`params` is the exact injected tagged context for that event.
+`params` is the exact injected tagged context for that event. When an occupied
+match joins an outstanding delivery obligation, the eventual action uses the
+latest joined event and adds the current-state delivery member defined below; it
+never emits each joined event as a separate action.
 
 **Implemented behavior.** Dispatch context is the ratified tagged union:
 
@@ -335,6 +378,19 @@ one emitted `dispatch_session { template, params }` action in list order, where
 **Implemented behavior.** The embedded event is the complete triggering durable
 fact, not reconstructed API state. A pull-request event always produces the
 first shape and `BranchWorkflowRunCompleted` always produces the second.
+
+**Implemented behavior.** A fresh dispatch carries no `delivery` member. A
+dispatch settling an occupied-refusal obligation adds
+`delivery { mode = "owed_current_state", obligation_id, matched_event_count, first_event_id, latest_event_id, current }`.
+Its embedded event is the latest matched fact joined to that obligation, while
+`current` is projected from the durable cursor read for dispatch. Pull-request
+current state carries `type`, `present`, and, when present, the complete current
+target, lifecycle, mergeability, completed check suites and runs, retained
+reviews, review threads, and configured-reviewer reactions. An absent pull
+request retains its number and `present = false`. Branch current state carries
+the branch, its optional current head, the triggering workflow name, and that
+workflow's latest completed runs. The count and boundary identities summarize
+collapse; intermediate facts are not replayed into the session.
 
 **Implemented behavior.** A session-template context declaration requires a
 nonempty set containing pull-request context, branch context, or both. Rule
@@ -439,45 +495,136 @@ back the whole batch. Each record links the triggering event, rule identity and
 version, singleton key, action ordinal, session-template provenance, and newly
 created session. The action ordinal distinguishes sibling sessions without
 letting the first action suppress later actions from the same match. An occupied
-singleton refuses another match. The batch releases it at the terminal
-transition that makes every dispatched session in that batch terminal; cooldown
-is measured from that recorded transition rather than from later watcher work
-and suppresses a successor until its interval has elapsed. Equal recovery cannot
-create a second session for the same admitted action. A session whose current
-goal is pursuing remains nonterminal for singleton ownership across the gap
-between a completed goal turn and its durably queued continuation. Goal
-blocking, achievement, or user stop rechecks release after pursuit ends. The
-append-only dispatch records identify the sessions responsible for the PR; no
-mutable assignment flag replaces them.
+singleton refuses another match and atomically opens one durable delivery
+obligation for that singleton. Further matching facts join its latest-event
+projection and increment its count, including a match racing with release, so
+one singleton has at most one outstanding obligation. Their individual terminal
+evaluations remain append-only audit facts. The batch releases the singleton at
+the transition that makes every dispatched turn terminal or runtime-irrelevant,
+leaves no live runtime-relevant turn for its session, and leaves no pursuing
+goal. A goal-ending recheck is deferred to its transaction boundary so an active
+turn's stop cascade is visible. A blocked or user-stopped dispatch session, and
+an achieved session whose delivered state is no longer the pull request's latest
+durable head, opens the same latest-state obligation before release; sibling
+terminations and matching events collapse into that one obligation without
+regressing its latest event. A batch delivers its originating event when
+admission dispatched that event, and the target's collapsed current state when
+admission settled an obligation by replaying a still-matching earlier event.
+Achievement is terminal exactly when that delivered state is known and is still
+the pull request's latest durable head, so the successor that carried the newest
+head seals instead of owing another batch after every cooldown. A batch admitted
+before the delivered state was recorded has none, and achievement cannot seal
+it: reading its originating event as the delivered state would seal without
+delivery whenever a head returns to an earlier value. A branch target records no
+durable revision, only a workflow conclusion, so achievement is its own seal
+there. A batch owes at most one requeue, at its own release, and the terminal
+event deciding it is the one ending the generation the dispatch commissioned; a
+later goal generation its session accepts terminates without reopening one,
+including while a sibling action still holds the batch. Termination takes the
+singleton advisory key that admission takes, and locks the rule activation row
+that recording a deactivation shares, so a match racing a termination joins its
+obligation and a racing deactivation cannot miss it. Termination does not take
+the repository key: it runs inside the transaction ending the goal, which holds
+that session row, and lifecycle-cutoff processing takes the repository key
+before waiting on the same row, so the reverse order would deadlock a goal pass
+against a cutoff attempt. The obligation becomes eligible only after release and
+the same cooldown that would suppress a fresh successor; cooldown suppression
+without an existing obligation does not create one. Eligibility settles the
+obligation and creates its one current-state batch atomically. Equal recovery
+cannot create a second session for the same admitted action or obligation. A
+session whose current goal is pursuing remains nonterminal for singleton
+ownership across the gap between a completed goal turn and its durably queued
+continuation. Goal blocking, achievement, or user stop rechecks release after
+pursuit ends. The append-only dispatch records identify the sessions responsible
+for the PR; no mutable assignment flag replaces them.
+
+**Implemented behavior.** A pull-request close or merge durably records one
+lifecycle cutoff. When that lifecycle remains terminal, repository watch applies
+the ordinary parent-only stop to each generation-one goal it commissioned for
+the pull request; it cannot stop descendants, a later user-authored generation,
+or an unrelated session. A later open event makes an earlier unprocessed cutoff
+a recorded reopen instead. Dispatch admission rechecks the latest durable
+lifecycle under the repository lock. A terminal cutoff settles every outstanding
+obligation for that pull request immediately, without waiting for singleton or
+cooldown readiness; the admission recheck is the race-closing backstop. Either
+path settles stale nonterminal work as `target_closed` without creating a
+session. A rule that matches the `PullRequestClosed` or `PullRequestMerged`
+event itself remains dispatch-eligible, and a non-converged termination of that
+dispatch still owes its requeue while its own cutoff remains the latest one; the
+terminal event is the cutoff fact, not work made stale by that fact. Corruption
+in one commissioned goal rolls back that goal's stop to a savepoint but does not
+roll back the cutoff: the terminal event remains durably dispositioned, healthy
+commissioned goals are stopped, and later cutoffs remain eligible for
+processing.
+
+**Implemented behavior.** Held singleton batches are directly observable in the
+`repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
+pull request, rule, singleton key, sessions, and held-since time; states each
+release clause independently; and names every failing clause in `blockers`.
+
+**Implemented behavior.** Outstanding obligations are directly observable in the
+`repo_watch_outstanding_dispatch_obligation` projection. Each row identifies the
+repository, rule, singleton and pull request or stack root, first and latest
+matched events, collapsed count and timestamps, any occupying dispatch and its
+sessions, cooldown eligibility, and present readiness. Rule deactivation settles
+an obligation without dispatch rather than leaving permanently owed work for
+semantics that are no longer configured; terminal-target settlement likewise
+records why the obligation no longer remains owed.
 
 **Implemented behavior.** A newly configured rule activates immediately after
 the repository's current durable event tail, before its task polls, and consumes
 later events in cursor and event-ordinal order. Activation and each terminal
 evaluation outcome are append-only. Restart resumes the oldest unevaluated fact
-for that rule version; it neither redispatches an evaluated fact nor treats
-pre-activation history as a new live signal. Reconciliation records an
-append-only deactivation when a configured identity or its repository
-disappears. Guarded daemon startup reconciles the complete repository set before
-any watch task starts, including the empty set when the repository-watch section
-is absent; the absent section still starts no watch runtime or polling task.
-Configuration reconciliation and evaluation are serialized per repository: an
-evaluation already committed may replay, but an already-loaded event cannot
-create a dispatch after deactivation commits. Activation stores a digest of the
-complete versioned matcher, ordered action list, singleton scope, and cooldown;
-changing any of those semantics while retaining an active identity is a
-permanent configuration failure. A deactivated rule identity and version cannot
-be configured again; either kind of replacement uses a new identity so no events
+and the oldest eligible obligation for that rule version; it neither
+redispatches an evaluated fact nor treats pre-activation history as a new live
+signal. An obligation is a separate collapsed delivery identity, not a request
+to reevaluate its occupied facts. Reconciliation records an append-only
+deactivation when a configured identity or its repository disappears. Guarded
+daemon startup reconciles the complete repository set before any watch task
+starts, including the empty set when the repository-watch section is absent; the
+absent section still starts no watch runtime or polling task. Configuration
+reconciliation and evaluation are serialized per repository: an evaluation
+already committed may replay, but an already-loaded event cannot create a
+dispatch after deactivation commits. Activation stores a digest of the complete
+versioned matcher, ordered action list, singleton scope, and cooldown; changing
+any of those semantics while retaining an active identity is a permanent
+configuration failure. A deactivated rule identity and version cannot be
+configured again; either kind of replacement uses a new identity so no events
 can be evaluated under semantics different from the activation that admitted
 them.
 
-## First live rule
+**Committed unimplemented functionality.** The structured-rule dispatch surface
+converges onto the program substrate by replacing each rule with a subscription
+whose action is a built-in dispatch program. This page owns that ingress
+cutover. Shadowing is validation only and never owns delivery. Cutover commits
+in one durable transaction at an event frontier after requiring a terminal
+evaluation outcome for every old-rule event through that frontier: it records
+deactivation of the old rule after the frontier, activation of the replacement
+subscription strictly after it, and the mapping from rule identity and version
+to the exact program registration. The same transaction transfers every occupied
+singleton batch, its responsible sessions, and any recorded cooldown boundary to
+substrate-owned dispatch state without recreating sessions or changing
+append-only audit identities. Events at or before the frontier remain owned only
+by rule evaluation; later events are owned only by subscription matching.
+Reconciliation, rule evaluation, event commit, and subscription matching
+serialize against this transaction, so a crash or concurrent poll may retry it
+but cannot omit or dispatch a boundary event twice or release an occupied
+singleton. After this transaction, the mapped rule is a subscription;
+subscription identity, delivery, continuation cursor inheritance, and
+cancellation follow the [program substrate](program-substrate.md).
 
-**Foundation contract.** The first deployed rule is `merge-forward-on-conflict`.
-It matches `MergeableStateChanged` with
-`mergeable_state.any_of = ["conflicting"]`, uses pull-request singleton scope,
-and dispatches the merge-forward session template configured with the approved
-cheap model and pull-request context. The rule does not match transitions back
-to `mergeable` or `unknown`.
+## Live merge-forward rule
+
+**Foundation contract.** The live merge-forward rule is
+`merge-forward-on-base-advance`. It matches `BaseAdvanced` for pull requests
+whose head branch matches `^agent/.+$`, uses pull-request singleton scope, and
+dispatches the merge-forward session template configured with the approved cheap
+model and pull-request context. Because each `BaseAdvanced` fact targets an open
+pull request based on the branch that advanced, the rule dispatches for each
+immediate dependent when a stacked parent branch advances and for each matching
+main-based pull request when `main` advances. It does not wait for a workflow
+conclusion or a `MergeableStateChanged` conflict fact, and a parent's own
+`HeadChanged` fact does not dispatch the parent.
 
 ## Designed-for version-two poll-cache persistence
 

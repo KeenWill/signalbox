@@ -15,6 +15,7 @@ mod approval_decisions;
 mod delegated_result_rereads;
 mod delegation_schema;
 mod delegation_transactions;
+mod hub_fence;
 mod model_call_execution_and_recovery;
 mod model_call_usage_and_interrupts;
 mod model_credentials_and_tool_batches;
@@ -42,12 +43,12 @@ use signalbox_application::{
     CreateSessionService, EligibilityNudge, EligibilityNudgeOutcome, EligibilitySweep,
     InProcessAttemptDispatchGate, LoadSessionService, ModelCallAuthorizationReread,
     ModelCallCredentialReference, ModelCallExecutionError, ModelCallExecutionIdGenerator,
-    ModelCallExecutionOutcome, ModelCallExecutionService, ModelConversationMessage,
-    OperatorFailureClass, PromptMemberStatement, ReplaceSessionDefaultsOutcome,
-    ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
-    RetainedModelCallObservationStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
-    SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
+    ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallObservationCommitOutcome,
+    ModelConversationMessage, OperatorFailureClass, PromptMemberStatement,
+    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
+    RetainedCapabilityFailureStatus, RetainedModelCallObservationStatus, ScriptedModelCallProvider,
+    ScriptedModelCallStep, SessionIdGenerator, StartEligibleTurnIdGenerator,
+    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
     SubmitInputService, ToolAttemptAuthorizationStatus, ToolCatalog, ToolDefinition,
     ToolInputSchema,
@@ -62,29 +63,32 @@ use signalbox_domain::{
     DelegateApprovalRecommendation, DelegationAwaitRequest, DelegationContent,
     DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest, DelegationWaitMode,
     DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, FastModeOverlay, FastModeSupport, FrozenModelSelection,
-    InitialToolApproval, ModelAlias, ModelCallId, ModelCallTerminalIdentities,
-    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelCapabilities,
-    ModelCapabilityCatalog, ModelCapabilityDefinition, ModelSelectionOverride,
-    ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence, ModelTargetCatalog,
-    ModelTargetDefinition, NormalizedToolArguments, PerInputConfigurationChoices,
-    PhysicalCancellationModelCallTurnIdentities, PreparedCreateSession, PreparedModelCallRequest,
-    ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
-    ReasoningLevel, RefusedModelCallTurnIdentities, ReplaceSessionDefaults,
-    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult, ResolvedProviderTarget,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionInputPosition, SessionSystemPrompt, SessionTemplateContentDigest,
+    FailedModelCallTurnIdentities, FastModeOverlay, FastModeSupport, FrozenModelSelection, Goal,
+    GoalCommandRejection, GoalCommandResult, GoalModelProvenance, GoalReport, GoalStatement,
+    GoalUserAction, GoalUserCommand, GoalUserProvenance, InitialToolApproval, ModelAlias,
+    ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelCallTerminalOutcome, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
+    ModelSelectionOverride, ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence,
+    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    PerInputConfigurationChoices, PhysicalCancellationModelCallTurnIdentities,
+    PreparedCreateSession, PreparedModelCallRequest, ProviderModelCallFailureCause,
+    ProviderModelIdentity, ProviderReportedTokenUsage, ReasoningLevel,
+    RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
+    ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryRef, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
+    SessionPlacement, SessionPlacementPath, SessionSystemPrompt, SessionTemplateContentDigest,
     SessionTemplateName, SessionTemplateProvenance, SettingOverlay,
     StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
     SubmitInputResult, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution,
     ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
-    ToolBatchExecutionFailure, ToolCallProposal, ToolDecisionRationale, ToolDispatchAuthority,
-    ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
-    ToolName, ToolPermissionDefault, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
-    ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry,
-    TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
+    ToolBatchExecutionFailure, ToolCallProposal, ToolDecisionRationale, ToolDenialReason,
+    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
+    ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequestId,
+    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
+    TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,
@@ -99,8 +103,12 @@ use signalbox_persistence::{
     create_session_from_imported_frontier::{
         ImportedSessionRepository, ImportedSessionRepositoryError,
     },
-    disposable_test_container_labels, local_test_connection_options, migrate,
+    disposable_test_container_labels,
+    goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
+    goal_turn::GoalTurnCandidates,
+    local_test_connection_options, migrate,
     model_execution::{
+        CredentialPoolRuntimeAction, CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
         PostgresModelCallRepository, PrepareInitialModelCallOutcome,
     },
@@ -179,6 +187,7 @@ const APPROVAL_JUDGE_CREDENTIAL: &str = "fixture-credential";
 const APPROVAL_JUDGE_RATIONALE: &str = "fixture rationale";
 const APPROVAL_JUDGE_ESTIMATED_PROVENANCE: &str = "estimated";
 const APPROVAL_DELEGATE_SOURCE: &str = "delegate";
+const APPROVAL_GOAL_STATEMENT: &str = "finish the commissioned approval task";
 
 fn ready_approval_judge(outcome: PrepareApprovalJudgeOutcome) -> PreparedApprovalJudge {
     match outcome {
@@ -3407,6 +3416,199 @@ async fn checkpoint_tool_batch_with_approval(
     }
     Ok((fixture, model_repository, observation, requests))
 }
+
+/// Commissions `APPROVAL_GOAL_STATEMENT` on an existing fixture session and
+/// returns the exact statement it commissioned.
+///
+/// The commission schedules its own queued goal turn from the seed, which
+/// leaves whatever turn the fixture already activated alone.
+async fn commission_fixture_session_goal(
+    pool: &PgPool,
+    session: SessionId,
+    seed: u128,
+) -> Result<GoalStatement, Box<dyn Error>> {
+    let statement = GoalStatement::try_new(String::from(APPROVAL_GOAL_STATEMENT))
+        .expect("the fixture goal statement is admitted");
+    let outcome = GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed)),
+                session,
+                GoalUserAction::Attach(statement.clone()),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(seed + 1)),
+                TurnId::from_uuid(Uuid::from_u128(seed + 2)),
+            )),
+            |_| None,
+        )
+        .await?;
+    assert_goal_command_applied(outcome);
+    Ok(statement)
+}
+
+/// Stops a fixture session's goal as a user stop scoped to that session alone.
+async fn stop_fixture_session_goal(
+    pool: &PgPool,
+    session: SessionId,
+    seed: u128,
+) -> Result<(), Box<dyn Error>> {
+    let outcome = GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed)),
+                session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    assert_goal_command_applied(outcome);
+    Ok(())
+}
+
+/// Fails naming the outcome a fixture goal command produced instead of an
+/// appended event, so a rejection or a reused identity is not mistaken for a
+/// fixture that set the goal up.
+#[track_caller]
+fn assert_goal_command_applied(outcome: GoalCommandHandlingOutcome) {
+    match outcome {
+        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(_)) => {}
+        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Rejected(rejection)) => {
+            panic!("the fixture goal command was rejected: {rejection:?}")
+        }
+        GoalCommandHandlingOutcome::ConflictingReuse { command_id } => {
+            panic!("the fixture goal command identity is already used: {command_id:?}")
+        }
+    }
+}
+
+/// The fixture check helper above branches over the three command outcomes,
+/// so its rejected classification carries its own test
+/// (`docs/agents/testing-style.md` rule 16).
+#[test]
+fn assert_goal_command_applied_names_a_rejection() {
+    let panic = std::panic::catch_unwind(|| {
+        assert_goal_command_applied(GoalCommandHandlingOutcome::Recorded(
+            GoalCommandResult::Rejected(GoalCommandRejection::SessionNotFound),
+        ))
+    })
+    .expect_err("a rejected fixture goal command must fail its fixture");
+    assert_eq!(
+        panic.downcast_ref::<String>().map(String::as_str),
+        Some("the fixture goal command was rejected: SessionNotFound")
+    );
+}
+
+/// The fixture check helper above branches over the three command outcomes,
+/// so its conflicting-reuse classification carries its own test
+/// (`docs/agents/testing-style.md` rule 16).
+#[test]
+fn assert_goal_command_applied_names_a_conflicting_reuse() {
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0x60a1));
+    let panic = std::panic::catch_unwind(|| {
+        assert_goal_command_applied(GoalCommandHandlingOutcome::ConflictingReuse { command_id })
+    })
+    .expect_err("a reused fixture goal command identity must fail its fixture");
+    assert_eq!(
+        panic.downcast_ref::<String>().map(String::as_str),
+        Some(format!("the fixture goal command identity is already used: {command_id:?}").as_str())
+    );
+}
+
+/// Fails naming the outcome a goal transition produced instead of an applied
+/// event, so a refused or misrouted fixture transition is not mistaken for
+/// one that landed.
+#[track_caller]
+fn assert_goal_transition_applied(outcome: &GoalTransitionOutcome) {
+    match outcome {
+        GoalTransitionOutcome::Applied(_) => {}
+        GoalTransitionOutcome::GoalNotAttached => {
+            panic!("the goal transition found no attached goal")
+        }
+        GoalTransitionOutcome::Rejected(error) => {
+            panic!("the goal transition was rejected: {:?}", error.failure())
+        }
+        GoalTransitionOutcome::NotCurrentGoalTurn => {
+            panic!("the goal transition named a turn outside the current goal generation")
+        }
+    }
+}
+
+/// A domain goal commissioned and stopped, whose refusal of a further
+/// declaration supplies the check helper's rejected branch a real error.
+fn stopped_fixture_goal() -> Goal {
+    Goal::commission(
+        SessionId::from_uuid(Uuid::from_u128(0x60b0)),
+        GoalStatement::try_new(String::from("classify the check helper"))
+            .expect("the fixture statement is admitted"),
+        GoalUserProvenance::new(DurableCommandId::from_uuid(Uuid::from_u128(0x60b1))),
+    )
+    .stop(GoalUserProvenance::new(DurableCommandId::from_uuid(
+        Uuid::from_u128(0x60b2),
+    )))
+    .expect("a pursuing fixture goal admits stopping")
+}
+
+/// The transition check helper above branches over the four outcomes, so its
+/// missing-goal classification carries its own test
+/// (`docs/agents/testing-style.md` rule 16).
+#[test]
+fn assert_goal_transition_applied_names_a_missing_goal() {
+    let panic = std::panic::catch_unwind(|| {
+        assert_goal_transition_applied(&GoalTransitionOutcome::GoalNotAttached)
+    })
+    .expect_err("a transition without an attached goal must fail its fixture");
+    assert_eq!(
+        panic.downcast_ref::<&str>().copied(),
+        Some("the goal transition found no attached goal")
+    );
+}
+
+/// The transition check helper above branches over the four outcomes, so its
+/// rejected classification carries its own test
+/// (`docs/agents/testing-style.md` rule 16).
+#[test]
+fn assert_goal_transition_applied_names_a_rejection() {
+    let error = stopped_fixture_goal()
+        .declare_achieved(
+            GoalReport::try_new(String::from("nothing further to report"))
+                .expect("the fixture report is admitted"),
+            GoalModelProvenance::new(
+                TurnId::from_uuid(Uuid::from_u128(0x60b3)),
+                ToolRequestId::from_uuid(Uuid::from_u128(0x60b4)),
+            ),
+        )
+        .expect_err("a stopped goal refuses a further declaration");
+    let failure = error.failure();
+    let panic = std::panic::catch_unwind(|| {
+        assert_goal_transition_applied(&GoalTransitionOutcome::Rejected(error))
+    })
+    .expect_err("a rejected fixture transition must fail its fixture");
+    assert_eq!(
+        panic.downcast_ref::<String>().map(String::as_str),
+        Some(format!("the goal transition was rejected: {failure:?}").as_str())
+    );
+}
+
+/// The transition check helper above branches over the four outcomes, so its
+/// non-current-turn classification carries its own test
+/// (`docs/agents/testing-style.md` rule 16).
+#[test]
+fn assert_goal_transition_applied_names_a_non_current_turn() {
+    let panic = std::panic::catch_unwind(|| {
+        assert_goal_transition_applied(&GoalTransitionOutcome::NotCurrentGoalTurn)
+    })
+    .expect_err("a transition from a non-current turn must fail its fixture");
+    assert_eq!(
+        panic.downcast_ref::<&str>().copied(),
+        Some("the goal transition named a turn outside the current goal generation")
+    );
+}
+
 async fn insert_completed_judge(
     connection: &mut PgConnection,
     fixture: &RestartModelCallFixture,
@@ -3490,14 +3692,14 @@ async fn persist_delegated_denial_fixture(
     .await?;
     sqlx::query(
         "INSERT INTO tool_approval_decision
-            (request_id, decision_kind, decision_source,
+            (request_id, decision_kind, decision_source, denial_reason,
              delegate_model_selection_id, delegate_model_call_id, rationale)
-         VALUES ($1, 'deny', 'delegate', $2, $3, $4)",
+         VALUES ($1, 'deny', 'delegate', $2, $3, $4, $2)",
     )
     .bind(request.into_uuid())
+    .bind(APPROVAL_JUDGE_RATIONALE)
     .bind(selection)
     .bind(judge_call)
-    .bind(APPROVAL_JUDGE_RATIONALE)
     .execute(&mut *connection)
     .await?;
     sqlx::query(

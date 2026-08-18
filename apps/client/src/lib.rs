@@ -58,16 +58,22 @@ mod error;
 mod presentation;
 mod transcript;
 
+// numeric-bound: ceiling - protects request memory and durable input storage
 const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
+// numeric-bound: ceiling - protects frame memory while decoding review input
 const MAX_REVIEW_JSON_INPUT_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
+// numeric-bound: ceiling - protects frame memory while reading import source
 const MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 /// Bounded memory used while hashing one client-local blob source.
 const BLOB_HASH_BUFFER_BYTES: usize = 64 * 1024;
 /// Smallest bounded metadata page the process protocol admits.
+// numeric-bound: tunable - controls the smallest requested metadata page
 const MIN_METADATA_PAGE_SIZE: u64 = 1;
 /// Largest bounded metadata page the process protocol admits.
+// numeric-bound: tunable - controls the largest requested metadata page
 const MAX_METADATA_PAGE_SIZE: u64 = 100;
 /// Largest finding inventory one review run can own.
+// numeric-bound: ceiling - protects memory and writes from runaway model findings
 const MAX_REVIEW_FINDINGS_PER_RUN: u64 = 32;
 
 #[derive(Deserialize)]
@@ -1504,6 +1510,12 @@ async fn write_blob_output(path: &Path, bytes: &[u8]) -> Result<(), ClientError>
     temporary
         .persist_noclobber(path)
         .map_err(|error| ClientError::blob_output_file(path, error.error))?;
+    tokio::fs::File::open(parent)
+        .await
+        .map_err(|source| ClientError::blob_output_file(path, source))?
+        .sync_all()
+        .await
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
     Ok(())
 }
 
@@ -8366,6 +8378,8 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        let byte_length = CanonicalU64::new(9);
+        let replica_count = CanonicalU64::new(1);
         let listener = UnixListener::bind(&socket)?;
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
@@ -8383,8 +8397,8 @@ mod tests {
                 metadata.request_id(),
                 ServerMessage::BlobMetadata {
                     digest,
-                    byte_length: CanonicalU64::new(9),
-                    replica_count: CanonicalU64::new(1),
+                    byte_length,
+                    replica_count,
                 },
             )
             .map_err(io::Error::other)?;
@@ -8402,7 +8416,11 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(stdout)?,
-            format!("digest={digest} byte_length=9 replica_count=1\n")
+            format!(
+                "digest={digest} byte_length={} replica_count={}\n",
+                byte_length.value(),
+                replica_count.value()
+            )
         );
         assert!(stderr.is_empty());
         server.await??;

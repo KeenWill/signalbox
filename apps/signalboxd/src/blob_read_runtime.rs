@@ -4,7 +4,9 @@ use std::num::NonZeroU64;
 
 use signalbox_blob_store::{BlobStoreFailureKind, MAX_BLOB_RANGE_BYTES};
 use signalbox_domain::BlobDigest;
-use signalbox_persistence::blob::{BlobCatalogRepository, BlobCatalogRepositoryError};
+use signalbox_persistence::blob::{
+    BlobCatalogEntry, BlobCatalogRepository, BlobCatalogRepositoryError,
+};
 use tokio::io::AsyncReadExt;
 
 use crate::blob_storage_runtime::BlobStoreRegistry;
@@ -31,11 +33,7 @@ pub(crate) async fn read_blob_metadata(
     repository: &BlobCatalogRepository,
     digest: BlobDigest,
 ) -> Result<BlobMetadata, BlobReadError> {
-    let entry = repository
-        .find(digest)
-        .await
-        .map_err(map_catalog_error)?
-        .ok_or(BlobReadError::NotFound)?;
+    let entry = read_blob_entry(repository, digest).await?;
     let replica_count =
         u64::try_from(entry.replicas().len()).map_err(|_| BlobReadError::Integrity)?;
     Ok(BlobMetadata {
@@ -44,19 +42,24 @@ pub(crate) async fn read_blob_metadata(
     })
 }
 
-pub(crate) async fn read_blob_chunk(
-    registry: &BlobStoreRegistry,
+pub(crate) async fn read_blob_entry(
     repository: &BlobCatalogRepository,
     digest: BlobDigest,
+) -> Result<BlobCatalogEntry, BlobReadError> {
+    repository
+        .find(digest)
+        .await
+        .map_err(map_catalog_error)?
+        .ok_or(BlobReadError::NotFound)
+}
+
+pub(crate) async fn read_blob_chunk(
+    registry: &BlobStoreRegistry,
+    entry: &BlobCatalogEntry,
     offset: u64,
     length: NonZeroU64,
 ) -> Result<Vec<u8>, BlobReadError> {
     debug_assert!(length.get() <= MAX_BLOB_RANGE_BYTES);
-    let entry = repository
-        .find(digest)
-        .await
-        .map_err(map_catalog_error)?
-        .ok_or(BlobReadError::NotFound)?;
     let expected = entry.expected();
     if offset
         .checked_add(length.get())
@@ -138,6 +141,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// INV-060: direct reads share the wire and store range bound.
     fn direct_read_bound_matches_the_wire_and_store_contract() {
         assert_eq!(
             MAX_BLOB_RANGE_BYTES,

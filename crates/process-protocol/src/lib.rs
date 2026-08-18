@@ -67,45 +67,67 @@ impl<'de> Deserialize<'de> for ProtocolVersion {
 }
 
 /// Maximum encoded frame size, including its final newline.
+// numeric-bound: ceiling - protects process memory from oversized wire frames
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// Maximum decoded source bytes carried by one conversation-import append.
 ///
 /// The half-frame raw-byte bound leaves fixed headroom for canonical padded
 /// base64, the request envelope, and the maximum-width correlation identity.
+// numeric-bound: derived ceiling from MAX_FRAME_BYTES
 pub const MAX_CONVERSATION_IMPORT_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum decoded bytes carried by one immutable-blob append.
+// numeric-bound: derived ceiling from MAX_FRAME_BYTES
 pub const MAX_BLOB_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum decoded bytes returned by one direct blob-range request.
+// numeric-bound: derived ceiling from MAX_FRAME_BYTES
 pub const MAX_BLOB_READ_BYTES: usize = MAX_FRAME_BYTES / 2;
 
+/// Tunable effective ceiling for concurrent process-protocol snapshot readers.
+///
+/// This operational admission bound is not a hard safety ceiling. The daemon
+/// additionally reserves pool connections outside snapshot work; this
+/// protocol-owned ceiling prevents a larger pool from expanding snapshot
+/// admission beyond the implemented contract.
+// numeric-bound: tunable - controls concurrent snapshot-reader admission
+pub const MAX_CONCURRENT_SNAPSHOT_READERS: usize = 8;
+
 /// Maximum replica count representable by the version-one deployment catalog.
+// numeric-bound: ceiling - restates blob-store's durable catalog capacity
 pub const MAX_BLOB_REPLICA_COUNT: u64 = signalbox_blob_store::MAX_BLOB_STORES as u64;
 
 /// Maximum number of simultaneously open JSON objects and arrays in one frame.
+// numeric-bound: ceiling - protects parser stack and latency from pathological nesting
 pub const MAX_JSON_CONTAINER_DEPTH: usize = 127;
 
 /// Maximum UTF-8 bytes in one transcript content fragment.
+// numeric-bound: ceiling - protects frame memory and transcript storage
 pub const MAX_CONTENT_FRAGMENT_BYTES: usize = 1024 * 1024;
 
 /// Maximum total UTF-8 bytes in one complete metadata object or filter.
+// numeric-bound: ceiling - protects metadata memory and storage
 pub const MAX_SESSION_METADATA_TOTAL_UTF8_BYTES: usize = 262_144;
 
 /// Maximum UTF-8 bytes in one indexed metadata tag or attribute key.
+// numeric-bound: ceiling - protects index storage and comparison latency
 pub const MAX_SESSION_METADATA_INDEXED_UTF8_BYTES: usize = 1_024;
 
 /// Maximum exact tags in one complete metadata object.
+// numeric-bound: ceiling - protects metadata memory and index fan-out
 pub const MAX_SESSION_METADATA_TAGS: usize = 256;
 
 /// Maximum exact attributes in one complete metadata object.
+// numeric-bound: ceiling - protects metadata memory and index fan-out
 pub const MAX_SESSION_METADATA_ATTRIBUTES: usize = 256;
 
 /// Maximum exact required tags in one metadata-list filter.
+// numeric-bound: ceiling - protects filter memory and matching work
 pub const MAX_SESSION_METADATA_REQUIRED_TAGS: usize = 256;
 
 /// Maximum UTF-8 bytes in one session system prompt.
+// numeric-bound: ceiling - protects context memory and provider spend
 pub const MAX_SYSTEM_PROMPT_UTF8_BYTES: usize = 1_048_576;
 
 /// Maximum UTF-8 bytes in one imported-entry text preview.
@@ -113,24 +135,31 @@ pub const MAX_SYSTEM_PROMPT_UTF8_BYTES: usize = 1_048_576;
 /// An inspection row is a scannable line, not the entry's content authority:
 /// the transcript snapshot already carries attested imported text in full, and
 /// the immutable aggregate remains the authority for everything else.
+// numeric-bound: tunable - controls retained inspection-preview detail
 pub const MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES: usize = 256;
 
 /// Maximum entries in one deployment model-alias catalog.
+// numeric-bound: ceiling - protects catalog memory and frame size
 pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
 
 /// Maximum entries in one deployment model-capability catalog.
+// numeric-bound: ceiling - protects catalog memory and frame size
 pub const MAX_MODEL_CAPABILITY_CATALOG_ENTRIES: usize = 10_000;
 
 /// Maximum canonical decimal USD amount text.
+// numeric-bound: not-a-bound - the longest canonical rust_decimal spelling
 pub const MAX_DOLLAR_AMOUNT_BYTES: usize = 30;
 
 /// Maximum UTF-8 bytes in one deployment-owned billing rate version.
+// numeric-bound: tunable - admits the deployment-owned rate version text
 pub const MAX_RATE_VERSION_UTF8_BYTES: usize = 128;
 
 /// Maximum concerns in one frozen review-orchestration attempt.
+// numeric-bound: ceiling - protects memory and work from runaway model concerns
 pub const MAX_REVIEW_ORCHESTRATION_CONCERNS: usize = 32;
 
 /// Maximum finding-indexed members in one review-orchestration request.
+// numeric-bound: ceiling - protects review request memory and wire size
 pub const MAX_REVIEW_ORCHESTRATION_MEMBERS: usize = 1_024;
 
 /// A lowercase hyphenated UUID at the process boundary.
@@ -1149,6 +1178,7 @@ pub struct CanonicalDollarAmount(String);
 impl CanonicalDollarAmount {
     /// Validates one shortest nonnegative base-ten decimal spelling.
     pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
+        // numeric-bound: not-a-bound - fixed rust_decimal coefficient representation
         const MAX_DECIMAL_COEFFICIENT: u128 = 79_228_162_514_264_337_593_543_950_335;
 
         let (integer, fraction) = value
@@ -2627,6 +2657,7 @@ impl MetadataLastWriter {
 
 /// Maximum Unicode scalars in one imported-conversation display title,
 /// restating the domain derivation bound on the wire.
+// numeric-bound: tunable - controls retained imported-title display detail
 pub const MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS: usize = 256;
 
 /// One closed conversation origin class.
@@ -2793,11 +2824,21 @@ fn validate_tool_approval_event_shape(
             } => rationale.is_none() && ToolDenialReason::try_new(reason.clone()).is_ok(),
         },
         ToolApprovalEventDecider::Delegate { .. } => match decision {
-            ToolApprovalEventDecision::Approve {}
-            | ToolApprovalEventDecision::Deny { reason: None } => rationale
+            ToolApprovalEventDecision::Approve {} => rationale
                 .as_ref()
                 .is_some_and(|rationale| ToolDecisionRationale::try_new(rationale.clone()).is_ok()),
-            ToolApprovalEventDecision::Deny { reason: Some(_) } => false,
+            // A delegate denial's reason is exactly the derivation from its
+            // rationale: absent only when the rationale derives nothing.
+            ToolApprovalEventDecision::Deny { reason } => {
+                rationale.as_ref().is_some_and(|rationale| {
+                    ToolDecisionRationale::try_new(rationale.clone()).is_ok_and(|rationale| {
+                        ToolDenialReason::from_rationale(&rationale)
+                            .as_ref()
+                            .map(ToolDenialReason::as_str)
+                            == reason.as_deref()
+                    })
+                })
+            }
         },
     };
     if !shape_matches {
@@ -5978,6 +6019,7 @@ pub struct RunnerWorkingDirectory(String);
 
 impl RunnerWorkingDirectory {
     /// Maximum UTF-8 bytes admitted by the runner domain and process wire.
+    // numeric-bound: tunable - mirrors the domain's exact runner-value grammar
     pub const MAX_UTF8_BYTES: usize = DomainRunnerWorkingDirectory::MAX_BYTES;
 
     /// Admits nonempty, NUL-free text within the exact byte bound.
@@ -13483,7 +13525,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_deny_event_round_trips_with_rationale()
+    fn inv033_tool_approval_delegate_deny_event_round_trips_null_reason_for_empty_derivation()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(4)?,
@@ -13498,10 +13540,10 @@ mod tests {
                         model_selection_id: uuid(10),
                         model_call_id: uuid(11),
                     },
-                    rationale: Some(String::from("request exceeds the stated scope")),
+                    rationale: Some(String::from("   ")),
                 },
             },
-            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"request exceeds the stated scope"}}"#,
+            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"   "}}"#,
         )
     }
 
@@ -13526,11 +13568,11 @@ mod tests {
                             model_selection_id: uuid(11),
                             model_call_id: uuid(12),
                         },
-                        rationale: Some(String::from("request exceeds the stated scope")),
+                        rationale: Some(String::from("   ")),
                     }),
                 },
             },
-            r#"{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000006","entry_id":"00000000-0000-0000-0000-000000000007","entry":{"type":"assistant_tool_use","turn_id":"00000000-0000-0000-0000-000000000008","model_call_id":"00000000-0000-0000-0000-000000000009","tool_request_id":"00000000-0000-0000-0000-00000000000a","tool_name":"publish","arguments":"{}","approval":{"decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000b","model_call_id":"00000000-0000-0000-0000-00000000000c"},"rationale":"request exceeds the stated scope"}}}"#,
+            r#"{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000006","entry_id":"00000000-0000-0000-0000-000000000007","entry":{"type":"assistant_tool_use","turn_id":"00000000-0000-0000-0000-000000000008","model_call_id":"00000000-0000-0000-0000-000000000009","tool_request_id":"00000000-0000-0000-0000-00000000000a","tool_name":"publish","arguments":"{}","approval":{"decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000b","model_call_id":"00000000-0000-0000-0000-00000000000c"},"rationale":"   "}}}"#,
         )
     }
 
@@ -13556,7 +13598,32 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_denial_rejects_user_reason() {
+    fn inv033_tool_approval_delegate_deny_event_round_trips_with_derived_reason()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(9),
+                session_id: uuid(6),
+                event: SessionEvent::ToolApprovalDecided {
+                    turn_id: uuid(7),
+                    tool_request_id: uuid(8),
+                    decision: ToolApprovalEventDecision::Deny {
+                        reason: Some(String::from("request exceeds the stated scope")),
+                    },
+                    decider: ToolApprovalEventDecider::Delegate {
+                        model_selection_id: uuid(10),
+                        model_call_id: uuid(11),
+                    },
+                    rationale: Some(String::from("request exceeds the stated scope")),
+                },
+            },
+            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"request exceeds the stated scope"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"request exceeds the stated scope"}}"#,
+        )
+    }
+
+    #[test]
+    fn inv033_tool_approval_delegate_denial_rejects_underived_reason() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"7","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"forged user reason"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"bounded rationale"}}}"#,
         );
