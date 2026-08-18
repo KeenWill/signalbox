@@ -116,9 +116,11 @@ pub(crate) fn retry_after(message: &str) -> Option<Duration> {
         .find_map(|marker| normalized.find(marker).map(|index| (marker, index)))?;
     let remainder = &normalized[marker.1 + marker.0.len()..];
     let mut parts = remainder.split_whitespace();
-    let amount = parts
-        .next()?
-        .trim_matches(|character: char| !character.is_ascii_digit());
+    let rendered_amount = parts.next()?;
+    if rendered_amount.starts_with('-') || rendered_amount.starts_with('+') {
+        return None;
+    }
+    let amount = rendered_amount.trim_matches(|character: char| !character.is_ascii_digit());
     let amount = amount.parse::<u64>().ok()?;
     let unit = parts
         .next()?
@@ -238,6 +240,8 @@ mod tests {
             Some(std::time::Duration::from_secs(120))
         );
         assert_eq!(retry_after("retry later"), None);
+        assert_eq!(retry_after("retry after -1 seconds"), None);
+        assert_eq!(retry_after("retry after +1 seconds"), None);
     }
 
     #[test]

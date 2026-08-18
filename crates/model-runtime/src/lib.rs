@@ -47,6 +47,7 @@ mod cli_redaction;
 mod credential;
 mod evidence;
 mod input_count;
+mod json;
 mod message;
 mod observation;
 mod operation;

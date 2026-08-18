@@ -4,9 +4,26 @@ CREATE TABLE model_call_credential_pool_policy (
     model_call_id uuid PRIMARY KEY REFERENCES model_call(model_call_id),
     pool_name text NOT NULL,
     on_pool_exhausted text NOT NULL CHECK (on_pool_exhausted IN ('park', 'fail')),
-    on_quota_exhausted text NOT NULL,
-    on_rate_limited text NOT NULL,
-    on_overloaded text NOT NULL
+    on_quota_exhausted text NOT NULL CHECK (
+        on_quota_exhausted IN (
+            'stay', 'switch_next_turn', 'switch_now', 'avoid_new_sessions', 'quarantine'
+        )
+    ),
+    on_rate_limited text NOT NULL CHECK (
+        on_rate_limited IN (
+            'stay', 'switch_next_turn', 'switch_now', 'avoid_new_sessions', 'quarantine'
+        )
+    ),
+    on_overloaded text NOT NULL CHECK (
+        on_overloaded IN (
+            'stay', 'switch_next_turn', 'switch_now', 'avoid_new_sessions', 'quarantine'
+        )
+    ),
+    on_credential_rejected text NOT NULL CHECK (
+        on_credential_rejected IN (
+            'stay', 'switch_next_turn', 'switch_now', 'avoid_new_sessions', 'quarantine'
+        )
+    )
 );
 
 CREATE TABLE model_call_credential_pool_member (
@@ -42,8 +59,12 @@ CREATE TABLE credential_pool_member_action (
     observed_turn_id uuid NOT NULL,
     observation_model_call_id uuid NOT NULL UNIQUE REFERENCES model_call(model_call_id),
     consumed_turn_id uuid,
+    -- A rejected credential is an ordinary durable exclusion cause: it admits
+    -- every action except switch_now, which needs a substitutable successor.
     cause_kind text NOT NULL CHECK (
-        cause_kind IN ('rate_limited', 'quota_exhausted', 'overloaded')
+        cause_kind IN (
+            'rate_limited', 'quota_exhausted', 'overloaded', 'credential_rejected'
+        )
     ),
     FOREIGN KEY (observed_turn_id, observed_session_id)
         REFERENCES turn_lifecycle(turn_id, session_id),
@@ -328,6 +349,65 @@ BEGIN
             ON successor.successor_turn_attempt_id = call.turn_attempt_id
          WHERE call.model_call_id = checked_model_call_id
     ) THEN
+        -- A terminal availability successor with no later availability
+        -- successor may have yielded into the ordinary tool-round lifecycle,
+        -- or ended ambiguously and parked its still-active turn for model-call
+        -- recovery. Preserve the availability lineage checks here, then
+        -- delegate the terminal lifecycle shape to the validator that owns
+        -- both of those active shapes.
+        IF EXISTS (
+            SELECT 1
+              FROM model_call AS call
+              JOIN credential_pool_availability_successor AS successor
+                ON successor.successor_turn_attempt_id = call.turn_attempt_id
+              JOIN model_call AS predecessor
+                ON predecessor.model_call_id = successor.predecessor_model_call_id
+             WHERE call.model_call_id = checked_model_call_id
+               AND call.turn_id = predecessor.turn_id
+               AND call.session_id = predecessor.session_id
+               AND call.resolved_provider_model_identity_id =
+                   predecessor.resolved_provider_model_identity_id
+               AND ROW(
+                    call.selection_kind,
+                    call.direct_model_selection_id,
+                    call.frozen_model_alias_id,
+                    call.frozen_alias_selected_direct_id
+               ) IS NOT DISTINCT FROM ROW(
+                    predecessor.selection_kind,
+                    predecessor.direct_model_selection_id,
+                    predecessor.frozen_model_alias_id,
+                    predecessor.frozen_alias_selected_direct_id
+               )
+               AND call.state_kind = 'terminal'
+               AND (
+                    EXISTS (
+                        SELECT 1
+                          FROM tool_round AS round
+                         WHERE round.producing_model_call_id = call.model_call_id
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                          FROM turn_lifecycle AS waiting
+                         WHERE waiting.turn_id = call.turn_id
+                           AND waiting.session_id = call.session_id
+                           AND waiting.state_kind = 'active'
+                           AND waiting.active_phase_kind =
+                               'awaiting_model_call_recovery'
+                           AND waiting.recovery_model_call_id = call.model_call_id
+                    )
+               )
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM credential_pool_availability_successor AS later
+                     WHERE later.predecessor_model_call_id = call.model_call_id
+               )
+        ) THEN
+            PERFORM assert_model_call_final_state_before_credential_pools(
+                checked_model_call_id
+            );
+            RETURN;
+        END IF;
+
         IF NOT EXISTS (
             SELECT 1
               FROM model_call AS call
@@ -367,8 +447,21 @@ BEGIN
                         AND lifecycle.current_attempt_id = call.turn_attempt_id
                     )
                     OR (
-                        call.state_kind IN ('in_flight', 'cancellation_requested')
+                        call.state_kind = 'in_flight'
                         AND attempt.state_kind = 'running'
+                        AND lifecycle.state_kind = 'active'
+                        AND lifecycle.active_phase_kind = 'running'
+                        AND lifecycle.current_attempt_id = call.turn_attempt_id
+                    )
+                    -- An interrupt on a rotated in-flight call moves the call
+                    -- to cancellation_requested and its attempt to
+                    -- stop_requested together, exactly as the pre-pool
+                    -- validator admits. Requiring a still-running attempt here
+                    -- rejected the submit-input transaction, so a provider call
+                    -- made by a substituted credential could not be cancelled.
+                    OR (
+                        call.state_kind = 'cancellation_requested'
+                        AND attempt.state_kind IN ('running', 'stop_requested')
                         AND lifecycle.state_kind = 'active'
                         AND lifecycle.active_phase_kind = 'running'
                         AND lifecycle.current_attempt_id = call.turn_attempt_id

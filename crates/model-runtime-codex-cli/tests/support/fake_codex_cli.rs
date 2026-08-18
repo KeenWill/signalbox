@@ -747,6 +747,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "error_provider_internal" => failed("internal server error"),
         "error_unrecognized" => failed("future failure shape"),
         "error_then_turn_failed" => unrecoverable(fixtures::STREAM_ERROR_MESSAGE),
+        // A stream-level error with no lifecycle echo at all: the process just
+        // ends. This is the shape the substitution proof must refuse.
+        "error_without_turn_failed" => {
+            emit_error(fixtures::STREAM_ERROR_MESSAGE);
+            std::process::exit(1);
+        }
         "error_then_turn_completed" => {
             emit_error(fixtures::STREAM_ERROR_MESSAGE);
             completed();

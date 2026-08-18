@@ -15,6 +15,7 @@ mod approval_decisions;
 mod delegated_result_rereads;
 mod delegation_schema;
 mod delegation_transactions;
+mod hub_fence;
 mod model_call_execution_and_recovery;
 mod model_call_usage_and_interrupts;
 mod model_credentials_and_tool_batches;
@@ -76,17 +77,18 @@ use signalbox_domain::{
     ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SemanticTranscriptEntryRef, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
-    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, SettingOverlay, StoppedToolResponsePartIdentity,
-    StoppedToolRoundModelCallIdentities, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
-    ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution, ToolAttemptCrashOutcome,
-    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure,
-    ToolCallProposal, ToolDecisionRationale, ToolDenialReason, ToolDispatchAuthority,
-    ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
-    ToolName, ToolPermissionDefault, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
-    ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry,
-    TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
+    SessionPlacement, SessionPlacementPath, SessionSystemPrompt, SessionTemplateContentDigest,
+    SessionTemplateName, SessionTemplateProvenance, SettingOverlay,
+    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
+    SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
+    SubmitInputResult, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution,
+    ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
+    ToolBatchExecutionFailure, ToolCallProposal, ToolDecisionRationale, ToolDenialReason,
+    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
+    ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequestId,
+    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
+    TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,

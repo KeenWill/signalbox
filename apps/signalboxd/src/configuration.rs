@@ -565,6 +565,13 @@ pub struct HubModelConfiguration {
     model_settings_lower_layers: HashMap<DirectModelSelection, ModelSettingsLowerLayers>,
     billing_rates: HashMap<ResolvedProviderTarget, ModelBillingRates>,
     target_adapters: HashMap<ResolvedProviderTarget, ModelAdapter>,
+    /// Pool name per target that can serve a call, selectable or serving-only.
+    ///
+    /// Selection keys on the target that actually serves the call, so a fast
+    /// alternate target must be indexed here under its mapped family's pool;
+    /// deriving this from selectable routes alone left those targets with no
+    /// policy at all.
+    target_credential_pools: HashMap<ResolvedProviderTarget, Arc<str>>,
     provider_model_adapters: HashMap<String, ModelAdapter>,
     session_credential_pin: SessionCredentialPin,
     fallback_credential_profile: Arc<str>,
@@ -906,6 +913,7 @@ impl HubModelConfiguration {
         let mut routes = HashMap::with_capacity(models.len());
         let mut target_billing_rates = HashMap::with_capacity(models.len());
         let mut target_adapters = HashMap::with_capacity(models.len());
+        let mut target_credential_pools = HashMap::with_capacity(models.len());
         let mut target_model_families = HashMap::with_capacity(models.len());
         let mut target_fast_targets = HashMap::new();
         let mut target_provider_models = HashMap::with_capacity(models.len());
@@ -1025,6 +1033,12 @@ impl HubModelConfiguration {
             {
                 return Err(HubModelConfigurationError::ConflictingTarget);
             }
+            if let Some(previous) =
+                target_credential_pools.insert(target, Arc::clone(&mapping.credential_pool))
+                && previous != mapping.credential_pool
+            {
+                return Err(HubModelConfigurationError::ConflictingTarget);
+            }
             if let Some(fast_target) = fast_target {
                 target_fast_targets.insert(target, fast_target);
             }
@@ -1113,6 +1127,7 @@ impl HubModelConfiguration {
                 target_provider_models.insert(target, provider_model.clone());
                 target_adapters.insert(target, mapping.adapter);
                 target_model_families.insert(target, Arc::clone(&model_family));
+                target_credential_pools.insert(target, Arc::clone(&mapping.credential_pool));
                 if let Some(previous) =
                     provider_model_adapters.insert(provider_model.clone(), mapping.adapter)
                     && previous != mapping.adapter
@@ -1203,6 +1218,7 @@ impl HubModelConfiguration {
             model_settings_lower_layers,
             billing_rates,
             target_adapters,
+            target_credential_pools,
             provider_model_adapters,
             session_credential_pin,
             fallback_credential_profile,
@@ -1341,20 +1357,20 @@ impl HubModelConfiguration {
 
     /// Projects admitted pool policy into the persistence-owned runtime form.
     pub fn credential_pool_runtime_catalog(&self) -> CredentialPoolRuntimeCatalog {
-        self.routes
-            .values()
-            .filter_map(|route| {
-                let pool = self.credential_pools.get(route.credential_pool())?;
+        self.target_credential_pools
+            .iter()
+            .filter_map(|(target, pool_name)| {
+                let pool = self.credential_pools.get(pool_name)?;
                 let mut members = pool.members().to_vec();
                 members.sort_by_key(|member| member.priority());
                 let members = members
                     .into_iter()
                     .map(|member| {
-                        CredentialPoolRuntimeMember::new(member.profile(), member.priority().get())
+                        CredentialPoolRuntimeMember::new(member.profile(), member.priority())
                     })
                     .collect::<Vec<_>>();
                 Some((
-                    route.target(),
+                    *target,
                     CredentialPoolRuntimePolicy::new(
                         pool.name(),
                         members,
@@ -1362,6 +1378,7 @@ impl HubModelConfiguration {
                         runtime_pool_action(pool.action(CredentialPoolTrigger::QuotaExhausted)),
                         runtime_pool_action(pool.action(CredentialPoolTrigger::RateLimited)),
                         runtime_pool_action(pool.action(CredentialPoolTrigger::Overloaded)),
+                        runtime_pool_action(pool.action(CredentialPoolTrigger::CredentialRejected)),
                     ),
                 ))
             })
@@ -3590,7 +3607,9 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const DUPLICATE_PROVIDER_WATCH_REPOSITORY: &str = "NAMESPACE/PROJECT";
     const DUPLICATE_PROVIDER_SIGNAL_REVIEWER: &str = "SIGNAL-REVIEWER";
     const RELATIVE_WATCH_CREDENTIAL_FILE: &str = "relative/watch-token";
-    const WATCH_RULE_ID: &str = "merge-forward-on-conflict";
+    const WATCH_RULE_ID: &str = "watch-forward";
+    const EAGER_WATCH_RULE_ID: &str = "merge-forward-on-base-advance";
+    const EAGER_WATCH_HEAD_PATTERN: &str = "^agent/.+$";
     const WATCH_TEMPLATE: &str = "merge-forward";
     const CONFIGURATION: &str = r#"
 version = 1
@@ -3962,6 +3981,29 @@ template = "{WATCH_TEMPLATE}"
         )
     }
 
+    fn configuration_with_eager_merge_forward_rule() -> String {
+        format!(
+            r#"{}
+
+[[repository_watch.rules]]
+id = "{EAGER_WATCH_RULE_ID}"
+version = 1
+singleton_per = "pull_request"
+cooldown_seconds = 0
+
+[repository_watch.rules.matcher]
+event_kinds = ["base_advanced"]
+repo = "{PROVIDER_WATCH_REPOSITORY}"
+head_branch_regex = "{EAGER_WATCH_HEAD_PATTERN}"
+
+[[repository_watch.rules.actions]]
+kind = "dispatch_session"
+template = "{WATCH_TEMPLATE}"
+"#,
+            configuration_with_repository_watch()
+        )
+    }
+
     fn watch_interval_fixture() -> Duration {
         Duration::from_secs(WATCH_INTERVAL_SECONDS)
     }
@@ -4140,7 +4182,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
     }
 
     #[test]
-    fn repository_watch_parses_the_conflict_only_live_rule() {
+    fn repository_watch_parses_the_structured_rule_fields() {
         let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
             .expect("repository-watch rule fixture is valid");
         let rule = &configured
@@ -4160,6 +4202,37 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             rule.matcher().mergeable_state(),
             [MergeableState::Conflicting]
         );
+        assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
+    }
+
+    #[test]
+    fn repository_watch_parses_the_eager_merge_forward_rule() {
+        let configured =
+            HubModelConfiguration::parse(&configuration_with_eager_merge_forward_rule())
+                .expect("eager merge-forward rule fixture is valid");
+        let rule = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .rules()[0];
+
+        assert_eq!(rule.id().as_str(), EAGER_WATCH_RULE_ID);
+        assert_eq!(rule.version().get(), 1);
+        assert_eq!(rule.singleton_per(), RepoWatchSingletonScope::PullRequest);
+        assert_eq!(rule.cooldown(), Duration::ZERO);
+        assert_eq!(
+            rule.matcher().event_kinds(),
+            [RepoWatchEventKindNameV1::BaseAdvanced]
+        );
+        assert_eq!(
+            rule.matcher()
+                .head_branch()
+                .expect("live rule narrows dispatched pull requests")
+                .as_str(),
+            EAGER_WATCH_HEAD_PATTERN
+        );
+        assert_eq!(rule.matcher().base_branch(), None);
+        assert!(rule.matcher().mergeable_state().is_empty());
+        assert!(rule.matcher().conclusion().is_empty());
         assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
     }
 

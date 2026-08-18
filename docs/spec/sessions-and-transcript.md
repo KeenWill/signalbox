@@ -571,6 +571,17 @@ creation-time override, or inference from missing attribution is stored. The
 dependency for future creation-derived visibility is recorded in
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention).
 
+**Committed unimplemented functionality.** No present surface constructs a
+program creation cause. The closed creation-cause vocabulary gains `workflow`
+and `eval` variants for sessions created by registered programs under the
+[program substrate](program-substrate.md): each names the creating program run
+(and, for `eval`, the trial identity the [evaluation system](eval-system.md)
+defines), is constructible only by the substrate's host-side session capability,
+and joins the stored closed-discriminator convention beside `user_initiated` and
+`delegated`. This constrains present change: creation-cause readers must not
+assume the two-variant vocabulary is final, and the stored discriminator's
+decode surface must stay extensible without reinterpreting existing spellings.
+
 ## The session aggregate
 
 The long-lived domain `Session` (`crates/domain/src/session.rs`) contains

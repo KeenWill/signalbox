@@ -29,7 +29,7 @@ use signalbox_model_runtime::{FastMode, ModelCapabilityCatalog, ModelCapabilityE
 
 use crate::config::AnthropicConfig;
 use crate::response::decode_buffered_response;
-use crate::status::{classify_error, classify_error_status};
+use crate::status::{classify_error_status, classify_error_with_proof};
 use crate::stream::{LaterRecords, StreamDecoder, StreamStep};
 use crate::translate::build_request_with_fast_mode;
 use crate::wire::{CountTokensRequest, CountTokensResponse, ErrorEnvelope};
@@ -804,16 +804,14 @@ async fn finish_error(
         }) = serde_json::from_slice(&body)
         && envelope_type == "error"
     {
-        let kind = classify_error(status, error.error_type.as_deref());
+        let (kind, non_acceptance_proven) =
+            classify_error_with_proof(status, error.error_type.as_deref());
         return TerminalEvidence::ProviderError(ProviderErrorEvidence {
             exchange,
             // The Messages error envelope reports no model identity.
             reported_model: None,
             kind,
-            non_acceptance_proven: matches!(
-                kind,
-                ProviderErrorKind::RateLimited | ProviderErrorKind::Overloaded
-            ),
+            non_acceptance_proven,
             native: error.into_native_facts(),
             usage: TokenUsage::unreported(),
         });

@@ -233,6 +233,8 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::AppendBlobUpload { .. }
         | ClientRequest::CommitBlobUpload {}
         | ClientRequest::AbortBlobUpload {}
+        | ClientRequest::ReadBlobMetadata { .. }
+        | ClientRequest::ReadBlobChunk { .. }
         | ClientRequest::ReadImportedConversation { .. }
         | ClientRequest::CreateSessionFromImportedFrontier { .. }
         | ClientRequest::ReconcileTurn { .. }

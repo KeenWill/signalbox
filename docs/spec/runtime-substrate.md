@@ -21,7 +21,7 @@ verified through PR #333 (`agent/ci-tells-truth`); its feature classification,
 ambient-skill catalog probe, and pinned version were verified against the
 `0.146.0` executable through PR #321 (`renovate/openai-codex-0.x`). Its
 twice-daily schedule and workflow-self-change trigger were verified through PR
-#471 (`agent/codex-smoke-schedule`). The Codex CLI adapter's prompt
+`#471` (`agent/codex-smoke-schedule`). The Codex CLI adapter's prompt
 tool-authority preamble is verified against this PR
 (`agent/phantom-prohibition`). The `signalboxd` names this page states for the
 composition root, its telemetry, and the production `FileCredentialAccess` were
@@ -46,7 +46,7 @@ composition is verified against this PR (`agent/wire-claude-cli-adapter`), and
 the OpenAI adapter's against this PR (`agent/wire-openai-adapter`). The
 Anthropic compatibility smoke was verified through PR #465
 (`agent/anthropic-api-smoke`), and the OpenAI compatibility smoke through PR
-#466 (`agent/openai-api-smoke`). The cross-adapter `ToolCallsAtLoss` fact
+`#466` (`agent/openai-api-smoke`). The cross-adapter `ToolCallsAtLoss` fact
 carried in boundary-loss evidence is verified against this PR
 (`agent/typed-loss-cause`), against every streamed and buffered loss path in the
 four adapters. This page covers the provider-neutral operation, observation, and
@@ -326,15 +326,20 @@ content, reported usage, or a finish token is already observed. Non-acceptance
 is precisely what such an exchange disproves, so attaching the proof there would
 authorize a second paid call for work the provider already did. An availability
 failure that arrives mid-stream therefore terminalizes the turn as any other
-known failure does, with no successor. Neither CLI adapter can supply the proof
-at all: each classifies from the rendered failure message by substring, which is
-exactly the native prose this contract already refuses as a derivation, and
-neither surfaces a structured native code its mapping could name. Admitting one
-under a CLI would need that CLI to expose a stable machine-readable
-discriminator first. The asymmetry is deliberate. An under-decoded rejection
-loses a substitution the deployment had configured, which costs one turn; a
-status-only or prose-derived inference that the provider did not act would
-authorize a second paid call on evidence the provider never gave.
+known failure does, with no successor. The two CLI adapters differ here. The
+Claude Code CLI cannot supply the proof at all: it classifies from the rendered
+failure message by substring, which is exactly the native prose this contract
+already refuses as a derivation, and it surfaces no structured native code its
+mapping could name. Admitting one under it would need that CLI to expose a
+stable machine-readable discriminator first. The Codex CLI classifies from that
+same rendered prose, but its JSONL lifecycle carries the machine-readable
+closure this contract demands, so it does supply the proof — under the exact,
+noncontradictory `turn.failed` closure stated above and never from the prose
+alone. A trailer that contradicts the recorded stream error fails closed and
+carries nothing. The asymmetry is deliberate. An under-decoded rejection loses a
+substitution the deployment had configured, which costs one turn; a status-only
+or prose-derived inference that the provider did not act would authorize a
+second paid call on evidence the provider never gave.
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion. An unrecognized finish token is boundary loss

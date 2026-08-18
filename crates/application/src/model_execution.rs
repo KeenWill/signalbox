@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 
+// numeric-bound: ceiling - protects against an unbounded paid provider loop
 const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 32;
 
 use signalbox_domain::{
@@ -841,6 +842,15 @@ pub enum RetainedModelCallObservationStatus {
     Pending,
     /// The exact observation is already represented durably.
     AlreadyCommitted,
+    /// The observation committed and its availability successor is durable.
+    ///
+    /// Distinct from `AlreadyCommitted` because the turn is still active on
+    /// the successor attempt: the caller must keep driving it after the
+    /// enclosed remaining delay rather than treating the turn as finished.
+    AvailabilitySuccessorCommitted {
+        /// Remaining wait before the successor attempt may prepare.
+        retry_backoff: Duration,
+    },
     /// A newer logical terminal proof made the retained provider result inert.
     DiscardedByLogicalTerminal,
 }
@@ -1492,6 +1502,15 @@ where
                             retained.call(),
                         ));
                     }
+                    Ok(RetainedModelCallObservationStatus::AvailabilitySuccessorCommitted {
+                        retry_backoff,
+                    }) => {
+                        // The commit landed with its successor, so the turn is
+                        // active on a new attempt rather than terminal. Waiting
+                        // out the remaining delay returns the caller to ordinary
+                        // preparation, which owns the successor from here.
+                        return Ok(ModelCallExecutionOutcome::RetryBackoff(retry_backoff));
+                    }
                     Ok(RetainedModelCallObservationStatus::Pending) => {
                         return self
                             .commit_terminal_observation(
@@ -1788,17 +1807,23 @@ where
         loop {
             let mut identities =
                 self.next_terminal_identities(observation.observation(), &tool_approvals);
+            // Every classified pool trigger evaluates its frozen action, not
+            // only the ones that could substitute a member on this turn.
+            // `switch_next_turn`, `avoid_new_sessions`, and `quarantine`
+            // terminalize the call and persist a durable exclusion, so gating
+            // them on substitution proof silently degraded them to `stay`.
+            // Persistence still requires the proof before creating a successor.
             if matches!(
                 observation.provider_failure_cause(),
                 Some(
                     signalbox_domain::ProviderModelCallFailureCause::RateLimited
                         | signalbox_domain::ProviderModelCallFailureCause::QuotaExhausted
                         | signalbox_domain::ProviderModelCallFailureCause::Overloaded
+                        | signalbox_domain::ProviderModelCallFailureCause::CredentialRejected
                 )
-            ) && observation.non_acceptance_proven()
-                && let ModelCallTerminalIdentityCandidates::Exact(
-                    signalbox_domain::ModelCallTerminalIdentities::Failed(failed),
-                ) = identities
+            ) && let ModelCallTerminalIdentityCandidates::Exact(
+                signalbox_domain::ModelCallTerminalIdentities::Failed(failed),
+            ) = identities
             {
                 identities = ModelCallTerminalIdentityCandidates::Availability {
                     failed,
@@ -1820,6 +1845,9 @@ where
                     return Ok(ModelCallExecutionOutcome::AvailabilitySuccessor(successor));
                 }
                 Ok(Some(ModelCallObservationCommitOutcome::PoolExhausted(exhausted))) => {
+                    if let CredentialPoolExhaustedOutcome::AfterCall { terminal, .. } = &exhausted {
+                        report_model_call_terminalization(terminal);
+                    }
                     return Ok(ModelCallExecutionOutcome::PoolExhausted(Box::new(
                         exhausted,
                     )));

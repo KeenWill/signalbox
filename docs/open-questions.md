@@ -466,6 +466,13 @@ https://github.com/KeenWill/signalbox/pull/306#discussion_r3669682038
   never make automatic, richer values beyond the
   [fixed profile/override ladder](spec/runner-protocol.md#sandbox-profiles-and-approval),
   and dynamic replacement/equality semantics remain undecided.
+- **External approval-judge corpus adaptation.** Whether and how to adapt public
+  agent-safety datasets such as R-Judge, AgentHarm, and ToolEmu into the
+  approval-judge case schema remains undecided. A future mapping must select and
+  pin source revisions, establish each dataset's label mapping and trajectory
+  treatment, and verify license terms before redistribution; source content is
+  not vendored. Blocks only external-corpus evaluation, not the synthetic corpus
+  or eval harness.
 - **Turn-origin instructions in the approval-judge request.** The delegated
   request context carries session-scoped authority — the goal generation the
   judged turn is bound to, the template name, and the system prompt frozen for
@@ -700,6 +707,20 @@ the implemented session and external-link evidence.
   constraint; mark/sweep rather than reference counting is nonbinding
   exploration guidance only.
 
+## Program substrate and evaluations
+
+The substrate and evaluation contracts are owned by
+[program-substrate](spec/program-substrate.md) and
+[eval-system](spec/eval-system.md). Two edges remain deferred:
+
+- **Remote and out-of-process program hosts.** The frame protocol is the seam;
+  only the in-daemon host is committed. Hosting programs in a separate
+  supervised process or on remote execution infrastructure requires a future
+  transport decision. Blocks nothing committed.
+- **Evaluation exporters.** Run scalars and per-case tables toward external
+  experiment trackers are deferred; the SQL surface is the contract until a
+  concrete tracker need appears. Blocks nothing committed.
+
 ## Destination features (target model)
 
 These unresolved foundation requirements are authoritative here. The
@@ -709,8 +730,12 @@ and ordering.
 - **Goal identity and lifecycle.** Durable persistent-objective identity and
   lifecycle require a future foundation decision. Blocks platform goal mode.
 - **Standing update-subscription lifecycle.** Identity, lifetime, delivery, and
-  cancellation for standing update subscriptions require a future foundation
-  decision. Blocks the planned callback surface.
+  cancellation for client-facing standing update subscriptions require a future
+  foundation decision. Blocks the planned callback surface. Narrowed: durable
+  program event subscriptions — identity, wake delivery, and cancellation for
+  registered programs — are decided and owned by
+  [program-substrate](spec/program-substrate.md), and are no longer part of this
+  question.
 - **Review-workflow orchestration.** The
   [review-workflow foundation](spec/review-workflows.md) fixes the target, run,
   pass, finding, external-link, and store contracts. The caller-driven

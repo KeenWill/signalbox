@@ -14,6 +14,7 @@ mod context_compaction;
 pub use approval_judge::{
     ApprovalJudgeModel, ApprovalJudgeModelError, ApprovalJudgeModelRequest,
     ApprovalJudgeModelResult, PreparedApprovalJudgeModelCall, RuntimeApprovalJudgeModel,
+    approval_judge_output_contract_text,
 };
 pub use context_compaction::{
     ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,
@@ -56,6 +57,7 @@ use signalbox_model_runtime::{
 ///
 /// The provider controls the reported spelling, so the diagnostic projection
 /// is bounded before it can reach a log line.
+// numeric-bound: tunable - controls retained provider identity detail
 const DIAGNOSTIC_MODEL_IDENTITY_LIMIT: usize = 128;
 
 const MODEL_IDENTITY_CHANGE_MESSAGE: &str = "Signalbox session event: your model identity is now";

@@ -879,6 +879,19 @@ additionally carries the bounded identity that actually served, so an operator
 can name the model the provider used. The runtime crates themselves remain
 logging-free ([runtime-substrate](runtime-substrate.md)).
 
+**Committed unimplemented functionality.** No present session surface carries a
+structured-output contract. For program-driven turns under the
+[program substrate](program-substrate.md), the accepted input records the
+program's declared output schema, that schema flows through turn preparation
+into the prepared model operation, and the runtime boundary enforces it — the
+turn's outcome payload validates against the declared schema or the turn reports
+its failure, never an unvalidated approximation. The
+[model-runtime substrate](runtime-substrate.md) already admits an optional
+per-call structured-output contract; this paragraph constrains the session path
+between them: nothing may assume a prepared model operation carries no output
+contract, and the prepared-operation shape must stay extensible to the recorded
+schema without reinterpreting existing calls.
+
 ## Terminal outcomes
 
 `apply_terminal_observation` derives one of seven outcomes from fresh state, and
@@ -1046,18 +1059,9 @@ prints the semantic transcript; it is deliberately not the client protocol.
   `DuplicateRiskAccepted`, replacement call, or outcome-authority transfer is
   implemented. Stop-caused ambiguity terminalizes proof-bearing reconciliation,
   but no later reconciliation workflow is implemented.
-- **Committed unimplemented functionality.** An
-  [availability successor call](#availability-successor-calls) — the `successor`
-  ending of
-  [the credential-availability machine](credential-availability.md#the-credential-availability-machine)
-  — is designed as durable evidence, but no present migration, repository
-  operation, or reconstitution path stores or recovers one, as
-  [persistence protocol](persistence-protocol.md) states under its
-  availability-successor storage contract, so predecessor lineage is not
-  presently recoverable. Once its implementing child lands that storage, the
-  chain will still be visible only after the fact: no client surface renders
-  that a successor is being selected. That transient visibility surface is
-  routed through
+- Availability-successor chains are visible only after the fact: no client
+  surface renders that a successor is being selected. That transient visibility
+  surface remains routed through
   [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 - Streaming deltas are collected but never delivered as transient drafts, and
   the designed early-observation pause/commit/resume path is unimplemented.
