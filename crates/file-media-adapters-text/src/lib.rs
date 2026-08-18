@@ -26,9 +26,10 @@ const JSON_MEDIA_TYPE: &str = "application/json";
 const CSV_MEDIA_TYPE: &str = "text/csv";
 const TEXT_VIEW_NAME: &str = "text";
 const STRUCTURED_VIEW_NAME: &str = "structured";
+// Tunable effective ceiling; bounds detection I/O while retaining useful structure evidence.
 const PROBE_PREFIX_BYTES: u64 = 4_096;
 
-/// Maximum bytes one text-family adapter reads or returns.
+/// Hard safety ceiling; bounds whole-source parsing and result allocation.
 pub const MAX_TEXT_FAMILY_BYTES: u64 = 131_072;
 
 /// Compiled provider for the three version-one text-family readers.
@@ -117,6 +118,7 @@ pub fn text_family_declaration()
             "malformed_json",
             "source_too_large",
             "depth_limit_exceeded",
+            "container_entry_limit_exceeded",
         ],
         fallback: StreamingTextFallback::Disabled,
     })?;

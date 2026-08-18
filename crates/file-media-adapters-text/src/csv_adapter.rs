@@ -95,7 +95,7 @@ struct CsvTable {
 }
 
 fn parse_table(text: &str) -> Result<CsvTable, &'static str> {
-    if !quotes_are_well_formed(text) {
+    if !quotes_are_well_formed(text) || has_blank_record(text) {
         return Err("malformed_csv");
     }
     let mut reader = csv::ReaderBuilder::new()
@@ -175,6 +175,40 @@ fn quotes_are_well_formed(text: &str) -> bool {
         };
     }
     !matches!(state, QuoteState::Quoted)
+}
+
+fn has_blank_record(text: &str) -> bool {
+    let mut in_quotes = false;
+    let mut record_has_content = false;
+    let mut bytes = text.bytes().peekable();
+    while let Some(byte) = bytes.next() {
+        if in_quotes {
+            if byte == b'"' && bytes.peek() == Some(&b'"') {
+                let _ = bytes.next();
+            } else if byte == b'"' {
+                in_quotes = false;
+            }
+            record_has_content = true;
+        } else {
+            match byte {
+                b'"' => {
+                    in_quotes = true;
+                    record_has_content = true;
+                }
+                b'\r' | b'\n' => {
+                    if byte == b'\r' && bytes.peek() == Some(&b'\n') {
+                        let _ = bytes.next();
+                    }
+                    if !record_has_content {
+                        return true;
+                    }
+                    record_has_content = false;
+                }
+                _ => record_has_content = true,
+            }
+        }
+    }
+    false
 }
 
 fn malformed(reason: &str) -> ProcessorValidationOutput {

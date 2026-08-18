@@ -1,8 +1,8 @@
 use serde::Deserialize;
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    ProbeStrength, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, ValidationEvidence, VerifiedBlobSource,
+    MAX_OBSERVED_CONTAINER_ENTRIES, ProbeStrength, ProcessorFailure, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ValidationEvidence, VerifiedBlobSource,
 };
 
 use crate::{JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, options_are_empty, source};
@@ -14,7 +14,8 @@ pub(crate) async fn probe(
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorProbeOutput, ProcessorFailure> {
     let prefix = source::read_probe_prefix(source, cancellation).await?;
-    let candidate = has_json_structure(&prefix);
+    let complete = source.byte_length().get() <= prefix.len() as u64;
+    let candidate = has_json_structure(&prefix, complete);
     if candidate {
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(JSON_MEDIA_TYPE),
@@ -25,10 +26,13 @@ pub(crate) async fn probe(
     }
 }
 
-fn has_json_structure(prefix: &[u8]) -> bool {
+fn has_json_structure(prefix: &[u8], complete: bool) -> bool {
     let prefix = trim_ascii_start(prefix);
-    if let Some(value_end) = parse_value_prefix(prefix) {
-        return prefix[value_end..].iter().all(u8::is_ascii_whitespace);
+    if complete {
+        let Ok(text) = std::str::from_utf8(prefix) else {
+            return false;
+        };
+        return validate_json(text).is_ok();
     }
     let Some((&opening, rest)) = prefix.split_first() else {
         return false;
@@ -38,18 +42,18 @@ fn has_json_structure(prefix: &[u8]) -> bool {
         (b'{', Some(_)) => rest.iter().enumerate().any(|(index, byte)| {
             *byte == b':' && serde_json::from_slice::<String>(&rest[..index]).is_ok()
         }),
-        (b'[', Some(_)) => has_array_structure(rest),
+        (b'[', Some(_)) => has_array_structure(rest, complete),
         _ => false,
     }
 }
 
-fn has_array_structure(rest: &[u8]) -> bool {
+fn has_array_structure(rest: &[u8], complete: bool) -> bool {
     let Some(first_end) = parse_value_prefix(rest) else {
         return false;
     };
     let after_first = trim_ascii_start(&rest[first_end..]);
     match after_first.split_first() {
-        Some((b']', trailing)) => trailing.iter().all(u8::is_ascii_whitespace),
+        Some((b']', trailing)) => complete && trailing.iter().all(u8::is_ascii_whitespace),
         Some((b',', after_comma)) => {
             let after_comma = trim_ascii_start(after_comma);
             let Some(second_end) = parse_value_prefix(after_comma) else {
@@ -58,7 +62,7 @@ fn has_array_structure(rest: &[u8]) -> bool {
             let after_second = trim_ascii_start(&after_comma[second_end..]);
             match after_second.split_first() {
                 Some((b',', _)) => true,
-                Some((b']', trailing)) => trailing.iter().all(u8::is_ascii_whitespace),
+                Some((b']', trailing)) => complete && trailing.iter().all(u8::is_ascii_whitespace),
                 _ => false,
             }
         }
@@ -130,6 +134,11 @@ pub(crate) async fn read(
             limit_kind: String::from("depth_limit_exceeded"),
         });
     }
+    if json_container_entries_exceed(&value, MAX_OBSERVED_CONTAINER_ENTRIES) {
+        return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+            limit_kind: String::from("container_entry_limit_exceeded"),
+        });
+    }
     let body_json = serde_json::to_string(&value).map_err(|_| ProcessorFailure::Failed)?;
     if body_json.len() > MAX_TEXT_FAMILY_BYTES as usize {
         return Ok(ProcessorReadOutput::OutputUnitTooLarge);
@@ -199,6 +208,32 @@ fn json_value_depth_exceeds(value: &serde_json::Value, maximum_depth: u32) -> bo
             }
             serde_json::Value::Object(values) => {
                 pending.extend(values.values().map(|value| (value, child_depth)));
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+    }
+    false
+}
+
+/// Checks concentrated container fan-out iteratively before output crosses the worker.
+fn json_container_entries_exceed(value: &serde_json::Value, maximum_entries: u64) -> bool {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            serde_json::Value::Array(values) => {
+                if values.len() as u64 > maximum_entries {
+                    return true;
+                }
+                pending.extend(values);
+            }
+            serde_json::Value::Object(values) => {
+                if values.len() as u64 > maximum_entries {
+                    return true;
+                }
+                pending.extend(values.values());
             }
             serde_json::Value::Null
             | serde_json::Value::Bool(_)

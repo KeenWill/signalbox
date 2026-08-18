@@ -54,8 +54,22 @@ pub(crate) fn complete_json_array_followed_by_prose() -> Vec<u8> {
     b"[1,2]\nbody".to_vec()
 }
 
+pub(crate) fn complete_json_prefix_followed_outside_probe() -> Vec<u8> {
+    let mut bytes = b"[1,2]".to_vec();
+    bytes.extend_from_slice(&vec![b' '; 4_091]);
+    bytes.extend_from_slice(b"body");
+    bytes
+}
+
 pub(crate) fn deeply_nested_json_within_source_ceiling() -> Vec<u8> {
     format!("{}0{}", "[".repeat(60_000), "]".repeat(60_000)).into_bytes()
+}
+
+pub(crate) fn json_beyond_container_entry_ceiling() -> Vec<u8> {
+    let mut bytes = b"[".to_vec();
+    bytes.extend_from_slice(b"0,".repeat(10_000).as_slice());
+    bytes.extend_from_slice(b"0]");
+    bytes
 }
 
 pub(crate) fn csv_table() -> Vec<u8> {
@@ -75,6 +89,10 @@ pub(crate) fn truncated_csv() -> Vec<u8> {
 
 pub(crate) fn csv_with_quotes_inside_unquoted_field() -> Vec<u8> {
     b"h1,h2\nab\"cd\"ef,x\n".to_vec()
+}
+
+pub(crate) fn csv_with_blank_record() -> Vec<u8> {
+    b"h1,h2\nv1,v2\n\nv3,v4\n".to_vec()
 }
 
 pub(crate) fn prose_with_comma_and_newline() -> Vec<u8> {

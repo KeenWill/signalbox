@@ -210,6 +210,45 @@ async fn complete_json_array_followed_by_prose_uses_text_fallback() -> Result<()
 }
 
 #[tokio::test]
+async fn complete_json_prefix_without_eof_uses_text_fallback() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::complete_json_prefix_followed_outside_probe());
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_validated_media(inspection, "text/plain");
+    Ok(())
+}
+
+#[tokio::test]
+async fn deeply_nested_json_is_structurally_probed() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::json_beyond_serde_recursion_limit());
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_declared_mismatch(inspection, "text/plain", "application/json");
+    Ok(())
+}
+
+#[tokio::test]
+async fn json_read_reports_the_container_entry_limit() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::json_beyond_container_entry_ceiling());
+    let expected = ReasonCode::try_new("container_entry_limit_exceeded")?;
+
+    let result = support::read(
+        &source,
+        "application/json",
+        "structured",
+        &DirectProcessor::provider(),
+    )
+    .await;
+    assert_eq!(
+        result,
+        Err(FileMediaFailure::ExpansionLimitExceeded {
+            limit_kind: expected
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn extremely_deep_json_reports_depth_limit_without_stack_walk() -> Result<(), Box<dyn Error>>
 {
     let source = MemorySource::new(fixtures::deeply_nested_json_within_source_ceiling());
@@ -272,6 +311,15 @@ async fn unprobed_declared_csv_candidate_is_unknown() -> Result<(), Box<dyn Erro
 #[tokio::test]
 async fn csv_rejects_quotes_inside_an_unquoted_field() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::csv_with_quotes_inside_unquoted_field());
+
+    let inspection = support::inspect(&source, "text/csv").await?;
+    support::assert_malformed_reason(inspection, "malformed_csv");
+    Ok(())
+}
+
+#[tokio::test]
+async fn csv_rejects_a_blank_record_as_typed_malformed() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::csv_with_blank_record());
 
     let inspection = support::inspect(&source, "text/csv").await?;
     support::assert_malformed_reason(inspection, "malformed_csv");
