@@ -260,14 +260,23 @@ fn completion_script() -> Script {
     }))
 }
 
-async fn kill_runner_and_stage_replacement(
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct RunnerLossFacts {
+    state_kind: String,
+    pinned_runner_id: uuid::Uuid,
+    loss_source_kind: String,
+    placement_revision: i64,
+}
+
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct ReplacementCounts {
+    staged_rows: i64,
+    terminal_results: i64,
+}
+
+async fn kill_runner_and_wait_for_loss(
     runner: &mut tokio::process::Child,
     loss_observer: &mut watch::Receiver<Option<RunnerConnectionTransition>>,
-    store: &RunnerProtocolStore,
-    pool: &PgPool,
-    session: SessionId,
-    runner_id: RunnerId,
-    placement_revision: RunnerGeneration,
 ) -> Result<(), Box<dyn Error>> {
     runner.start_kill()?;
     timeout(PROCESS_TIMEOUT, runner.wait())
@@ -281,66 +290,6 @@ async fn kill_runner_and_stage_replacement(
     .await
     .expect("the daemon propagates runner loss before the integration deadline")
     .expect("the loss observer remains connected");
-    let lost_placement = store
-        .load_placement(session)
-        .await?
-        .expect("the pinned proof placement remains reconstitutable after loss");
-    let loss_facts: (String, uuid::Uuid, String, i64) = sqlx::query_as(
-        "SELECT placement.state_kind, placement.pinned_runner_id,
-                placement.loss_source_kind, placement.placement_revision::bigint
-           FROM runner_current_session_placement AS current_head
-           JOIN runner_session_placement_record AS placement
-             ON placement.session_id = current_head.session_id
-            AND placement.event_ordinal = current_head.event_ordinal
-          WHERE current_head.session_id = $1",
-    )
-    .bind(session.into_uuid())
-    .fetch_one(pool)
-    .await?;
-    assert_eq!(lost_placement.placement().revision(), placement_revision);
-    assert_eq!(loss_facts.0, "runner_lost");
-    assert_eq!(loss_facts.1, runner_id.into_uuid());
-    assert_eq!(loss_facts.2, "connection");
-    assert_eq!(
-        loss_facts.3,
-        i64::try_from(placement_revision.get())
-            .expect("the proof placement revision fits PostgreSQL bigint")
-    );
-
-    let replacement_command = ReplaceLostRunner::new(
-        DurableCommandId::from_uuid(uuid::Uuid::from_u128(PROOF_REPLACEMENT_COMMAND)),
-        session,
-        placement_revision,
-        RunnerReplacementTarget::Runner(RunnerId::from_uuid(uuid::Uuid::from_u128(
-            PROOF_REPLACEMENT_RUNNER,
-        ))),
-    );
-    let replacement_identities = PinnedRunnerReplacementIdentities::new(
-        SemanticTranscriptEntryId::from_uuid(uuid::Uuid::from_u128(PROOF_REPLACEMENT_ENTRY)),
-        ContextFrontierId::from_uuid(uuid::Uuid::from_u128(PROOF_REPLACEMENT_FRONTIER)),
-    );
-    let staged = store
-        .stage_workspace_free_pinned_replacement(replacement_command, replacement_identities)
-        .await?;
-    let replayed = store
-        .stage_workspace_free_pinned_replacement(replacement_command, replacement_identities)
-        .await?;
-    let replacement_counts: (i64, i64) = sqlx::query_as(
-        "SELECT
-             (SELECT count(*) FROM runner_workspace_free_replacement_stage
-               WHERE command_id = $1),
-             (SELECT count(*) FROM replace_lost_runner_result
-               WHERE command_id = $1)",
-    )
-    .bind(replacement_command.command().into_uuid())
-    .fetch_one(pool)
-    .await?;
-    let expected_stage = PinnedRunnerReplacementOutcome::Staged {
-        command: replacement_command.command(),
-    };
-    assert_eq!(staged, expected_stage);
-    assert_eq!(replayed, expected_stage);
-    assert_eq!(replacement_counts, (1, 0));
     Ok(())
 }
 
@@ -899,16 +848,78 @@ async fn s30_s32_inv042_inv043_inv044_spawned_runner_executes_then_stages_replac
     );
     assert_eq!(model_runtime.received_operations().len(), 2);
 
-    Box::pin(kill_runner_and_stage_replacement(
-        &mut runner,
-        &mut loss_observer,
-        &store,
-        &pool,
-        session,
-        enrollment.runner(),
-        completed_correlation.placement_revision,
-    ))
+    kill_runner_and_wait_for_loss(&mut runner, &mut loss_observer).await?;
+    let lost_placement = store
+        .load_placement(session)
+        .await?
+        .expect("the pinned proof placement remains reconstitutable after loss");
+    let loss_facts: RunnerLossFacts = sqlx::query_as(
+        "SELECT placement.state_kind AS state_kind,
+                placement.pinned_runner_id AS pinned_runner_id,
+                placement.loss_source_kind AS loss_source_kind,
+                placement.placement_revision::bigint AS placement_revision
+           FROM runner_current_session_placement AS current_head
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = current_head.session_id
+            AND placement.event_ordinal = current_head.event_ordinal
+          WHERE current_head.session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
     .await?;
+    assert_eq!(
+        lost_placement.placement().revision(),
+        completed_correlation.placement_revision
+    );
+    assert_eq!(loss_facts.state_kind, "runner_lost");
+    assert_eq!(loss_facts.pinned_runner_id, enrollment.runner().into_uuid());
+    assert_eq!(loss_facts.loss_source_kind, "connection");
+    assert_eq!(
+        loss_facts.placement_revision,
+        i64::try_from(completed_correlation.placement_revision.get())
+            .expect("the proof placement revision fits PostgreSQL bigint")
+    );
+
+    let replacement_command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid::Uuid::from_u128(PROOF_REPLACEMENT_COMMAND)),
+        session,
+        completed_correlation.placement_revision,
+        RunnerReplacementTarget::Runner(RunnerId::from_uuid(uuid::Uuid::from_u128(
+            PROOF_REPLACEMENT_RUNNER,
+        ))),
+    );
+    let replacement_identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid::Uuid::from_u128(PROOF_REPLACEMENT_ENTRY)),
+        ContextFrontierId::from_uuid(uuid::Uuid::from_u128(PROOF_REPLACEMENT_FRONTIER)),
+    );
+    let staged = store
+        .stage_workspace_free_pinned_replacement(replacement_command, replacement_identities)
+        .await?;
+    let replayed = store
+        .stage_workspace_free_pinned_replacement(replacement_command, replacement_identities)
+        .await?;
+    let replacement_counts: ReplacementCounts = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM runner_workspace_free_replacement_stage
+               WHERE command_id = $1) AS staged_rows,
+             (SELECT count(*) FROM replace_lost_runner_result
+               WHERE command_id = $1) AS terminal_results",
+    )
+    .bind(replacement_command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let expected_stage = PinnedRunnerReplacementOutcome::Staged {
+        command: replacement_command.command(),
+    };
+    assert_eq!(staged, expected_stage);
+    assert_eq!(replayed, expected_stage);
+    assert_eq!(
+        replacement_counts,
+        ReplacementCounts {
+            staged_rows: 1,
+            terminal_results: 0,
+        }
+    );
 
     shutdown_sender.send(true)?;
     timeout(PROCESS_TIMEOUT, runtime)
