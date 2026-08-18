@@ -27,15 +27,15 @@ use signalbox_domain::{
     DurableCommandId, EndedToolAttempt, GoalGeneration, NormalizedToolArguments,
     PreparedDecideToolRequest, PreparedToolBatchDecision, PreparedToolResultProjection,
     ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput,
-    ResolvedContextFrontierSnapshot, SemanticTranscriptEntryPayload, SessionId,
-    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind,
-    ToolAttemptDispatchCorrelation, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
-    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionFailure,
-    ToolBatchReconstitutionInput, ToolDenialReason, ToolDispatchAuthority, ToolDispatchGeneration,
-    ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
-    ToolName, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent,
-    ToolResultText, TurnId,
+    ResolvedContextFrontierSnapshot, RunnerToolAttemptAuthorization,
+    SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind, ToolAttemptDispatchCorrelation,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolAttemptReconstitutionInput,
+    ToolAttemptReconstitutionState, ToolBatch, ToolBatchPhaseReconstitutionInput,
+    ToolBatchReconstitutionFailure, ToolBatchReconstitutionInput, ToolDenialReason,
+    ToolDispatchAuthority, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -1462,6 +1462,60 @@ pub(crate) async fn load_active_batch_from_connection(
     .reconstitute()
     .map(Some)
     .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
+}
+
+pub(crate) async fn authorize_runner_attempt_from_connection(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    attempt: ToolAttemptId,
+) -> Result<RunnerToolAttemptAuthorization, ToolLoopRepositoryError> {
+    let batch = load_active_batch_from_connection(connection, session, turn)
+        .await?
+        .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
+    let authorized = batch
+        .authorize_runner_attempt(attempt)
+        .map_err(|_| ToolLoopRepositoryError::InvalidTransition("tool attempt is not prepared"))?;
+    let correlation = authorized.correlation();
+    let turn_rows = sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'running'
+          WHERE turn_attempt_id = $1
+            AND turn_id = $2
+            AND session_id = $3
+            AND state_kind IN ('prepared', 'running')
+            AND end_variant IS NULL
+            AND end_disposition IS NULL",
+    )
+    .bind(correlation.issuing_attempt().into_uuid())
+    .bind(turn_id_to_uuid(correlation.turn()))
+    .bind(session_id_to_uuid(correlation.session()))
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    require_single(turn_rows, "runner tool issuing attempt authorization")?;
+    let attempt_rows = sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'in_flight'
+          WHERE attempt_id = $1
+            AND request_id = $2
+            AND session_id = $3
+            AND turn_id = $4
+            AND issuing_turn_attempt_id = $5
+            AND dispatch_generation = $6
+            AND state_kind = 'prepared'",
+    )
+    .bind(tool_attempt_id_to_uuid(correlation.attempt()))
+    .bind(tool_request_id_to_uuid(correlation.request()))
+    .bind(session_id_to_uuid(correlation.session()))
+    .bind(turn_id_to_uuid(correlation.turn()))
+    .bind(correlation.issuing_attempt().into_uuid())
+    .bind(Decimal::from(correlation.generation().as_u64()))
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    require_single(attempt_rows, "runner tool attempt authorization")?;
+    Ok(authorized)
 }
 
 /// Loads the exact frontier from which a runner-recovery interrupt must

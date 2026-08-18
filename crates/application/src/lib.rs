@@ -12,6 +12,7 @@ mod list_conversations;
 mod load_session;
 mod model_execution;
 mod operator_failure;
+mod pinned_runner_dispatch;
 mod promote_pending_runner;
 mod replace_lost_runner_before_pin;
 mod replace_session_defaults;
@@ -76,6 +77,10 @@ pub use model_execution::{
     ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
 };
 pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
+pub use pinned_runner_dispatch::{
+    PinnedRunnerDispatchRequest, PinnedRunnerDispatchService, PinnedRunnerDispatchTransaction,
+    RunnerLeaseIdGenerator, UuidV7RunnerLeaseIdGenerator,
+};
 pub use promote_pending_runner::{
     PromotePendingRunnerOutcome, PromotePendingRunnerRequest, PromotePendingRunnerService,
     PromotePendingRunnerTransaction,

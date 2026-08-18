@@ -31,7 +31,9 @@ verified against this PR
 pinned-replacement command claim and provisioning-stage producer were verified
 against this PR (`agent/runner-replacement-provisioning-transaction`). The exact
 lease-offer registration and execution-placement reconstitution facts are
-verified against this PR (`agent/runner-lease-domain-correlation`).
+verified against this PR (`agent/runner-lease-domain-correlation`). Existing-pin
+attempt-and-offer atomicity is verified against this PR
+(`agent/runner-pinned-dispatch-transaction`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -604,7 +606,8 @@ Representation rules, all enforced in the schema:
   Equal replay returns the first authorization or refusal; unequal reuse returns
   a command conflict. A workspace-free or pre-pin placement rolls the claim back
   and returns `NotApplicable`, leaving its terminal replacement transaction as
-  the only command owner. No transaction remains open across runner I/O.
+  the only command-claiming transaction. No transaction remains open across
+  runner I/O.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their
@@ -1099,13 +1102,20 @@ Locks per transaction, in acquisition order:
 - **Runner dispatch and result**: `session_scheduler` is the first lock,
   followed by enrollment, current runner connection/loss, registration,
   placement, current credential grant when present, and lease heads in the total
-  order above. The initial dispatch transaction then stores workspace receipt
-  consumption, pin, grant, `InFlight` attempt, and offered lease together. Claim
-  locks the session scheduler first, followed by enrollment, runner,
-  registration, and lease in that order, and commits before acknowledgement.
-  Result admission takes the session scheduler first, then the applicable runner
-  and lease rows without acquiring an earlier omitted lock, and commits the
-  checked terminal attempt observation and claimed-lease completion together.
+  order above. Dispatch through an existing pin revalidates the caller's frozen
+  enrollment and registration revision, derives the tool only from the canonical
+  approved request, and commits its `InFlight` attempt and offered lease in one
+  transaction. A stale registration rolls back both facts. **Committed
+  unimplemented functionality.** No present transaction performs the initial
+  dispatch boundary that consumes a workspace receipt when present and stores
+  pin, grant, `InFlight` attempt, and offered lease together. Claim and result
+  admission likewise have no present transaction; their future implementations
+  must retain this lock order and commit before acknowledgement. Claim locks the
+  session scheduler first, followed by enrollment, runner, registration, and
+  lease. Result admission takes the session scheduler first, then the applicable
+  runner and lease rows without acquiring an earlier omitted lock, and commits
+  the checked terminal attempt observation and claimed-lease completion
+  together.
 
 - **Runner loss**: one short transaction locks only the current connection/loss
   head, advances a positive durable loss epoch, and thereby makes every trigger
