@@ -141,10 +141,10 @@ impl BlobStoreRegistry {
                 } else {
                     S3NamespaceBindingState::New
                 };
-                tokio::time::timeout_at(s3_deadline, store.prepare_namespace(state))
+                tokio::time::timeout_at(s3_deadline, Box::pin(store.prepare_namespace(state)))
                     .await
                     .map_err(|_| BlobStoreRegistryError::S3StartupDeadline)??;
-                tokio::time::timeout_at(s3_deadline, store.verify_multipart_lifecycle())
+                tokio::time::timeout_at(s3_deadline, Box::pin(store.verify_multipart_lifecycle()))
                     .await
                     .map_err(|_| BlobStoreRegistryError::S3StartupDeadline)??;
             }
