@@ -742,7 +742,7 @@ selected runner authority, and placement in the runner lock order, authenticates
 either a distinct live successor or the registration-loss-only same-runner
 exception, and returns the original durable stage on equal replay. A
 workspace-free placement returns `NotApplicable` without claiming the command,
-so only its later terminal transaction completes the command. The runner
+so its later terminal transaction remains the sole command claimant. The runner
 provisions and spools `workspace_ready` under that limited authority. Only a later
 transaction can activate the pending enrollment: it rechecks the lost
 predecessor and connected candidate, consumes the exact workspace receipt,
