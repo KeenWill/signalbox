@@ -676,7 +676,9 @@ impl PostgresRepoWatchStore {
                 )
                 .await?;
             }
-            if let Some(assessments) = assessments {
+            if let Some(assessments) = assessments
+                && current_generation == Some(cursor.generation())
+            {
                 Self::record_convergence_assessments_in_transaction(
                     &mut transaction,
                     repository,
@@ -833,13 +835,16 @@ impl PostgresRepoWatchStore {
             // GitHub's pull-request `baseRefOid` is the exact base revision
             // associated with that pull request. It can remain behind the
             // current branch ref until the pull request is merged forward.
-            // The cursor must still contain the named base branch, but current
-            // convergence is decided at admission and cutoff time by comparing
-            // this assessed revision with that branch's latest cursor head.
-            let base_branch_matches = state
-                .branch_heads()
-                .iter()
-                .any(|branch_head| branch_head.branch() == assessment.base_branch());
+            // Complete polls must contain the named base branch. A targeted
+            // webhook read may reach a pull request before the cursor learns
+            // that branch, so it still records the assessment to supersede
+            // older evidence. Admission and cutoff remain ineligible until a
+            // later cursor contains the assessed branch revision.
+            let base_branch_matches = partial
+                || state
+                    .branch_heads()
+                    .iter()
+                    .any(|branch_head| branch_head.branch() == assessment.base_branch());
             if !pull_request_matches || !base_branch_matches {
                 return Err(RepoWatchStoreError::ConvergenceEvidenceMismatch);
             }
@@ -861,18 +866,18 @@ impl PostgresRepoWatchStore {
                 "SELECT EXISTS (
                     SELECT 1
                       FROM (
-                            SELECT base_branch, base_revision, mergeable_state,
+                            SELECT head_sha, base_branch, base_revision, mergeable_state,
                                    review_decision, unresolved_threads,
                                    gating_check_count, non_green_gating_checks,
                                    verdict_kind
-                              FROM repo_watch_pull_request_convergence_assessment
+                             FROM repo_watch_pull_request_convergence_assessment
                              WHERE repository = $1
                                AND pull_request_number = $2
-                               AND head_sha = $3
                              ORDER BY recorded_at DESC, assessment_id DESC
                              LIMIT 1
                            ) AS current
-                     WHERE current.base_revision = $4
+                     WHERE current.head_sha = $3
+                       AND current.base_revision = $4
                        AND current.base_branch = $5
                        AND current.mergeable_state = $6
                        AND current.review_decision = $7

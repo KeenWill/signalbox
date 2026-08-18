@@ -817,9 +817,99 @@ async fn evidence_replay_after_a_head_round_trip_uses_the_candidate_head()
     .bind(INITIAL_HEAD)
     .fetch_one(&pool)
     .await?;
+    let latest_assessment_head: String = sqlx::query_scalar(
+        "SELECT head_sha
+           FROM repo_watch_pull_request_convergence_assessment
+          ORDER BY recorded_at DESC, assessment_id DESC
+          LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await?;
 
-    assert_eq!(assessment_count, 2);
-    assert_eq!(first_head_assessment_count, 1);
+    assert_eq!(assessment_count, 3);
+    assert_eq!(first_head_assessment_count, 2);
+    assert_eq!(latest_assessment_head, INITIAL_HEAD);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn historical_exact_replay_does_not_append_stale_assessment() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = candidate(None)?;
+    let baseline_generation = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, baseline.clone(), Vec::new()),
+            )
+            .await?,
+    );
+    let first_observation = observation(Some(INITIAL_HEAD))?;
+    let mut first_frontier = baseline.event_identity_frontier().clone();
+    let mut ids = FixedEventIds::default();
+    let first_events = derive_repo_watch_events(
+        &repository,
+        Some(baseline.observation()),
+        &first_observation,
+        &mut first_frontier,
+        &mut ids,
+    )?;
+    let first =
+        RepoWatchCursorCandidate::with_event_identity_frontier(first_observation, first_frontier);
+    let first_generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    Some(baseline_generation),
+                    first.clone(),
+                    first_events.clone(),
+                ),
+                &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+            )
+            .await?,
+    );
+    let second_observation = observation(Some(CHANGED_HEAD))?;
+    let mut second_frontier = first.event_identity_frontier().clone();
+    let second_events = derive_repo_watch_events(
+        &repository,
+        Some(first.observation()),
+        &second_observation,
+        &mut second_frontier,
+        &mut ids,
+    )?;
+    let second =
+        RepoWatchCursorCandidate::with_event_identity_frontier(second_observation, second_frontier);
+    store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(Some(first_generation), second, second_events),
+            &[merge_ready_assessment(CHANGED_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+
+    let replayed = replayed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(Some(baseline_generation), first, first_events),
+                &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+            )
+            .await?,
+    );
+    let assessment_heads: Vec<String> = sqlx::query_scalar(
+        "SELECT head_sha
+           FROM repo_watch_pull_request_convergence_assessment
+          ORDER BY cursor_generation",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(replayed, first_generation);
+    assert_eq!(assessment_heads, vec![INITIAL_HEAD, CHANGED_HEAD]);
     Ok(())
 }
 
