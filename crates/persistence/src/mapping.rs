@@ -183,6 +183,11 @@ pub(crate) fn program_reject_reason_from_str(value: &str) -> Option<RejectReason
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
+use crate::repo_watch::{
+    RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome,
+    RepoWatchStaleReviewClearanceReason,
+};
+
 use crate::{approval_judge::FailedApprovalJudgeDisposition, outbox::DispatchedRunnerState};
 
 /// Closed stored states for one durable runner-loss propagation cursor.
@@ -1254,6 +1259,73 @@ pub fn repo_watch_review_decision_from_str(value: &str) -> Option<RepoWatchRevie
     }
 }
 
+pub(crate) const fn repo_watch_stale_review_clearance_outcome_to_str(
+    value: RepoWatchStaleReviewClearanceOutcome,
+) -> &'static str {
+    match value {
+        RepoWatchStaleReviewClearanceOutcome::Dismissed => "dismissed",
+        RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed => "already_dismissed",
+        RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere => "cleared_elsewhere",
+        RepoWatchStaleReviewClearanceOutcome::Superseded => "superseded",
+    }
+}
+
+pub fn repo_watch_stale_review_clearance_outcome_from_str(
+    value: &str,
+) -> Option<RepoWatchStaleReviewClearanceOutcome> {
+    match value {
+        "dismissed" => Some(RepoWatchStaleReviewClearanceOutcome::Dismissed),
+        "already_dismissed" => Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed),
+        "cleared_elsewhere" => Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere),
+        "superseded" => Some(RepoWatchStaleReviewClearanceOutcome::Superseded),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_stale_review_clearance_reason_to_str(
+    value: RepoWatchStaleReviewClearanceReason,
+) -> &'static str {
+    match value {
+        RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks => "only_stale_review_blocks",
+    }
+}
+
+pub(crate) fn repo_watch_stale_review_clearance_reason_from_str(
+    value: &str,
+) -> Option<RepoWatchStaleReviewClearanceReason> {
+    match value {
+        "only_stale_review_blocks" => {
+            Some(RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_observed_review_state_to_str(
+    value: RepoWatchObservedReviewState,
+) -> &'static str {
+    match value {
+        RepoWatchObservedReviewState::Approved => "approved",
+        RepoWatchObservedReviewState::ChangesRequested => "changes_requested",
+        RepoWatchObservedReviewState::Commented => "commented",
+        RepoWatchObservedReviewState::Dismissed => "dismissed",
+        RepoWatchObservedReviewState::Pending => "pending",
+    }
+}
+
+pub fn repo_watch_observed_review_state_from_str(
+    value: &str,
+) -> Option<RepoWatchObservedReviewState> {
+    match value {
+        "approved" => Some(RepoWatchObservedReviewState::Approved),
+        "changes_requested" => Some(RepoWatchObservedReviewState::ChangesRequested),
+        "commented" => Some(RepoWatchObservedReviewState::Commented),
+        "dismissed" => Some(RepoWatchObservedReviewState::Dismissed),
+        "pending" => Some(RepoWatchObservedReviewState::Pending),
+        _ => None,
+    }
+}
+
 pub(crate) const fn repo_watch_convergence_verdict_to_str(
     value: RepoWatchConvergenceVerdict,
 ) -> &'static str {
@@ -2257,7 +2329,10 @@ mod tests {
     };
     use sqlx::types::Uuid;
 
-    use crate::outbox::DispatchedRunnerState;
+    use crate::{
+        outbox::DispatchedRunnerState,
+        repo_watch::{RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome},
+    };
 
     use super::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
@@ -2295,11 +2370,13 @@ mod tests {
         repo_watch_event_kind_to_str, repo_watch_lifecycle_cutoff_disposition_from_str,
         repo_watch_lifecycle_cutoff_disposition_to_str, repo_watch_mergeable_state_from_str,
         repo_watch_mergeable_state_to_str, repo_watch_obligation_settlement_from_str,
-        repo_watch_obligation_settlement_to_str, repo_watch_pull_request_lifecycle_from_str,
+        repo_watch_obligation_settlement_to_str, repo_watch_observed_review_state_from_str,
+        repo_watch_observed_review_state_to_str, repo_watch_pull_request_lifecycle_from_str,
         repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
         repo_watch_reaction_change_to_str, repo_watch_review_decision_from_str,
         repo_watch_review_decision_to_str, repo_watch_review_state_from_str,
-        repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
+        repo_watch_review_state_to_str, repo_watch_stale_review_clearance_outcome_from_str,
+        repo_watch_stale_review_clearance_outcome_to_str, repo_watch_thread_state_from_str,
         repo_watch_thread_state_to_str, runner_loss_propagation_state_from_str,
         runner_loss_propagation_state_to_str, runner_placement_loss_source_from_str,
         runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
@@ -3406,6 +3483,81 @@ mod tests {
             Some(RepoWatchConvergenceVerdict::MergeReady),
         );
         assert_eq!(repo_watch_convergence_verdict_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn repository_watch_review_clearance_outcome_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::Dismissed,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::Dismissed),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::Superseded,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::Superseded),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str("unknown"),
+            None
+        );
+    }
+
+    #[test]
+    fn repository_watch_observed_review_state_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Approved,
+            )),
+            Some(RepoWatchObservedReviewState::Approved),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::ChangesRequested,
+            ),),
+            Some(RepoWatchObservedReviewState::ChangesRequested),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Commented,
+            )),
+            Some(RepoWatchObservedReviewState::Commented),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Dismissed,
+            )),
+            Some(RepoWatchObservedReviewState::Dismissed),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Pending,
+            )),
+            Some(RepoWatchObservedReviewState::Pending),
+        );
+        assert_eq!(repo_watch_observed_review_state_from_str("unknown"), None);
     }
 
     #[test]

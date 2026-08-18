@@ -5,13 +5,13 @@ boundary from its first operation: the daemon holds a distinct credential-file
 reference for each configured repository, reads secret bytes only for that
 repository's request, and never gives a dispatched session the watch credential.
 Per-repository tokens carry the least GitHub scope needed to read the configured
-signals. This is the C0 confused-deputy boundary: a credential for one
-repository cannot authorize a request to another repository. A repository
-without a credential-file reference is invalid configuration and is not watched;
-a repository absent from the list is not watched; an absent repository-watch
-section means that the subsystem does not start. Dispatched sessions retain the
-approval posture of their named session templates, without authority inherited
-from the watcher.
+signals and dismiss an eligible stale pull-request review. This is the C0
+confused-deputy boundary: a credential for one repository cannot authorize a
+request to another repository. A repository without a credential-file reference
+is invalid configuration and is not watched; a repository absent from the list
+is not watched; an absent repository-watch section means that the subsystem does
+not start. Dispatched sessions retain the approval posture of their named
+session templates, without authority inherited from the watcher.
 
 **Foundation contract.** This bottom specification diff owns the
 four-pull-request repository-watch stack. The version-one domain vocabulary and
@@ -31,6 +31,8 @@ PR #886 (`agent/eager-merge-forward`). Requeue after non-converged dispatch
 termination is verified against this PR
 (`agent/dispatch-requeue-on-invalidation`). Exact-head convergence assessment
 and cutoff are verified against this PR (`agent/dispatch-autonomy-convergence`).
+Conservative stale blocking-review dismissal is verified against this PR
+(`agent/dispatch-autonomy-review-clearance`).
 
 ## Configuration and credential boundary
 
@@ -607,6 +609,38 @@ Dispatch admission rechecks the seal under the repository lock: a stale match or
 collapsed obligation settles as `target_converged` only when its head is the
 latest assessed identity and that identity's head and base revision are sealed.
 An older identity cannot stop current work.
+
+**Implemented behavior.** `CHANGES_REQUESTED` gates merging, never dispatching:
+repository watch continues delivering matching findings while that aggregate
+decision remains. It may dismiss a blocking review only when GitHub reports it
+among the pull request's latest opinionated `CHANGES_REQUESTED` reviews and its
+associated commit differs from the exact current head. The current convergence
+evidence must otherwise pass: zero unresolved threads, zero non-green gating
+checks, and nonconflicting mergeability. Every effective blocking review must
+target a superseded head; one current-head blocker prevents every dismissal for
+that assessment. A current-head review is never dismissed automatically. Why: a
+new review is live judgment, while a stale aggregate decision whose complete
+thread inventory is resolved is forge state that alone prevents an otherwise
+finished head from converging. The following ordinary poll observes the
+dismissal and may then seal convergence; dismissal itself does not stop
+dispatch.
+
+**Implemented behavior.** Before sending GitHub's review-dismissal mutation, the
+daemon appends a unique intent naming the assessment, repository, pull request,
+exact current and reviewed heads, review node, reviewer, fixed reason kind, and
+the exact human-readable dismissal message. That message identifies the review
+node, reviewer, superseded head, exact current head, and the resolved threads
+and green other gates that justify clearance. It appends the provider's terminal
+result separately. Replaying equal evidence reuses the intent rather than
+creating or sending concurrent duplicate work. After an ambiguous process
+failure, a later poll observes the named review directly: an already dismissed
+review completes the audit, a newer pull-request head supersedes the intent, and
+a review decision cleared by another actor is recorded as cleared elsewhere. A
+still-blocking intent is retried only when a current poll again proves the full
+dismissal predicate. The pending-intent projection makes every unsettled
+external action directly observable. The next poll observes the dismissal
+through the ordinary review and convergence projections; no synthetic approval
+is created and no fresh review is requested.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,

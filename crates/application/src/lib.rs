@@ -84,7 +84,8 @@ pub use repo_watch::{
     RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
     RepoWatchRepositoryStateError, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
     RepoWatchReviewDecision, RepoWatchReviewObservation, RepoWatchRuleEvaluation,
-    RepoWatchRuleEvaluationOutcome, RepoWatchSingletonKey, RepoWatchTemplateResolver,
+    RepoWatchRuleEvaluationOutcome, RepoWatchSingletonKey, RepoWatchStaleReviewClearanceCandidate,
+    RepoWatchStaleReviewClearanceCandidateError, RepoWatchTemplateResolver,
     RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
     UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
 };
