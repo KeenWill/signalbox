@@ -33,6 +33,18 @@ const OUTPUT_SCHEMA: &str = r#"{
   "additionalProperties":false
 }"#;
 
+/// Returns a canonical rendering of the complete structured-output contract
+/// every approval-judge call carries — name, description, and schema — so
+/// measurement harnesses can fingerprint the exact acceptance criteria they
+/// replay. U+0000 separators cannot occur inside any component.
+#[must_use]
+pub fn approval_judge_output_contract_text() -> String {
+    format!(
+        "{OUTPUT_NAME}\u{0}{OUTPUT_DESCRIPTION}\u{0}{OUTPUT_SCHEMA}\u{0}rationale_decoder=nonempty,max_utf8_bytes={},exclude_u+0000",
+        ToolDecisionRationale::MAX_UTF8_BYTES
+    )
+}
+
 /// Exact inputs to one dedicated approval-judge model call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalJudgeModelRequest {
@@ -61,6 +73,8 @@ pub struct ApprovalJudgeModelResult {
     pub recommendation: DelegateApprovalRecommendation,
     /// Checked nonempty rationale emitted with the recommendation.
     pub rationale: ToolDecisionRationale,
+    /// Model identity reported by the provider, when one was observable.
+    pub reported_model: Option<ProviderReportedModel>,
     /// Provider-reported usage, independently optional by field.
     pub usage: TokenUsage,
 }
@@ -289,8 +303,9 @@ where
         TerminalEvidence::CancellationConfirmed(evidence) => evidence.reported_model.as_ref(),
         TerminalEvidence::BoundaryLoss(evidence) => evidence.reported_model.as_ref(),
         TerminalEvidence::ProvenUnsent(_) => None,
-    };
-    if let Some(reported) = reported_model {
+    }
+    .cloned();
+    if let Some(reported) = &reported_model {
         require_same_target(&resolved, reported, usage)?;
     }
     let completed = match report.evidence {
@@ -328,6 +343,7 @@ where
         call,
         recommendation,
         rationale,
+        reported_model,
         usage: completed.usage,
     })
 }
@@ -742,6 +758,13 @@ mod tests {
             DelegateApprovalRecommendation::Approve
         );
         assert_eq!(result.rationale.as_str(), APPROVAL_RATIONALE);
+        assert_eq!(
+            result
+                .reported_model
+                .as_ref()
+                .map(ProviderReportedModel::as_str),
+            Some(PROVIDER_MODEL)
+        );
         assert_eq!(result.usage.input_tokens, Some(INPUT_TOKENS));
         assert_eq!(result.usage.output_tokens, Some(OUTPUT_TOKENS));
         assert_eq!(
@@ -873,5 +896,16 @@ mod tests {
                 reported_usage()
             )
         );
+    }
+
+    #[test]
+    fn output_contract_fingerprints_rationale_decoder_constraints() {
+        let contract = super::approval_judge_output_contract_text();
+
+        assert!(contract.contains(&format!(
+            "max_utf8_bytes={}",
+            signalbox_domain::ToolDecisionRationale::MAX_UTF8_BYTES
+        )));
+        assert!(contract.contains("exclude_u+0000"));
     }
 }

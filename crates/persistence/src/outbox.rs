@@ -1023,6 +1023,13 @@ async fn load_event(
             DispatchedOutboxEventKind::TurnModelSettingsResolved(event)
         }
         INPUT_ACCEPTED => {
+            // The two admitted shapes are the two ways an input is authored:
+            // by an applied submit command, or by the goal machinery, which
+            // mints a commandless input and proves it with a `goal_turn` row.
+            // A generation owning the turn does not disqualify the first shape:
+            // a goal turn bound to a turn a command already accepted — what
+            // repository-watch dispatch commits — is exactly a commanded input
+            // that also carries a `goal_turn` row.
             let row = sqlx::query(
                 "SELECT event.accepted_input_id, event.turn_id,
                         event.acceptance_position, accepted.content_text
@@ -1062,7 +1069,6 @@ async fn load_event(
                     AND (
                         (
                             accepted.accepting_command_id IS NOT NULL
-                            AND goal.turn_id IS NULL
                             AND (
                                 (
                                     accepted.disposition_kind = 'origin_of'
@@ -2006,6 +2012,20 @@ async fn load_runner_state_transition(
                 placement.registration_enrollment_id AS source_registration_enrollment_id,
                 connection.state_kind AS source_connection_state_kind,
                 connection.cause_kind AS source_connection_cause_kind,
+                CASE
+                    WHEN connection.cause_kind = 'established' THEN
+                        connection.event_ordinal = 1
+                        AND connection_prior.connection_epoch + 1 =
+                            connection.connection_epoch
+                        AND connection_prior.state_kind = 'suspect'
+                    WHEN connection.cause_kind = 'heartbeat_recovered' THEN
+                        connection_prior.connection_epoch =
+                            connection.connection_epoch
+                        AND connection_prior.event_ordinal + 1 =
+                            connection.event_ordinal
+                        AND connection_prior.state_kind = 'suspect'
+                    ELSE false
+                END AS source_connection_predecessor_matches,
                 prior.lost_runner_id AS prior_lost_runner_id,
                 prior.requested_working_directory AS prior_working_directory
            FROM runner_state_transition_outbox_event AS event
@@ -2017,6 +2037,22 @@ async fn load_runner_state_transition(
              ON connection.enrollment_id = event.connection_enrollment_id
             AND connection.connection_epoch = event.connection_epoch
             AND connection.event_ordinal = event.connection_event_ordinal
+           LEFT JOIN LATERAL (
+                SELECT earlier.connection_epoch, earlier.event_ordinal,
+                       earlier.state_kind
+                  FROM runner_connection_event AS earlier
+                 WHERE earlier.enrollment_id = connection.enrollment_id
+                   AND (
+                        earlier.connection_epoch < connection.connection_epoch
+                        OR (
+                            earlier.connection_epoch = connection.connection_epoch
+                            AND earlier.event_ordinal < connection.event_ordinal
+                        )
+                   )
+                 ORDER BY earlier.connection_epoch DESC,
+                          earlier.event_ordinal DESC
+                 LIMIT 1
+           ) AS connection_prior ON true
            LEFT JOIN runner_session_placement_record AS prior
              ON prior.session_id = placement.session_id
             AND prior.event_ordinal + 1 = placement.event_ordinal
@@ -2116,10 +2152,13 @@ async fn load_runner_state_transition(
                     .try_get::<Option<String>, _>("source_connection_state_kind")?
                     .as_deref()
                     == Some("connected")
-                && row
-                    .try_get::<Option<String>, _>("source_connection_cause_kind")?
-                    .as_deref()
-                    == Some("heartbeat_recovered")
+                && matches!(
+                    row.try_get::<Option<String>, _>("source_connection_cause_kind")?
+                        .as_deref(),
+                    Some("established" | "heartbeat_recovered")
+                )
+                && row.try_get::<Option<bool>, _>("source_connection_predecessor_matches")?
+                    == Some(true)
         }
         DispatchedRunnerState::RunnerLostBeforePin => {
             source_event == "runner_lost_before_pin"

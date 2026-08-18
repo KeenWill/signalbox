@@ -2,7 +2,15 @@
 
 The runner-recovery active-phase algebra, checked persistence reconstitution,
 and preserved interrupt/stop authority were verified against this PR
-(`agent/runner-awaiting-recovery-persistence`).
+(`agent/runner-awaiting-recovery-persistence`). The atomic persistence
+transition into runner recovery was verified against this PR
+(`agent/runner-loss-session-transaction`).
+
+The active-tail predecessor-steering correction was verified against this PR
+(`agent/daemon-ops-overnight`).
+
+Tool-attempt reconciliation predecessor replay was verified against this PR
+(`agent/tool-reconciliation-origin-replay`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -382,10 +390,13 @@ the sweep (INV-007).
   new), `SubmitInputService` hands the session to the in-process nudge port. The
   buffer is bounded (1024); a full buffer or closed source drops only the hint,
   visibly, and never changes the command result.
-- **Sweep (backstop).** `PostgresEligibilitySweep` finds three durable shapes: a
-  queued turn with no active turn (the activation precondition), an active tool
-  round in the running phase, or a current pursuing goal turn that is terminal
-  and therefore still owed its durable continuation-or-blocking disposition. The
+- **Sweep (backstop).** `PostgresEligibilitySweep` finds four durable shapes: a
+  queued turn with no active turn (the activation precondition), an active turn
+  whose current model call remains `Prepared`, an active tool round in the
+  running phase, or a current pursuing goal turn that is terminal and therefore
+  still owed its durable continuation-or-blocking disposition. A `Prepared`
+  model call covers both an ordinary not-yet-driven call and an attachment check
+  retained for retry after temporary store unavailability. The
   `turn_lifecycle_queued_by_session` partial index is created for the queued
   query shape, though planner adoption is not pinned by any test. Results are
   paged 16 sessions per query with a fixed per-cycle bound; continuation pages
@@ -396,18 +407,34 @@ the sweep (INV-007).
   passes, deduplicates hints for a session already in flight (recording one
   rerun), and keeps an in-progress sweep read alive across pass completions. A
   failed or panicked pass is logged and retried by a later hint or sweep;
-  nothing is lost because the rows are the queue.
+  nothing is lost because the rows are the queue. A pass about to perform
+  attachment store I/O first tries the blob contract's separate
+  attachment-preparation permit without waiting. If none is immediately
+  available, the pass relinquishes its 16-pass capacity, ends, and leaves only
+  the durable `Prepared` row for a later sweep. After acquiring a permit, its
+  task remains in flight for per-session deduplication but relinquishes the
+  scheduler-pass slot during store I/O; after successful verification it
+  reacquires a slot before send authorization and its guarded transaction
+  revalidates authority. A model-originated `blob_read` uses the same slot
+  handoff after it acquires the blob contract's non-waiting direct-read permit:
+  its physical attempt remains in flight during store traversal, and it
+  reacquires a slot before committing correlated result evidence or crash-loss
+  classification. At most 16 direct reads can wait at that reacquisition point.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. This recovers a goal disposition when the
 process ended after turn terminalization but before scheduler reconciliation.
 Each authoritative pass first asks its execution composition to reconcile any
-active running tool round for the hinted session, then runs ordinary queued-turn
-activation. Failure of the read-only active-round lookup is an ordinary failed
-pass for later scheduler retry; only a failure after active-turn execution
-begins trips fatal recovery supervision. A parked approval returns from the pass
-immediately and therefore retains no scheduler worker capacity. Activation
-returns the activated turn
+active running tool round for the hinted session. If the active turn instead
+retains a current `Prepared` model call, the pass reloads that call and hands it
+to the same `ModelCallExecutionService` used after activation; temporary
+attachment unavailability can therefore retain the call for a later sweep
+without requiring restart. Only a session with neither shape proceeds to
+ordinary queued-turn activation. Failure of either read-only lookup is an
+ordinary failed pass for later scheduler retry; only a failure after active-turn
+execution begins trips fatal recovery supervision. A parked approval returns
+from the pass immediately and therefore retains no scheduler worker capacity.
+Activation returns the activated turn
 (`StartEligibleTurnOutcome::Activated(Box<ActivatedAcceptedInputTurn>)`), and
 signalboxd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
 `ModelCallExecutionService` over the `ModelCallProvider` port — so each pass
@@ -460,9 +487,9 @@ end (INV-034):
 - an evidence-free turn (no model call) prepares
   `prepare_active_turn_lost_failure`: the current attempt ends
   `WithoutStop(Lost)` and the turn fails;
-- a turn holding a `Prepared` model call (`recover_after_restart`) closes the
-  call `known_failed` while its abandoned attempt still ends
-  `WithoutStop(Lost)`, and the turn fails; and
+- a turn holding a `Prepared` model call proves that no send authorization
+  existed. Startup validates its exact stored frontier and leaves the call,
+  attempt, and turn unchanged for the ordinary scheduler to retry; and
 - a turn holding an unstopped in-flight call ends the call `ambiguous` and the
   attempt `WithoutStop(Lost)`, but the turn does not terminalize: it stays
   active, parked in the `awaiting_model_call_recovery` phase naming the
@@ -499,17 +526,16 @@ end (INV-034):
   so a scheduler pass projects its results and prepares the next call without
   relying on a lost local wake.
 
-In the three failing branches only, one `TurnFailed` semantic entry is appended.
-The evidence-free branch extends the starting frontier; the prepared-call branch
-extends that call's exact source frontier, which already contains every steering
-entry consumed when the call was prepared; and the prepared/effect-free tool
-branch extends the yielded tool-use frontier by exactly one correlated result
-entry per request in proposal order before the failure marker. The turn
-terminalizes `Failed`, releasing the slot via one guarded attempt-end update and
-one guarded lifecycle update, each required to match exactly one row; and a
-`turn_failed` outbox record is appended in the same transaction (entry payloads
-are [sessions-and-transcript](sessions-and-transcript.md) scope; outbox
-mechanics are [persistence-protocol](persistence-protocol.md) scope).
+In the two failing branches only, one `TurnFailed` semantic entry is appended.
+The evidence-free branch extends the starting frontier, and the
+prepared/effect-free tool branch extends the yielded tool-use frontier by
+exactly one correlated result entry per request in proposal order before the
+failure marker. The turn terminalizes `Failed`, releasing the slot via one
+guarded attempt-end update and one guarded lifecycle update, each required to
+match exactly one row; and a `turn_failed` outbox record is appended in the same
+transaction (entry payloads are
+[sessions-and-transcript](sessions-and-transcript.md) scope; outbox mechanics
+are [persistence-protocol](persistence-protocol.md) scope).
 
 Why `Failed`: the evidence-free slice stores no operations, waits, or stop
 causes, so an abandoned tenure has no sufficient completion, refusal, or
@@ -612,21 +638,22 @@ connection epoch, and stale epochs cannot write after that commit. Transport
 closure and protocol failure reach the same terminal connection state; clean
 shutdown remains a distinct durable state.
 
-**Committed unimplemented functionality.** No present runner execution or
-placement surface propagates connection loss into sessions. Future bounded
-per-session propagation marks a pinned placement `RunnerLost` or an unpinned
-placement whose exact-identity selector names the lost runner
-`RunnerLostBeforePin { runner }`, preserves exact tool-attempt ambiguity, and
-appends one durable runner state event. An active turn already at a runner
-boundary moves to `AwaitingRunnerRecovery`. A daemon-local model operation that
-was physically authorized before loss retains its ordinary completion or
-ambiguity law; its observation may complete the turn, but any returned
-runner-only proposal parks before authorization because the frozen runner locus
-is now lost. No provider call is repeated merely to project runner loss. A
-queued turn remains queued and cannot activate while its placement is lost. An
-unpinned capability-class request names no selected runner and is unaffected
-until a live registration can satisfy it. Locking, page bounds, and crash
-recovery are owned by [persistence-protocol](persistence-protocol.md).
+The persistence adapter applies bounded per-session connection-loss propagation.
+It marks a pinned placement `RunnerLost` or an unpinned placement whose
+exact-identity selector names the lost runner `RunnerLostBeforePin { runner }`,
+preserves exact tool-attempt ambiguity, and appends one durable runner state
+event. An active turn already at a runner boundary moves to
+`AwaitingRunnerRecovery`. A daemon-local model operation that was physically
+authorized before loss retains its ordinary completion or ambiguity law; its
+observation may complete the turn, but any returned runner-only proposal parks
+before authorization because the frozen runner locus is now lost. No provider
+call is repeated merely to project runner loss. A queued turn remains queued and
+cannot activate while its placement is lost. An unpinned capability-class
+request names no selected runner and is unaffected until a live registration can
+satisfy it. Locking, page bounds, and crash recovery are owned by
+[persistence-protocol](persistence-protocol.md). **Committed unimplemented
+functionality.** No present daemon service pages pending losses or invokes that
+adapter, and no runner execution surface yet depends on the projected state.
 
 Only two user commands consume that state. `ReplaceLostRunner` requires the
 expected current placement revision and either a different live exact runner,
@@ -833,8 +860,12 @@ are conclusions derived from complete owner facts, never trusted discriminators.
 - Every active turn's projection must carry a session-scoped acceptance tail
   anchored at the turn's exact origin and extending gap-free through the
   observed last acceptance position, with unique identities, same- session
-  membership, and per-entry delivery/disposition correlation. A filtered
-  pending-steering list or bare maximum cannot substitute (INV-007, INV-016).
+  membership, and per-entry delivery/disposition correlation. When an origin was
+  queued before a later input was consumed by the then-active predecessor, that
+  predecessor-consumed position remains in the complete tail after the queued
+  origin activates; only steering consumed by the new active turn enters its
+  execution aggregate. A filtered pending-steering list or bare maximum cannot
+  substitute (INV-007, INV-016).
 - A tail entry recording an accepted interrupt against the active turn is
   admitted only when the current stop/recovery state carries its exact
   `AppliedInterruptProof`; an evidence-free active phase rejects it as
@@ -861,16 +892,20 @@ profile map, as specified by
 The configuration page owns these provisional channels. It validates the model
 catalog, then resolves the template catalog and all of its prompt files against
 that model catalog, before connecting. It then acquires the single-daemon guard,
-fences the prior pool incarnation, migrates and resolves the one-time imported
-display-title backfill
-([conversation-import](conversation-import.md#derived-display-titles)),
-completes the generic recovery scan, marks every prior-process nonterminal
-runner connection lost, and — once the credential-pool child is composed —
-establishes each `codex_home` profile's credential-home identity, resolves every
-prior-process capacity reservation, resolves every retained OAuth
-refresh-in-progress marker to a replacement token or a quarantine, scavenges
-every crash-left OAuth scratch home, and runs the legacy family-to-policy
-backfill
+fences the prior pool incarnation, migrates, and completes the generic recovery
+scan. It then initializes every configured blob store against its recorded
+namespace binding, verifies every currently routed S3 namespace marker and
+multipart lifecycle rule under the blob contract's aggregate startup deadline,
+resolves the one-time imported display-title backfill
+([conversation-import](conversation-import.md#derived-display-titles)), and
+marks every prior-process nonterminal runner connection lost. Blob
+initialization failure stops startup before the backfill, either socket binding,
+or scheduling; unrouted historical S3 bindings retain their lazy runtime check.
+It then — once the credential-pool child is composed — establishes each
+`codex_home` profile's credential-home identity, resolves every prior-process
+capacity reservation, resolves every retained OAuth refresh-in-progress marker
+to a replacement token or a quarantine, scavenges every crash-left OAuth scratch
+home, and runs the legacy family-to-policy backfill
 ([configuration and credentials](configuration-and-credentials.md#credential-deliveries)).
 Those five gates sit after the recovery scan so a failure cannot block recovery
 of acknowledged work, and before any socket binding or scheduling so no request

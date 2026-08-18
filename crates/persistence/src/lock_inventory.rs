@@ -1,4 +1,15 @@
 //! Reviewed SQL statements that acquire explicit persistence row locks.
+//!
+//! Session/scheduler pair order: every transaction that locks both a
+//! `session` row and a `session_scheduler` row acquires the `session` row
+//! first. Submit-input, applied goal commands (fresh dispatch commissioning
+//! included), the delegated endpoint prefixes, and approval-judge completion
+//! all take that order; goal system transitions — model declarations and
+//! scheduler-failure blocking — hold only the session row, the remaining
+//! scheduler-family transactions hold only the scheduler row, and so no two
+//! transactions wait on this pair in opposite orders. A scheduler-first
+//! acquisition of the pair would deadlock against every path above and must
+//! not be introduced.
 
 use signalbox_domain::SessionId;
 
@@ -12,6 +23,18 @@ pub(crate) const fn ordered_session_pair(
         (second, first)
     }
 }
+
+pub(crate) const PROGRAM_JOURNAL_SEQUENCE: &str = "SELECT
+        last_position, last_request_ordinal, last_delivery_ordinal
+   FROM program_run_journal_sequence_state
+  WHERE run_id = $1
+  FOR UPDATE";
+
+pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION: &str =
+    "SELECT latest_event_id, settled_kind, settled_dispatch_id
+       FROM repo_watch_dispatch_obligation
+      WHERE obligation_id = $1
+      FOR UPDATE";
 
 pub(crate) const START_ELIGIBLE_TURN: &str = "SELECT
             EXISTS (
@@ -123,7 +146,12 @@ pub(crate) const SUBMIT_INPUT_RUNNER_RECOVERY_ATTEMPT: &str =
         AND placement.state_kind = 'runner_lost'
         AND placement.interrupted_tool_attempt_id = tool_attempt.attempt_id
         AND placement.lost_runner_id = lease.runner_id
-        AND placement.placement_revision = leased_placement.placement_revision
+        AND runner_lease_placement_reaches_loss_revision(
+            lease.session_id,
+            lease.placement_event_ordinal,
+            placement.placement_revision,
+            placement.lost_runner_id
+        )
         AND leased_placement.state_kind = 'pinned'
         AND leased_placement.pinned_runner_id = placement.lost_runner_id
       FOR UPDATE OF tool_attempt";
@@ -312,6 +340,24 @@ pub(crate) const RUNNER_LEASE_ENROLLMENT_AUTHORITY: &str = "SELECT state_kind
               WHERE enrollment_id = $1
               FOR SHARE";
 
+pub(crate) const RUNNER_CONNECTION_LOSS_HEAD: &str = "SELECT loss_epoch
+               FROM runner_current_connection_loss
+              WHERE enrollment_id = $1
+              FOR UPDATE";
+
+pub(crate) const RUNNER_CONNECTION_LOSS_PROPAGATION: &str = "SELECT
+                    propagation.propagated_through_session_id,
+                    propagation.state_kind,
+                    loss.connection_epoch,
+                    loss.connection_event_ordinal
+               FROM runner_connection_loss_propagation AS propagation
+               JOIN runner_connection_loss_epoch AS loss
+                 ON loss.enrollment_id = propagation.enrollment_id
+                AND loss.loss_epoch = propagation.loss_epoch
+              WHERE propagation.enrollment_id = $1
+                AND propagation.loss_epoch = $2
+              FOR UPDATE OF propagation";
+
 pub(crate) const RUNNER_LEASE_GRANT_AUTHORITY: &str = "SELECT grant_record.credential_profile_name
                FROM runner_current_credential_grant_audit AS current_audit
                JOIN runner_credential_grant AS grant_record
@@ -338,6 +384,21 @@ pub(crate) const RUNNER_PLACEMENT_HEAD: &str = "SELECT record.*
                 AND record.event_ordinal = current_placement.event_ordinal
               WHERE current_placement.session_id = $1
               FOR UPDATE OF current_placement";
+
+pub(crate) const RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER: &str = "SELECT enrollment_id
+               FROM runner_enrollment
+              WHERE runner_id = $1
+              FOR UPDATE";
+
+pub(crate) const RUNNER_PLACEMENT_CONNECTION_AUTHORITY: &str = "SELECT connection_epoch
+               FROM runner_connection_authority_head
+              WHERE enrollment_id = $1
+              FOR SHARE";
+
+pub(crate) const RUNNER_PLACEMENT_CURRENT_LOSS: &str = "SELECT loss_epoch
+               FROM runner_current_connection_loss
+              WHERE enrollment_id = $1
+              FOR SHARE";
 
 pub(crate) const RUNNER_RETRY_REPLACEMENT_SCHEDULER: &str = "SELECT session_id
                FROM session_scheduler

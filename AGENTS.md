@@ -185,7 +185,8 @@ INV-tagged tests. Repository process rules live in `AGENTS.md` or the process
 document it names as their owner; scenarios and fixtures may themselves be the
 statement of record. Other documents link to an owner rather than restating it,
 and an owning scenario or fixture changes only with the owner-approved change
-that authorizes it.
+that authorizes it. Raising a hard safety ceiling requires a reviewed code
+change with a test and rationale.
 
 Ordinary implementation choices are made in the pull request and remain durable
 in its description and git history. Foundation-weight changes — changing
@@ -317,10 +318,13 @@ Documentation bar:
 ```bash
 python3 scripts/generate_invariants.py --check
 python3 scripts/check_domain_spine.py
+python3 scripts/test_check_domain_spine.py
 python3 scripts/check_docs_consistency.py
 python3 scripts/test_check_docs_consistency.py
 python3 scripts/check_migration_versions.py
 python3 scripts/test_check_migration_versions.py
+python3 scripts/check_numeric_bounds.py
+python3 scripts/test_check_numeric_bounds.py
 python3 scripts/check_panic_gate.py
 python3 scripts/test_check_panic_gate.py
 python3 scripts/test_postgres_integration_suites.py

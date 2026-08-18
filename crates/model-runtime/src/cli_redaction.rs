@@ -11,7 +11,9 @@ pub const REDACTED: &str = "[redacted]";
 /// form still carries a credential shape after structural redaction, so the
 /// `arguments_json` raw-JSON contract is never broken by a bare sentinel.
 const REDACTED_JSON_OBJECT: &str = r#"{"redacted":"[redacted]"}"#;
+// numeric-bound: ceiling - protects redaction memory from an unterminated stream value
 const MAX_PENDING_STREAM_BYTES: usize = 64 * 1024;
+// numeric-bound: derived ceiling from MAX_PENDING_STREAM_BYTES
 const MAX_PENDING_RESCAN_BYTES: usize = 6 * MAX_PENDING_STREAM_BYTES;
 const LINE_CREDENTIAL_MARKERS: &[&str] =
     &["authorization=", "authorization:", "cookie=", "cookie:"];

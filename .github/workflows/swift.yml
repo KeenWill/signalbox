@@ -322,7 +322,7 @@ jobs:
       - name: Upload coverage reports to Codecov
         if: ${{ always() && steps.native_lcov.outputs.exported == 'true' }}
         continue-on-error: true
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ${{ runner.temp }}/native-coverage/lcov.info
@@ -464,6 +464,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: swift-real-daemon
+          shared-key: rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run native client against signalboxd
         run: clients/native/scripts/test-real-server-xcode.sh

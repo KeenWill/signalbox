@@ -40,6 +40,7 @@ pub enum RepoWatchPullRequestLifecycle {
     Merged,
 }
 
+// numeric-bound: tunable - admits the provider check-generation text this accepts
 const MAX_CHECK_COMPLETION_GENERATION_BYTES: usize = 64;
 
 /// Opaque provider generation for one completed check execution.
@@ -727,11 +728,18 @@ fn derive_pull_request_events(
             ids,
             events,
         )?;
-        if previous.is_none() {
-            return Ok(());
-        }
     }
     let Some(previous) = previous else {
+        if let Some(previous_repository) = repository_comparison.previous {
+            derive_base_advanced_event(
+                repository,
+                previous_repository,
+                repository_comparison.current,
+                current,
+                ids,
+                events,
+            )?;
+        }
         return Ok(());
     };
     if previous.context().head_sha() != context.head_sha() {
@@ -1209,45 +1217,12 @@ pub enum RepoWatchSingletonKey {
     },
 }
 
-/// The goal one dispatched session is commissioned with at creation.
-///
-/// A dispatched session declares nothing about itself, so the goal that states
-/// its authority is composed here, from the dispatch, and committed with the
-/// session rather than left for the session to attach.
-#[derive(Debug)]
-pub struct RepoWatchDispatchGoal {
-    command: GoalUserCommand,
-    accepted_input: AcceptedInputId,
-    turn: TurnId,
-}
-
-impl RepoWatchDispatchGoal {
-    pub const fn new(
-        command: GoalUserCommand,
-        accepted_input: AcceptedInputId,
-        turn: TurnId,
-    ) -> Self {
-        Self {
-            command,
-            accepted_input,
-            turn,
-        }
-    }
-
-    pub const fn command(&self) -> &GoalUserCommand {
-        &self.command
-    }
-
-    pub const fn accepted_input(&self) -> AcceptedInputId {
-        self.accepted_input
-    }
-
-    pub const fn turn(&self) -> TurnId {
-        self.turn
-    }
-}
-
 /// One action whose current-interface session creation has been domain-prepared.
+///
+/// The turn reserved here is the only one a dispatched session receives. It
+/// carries the tagged context, and the goal commissioned in the same
+/// transaction adopts it as that generation's own first turn, so no separate
+/// identity is reserved for the goal.
 #[derive(Debug)]
 pub struct RepoWatchPreparedDispatchAction {
     action: RepoWatchActionV1,
@@ -1257,7 +1232,7 @@ pub struct RepoWatchPreparedDispatchAction {
     turn: TurnId,
     cancellation_entry: SemanticTranscriptEntryId,
     cancellation_frontier: ContextFrontierId,
-    goal: RepoWatchDispatchGoal,
+    goal: GoalUserCommand,
 }
 
 impl RepoWatchPreparedDispatchAction {
@@ -1269,7 +1244,12 @@ impl RepoWatchPreparedDispatchAction {
         &self.prepared_session
     }
 
-    pub const fn goal(&self) -> &RepoWatchDispatchGoal {
+    /// Returns the commission this dispatch composed for the created session.
+    ///
+    /// A dispatched session declares nothing about itself, so the goal that
+    /// states its authority is composed here, from the dispatch, and committed
+    /// with the session rather than left for the session to attach.
+    pub const fn goal(&self) -> &GoalUserCommand {
         &self.goal
     }
 
@@ -1283,7 +1263,7 @@ impl RepoWatchPreparedDispatchAction {
         TurnId,
         SemanticTranscriptEntryId,
         ContextFrontierId,
-        RepoWatchDispatchGoal,
+        GoalUserCommand,
     ) {
         (
             self.action,
@@ -1322,6 +1302,7 @@ pub enum RepoWatchRuleEvaluation {
 pub enum RepoWatchRuleEvaluationOutcome {
     Inactive,
     NotMatched,
+    TargetClosed,
     Occupied,
     Cooldown,
     Dispatched {
@@ -1514,14 +1495,10 @@ where
             let turn = self.ids.next_turn_id();
             let cancellation_entry = self.ids.next_semantic_entry_id();
             let cancellation_frontier = self.ids.next_context_frontier_id();
-            let goal = RepoWatchDispatchGoal::new(
-                GoalUserCommand::new(
-                    self.ids.next_command_id(),
-                    session,
-                    GoalUserAction::Attach(statement),
-                ),
-                self.ids.next_accepted_input_id(),
-                self.ids.next_turn_id(),
+            let goal = GoalUserCommand::new(
+                self.ids.next_command_id(),
+                session,
+                GoalUserAction::Attach(statement),
             );
             prepared_actions.push(RepoWatchPreparedDispatchAction {
                 action,
@@ -2707,6 +2684,42 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0].kind(),
+            &RepoWatchEventKindV1::BaseAdvanced {
+                branch: expected_branch,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn newly_observed_pull_request_emits_base_advance() -> Result<(), Box<dyn Error>> {
+        let previous = observation(
+            Vec::new(),
+            Vec::new(),
+            vec![branch_head(INITIAL_BASE_HEAD)?],
+            Vec::new(),
+        )?;
+        let current_pull_request = pull_request(PullRequestFacts::matching(PULL_REQUEST_NUMBER))?;
+        let expected_branch = current_pull_request.context().base_branch().clone();
+        let current = observation(
+            vec![current_pull_request],
+            Vec::new(),
+            vec![branch_head(CHANGED_BASE_HEAD)?],
+            Vec::new(),
+        )?;
+
+        let events = derive(Some(&previous), &current)?;
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].kind(), &RepoWatchEventKindV1::PullRequestOpened);
+        assert_eq!(
+            events[1].kind(),
+            &RepoWatchEventKindV1::MergeableStateChanged {
+                current: MergeableState::Mergeable,
+            }
+        );
+        assert_eq!(
+            events[2].kind(),
             &RepoWatchEventKindV1::BaseAdvanced {
                 branch: expected_branch,
             }

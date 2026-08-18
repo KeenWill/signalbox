@@ -46,11 +46,12 @@
 name = "persistence"
 package = "signalbox-persistence"
 features = ["postgres-integration"]
-# The long pole by an order of magnitude: 695 of the 1,079 ignored tests these
-# suites hold, and 22m22s as one job against 6-7m per shard at three ways.
+# The long pole by an order of magnitude: 695 of the 1,134 ignored tests these
+# suites hold. Three shards still took about 8m15s each at the measured
+# baseline, so six bring the test-execution long pole into the four-minute band.
 # Counts are a snapshot, taken with `cargo test --tests -- --ignored --list`;
 # they justify the shard count and nothing depends on them staying exact.
-shards = 3
+shards = 6
 skip = []
 exclude_binaries = ["runner_protocol_postgres"]
 
@@ -58,16 +59,26 @@ exclude_binaries = ["runner_protocol_postgres"]
 name = "runner"
 package = "signalbox-persistence"
 features = ["postgres-integration"]
-# The 211 runner-protocol tests have their own single-purpose CI partition.
-shards = 1
+# The 263 runner-protocol tests took about eight minutes as one partition at the
+# measured baseline, so they are split across two runners.
+shards = 2
 skip = []
 include_binaries = ["runner_protocol_postgres"]
 
 [[suite]]
+name = "program-runtime"
+package = "signalbox-program-runtime"
+features = ["postgres-integration"]
+shards = 1
+skip = []
+
+[[suite]]
 name = "signalboxd"
 package = "signalboxd"
-features = []
-shards = 1
+features = ["test-support"]
+# One partition took about five minutes at the measured baseline; two keep it
+# from replacing persistence as the integration-test long pole.
+shards = 2
 # Subprocess entry points invoked only by their owning process tests.
 skip = ["bridge_build_direct_invocation_fixture", "bridge_wait_"]
 

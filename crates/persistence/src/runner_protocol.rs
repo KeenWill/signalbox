@@ -41,15 +41,22 @@ use signalbox_domain::{
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::lock_inventory::{
-    RUNNER_ENROLLMENT, RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY,
-    RUNNER_LEASE_GRANT_AUTHORITY, RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_HEAD,
+    RUNNER_CONNECTION_LOSS_HEAD, RUNNER_CONNECTION_LOSS_PROPAGATION, RUNNER_ENROLLMENT,
+    RUNNER_GRANT, RUNNER_LEASE_ENROLLMENT_AUTHORITY, RUNNER_LEASE_GRANT_AUTHORITY,
+    RUNNER_LEASE_HEAD, RUNNER_LEASE_PLACEMENT, RUNNER_PLACEMENT_CONNECTION_AUTHORITY,
+    RUNNER_PLACEMENT_CURRENT_LOSS, RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER, RUNNER_PLACEMENT_HEAD,
     RUNNER_REGISTRATION_HEAD, RUNNER_RETRY_REPLACEMENT_SCHEDULER,
 };
 use crate::mapping::{
-    ToolAttemptDispositionStorageKind, runner_placement_loss_source_from_str,
-    runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
-    tool_attempt_disposition_to_str, tool_permission_default_from_str,
-    tool_permission_default_to_str,
+    RunnerLossPropagationStateStorageKind, ToolAttemptDispositionStorageKind,
+    runner_loss_propagation_state_from_str, runner_loss_propagation_state_to_str,
+    runner_placement_loss_source_from_str, runner_placement_loss_source_to_str,
+    runner_sandbox_from_str, runner_sandbox_to_str, tool_attempt_disposition_to_str,
+    tool_permission_default_from_str, tool_permission_default_to_str,
+};
+use crate::outbox::{
+    self, DispatchedRunnerState, OutboxEvent, RunnerConnectionOutboxSource, RunnerStateOutboxEvent,
+    RunnerStateOutboxSource,
 };
 
 #[derive(Clone, Copy)]
@@ -123,6 +130,29 @@ impl RunnerConnectionEpoch {
     }
 }
 
+/// Positive append-only epoch of one enrollment's terminal connection losses.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RunnerConnectionLossEpoch(NonZeroU64);
+
+impl RunnerConnectionLossEpoch {
+    /// Admits one nonzero loss-epoch value.
+    pub const fn try_from_u64(value: u64) -> Option<Self> {
+        match NonZeroU64::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    /// Returns the positive integer carried by this loss epoch.
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    fn checked_next(self) -> Option<Self> {
+        self.get().checked_add(1).and_then(Self::try_from_u64)
+    }
+}
+
 /// Durable health state of the current physical runner connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerConnectionState {
@@ -166,6 +196,84 @@ pub struct RunnerConnectionSnapshot {
     event_ordinal: NonZeroU64,
     state: RunnerConnectionState,
     cause: RunnerConnectionCause,
+}
+
+/// Exact terminal connection source named by the current durable loss fence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunnerConnectionLossSnapshot {
+    enrollment: RunnerEnrollmentId,
+    loss_epoch: RunnerConnectionLossEpoch,
+    connection_epoch: RunnerConnectionEpoch,
+    connection_event_ordinal: NonZeroU64,
+}
+
+/// One bounded restart page for an enrollment's durable connection loss.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerConnectionLossPropagationPage {
+    loss: RunnerConnectionLossSnapshot,
+    propagated_through: Option<SessionId>,
+    sessions: Vec<SessionId>,
+    complete: bool,
+}
+
+/// Durable effect of applying one connection-loss cursor to one session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerConnectionLossSessionDisposition {
+    /// The transaction projected the exact loss and advanced its cursor.
+    Applied {
+        /// Placement state appended by the projection.
+        state: DispatchedRunnerState,
+        /// Physical attempt retained by the runner-recovery wait, when any.
+        interrupted_tool_attempt: Option<ToolAttemptId>,
+    },
+    /// A serialized placement change made this cursor subject no longer affected.
+    Superseded,
+    /// The exact session was already committed at or behind this cursor.
+    Replayed,
+}
+
+impl RunnerConnectionLossPropagationPage {
+    /// Returns the exact durable loss whose cursor produced this page.
+    pub const fn loss(&self) -> RunnerConnectionLossSnapshot {
+        self.loss
+    }
+
+    /// Returns the last session atomically committed before this page.
+    pub const fn propagated_through(&self) -> Option<SessionId> {
+        self.propagated_through
+    }
+
+    /// Returns at most 64 affected session identities in canonical order.
+    pub fn sessions(&self) -> &[SessionId] {
+        &self.sessions
+    }
+
+    /// Reports that this loss cursor has durably completed.
+    pub const fn is_complete(&self) -> bool {
+        self.complete
+    }
+}
+
+impl RunnerConnectionLossSnapshot {
+    /// Returns the enrollment whose connection became terminally lost.
+    pub const fn enrollment(self) -> RunnerEnrollmentId {
+        self.enrollment
+    }
+
+    /// Returns this enrollment's positive append-only loss epoch.
+    pub const fn loss_epoch(self) -> RunnerConnectionLossEpoch {
+        self.loss_epoch
+    }
+
+    /// Returns the exact terminal physical connection epoch.
+    pub const fn connection_epoch(self) -> RunnerConnectionEpoch {
+        self.connection_epoch
+    }
+
+    /// Returns the exact terminal event ordinal within the connection epoch.
+    pub const fn connection_event_ordinal(self) -> u64 {
+        self.connection_event_ordinal.get()
+    }
 }
 
 impl RunnerConnectionSnapshot {
@@ -642,6 +750,20 @@ impl RunnerProtocolStore {
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         }
         let prior = load_connection_head_in(transaction.as_mut(), enrollment).await?;
+        let prior_was_suspect = match prior {
+            Some(RunnerConnectionSnapshot {
+                state: RunnerConnectionState::Suspect,
+                ..
+            }) => true,
+            None
+            | Some(RunnerConnectionSnapshot {
+                state:
+                    RunnerConnectionState::Connected
+                    | RunnerConnectionState::Shutdown
+                    | RunnerConnectionState::Lost,
+                ..
+            }) => false,
+        };
         let epoch = match prior {
             Some(prior) => prior
                 .epoch()
@@ -666,6 +788,18 @@ impl RunnerProtocolStore {
             state: RunnerConnectionState::Connected,
             cause: RunnerConnectionCause::Established,
         };
+        advance_runner_connection_authority_head(
+            transaction.as_mut(),
+            enrollment,
+            prior,
+            snapshot,
+            None,
+        )
+        .await?;
+        if prior_was_suspect {
+            append_runner_connection_health_events(transaction.as_mut(), enrollment, snapshot)
+                .await?;
+        }
         match commit_mutation(transaction).await {
             Ok(()) => Ok(snapshot),
             Err(error @ RunnerProtocolStoreError::CommitAmbiguous(_)) => self
@@ -790,6 +924,23 @@ impl RunnerProtocolStore {
         .bind(cause_kind)
         .execute(&mut *transaction)
         .await?;
+        let snapshot = RunnerConnectionSnapshot {
+            epoch,
+            event_ordinal,
+            state,
+            cause,
+        };
+        let loss =
+            append_runner_connection_loss_epoch(transaction.as_mut(), enrollment, snapshot).await?;
+        advance_runner_connection_authority_head(
+            transaction.as_mut(),
+            enrollment,
+            Some(current),
+            snapshot,
+            loss,
+        )
+        .await?;
+        append_runner_connection_health_events(transaction.as_mut(), enrollment, snapshot).await?;
         commit_mutation(transaction).await?;
         Ok(RunnerConnectionTransitionEffect::Applied(
             AppliedRunnerConnectionTransition {
@@ -813,6 +964,357 @@ impl RunnerProtocolStore {
         let snapshot = load_connection_head_in(transaction.as_mut(), enrollment).await?;
         transaction.commit().await?;
         Ok(snapshot)
+    }
+
+    /// Loads the latest terminal connection source retained by the loss fence.
+    pub async fn load_current_connection_loss(
+        &self,
+        enrollment: RunnerEnrollmentId,
+    ) -> Result<Option<RunnerConnectionLossSnapshot>, RunnerProtocolStoreError> {
+        let row = sqlx::query(
+            "SELECT loss.loss_epoch, loss.connection_epoch,
+                    loss.connection_event_ordinal
+               FROM runner_current_connection_loss AS current_loss
+               JOIN runner_connection_loss_epoch AS loss
+                 ON loss.enrollment_id = current_loss.enrollment_id
+                AND loss.loss_epoch = current_loss.loss_epoch
+              WHERE current_loss.enrollment_id = $1",
+        )
+        .bind(enrollment.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let loss_epoch = RunnerConnectionLossEpoch::try_from_u64(decode_u64(
+                row.decode_column("loss_epoch")?,
+            )?)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+            let connection_epoch = RunnerConnectionEpoch::try_from_u64(decode_u64(
+                row.decode_column("connection_epoch")?,
+            )?)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+            let connection_event_ordinal =
+                NonZeroU64::new(decode_u64(row.decode_column("connection_event_ordinal")?)?)
+                    .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+            Ok(RunnerConnectionLossSnapshot {
+                enrollment,
+                loss_epoch,
+                connection_epoch,
+                connection_event_ordinal,
+            })
+        })
+        .transpose()
+    }
+
+    /// Loads the next bounded, ordered session page for one durable loss cursor.
+    pub async fn load_connection_loss_propagation_page(
+        &self,
+        loss: RunnerConnectionLossSnapshot,
+    ) -> Result<RunnerConnectionLossPropagationPage, RunnerProtocolStoreError> {
+        const PAGE_LIMIT: i64 = 64;
+
+        let mut transaction = begin_repeatable_read(&self.pool).await?;
+        let cursor = sqlx::query(
+            "SELECT propagation.propagated_through_session_id,
+                    propagation.state_kind,
+                    loss.connection_epoch, loss.connection_event_ordinal
+               FROM runner_connection_loss_propagation AS propagation
+               JOIN runner_connection_loss_epoch AS loss
+                 ON loss.enrollment_id = propagation.enrollment_id
+                AND loss.loss_epoch = propagation.loss_epoch
+              WHERE propagation.enrollment_id = $1
+                AND propagation.loss_epoch = $2",
+        )
+        .bind(loss.enrollment().into_uuid())
+        .bind(Decimal::from(loss.loss_epoch().get()))
+        .fetch_optional(transaction.as_mut())
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalLoss)?;
+        let stored_connection_epoch = RunnerConnectionEpoch::try_from_u64(decode_u64(
+            cursor.decode_column("connection_epoch")?,
+        )?)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let stored_connection_event_ordinal =
+            decode_u64(cursor.decode_column("connection_event_ordinal")?)?;
+        if stored_connection_epoch != loss.connection_epoch()
+            || stored_connection_event_ordinal != loss.connection_event_ordinal()
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        let propagated_through = cursor
+            .decode_column::<Option<Uuid>>("propagated_through_session_id")?
+            .map(session_id);
+        let state: String = cursor.decode_column("state_kind")?;
+        let complete = match runner_loss_propagation_state_from_str(&state)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?
+        {
+            RunnerLossPropagationStateStorageKind::Pending => false,
+            RunnerLossPropagationStateStorageKind::Completed => true,
+        };
+        let sessions = if complete {
+            Vec::new()
+        } else {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT placement.session_id
+                   FROM runner_current_session_placement AS current_placement
+                   JOIN runner_session_placement_record AS placement
+                     ON placement.session_id = current_placement.session_id
+                    AND placement.event_ordinal = current_placement.event_ordinal
+                   JOIN runner_enrollment AS lost_enrollment
+                     ON lost_enrollment.enrollment_id = $1
+                  WHERE (
+                        placement.loss_fence_enrollment_id = $1
+                        OR (
+                            placement.loss_fence_enrollment_id IS NULL
+                            AND placement.state_kind = 'unpinned'
+                            AND placement.selector_kind = 'identity'
+                            AND placement.selector_runner_id =
+                                lost_enrollment.runner_id
+                        )
+                    )
+                    AND (
+                        placement.observed_runner_loss_epoch IS NULL
+                        OR placement.observed_runner_loss_epoch < $2
+                    )
+                    AND (
+                        placement.state_kind = 'pinned'
+                        OR (
+                            placement.state_kind = 'unpinned'
+                            AND placement.selector_kind = 'identity'
+                        )
+                    )
+                    AND ($3::uuid IS NULL OR placement.session_id > $3)
+                  ORDER BY placement.session_id
+                  LIMIT $4",
+            )
+            .bind(loss.enrollment().into_uuid())
+            .bind(Decimal::from(loss.loss_epoch().get()))
+            .bind(propagated_through.map(SessionId::into_uuid))
+            .bind(PAGE_LIMIT)
+            .fetch_all(transaction.as_mut())
+            .await?
+            .into_iter()
+            .map(session_id)
+            .collect()
+        };
+        transaction.commit().await?;
+        Ok(RunnerConnectionLossPropagationPage {
+            loss,
+            propagated_through,
+            sessions,
+            complete,
+        })
+    }
+
+    /// Projects one exact connection loss into one session and advances the
+    /// restart cursor in the same transaction.
+    pub async fn propagate_connection_loss_session(
+        &self,
+        loss: RunnerConnectionLossSnapshot,
+        session: SessionId,
+    ) -> Result<RunnerConnectionLossSessionDisposition, RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        require_runner_loss_session_scheduler(&mut transaction, session).await?;
+        require_runner_loss_authority(&mut transaction, loss).await?;
+        let cursor = lock_runner_loss_propagation(&mut transaction, loss).await?;
+        if cursor
+            .propagated_through
+            .is_some_and(|committed| committed.as_uuid() >= session.as_uuid())
+        {
+            transaction.rollback().await?;
+            return Ok(RunnerConnectionLossSessionDisposition::Replayed);
+        }
+        if cursor.complete {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+
+        let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
+            .bind(session.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
+        let lost_runner: Uuid = sqlx::query_scalar(
+            "SELECT runner_id
+               FROM runner_enrollment
+              WHERE enrollment_id = $1",
+        )
+        .bind(loss.enrollment().into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let affected = placement_is_affected_by_loss(&prior, loss, lost_runner)?;
+        if !affected {
+            advance_runner_loss_cursor(&mut transaction, loss, session).await?;
+            commit_mutation(transaction).await?;
+            return Ok(RunnerConnectionLossSessionDisposition::Superseded);
+        }
+
+        let stored = self
+            .decode_stored_placement_in(&mut transaction, &prior)
+            .await?;
+        let (prior_event_ordinal, placement, registration, _grant, _prior_interrupted_tool_attempt) =
+            stored.into_parts();
+        let current_lease = self
+            .load_current_loss_lease_in(&mut transaction, session)
+            .await?;
+        let interrupted_tool_attempt = current_lease.as_ref().map(RunnerLease::attempt);
+        let selected_runner = placement_loss_fence_runner(&placement)
+            .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+        let (event_kind, state, lost) = match placement.state() {
+            SessionRunnerPlacementState::Unpinned => {
+                let lost = placement
+                    .mark_runner_lost_before_pin(selected_runner)
+                    .map_err(RunnerProtocolStoreError::Domain)?;
+                (
+                    "runner_lost_before_pin",
+                    DispatchedRunnerState::RunnerLostBeforePin,
+                    lost,
+                )
+            }
+            SessionRunnerPlacementState::Pinned(_) => {
+                let lost = placement
+                    .mark_runner_lost()
+                    .map_err(RunnerProtocolStoreError::Domain)?;
+                ("runner_lost", DispatchedRunnerState::RunnerLost, lost)
+            }
+            SessionRunnerPlacementState::RunnerLostBeforePin(_)
+            | SessionRunnerPlacementState::RunnerLost(_)
+            | SessionRunnerPlacementState::RunnerAbandoned(_) => {
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+            }
+        };
+        if event_kind == "runner_lost_before_pin" && current_lease.is_some() {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        let event_ordinal = prior_event_ordinal
+            .checked_add(1)
+            .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+        let grant_origin = placement_grant_origin(Some(&prior), event_ordinal, &lost)?;
+        insert_placement_record(
+            &mut transaction,
+            event_ordinal,
+            event_kind,
+            &lost,
+            stored_registration_identity(registration.as_ref()),
+            grant_origin,
+            interrupted_tool_attempt,
+        )
+        .await?;
+        let changed = sqlx::query(
+            "UPDATE runner_current_session_placement
+                SET event_ordinal = $2
+              WHERE session_id = $1 AND event_ordinal = $3",
+        )
+        .bind(session.into_uuid())
+        .bind(Decimal::from(event_ordinal))
+        .bind(Decimal::from(prior_event_ordinal))
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+
+        if let Some(lease) = current_lease {
+            persist_runner_loss_lease_and_wait(&mut transaction, &lost, lease).await?;
+        } else {
+            let has_active_runner_boundary: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                     SELECT 1
+                       FROM turn_lifecycle AS lifecycle
+                       JOIN turn_attempt AS turn_attempt
+                         ON turn_attempt.turn_attempt_id =
+                            lifecycle.current_attempt_id
+                        AND turn_attempt.turn_id = lifecycle.turn_id
+                        AND turn_attempt.session_id = lifecycle.session_id
+                       JOIN tool_request AS request
+                         ON request.producing_model_call_id =
+                            lifecycle.active_tool_round_call_id
+                        AND request.turn_id = lifecycle.turn_id
+                        AND request.session_id = lifecycle.session_id
+                       JOIN runner_current_session_placement AS placement_head
+                         ON placement_head.session_id = lifecycle.session_id
+                       JOIN runner_session_placement_tool AS required
+                         ON required.session_id = placement_head.session_id
+                        AND required.event_ordinal = placement_head.event_ordinal
+                        AND required.tool_name = request.tool_name
+                        AND required.runner_required
+                      WHERE lifecycle.session_id = $1
+                        AND lifecycle.state_kind = 'active'
+                        AND lifecycle.active_phase_kind = 'running'
+                        AND lifecycle.active_tool_round_call_id IS NOT NULL
+                        AND turn_attempt.state_kind = 'running'
+                        AND NOT EXISTS (
+                            SELECT 1
+                              FROM tool_approval_decision AS denied
+                             WHERE denied.request_id = request.request_id
+                               AND denied.decision_kind = 'deny'
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1
+                              FROM tool_attempt AS finished
+                             WHERE finished.request_id = request.request_id
+                               AND finished.state_kind = 'terminal'
+                        )
+                 )",
+            )
+            .bind(session.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if has_active_runner_boundary {
+                yield_turn_to_runner_recovery_without_lease(&mut transaction, &lost).await?;
+            }
+        }
+        outbox::append(
+            transaction.as_mut(),
+            OutboxEvent::RunnerStateTransition(RunnerStateOutboxEvent {
+                session,
+                runner: placement_loss_fence_runner(&lost)
+                    .ok_or(RunnerProtocolCorruption::CrossWiredReference)?,
+                placement_revision: lost.revision(),
+                sandbox: lost.request().sandbox,
+                working_directory: lost_runner_working_directory(&lost),
+                state,
+                source: RunnerStateOutboxSource {
+                    placement_event_ordinal: event_ordinal,
+                    connection: None,
+                },
+            }),
+        )
+        .await?;
+        advance_runner_loss_cursor(&mut transaction, loss, session).await?;
+        commit_mutation(transaction).await?;
+        Ok(RunnerConnectionLossSessionDisposition::Applied {
+            state,
+            interrupted_tool_attempt,
+        })
+    }
+
+    /// Marks one loss cursor complete after every affected session committed.
+    pub async fn complete_connection_loss_propagation(
+        &self,
+        loss: RunnerConnectionLossSnapshot,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        require_runner_loss_authority(&mut transaction, loss).await?;
+        let cursor = lock_runner_loss_propagation(&mut transaction, loss).await?;
+        if cursor.complete {
+            transaction.rollback().await?;
+            return Ok(());
+        }
+        let changed = sqlx::query(
+            "UPDATE runner_connection_loss_propagation
+                SET state_kind = 'completed'
+              WHERE enrollment_id = $1 AND loss_epoch = $2
+                AND state_kind = 'pending'",
+        )
+        .bind(loss.enrollment().into_uuid())
+        .bind(Decimal::from(loss.loss_epoch().get()))
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if changed != 1 {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        commit_mutation(transaction).await
     }
 
     /// Loads every current nonterminal connection head for startup reconciliation.
@@ -1391,7 +1893,7 @@ impl RunnerProtocolStore {
         authority: PlacementProjectionAuthority,
     ) -> Result<(), RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
-        lock_runner_session_scheduler(&mut transaction, placement.session()).await?;
+        lock_runner_placement_loss_baseline(&mut transaction, placement).await?;
         let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
             .bind(placement.session().into_uuid())
             .fetch_optional(&mut *transaction)
@@ -1411,7 +1913,8 @@ impl RunnerProtocolStore {
         // snapshot writer must not fabricate the multi-aggregate transaction.
         if matches!(
             event_kind,
-            "runner_lost_before_pin"
+            "pinned"
+                | "runner_lost_before_pin"
                 | "pre_pin_replaced"
                 | "runner_lost"
                 | "runner_replaced"
@@ -1533,6 +2036,7 @@ impl RunnerProtocolStore {
             placement,
             registration_identity,
             grant_origin,
+            None,
         )
         .await?;
         if let (Some(grant), Some(registration)) = (grant, registration) {
@@ -1582,7 +2086,49 @@ impl RunnerProtocolStore {
             ));
         }
         let mut transaction = self.pool.begin().await?;
-        lock_runner_session_scheduler(&mut transaction, pin.placement.session()).await?;
+        lock_runner_placement_loss_baseline(&mut transaction, &pin.placement).await?;
+        let enrollment = registration.registration().enrollment();
+        let locked = sqlx::query(RUNNER_ENROLLMENT)
+            .bind(enrollment.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if locked.is_none() {
+            return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+        }
+        let enrollment_state: String = sqlx::query_scalar(
+            "SELECT state_kind
+               FROM runner_enrollment
+              WHERE enrollment_id = $1",
+        )
+        .bind(enrollment.into_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        match decode_enrollment_state(&enrollment_state)? {
+            RunnerEnrollmentState::Active => {}
+            RunnerEnrollmentState::Revoked => {
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::EnrollmentRevoked,
+                ));
+            }
+        }
+        match load_connection_head_in(transaction.as_mut(), enrollment).await? {
+            None
+            | Some(RunnerConnectionSnapshot {
+                state: RunnerConnectionState::Connected,
+                ..
+            }) => {}
+            Some(RunnerConnectionSnapshot {
+                state:
+                    RunnerConnectionState::Suspect
+                    | RunnerConnectionState::Shutdown
+                    | RunnerConnectionState::Lost,
+                ..
+            }) => {
+                return Err(RunnerProtocolStoreError::Domain(
+                    RunnerDomainError::InvalidState,
+                ));
+            }
+        }
         let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
             .bind(pin.placement.session().into_uuid())
             .fetch_optional(&mut *transaction)
@@ -1608,6 +2154,7 @@ impl RunnerProtocolStore {
             &pin.placement,
             stored_registration_identity(Some(registration)),
             grant_origin,
+            None,
         )
         .await?;
         if let Some(grant) = pin.grant.as_ref() {
@@ -1730,6 +2277,61 @@ impl RunnerProtocolStore {
             grant,
             interrupted_tool_attempt,
         }))
+    }
+
+    async fn decode_stored_placement_in(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        row: &PgRow,
+    ) -> Result<StoredSessionRunnerPlacement, RunnerProtocolStoreError> {
+        let event_ordinal = decode_u64(row.decode_column("event_ordinal")?)?;
+        let session = session_id(row.decode_column("session_id")?);
+        let maximum_event_ordinal: Option<Decimal> = sqlx::query_scalar(
+            "SELECT max(event_ordinal)
+               FROM runner_session_placement_record
+              WHERE session_id = $1",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(&mut **transaction)
+        .await?;
+        if maximum_event_ordinal.map(decode_u64).transpose()? != Some(event_ordinal) {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        let grant_policies = load_grant_policy_index(transaction.as_mut(), row).await?;
+        let registration =
+            load_placement_registration(transaction.as_mut(), row, &self.catalog).await?;
+        let grant = if registration.is_some() {
+            load_grant_for_placement(transaction.as_mut(), row, &self.catalog, &grant_policies)
+                .await?
+        } else {
+            None
+        };
+        let pinned_profile =
+            row.decode_column::<Option<String>>("pinned_credential_profile_name")?;
+        let profileless_tombstone = grant
+            .as_ref()
+            .filter(|grant| credential_grant_is_revoked(grant.state()) && pinned_profile.is_none());
+        let placement = decode_placement(
+            transaction.as_mut(),
+            row,
+            &self.catalog,
+            &grant_policies,
+            registration
+                .as_ref()
+                .map(StoredValidatedRunnerRegistration::registration),
+            profileless_tombstone,
+        )
+        .await?;
+        let interrupted_tool_attempt = row
+            .decode_column::<Option<Uuid>>("interrupted_tool_attempt_id")?
+            .map(tool_attempt_id);
+        Ok(StoredSessionRunnerPlacement {
+            event_ordinal,
+            placement,
+            registration,
+            grant,
+            interrupted_tool_attempt,
+        })
     }
 
     /// Loads the exact authenticated runner-recovery wait for one session.
@@ -1949,6 +2551,55 @@ impl RunnerProtocolStore {
             ));
         }
         self.store_lease_without_proof(lease).await
+    }
+
+    async fn load_current_loss_lease_in(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        session: SessionId,
+    ) -> Result<Option<RunnerLease>, RunnerProtocolStoreError> {
+        let candidates = sqlx::query(
+            "SELECT generation.lease_id, generation.generation
+               FROM runner_lease_generation AS generation
+               JOIN runner_current_lease_event AS current_event
+                 ON current_event.lease_id = generation.lease_id
+                AND current_event.generation = generation.generation
+               JOIN runner_lease_event AS event
+                 ON event.lease_id = current_event.lease_id
+                AND event.generation = current_event.generation
+                AND event.event_ordinal = current_event.event_ordinal
+               JOIN runner_current_tool_attempt AS current_attempt
+                 ON current_attempt.attempt_id = generation.attempt_id
+              WHERE generation.session_id = $1
+                AND event.state_kind IN ('offered', 'claimed')
+              ORDER BY generation.lease_id, generation.generation
+              LIMIT 2",
+        )
+        .bind(session.into_uuid())
+        .fetch_all(&mut **transaction)
+        .await?;
+        let [candidate] = candidates.as_slice() else {
+            if candidates.is_empty() {
+                return Ok(None);
+            }
+            return Err(RunnerProtocolCorruption::IncompleteInventory.into());
+        };
+        let lease_id = runner_lease_id(candidate.decode_column("lease_id")?);
+        let generation = decode_generation(candidate.decode_column("generation")?)?;
+        let locked = sqlx::query(RUNNER_LEASE_HEAD)
+            .bind(lease_id.into_uuid())
+            .bind(Decimal::from(generation.get()))
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalLease)?;
+        let state: String = locked.decode_column("state_kind")?;
+        if !matches!(state.as_str(), "offered" | "claimed") {
+            return Ok(None);
+        }
+        self.load_lease_in(transaction, lease_id, generation)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalLease.into())
+            .map(Some)
     }
 
     /// Stores one sealed lease loss that does not claim independent no-execution proof.
@@ -2474,6 +3125,641 @@ impl RunnerProtocolStore {
     }
 }
 
+#[derive(Clone, Copy)]
+struct LockedRunnerLossPropagation {
+    propagated_through: Option<SessionId>,
+    complete: bool,
+}
+
+async fn require_runner_loss_session_scheduler(
+    transaction: &mut Transaction<'_, Postgres>,
+    session: SessionId,
+) -> Result<(), RunnerProtocolStoreError> {
+    let scheduler = sqlx::query_scalar::<_, Uuid>(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
+        .bind(session.into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    if scheduler.is_none() {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(())
+}
+
+async fn require_runner_loss_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    loss: RunnerConnectionLossSnapshot,
+) -> Result<(), RunnerProtocolStoreError> {
+    let identity = sqlx::query(
+        "SELECT lock_runner_loss_identity(runner_id)
+           FROM runner_enrollment
+          WHERE enrollment_id = $1",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if identity.is_none() {
+        return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+    }
+    let enrollment = sqlx::query_scalar::<_, Uuid>(RUNNER_ENROLLMENT)
+        .bind(loss.enrollment().into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    if enrollment.is_none() {
+        return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+    }
+    sqlx::query_scalar::<_, Decimal>(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
+        .bind(loss.enrollment().into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    let current_loss = sqlx::query_scalar::<_, Decimal>(RUNNER_CONNECTION_LOSS_HEAD)
+        .bind(loss.enrollment().into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalLoss)?;
+    if decode_u64(current_loss)? < loss.loss_epoch().get() {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let source = sqlx::query(
+        "SELECT connection_epoch, connection_event_ordinal
+           FROM runner_connection_loss_epoch
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalLoss)?;
+    if decode_u64(source.decode_column("connection_epoch")?)? != loss.connection_epoch().get()
+        || decode_u64(source.decode_column("connection_event_ordinal")?)?
+            != loss.connection_event_ordinal()
+    {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(())
+}
+
+async fn lock_runner_loss_propagation(
+    transaction: &mut Transaction<'_, Postgres>,
+    loss: RunnerConnectionLossSnapshot,
+) -> Result<LockedRunnerLossPropagation, RunnerProtocolStoreError> {
+    let row = sqlx::query(RUNNER_CONNECTION_LOSS_PROPAGATION)
+        .bind(loss.enrollment().into_uuid())
+        .bind(Decimal::from(loss.loss_epoch().get()))
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalLoss)?;
+    if decode_u64(row.decode_column("connection_epoch")?)? != loss.connection_epoch().get()
+        || decode_u64(row.decode_column("connection_event_ordinal")?)?
+            != loss.connection_event_ordinal()
+    {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let state: String = row.decode_column("state_kind")?;
+    let complete = match runner_loss_propagation_state_from_str(&state)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?
+    {
+        RunnerLossPropagationStateStorageKind::Pending => false,
+        RunnerLossPropagationStateStorageKind::Completed => true,
+    };
+    Ok(LockedRunnerLossPropagation {
+        propagated_through: row
+            .decode_column::<Option<Uuid>>("propagated_through_session_id")?
+            .map(session_id),
+        complete,
+    })
+}
+
+fn placement_is_affected_by_loss(
+    placement: &PgRow,
+    loss: RunnerConnectionLossSnapshot,
+    lost_runner: Uuid,
+) -> Result<bool, RunnerProtocolStoreError> {
+    let enrollment = placement.decode_column::<Option<Uuid>>("loss_fence_enrollment_id")?;
+    let observed = placement
+        .decode_column::<Option<Decimal>>("observed_runner_loss_epoch")?
+        .map(decode_u64)
+        .transpose()?;
+    let state: String = placement.decode_column("state_kind")?;
+    let selector: String = placement.decode_column("selector_kind")?;
+    let selector_runner = placement.decode_column::<Option<Uuid>>("selector_runner_id")?;
+    let enrollment_matches = enrollment == Some(loss.enrollment().into_uuid())
+        || (enrollment.is_none()
+            && state == "unpinned"
+            && selector == "identity"
+            && selector_runner == Some(lost_runner));
+    Ok(enrollment_matches
+        && observed.is_none_or(|epoch| epoch < loss.loss_epoch().get())
+        && (state == "pinned" || (state == "unpinned" && selector == "identity")))
+}
+
+async fn advance_runner_loss_cursor(
+    transaction: &mut Transaction<'_, Postgres>,
+    loss: RunnerConnectionLossSnapshot,
+    session: SessionId,
+) -> Result<(), RunnerProtocolStoreError> {
+    let changed = sqlx::query(
+        "UPDATE runner_connection_loss_propagation
+            SET propagated_through_session_id = $3
+          WHERE enrollment_id = $1 AND loss_epoch = $2
+            AND state_kind = 'pending'",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if changed != 1 {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(())
+}
+
+fn lost_runner_working_directory(
+    placement: &SessionRunnerPlacement,
+) -> Option<RunnerWorkingDirectory> {
+    match &placement.request().working_directory {
+        WorkingDirectorySelection::Exact(directory) => Some(directory.clone()),
+        WorkingDirectorySelection::RunnerDefault => None,
+    }
+}
+
+async fn persist_runner_loss_lease_and_wait(
+    transaction: &mut Transaction<'_, Postgres>,
+    placement: &SessionRunnerPlacement,
+    lease: RunnerLease,
+) -> Result<(), RunnerProtocolStoreError> {
+    let correlation = lease.correlation();
+    if correlation.dispatch.session() != placement.session()
+        || placement_loss_fence_runner(placement) != Some(correlation.runner)
+    {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let side_effecting = lease.effect() == RunnerToolEffectClass::SideEffecting;
+    let execution_possible = lease.state() == RunnerLeaseState::Claimed;
+    match lease.state() {
+        RunnerLeaseState::Offered => {
+            append_lost_unclaimed_lease_event(transaction, &lease).await?;
+        }
+        RunnerLeaseState::Claimed => {
+            let loss = lease.lose().map_err(RunnerProtocolStoreError::Domain)?;
+            append_lease_event_in(transaction, loss.lost()).await?;
+            if side_effecting && loss.crash_attempt() != Some(correlation.dispatch.attempt()) {
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+            }
+        }
+        RunnerLeaseState::Completed
+        | RunnerLeaseState::LostUnclaimed
+        | RunnerLeaseState::LostExecutionPossible
+        | RunnerLeaseState::LostClaimed => {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+    }
+    if side_effecting && execution_possible {
+        terminalize_runner_loss_attempt_ambiguous(transaction, &correlation).await?;
+    }
+    yield_turn_to_runner_recovery(transaction, placement, &correlation).await
+}
+
+async fn yield_turn_to_runner_recovery_without_lease(
+    transaction: &mut Transaction<'_, Postgres>,
+    placement: &SessionRunnerPlacement,
+) -> Result<(), RunnerProtocolStoreError> {
+    let runner = placement_loss_fence_runner(placement)
+        .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+    let retired = sqlx::query(
+        "UPDATE tool_attempt AS attempt
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'known_failed',
+                error_kind = 'crash_lost'
+           FROM tool_request AS request,
+                turn_lifecycle AS lifecycle,
+                runner_current_session_placement AS placement_head,
+                runner_session_placement_tool AS required
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.state_kind = 'active'
+            AND lifecycle.active_phase_kind = 'running'
+            AND lifecycle.active_tool_round_call_id IS NOT NULL
+            AND request.producing_model_call_id =
+                lifecycle.active_tool_round_call_id
+            AND request.turn_id = lifecycle.turn_id
+            AND request.session_id = lifecycle.session_id
+            AND attempt.request_id = request.request_id
+            AND attempt.turn_id = request.turn_id
+            AND attempt.session_id = request.session_id
+            AND attempt.state_kind = 'prepared'
+            AND placement_head.session_id = lifecycle.session_id
+            AND required.session_id = placement_head.session_id
+            AND required.event_ordinal = placement_head.event_ordinal
+            AND required.tool_name = request.tool_name
+            AND required.runner_required",
+    )
+    .bind(placement.session().into_uuid())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if retired > 1 {
+        return Err(RunnerProtocolCorruption::IncompleteInventory.into());
+    }
+    let yielded = sqlx::query(
+        "UPDATE turn_attempt AS attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+           FROM turn_lifecycle AS lifecycle
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.state_kind = 'active'
+            AND lifecycle.active_phase_kind = 'running'
+            AND lifecycle.active_tool_round_call_id IS NOT NULL
+            AND lifecycle.current_attempt_id = attempt.turn_attempt_id
+            AND lifecycle.turn_id = attempt.turn_id
+            AND lifecycle.session_id = attempt.session_id
+            AND attempt.state_kind = 'running'
+            AND attempt.end_variant IS NULL
+            AND attempt.end_disposition IS NULL",
+    )
+    .bind(placement.session().into_uuid())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if yielded != 1 {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let changed = sqlx::query(
+        "UPDATE turn_lifecycle AS lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL,
+                runner_recovery_runner_id = $2,
+                runner_recovery_placement_revision = $3,
+                runner_recovery_tool_attempt_id = NULL
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.state_kind = 'active'
+            AND lifecycle.active_phase_kind = 'running'
+            AND lifecycle.active_tool_round_call_id IS NOT NULL
+            AND EXISTS (
+                SELECT 1
+                  FROM turn_attempt AS attempt
+                 WHERE attempt.turn_attempt_id = lifecycle.current_attempt_id
+                   AND attempt.turn_id = lifecycle.turn_id
+                   AND attempt.session_id = lifecycle.session_id
+                   AND attempt.state_kind = 'ended'
+                   AND attempt.end_variant = 'without_stop'
+                   AND attempt.end_disposition = 'yielded_to_durable_wait'
+            )",
+    )
+    .bind(placement.session().into_uuid())
+    .bind(runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if changed != 1 {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(())
+}
+
+async fn append_lost_unclaimed_lease_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    lease: &RunnerLease,
+) -> Result<(), RunnerProtocolStoreError> {
+    let correlation = lease.correlation();
+    let current = sqlx::query(RUNNER_LEASE_HEAD)
+        .bind(correlation.lease.into_uuid())
+        .bind(Decimal::from(correlation.generation.get()))
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalLoss)?;
+    require_stored_lease_identity(&current, lease)?;
+    let state: String = current.decode_column("state_kind")?;
+    if state != "offered" {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let event_ordinal = decode_u64(current.decode_column("event_ordinal")?)?
+        .checked_add(1)
+        .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+    sqlx::query(
+        "INSERT INTO runner_lease_event
+            (lease_id, generation, event_ordinal, state_kind)
+         VALUES ($1, $2, $3, 'lost_unclaimed')",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .bind(Decimal::from(event_ordinal))
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_lease_event
+            SET event_ordinal = $3
+          WHERE lease_id = $1 AND generation = $2",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .bind(Decimal::from(event_ordinal))
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_lease_no_execution_proof
+            (lease_id, generation, attempt_id, session_id, runner_id,
+             tool_name, turn_id, issuing_turn_attempt_id, request_id,
+             dispatch_generation)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .bind(correlation.dispatch.attempt().into_uuid())
+    .bind(correlation.dispatch.session().into_uuid())
+    .bind(correlation.runner.into_uuid())
+    .bind(correlation.tool.as_str())
+    .bind(correlation.dispatch.turn().into_uuid())
+    .bind(correlation.dispatch.issuing_attempt().into_uuid())
+    .bind(correlation.dispatch.request().into_uuid())
+    .bind(Decimal::from(correlation.dispatch.generation().as_u64()))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn terminalize_runner_loss_attempt_ambiguous(
+    transaction: &mut Transaction<'_, Postgres>,
+    correlation: &RunnerLeaseCorrelation,
+) -> Result<(), RunnerProtocolStoreError> {
+    let changed = sqlx::query(
+        "UPDATE tool_attempt
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'ambiguous'
+          WHERE attempt_id = $1 AND request_id = $2 AND session_id = $3
+            AND turn_id = $4 AND issuing_turn_attempt_id = $5
+            AND dispatch_generation = $6 AND state_kind = 'in_flight'",
+    )
+    .bind(correlation.dispatch.attempt().into_uuid())
+    .bind(correlation.dispatch.request().into_uuid())
+    .bind(correlation.dispatch.session().into_uuid())
+    .bind(correlation.dispatch.turn().into_uuid())
+    .bind(correlation.dispatch.issuing_attempt().into_uuid())
+    .bind(Decimal::from(correlation.dispatch.generation().as_u64()))
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if changed != 1 {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(())
+}
+
+async fn yield_turn_to_runner_recovery(
+    transaction: &mut Transaction<'_, Postgres>,
+    placement: &SessionRunnerPlacement,
+    correlation: &RunnerLeaseCorrelation,
+) -> Result<(), RunnerProtocolStoreError> {
+    let yielded = sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3
+            AND state_kind = 'running' AND end_variant IS NULL
+            AND end_disposition IS NULL",
+    )
+    .bind(correlation.dispatch.issuing_attempt().into_uuid())
+    .bind(correlation.dispatch.turn().into_uuid())
+    .bind(correlation.dispatch.session().into_uuid())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if yielded != 1 {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let changed = sqlx::query(
+        "UPDATE turn_lifecycle AS lifecycle
+            SET active_phase_kind = 'awaiting_runner_recovery',
+                current_attempt_id = NULL,
+                runner_recovery_runner_id = $4,
+                runner_recovery_placement_revision = $5,
+                runner_recovery_tool_attempt_id = $6
+           FROM tool_request AS request
+          WHERE lifecycle.turn_id = $1 AND lifecycle.session_id = $2
+            AND lifecycle.state_kind = 'active'
+            AND lifecycle.active_phase_kind = 'running'
+            AND lifecycle.current_attempt_id = $3
+            AND lifecycle.active_tool_round_call_id =
+                request.producing_model_call_id
+            AND request.request_id = $7 AND request.turn_id = $1
+            AND request.session_id = $2",
+    )
+    .bind(correlation.dispatch.turn().into_uuid())
+    .bind(correlation.dispatch.session().into_uuid())
+    .bind(correlation.dispatch.issuing_attempt().into_uuid())
+    .bind(correlation.runner.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(correlation.dispatch.attempt().into_uuid())
+    .bind(correlation.dispatch.request().into_uuid())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if changed != 1 {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(())
+}
+
+async fn append_runner_connection_health_events(
+    connection: &mut PgConnection,
+    enrollment: RunnerEnrollmentId,
+    snapshot: RunnerConnectionSnapshot,
+) -> Result<(), RunnerProtocolStoreError> {
+    let expected_state = match snapshot.cause() {
+        RunnerConnectionCause::Established | RunnerConnectionCause::HeartbeatRecovered => {
+            RunnerConnectionState::Connected
+        }
+        RunnerConnectionCause::HeartbeatMissed => RunnerConnectionState::Suspect,
+        RunnerConnectionCause::DaemonShutdown | RunnerConnectionCause::RunnerShutdown => {
+            RunnerConnectionState::Shutdown
+        }
+        RunnerConnectionCause::HeartbeatTimeout
+        | RunnerConnectionCause::TransportClosed
+        | RunnerConnectionCause::ProtocolFailure
+        | RunnerConnectionCause::EnrollmentRevoked => RunnerConnectionState::Lost,
+    };
+    if snapshot.state() != expected_state {
+        return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+    }
+    let state = match snapshot.cause() {
+        RunnerConnectionCause::HeartbeatMissed => DispatchedRunnerState::Suspect,
+        RunnerConnectionCause::Established | RunnerConnectionCause::HeartbeatRecovered => {
+            DispatchedRunnerState::Connected
+        }
+        RunnerConnectionCause::DaemonShutdown
+        | RunnerConnectionCause::RunnerShutdown
+        | RunnerConnectionCause::HeartbeatTimeout
+        | RunnerConnectionCause::TransportClosed
+        | RunnerConnectionCause::ProtocolFailure
+        | RunnerConnectionCause::EnrollmentRevoked => return Ok(()),
+    };
+    let placements = sqlx::query(
+        "SELECT placement.session_id, placement.event_ordinal,
+                placement.placement_revision, placement.pinned_runner_id,
+                placement.requested_sandbox_profile,
+                placement.requested_working_directory
+           FROM runner_current_session_placement AS current_placement
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = current_placement.session_id
+            AND placement.event_ordinal = current_placement.event_ordinal
+          WHERE placement.state_kind = 'pinned'
+            AND placement.registration_enrollment_id = $1
+          ORDER BY placement.session_id",
+    )
+    .bind(enrollment.into_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
+    for placement in placements {
+        let session = session_id(placement.decode_column("session_id")?);
+        let runner = runner_id(placement.decode_column("pinned_runner_id")?);
+        let placement_revision = decode_generation(placement.decode_column("placement_revision")?)?;
+        let sandbox = decode_sandbox(placement.decode_column("requested_sandbox_profile")?)?;
+        let working_directory = placement
+            .decode_column::<Option<String>>("requested_working_directory")?
+            .map(working_directory)
+            .transpose()?;
+        let placement_event_ordinal = decode_u64(placement.decode_column("event_ordinal")?)?;
+        outbox::append(
+            connection,
+            OutboxEvent::RunnerStateTransition(RunnerStateOutboxEvent {
+                session,
+                runner,
+                placement_revision,
+                sandbox,
+                working_directory,
+                state,
+                source: RunnerStateOutboxSource {
+                    placement_event_ordinal,
+                    connection: Some(RunnerConnectionOutboxSource {
+                        enrollment,
+                        epoch: snapshot.epoch().get(),
+                        event_ordinal: snapshot.event_ordinal(),
+                    }),
+                },
+            }),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn append_runner_connection_loss_epoch(
+    connection: &mut PgConnection,
+    enrollment: RunnerEnrollmentId,
+    snapshot: RunnerConnectionSnapshot,
+) -> Result<Option<RunnerConnectionLossSnapshot>, RunnerProtocolStoreError> {
+    if snapshot.state() != RunnerConnectionState::Lost {
+        return Ok(None);
+    }
+    let prior: Option<Decimal> = sqlx::query_scalar(RUNNER_CONNECTION_LOSS_HEAD)
+        .bind(enrollment.into_uuid())
+        .fetch_optional(&mut *connection)
+        .await?;
+    let (loss_epoch, head_statement) = match prior {
+        Some(prior) => (
+            RunnerConnectionLossEpoch::try_from_u64(decode_u64(prior)?)
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?
+                .checked_next()
+                .ok_or(RunnerProtocolCorruption::GenerationExhausted)?,
+            "UPDATE runner_current_connection_loss
+                SET loss_epoch = $2
+              WHERE enrollment_id = $1",
+        ),
+        None => (
+            RunnerConnectionLossEpoch::try_from_u64(1)
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+            "INSERT INTO runner_current_connection_loss
+                (enrollment_id, loss_epoch)
+             VALUES ($1, $2)",
+        ),
+    };
+    sqlx::query(
+        "INSERT INTO runner_connection_loss_epoch
+            (enrollment_id, loss_epoch, connection_epoch,
+             connection_event_ordinal)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(loss_epoch.get()))
+    .bind(Decimal::from(snapshot.epoch().get()))
+    .bind(Decimal::from(snapshot.event_ordinal()))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_connection_loss_propagation
+            (enrollment_id, loss_epoch, propagated_through_session_id,
+             state_kind)
+         VALUES ($1, $2, NULL, $3)",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(loss_epoch.get()))
+    .bind(runner_loss_propagation_state_to_str(
+        RunnerLossPropagationStateStorageKind::Pending,
+    ))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(head_statement)
+        .bind(enrollment.into_uuid())
+        .bind(Decimal::from(loss_epoch.get()))
+        .execute(&mut *connection)
+        .await?;
+    let connection_event_ordinal = NonZeroU64::new(snapshot.event_ordinal())
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+    Ok(Some(RunnerConnectionLossSnapshot {
+        enrollment,
+        loss_epoch,
+        connection_epoch: snapshot.epoch(),
+        connection_event_ordinal,
+    }))
+}
+
+async fn advance_runner_connection_authority_head(
+    connection: &mut PgConnection,
+    enrollment: RunnerEnrollmentId,
+    prior: Option<RunnerConnectionSnapshot>,
+    current: RunnerConnectionSnapshot,
+    loss: Option<RunnerConnectionLossSnapshot>,
+) -> Result<(), RunnerProtocolStoreError> {
+    let rows = match prior {
+        Some(prior) => sqlx::query(
+            "UPDATE runner_connection_authority_head
+                    SET connection_epoch = $2,
+                        connection_event_ordinal = $3,
+                        latest_loss_epoch = COALESCE($4, latest_loss_epoch)
+                  WHERE enrollment_id = $1
+                    AND connection_epoch = $5
+                    AND connection_event_ordinal = $6",
+        )
+        .bind(enrollment.into_uuid())
+        .bind(Decimal::from(current.epoch().get()))
+        .bind(Decimal::from(current.event_ordinal()))
+        .bind(loss.map(|loss| Decimal::from(loss.loss_epoch().get())))
+        .bind(Decimal::from(prior.epoch().get()))
+        .bind(Decimal::from(prior.event_ordinal()))
+        .execute(&mut *connection)
+        .await?
+        .rows_affected(),
+        None => sqlx::query(
+            "INSERT INTO runner_connection_authority_head
+                    (enrollment_id, connection_epoch,
+                     connection_event_ordinal, latest_loss_epoch)
+                 VALUES ($1, $2, $3, $4)",
+        )
+        .bind(enrollment.into_uuid())
+        .bind(Decimal::from(current.epoch().get()))
+        .bind(Decimal::from(current.event_ordinal()))
+        .bind(loss.map(|loss| Decimal::from(loss.loss_epoch().get())))
+        .execute(&mut *connection)
+        .await?
+        .rows_affected(),
+    };
+    if rows != 1 {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct StoredEnrollmentRequestFacts {
     identities: IssuedRunnerEnrollmentIdentities,
@@ -2600,10 +3886,13 @@ async fn terminalize_connection_for_revocation(
     ) {
         return Ok(());
     }
-    let event_ordinal = current
-        .event_ordinal()
-        .checked_add(1)
-        .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+    let event_ordinal = NonZeroU64::new(
+        current
+            .event_ordinal()
+            .checked_add(1)
+            .ok_or(RunnerProtocolCorruption::GenerationExhausted)?,
+    )
+    .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
     sqlx::query(
         "INSERT INTO runner_connection_event
             (enrollment_id, connection_epoch, event_ordinal,
@@ -2612,9 +3901,26 @@ async fn terminalize_connection_for_revocation(
     )
     .bind(enrollment.into_uuid())
     .bind(Decimal::from(current.epoch().get()))
-    .bind(Decimal::from(event_ordinal))
+    .bind(Decimal::from(event_ordinal.get()))
     .execute(&mut **transaction)
     .await?;
+    let snapshot = RunnerConnectionSnapshot {
+        epoch: current.epoch(),
+        event_ordinal,
+        state: RunnerConnectionState::Lost,
+        cause: RunnerConnectionCause::EnrollmentRevoked,
+    };
+    let loss =
+        append_runner_connection_loss_epoch(transaction.as_mut(), enrollment, snapshot).await?;
+    advance_runner_connection_authority_head(
+        transaction.as_mut(),
+        enrollment,
+        Some(current),
+        snapshot,
+        loss,
+    )
+    .await?;
+    append_runner_connection_health_events(transaction.as_mut(), enrollment, snapshot).await?;
     Ok(())
 }
 
@@ -3286,6 +4592,7 @@ async fn insert_placement_record(
     placement: &SessionRunnerPlacement,
     registration_identity: (Option<Uuid>, Option<Decimal>),
     grant_origin: Option<Decimal>,
+    interrupted_tool_attempt: Option<ToolAttemptId>,
 ) -> Result<(), RunnerProtocolStoreError> {
     let request = placement.request();
     let (selector_kind, selector_runner, selector_class) = encode_selector(&request.selector);
@@ -3302,7 +4609,7 @@ async fn insert_placement_record(
              requested_credential_profile_name, workspace_requirement_kind,
              requested_repository_key, requested_sandbox_profile,
              permission_override_count, state_kind, lost_runner_id,
-             loss_source_kind, pinned_runner_id,
+             loss_source_kind, pinned_runner_id, interrupted_tool_attempt_id,
              pinned_working_directory, pinned_credential_profile_name,
              registration_enrollment_id, registration_revision,
              pinned_tool_count, workspace_repository_key,
@@ -3317,7 +4624,7 @@ async fn insert_placement_record(
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
              $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
              $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
-             $32, $33, $34, $35, $36, $37
+             $32, $33, $34, $35, $36, $37, $38
          )",
     )
     .bind(placement.session().into_uuid())
@@ -3343,6 +4650,7 @@ async fn insert_placement_record(
     .bind(state.lost_runner)
     .bind(state.loss_source)
     .bind(state.pinned_runner)
+    .bind(interrupted_tool_attempt.map(ToolAttemptId::into_uuid))
     .bind(state.pinned_directory)
     .bind(state.pinned_profile)
     .bind(registration_enrollment)
@@ -5154,6 +6462,9 @@ async fn append_lease_event_in(
 ) -> Result<(), RunnerProtocolStoreError> {
     let correlation = lease.correlation();
     lock_runner_session_scheduler(transaction, correlation.dispatch.session()).await?;
+    if lease.state() == RunnerLeaseState::Claimed {
+        lock_runner_lease_claim_connection_authority(transaction, &correlation).await?;
+    }
     let current_event = sqlx::query(RUNNER_LEASE_HEAD)
         .bind(correlation.lease.into_uuid())
         .bind(Decimal::from(correlation.generation.get()))
@@ -5203,6 +6514,43 @@ async fn append_lease_event_in(
     Ok(())
 }
 
+async fn lock_runner_lease_claim_connection_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    correlation: &RunnerLeaseCorrelation,
+) -> Result<(), RunnerProtocolStoreError> {
+    let enrollment: Uuid = sqlx::query_scalar(
+        "SELECT registration_enrollment_id
+           FROM runner_lease_generation
+          WHERE lease_id = $1 AND generation = $2",
+    )
+    .bind(correlation.lease.into_uuid())
+    .bind(Decimal::from(correlation.generation.get()))
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(RunnerProtocolStoreError::Domain(
+        RunnerDomainError::InvalidState,
+    ))?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_enrollment
+          WHERE enrollment_id = $1
+          FOR SHARE",
+    )
+    .bind(enrollment)
+    .fetch_one(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_connection_authority_head
+          WHERE enrollment_id = $1
+          FOR SHARE",
+    )
+    .bind(enrollment)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn lock_runner_session_scheduler(
     transaction: &mut Transaction<'_, Postgres>,
     session: SessionId,
@@ -5248,6 +6596,26 @@ async fn insert_lease_generation(
     {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
+    let observed_enrollment: Uuid = sqlx::query_scalar(
+        "SELECT record.registration_enrollment_id
+           FROM runner_current_session_placement AS current_placement
+           JOIN runner_session_placement_record AS record
+             ON record.session_id = current_placement.session_id
+            AND record.event_ordinal = current_placement.event_ordinal
+          WHERE current_placement.session_id = $1",
+    )
+    .bind(lease.session().into_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .flatten()
+    .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+    let enrollment_state: Option<String> = sqlx::query_scalar(RUNNER_LEASE_ENROLLMENT_AUTHORITY)
+        .bind(observed_enrollment)
+        .fetch_optional(&mut **transaction)
+        .await?;
+    if enrollment_state.is_none() {
+        return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+    }
     let placement = sqlx::query(RUNNER_LEASE_PLACEMENT)
         .bind(lease.session().into_uuid())
         .fetch_optional(&mut **transaction)
@@ -5262,12 +6630,8 @@ async fn insert_lease_generation(
     let enrollment = placement
         .decode_column::<Option<Uuid>>("registration_enrollment_id")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
-    let enrollment_state: Option<String> = sqlx::query_scalar(RUNNER_LEASE_ENROLLMENT_AUTHORITY)
-        .bind(enrollment)
-        .fetch_optional(&mut **transaction)
-        .await?;
-    if enrollment_state.is_none() {
-        return Err(RunnerProtocolCorruption::MissingCanonicalEnrollment.into());
+    if enrollment != observed_enrollment {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
     let authorization = lease.credential_authorization();
     let authorization_origin = match authorization {
@@ -5544,6 +6908,60 @@ fn pinned_placement(state: &SessionRunnerPlacementState) -> Option<&PinnedRunner
             None
         }
     }
+}
+
+fn placement_loss_fence_runner(placement: &SessionRunnerPlacement) -> Option<RunnerId> {
+    match placement.state() {
+        SessionRunnerPlacementState::Unpinned => match &placement.request().selector {
+            RunnerSelector::Identity(runner) => Some(*runner),
+            RunnerSelector::CapabilityClass(_) => None,
+        },
+        SessionRunnerPlacementState::Pinned(pinned) => Some(pinned.runner),
+        SessionRunnerPlacementState::RunnerLostBeforePin(lost) => Some(lost.runner()),
+        SessionRunnerPlacementState::RunnerLost(lost) => Some(lost.pinned().runner),
+        SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::BeforePin(lost)) => {
+            Some(lost.runner())
+        }
+        SessionRunnerPlacementState::RunnerAbandoned(AbandonedRunnerPlacement::Pinned(lost)) => {
+            Some(lost.pinned().runner)
+        }
+    }
+}
+
+async fn lock_runner_placement_loss_baseline(
+    transaction: &mut Transaction<'_, Postgres>,
+    placement: &SessionRunnerPlacement,
+) -> Result<(), RunnerProtocolStoreError> {
+    let scheduler = sqlx::query_scalar::<_, Uuid>(RUNNER_RETRY_REPLACEMENT_SCHEDULER)
+        .bind(placement.session().into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    if scheduler.is_none() {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    }
+    let Some(runner) = placement_loss_fence_runner(placement) else {
+        return Ok(());
+    };
+    sqlx::query("SELECT lock_runner_loss_identity($1)")
+        .bind(runner.into_uuid())
+        .execute(&mut **transaction)
+        .await?;
+    let enrollment = sqlx::query_scalar::<_, Uuid>(RUNNER_PLACEMENT_ENROLLMENT_BY_RUNNER)
+        .bind(runner.into_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    let Some(enrollment) = enrollment else {
+        return Ok(());
+    };
+    sqlx::query_scalar::<_, Decimal>(RUNNER_PLACEMENT_CONNECTION_AUTHORITY)
+        .bind(enrollment)
+        .fetch_optional(&mut **transaction)
+        .await?;
+    sqlx::query_scalar::<_, Decimal>(RUNNER_PLACEMENT_CURRENT_LOSS)
+        .bind(enrollment)
+        .fetch_optional(&mut **transaction)
+        .await?;
+    Ok(())
 }
 
 async fn prospective_placement_reconstitution_history(
@@ -6376,6 +7794,10 @@ pub enum RunnerProtocolCorruption {
     MissingCanonicalRegistration,
     /// Canonical physical connection state is absent.
     MissingCanonicalConnection,
+    /// Canonical connection-loss state or its propagation cursor is absent.
+    MissingCanonicalLoss,
+    /// Canonical runner-lease state is absent.
+    MissingCanonicalLease,
     /// Canonical placement state is absent.
     MissingCanonicalPlacement,
     /// Canonical credential-grant state is absent.
@@ -6409,6 +7831,10 @@ impl fmt::Display for RunnerProtocolCorruption {
             Self::MissingCanonicalConnection => {
                 formatter.write_str("canonical runner connection is missing")
             }
+            Self::MissingCanonicalLoss => {
+                formatter.write_str("canonical runner connection loss is missing")
+            }
+            Self::MissingCanonicalLease => formatter.write_str("canonical runner lease is missing"),
             Self::MissingCanonicalPlacement => {
                 formatter.write_str("canonical runner placement is missing")
             }
