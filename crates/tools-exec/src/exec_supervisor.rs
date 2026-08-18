@@ -340,7 +340,12 @@ mod linux {
         };
         for inherited_descriptor in inherited_descriptors {
             if inherited_descriptor > 2 && inherited_descriptor != broker_descriptor_number {
-                rustix::io::close(inherited_descriptor);
+                // SAFETY: these descriptor numbers were enumerated from this single-threaded
+                // supervisor after the directory iterator was dropped, and the retained broker
+                // descriptor is excluded above. No owner remains to close an inherited descriptor.
+                unsafe {
+                    rustix::io::close(inherited_descriptor);
+                }
             }
         }
         let broker = PathBuf::from(format!("/proc/self/fd/{}", broker_descriptor_number));
