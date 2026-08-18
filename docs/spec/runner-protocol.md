@@ -1581,11 +1581,12 @@ The reusable process core implements that filesystem and namespace request
 shape: it pins every configured read-only identity, rechecks those identities
 before both the availability probe and dispatch, recreates standard usr-merge
 aliases only when their targets are inside the configured mounts, and derives
-`PATH` only from configured mounts. `signalbox-runner` does not yet invoke this
-constructor or advertise `WorkspaceRestricted`; the execution child slice must
-compose it before any runner tool is executable. The HTTPS broker and resource
-limits remain separate work, with first-release resource limits still
-owner-gated in
+`PATH` only from configured mounts. `signalbox-runner` invokes this constructor
+for an exact `sandboxed_exec` dispatch carrying `WorkspaceRestricted`, using the
+correlation's exact working directory as the writable root and the configured
+read-only paths. The shipped catalog remains empty, so the runner does not yet
+advertise or newly receive that tool. The HTTPS broker and resource limits
+remain separate work, with first-release resource limits still owner-gated in
 [open questions](../open-questions.md#identity-credentials-and-resource-governance).
 
 Confinement is defined over that writable root, which need not be a repository.

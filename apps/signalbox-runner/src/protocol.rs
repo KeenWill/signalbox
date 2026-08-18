@@ -1095,7 +1095,7 @@ where
         state: &mut RunnerStateRoot,
         dispatch: RunnerDispatchReady,
         execution: F,
-    ) -> Result<(), RunnerConnectionError>
+    ) -> Result<Option<ServeOutcome>, RunnerConnectionError>
     where
         F: Future<Output = TerminalResult>,
     {
@@ -1129,16 +1129,11 @@ where
                         }),
                     )
                     .await?;
-                    return Ok(());
+                    return Ok(None);
                 }
                 message = receive_message(&mut self.io) => {
-                    if self.serve_message(state, message?).await?.is_some() {
-                        return Err(RunnerConnectionError::Violation(
-                            ProtocolViolation::UnexpectedFrame {
-                                expected: MessageKind::Heartbeat,
-                                received: MessageKind::Shutdown,
-                            },
-                        ));
+                    if let Some(outcome) = self.serve_message(state, message?).await? {
+                        return Ok(Some(outcome));
                     }
                 }
             }
@@ -2620,6 +2615,92 @@ mod tests {
                 result: expected_terminal,
             })
         );
+    }
+
+    /// INV-011 / INV-024 / INV-043: daemon shutdown remains a graceful
+    /// connection end while execution is in its durable possible phase.
+    #[tokio::test]
+    async fn s31_inv011_inv024_inv043_execution_propagates_daemon_shutdown() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let advertisement = advertisement_with_exec_tool();
+        let mut state = enrolled_state_for(&parent, &advertisement);
+        let correlation = retained_lease_correlation();
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: correlation.clone(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        let dispatch = retained_dispatch();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume accepts the exact retained lease");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the canonical claim acknowledgement is accepted");
+            let ready = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the canonical dispatch is accepted")
+                .expect("dispatch yields one executor handoff")
+                .into_dispatch_ready()
+                .map_err(|_| "dispatch did not yield its executor handoff")?;
+            connection
+                .execute_while_serving(&mut state, ready, std::future::pending::<TerminalResult>())
+                .await
+                .map_err(|_| "daemon shutdown was not propagated")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_lease_directives(DirectiveAction::Await),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::LeaseClaimed(LeaseClaimed {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::Dispatch(dispatch)).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Shutdown(Shutdown {
+                    reason: ShutdownReason::DaemonShutdown,
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                }),
+            )
+            .await;
+        };
+        let (outcome, ()) = tokio::join!(runner, hub);
+
+        assert_eq!(
+            outcome.expect("the execution harness completes"),
+            Some(ServeOutcome::ConnectionEnded(
+                ConnectionEnd::DaemonShutdown {
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                },
+            )),
+        );
+        assert_eq!(
+            state.reconnect_inventory().lease,
+            Some(LeasePhase {
+                correlation,
+                phase: LeasePhaseKind::ExecutionMayHaveStarted,
+            }),
+        );
+        assert_eq!(state.reconnect_inventory().result, None);
     }
 
     /// INV-011 / INV-024 / INV-043: resume sends the exact retained terminal

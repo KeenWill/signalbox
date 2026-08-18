@@ -11,7 +11,9 @@ use signalbox_runner::{
     RunnerStateError, RunnerStateRoot, ServeOutcome, SocketConnectError, connect_verified,
 };
 use signalbox_runner_wire::{ExecutionErrorKind, SandboxProfile, TerminalResult};
-use signalbox_tools_exec::{ExecArguments, SandboxedCommandRunner, TokioProcessRunner};
+use signalbox_tools_exec::{
+    ExecArguments, SANDBOXED_EXEC_NAME, SandboxedCommandRunner, TokioProcessRunner,
+};
 
 const CONFIGURATION_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_CONFIG_FILE";
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -114,11 +116,13 @@ async fn run(
                         dispatch.correlation().clone(),
                         dispatch.normalized_arguments().clone(),
                     );
-                    if let Err(error) = connection
+                    match connection
                         .execute_while_serving(&mut state, *dispatch, execution)
                         .await
                     {
-                        break Err(error);
+                        Ok(Some(outcome)) => break Ok(outcome),
+                        Ok(None) => {}
+                        Err(error) => break Err(error),
                     }
                 }
                 outcome => break outcome,
@@ -162,7 +166,7 @@ async fn execute_dispatch(
     correlation: signalbox_runner_wire::LeaseCorrelation,
     normalized_arguments: serde_json::Value,
 ) -> TerminalResult {
-    if correlation.sandbox_profile != SandboxProfile::WorkspaceRestricted {
+    if !supports_execution(correlation.tool_name.as_str(), &correlation.sandbox_profile) {
         return TerminalResult::KnownFailure {
             error_kind: ExecutionErrorKind::ExecutionFailed,
             detail: None,
@@ -212,6 +216,10 @@ async fn execute_dispatch(
             detail: None,
         },
     }
+}
+
+fn supports_execution(tool_name: &str, sandbox_profile: &SandboxProfile) -> bool {
+    tool_name == SANDBOXED_EXEC_NAME && sandbox_profile == &SandboxProfile::WorkspaceRestricted
 }
 
 async fn shutdown_with_timeout(
@@ -388,6 +396,14 @@ impl Error for RunnerDaemonError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreign_workspace_restricted_tool_is_not_executable() {
+        assert!(!supports_execution(
+            "another_workspace_tool",
+            &SandboxProfile::WorkspaceRestricted,
+        ));
+    }
 
     #[test]
     fn reconnect_backoff_caps_and_resets() {
