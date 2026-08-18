@@ -153,7 +153,6 @@ jobs:
           cache-on-failure: true
           shared-key: rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: anthropic-smoke
       # Compile before the credential exists in any step environment, and
       # capture the resulting binary path: the credentialed step below
       # executes that binary directly rather than invoking Cargo a second

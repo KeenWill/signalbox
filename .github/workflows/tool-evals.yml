@@ -209,7 +209,6 @@ jobs:
           cache-on-failure: true
           shared-key: rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: daemon-tool-eval-${{ matrix.family }}
       - name: Build the tool-eval binary without credentials
         id: build
         run: |
