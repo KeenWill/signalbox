@@ -795,8 +795,10 @@ fn validate_view(
 ) -> Result<(), FileMediaRegistryConstructionError> {
     if matches!(
         access,
-        ReadAccessPattern::RandomAccess { maximum_ranges: 0 }
+        ReadAccessPattern::RandomAccess { maximum_ranges }
+            if maximum_ranges == 0 || maximum_ranges > ceilings.read_ranges
     ) || bounds.source_bytes() == 0
+        || bounds.source_bytes() > ceilings.read_source_bytes
     {
         return Err(FileMediaRegistryConstructionError::ViewBounds);
     }

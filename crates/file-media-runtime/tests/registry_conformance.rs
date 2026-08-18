@@ -172,7 +172,7 @@ impl FileMediaProcessor for SyntheticProcessor {
                     cursor: None,
                 },
                 ReadBehavior::DuplicateStructuredMember => ProcessorReadOutput::Structured {
-                    body_json: String::from(r#"{\"kind\":\"safe\",\"kind\":\"attacker\"}"#),
+                    body_json: String::from(r#"{"kind":"safe","kind":"attacker"}"#),
                     truncated: false,
                     cursor: None,
                 },
@@ -568,6 +568,84 @@ fn provider_reader_inventory_is_canonically_sorted() {
             .as_str(),
         "second"
     );
+}
+
+#[test]
+fn read_view_source_work_above_the_compiled_ceiling_is_rejected() {
+    let ceilings = FileMediaCeilings::version_one();
+    let source_bytes = ceilings
+        .read_source_bytes
+        .checked_add(1)
+        .expect("the fixture ceiling leaves room for one excessive byte");
+    let view = bounded_text_view(ReadAccessPattern::Streaming, source_bytes);
+
+    let outcome = registry_outcome_with_view(view, ceilings);
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ViewBounds)
+    ));
+}
+
+#[test]
+fn random_access_range_fanout_above_the_compiled_ceiling_is_rejected() {
+    let ceilings = FileMediaCeilings::version_one();
+    let maximum_ranges = ceilings
+        .read_ranges
+        .checked_add(1)
+        .expect("the fixture ceiling leaves room for one excessive range");
+    let view = bounded_text_view(ReadAccessPattern::RandomAccess { maximum_ranges }, 1_024);
+
+    let outcome = registry_outcome_with_view(view, ceilings);
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ViewBounds)
+    ));
+}
+
+fn bounded_text_view(access: ReadAccessPattern, source_bytes: u64) -> ReadViewDeclaration {
+    ReadViewDeclaration::try_new(
+        ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
+        String::from("Reads the bounded synthetic body."),
+        CanonicalJsonObjectSchema::try_new(EMPTY_OPTIONS_SCHEMA)
+            .expect("fixture schema is object-rooted"),
+        access,
+        ReadViewBounds::Text {
+            source_bytes,
+            output_bytes: 64,
+        },
+    )
+    .expect("the declaration constructor defers resource checks to the registry")
+}
+
+fn registry_outcome_with_view(
+    view: ReadViewDeclaration,
+    ceilings: FileMediaCeilings,
+) -> Result<FileMediaRegistry, signalbox_file_media_runtime::FileMediaRegistryConstructionError> {
+    let provider =
+        FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
+    let reader = reader_declaration_with_view(provider.clone(), view);
+    let declaration = FileMediaProviderDeclaration::try_new(provider, vec![reader])
+        .expect("fixture provider owns its reader");
+    FileMediaRegistry::try_new(vec![declaration], ceilings, ProcessorIsolation::Available)
+}
+
+fn reader_declaration_with_view(
+    provider: FileReaderProviderName,
+    view: ReadViewDeclaration,
+) -> ReaderDeclaration {
+    ReaderDeclaration::try_new(ReaderDeclarationInput {
+        provider,
+        reader: FileReaderName::try_new("fixture").expect("fixture reader name is valid"),
+        revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
+        media_types: vec![media_type(SYNTHETIC_MEDIA_TYPE)],
+        probe: ProbeDeclaration::new(4, 0, 0, 4),
+        views: vec![view],
+        reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
+        streaming_text_fallback: StreamingTextFallback::Disabled,
+    })
+    .expect("fixture reader declaration is nonempty")
 }
 
 fn reader_declaration(

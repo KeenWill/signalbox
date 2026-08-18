@@ -661,7 +661,7 @@ mod tests {
 
     #[test]
     fn metadata_rejects_duplicate_object_members() {
-        let outcome = BoundedMetadata::try_new(r#"{\"kind\":\"safe\",\"kind\":\"attacker\"}"#);
+        let outcome = BoundedMetadata::try_new(r#"{"kind":"safe","kind":"attacker"}"#);
 
         assert_eq!(outcome, Err(RegistryValueError::Metadata));
     }
@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn schema_rejects_nested_duplicate_object_members() {
         let outcome = CanonicalJsonObjectSchema::try_new(
-            r#"{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"string\",\"type\":\"number\"}}}"#,
+            r#"{"type":"object","properties":{"value":{"type":"string","type":"number"}}}"#,
         );
 
         assert_eq!(outcome, Err(RegistryValueError::Schema));
