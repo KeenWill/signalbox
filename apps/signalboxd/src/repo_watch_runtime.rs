@@ -1175,6 +1175,10 @@ impl RepositoryWatchTask {
                     cause_code = error.cause_code(),
                     "repository-watch leading reconciliation failed; the poll and its drains continue"
                 );
+                // Recorded before the poll so an attempt that exits ahead of
+                // the trailing pass still owes the dispatch its follow-up; the
+                // trailing pass clears it when it meets the obligation.
+                *trailing_failure = Some(error);
             }
             // Deliveries already admitted are projected before this poll runs.
             // A poll that observes the same transition would otherwise advance
@@ -1234,9 +1238,18 @@ impl RepositoryWatchTask {
             );
             if drain == WebhookDrain::Run && !pre_drain_projection_failed {
                 let outcome = self.process_webhook_deliveries().await;
-                *drained = Some(outcome);
                 if let Some(error) = outcome.failure() {
+                    *drained = Some(outcome);
                     return Err(error);
+                }
+                // A successful second drain does not erase a terminal dispatch
+                // failure the first one reported: the caller's retry state
+                // still owes that dispatch its follow-up.
+                if !matches!(
+                    drained.as_ref(),
+                    Some(WebhookDrainOutcome::DispatchFailedAfterTerminal(_))
+                ) {
+                    *drained = Some(outcome);
                 }
             }
             accelerated?;
@@ -1252,7 +1265,12 @@ impl RepositoryWatchTask {
                 return Err(error);
             }
             match self.process_dispatches().await {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    // The trailing pass met any leading dispatch obligation, so
+                    // the recorded leading failure no longer owes a follow-up.
+                    *trailing_failure = None;
+                    Ok(())
+                }
                 Err(error) => {
                     *trailing_failure = Some(error);
                     Err(error)
