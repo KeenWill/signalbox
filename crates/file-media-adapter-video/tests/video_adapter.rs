@@ -323,6 +323,51 @@ async fn hevc_mp4_video_sample_entry_validates() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn truncated_hevc_configuration_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::hevc_mp4_with_truncated_configuration(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn duplicate_mp4_handlers_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_media_with_duplicate_handlers(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn unsupported_ebml_read_version_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_unsupported_ebml_read_version(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn unsupported_webm_doctype_read_version_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_unsupported_doctype_read_version(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn webm_video_track_with_audio_codec_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_video_track_with_audio_codec(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn webm_track_without_mandatory_fields_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::webm_track_missing_number_and_codec(),

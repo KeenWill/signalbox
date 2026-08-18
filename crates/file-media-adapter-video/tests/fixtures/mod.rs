@@ -239,6 +239,19 @@ impl VideoFixture {
     }
 
     pub fn hevc_mp4() -> Self {
+        let mut configuration = vec![0_u8; 23];
+        configuration[0] = 1;
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(
+                MP4_TIMESCALE,
+                MP4_DURATION_UNITS,
+                visual_sample_entry(*b"hvc1", *b"hvcC", &configuration),
+            ),
+        )
+    }
+
+    pub fn hevc_mp4_with_truncated_configuration() -> Self {
         Self::new(
             FixtureKind::Mp4,
             mp4_bytes_with_sample_entry(
@@ -247,6 +260,61 @@ impl VideoFixture {
                 visual_sample_entry(*b"hvc1", *b"hvcC", &[1]),
             ),
         )
+    }
+
+    pub fn mp4_media_with_duplicate_handlers() -> Self {
+        let mut movie_header = vec![0_u8; 100];
+        movie_header[12..16].copy_from_slice(&MP4_TIMESCALE.to_be_bytes());
+        movie_header[16..20].copy_from_slice(&MP4_DURATION_UNITS.to_be_bytes());
+        let mut handler = vec![0_u8; 24];
+        handler[8..12].copy_from_slice(b"vide");
+        let mut sample_description = vec![0_u8; 8];
+        sample_description[4..8].copy_from_slice(&1_u32.to_be_bytes());
+        sample_description.extend_from_slice(&avc1_sample_entry());
+        let sample_table = mp4_box(*b"stbl", &mp4_box(*b"stsd", &sample_description));
+        let media_information = mp4_box(*b"minf", &sample_table);
+        let media = mp4_box(
+            *b"mdia",
+            &[
+                mp4_box(*b"hdlr", &handler),
+                mp4_box(*b"hdlr", &handler),
+                media_information,
+            ]
+            .concat(),
+        );
+        let track = mp4_box(*b"trak", &media);
+        let movie = mp4_box(
+            *b"moov",
+            &[mp4_box(*b"mvhd", &movie_header), track].concat(),
+        );
+        Self::new(FixtureKind::Mp4, [ftyp(), movie].concat())
+    }
+
+    pub fn webm_with_unsupported_ebml_read_version() -> Self {
+        let read_version = ebml_element(&[0x42, 0xf7], &[0xff]);
+        Self::new(
+            FixtureKind::Webm,
+            webm_bytes_with_header(ebml_header_with_extra(&read_version)),
+        )
+    }
+
+    pub fn webm_with_unsupported_doctype_read_version() -> Self {
+        let read_version = ebml_element(&[0x42, 0x85], &[0xff]);
+        Self::new(
+            FixtureKind::Webm,
+            webm_bytes_with_header(ebml_header_with_extra(&read_version)),
+        )
+    }
+
+    pub fn webm_video_track_with_audio_codec() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let track_number = ebml_element(&[0xd7], &[1]);
+        let track_type = ebml_element(&[0x83], &[1]);
+        let codec_id = ebml_element(&[0x86], b"A_OPUS");
+        let track_entry = ebml_element(&[0xae], &[track_number, track_type, codec_id].concat());
+        let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
     }
 
     pub fn fragmented_mp4_with_movie_extends_duration() -> Self {
@@ -512,11 +580,27 @@ fn webm_bytes(duration: f64, protection: ContentProtection) -> Vec<u8> {
 }
 
 fn webm_bytes_with_duration(duration: Option<f64>, protection: ContentProtection) -> Vec<u8> {
+    webm_bytes_with_header_and_duration(ebml_header(), duration, protection)
+}
+
+fn webm_bytes_with_header(header: Vec<u8>) -> Vec<u8> {
+    webm_bytes_with_header_and_duration(
+        header,
+        Some(WEBM_DURATION_TIMECODE_UNITS),
+        ContentProtection::Clear,
+    )
+}
+
+fn webm_bytes_with_header_and_duration(
+    header: Vec<u8>,
+    duration: Option<f64>,
+    protection: ContentProtection,
+) -> Vec<u8> {
     let info = webm_info(duration);
     let track_entry = webm_track_entry(protection);
     let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
     let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
-    [ebml_header(), segment].concat()
+    [header, segment].concat()
 }
 
 fn webm_info(duration: Option<f64>) -> Vec<u8> {
@@ -550,8 +634,15 @@ fn webm_track_entry_with_number(number: u8, protection: ContentProtection) -> Ve
 }
 
 fn ebml_header() -> Vec<u8> {
+    ebml_header_with_extra(&[])
+}
+
+fn ebml_header_with_extra(extra: &[u8]) -> Vec<u8> {
     let doc_type = ebml_element(&[0x42, 0x82], b"webm");
-    ebml_element(&[0x1a, 0x45, 0xdf, 0xa3], &doc_type)
+    ebml_element(
+        &[0x1a, 0x45, 0xdf, 0xa3],
+        &[doc_type, extra.to_vec()].concat(),
+    )
 }
 
 fn ebml_element(id: &[u8], payload: &[u8]) -> Vec<u8> {
