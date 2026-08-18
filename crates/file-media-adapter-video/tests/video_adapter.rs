@@ -249,6 +249,15 @@ async fn partial_mp4_extended_header_at_metadata_cutoff_is_an_accepted_truncated
 }
 
 #[tokio::test]
+async fn mp4_box_declared_past_actual_source_end_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::large_mp4_with_box_past_source_end(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn header_only_avc1_sample_entry_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(VideoFixture::header_only_avc1_mp4(), "malformed_video").await
 }
@@ -332,6 +341,15 @@ async fn truncated_hevc_configuration_is_malformed() -> Result<(), Box<dyn Error
 }
 
 #[tokio::test]
+async fn truncated_avc_parameter_set_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::avc_mp4_with_truncated_parameter_set(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn duplicate_mp4_handlers_are_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_media_with_duplicate_handlers(),
@@ -371,6 +389,15 @@ async fn webm_video_track_with_audio_codec_is_malformed() -> Result<(), Box<dyn 
 async fn webm_track_without_mandatory_fields_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::webm_track_missing_number_and_codec(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn webm_video_track_without_video_settings_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_video_track_without_video_settings(),
         "malformed_video",
     )
     .await

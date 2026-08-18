@@ -53,6 +53,9 @@ const EBML_TRACK_ENTRY: u64 = 0xae;
 const EBML_TRACK_NUMBER: u64 = 0xd7;
 const EBML_TRACK_TYPE: u64 = 0x83;
 const EBML_CODEC_ID: u64 = 0x86;
+const EBML_VIDEO: u64 = 0xe0;
+const EBML_PIXEL_WIDTH: u64 = 0xb0;
+const EBML_PIXEL_HEIGHT: u64 = 0xba;
 const EBML_CLUSTER: u64 = 0x1f43b675;
 const EBML_CONTENT_ENCODINGS: u64 = 0x6d80;
 const EBML_CONTENT_ENCODING: u64 = 0x6240;
@@ -113,12 +116,12 @@ impl FileMediaProvider for VideoProvider {
             if request.media_type.as_str() != kind.media_type() {
                 return Err(ProcessorFailure::Protocol);
             }
-            let (bytes, source_complete) = read_metadata_prefix(source).await?;
+            let (bytes, source_bytes) = read_metadata_prefix(source).await?;
             require_active(cancellation)?;
             if !kind.matches_probe(&bytes) {
                 return Ok(ProcessorValidationOutput::NoMatch);
             }
-            match parse(kind, &bytes, source_complete) {
+            match parse(kind, &bytes, source_bytes) {
                 Ok(metadata) => validated_output(kind, request.evidence, &metadata),
                 Err(VideoIssue::Encrypted) => Ok(ProcessorValidationOutput::EncryptedOrLocked {
                     media_type: String::from(kind.media_type()),
@@ -147,9 +150,9 @@ impl FileMediaProvider for VideoProvider {
             if request.view.as_str() != METADATA_VIEW {
                 return Ok(ProcessorReadOutput::UnsupportedView);
             }
-            let (bytes, source_complete) = read_metadata_prefix(source).await?;
+            let (bytes, source_bytes) = read_metadata_prefix(source).await?;
             require_active(cancellation)?;
-            match parse(kind, &bytes, source_complete) {
+            match parse(kind, &bytes, source_bytes) {
                 Ok(metadata) => metadata_output(kind, &metadata),
                 Err(_) => Err(ProcessorFailure::Failed),
             }
@@ -339,14 +342,10 @@ impl VideoIssue {
     }
 }
 
-fn parse(
-    kind: VideoKind,
-    bytes: &[u8],
-    source_complete: bool,
-) -> Result<VideoMetadata, VideoIssue> {
+fn parse(kind: VideoKind, bytes: &[u8], source_bytes: u64) -> Result<VideoMetadata, VideoIssue> {
     match kind {
-        VideoKind::Mp4 => parse_mp4(bytes, source_complete),
-        VideoKind::Webm => parse_webm(bytes, source_complete),
+        VideoKind::Mp4 => parse_mp4(bytes, source_bytes),
+        VideoKind::Webm => parse_webm(bytes, source_bytes),
     }
 }
 
@@ -402,12 +401,20 @@ struct Mp4State {
     video_tracks: u64,
 }
 
-fn parse_mp4(bytes: &[u8], source_complete: bool) -> Result<VideoMetadata, VideoIssue> {
+fn parse_mp4(bytes: &[u8], source_bytes: u64) -> Result<VideoMetadata, VideoIssue> {
     if bytes.get(4..8) != Some(MP4_FTYP.as_slice()) {
         return Err(VideoIssue::Malformed);
     }
     let mut state = Mp4State::default();
-    parse_mp4_boxes(bytes, 0, Mp4Scope::Root, !source_complete, &mut state)?;
+    let prefix_bytes = u64::try_from(bytes.len()).map_err(|_| VideoIssue::Structure)?;
+    parse_mp4_boxes(
+        bytes,
+        0,
+        Mp4Scope::Root,
+        source_bytes > prefix_bytes,
+        source_bytes,
+        &mut state,
+    )?;
     let profile = state.brand.ok_or(VideoIssue::Malformed)?;
     let timescale = state.movie_timescale.ok_or(VideoIssue::Malformed)?;
     let duration = if state.fragmented && state.movie_duration == Some(0) {
@@ -439,6 +446,7 @@ fn parse_mp4_boxes(
     depth: usize,
     scope: Mp4Scope,
     allow_truncated_tail: bool,
+    source_bytes: u64,
     state: &mut Mp4State,
 ) -> Result<Mp4TrackEvidence, VideoIssue> {
     if depth > MAX_DEPTH {
@@ -453,7 +461,7 @@ fn parse_mp4_boxes(
             Ok(parsed) => parsed,
             Err(VideoIssue::Malformed)
                 if allow_truncated_tail
-                    && (bytes.len() - cursor < 8 || mp4_box_extends_beyond(bytes, cursor)) =>
+                    && mp4_box_is_truncated_prefix(bytes, cursor, source_bytes)? =>
             {
                 break;
             }
@@ -470,13 +478,27 @@ fn parse_mp4_boxes(
                     return Err(VideoIssue::Recursive);
                 }
                 state.movie_seen = true;
-                parse_mp4_boxes(payload, depth + 1, Mp4Scope::Movie, false, state)?;
+                parse_mp4_boxes(
+                    payload,
+                    depth + 1,
+                    Mp4Scope::Movie,
+                    false,
+                    u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
+                    state,
+                )?;
             }
             MP4_MOOV => return Err(VideoIssue::Recursive),
             MP4_MVHD if scope == Mp4Scope::Movie => parse_mvhd(payload, state)?,
             MP4_TRAK if scope == Mp4Scope::Movie => {
-                if parse_mp4_boxes(payload, depth + 1, Mp4Scope::Track, false, state)?
-                    .is_video_track()
+                if parse_mp4_boxes(
+                    payload,
+                    depth + 1,
+                    Mp4Scope::Track,
+                    false,
+                    u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
+                    state,
+                )?
+                .is_video_track()
                 {
                     state.video_tracks = state
                         .video_tracks
@@ -494,6 +516,7 @@ fn parse_mp4_boxes(
                     depth + 1,
                     Mp4Scope::Media,
                     false,
+                    u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
                     state,
                 )?);
             }
@@ -510,6 +533,7 @@ fn parse_mp4_boxes(
                     depth + 1,
                     Mp4Scope::MediaInformation,
                     false,
+                    u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
                     state,
                 )?);
             }
@@ -519,6 +543,7 @@ fn parse_mp4_boxes(
                     depth + 1,
                     Mp4Scope::SampleTable,
                     false,
+                    u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
                     state,
                 )?);
             }
@@ -530,7 +555,14 @@ fn parse_mp4_boxes(
                     return Err(VideoIssue::Malformed);
                 }
                 state.fragmented = true;
-                parse_mp4_boxes(payload, depth + 1, Mp4Scope::MovieExtends, false, state)?;
+                parse_mp4_boxes(
+                    payload,
+                    depth + 1,
+                    Mp4Scope::MovieExtends,
+                    false,
+                    u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
+                    state,
+                )?;
             }
             MP4_MEHD if scope == Mp4Scope::MovieExtends => parse_mehd(payload, state)?,
             _ => {}
@@ -583,24 +615,32 @@ fn mp4_box_at(bytes: &[u8], cursor: usize) -> Result<([u8; 4], &[u8], usize), Vi
     Ok((box_type, payload, size))
 }
 
-fn mp4_box_extends_beyond(bytes: &[u8], cursor: usize) -> bool {
+fn mp4_box_is_truncated_prefix(
+    bytes: &[u8],
+    cursor: usize,
+    source_bytes: u64,
+) -> Result<bool, VideoIssue> {
+    let prefix_bytes = u64::try_from(bytes.len()).map_err(|_| VideoIssue::Structure)?;
+    if source_bytes <= prefix_bytes {
+        return Ok(false);
+    }
     let Some(header_end) = cursor.checked_add(8) else {
-        return false;
+        return Err(VideoIssue::Structure);
     };
     let Some(header) = bytes.get(cursor..header_end) else {
-        return false;
+        return Ok(true);
     };
     let size32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
     let available = bytes.len() - cursor;
     if size32 == 0 {
-        return false;
+        return Ok(true);
     }
     if size32 == 1 {
         let Some(extended_end) = cursor.checked_add(16) else {
-            return false;
+            return Err(VideoIssue::Structure);
         };
         let Some(extended) = bytes.get(cursor + 8..extended_end) else {
-            return available >= 8 && available < 16;
+            return Ok(available >= 8 && available < 16);
         };
         let size = u64::from_be_bytes([
             extended[0],
@@ -612,9 +652,26 @@ fn mp4_box_extends_beyond(bytes: &[u8], cursor: usize) -> bool {
             extended[6],
             extended[7],
         ]);
-        return size >= 16 && usize::try_from(size).is_ok_and(|size| size > available);
+        if size < 16 {
+            return Ok(false);
+        }
+        let declared_end = u64::try_from(cursor)
+            .map_err(|_| VideoIssue::Structure)?
+            .checked_add(size)
+            .ok_or(VideoIssue::Structure)?;
+        return Ok(
+            size > u64::try_from(available).map_err(|_| VideoIssue::Structure)?
+                && declared_end <= source_bytes,
+        );
     }
-    usize::try_from(size32).is_ok_and(|size| size >= 8 && size > available)
+    let size = u64::from(size32);
+    let declared_end = u64::try_from(cursor)
+        .map_err(|_| VideoIssue::Structure)?
+        .checked_add(size)
+        .ok_or(VideoIssue::Structure)?;
+    Ok(size >= 8
+        && size > u64::try_from(available).map_err(|_| VideoIssue::Structure)?
+        && declared_end <= source_bytes)
 }
 
 fn parse_ftyp(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
@@ -808,9 +865,7 @@ fn validate_visual_configuration(
 ) -> Result<(), VideoIssue> {
     match configuration_type {
         [b'a', b'v', b'c', b'C'] => {
-            if configuration.len() < 7 || configuration.first() != Some(&1) {
-                return Err(VideoIssue::Malformed);
-            }
+            validate_avc_configuration(configuration)?;
         }
         [b'h', b'v', b'c', b'C'] => validate_hevc_configuration(configuration)?,
         [b'a', b'v', b'1', b'C'] => {
@@ -825,6 +880,45 @@ fn validate_visual_configuration(
         _ => return Err(VideoIssue::Malformed),
     }
     Ok(())
+}
+
+fn validate_avc_configuration(configuration: &[u8]) -> Result<(), VideoIssue> {
+    if configuration.len() < 7 || configuration.first() != Some(&1) {
+        return Err(VideoIssue::Malformed);
+    }
+    let sequence_parameter_sets = usize::from(configuration[5] & 0x1f);
+    let mut cursor = 6_usize;
+    for _ in 0..sequence_parameter_sets {
+        cursor = consume_avc_parameter_set(configuration, cursor)?;
+    }
+    let picture_parameter_sets =
+        usize::from(*configuration.get(cursor).ok_or(VideoIssue::Malformed)?);
+    cursor = cursor.checked_add(1).ok_or(VideoIssue::Structure)?;
+    for _ in 0..picture_parameter_sets {
+        cursor = consume_avc_parameter_set(configuration, cursor)?;
+    }
+    if cursor != configuration.len() {
+        return Err(VideoIssue::Malformed);
+    }
+    Ok(())
+}
+
+fn consume_avc_parameter_set(configuration: &[u8], cursor: usize) -> Result<usize, VideoIssue> {
+    let length_end = cursor.checked_add(2).ok_or(VideoIssue::Structure)?;
+    let length_bytes = configuration
+        .get(cursor..length_end)
+        .ok_or(VideoIssue::Malformed)?;
+    let length = usize::from(u16::from_be_bytes([length_bytes[0], length_bytes[1]]));
+    if length == 0 {
+        return Err(VideoIssue::Malformed);
+    }
+    let end = length_end
+        .checked_add(length)
+        .ok_or(VideoIssue::Structure)?;
+    configuration
+        .get(length_end..end)
+        .ok_or(VideoIssue::Malformed)?;
+    Ok(end)
 }
 
 fn validate_hevc_configuration(configuration: &[u8]) -> Result<(), VideoIssue> {
@@ -885,6 +979,7 @@ enum EbmlScope {
     Info,
     Tracks,
     TrackEntry,
+    Video,
     ContentEncodings,
     ContentEncoding,
 }
@@ -939,12 +1034,20 @@ impl Default for EbmlState {
     }
 }
 
-fn parse_webm(bytes: &[u8], source_complete: bool) -> Result<VideoMetadata, VideoIssue> {
+fn parse_webm(bytes: &[u8], source_bytes: u64) -> Result<VideoMetadata, VideoIssue> {
     if !bytes.starts_with(&EBML_HEADER_BYTES) {
         return Err(VideoIssue::Malformed);
     }
     let mut state = EbmlState::default();
-    parse_ebml_scope(bytes, 0, EbmlScope::Root, !source_complete, &mut state)?;
+    let prefix_bytes = u64::try_from(bytes.len()).map_err(|_| VideoIssue::Structure)?;
+    parse_ebml_scope(
+        bytes,
+        0,
+        EbmlScope::Root,
+        source_bytes > prefix_bytes,
+        source_bytes,
+        &mut state,
+    )?;
     if !state.header_seen
         || !state.doc_type_seen
         || !state.segment_seen
@@ -975,6 +1078,7 @@ fn parse_ebml_scope(
     depth: usize,
     scope: EbmlScope,
     allow_truncated_tail: bool,
+    source_bytes: u64,
     state: &mut EbmlState,
 ) -> Result<VideoTrackPresence, VideoIssue> {
     if depth > MAX_DEPTH {
@@ -984,6 +1088,9 @@ fn parse_ebml_scope(
     let mut track_number_seen = false;
     let mut track_type = None;
     let mut codec_kind = None;
+    let mut video_settings_seen = false;
+    let mut pixel_width_seen = false;
+    let mut pixel_height_seen = false;
     while cursor < bytes.len() {
         let (id, id_bytes, _) = match read_ebml_vint(bytes, cursor, EbmlVintKind::Identifier, 4) {
             Ok(parsed) => parsed,
@@ -1024,6 +1131,11 @@ fn parse_ebml_scope(
         };
         let payload_truncated = declared_payload_end > bytes.len();
         if payload_truncated {
+            if u64::try_from(declared_payload_end).map_err(|_| VideoIssue::Structure)?
+                > source_bytes
+            {
+                return Err(VideoIssue::Malformed);
+            }
             if allow_truncated_tail && scope == EbmlScope::Segment {
                 break;
             }
@@ -1045,18 +1157,29 @@ fn parse_ebml_scope(
                     return Err(VideoIssue::Recursive);
                 }
                 state.header_seen = true;
-                parse_ebml_scope(payload, depth + 1, EbmlScope::Header, false, state)?;
+                parse_ebml_scope(
+                    payload,
+                    depth + 1,
+                    EbmlScope::Header,
+                    false,
+                    u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
+                    state,
+                )?;
             }
             (EBML_SEGMENT, EbmlScope::Root) => {
                 if state.segment_seen {
                     return Err(VideoIssue::Recursive);
                 }
                 state.segment_seen = true;
+                let segment_source_bytes = source_bytes
+                    .checked_sub(u64::try_from(payload_offset).map_err(|_| VideoIssue::Structure)?)
+                    .ok_or(VideoIssue::Malformed)?;
                 parse_ebml_scope(
                     payload,
                     depth + 1,
                     EbmlScope::Segment,
                     allow_truncated_tail && (payload_truncated || unknown),
+                    segment_source_bytes,
                     state,
                 )?;
             }
@@ -1066,18 +1189,39 @@ fn parse_ebml_scope(
                     return Err(VideoIssue::Malformed);
                 }
                 state.info_seen = true;
-                parse_ebml_scope(payload, depth + 1, EbmlScope::Info, false, state)?;
+                parse_ebml_scope(
+                    payload,
+                    depth + 1,
+                    EbmlScope::Info,
+                    false,
+                    u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
+                    state,
+                )?;
             }
             (EBML_TRACKS, EbmlScope::Segment) => {
                 if state.tracks_seen {
                     return Err(VideoIssue::Malformed);
                 }
                 state.tracks_seen = true;
-                parse_ebml_scope(payload, depth + 1, EbmlScope::Tracks, false, state)?;
+                parse_ebml_scope(
+                    payload,
+                    depth + 1,
+                    EbmlScope::Tracks,
+                    false,
+                    u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
+                    state,
+                )?;
             }
             (EBML_TRACK_ENTRY, EbmlScope::Tracks) => {
-                if parse_ebml_scope(payload, depth + 1, EbmlScope::TrackEntry, false, state)?
-                    .is_present()
+                if parse_ebml_scope(
+                    payload,
+                    depth + 1,
+                    EbmlScope::TrackEntry,
+                    false,
+                    u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
+                    state,
+                )?
+                .is_present()
                 {
                     state.video_tracks = state
                         .video_tracks
@@ -1091,11 +1235,19 @@ fn parse_ebml_scope(
                     depth + 1,
                     EbmlScope::ContentEncodings,
                     false,
+                    u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
                     state,
                 )?;
             }
             (EBML_CONTENT_ENCODING, EbmlScope::ContentEncodings) => {
-                parse_ebml_scope(payload, depth + 1, EbmlScope::ContentEncoding, false, state)?;
+                parse_ebml_scope(
+                    payload,
+                    depth + 1,
+                    EbmlScope::ContentEncoding,
+                    false,
+                    u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
+                    state,
+                )?;
             }
             (EBML_CONTENT_ENCRYPTION, EbmlScope::ContentEncoding) => {
                 return Err(VideoIssue::Encrypted);
@@ -1148,6 +1300,34 @@ fn parse_ebml_scope(
                 }
                 codec_kind = Some(parse_ebml_codec_kind(payload)?);
             }
+            (EBML_VIDEO, EbmlScope::TrackEntry) => {
+                if video_settings_seen
+                    || !parse_ebml_scope(
+                        payload,
+                        depth + 1,
+                        EbmlScope::Video,
+                        false,
+                        u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
+                        state,
+                    )?
+                    .is_present()
+                {
+                    return Err(VideoIssue::Malformed);
+                }
+                video_settings_seen = true;
+            }
+            (EBML_PIXEL_WIDTH, EbmlScope::Video) => {
+                if pixel_width_seen || parse_ebml_uint(payload)? == 0 {
+                    return Err(VideoIssue::Malformed);
+                }
+                pixel_width_seen = true;
+            }
+            (EBML_PIXEL_HEIGHT, EbmlScope::Video) => {
+                if pixel_height_seen || parse_ebml_uint(payload)? == 0 {
+                    return Err(VideoIssue::Malformed);
+                }
+                pixel_height_seen = true;
+            }
             _ => {}
         }
         cursor = payload_end;
@@ -1159,7 +1339,8 @@ fn parse_ebml_scope(
         let track_type = track_type.ok_or(VideoIssue::Malformed)?;
         let codec_kind = codec_kind.ok_or(VideoIssue::Malformed)?;
         if !track_number_seen
-            || (track_type == EbmlTrackKind::Video && codec_kind != EbmlTrackKind::Video)
+            || (track_type == EbmlTrackKind::Video
+                && (codec_kind != EbmlTrackKind::Video || !video_settings_seen))
             || (track_type == EbmlTrackKind::Audio && codec_kind != EbmlTrackKind::Audio)
         {
             return Err(VideoIssue::Malformed);
@@ -1169,6 +1350,12 @@ fn parse_ebml_scope(
         } else {
             VideoTrackPresence::Absent
         });
+    }
+    if scope == EbmlScope::Video {
+        if !pixel_width_seen || !pixel_height_seen {
+            return Err(VideoIssue::Malformed);
+        }
+        return Ok(VideoTrackPresence::Present);
     }
     Ok(VideoTrackPresence::Absent)
 }
@@ -1314,10 +1501,10 @@ fn metadata_json(kind: VideoKind, metadata: &VideoMetadata) -> Result<String, Pr
 
 async fn read_metadata_prefix(
     source: &dyn VerifiedBlobSource,
-) -> Result<(Vec<u8>, bool), ProcessorFailure> {
+) -> Result<(Vec<u8>, u64), ProcessorFailure> {
     let source_bytes = source.byte_length().get();
     let length = source_bytes.min(METADATA_BYTES);
-    Ok((read_range(source, 0, length).await?, length == source_bytes))
+    Ok((read_range(source, 0, length).await?, source_bytes))
 }
 
 async fn read_range(
