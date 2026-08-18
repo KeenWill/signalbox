@@ -48,9 +48,12 @@ workspace evidence for later durable release precondition checks is prepared by
 the exact domain candidate verified against this PR
 (`agent/runner-workspace-release-candidate`). Admission of an already validated
 replacement `workspace_ready` receipt under its exact durable authority is
-verified against this PR (`agent/runner-workspace-ready-admission`).
-Established-connection routing of those inbound claim and result frames through
-the durable transactions before acknowledgement is re-verified through this PR
+verified against this PR (`agent/runner-workspace-ready-admission`). Live
+established-connection routing of that frame through durable receipt admission,
+followed by exact `workspace_recorded` projection, is verified against this PR
+(`agent/daemon-runner-workspace-ready-routing`). Established-connection routing
+of those inbound claim and result frames through the durable transactions before
+acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
