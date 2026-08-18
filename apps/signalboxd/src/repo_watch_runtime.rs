@@ -481,13 +481,10 @@ impl RepositoryWatchTask {
                     };
                     let metrics = self.poller.attempt_metrics();
                     match &result {
-                        Ok(()) => {
-                            tracing::debug!(
-                                repository = %self.repository.as_str(),
-                                "repository-watch polling attempt completed"
-                            );
-                            self.maybe_purge_expired_payloads().await;
-                        }
+                        Ok(()) => tracing::debug!(
+                            repository = %self.repository.as_str(),
+                            "repository-watch polling attempt completed"
+                        ),
                         Err(error) => tracing::warn!(
                             repository = %self.repository.as_str(),
                             cause_code = error.cause_code(),
@@ -542,8 +539,10 @@ impl RepositoryWatchTask {
         }
     }
 
-    /// Deletes expired terminal payload bytes after a successful poll, at most
-    /// once per purge interval, starting with the first poll after boot.
+    /// Deletes expired terminal payload bytes after a successful full poll, at
+    /// most once per purge interval, starting with the first poll after boot,
+    /// independently of whether the surrounding attempt reports a deferred
+    /// drain failure.
     ///
     /// A purge failure never fails the watch: the deletion covers only
     /// already-terminal deliveries, so it is retried on the next successful
@@ -601,6 +600,10 @@ impl RepositoryWatchTask {
                 );
             }
             self.poll_and_commit().await?;
+            // Keyed on the poll succeeding rather than the whole attempt, so a
+            // deferred pre-poll drain failure reported at the end of the sweep
+            // cannot starve retention while one delivery persistently fails.
+            self.maybe_purge_expired_payloads().await;
             self.process_webhook_deliveries().await?;
             self.process_cutoffs().await?;
             self.process_dispatches().await?;
@@ -881,7 +884,25 @@ impl RepositoryWatchTask {
                         // a transient fetch failure leaves this delivery pending
                         // and retryable instead of terminal with a targeted query
                         // that never happened.
-                        let prepared = self.prepare_targeted_refresh(&refreshes).await?;
+                        let prepared = match self.prepare_targeted_refresh(&refreshes).await? {
+                            PreparedTargetedRefreshOutcome::SupersededTarget => {
+                                // The provider proved a targeted head stale
+                                // before anything was recorded: the derived
+                                // projections describe state the repository has
+                                // already left, so the delivery is superseded
+                                // and the shadow stays exactly as it was.
+                                return self
+                                    .record_webhook_terminal(
+                                        pending,
+                                        Vec::new(),
+                                        RepoWatchWebhookDisposition::Superseded,
+                                        None,
+                                    )
+                                    .await;
+                            }
+                            PreparedTargetedRefreshOutcome::NoTargets => None,
+                            PreparedTargetedRefreshOutcome::Prepared(prepared) => Some(prepared),
+                        };
                         // Only refreshes actually sent are recorded, so a
                         // branch-only delivery naming no pull request cannot
                         // claim a query the poller never issued.
@@ -998,7 +1019,7 @@ impl RepositoryWatchTask {
     async fn prepare_targeted_refresh(
         &mut self,
         refreshes: &[RepoWatchTargetedRefreshV1],
-    ) -> Result<Option<PreparedTargetedRefresh>, RepositoryWatchAttemptError> {
+    ) -> Result<PreparedTargetedRefreshOutcome, RepositoryWatchAttemptError> {
         let cursor = self
             .store
             .load_cursor(&self.repository)
@@ -1007,7 +1028,7 @@ impl RepositoryWatchTask {
             .ok_or(RepositoryWatchAttemptError::Persistence)?;
         let targets = targeted_pull_requests(cursor.candidate().observation(), refreshes)?;
         if targets.is_empty() {
-            return Ok(None);
+            return Ok(PreparedTargetedRefreshOutcome::NoTargets);
         }
         // A refresh naming no pull request the cursor carries is never sent, so
         // it must not be recorded as a query that happened.
@@ -1017,10 +1038,16 @@ impl RepositoryWatchTask {
             .cloned()
             .collect::<Vec<_>>();
         let mut event_identity_frontier = cursor.candidate().event_identity_frontier().clone();
-        let observation = self
+        let observation = match self
             .poller
             .poll_targeted_pull_requests_against_cursor(cursor.candidate().observation(), &targets)
-            .await?;
+            .await?
+        {
+            TargetedPollOutcome::Observation(observation) => observation,
+            TargetedPollOutcome::SupersededTarget => {
+                return Ok(PreparedTargetedRefreshOutcome::SupersededTarget);
+            }
+        };
         let events = derive_repo_watch_events(
             &self.repository,
             Some(cursor.candidate().observation()),
@@ -1029,15 +1056,17 @@ impl RepositoryWatchTask {
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .map_err(|_| RepositoryWatchAttemptError::Differ)?;
-        Ok(Some(PreparedTargetedRefresh {
-            generation: cursor.generation(),
-            candidate: RepoWatchCursorCandidate::with_event_identity_frontier(
-                observation,
-                event_identity_frontier,
-            ),
-            events,
-            queried,
-        }))
+        Ok(PreparedTargetedRefreshOutcome::Prepared(
+            PreparedTargetedRefresh {
+                generation: cursor.generation(),
+                candidate: RepoWatchCursorCandidate::with_event_identity_frontier(
+                    observation,
+                    event_identity_frontier,
+                ),
+                events,
+                queried,
+            },
+        ))
     }
 
     /// Commits one prepared targeted refresh against the generation it read.
@@ -1284,6 +1313,23 @@ struct TargetedPullRequest {
 }
 
 /// One targeted refresh that has been fetched and derived but not committed.
+/// What a targeted poll produced: a reconciled observation, or proof that a
+/// targeted head is already stale.
+#[derive(Debug, PartialEq)]
+enum TargetedPollOutcome {
+    Observation(RepoWatchObservation),
+    SupersededTarget,
+}
+
+/// What preparing a targeted refresh decided for the delivery that asked.
+enum PreparedTargetedRefreshOutcome {
+    /// No named pull request is carried by the cursor; nothing was queried.
+    NoTargets,
+    /// The provider proved a targeted head stale; the delivery is superseded.
+    SupersededTarget,
+    Prepared(PreparedTargetedRefresh),
+}
+
 struct PreparedTargetedRefresh {
     generation: RepoWatchCursorGeneration,
     candidate: RepoWatchCursorCandidate,
@@ -2149,7 +2195,7 @@ impl GitHubRepositoryPoller {
         &self,
         previous: &RepoWatchObservation,
         targets: &[TargetedPullRequest],
-    ) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
+    ) -> Result<TargetedPollOutcome, RepositoryWatchAttemptError> {
         let mut state = RepoWatchRepositoryStateInput {
             pull_requests: previous.state().pull_requests().to_vec(),
             workflow_runs: previous.state().workflow_runs().to_vec(),
@@ -2170,12 +2216,15 @@ impl GitHubRepositoryPoller {
                 .as_ref()
                 .is_some_and(|expected| fetched.state.context().head_sha() != expected)
             {
+                // The provider has already moved past the head this delivery
+                // describes, so the caller must record the delivery superseded
+                // rather than commit retained state and project stale facts.
                 tracing::debug!(
                     repository = %self.repository.as_str(),
                     pull_request = target.number.get(),
                     "targeted repository refresh was superseded before its response"
                 );
-                continue;
+                return Ok(TargetedPollOutcome::SupersededTarget);
             }
             match retained_index {
                 Some(index) => state.pull_requests[index] = fetched.state,
@@ -2184,10 +2233,10 @@ impl GitHubRepositoryPoller {
         }
         let state = RepoWatchRepositoryState::try_new(state)
             .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        Ok(RepoWatchObservation::new(
+        Ok(TargetedPollOutcome::Observation(RepoWatchObservation::new(
             self.signal_reviewers.clone(),
             state,
-        ))
+        )))
     }
 
     async fn poll_complete(
@@ -3984,9 +4033,9 @@ mod tests {
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchChildExit,
         RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, ResourceKey,
-        ReviewState, TargetedPullRequest, Url, UuidV7RepoWatchEventIdGenerator, WorkflowName,
-        WorkflowResponse, derive_repo_watch_events, dispatch_context_json,
-        normalize_checks_outcome, normalize_pull_request_context, object_id,
+        ReviewState, TargetedPollOutcome, TargetedPullRequest, Url,
+        UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse, derive_repo_watch_events,
+        dispatch_context_json, normalize_checks_outcome, normalize_pull_request_context, object_id,
         owed_dispatch_context_json_parts, remaining_interval, rule_activation_error,
         supervise_repository_tasks, targeted_pull_requests,
     };
@@ -5486,7 +5535,32 @@ mod tests {
             .expect("targeted refresh succeeds");
 
         server.finish().await;
-        assert_eq!(refreshed, previous);
+        assert_eq!(refreshed, TargetedPollOutcome::Observation(previous));
+    }
+
+    #[tokio::test]
+    async fn targeted_refresh_reports_a_moved_head_as_superseded() {
+        let previous = complete_typed_observation().await;
+        let server = ScriptedServer::start(complete_pull_request_responses()).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let target = TargetedPullRequest {
+            number: PullRequestNumber::new(
+                NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+            ),
+            expected_head: Some(
+                CommitSha::try_new(String::from("beefbeefbeefbeefbeefbeefbeefbeefbeefbeef"))
+                    .expect("fixture head SHA is canonical"),
+            ),
+        };
+
+        let refreshed = fixture
+            .poller
+            .poll_targeted_pull_requests_against_cursor(&previous, &[target])
+            .await
+            .expect("targeted refresh succeeds");
+
+        server.finish().await;
+        assert_eq!(refreshed, TargetedPollOutcome::SupersededTarget);
     }
 
     #[tokio::test]
