@@ -149,17 +149,18 @@ verification traversal, makes it read-only before any probe runs, and serves all
 later probe and reader ranges from that exact verified generation. It deletes
 the snapshot after the request and never exposes its path to a worker. Before
 traversal, the broker atomically reserves the authenticated exact byte length
-from both per-request and process-wide snapshot pools. Capacity exhaustion
-returns `SourceTooLarge { maximum_bytes: 68719476736 }` when the authenticated
-length exceeds the compiled 64 GiB per-request ceiling. Temporary exhaustion of
-the process-wide pool returns `ProcessorUnavailable`. Either rejection occurs
-without reading source bytes or creating a snapshot. The reservation remains
-held until the request-local file is removed. At startup, the broker removes
-abandoned files from its owner-private snapshot directory before admitting work,
-so a crash cannot permanently consume the pool. This preserves verification
-across range reads even for filesystem replicas and S3 replicas without
-immutable version tokens. Detection does not call the process protocol, decode
-base64, expose paths, or hand store credentials to a worker.
+from both per-request and process-wide snapshot pools. The effective per-request
+maximum is the lesser of the configured per-request and process-wide bounds. An
+authenticated length above that maximum returns
+`SourceTooLarge { maximum_bytes }`; temporary exhaustion by other fitting
+requests returns `ProcessorUnavailable`. Either rejection occurs without reading
+source bytes or creating a snapshot. The reservation remains held until the
+request-local file is removed. At startup, the broker removes abandoned files
+from its owner-private snapshot directory before admitting work, so a crash
+cannot permanently consume the pool. This preserves verification across range
+reads even for filesystem replicas and S3 replicas without immutable version
+tokens. Detection does not call the process protocol, decode base64, expose
+paths, or hand store credentials to a worker.
 
 Each provider registers bounded probes returning:
 
@@ -230,9 +231,12 @@ Detection follows one fixed algorithm:
 07. With no byte-evidence candidate selected, a syntactically valid declared
     type may nominate its sole provider for structural validation. Only a
     `DeclaredCandidate` for that exact declared type and provider is considered.
-    The declaration is not proof. A failed declared-candidate validation returns
-    `UnknownType` and does not fall back to text or a weaker candidate; only
-    authenticated malformed evidence returns `Malformed`.
+    The declaration is not proof. Authenticated structural-invalid evidence from
+    declared-candidate validation returns `UnknownType` and does not fall back
+    to text or a weaker candidate; authenticated malformed evidence returns
+    `Malformed`. Operational, cancellation, and locked outcomes propagate
+    unchanged as `ProcessorTimedOut`, `ProcessorFailed`, `Cancelled`, or
+    `EncryptedOrLocked`.
 08. With no structural or declared candidate, a text provider may claim only
     after complete streaming UTF-8 and control-policy validation. After
     successful validation, compare the canonical text type with any
@@ -268,9 +272,13 @@ their opaque capabilities. Exactly one winning key therefore supplies the
 `selected_probe` passed to `validate`, independently of scheduling or return
 order.
 
-Version one has no durable classification cache. Immutable tool results already
-preserve what a model saw. A later tool request may use a newer reader revision,
-but cannot rewrite the earlier result.
+Whether validated classifications need a durable cache remains an owner decision
+in
+[`docs/open-questions.md`](../open-questions.md#file-and-media-interpretation).
+This proposal requires immutable tool results to preserve what a model saw but
+does not decide whether an implementation also caches classifications. A later
+tool request may use a newer reader revision, but cannot rewrite the earlier
+result.
 
 ## Registry and adapter boundary
 
@@ -487,6 +495,13 @@ must bind the same digest, selector, reader identity, and view.
 - `File` returns a reference only when the selected model adapter supports a
   reviewed general-file input contract; it never silently becomes text.
 
+Before committing any successful `Text` or `Structured` page, the tool loop
+prospectively projects the complete rendered result, continuation framing, and
+reserved output into the pinned target and current frontier. If that exact page
+cannot fit the target's remaining input capacity, the request returns
+`OutputUnitTooLarge` and commits neither the page nor continuation state;
+automatic compaction is not admission.
+
 Pagination uses a common opaque authenticated cursor of at most 1,024 bytes. The
 cursor is only a random token for bounded process-local state; it does not embed
 provider options or semantic positions. The state binds digest, part selector,
@@ -623,15 +638,20 @@ may lower but never raise these process ceilings:
 
 A stored blob may remain multi-gigabyte. Inspection may verify it into one
 immutable request-local snapshot with a deadline-bounded full traversal whose
-byte bound is its authenticated length, provided that length fits the compiled
-64 GiB per-request snapshot ceiling and available process capacity; deployments
-may lower both snapshot bounds. Probe and reader work remain under their smaller
-fixed ceilings. A compatible reader can stream bounded regions from it, but no
-one read may consume more than 1,073,741,824 source bytes; a whole-decode view
-may return `SourceTooLarge` without invalidating the blob. Text/structure stops
-before the first complete semantic unit that would cross output bounds; a single
-oversized unit returns `OutputUnitTooLarge`, never partial UTF-8 or JSON. Image
-and audio limits are checked before decode allocation.
+byte bound is its authenticated length, provided that length fits the effective
+per-request snapshot ceiling and available process capacity. Deployments may
+lower the compiled 64 GiB per-request and 256 GiB process bounds, but the
+effective per-request maximum is the lesser of both configured bounds. A source
+larger than that effective maximum returns `SourceTooLarge { maximum_bytes }`
+because it can never fit; `ProcessorUnavailable` is reserved for capacity that
+could fit the request but is currently occupied. Probe and reader work remain
+under their smaller fixed ceilings. A compatible reader can stream bounded
+regions from it, but no one read may consume more than 1,073,741,824 source
+bytes; a whole-decode view may return `SourceTooLarge` without invalidating the
+blob. Text/structure stops before the first complete semantic unit that would
+cross output bounds; a single oversized unit returns `OutputUnitTooLarge`, never
+partial UTF-8 or JSON. Image and audio limits are checked before decode
+allocation.
 
 Per-turn governance adds durable typed-read count and source-work reservations.
 One tool request charges once before authorization and is never refunded or
@@ -718,15 +738,20 @@ One shared suite proves every provider and isolation implementation:
   verification traversal and prove every probe/read range still observes only
   the completed verified snapshot;
 - snapshot admission reserves exact bytes before traversal, rejects exhausted
-  process capacity without source I/O, classifies a length above the 64 GiB
-  per-request ceiling as `SourceTooLarge`, releases capacity only after
-  deletion, and removes crash leftovers before startup admission;
+  process capacity without source I/O, classifies a length above the effective
+  configured per-request maximum as `SourceTooLarge` with that maximum, uses
+  `ProcessorUnavailable` only when an otherwise fitting request is blocked by
+  occupied capacity, releases capacity only after deletion, and removes crash
+  leftovers before startup admission;
 - declarations above 4,096 reader ranges or 1,073,741,824 reader-source bytes
   are rejected, and runtime exhaustion returns `SourceTooLarge` without another
   source byte;
 - any scheduled relevant probe's crash, cancellation, timeout, memory/output
   kill, or framing defect terminates inspection with its exact operational
   outcome before candidate classification and produces no partial success;
+- declared-candidate validation preserves timeout, processor failure,
+  cancellation, and locked outcomes unchanged, and only authenticated
+  structural-invalid evidence becomes `UnknownType`;
 - workers lack network, credentials, database, arbitrary host-path, and
   second-digest access;
 - path-based CLI fixtures prove seeks, positioned reads, mappings, and rereads
@@ -744,10 +769,10 @@ One shared suite proves every provider and isolation implementation:
   which the attempt cannot later commit a result;
 - continuation tokens authenticate and resolve only to their bound digest, part
   selector, reader identity, view, normalized initial options, and position;
-- inspection and rich-result commits are rejected prospectively when their
-  mandatory continuation cannot fit the pinned target context, and rich views
-  are rejected before processing when their maximum exceeds a target-specific
-  materialized or wire-byte limit; and
+- inspection, text, structured, and rich-result commits are rejected
+  prospectively when their mandatory continuation cannot fit the pinned target
+  context, and rich views are rejected before processing when their maximum
+  exceeds a target-specific materialized or wire-byte limit; and
 - preparation rejects missing, corrupt, malformed, oversized, and
   modality-unsupported references before send authorization.
 
