@@ -134,6 +134,7 @@ ALLOWLIST = (
         re.compile(
             r"^(?:apps/client/src/(?:arguments|presentation)[.]rs|"
             r"apps/client/tests/end_to_end[.]rs|"
+            r"apps/signalboxd/src/lib[.]rs|"
             r"apps/signalboxd/tests/offline_tool_loop[.]rs|"
             r"crates/application/src/review_orchestration[.]rs|"
             r"crates/process-protocol/src/lib[.]rs|crates/runner-wire/src/tests[.]rs|"
@@ -167,6 +168,11 @@ ALLOWLIST = (
             r"ThreadInventory)\(\$owner: String!,|"
             r"^\s*repository\(owner: \$(?:namespace|owner), name: \$name\) \{\s*$"
         ),
+    ),
+    Allowance(
+        "GitHub nameWithOwner GraphQL repository-identity field",
+        re.compile(r"^crates/tools-code-host/src/code_host/github[.]rs$"),
+        re.compile(r"\"nameWithOwner\"|repository \{ nameWithOwner \}|\bname_with_owner\b"),
     ),
     Allowance(
         "GitHub stack GraphQL owner declarations",

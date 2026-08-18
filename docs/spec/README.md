@@ -54,6 +54,7 @@ owned by a sibling page is linked, never restated.
 - [Runner protocol and placement](runner-protocol.md)
 - [Review workflows](review-workflows.md)
 - [Persistence protocol](persistence-protocol.md)
+- [Blob storage](blob-storage.md)
 - [Identity, commands, and telemetry correlation](identity-and-commands.md)
 - [Model-runtime substrate](runtime-substrate.md)
 - [Model and session settings](model-session-settings.md)
@@ -61,6 +62,8 @@ owned by a sibling page is linked, never restated.
 - [Credential availability](credential-availability.md)
 - [Process protocol](process-protocol.md)
 - [Repository watch and event dispatch](repo-watch.md)
+- [Program substrate](program-substrate.md)
+- [Evaluation system](eval-system.md)
 
 ## ADR mapping
 

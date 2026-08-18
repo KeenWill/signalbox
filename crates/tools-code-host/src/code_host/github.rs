@@ -216,6 +216,20 @@ mutation ThreadResolve($thread: ID!) {
 }
 "#;
 
+const THREAD_OWNERSHIP_QUERY: &str = r#"
+query ThreadOwnership($thread: ID!) {
+  node(id: $thread) {
+    __typename
+    ... on PullRequestReviewThread {
+      pullRequest {
+        number
+        repository { nameWithOwner }
+      }
+    }
+  }
+}
+"#;
+
 /// Production GitHub transport with fixed endpoint and bounded exchange policy.
 #[derive(Clone, Debug)]
 pub struct GitHubCodeHostTransport {
@@ -591,9 +605,11 @@ impl GitHubCodeHostTransport {
             Err(
                 CodeHostTransportFailure::InvalidCredential
                 | CodeHostTransportFailure::Rejected
+                | CodeHostTransportFailure::ThreadNotInChangeRequest
                 | CodeHostTransportFailure::InvalidResponse
                 | CodeHostTransportFailure::ResponseTooLarge
                 | CodeHostTransportFailure::ChangeRequestRevisionChanged
+                | CodeHostTransportFailure::MutationNotDispatched
                 | CodeHostTransportFailure::DispatchUnknown,
             ) => return outcome,
         }
@@ -1243,7 +1259,75 @@ impl GitHubCodeHostTransport {
         Ok(value)
     }
 
+    /// Confirms the named thread node belongs to the named change request
+    /// before any mutation naming it is dispatched. A review thread never
+    /// moves between change requests on GitHub, so evidence gathered here
+    /// cannot be invalidated between this read and the following mutation.
+    ///
+    /// Every failure passes through [`ownership_evidence_failure`]: nothing
+    /// has been written when this read fails, so its failures keep read
+    /// classification and are never presented as commit-ambiguous mutations.
+    ///
+    /// The response is judged by its `data` member rather than by the shared
+    /// GraphQL error rejection: definitive absence evidence for a `node`
+    /// lookup arrives as an evaluated `data.node: null` beside an error
+    /// entry carrying the code host's typed `NOT_FOUND` classification, so
+    /// the evaluated `data` member distinguishes an answered query from a
+    /// failed request, and the error classification distinguishes definitive
+    /// absence from a transient field failure that proves nothing.
+    async fn confirm_thread_in_change_request(
+        &self,
+        repository: &CodeHostRepository,
+        number: CodeHostChangeRequestNumber,
+        thread_id: &super::CodeHostOpaqueId,
+        credential: &CredentialValue,
+    ) -> Result<(), CodeHostTransportFailure> {
+        let outcome = async {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "query": THREAD_OWNERSHIP_QUERY,
+                "variables": {"thread": thread_id.as_str()},
+            }))
+            .map_err(|_| CodeHostTransportFailure::InvalidResponse)?;
+            let response = self
+                .send_authenticated(
+                    Method::POST,
+                    self.graphql_url.clone(),
+                    Some(body),
+                    credential,
+                )
+                .await?;
+            let (value, _completeness) = self.json_page(response, StatusCode::OK).await?;
+            let evidence = parse_thread_ownership(&value)?;
+            if thread_in_change_request(&evidence, repository, number) {
+                Ok(())
+            } else {
+                Err(CodeHostTransportFailure::ThreadNotInChangeRequest)
+            }
+        }
+        .await;
+        outcome.map_err(ownership_evidence_failure)
+    }
+
     async fn thread_reply(
+        &self,
+        arguments: super::ThreadReplyArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        let started = tokio::time::Instant::now();
+        self.confirm_thread_in_change_request(
+            arguments.repository(),
+            arguments.number(),
+            arguments.thread_id(),
+            credential,
+        )
+        .await?;
+        let remaining = remaining_mutation_budget(started.elapsed())?;
+        tokio::time::timeout(remaining, self.dispatch_thread_reply(arguments, credential))
+            .await
+            .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
+    }
+
+    async fn dispatch_thread_reply(
         &self,
         arguments: super::ThreadReplyArguments,
         credential: &CredentialValue,
@@ -1285,6 +1369,28 @@ impl GitHubCodeHostTransport {
     }
 
     async fn thread_resolve(
+        &self,
+        arguments: super::ThreadResolveArguments,
+        credential: &CredentialValue,
+    ) -> Result<CodeHostResult, CodeHostTransportFailure> {
+        let started = tokio::time::Instant::now();
+        self.confirm_thread_in_change_request(
+            arguments.repository(),
+            arguments.number(),
+            arguments.thread_id(),
+            credential,
+        )
+        .await?;
+        let remaining = remaining_mutation_budget(started.elapsed())?;
+        tokio::time::timeout(
+            remaining,
+            self.dispatch_thread_resolve(arguments, credential),
+        )
+        .await
+        .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
+    }
+
+    async fn dispatch_thread_resolve(
         &self,
         arguments: super::ThreadResolveArguments,
         credential: &CredentialValue,
@@ -1487,9 +1593,11 @@ impl GitHubCodeHostTransport {
                 CodeHostTransportFailure::InvalidCredential
                 | CodeHostTransportFailure::Rejected
                 | CodeHostTransportFailure::NotFound => failure,
-                CodeHostTransportFailure::InvalidResponse
+                CodeHostTransportFailure::ThreadNotInChangeRequest
+                | CodeHostTransportFailure::InvalidResponse
                 | CodeHostTransportFailure::ResponseTooLarge
                 | CodeHostTransportFailure::ChangeRequestRevisionChanged
+                | CodeHostTransportFailure::MutationNotDispatched
                 | CodeHostTransportFailure::DispatchUnknown => {
                     CodeHostTransportFailure::DispatchUnknown
                 }
@@ -2523,6 +2631,19 @@ fn remaining_exchange_timeout(elapsed: Duration) -> Result<Duration, CodeHostTra
         .ok_or(CodeHostTransportFailure::DispatchUnknown)
 }
 
+/// Bounds a mutation phase to the whole-exchange budget its ownership
+/// confirmation has not consumed, so confirmation and mutation together
+/// respect the transport's single 30-second exchange timeout. Exhaustion
+/// here proves the mutation was never dispatched; a timeout after dispatch
+/// is transport loss with dispatch unknown, which the executor classifies as
+/// commit-ambiguous for a mutating declaration.
+fn remaining_mutation_budget(elapsed: Duration) -> Result<Duration, CodeHostTransportFailure> {
+    DEFAULT_TIMEOUT
+        .checked_sub(elapsed)
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(CodeHostTransportFailure::MutationNotDispatched)
+}
+
 fn reject_graphql_errors(value: &serde_json::Value) -> Result<(), CodeHostTransportFailure> {
     match value.get("errors") {
         None => Ok(()),
@@ -2536,6 +2657,119 @@ fn reject_graphql_mutation_errors(
     value: &serde_json::Value,
 ) -> Result<(), CodeHostTransportFailure> {
     reject_graphql_errors(value).map_err(|_| CodeHostTransportFailure::DispatchUnknown)
+}
+
+/// What the ownership query proved about the node a thread mutation names.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ThreadOwnershipEvidence {
+    /// The node is a review thread owned by exactly this change request.
+    Thread { number: u64, repository: String },
+    /// The identity resolved to no node, or to a node that is not a review
+    /// thread, so it cannot belong to any change request.
+    NotAThread,
+}
+
+/// Reads ownership evidence from the bounded `ThreadOwnership` response.
+///
+/// A `node` lookup nulls its field for definitive absence and for transient
+/// resolver failures alike, so an evaluated `data.node: null` is definitive
+/// absence evidence only when every accompanying error entry carries the code
+/// host's typed `NOT_FOUND` classification (or no error accompanies it); any
+/// other error beside the null proves nothing about the thread and reports
+/// only that the mutation was not dispatched. A node of another type carries
+/// absence weight itself: it cannot belong to any change request as a review
+/// thread. A response without an evaluated `data` member never ran the query,
+/// so it likewise proves only that the mutation was not dispatched; a `data`
+/// member whose shape violates the query is a malformed bounded response.
+fn parse_thread_ownership(
+    value: &serde_json::Value,
+) -> Result<ThreadOwnershipEvidence, CodeHostTransportFailure> {
+    let data = match value.get("data") {
+        Some(data) if !data.is_null() => data,
+        Some(_) | None => return Err(CodeHostTransportFailure::MutationNotDispatched),
+    };
+    let node = match required(required_object(data)?, "node")? {
+        serde_json::Value::Null => {
+            return if node_errors_prove_absence(value) {
+                Ok(ThreadOwnershipEvidence::NotAThread)
+            } else {
+                Err(CodeHostTransportFailure::MutationNotDispatched)
+            };
+        }
+        node => required_object(node)?,
+    };
+    if required_string(node, "__typename")? != "PullRequestReviewThread" {
+        return Ok(ThreadOwnershipEvidence::NotAThread);
+    }
+    let change_request = required_object(required(node, "pullRequest")?)?;
+    let repository = required_object(required(change_request, "repository")?)?;
+    Ok(ThreadOwnershipEvidence::Thread {
+        number: required_u64(change_request, "number")?,
+        repository: required_string(repository, "nameWithOwner")?,
+    })
+}
+
+/// Whether the error entries beside an evaluated `data.node: null` prove the
+/// identity names no node. Reading the closed `type` classification field
+/// parallels the REST absence proof in
+/// [`repository_commit_response_names_missing_revision`]; no error text
+/// enters a result or a sanitized detail. An empty or absent error array
+/// beside the evaluated null is the query's own answer that nothing
+/// resolved, and an entry without the classification field proves nothing.
+fn node_errors_prove_absence(value: &serde_json::Value) -> bool {
+    match value.get("errors") {
+        None => true,
+        Some(serde_json::Value::Array(errors)) => errors.iter().all(|error| {
+            error.get("type").and_then(serde_json::Value::as_str) == Some("NOT_FOUND")
+        }),
+        Some(_) => false,
+    }
+}
+
+/// Whether complete ownership evidence places the thread inside the named
+/// change request. GitHub resolves repository spellings case-insensitively,
+/// so the spelling comparison ignores ASCII case rather than inventing a
+/// stricter repository identity than the code host enforces; the
+/// change-request number has no such latitude and must match exactly.
+fn thread_in_change_request(
+    evidence: &ThreadOwnershipEvidence,
+    repository: &CodeHostRepository,
+    number: CodeHostChangeRequestNumber,
+) -> bool {
+    match evidence {
+        ThreadOwnershipEvidence::NotAThread => false,
+        ThreadOwnershipEvidence::Thread {
+            number: owning_number,
+            repository: owning_repository,
+        } => {
+            *owning_number == u64::from(number.get())
+                && owning_repository.eq_ignore_ascii_case(repository.as_str())
+        }
+    }
+}
+
+/// Shapes a failure observed while establishing thread ownership, before the
+/// mutation existed as a request. The ownership check is a read, so its
+/// failures keep the classification a read would receive: a definitive
+/// answer keeps its meaning, a bounded response the contract refuses is the
+/// code host's answer and ends the attempt as a known failure, and
+/// transport loss proves only that the mutation was never dispatched — it is
+/// never presented as a commit-ambiguous mutation.
+const fn ownership_evidence_failure(failure: CodeHostTransportFailure) -> CodeHostTransportFailure {
+    match failure {
+        CodeHostTransportFailure::InvalidCredential
+        | CodeHostTransportFailure::Rejected
+        | CodeHostTransportFailure::ThreadNotInChangeRequest
+        | CodeHostTransportFailure::MutationNotDispatched => failure,
+        CodeHostTransportFailure::InvalidResponse | CodeHostTransportFailure::ResponseTooLarge => {
+            CodeHostTransportFailure::Rejected
+        }
+        CodeHostTransportFailure::NotFound
+        | CodeHostTransportFailure::ChangeRequestRevisionChanged
+        | CodeHostTransportFailure::DispatchUnknown => {
+            CodeHostTransportFailure::MutationNotDispatched
+        }
+    }
 }
 
 fn nested<'a>(
@@ -4822,5 +5056,502 @@ mod tests {
 
         assert_eq!(text.len(), EXPECTED_TEXT_BYTES);
         assert_eq!(completeness, CodeHostResultCompleteness::Truncated);
+    }
+
+    const OWNED_THREAD_ID: &str = "PRRT_thread";
+    const THREAD_REPLY_BODY: &str = "fixed";
+    const REPLY_COMMENT_ID: &str = "PRRC_reply";
+    const REPLY_COMMENT_URL: &str = "https://github.example/comment/7002";
+    // Arbitrary foreign coordinates; each only needs to differ from the
+    // owning `FILE_PATCH_REPOSITORY` / `FILE_PATCH_NUMBER` pair.
+    const FOREIGN_CHANGE_REQUEST_NUMBER: u32 = 18;
+    const FOREIGN_REPOSITORY: &str = "another/repository";
+    /// How long a loopback server watches for a mutation request that a
+    /// refused ownership check must never dispatch.
+    const NO_FOLLOWUP_REQUEST_WINDOW: Duration = Duration::from_millis(200);
+
+    fn change_request_number() -> CodeHostChangeRequestNumber {
+        CodeHostChangeRequestNumber::try_new(u64::from(FILE_PATCH_NUMBER))
+            .expect("fixture change-request number is admitted")
+    }
+
+    fn thread_reply_test_arguments() -> crate::ThreadReplyArguments {
+        serde_json::from_value(serde_json::json!({
+            "body": THREAD_REPLY_BODY,
+            "number": FILE_PATCH_NUMBER,
+            "repository": FILE_PATCH_REPOSITORY,
+            "thread_id": OWNED_THREAD_ID,
+        }))
+        .expect("fixture thread-reply arguments decode")
+    }
+
+    fn thread_resolve_test_arguments() -> crate::ThreadResolveArguments {
+        serde_json::from_value(serde_json::json!({
+            "number": FILE_PATCH_NUMBER,
+            "repository": FILE_PATCH_REPOSITORY,
+            "thread_id": OWNED_THREAD_ID,
+        }))
+        .expect("fixture thread-resolve arguments decode")
+    }
+
+    fn thread_ownership_response(number: u32, name_with_owner: &str) -> Vec<u8> {
+        serde_json::json!({
+            "data": {"node": {
+                "__typename": "PullRequestReviewThread",
+                "pullRequest": {
+                    "number": number,
+                    "repository": {"nameWithOwner": name_with_owner},
+                },
+            }},
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn owned_thread_ownership_response() -> Vec<u8> {
+        thread_ownership_response(FILE_PATCH_NUMBER, FILE_PATCH_REPOSITORY)
+    }
+
+    fn foreign_number_thread_ownership_response() -> Vec<u8> {
+        thread_ownership_response(FOREIGN_CHANGE_REQUEST_NUMBER, FILE_PATCH_REPOSITORY)
+    }
+
+    fn foreign_repository_thread_ownership_response() -> Vec<u8> {
+        thread_ownership_response(FILE_PATCH_NUMBER, FOREIGN_REPOSITORY)
+    }
+
+    fn thread_reply_acknowledgement() -> Vec<u8> {
+        serde_json::json!({
+            "data": {"addPullRequestReviewThreadReply": {"comment": {
+                "id": REPLY_COMMENT_ID,
+                "url": REPLY_COMMENT_URL,
+            }}},
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn thread_resolve_acknowledgement() -> Vec<u8> {
+        serde_json::json!({
+            "data": {"resolveReviewThread": {"thread": {
+                "id": OWNED_THREAD_ID,
+                "isResolved": true,
+            }}},
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    async fn graphql_test_transport() -> (GitHubCodeHostTransport, tokio::net::TcpListener) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener binds");
+        let address = listener
+            .local_addr()
+            .expect("listener address is available");
+        let mut transport = GitHubCodeHostTransport::try_new().expect("fixed transport constructs");
+        transport.graphql_url = Url::parse(&format!("http://{address}/graphql"))
+            .expect("loopback GraphQL URL is valid");
+        (transport, listener)
+    }
+
+    /// Serves one bounded JSON success response and returns the observed
+    /// request body, so a test can assert which GraphQL document arrived.
+    async fn serve_graphql_response(
+        listener: &tokio::net::TcpListener,
+        response_body: &[u8],
+    ) -> String {
+        use tokio::io::AsyncReadExt;
+
+        let (mut stream, _) = listener.accept().await.expect("one request connects");
+        let mut reader = BufReader::new(&mut stream);
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .await
+                .expect("request header line is readable");
+            let line = line.trim_end();
+            if line.is_empty() {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                content_length = value
+                    .trim()
+                    .parse()
+                    .expect("request content length is numeric");
+            }
+        }
+        let mut request_body = vec![0u8; content_length];
+        reader
+            .read_exact(&mut request_body)
+            .await
+            .expect("request body is readable");
+        drop(reader);
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            response_body.len()
+        );
+        stream
+            .write_all(header.as_bytes())
+            .await
+            .expect("response header is writable");
+        stream
+            .write_all(response_body)
+            .await
+            .expect("response body is writable");
+        String::from_utf8(request_body).expect("request body is UTF-8")
+    }
+
+    /// A thread reply is dispatched only after the code host places the named
+    /// thread inside the change request the arguments name, so the ownership
+    /// query precedes the reply mutation on the wire.
+    #[tokio::test]
+    async fn thread_reply_confirms_ownership_before_dispatching_the_mutation() {
+        let (transport, listener) = graphql_test_transport().await;
+        let ownership_response = owned_thread_ownership_response();
+        let mutation_response = thread_reply_acknowledgement();
+        let server = tokio::spawn(async move {
+            let ownership_request = serve_graphql_response(&listener, &ownership_response).await;
+            let mutation_request = serve_graphql_response(&listener, &mutation_response).await;
+            [ownership_request, mutation_request]
+        });
+        let result = transport
+            .thread_reply(thread_reply_test_arguments(), &test_credential())
+            .await
+            .expect("an owned thread admits the reply mutation");
+        let [ownership_request, mutation_request] = repository_server_result(server).await;
+
+        assert_eq!(
+            result.into_json_value(),
+            serde_json::json!({"id": REPLY_COMMENT_ID, "url": REPLY_COMMENT_URL})
+        );
+        assert!(ownership_request.contains("ThreadOwnership"));
+        assert!(ownership_request.contains(OWNED_THREAD_ID));
+        assert!(mutation_request.contains("addPullRequestReviewThreadReply"));
+    }
+
+    /// A reply naming a thread the code host places in another change request
+    /// is refused with the typed ownership failure, and the refusal window
+    /// observes no mutation request.
+    #[tokio::test]
+    async fn thread_reply_to_a_foreign_thread_dispatches_no_mutation() {
+        let (transport, listener) = graphql_test_transport().await;
+        let ownership_response = foreign_number_thread_ownership_response();
+        let server = tokio::spawn(async move {
+            let ownership_request = serve_graphql_response(&listener, &ownership_response).await;
+            let followup =
+                tokio::time::timeout(NO_FOLLOWUP_REQUEST_WINDOW, listener.accept()).await;
+            (ownership_request, followup.is_err())
+        });
+        let failure = transport
+            .thread_reply(thread_reply_test_arguments(), &test_credential())
+            .await
+            .expect_err("a foreign thread cannot admit a reply mutation");
+        let (ownership_request, no_followup_request) = repository_server_result(server).await;
+
+        assert_eq!(failure, CodeHostTransportFailure::ThreadNotInChangeRequest);
+        assert!(ownership_request.contains("ThreadOwnership"));
+        assert!(
+            no_followup_request,
+            "the refused reply must not dispatch a mutation request"
+        );
+    }
+
+    /// A thread resolution is dispatched only after the same ownership
+    /// confirmation as a reply.
+    #[tokio::test]
+    async fn thread_resolve_confirms_ownership_before_dispatching_the_mutation() {
+        let (transport, listener) = graphql_test_transport().await;
+        let ownership_response = owned_thread_ownership_response();
+        let mutation_response = thread_resolve_acknowledgement();
+        let server = tokio::spawn(async move {
+            let ownership_request = serve_graphql_response(&listener, &ownership_response).await;
+            let mutation_request = serve_graphql_response(&listener, &mutation_response).await;
+            [ownership_request, mutation_request]
+        });
+        let result = transport
+            .thread_resolve(thread_resolve_test_arguments(), &test_credential())
+            .await
+            .expect("an owned thread admits the resolve mutation");
+        let [ownership_request, mutation_request] = repository_server_result(server).await;
+
+        assert_eq!(
+            result.into_json_value(),
+            serde_json::json!({"resolved": true, "thread_id": OWNED_THREAD_ID})
+        );
+        assert!(ownership_request.contains("ThreadOwnership"));
+        assert!(ownership_request.contains(OWNED_THREAD_ID));
+        assert!(mutation_request.contains("resolveReviewThread"));
+    }
+
+    /// A resolution naming a thread the code host places in another
+    /// repository is refused with the typed ownership failure, and the
+    /// refusal window observes no mutation request.
+    #[tokio::test]
+    async fn thread_resolve_in_a_foreign_repository_dispatches_no_mutation() {
+        let (transport, listener) = graphql_test_transport().await;
+        let ownership_response = foreign_repository_thread_ownership_response();
+        let server = tokio::spawn(async move {
+            let ownership_request = serve_graphql_response(&listener, &ownership_response).await;
+            let followup =
+                tokio::time::timeout(NO_FOLLOWUP_REQUEST_WINDOW, listener.accept()).await;
+            (ownership_request, followup.is_err())
+        });
+        let failure = transport
+            .thread_resolve(thread_resolve_test_arguments(), &test_credential())
+            .await
+            .expect_err("a foreign thread cannot admit a resolve mutation");
+        let (ownership_request, no_followup_request) = repository_server_result(server).await;
+
+        assert_eq!(failure, CodeHostTransportFailure::ThreadNotInChangeRequest);
+        assert!(ownership_request.contains("ThreadOwnership"));
+        assert!(
+            no_followup_request,
+            "the refused resolution must not dispatch a mutation request"
+        );
+    }
+
+    /// Complete ownership evidence for the named change request decodes into
+    /// the exact owning coordinates.
+    #[test]
+    fn thread_ownership_evidence_decodes_the_owning_change_request() {
+        let value: serde_json::Value = serde_json::from_slice(&owned_thread_ownership_response())
+            .expect("fixture ownership response is JSON");
+
+        assert_eq!(
+            parse_thread_ownership(&value),
+            Ok(ThreadOwnershipEvidence::Thread {
+                number: u64::from(FILE_PATCH_NUMBER),
+                repository: String::from(FILE_PATCH_REPOSITORY),
+            })
+        );
+    }
+
+    /// Definitive node absence arrives as an evaluated `data.node: null`
+    /// beside the code host's typed not-found error, and reads as ownership
+    /// refusal rather than as transport loss.
+    #[test]
+    fn a_missing_thread_node_is_definitive_ownership_refusal() {
+        let value = serde_json::json!({
+            "data": {"node": null},
+            "errors": [{"type": "NOT_FOUND", "message": "Could not resolve to a node"}],
+        });
+
+        assert_eq!(
+            parse_thread_ownership(&value),
+            Ok(ThreadOwnershipEvidence::NotAThread)
+        );
+    }
+
+    /// An evaluated null node with no error entry at all is the query's own
+    /// answer that nothing resolved.
+    #[test]
+    fn an_evaluated_null_node_without_errors_is_definitive_absence() {
+        let value = serde_json::json!({"data": {"node": null}});
+
+        assert_eq!(
+            parse_thread_ownership(&value),
+            Ok(ThreadOwnershipEvidence::NotAThread)
+        );
+    }
+
+    /// A field error without the not-found classification nulls the node for
+    /// a transient resolver failure as readily as for absence, so it proves
+    /// nothing about the thread and reports only the undispatched mutation.
+    #[test]
+    fn a_field_error_beside_a_null_node_is_not_absence_evidence() {
+        let value = serde_json::json!({
+            "data": {"node": null},
+            "errors": [{"type": "INTERNAL", "message": "Something went wrong"}],
+        });
+
+        assert_eq!(
+            parse_thread_ownership(&value),
+            Err(CodeHostTransportFailure::MutationNotDispatched)
+        );
+    }
+
+    /// An error entry that carries no classification field cannot prove
+    /// absence, so the null node beside it stays an undispatched mutation.
+    #[test]
+    fn an_unclassified_error_beside_a_null_node_is_not_absence_evidence() {
+        let value = serde_json::json!({
+            "data": {"node": null},
+            "errors": [{"message": "Could not resolve to a node"}],
+        });
+
+        assert_eq!(
+            parse_thread_ownership(&value),
+            Err(CodeHostTransportFailure::MutationNotDispatched)
+        );
+    }
+
+    /// A node of another type cannot belong to any change request as a
+    /// review thread.
+    #[test]
+    fn another_node_type_is_not_thread_ownership_evidence() {
+        let value = serde_json::json!({"data": {"node": {"__typename": "Issue"}}});
+
+        assert_eq!(
+            parse_thread_ownership(&value),
+            Ok(ThreadOwnershipEvidence::NotAThread)
+        );
+    }
+
+    /// A response without an evaluated `data` member never ran the query, so
+    /// it proves only that the mutation was not dispatched.
+    #[test]
+    fn an_unevaluated_ownership_response_proves_only_no_dispatch() {
+        let value = serde_json::json!({"errors": [{"message": "rate limited"}]});
+
+        assert_eq!(
+            parse_thread_ownership(&value),
+            Err(CodeHostTransportFailure::MutationNotDispatched)
+        );
+    }
+
+    /// A node claiming the thread type without its owning change request is a
+    /// malformed bounded response, not ownership evidence.
+    #[test]
+    fn a_malformed_thread_node_is_an_invalid_bounded_response() {
+        let value =
+            serde_json::json!({"data": {"node": {"__typename": "PullRequestReviewThread"}}});
+
+        assert_eq!(
+            parse_thread_ownership(&value),
+            Err(CodeHostTransportFailure::InvalidResponse)
+        );
+    }
+
+    /// Matching coordinates place the thread inside the named change request.
+    #[test]
+    fn thread_ownership_predicate_admits_the_owning_change_request() {
+        let evidence = ThreadOwnershipEvidence::Thread {
+            number: u64::from(FILE_PATCH_NUMBER),
+            repository: String::from(FILE_PATCH_REPOSITORY),
+        };
+
+        assert!(thread_in_change_request(
+            &evidence,
+            &repository(),
+            change_request_number(),
+        ));
+    }
+
+    /// GitHub addresses repositories case-insensitively, so a case-variant
+    /// spelling of the same repository is not a foreign target.
+    #[test]
+    fn thread_ownership_predicate_admits_case_variant_repository_spelling() {
+        let evidence = ThreadOwnershipEvidence::Thread {
+            number: u64::from(FILE_PATCH_NUMBER),
+            repository: FILE_PATCH_REPOSITORY.to_ascii_uppercase(),
+        };
+
+        assert!(thread_in_change_request(
+            &evidence,
+            &repository(),
+            change_request_number(),
+        ));
+    }
+
+    /// A thread owned by another change-request number is a foreign target.
+    #[test]
+    fn thread_ownership_predicate_rejects_a_foreign_number() {
+        let evidence = ThreadOwnershipEvidence::Thread {
+            number: u64::from(FOREIGN_CHANGE_REQUEST_NUMBER),
+            repository: String::from(FILE_PATCH_REPOSITORY),
+        };
+
+        assert!(!thread_in_change_request(
+            &evidence,
+            &repository(),
+            change_request_number(),
+        ));
+    }
+
+    /// A thread owned by another repository is a foreign target even at the
+    /// same change-request number.
+    #[test]
+    fn thread_ownership_predicate_rejects_a_foreign_repository() {
+        let evidence = ThreadOwnershipEvidence::Thread {
+            number: u64::from(FILE_PATCH_NUMBER),
+            repository: String::from(FOREIGN_REPOSITORY),
+        };
+
+        assert!(!thread_in_change_request(
+            &evidence,
+            &repository(),
+            change_request_number(),
+        ));
+    }
+
+    /// Evidence that the identity names no review thread never places it in
+    /// any change request.
+    #[test]
+    fn thread_ownership_predicate_rejects_a_non_thread_node() {
+        assert!(!thread_in_change_request(
+            &ThreadOwnershipEvidence::NotAThread,
+            &repository(),
+            change_request_number(),
+        ));
+    }
+
+    /// The mutation phase receives only the exchange budget the ownership
+    /// confirmation left unconsumed, so both requests together respect the
+    /// transport's single 30-second exchange timeout.
+    #[test]
+    fn thread_mutation_uses_the_remaining_exchange_budget() {
+        const ELAPSED: Duration = Duration::from_secs(7);
+        const EXPECTED_REMAINING: Duration = Duration::from_secs(23);
+
+        assert_eq!(remaining_mutation_budget(ELAPSED), Ok(EXPECTED_REMAINING));
+    }
+
+    /// A confirmation that exhausts the whole exchange budget proves the
+    /// mutation was never dispatched rather than claiming ambiguity.
+    #[test]
+    fn an_exhausted_exchange_budget_proves_no_dispatch() {
+        assert_eq!(
+            remaining_mutation_budget(DEFAULT_TIMEOUT),
+            Err(CodeHostTransportFailure::MutationNotDispatched)
+        );
+    }
+
+    /// Ownership-check failures keep read classification: definitive answers
+    /// keep their meaning, refused bounded responses end the attempt as the
+    /// code host's answer, and transport loss proves only that the mutation
+    /// was never dispatched.
+    #[test]
+    fn ownership_evidence_failures_keep_read_classification() {
+        assert_eq!(
+            ownership_evidence_failure(CodeHostTransportFailure::InvalidCredential),
+            CodeHostTransportFailure::InvalidCredential
+        );
+        assert_eq!(
+            ownership_evidence_failure(CodeHostTransportFailure::Rejected),
+            CodeHostTransportFailure::Rejected
+        );
+        assert_eq!(
+            ownership_evidence_failure(CodeHostTransportFailure::ThreadNotInChangeRequest),
+            CodeHostTransportFailure::ThreadNotInChangeRequest
+        );
+        assert_eq!(
+            ownership_evidence_failure(CodeHostTransportFailure::InvalidResponse),
+            CodeHostTransportFailure::Rejected
+        );
+        assert_eq!(
+            ownership_evidence_failure(CodeHostTransportFailure::ResponseTooLarge),
+            CodeHostTransportFailure::Rejected
+        );
+        assert_eq!(
+            ownership_evidence_failure(CodeHostTransportFailure::DispatchUnknown),
+            CodeHostTransportFailure::MutationNotDispatched
+        );
+        assert_eq!(
+            ownership_evidence_failure(CodeHostTransportFailure::MutationNotDispatched),
+            CodeHostTransportFailure::MutationNotDispatched
+        );
     }
 }

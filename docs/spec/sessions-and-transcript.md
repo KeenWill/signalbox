@@ -3,6 +3,10 @@
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+The multipart user-content aggregate below is the foundation proposal from PR
+`#553` (`agent/blob-storage-foundation`) and becomes verified with its
+implementing child stack.
+
 This page specifies the implemented behavior of session creation and ancestry,
 creation from an imported frontier, session-level configuration defaults and
 their replacement, replaceable organizational metadata and listing, the
@@ -567,6 +571,17 @@ creation-time override, or inference from missing attribution is stored. The
 dependency for future creation-derived visibility is recorded in
 [open-questions.md](../open-questions.md#session-organization-visibility-and-retention).
 
+**Committed unimplemented functionality.** No present surface constructs a
+program creation cause. The closed creation-cause vocabulary gains `workflow`
+and `eval` variants for sessions created by registered programs under the
+[program substrate](program-substrate.md): each names the creating program run
+(and, for `eval`, the trial identity the [evaluation system](eval-system.md)
+defines), is constructible only by the substrate's host-side session capability,
+and joins the stored closed-discriminator convention beside `user_initiated` and
+`delegated`. This constrains present change: creation-cause readers must not
+assume the two-variant vocabulary is final, and the stored discriminator's
+decode surface must stay extensible without reinterpreting existing spellings.
+
 ## The session aggregate
 
 The long-lived domain `Session` (`crates/domain/src/session.rs`) contains
@@ -891,14 +906,16 @@ cause it carries. This inventory is closed at four.
 
 ## User content
 
-Accepted-input content is the closed one-variant algebra `UserContent`; its only
-variant is `Text { value: NonEmptyUnicodeText }`
-(`crates/domain/src/user_content.rs`). Construction rejects empty text and any
-text containing U+0000 (which PostgreSQL text cannot store); whitespace-only
-text is content. The domain applies no trimming, Unicode normalization, case
-folding, or any other rewriting, and equality is the exact ordered scalar
-sequence — normalization-distinct spellings are unequal. That exact value
-participates in `SubmitInput` replay equality (INV-012).
+Accepted-input content is `UserContent`, one ordered nonempty sequence of closed
+text or attachment parts under the cross-crate contract owned by
+[blob storage](blob-storage.md#multipart-user-content). A text part carries
+`NonEmptyUnicodeText`; construction rejects empty text and any text containing
+U+0000 (which PostgreSQL text cannot store), while whitespace-only text remains
+content. The domain applies no trimming, Unicode normalization, case folding, or
+other rewriting. Equality is exact part order plus each part's complete value
+and metadata, so normalization-distinct text spellings are unequal and any
+attachment difference changes replay equality. That exact value participates in
+`SubmitInput` replay equality (INV-012).
 
 Why (exact, unnormalized): replay equality must not depend on a normalization
 policy; search or display projections may normalize without changing accepted
@@ -922,17 +939,24 @@ INV-007, INV-036).
 
 ### Bounds
 
-The domain value is unbounded. Admission is bounded at the application boundary:
-`SubmitInputRequest::try_new` rejects text whose UTF-8 encoding exceeds
-`MAX_CONTENT_UTF8_BYTES` = 1,048,576 bytes before typed command construction, so
-no command identifier is claimed. The `OversizedContent` failure retains only
-the byte length, never the rejected content. Matching
-`octet_length(convert_to(content_text, 'UTF8'))` CHECK constraints protect both
-durable content columns (migration `202607200001_bounded_user_content.sql`).
+The multipart value and application admission apply the exact structural,
+text-byte, and attachment-metadata bounds owned by
+[blob storage](blob-storage.md#multipart-user-content) before typed command
+construction, so no command identifier is claimed for a structurally invalid
+value. Typed construction and the registry claim precede the current-state
+catalog-existence, aggregate-attachment, and prospective-complete-frontier
+checks. Failure of one of those post-claim checks records its closed terminal
+rejection and no accepted-input effect. Resource failures retain counts and
+configured maxima, never rejected text or attachment metadata. The final schema
+stores one complete ordinally guarded part sequence in each mirrored command and
+accepted-input satellite, with no `content_text` authority; its one-time
+migration and exact storage version are owned by that same cross-crate contract.
 
-Why (bytes, at admission): byte measurement matches wire and storage cost and
-keeps the domain value exactly as accepted; rejecting before construction can
-never truncate or rewrite content.
+Why (bytes and parts, at admission): measurement matches wire, storage, and
+verification cost and keeps the domain value exactly as accepted. Stable shape
+failures precede construction, while checks whose answer depends on current
+catalog or session state occur under durable command authority; neither path can
+truncate, reorder, or rewrite content.
 
 This is a provisional maintainer-approved floor, not the resource-governance
 policy.
@@ -1140,9 +1164,9 @@ placement and this stack implements no placement logic.
   maintainer amendment choice.
 - `Recovery` and `Model` actor variants have no constructing boundary;
   per-transition attribution adoption schedules remain open.
-- The 1 MiB content bound is a provisional maintainer floor; the
-  resource-governance limit question stays open, and non-text content kinds
-  remain unconstructible pending their owning decisions.
+- The multipart part-count, text-byte, metadata, and attachment-work bounds are
+  provisional maintainer floors; the resource-governance limit question stays
+  open.
 - The session system prompt remains one optional bounded string per defaults
   epoch. Composition from base, per-use-case, and instruction-file sources and
   richer named profiles remain the open

@@ -1,4 +1,15 @@
 //! Reviewed SQL statements that acquire explicit persistence row locks.
+//!
+//! Session/scheduler pair order: every transaction that locks both a
+//! `session` row and a `session_scheduler` row acquires the `session` row
+//! first. Submit-input, applied goal commands (fresh dispatch commissioning
+//! included), the delegated endpoint prefixes, and approval-judge completion
+//! all take that order; goal system transitions — model declarations and
+//! scheduler-failure blocking — hold only the session row, the remaining
+//! scheduler-family transactions hold only the scheduler row, and so no two
+//! transactions wait on this pair in opposite orders. A scheduler-first
+//! acquisition of the pair would deadlock against every path above and must
+//! not be introduced.
 
 use signalbox_domain::SessionId;
 
@@ -12,6 +23,18 @@ pub(crate) const fn ordered_session_pair(
         (second, first)
     }
 }
+
+pub(crate) const PROGRAM_JOURNAL_SEQUENCE: &str = "SELECT
+        last_position, last_request_ordinal, last_delivery_ordinal
+   FROM program_run_journal_sequence_state
+  WHERE run_id = $1
+  FOR UPDATE";
+
+pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION: &str =
+    "SELECT latest_event_id, settled_kind, settled_dispatch_id
+       FROM repo_watch_dispatch_obligation
+      WHERE obligation_id = $1
+      FOR UPDATE";
 
 pub(crate) const START_ELIGIBLE_TURN: &str = "SELECT
             EXISTS (

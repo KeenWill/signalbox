@@ -122,6 +122,17 @@ remembered to read it. This repository's domain crate already works this way —
 see the exemplars below; the rule extends that standard to test fixtures and
 helper signatures, where it is applied least consistently today.
 
+## Numeric bounds
+
+Every numeric bound declares whether it is a **hard safety ceiling** or a
+**tunable effective ceiling** and carries a one-line rationale naming what it
+protects. A hard safety ceiling is code-defined against runaway memory, latency,
+spend, or storage. Configuration may lower a deployment's effective ceiling but
+never raise the hard safety ceiling.
+
+Set a hard safety ceiling at the real production danger point. Ordinary real
+work must not reach it; otherwise it is a product limit, not runaway protection.
+
 ## Conventions at component seams
 
 The core principles imply the following narrower rules where representations,

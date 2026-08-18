@@ -14,6 +14,7 @@ mod context_compaction;
 pub use approval_judge::{
     ApprovalJudgeModel, ApprovalJudgeModelError, ApprovalJudgeModelRequest,
     ApprovalJudgeModelResult, PreparedApprovalJudgeModelCall, RuntimeApprovalJudgeModel,
+    approval_judge_output_contract_text,
 };
 pub use context_compaction::{
     ContextCompactionModel, ContextCompactionModelError, ContextCompactionModelRequest,

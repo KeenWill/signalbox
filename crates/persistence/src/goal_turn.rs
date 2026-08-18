@@ -260,23 +260,14 @@ pub(crate) async fn insert_goal_turn(
     ))?;
     model_settings_resolution::persist(connection, session, &settings_event).await?;
 
-    let (source_event, predecessor) = match source {
-        GoalTurnSource::UserEvent(event) => (Some(Decimal::from(event.get())), None),
-        GoalTurnSource::SuccessfulTurn(predecessor) => (None, Some(turn_id_to_uuid(predecessor))),
-    };
-    sqlx::query(
-        "INSERT INTO goal_turn
-            (session_id, goal_generation, turn_id, accepted_input_id,
-             source_event_ordinal, predecessor_turn_id)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+    bind_goal_turn(
+        connection,
+        session,
+        generation,
+        source,
+        candidates.accepted_input(),
+        candidates.turn(),
     )
-    .bind(session_uuid)
-    .bind(Decimal::from(generation.get()))
-    .bind(turn)
-    .bind(accepted)
-    .bind(source_event)
-    .bind(predecessor)
-    .execute(&mut *connection)
     .await?;
 
     outbox::append(
@@ -288,6 +279,52 @@ pub(crate) async fn insert_goal_turn(
             acceptance_position: position,
         },
     )
+    .await?;
+    Ok(())
+}
+
+/// Records an existing queued turn as the goal turn of one generation.
+///
+/// A repository-watch dispatch submits its tagged context through its own
+/// command before the goal it commissions exists, so the generation cannot mint
+/// the turn that carries it. Binding writes the `goal_turn` row alone: the
+/// accepted input, queued origin, lifecycle, and model-settings resolution the
+/// turn already owns are exactly the ones the generation adopts, and writing
+/// them again would fabricate a second history for a turn that has one.
+///
+/// No `InputAccepted` outbox event is appended here. The command that accepted
+/// this turn already published one naming the same accepted input and turn, and
+/// `input_accepted_outbox_event` is unique on each of them, so a second append
+/// is a constraint violation rather than a duplicate a follower could absorb.
+///
+/// This writes the single row and asserts nothing beyond it, because the
+/// deferred `goal_turn_shape` trigger decides the whole shape at commit. The
+/// turn-minting path above reaches this function for the same row.
+pub(crate) async fn bind_goal_turn(
+    connection: &mut PgConnection,
+    session: SessionId,
+    generation: GoalGeneration,
+    source: GoalTurnSource,
+    accepted_input: AcceptedInputId,
+    turn: TurnId,
+) -> Result<(), GoalRepositoryError> {
+    let (source_event, predecessor) = match source {
+        GoalTurnSource::UserEvent(event) => (Some(Decimal::from(event.get())), None),
+        GoalTurnSource::SuccessfulTurn(predecessor) => (None, Some(turn_id_to_uuid(predecessor))),
+    };
+    sqlx::query(
+        "INSERT INTO goal_turn
+            (session_id, goal_generation, turn_id, accepted_input_id,
+             source_event_ordinal, predecessor_turn_id)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(Decimal::from(generation.get()))
+    .bind(turn_id_to_uuid(turn))
+    .bind(accepted_input_id_to_uuid(accepted_input))
+    .bind(source_event)
+    .bind(predecessor)
+    .execute(&mut *connection)
     .await?;
     Ok(())
 }

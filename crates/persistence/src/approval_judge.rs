@@ -18,7 +18,7 @@ use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
 use crate::{
     ModelCredentialFamilyCatalog, commit_failure_is_ambiguous,
-    goal::{GoalRepositoryError, load_goal_from_connection},
+    goal::{self, GoalRepositoryError, load_goal_from_connection},
     mapping::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         ToolApprovalDecisionSourceStorageKind, approval_judge_recommendation_from_str,
@@ -127,7 +127,10 @@ impl PreparedApprovalJudge {
     ///
     /// The context is read fresh on every preparation and is deliberately
     /// absent from the durable judge binding, so it never participates in the
-    /// exact-call recheck that guards authorization and completion.
+    /// exact-call recheck that guards authorization and completion. Completion
+    /// does compare the goal it carries against the statement in force at that
+    /// moment, but by resolving that statement again rather than by binding
+    /// this value durably.
     pub const fn session_context(&self) -> &SessionAuthorityContext {
         &self.session_context
     }
@@ -413,6 +416,17 @@ impl PostgresApprovalJudgeRepository {
         continuation_attempt: TurnAttemptId,
     ) -> Result<CompleteApprovalJudgeOutcome, ApprovalJudgeRepositoryError> {
         let mut transaction = self.pool.begin().await?;
+        // Completion rechecks the goal authority in force, and goal system
+        // transitions serialize on the session row without ever taking the
+        // scheduler row (`goal::handle_system_transition`), so excluding a
+        // concurrent `declare_achieved` requires holding the session row
+        // from before that read until this commit. It is taken before the
+        // scheduler lock below because every transaction locking both rows
+        // acquires the session row first (see `lock_inventory`); acquiring
+        // it after would deadlock against every applied goal command.
+        if !goal::lock_session(&mut transaction, prepared.request.session()).await? {
+            return Err(ApprovalJudgeCorruption::Missing("judge completion session").into());
+        }
         lock_session(&mut transaction, prepared.request.session())
             .await
             .map_err(map_model_error)?;
@@ -435,6 +449,26 @@ impl PostgresApprovalJudgeRepository {
         if state != ApprovalJudgeStateStorageKind::InFlight {
             return Err(ApprovalJudgeCorruption::Inconsistent("judge completion state").into());
         }
+        // Resolved under the completion lock rather than trusted from the
+        // prepared binding: the session was unlocked for the whole provider
+        // round-trip, which is exactly when a user stopping the goal lands.
+        // This runs only for a completion that has not committed yet, so a
+        // replay never recomputes a decision against authority that moved after
+        // the decision was already durable.
+        let in_force = load_judged_turn_authority_in_force(
+            &mut transaction,
+            prepared.request.session(),
+            prepared.request.turn(),
+        )
+        .await?;
+        let recommendation = if read_authority_still_stands(JudgedTurnAuthority {
+            read: prepared.session_context.goal(),
+            in_force: in_force.as_ref(),
+        }) {
+            recommendation
+        } else {
+            DelegateApprovalRecommendation::EscalateToHuman
+        };
         let batch = load_active_batch_from_connection(
             &mut transaction,
             prepared.request.session(),
@@ -772,36 +806,64 @@ async fn load_session_authority_context(
 /// guarantee. The generation recorded for the turn is therefore the binding
 /// whenever the turn has one.
 ///
-/// A turn the goal machinery did not schedule has no such record, and a goal
-/// session runs those too: repository-watch dispatch commissions a goal and
-/// delivers its tagged context as an ordinary input, so the turn doing the
-/// dispatched work is not itself a goal turn. Refusing every such turn would
-/// leave the judge deciding a dispatched session's requests with no statement
-/// of the authority that session was created under, so such a turn resolves
-/// against the lineage under two conditions, both of which must hold.
+/// A turn with no such record resolves to no statement, and the judge
+/// escalates. A goal session runs turns the goal machinery did not schedule —
+/// an ordinary input submitted into a session that has a goal — and the
+/// generation states nothing about those, so reading one against the session's
+/// lineage would let a goal attached after the turn already existed supply
+/// authority it never covered. Repository-watch dispatch, which is why a
+/// dispatched session's requests reach the judge at all, no longer produces
+/// one: the turn carrying its tagged context is the commissioned generation's
+/// own turn and carries the record.
 ///
-/// The lineage has exactly one generation, so no supersession can have
-/// broadened what the judge reads. And that generation is still open, so a goal
-/// already stopped or achieved supplies no statement. Anything else resolves to
-/// no statement and the judge escalates.
-///
-/// A goal attached after the judged turn already existed still resolves here.
-/// Ordering the commission before the turn would prove it did not, but under
-/// this schema a turn's acceptance position is also its execution order, so
-/// commissioning first makes a dispatched session act on the statement before
-/// its triggering event arrives. Binding the dispatched work turn to the
-/// generation is the structural answer and is committed unimplemented
-/// functionality.
-///
-/// This runs while the judge is prepared, and the statement it yields is
-/// carried on the prepared binding rather than re-read at completion. A
-/// generation closed after preparation is therefore not seen by the decision
-/// that preparation feeds; rechecking under the completion lock is committed
-/// unimplemented functionality.
+/// This is what the judge reads while it is prepared. Completion asks a
+/// different question of the same lineage and uses
+/// `judged_turn_authority_in_force`.
 async fn load_judged_turn_goal(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
+) -> Result<Option<GoalStatement>, ApprovalJudgeRepositoryError> {
+    load_judged_turn_lineage(connection, session, turn, judged_turn_goal_statement).await
+}
+
+/// Resolves the statement in force for the judged turn under the commit lock.
+///
+/// Reading and committing ask different questions of the same lineage, so they
+/// do not share a resolution. Reading binds the recorded generation exactly, on
+/// purpose: a supersession while the turn is parked must not broaden what the
+/// model is shown. Committing asks whether the authority the decision was
+/// formed under is still in force, and a generation that has since been
+/// stopped, achieved, or superseded is not — however exactly it is bound.
+///
+/// Reusing the reading resolution here would make the check vacuous for every
+/// turn goal mode scheduled: the recorded branch returns its generation's
+/// statement whatever state that generation reached, so the comparison would
+/// find the bytes equal and commit under withdrawn authority.
+async fn load_judged_turn_authority_in_force(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<Option<GoalStatement>, ApprovalJudgeRepositoryError> {
+    load_judged_turn_lineage(connection, session, turn, judged_turn_authority_in_force).await
+}
+
+/// Selects a statement from the judged turn's lineage.
+///
+/// Reading and committing ask different questions of the same lineage, so the
+/// loading is shared and the question is the parameter.
+type ResolveJudgedTurnStatement =
+    fn(&[GoalGenerationSnapshot], Option<GoalGeneration>) -> ResolvedJudgedTurnStatement;
+
+/// What one resolution of the judged turn's lineage decided.
+type ResolvedJudgedTurnStatement = Result<Option<GoalStatement>, ApprovalJudgeCorruption>;
+
+/// Loads the judged turn's lineage and hands it to one resolution.
+async fn load_judged_turn_lineage(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    resolve: ResolveJudgedTurnStatement,
 ) -> Result<Option<GoalStatement>, ApprovalJudgeRepositoryError> {
     let recorded = sqlx::query_scalar::<_, Decimal>(
         "SELECT goal_generation
@@ -830,16 +892,80 @@ async fn load_judged_turn_goal(
             Err(ApprovalJudgeCorruption::Missing("judged turn goal").into())
         }
         None => Ok(None),
-        Some(goal) => Ok(judged_turn_goal_statement(goal.generations(), recorded)?),
+        Some(goal) => Ok(resolve(goal.generations(), recorded)?),
     }
+}
+
+/// Selects the statement still in force for the judged turn, if any.
+///
+/// A recorded generation supplies its statement only while it remains open; a
+/// stopped, achieved, or superseded one supplies nothing, because the authority
+/// it stated has been withdrawn or discharged. An unrecorded turn resolves as
+/// it does for reading — to no statement — so a judge that read nothing
+/// commits its decision unchanged: the comparison pins withdrawal, and a turn
+/// no generation authorized has no authority to withdraw.
+fn judged_turn_authority_in_force(
+    generations: &[GoalGenerationSnapshot],
+    recorded: Option<GoalGeneration>,
+) -> Result<Option<GoalStatement>, ApprovalJudgeCorruption> {
+    match recorded {
+        Some(generation) => generations
+            .iter()
+            .find(|snapshot| snapshot.generation() == generation)
+            .map(|snapshot| {
+                snapshot
+                    .state()
+                    .is_open()
+                    .then(|| snapshot.statement().clone())
+            })
+            .ok_or(ApprovalJudgeCorruption::Inconsistent(
+                "judged turn goal generation",
+            )),
+        None => judged_turn_goal_statement(generations, None),
+    }
+}
+
+/// Whether the authority the judge read is still the authority in force.
+///
+/// The judge reads a statement while it is prepared, spends a provider
+/// round-trip deciding under it, and commits afterwards. A user can stop or
+/// supersede the goal in that window, so the statement resolved again under the
+/// completion lock is compared against the one the decision was made under.
+///
+/// Equal statements stand. A statement that resolved before and resolves to
+/// nothing now belongs to a generation that closed, and one that resolves to
+/// different bytes belongs to a generation that was replaced; neither is the
+/// authority the recommendation was formed under. A judge that read no
+/// statement decided without one, so a goal appearing since revokes nothing and
+/// leaves that decision alone — this pins withdrawal, not novelty.
+fn read_authority_still_stands(authority: JudgedTurnAuthority<'_>) -> bool {
+    match (authority.read, authority.in_force) {
+        (Some(read), Some(in_force)) => read == in_force,
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
+}
+
+/// The two statements a completion compares, named because their roles differ.
+///
+/// Both are `Option<&GoalStatement>` and the comparison is asymmetric —
+/// withdrawn authority is `read` present and `in_force` absent, while the
+/// reverse preserves the decision — so transposing them would reverse the commit
+/// decision without a type error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct JudgedTurnAuthority<'statement> {
+    /// What the judge read while it was prepared, and decided under.
+    read: Option<&'statement GoalStatement>,
+    /// What resolves for the same turn under the completion lock.
+    in_force: Option<&'statement GoalStatement>,
 }
 
 /// Selects which generation's statement states the judged turn's authority.
 ///
-/// A recorded generation binds exactly. Its absence admits a lineage only when
-/// both conditions hold together: one generation, and that generation still
-/// open. Every other shape resolves to no statement, which the judge renders as
-/// absent and escalates on.
+/// A recorded generation binds exactly, and its absence resolves to no
+/// statement, which the judge renders as absent and escalates on. Nothing is
+/// inferred from the lineage's shape: a turn no generation recorded is a turn
+/// no generation authorized, however few or however open the generations are.
 fn judged_turn_goal_statement(
     generations: &[GoalGenerationSnapshot],
     recorded: Option<GoalGeneration>,
@@ -852,10 +978,7 @@ fn judged_turn_goal_statement(
             .ok_or(ApprovalJudgeCorruption::Inconsistent(
                 "judged turn goal generation",
             )),
-        None => Ok(match generations {
-            [only] if only.state().is_open() => Some(only.statement().clone()),
-            _ => None,
-        }),
+        None => Ok(None),
     }
 }
 
@@ -967,9 +1090,32 @@ async fn exact_completed(
     .await?;
     let terminal_disposition: String = required(&row, "terminal_disposition_kind")?;
     let stored_recommendation: String = required(&row, "recommendation_kind")?;
+    // What the completion committed, which is not always what its caller
+    // offered: a completion whose authority closed during the provider
+    // round-trip stored an escalation in place of the provider's
+    // recommendation. A retry after an uncertain response still carries the
+    // original value, so the replay is judged against the stored decision.
+    //
+    // A stored escalation is admitted for a different offered value only while
+    // the authority is still withdrawn, which is the condition that produced it
+    // and one a closed generation cannot leave. With the authority intact the
+    // escalation was the provider's own, so an offered approval or denial is a
+    // structurally different call and must be reported rather than replayed.
+    let stored = approval_judge_recommendation_from_str(&stored_recommendation);
+    let substituted = stored == Some(DelegateApprovalRecommendation::EscalateToHuman)
+        && !read_authority_still_stands(JudgedTurnAuthority {
+            read: prepared.session_context.goal(),
+            in_force: load_judged_turn_authority_in_force(
+                connection,
+                prepared.request.session(),
+                prepared.request.turn(),
+            )
+            .await?
+            .as_ref(),
+        });
     let exact = approval_judge_terminal_disposition_from_str(&terminal_disposition)
         == Some(ApprovalJudgeTerminalDispositionStorageKind::Completed)
-        && approval_judge_recommendation_from_str(&stored_recommendation) == Some(recommendation)
+        && (stored == Some(recommendation) || substituted)
         && required::<String>(&row, "rationale")? == rationale.as_str()
         && row.try_get::<Option<Decimal>, _>("input_tokens")? == encoded.input
         && row.try_get::<Option<Decimal>, _>("output_tokens")? == encoded.output
@@ -979,13 +1125,13 @@ async fn exact_completed(
     if !exact {
         return Ok(None);
     }
-    let continuation_exact = recommendation == DelegateApprovalRecommendation::EscalateToHuman
+    let continuation_exact = stored == Some(DelegateApprovalRecommendation::EscalateToHuman)
         || exact_completion_continuation(connection, prepared, continuation_attempt).await?;
-    Ok(continuation_exact.then_some(match recommendation {
-        DelegateApprovalRecommendation::Approve | DelegateApprovalRecommendation::Deny => {
+    Ok(continuation_exact.then_some(match stored {
+        Some(DelegateApprovalRecommendation::Approve | DelegateApprovalRecommendation::Deny) => {
             CompleteApprovalJudgeOutcome::Decided
         }
-        DelegateApprovalRecommendation::EscalateToHuman => {
+        Some(DelegateApprovalRecommendation::EscalateToHuman) | None => {
             CompleteApprovalJudgeOutcome::EscalatedToHuman
         }
     }))
@@ -1282,13 +1428,13 @@ mod tests {
     use std::num::NonZeroU64;
 
     use signalbox_domain::{
-        DurableCommandId, Goal, GoalGeneration, GoalModelProvenance, GoalReport, GoalStatement,
-        GoalUserProvenance, SessionId, ToolRequestId, TurnId,
+        DurableCommandId, Goal, GoalGeneration, GoalStatement, GoalUserProvenance, SessionId,
     };
     use sqlx::types::Uuid;
 
     use super::{
-        ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, judged_turn_goal_statement,
+        ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, JudgedTurnAuthority,
+        judged_turn_authority_in_force, judged_turn_goal_statement, read_authority_still_stands,
     };
 
     /// A goal commissioned with the given statement, as dispatch commissions it.
@@ -1308,31 +1454,15 @@ mod tests {
         GoalGeneration::new(NonZeroU64::new(value).expect("the fixture generation is positive"))
     }
 
-    /// The dispatch shape: the turn doing dispatched work is not a goal turn,
-    /// and the one commissioned generation is what that turn runs under.
+    /// A single open generation is the most permissive lineage there is, and an
+    /// unrecorded turn still reads nothing from it. Dispatch binds the turn it
+    /// creates, so no turn needs this inference, and a goal attached after some
+    /// other turn already existed must not supply that turn authority.
     #[test]
-    fn an_unrecorded_turn_reads_a_lineage_that_was_never_superseded() {
-        let dispatched = "Dispatched by rule watch-forward: template merge-forward";
-        let goal = commissioned(dispatched);
+    fn an_unrecorded_turn_resolves_to_no_statement() {
+        let goal = commissioned("Dispatched by rule watch-forward: template merge-forward");
 
         let resolved = judged_turn_goal_statement(goal.generations(), None);
-
-        assert_eq!(resolved, Ok(Some(goal_statement(dispatched))));
-    }
-
-    /// The hazard the turn binding exists for: with a supersession in the
-    /// lineage an unrecorded turn resolves to nothing, so the judge escalates
-    /// instead of reading a replacement that may have broadened authority.
-    #[test]
-    fn an_unrecorded_turn_refuses_a_superseded_lineage() {
-        let superseded = commissioned("land the reviewer fixes")
-            .supersede(
-                goal_statement("land anything at all"),
-                GoalUserProvenance::new(DurableCommandId::from_uuid(Uuid::from_u128(3))),
-            )
-            .expect("a pursuing generation admits supersession");
-
-        let resolved = judged_turn_goal_statement(superseded.generations(), None);
 
         assert_eq!(resolved, Ok(None));
     }
@@ -1369,42 +1499,132 @@ mod tests {
         );
     }
 
-    /// A goal stopped by the time the judge reads it has had its authority
-    /// withdrawn, so the read yields no statement and the judge escalates.
-    /// This pins the read, not the commit: a stop landing after preparation is
-    /// not seen by the decision that preparation feeds.
+    /// A recorded turn reads its own generation's statement whether or not that
+    /// generation is still open. The judge is deciding a request the turn made
+    /// under that authority; a stop landing afterwards withdraws the authority
+    /// for future work rather than retroactively unstating what this turn ran
+    /// under, and this pins the read rather than the commit — the commit is
+    /// caught by the resolution completion runs under its own lock.
     #[test]
-    fn an_unrecorded_turn_refuses_a_stopped_goal() {
+    fn a_recorded_turn_reads_a_closed_generation_it_ran_under() {
+        let statement = "land the reviewer fixes";
+        let stopped = commissioned(statement)
+            .stop(GoalUserProvenance::new(DurableCommandId::from_uuid(
+                Uuid::from_u128(4),
+            )))
+            .expect("a pursuing generation admits stopping");
+
+        let resolved = judged_turn_goal_statement(stopped.generations(), Some(generation(1)));
+
+        assert_eq!(resolved, Ok(Some(goal_statement(statement))));
+    }
+
+    /// The hole this resolution exists for. Reading binds a recorded generation
+    /// exactly and returns its statement whatever state it reached, so reusing
+    /// the reading resolution at commit time would compare a statement against
+    /// itself and find the authority intact after the user withdrew it.
+    #[test]
+    fn a_recorded_generation_that_stopped_is_no_longer_in_force() {
         let stopped = commissioned("land the reviewer fixes")
             .stop(GoalUserProvenance::new(DurableCommandId::from_uuid(
                 Uuid::from_u128(4),
             )))
             .expect("a pursuing generation admits stopping");
 
-        let resolved = judged_turn_goal_statement(stopped.generations(), None);
+        let read = judged_turn_goal_statement(stopped.generations(), Some(generation(1)));
+        let in_force = judged_turn_authority_in_force(stopped.generations(), Some(generation(1)));
 
-        assert_eq!(resolved, Ok(None));
+        assert_eq!(read, Ok(Some(stopped.current().statement().clone())));
+        assert_eq!(in_force, Ok(None));
     }
 
-    /// An achieved generation is discharged rather than withdrawn, and a
-    /// discharged authority states nothing about a request still parked under
-    /// it, so it resolves to no statement exactly as a stopped one does.
+    /// A supersession replaces the authority the turn ran under, so the
+    /// generation it is bound to states nothing that is still in force even
+    /// though the lineage still holds its statement.
     #[test]
-    fn an_unrecorded_turn_refuses_an_achieved_goal() {
-        let achieved = commissioned("land the reviewer fixes")
-            .declare_achieved(
-                GoalReport::try_new(String::from("the fixes are landed"))
-                    .expect("the fixture report is admitted"),
-                GoalModelProvenance::new(
-                    TurnId::from_uuid(Uuid::from_u128(5)),
-                    ToolRequestId::from_uuid(Uuid::from_u128(6)),
-                ),
+    fn a_recorded_generation_that_was_superseded_is_no_longer_in_force() {
+        let superseded = commissioned("land the reviewer fixes")
+            .supersede(
+                goal_statement("land anything at all"),
+                GoalUserProvenance::new(DurableCommandId::from_uuid(Uuid::from_u128(3))),
             )
-            .expect("a pursuing generation admits achievement");
+            .expect("a pursuing generation admits supersession");
 
-        let resolved = judged_turn_goal_statement(achieved.generations(), None);
+        let in_force =
+            judged_turn_authority_in_force(superseded.generations(), Some(generation(1)));
 
-        assert_eq!(resolved, Ok(None));
+        assert_eq!(in_force, Ok(None));
+    }
+
+    /// An open recorded generation states authority that still stands, so the
+    /// decision formed under it commits unchanged.
+    #[test]
+    fn an_open_recorded_generation_remains_in_force() {
+        let goal = commissioned("land the reviewer fixes");
+
+        let in_force = judged_turn_authority_in_force(goal.generations(), Some(generation(1)));
+
+        assert_eq!(in_force, Ok(Some(goal.current().statement().clone())));
+    }
+
+    /// The ordinary case: nothing moved while the judge was deciding, so the
+    /// recommendation it formed is the one that commits.
+    #[test]
+    fn an_unchanged_statement_still_stands_at_completion() {
+        let statement = goal_statement("land the reviewer fixes");
+
+        let stands = read_authority_still_stands(JudgedTurnAuthority {
+            read: Some(&statement),
+            in_force: Some(&statement),
+        });
+
+        assert!(stands);
+    }
+
+    /// The hazard this recheck exists for: the goal was stopped while the
+    /// request sat awaiting a decision, so the statement resolves to nothing
+    /// and the authority the recommendation was formed under is gone.
+    #[test]
+    fn a_statement_that_stopped_no_longer_stands() {
+        let read = goal_statement("land the reviewer fixes");
+
+        let stands = read_authority_still_stands(JudgedTurnAuthority {
+            read: Some(&read),
+            in_force: None,
+        });
+
+        assert!(!stands);
+    }
+
+    /// A supersession is a replacement, not a continuation: the judge decided
+    /// under the statement it read, and the one now in force may authorize
+    /// something wider than that decision covered.
+    #[test]
+    fn a_replaced_statement_no_longer_stands() {
+        let read = goal_statement("land the reviewer fixes");
+        let in_force = goal_statement("land anything at all");
+
+        let stands = read_authority_still_stands(JudgedTurnAuthority {
+            read: Some(&read),
+            in_force: Some(&in_force),
+        });
+
+        assert!(!stands);
+    }
+
+    /// A judge that read no statement decided without one. A goal attached
+    /// since withdraws nothing, so this pins withdrawal rather than novelty and
+    /// leaves such a decision alone.
+    #[test]
+    fn a_goal_appearing_after_an_absent_read_still_stands() {
+        let in_force = goal_statement("land the reviewer fixes");
+
+        let stands = read_authority_still_stands(JudgedTurnAuthority {
+            read: None,
+            in_force: Some(&in_force),
+        });
+
+        assert!(stands);
     }
 
     #[test]
