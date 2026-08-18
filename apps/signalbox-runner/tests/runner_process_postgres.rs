@@ -8,6 +8,7 @@ use std::{
     error::Error,
     fs,
     os::unix::fs::PermissionsExt as _,
+    path::PathBuf,
     process::Stdio,
     sync::{Arc, Mutex},
     time::Duration,
@@ -57,6 +58,12 @@ const DATABASE_NAME: &str = "signalbox_runner_process";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn packaged_runner_binary() -> PathBuf {
+    std::env::var_os("NEXTEST_BIN_EXE_signalbox_runner")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_signalbox-runner")))
+}
 
 #[derive(Clone)]
 struct LossObservedRegistrationService {
@@ -144,13 +151,13 @@ async fn s30_inv042_spawned_runner_enrolls_against_durable_daemon() -> Result<()
     let socket = directory.path().join("runner.sock");
     let runner_root = directory.path().join("runner-state");
     let configuration_path = directory.path().join("runner.toml");
-    let runner_binary = env!("CARGO_BIN_EXE_signalbox-runner");
+    let runner_binary = packaged_runner_binary();
     let configuration = format!(
         r#"version = 1
 daemon_socket_path = "{}"
 runner_root = "{}"
-exec_supervisor_executable = "{runner_binary}"
-bubblewrap_path = "{runner_binary}"
+exec_supervisor_executable = "{}"
+bubblewrap_path = "{}"
 read_only_paths = ["/usr"]
 allowed_network_hosts = []
 git_author_name = "Signalbox Test Runner"
@@ -160,6 +167,8 @@ repositories = {{}}
 "#,
         socket.display(),
         runner_root.display(),
+        runner_binary.display(),
+        runner_binary.display(),
     );
     fs::write(&configuration_path, configuration)?;
 
@@ -169,7 +178,7 @@ repositories = {{}}
     let store = service.protocol_store();
     let (shutdown_sender, shutdown) = watch::channel(false);
     let runtime = tokio::spawn(RunnerProtocolRuntime::new(listener, service).run(shutdown));
-    let mut runner = Command::new(runner_binary)
+    let mut runner = Command::new(&runner_binary)
         .arg("--config")
         .arg(&configuration_path)
         .stdout(Stdio::null())
@@ -216,13 +225,13 @@ async fn s32_inv042_inv044_spawned_runner_loss_reaches_its_placed_session()
     let runner_root = directory.path().join("runner-state");
     let working_directory = directory.path().join("session-workspace");
     let configuration_path = directory.path().join("runner.toml");
-    let runner_binary = env!("CARGO_BIN_EXE_signalbox-runner");
+    let runner_binary = packaged_runner_binary();
     let configuration = format!(
         r#"version = 1
 daemon_socket_path = "{}"
 runner_root = "{}"
-exec_supervisor_executable = "{runner_binary}"
-bubblewrap_path = "{runner_binary}"
+exec_supervisor_executable = "{}"
+bubblewrap_path = "{}"
 read_only_paths = ["/usr"]
 allowed_network_hosts = []
 git_author_name = "Signalbox Test Runner"
@@ -232,6 +241,8 @@ repositories = {{}}
 "#,
         socket.display(),
         runner_root.display(),
+        runner_binary.display(),
+        runner_binary.display(),
     );
     fs::write(&configuration_path, configuration)?;
 
@@ -246,7 +257,7 @@ repositories = {{}}
     };
     let (shutdown_sender, shutdown) = watch::channel(false);
     let runtime = tokio::spawn(RunnerProtocolRuntime::new(listener, service).run(shutdown));
-    let mut runner = Command::new(runner_binary)
+    let mut runner = Command::new(&runner_binary)
         .arg("--config")
         .arg(&configuration_path)
         .stdout(Stdio::null())

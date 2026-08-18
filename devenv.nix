@@ -60,6 +60,7 @@ let
   daemonTemplateConfigFile = "${stateRoot}/session-templates.toml";
   daemonBraveApiKeyFile = "${stateRoot}/brave-api-key";
   runnerConfigFile = "${stateRoot}/signalbox-runner.toml";
+  runnerRuntimeConfigFile = "${daemonSocketDirectory}/signalbox-runner.toml";
   runnerRoot = "${stateRoot}/runner";
   runnerGithubTokenFile = "${stateRoot}/runner-github-token";
   runnerBubblewrapPath =
@@ -680,9 +681,37 @@ in
           "$DEVENV_ROOT/Cargo.toml" "$target_directory" \
           signalbox-runner signalbox-runner
       )"
+      supervisor_executable="$(
+        "$DEVENV_ROOT/tooling/resolve-cargo-bin.sh" \
+          "$DEVENV_ROOT/Cargo.toml" "$target_directory" \
+          signalbox-tools-exec signalbox-exec-supervisor
+      )"
+
+      # A checked-in example carries an installation placeholder, and a dev
+      # instance seeded before the supervisor field existed has no value at
+      # all. Materialize a runtime-only copy in both cases while preserving an
+      # explicitly configured non-placeholder path.
+      ${tomlPython}/bin/python3 -c ${shellArg ''
+        import sys
+        from pathlib import Path
+
+        import tomlkit
+
+        source_path = Path(sys.argv[1])
+        destination_path = Path(sys.argv[2])
+        supervisor = sys.argv[3]
+        document = tomlkit.parse(source_path.read_text())
+        placeholder = "/usr/local/bin/signalbox-exec-supervisor"
+        configured = document.get("exec_supervisor_executable")
+        if configured is None or configured == placeholder:
+            document["exec_supervisor_executable"] = supervisor
+        destination_path.write_text(tomlkit.dumps(document))
+      ''} ${shellArg runnerConfigFile} ${shellArg runnerRuntimeConfigFile} \
+        "$supervisor_executable"
+      chmod 600 ${shellArg runnerRuntimeConfigFile}
 
       exec env \
-        SIGNALBOX_RUNNER_CONFIG_FILE=${shellArg runnerConfigFile} \
+        SIGNALBOX_RUNNER_CONFIG_FILE=${shellArg runnerRuntimeConfigFile} \
         "$runner_executable"
     '';
   };
