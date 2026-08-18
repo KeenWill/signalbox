@@ -3650,6 +3650,7 @@ impl RunnerProtocolStore {
                         retirement_loss_connection_epoch,
                     retirement_loss.connection_event_ordinal AS
                         retirement_loss_connection_event_ordinal,
+                    source_loss.enrollment_id AS source_loss_enrollment_id,
                     retired.event_kind AS retired_event_kind,
                     retired.state_kind AS retired_state_kind,
                     retired.loss_source_kind AS retired_loss_source_kind,
@@ -3677,6 +3678,9 @@ impl RunnerProtocolStore {
                LEFT JOIN runner_connection_loss_epoch AS retirement_loss
                  ON retirement_loss.enrollment_id = retirement.enrollment_id
                 AND retirement_loss.loss_epoch = retirement.loss_epoch
+               LEFT JOIN runner_connection_loss_epoch AS source_loss
+                 ON source_loss.enrollment_id = release.enrollment_id
+                AND source_loss.connection_epoch = release.connection_epoch
                JOIN runner_session_placement_record AS retired
                  ON retired.session_id = release.session_id
                 AND retired.event_ordinal =
@@ -3731,6 +3735,9 @@ impl RunnerProtocolStore {
             || retirement_connection_event_ordinal.is_some()
             || retirement_loss_connection_epoch.is_some()
             || retirement_loss_connection_event_ordinal.is_some();
+        let source_connection_is_lost = row
+            .decode_column::<Option<Uuid>>("source_loss_enrollment_id")?
+            .is_some();
         if has_acknowledgement && has_retirement {
             return Err(RunnerProtocolCorruption::CrossWiredReference.into());
         }
@@ -3755,6 +3762,9 @@ impl RunnerProtocolStore {
             if !retirement_is_exact {
                 return Err(RunnerProtocolCorruption::CrossWiredReference.into());
             }
+            return Ok(None);
+        }
+        if source_connection_is_lost {
             return Ok(None);
         }
         let retired_placement_event_ordinal =
@@ -3821,13 +3831,18 @@ impl RunnerProtocolStore {
         let row = sqlx::query(
             "SELECT acknowledgement.runner_id, acknowledgement.manifest_id,
                     release.session_id AS release_session_id,
-                    release.state_kind
+                    release.state_kind,
+                    retirement.session_id AS retirement_session_id
                FROM runner_workspace_release_acknowledgement AS acknowledgement
                LEFT JOIN runner_workspace_release AS release
                  ON release.session_id = acknowledgement.session_id
                 AND release.placement_revision = acknowledgement.placement_revision
                 AND release.runner_id = acknowledgement.runner_id
                 AND release.manifest_id = acknowledgement.manifest_id
+               LEFT JOIN runner_workspace_release_loss_retirement AS retirement
+                 ON retirement.session_id = acknowledgement.session_id
+                AND retirement.placement_revision =
+                    acknowledgement.placement_revision
               WHERE acknowledgement.session_id = $1
                 AND acknowledgement.placement_revision = $2",
         )
@@ -3843,6 +3858,9 @@ impl RunnerProtocolStore {
                 .decode_column::<Option<String>>("state_kind")?
                 .as_deref()
                 != Some("pending")
+            || row
+                .decode_column::<Option<Uuid>>("retirement_session_id")?
+                .is_some()
         {
             return Err(RunnerProtocolCorruption::CrossWiredReference.into());
         }
