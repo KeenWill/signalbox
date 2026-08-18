@@ -37,7 +37,10 @@ occurrence, and the storage migration are verified against PR #870
 (`agent/repo-watch-content-identity`). The authenticated webhook intake, its
 ingress ceilings, shadow projection, parity view and causes, and targeted
 refresh behavior are verified against this PR
-(`agent/repo-watch-webhook-receiver`).
+(`agent/repo-watch-webhook-receiver`). The projection coverage enumeration,
+pull-request issue-comment behavior, per-page hydration coalescing, and
+workflow-run branch symmetry below are verified against this PR
+(`agent/webhook-event-mapping`).
 
 ## Configuration and credential boundary
 
@@ -963,29 +966,56 @@ poll, at most once per day and starting with the first poll after boot, the
 daemon deletes only the expired payload bytes. Delivery tombstones, digests,
 projections, and dispositions remain append-only.
 
-**Implemented behavior.** The mapped set is pull-request open, reopen, close,
-synchronize, label, unlabel, edit, draft conversion, and ready-for-review;
-submitted pull-request review; resolved or unresolved review thread; completed
-check run; completed check suite; completed workflow run; branch push, create,
-advance, and delete as represented by GitHub's `push` payload; and ping. Review
-dismissal and ping are mapped no-change. Tag pushes, the separate `create` and
-`delete` event families, foreign-repository workflow heads, completed workflow
-runs whose head repository or head branch is absent, and every other
-signature-valid event or action are ignored successfully. Guards make stale
+**Implemented behavior.** Projection coverage is closed by delivery family and
+action:
+
+| GitHub delivery                                                                          | Shadow projection                                                                                                                                                                                        |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pull_request: opened`, `reopened`                                                       | Guarded complete context plus pull-request hydration; may derive `PullRequestOpened`                                                                                                                     |
+| `pull_request: closed`                                                                   | Guarded lifecycle context; may derive `PullRequestClosed` or `PullRequestMerged`                                                                                                                         |
+| `pull_request: synchronize`                                                              | Guarded context plus mergeability and check-rollup queries; may derive `HeadChanged` and poll-derived rollup facts                                                                                       |
+| `pull_request: labeled`, `unlabeled`, `edited`, `converted_to_draft`, `ready_for_review` | Guarded complete context; label actions may derive `Labeled` or `Unlabeled`                                                                                                                              |
+| `issue_comment: created`, `edited`, `deleted` on a pull request                          | Pull-request hydration through the polling normalizer; may derive only facts polling observes, including reaction changes                                                                                |
+| `pull_request_review: submitted`                                                         | Guarded provider-review union; may derive `ReviewSubmitted`                                                                                                                                              |
+| `pull_request_review: dismissed`                                                         | Mapped no-change because version one has no dismissal fact                                                                                                                                               |
+| `pull_request_review_thread: resolved`, `unresolved`                                     | Guarded thread state; may derive `ThreadResolved` or `ThreadOpened`                                                                                                                                      |
+| `check_run: completed`                                                                   | An unambiguous watched pull request gets a guarded provider-run union and check-rollup query; otherwise only a head-SHA check-rollup query; may derive `CheckRunCompleted` and poll-derived rollup facts |
+| `check_suite: completed`                                                                 | Head-SHA check-rollup query; only its poll-normalized result may derive `ChecksCompleted`                                                                                                                |
+| `workflow_run: completed` for the watched repository                                     | Guarded workflow/run/attempt state when the run's head branch is still in the observed branch set; may derive `BranchWorkflowRunCompleted`                                                               |
+| `push` on `refs/heads/*`                                                                 | Guarded branch create, advance, or delete; an advance may derive `BaseAdvanced` for affected open pull requests                                                                                          |
+| `ping`                                                                                   | Mapped endpoint-health no-change                                                                                                                                                                         |
+
+Ordinary issue comments, other actions in those families, tag pushes, the
+separate `create` and `delete` event families, foreign-repository workflow
+heads, completed workflow runs whose payload head repository or head branch is
+absent, workflow runs whose head branch is absent from the observed branch set,
+and every other signature-valid event are ignored successfully. That last one
+holds the two producers to the same fact set: polling admits a workflow run only
+for a branch it currently observes, so a run on a deleted branch is a fact
+polling can never produce, and projecting it would leave a webhook-only parity
+row nothing can ever match and, under a later write mode, a dispatch target that
+no longer exists. It is ignored rather than turned into a targeted query for the
+same reason — there is nothing to reconcile toward, so the delivery is terminal
+`ignored` and records no projection. The branch set that decides this is the one
+every earlier delivery has already been applied to, and deliveries drain in
+receipt order, so a branch the stream itself announced carries into every later
+run on it; a branch the stream never announced, because it was created outside
+the mapped set or before intake began, leaves its runs ignored until the next
+complete poll, and the poll-only row that follows is an accurate report that the
+webhook stream could not have projected them. The workflow-run generation guard
+is unchanged for a branch that is still present. Guards otherwise make stale
 head, lifecycle, branch, workflow-attempt, and immutable-provider facts
 superseded or duplicate rather than allowing regression. A rerequested check run
 replaces the retained completion only when its provider completion generation is
 no older, so a delayed original completion is superseded instead of regressing
 the baseline; an equal generation still replaces, which is how a conclusion edit
-arrives. A workflow completion whose branch head is already gone is superseded,
-because polling projects workflow runs only for the heads it queries and could
-never reproduce it. A delivered run adopts the workflow name retained state
-already carries for that workflow identity. The occurrence identity deliberately
-excludes that mutable display name, so this is not what keeps the two sources
-matching; it keeps the shadow observation equal to the one polling stores, so a
-rename cannot make an otherwise duplicate delivery look like a changed fact. A
-completed check run rerequested under the same provider identity carries a new
-completion generation or conclusion, which the differ treats as a new observable
+arrives. A delivered run adopts the workflow name retained state already carries
+for that workflow identity. The occurrence identity deliberately excludes that
+mutable display name, so this is not what keeps the two sources matching; it
+keeps the shadow observation equal to the one polling stores, so a rename cannot
+make an otherwise duplicate delivery look like a changed fact. A completed check
+run rerequested under the same provider identity carries a new completion
+generation or conclusion, which the differ treats as a new observable
 completion, so the retained run is replaced under the same head guard. GitHub
 represents `pull_request.head.repo` as null once a tracked fork is deleted; like
 the poll normalizer, the mapper models that field as optional and application
@@ -1001,11 +1031,36 @@ missing pull-request baseline, current mergeability, or a check rollup records a
 targeted-query projection and immediately reuses the repository poller's
 credential, client, conditional cache, normalization, and request bounds to
 fetch only the affected pull requests. Those observations commit through the
-ordinary poll producer and dispatch path. Full polling continues unchanged as
-the slow complete reconciliation sweep and remains authoritative for missed
-deliveries, reactions, and every provider fact outside the mapped set. Poll
-frequency does not drop in shadow mode; any later write mode or slower cadence
-requires a separately reviewed ruling after parity over a real workday.
+ordinary poll producer and dispatch path. Whole-pull-request hydrations coalesce
+per pull request across one drained page of pending deliveries: the whole page
+is durably admitted before it is read, so one hydration already observes every
+delivery on it, and repeating the hydration would only re-read the same state at
+the shared credential's expense. Anyone who may comment on a watched pull
+request would otherwise pace that hydration — detail, check suites, check runs,
+reviews, threads, and one request per comment for its reactions — with repeated
+comment deliveries. Coalescing is scoped to the page and never to a whole drain,
+because a later page may carry deliveries admitted after the earlier hydration
+ran. Head-guarded mergeability and check-rollup queries name a specific commit
+and do not coalesce against a hydration. Only a hydration that reached the
+provider suppresses a later one. A refresh that fails before its fetch or before
+its commit leaves its delivery pending rather than terminal, so the page's
+remaining deliveries reissue it; and a hydration requested beside a head-guarded
+query is never recorded, because the merged request carries that guard and a
+superseded head discards the fetched state while the query still reports
+success. A delivery whose hydration the page already issued records no
+targeted-query projection of its own, on the same rule that only a query the
+poller actually made is recorded. Coalescing therefore bounds bursts and not
+pacing: a delivery admitted after a hydration reports state that hydration could
+not have observed, so it is refreshed however slowly such deliveries arrive.
+Bounding a paced stream would require a minimum interval between a pull
+request's refreshes, trading both freshness and the fidelity of the parity
+measurement shadow mode exists to produce; that trade is not taken while poll
+frequency is unchanged and the complete sweep remains authoritative. Full
+polling continues unchanged as the slow complete reconciliation sweep and
+remains authoritative for missed deliveries, reactions, and every provider fact
+outside the mapped set. Poll frequency does not drop in shadow mode; any later
+write mode or slower cadence requires a separately reviewed ruling after parity
+over a real workday.
 
 **Committed unimplemented functionality.** The rollout gate is no *unexplained*
 divergence, not no divergence: it is zero `repo_watch_webhook_parity` rows whose

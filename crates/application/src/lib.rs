@@ -94,12 +94,12 @@ pub use repo_watch::{
 pub use repo_watch_webhook::{
     RepoWatchBranchHeadPreviousV1, RepoWatchObservationApplyV1, RepoWatchObservationChangeV1,
     RepoWatchObservationPatchV1, RepoWatchPullRequestHeadGuardV1,
-    RepoWatchPullRequestMissingPolicyV1, RepoWatchTargetedRefreshV1, RepoWatchWebhookApplyError,
-    RepoWatchWebhookBodyReferenceV1, RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input,
-    RepoWatchWebhookIgnoredReasonV1, RepoWatchWebhookMappedNoChangeV1,
-    RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1, RepoWatchWebhookPullRequestContextV1,
-    RepoWatchWebhookPullRequestContextV1Input, apply_repo_watch_observation_patch_v1,
-    map_repo_watch_webhook_delivery_v1,
+    RepoWatchPullRequestMissingPolicyV1, RepoWatchTargetedRefreshCoalescerV1,
+    RepoWatchTargetedRefreshV1, RepoWatchWebhookApplyError, RepoWatchWebhookBodyReferenceV1,
+    RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
+    RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
+    RepoWatchWebhookPullRequestContextV1, RepoWatchWebhookPullRequestContextV1Input,
+    apply_repo_watch_observation_patch_v1, map_repo_watch_webhook_delivery_v1,
 };
 pub use review_orchestration::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,
