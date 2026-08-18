@@ -2223,7 +2223,7 @@ public struct SignalboxProcessSessionMetadataRead: Decodable, Equatable, Sendabl
   }
 }
 
-public enum SignalboxRunnerSandboxProfile: String, Decodable, Equatable, Sendable {
+public enum SignalboxRunnerSandboxProfile: String, Codable, Equatable, Sendable {
   case ambient
   case workspaceRestricted = "workspace-restricted"
 }
