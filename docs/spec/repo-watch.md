@@ -28,10 +28,13 @@ PR. The provider members the poller adopts as check-suite and check-run
 completion generations are verified against PR #541
 (`fix/check-run-updated-at`). Eager merge-forward dispatch is verified against
 PR #886 (`agent/eager-merge-forward`). Requeue after non-converged dispatch
-termination is verified against this PR
+termination is verified against PR #894
 (`agent/dispatch-requeue-on-invalidation`). Safe rule revision admission and
-configuration diagnostics are verified against this PR
-(`agent/repo-watch-rule-robustness`).
+configuration diagnostics are verified against PR #863
+(`agent/repo-watch-rule-robustness`). The source-independent event occurrence
+identity, its durable frontier, the commit-time coalescing of a restated
+occurrence, and the storage migration are verified against this PR
+(`agent/repo-watch-content-identity`).
 
 ## Configuration and credential boundary
 
@@ -163,18 +166,94 @@ clean exit. Once shutdown is observable, the supervisor drains every watch task
 and reports a clean stop; a task that exits cleanly before shutdown remains a
 runtime lifecycle defect.
 
-**Implemented behavior.** The versioned durable cursor retains only the complete
-normalized repository state and exact signal-reviewer set needed for comparison.
-It does not retain resource keys, ETags, accepted transport responses, raw
-provider payloads, or credentials. A per-repository atomic commit accepts an
-expected generation, one complete cursor candidate, and its ordered event batch.
-It serializes competing commits, appends the cursor and every event together,
-rolls back the whole batch on failure, reports a stale generation as conflict,
-and recognizes only an exact candidate-and-event replay. An unchanged candidate
-with no events does not advance the cursor; an unchanged candidate carrying
-events is rejected. The relational event table admits an event row only in the
-database transaction that inserts its referenced cursor generation, preventing
-later maintenance or future writers from changing an already-committed batch.
+**Implemented behavior.** The versioned durable cursor retains the complete
+normalized repository state, exact signal-reviewer set, and the last positive
+occurrence sequence for each recurring source-independent event stream. The
+frontier is canonical by its 32-byte stream identities, rejects duplicates and
+zero sequences, and admits at most 1,000,000 streams. That ceiling is where one
+repository's identity state, rather than its event history, becomes the dominant
+cost of watching it: each entry costs a 32-byte stream identity and an 8-byte
+sequence, so the limit bounds one frontier near 40 MB. Exceeding it fails the
+comparison, because the alternative is reusing an occurrence number and minting
+a content identity that collides with an already-durable one. Sequence
+exhaustion fails the comparison rather than wrapping. Provider-keyed immutable
+facts use sequence one without occupying frontier space. A fact counts as
+immutable only when the differ suppresses re-emission on members its stream key
+already names, so completed check runs are not among them: their conclusion can
+change under an unchanged run identity and completion generation, and they
+advance a frontier sequence like any recurring stream. The cursor does not
+retain resource keys, ETags, accepted transport responses, raw provider
+payloads, or credentials. A per-repository atomic commit accepts an expected
+generation, one complete cursor candidate, and its ordered event-occurrence
+batch. It serializes competing commits, appends the cursor and every event
+together, rolls back the whole batch on failure, reports a stale generation as
+conflict, and recognizes only an exact candidate-and-occurrence replay. An
+unchanged candidate with no events does not advance the cursor; an unchanged
+candidate carrying events is rejected.
+
+A commit coalesces an occurrence whose content identity is already durable for
+that repository under the same content, writing the cursor without a second row
+for it. A provider entity that leaves the observation and returns re-derives
+exactly that occurrence, with a fresh candidate identity but an equal content
+identity, and without coalescing the duplicate would abort the whole
+cursor-and-event transaction and leave the cursor at the entity-absent
+generation, so every later poll would repeat the same failure. Content equality
+excludes the random event identity, exactly as the digest does. An occurrence
+whose content identity is durable under different content is not coalesced: it
+is written, and the durable unique constraint rejects it. Replay detection
+compares against the batch the replayed generation would have stored, so a
+coalesced commit is still recognized as its own replay. The relational event
+table admits an event row only in the database transaction that inserts its
+referenced cursor generation, preventing later maintenance or future writers
+from changing an already-committed batch.
+
+**Implemented behavior.** `RepoWatchEventContentIdentityV1` is the exact shared
+content identity for a normalized event occurrence. It is a 32-byte SHA-256
+digest whose length-framed input begins with
+`signalbox/repo-watch/event-content-identity/v1`, then includes the repository,
+event version, canonical target and the identifying members of the event
+payload, a separately domain-separated source-independent stream identity, and
+the stream's positive occurrence sequence. Identifying is narrower than
+complete: the exclusions below are part of the contract, and a second producer
+deriving this identity excludes exactly the same members, because hashing either
+one derives a different identity for the same fact and defeats the
+cross-producer coalescing this identity exists to enable. The stream identity is
+closed by event kind. Recurring PR lifecycle, mergeability, head, label, thread,
+branch-advance, and reaction streams name the PR and their kind-specific label,
+thread, branch, or reaction members. Check runs are recurring too, naming their
+provider run identity and completion generation: a completed run edited back to
+an earlier conclusion restates that conclusion's facts exactly, so only an
+advancing occurrence sequence keeps the restored event's identity distinct from
+the first, and without it the commit would coalesce the restored conclusion away
+rather than announce it. Immutable check-suite facts name their provider
+identity and completion generation; reviews name their provider review identity;
+workflow facts name branch, workflow identity, run identity, and attempt. The
+normalized review observation has no submitted-time member, so version one
+assumes the provider review identity alone uniquely identifies that immutable
+submission. Two payload members are excluded from the digest, and only these
+two. The random `RepoWatchEventId` is excluded because a re-derivation of one
+occurrence mints a fresh candidate. The workflow display name is excluded
+because it is rule-visible payload rather than an identifying member: the differ
+suppresses a re-observed run attempt on members the stream identity already
+names, and a provider can rename a workflow under all of them, so hashing the
+name would mint a new identity for a run that leaves the observation and returns
+after a rename. Both remain in the event payload that rules read.
+
+**Implemented behavior.** A later equal fact on a recurring stream advances its
+sequence and therefore has a different content identity. Equal normalized facts
+derived from an equal cursor frontier have the same content identity even when
+their candidate UUIDs differ. Persistence rejects duplicate UUID or content
+identity members within one batch, and the relational store uniquely constrains
+`(content_identity_version, content_identity)` across batches. Exact replay
+compares the cursor candidate and accounts for every requested occurrence. If
+the replayed generation stored the occurrence, the stored event's whole
+UUID-bearing value and content identity are compared. If that generation
+coalesced the occurrence, it must be durable in an earlier generation under the
+same content identity and identified content. A coalesced occurrence's own
+candidate UUID is neither persisted nor compared, because the fact it restates
+is durable under the UUID of the occurrence that first recorded it, so a request
+whose occurrences are all coalesced replays on candidate and content identity
+alone.
 
 **Implemented behavior.** The version-one cursor reader remains compatible with
 the earlier version-one workflow record that lacked a workflow-definition ID. It
@@ -183,6 +262,25 @@ the definition-identity sentinel, suppresses the same completed run attempt by
 branch, run ID, and attempt number, and writes the complete current shape on the
 next successful commit. A legacy cursor therefore cannot permanently block its
 repository.
+
+**Implemented behavior.** The content-identity migration rewrites every durable
+cursor to storage version two with an empty occurrence frontier, then all later
+poll commits carry and advance that frontier. Event rows recorded before it
+cannot be reconstructed as the content occurrences the differ would emit,
+because their durable shape lacks every provider identity the differ uses and
+the frontier reset discards the sequence state their identities derive from.
+Dispatch rows reference those events under `ON DELETE RESTRICT`, so they are
+carried rather than discarded, and their identity is derived under a hash domain
+reserved for the migration itself and disjoint from the differ's: a carried row
+can never claim an identity a producer would also derive, and never matches one.
+
+The carry completes across two migrations, because the first was applied before
+its shape was settled and an applied migration is immutable. `202608150001`
+marked those rows content-identity version zero and admitted both versions;
+`202608170003` moves them to version one and narrows the durable constraint to
+version one alone. Exactly one content-identity version is readable once both
+have run. The durable constraint and the decoder admit version one alone, so no
+earlier event shape survives for a reader to accept.
 
 **Implemented behavior.** A pure differ compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities
@@ -247,11 +345,13 @@ current or prior head-repository identity still fails closed.
 
 **Implemented behavior.** Accepted events append in observation order as durable
 facts and are never updated, deleted, or truncated. The relational storage row
-fixes the event version to one, closes both target and payload discriminators,
-retains complete PR context, and rejects incoherent payload columns. Reads
-decode every field into the closed domain event and fail closed when a durable
-cursor or event row is malformed or noncanonical. Bounded keyset pages expose
-repository event history in cursor-generation and event-ordinal order.
+fixes the event version to one, records the content-identity version and 32-byte
+digest, records `poll` as the only presently implemented producer, closes both
+target and payload discriminators, retains complete PR context, and rejects
+incoherent payload columns. Reads decode every field into the closed domain
+event and fail closed when a durable cursor or event row is malformed or
+noncanonical. Bounded keyset pages expose repository event history in
+cursor-generation and event-ordinal order.
 
 **Implemented behavior.** The closed version-one event payloads are:
 
