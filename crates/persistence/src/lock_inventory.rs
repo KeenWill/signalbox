@@ -146,7 +146,12 @@ pub(crate) const SUBMIT_INPUT_RUNNER_RECOVERY_ATTEMPT: &str =
         AND placement.state_kind = 'runner_lost'
         AND placement.interrupted_tool_attempt_id = tool_attempt.attempt_id
         AND placement.lost_runner_id = lease.runner_id
-        AND placement.placement_revision = leased_placement.placement_revision
+        AND runner_lease_placement_reaches_loss_revision(
+            lease.session_id,
+            lease.placement_event_ordinal,
+            placement.placement_revision,
+            placement.lost_runner_id
+        )
         AND leased_placement.state_kind = 'pinned'
         AND leased_placement.pinned_runner_id = placement.lost_runner_id
       FOR UPDATE OF tool_attempt";

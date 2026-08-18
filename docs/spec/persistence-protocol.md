@@ -25,7 +25,9 @@ source check was re-verified against this PR
 (`agent/daemon-runner-health-events`).
 
 The runner-recovery turn-phase representation and read boundary were verified
-against this PR (`agent/runner-awaiting-recovery-persistence`).
+against this PR (`agent/runner-awaiting-recovery-persistence`). The
+recorded-migration immutability rule was verified against this PR
+(`agent/mechanical-cleanup-batch`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -166,6 +168,12 @@ The fence migration's first installation is the sole case without a prior fenced
 pool, because no earlier schema can have admitted one. Why: checksummed
 forward-only files make every schema change a reviewed, immutable artifact, so a
 deployed database's history is never silently edited.
+
+A migration becomes immutable as soon as its version is recorded in the target
+database's `_sqlx_migrations` table, regardless of whether the migration's
+branch or pull request has merged. Correct an already-recorded migration with a
+new forward migration; never edit, replace, or renumber the recorded migration
+file.
 
 Prefix reservation across concurrent stacks: the bottom pull request of any
 stack that will add migrations declares a reserved prefix block — a date plus a
@@ -356,7 +364,11 @@ Representation rules, all enforced in the schema:
   propagation adapter installs only loss transitions under those authorities;
   replacement and abandonment remain **committed unimplemented functionality**
   for their dedicated orchestration transactions. Direct snapshot storage cannot
-  stand in for any of those transactions.
+  stand in for any of those transactions. `RunnerReplacementTestProjection` and
+  `store_runner_replacement_projection_for_test` are compiled only with
+  `postgres-integration` for integration-test round trips; they are not
+  production authority-bearing adapters. The generic production placement writer
+  rejects `runner_replaced`.
 - Migration `202608110005` records the connection-loss epoch observed when each
   placement selects a known enrollment and carries that baseline through later
   loss or abandonment records. The value is derived while holding scheduler,
