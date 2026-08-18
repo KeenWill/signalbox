@@ -364,7 +364,7 @@ where
         client
             .read_exact(&mut header)
             .await
-            .map_err(HttpsBrokerError::Io)?;
+            .map_err(classify_client_hello_read_error)?;
         let length = usize::from(u16::from_be_bytes([header[3], header[4]]));
         if header[0] != 22 || header[1] != 3 || length == 0 || length > TLS_RECORD_BYTES {
             return Err(HttpsBrokerError::InvalidClientHello);
@@ -373,7 +373,7 @@ where
         client
             .read_exact(&mut payload)
             .await
-            .map_err(HttpsBrokerError::Io)?;
+            .map_err(classify_client_hello_read_error)?;
         records.extend_from_slice(&header);
         records.extend_from_slice(&payload);
         handshake.extend_from_slice(&payload);
@@ -393,6 +393,14 @@ where
                 return Ok(CapturedClientHello { records, handshake });
             }
         }
+    }
+}
+
+fn classify_client_hello_read_error(error: io::Error) -> HttpsBrokerError {
+    if error.kind() == io::ErrorKind::UnexpectedEof {
+        HttpsBrokerError::InvalidClientHello
+    } else {
+        HttpsBrokerError::Io(error)
     }
 }
 
@@ -661,13 +669,14 @@ mod tests {
 
     #[tokio::test]
     async fn blackholed_destination_leaves_time_for_the_next_address() {
-        let blackhole = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 35));
-        let expected_blackhole = "93.184.216.35:443"
+        let expected_blackhole: SocketAddr = "93.184.216.35:443"
             .parse()
             .expect("the blackholed destination fixture parses");
-        let expected_reachable = "93.184.216.34:443"
+        let expected_reachable: SocketAddr = "93.184.216.34:443"
             .parse()
             .expect("the reachable destination fixture parses");
+        let blackhole = expected_blackhole.ip();
+        let reachable = expected_reachable.ip();
         let (broker_stream, _upstream_stream) = tokio::io::duplex(4096);
         let destinations = Arc::new(Mutex::new(Vec::new()));
         let connector = BlackholeThenConnect {
@@ -677,8 +686,7 @@ mod tests {
         };
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(100);
 
-        let connected =
-            connect_resolved(&connector, &[blackhole, PUBLIC_DESTINATION], deadline).await;
+        let connected = connect_resolved(&connector, &[blackhole, reachable], deadline).await;
         let observed = destinations
             .lock()
             .expect("the destination fixture is available")
@@ -686,6 +694,46 @@ mod tests {
 
         assert!(connected.is_ok());
         assert_eq!(observed, vec![expected_blackhole, expected_reachable]);
+    }
+
+    #[tokio::test]
+    async fn truncated_client_hello_record_header_is_invalid() {
+        let (mut client, mut broker_client) = tokio::io::duplex(4096);
+        client
+            .write_all(&[22, 3])
+            .await
+            .expect("the partial TLS record header writes");
+        client
+            .shutdown()
+            .await
+            .expect("the partial TLS record header closes");
+
+        let rejected = read_client_hello(&mut broker_client).await;
+
+        assert!(matches!(
+            rejected,
+            Err(HttpsBrokerError::InvalidClientHello)
+        ));
+    }
+
+    #[tokio::test]
+    async fn truncated_client_hello_record_payload_is_invalid() {
+        let (mut client, mut broker_client) = tokio::io::duplex(4096);
+        client
+            .write_all(&[22, 3, 1, 0, 4, 1, 0])
+            .await
+            .expect("the partial TLS record payload writes");
+        client
+            .shutdown()
+            .await
+            .expect("the partial TLS record payload closes");
+
+        let rejected = read_client_hello(&mut broker_client).await;
+
+        assert!(matches!(
+            rejected,
+            Err(HttpsBrokerError::InvalidClientHello)
+        ));
     }
 
     #[tokio::test]
