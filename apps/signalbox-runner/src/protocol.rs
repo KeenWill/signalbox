@@ -757,7 +757,7 @@ where
     ) -> Result<Option<ConnectionEnd>, RunnerConnectionError> {
         match message {
             Message::Heartbeat(challenge) => {
-                let acknowledgement = self.heartbeat_acknowledgement(challenge)?;
+                let acknowledgement = self.heartbeat_acknowledgement(challenge, state)?;
                 send_message(&mut self.io, Message::HeartbeatAck(acknowledgement)).await?;
                 Ok(None)
             }
@@ -847,6 +847,7 @@ where
     fn heartbeat_acknowledgement(
         &mut self,
         challenge: Heartbeat,
+        state: &RunnerStateRoot,
     ) -> Result<HeartbeatAck, RunnerConnectionError> {
         if let Some(previous) = &self.heartbeat {
             if challenge.sequence == previous.challenge.sequence {
@@ -893,11 +894,18 @@ where
                     ProtocolViolation::RunnerSequenceExhausted,
                 ))?,
         };
+        let lease_phase = state.reconnect_inventory().lease.clone();
+        if let Some(lease) = &lease_phase {
+            self.validate_connection_correlation(
+                lease.correlation.runner_id,
+                lease.correlation.registration_revision,
+            )?;
+        }
         let acknowledgement = HeartbeatAck {
             challenge_sequence: challenge.sequence,
             runner_sequence: PositiveU64::try_new(runner_sequence)
                 .map_err(RunnerConnectionError::InvalidLocalFrame)?,
-            lease_phase: None,
+            lease_phase,
             workspace_phase: None,
         };
         self.heartbeat = Some(HeartbeatExchange {
@@ -1372,6 +1380,117 @@ mod tests {
                 workspace_phase: None,
             })
         );
+    }
+
+    /// INV-011 / INV-024: heartbeat progress repeats the exact fsynced lease
+    /// phase instead of inventing process-local execution state.
+    #[tokio::test]
+    async fn inv011_inv024_heartbeat_reports_the_current_durable_lease_phase() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_terminal_result(&parent);
+        let advertisement = empty_advertisement();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before heartbeat");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the heartbeat is served")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Heartbeat(Heartbeat {
+                    sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                    last_accepted_peer_sequence: NO_ACCEPTED_PEER_SEQUENCE,
+                }),
+            )
+            .await;
+            receive_hub_message(&mut hub_io).await
+        };
+        let (outcome, acknowledgement) = tokio::join!(runner, hub);
+
+        assert_eq!(outcome, None);
+        assert_eq!(
+            acknowledgement,
+            Message::HeartbeatAck(HeartbeatAck {
+                challenge_sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                runner_sequence: positive(FIRST_RUNNER_SEQUENCE),
+                lease_phase: Some(LeasePhase {
+                    correlation: retained_lease_correlation(),
+                    phase: LeasePhaseKind::ExecutionMayHaveStarted,
+                }),
+                workspace_phase: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_rejects_a_lease_phase_from_another_registration() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = state_with_terminal_result(&parent);
+        let retained = state.reconnect_inventory().clone();
+        let advertisement = empty_advertisement();
+        state
+            .record_registration(
+                positive(NEXT_REGISTRATION_REVISION),
+                advertisement_digest(&advertisement)
+                    .expect("the explicit empty advertisement has a digest"),
+            )
+            .expect("the successor registration receipt is durable");
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before heartbeat");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect_err("a stale-registration lease phase fails closed")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(NEXT_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Heartbeat(Heartbeat {
+                    sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                    last_accepted_peer_sequence: NO_ACCEPTED_PEER_SEQUENCE,
+                }),
+            )
+            .await;
+        };
+        let (error, ()) = tokio::join!(runner, hub);
+
+        assert!(matches!(
+            error,
+            RunnerConnectionError::Violation(ProtocolViolation::ConnectionCorrelationMismatch)
+        ));
+        assert_eq!(state.reconnect_inventory(), &retained);
     }
 
     /// INV-011 / INV-024: an exact durable result acknowledgement frees the

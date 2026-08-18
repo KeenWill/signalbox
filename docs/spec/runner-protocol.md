@@ -44,14 +44,16 @@ the durable transactions before acknowledgement is re-verified through this PR
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
 contract was re-verified through PR #322 (`agent/docs-discipline`; pinned and
-pinned-loss request mismatches). Owner-private storage of the one retained lease
+pinned-loss request mismatches). Private storage of the one retained lease
 and its monotonic fsynced phases is re-verified through this PR
 (`agent/runner-operation-journal`). Matching terminal-result retention and
 atomic acknowledgement clearing are re-verified through this PR
 (`agent/runner-result-journal`), and live exact acknowledgement consumption is
-re-verified through this PR (`agent/runner-result-acknowledgement`). The
-placement loss-source, pre-pin replacement and abandonment state shapes, and
-append-only reconstitution-history contract are re-verified through this PR
+re-verified through this PR (`agent/runner-result-acknowledgement`). Exact
+heartbeat projection of the current journaled lease phase is re-verified through
+this PR (`agent/runner-heartbeat-lease-phase`). The placement loss-source,
+pre-pin replacement and abandonment state shapes, and append-only
+reconstitution-history contract are re-verified through this PR
 (`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
 daemon-authoritative catalog validation, runner leases, the independent
 session-composition axes, session placement and affinity, credential-profile
@@ -619,15 +621,17 @@ cannot apply its requested transition to the fresh epoch. Because
 `stale_connection` is fatal, an established stream that sends the stale shutdown
 is terminalized as `protocol_failure` and closed.
 
-The daemon sends a heartbeat challenge every five seconds. The registration-only
-runner replies with its monotonically increasing heartbeat sequence and no lease
-or workspace phase. An acknowledgement must name the exact outstanding
+The daemon sends a heartbeat challenge every five seconds. The runner replies
+with its monotonically increasing heartbeat sequence and the exact current
+journaled lease phase when one exists; it still reports no workspace phase. The
+phase must name the active connection's runner and registration or the runner
+fails closed before sending. An acknowledgement must name the exact outstanding
 challenge, and a second challenge is not issued while the first remains
 unanswered. One missed interval durably records `suspect`; the third consecutive
 miss, fifteen seconds after the challenge, records `lost`. An exact late
 acknowledgement before the third miss appends `connected` with
-`heartbeat_recovered`. Operation phases fail closed because this runtime
-advertises and serves no operation provider.
+`heartbeat_recovered`. No present live path populates an operation phase because
+this runtime advertises and serves no operation provider.
 
 An unannounced transport close or protocol failure durably records `lost`; an
 epoch-targeted shutdown from either side durably records `shutdown`. On hub
@@ -800,7 +804,7 @@ selected runner authority, and placement in the runner lock order, authenticates
 either a distinct live successor or the registration-loss-only same-runner
 exception, and returns the original durable stage on equal replay. A
 workspace-free placement returns `NotApplicable` without claiming the command,
-so its later terminal transaction remains the sole owner. The runner provisions
+so its later terminal transaction remains the sole authority. The runner provisions
 and spools `workspace_ready` under that limited authority. Only a later
 transaction can activate the pending enrollment: it rechecks the lost
 predecessor and connected candidate, consumes the exact workspace receipt,
