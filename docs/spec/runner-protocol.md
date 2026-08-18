@@ -102,7 +102,9 @@ emission, and post-acknowledgement lease journaling for that generic slice are
 re-verified through this PR (`agent/runner-live-lease-admission`). The
 runner-owned HTTPS broker core's bounded CONNECT admission, configured hostname
 gate, public-address pinning, TLS ClientHello SNI check, and tunnel relay are
-verified against this PR (`agent/runner-https-broker`). The proof-only runner
+verified against this PR (`agent/runner-https-broker`). The namespace-local
+loopback proxy and pinned per-dispatch broker-socket sandbox shape are verified
+against this PR (`agent/runner-https-namespace-shim`). The proof-only runner
 catalog configuration is re-verified through this PR
 (`agent/runner-execution-proof-catalog`). The profileless lease admission
 guard's exact `WorkspaceRestricted` policy-auto handling is re-verified through
@@ -1743,9 +1745,14 @@ ports, DNS rebinding, and missing or mismatched SNI fail closed. The broker
 proves a TLS tunnel to the checked host; it does not claim visibility into the
 encrypted application protocol.
 
+The restricted sandbox pins the exact per-dispatch Unix socket identity, passes
+its descriptor only to the supervisor, sets the fixed loopback HTTPS proxy, and
+starts the supervisor's bounded namespace-local TCP-to-Unix relay. The target
+has no pathname for the broker socket and can reach it only through that relay.
+
 **Committed unimplemented functionality.** No present surface creates the
-per-dispatch Unix socket or starts the namespace-local shim that will connect a
-restricted process to this broker core. Until those two pieces compose, a
+per-dispatch Unix socket or serves it through the runner-owned broker core.
+Until the runner creates and serves the socket under the dispatch deadline, a
 restricted runner dispatch has no network path.
 
 For `Ambient`, the runner still uses one labeled bubblewrap supervisor but binds

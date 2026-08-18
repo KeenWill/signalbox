@@ -3,7 +3,8 @@
 //! `real_bwrap_profile_confines_or_proves_typed_host_refusal` runs the actual
 //! `bwrap` binary against the compiled `signalbox-exec-supervisor` and asserts
 //! both the daemon-local and runner-restricted request profiles either confine
-//! genuinely or return a typed host-refusal outcome;
+//! genuinely or return a typed host-refusal outcome, including a real pinned
+//! Unix socket relayed through the namespace-local loopback proxy;
 //! `real_bwrap_gate` decides when that check is mandatory (CI) versus skipped
 //! (unsupported local host, unless opted in).
 
@@ -14,6 +15,9 @@ use signalbox_tools_exec::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecutionConfinement, OutputEncoding,
     ProcessOutcome, ProcessSpawnFailure, SandboxedCommandRunner, TokioProcessRunner,
 };
+
+const BRIDGE_REQUEST: &str = "bridge request";
+const BRIDGE_RESPONSE: &str = "bridge response";
 
 #[tokio::test]
 async fn real_bwrap_profile_confines_or_proves_typed_host_refusal()
@@ -137,7 +141,169 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
 
     let restricted_result = runner.try_run(restricted_arguments).await?;
 
-    assert_real_bwrap_result(restricted_result, ci)
+    assert_real_bwrap_result(restricted_result, ci)?;
+
+    let mut broker = BrokerSocketFixture::new()?;
+    let broker_task = broker.spawn_one_tunnel()?;
+    let process_runner = TokioProcessRunner::try_new(test_bin_path!("signalbox-exec-supervisor"))?;
+    let mut runner = SandboxedCommandRunner::try_new_runner_restricted_with_https_broker(
+        process_runner,
+        &root,
+        &[std::path::PathBuf::from("/usr")],
+        broker.socket(),
+    )?;
+    let bridged_arguments = ExecArguments {
+        program: String::from("python3"),
+        arguments: vec![
+            String::from("-c"),
+            format!(
+                "import os, socket\nassert not os.path.exists('/run/signalbox/https-broker.sock')\ninaccessible=False\ntry:\n os.listdir('/proc/1/fd')\nexcept PermissionError:\n inaccessible=True\nassert inaccessible\ns=socket.create_connection(('127.0.0.1',18080))\ns.sendall({BRIDGE_REQUEST:?}.encode())\ns.shutdown(socket.SHUT_WR)\nassert s.recv(32)=={BRIDGE_RESPONSE:?}.encode()"
+            ),
+        ],
+        working_directory: String::from("."),
+        timeout_seconds: 5,
+    };
+
+    let bridged_result = runner.try_run(bridged_arguments).await?;
+    let broker_request = broker_task
+        .join()
+        .map_err(|_| std::io::Error::other("broker fixture thread failed"))??;
+
+    assert_real_bwrap_bridge_observation(
+        bridged_result.confinement,
+        broker_request.as_deref(),
+        ci,
+    )?;
+    assert_real_bwrap_result(bridged_result, ci)
+}
+
+type BrokerTask = std::thread::JoinHandle<std::io::Result<Option<Vec<u8>>>>;
+
+struct BrokerSocketFixture {
+    root: std::path::PathBuf,
+    socket: std::path::PathBuf,
+    listener: Option<std::os::unix::net::UnixListener>,
+}
+
+impl BrokerSocketFixture {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let identity = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "signalbox-bwrap-https-{}-{identity}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root)?;
+        let socket = root.join("broker.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket)?;
+        Ok(Self {
+            root,
+            socket,
+            listener: Some(listener),
+        })
+    }
+
+    fn socket(&self) -> &std::path::Path {
+        &self.socket
+    }
+
+    fn spawn_one_tunnel(&mut self) -> Result<BrokerTask, Box<dyn std::error::Error>> {
+        let listener = self
+            .listener
+            .take()
+            .ok_or_else(|| std::io::Error::other("broker fixture listener already consumed"))?;
+        listener.set_nonblocking(true)?;
+        Ok(std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _address)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return Ok(None);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            let mut request = Vec::new();
+            std::io::Read::read_to_end(&mut stream, &mut request)?;
+            std::io::Write::write_all(&mut stream, BRIDGE_RESPONSE.as_bytes())?;
+            stream.shutdown(std::net::Shutdown::Write)?;
+            Ok(Some(request))
+        }))
+    }
+}
+
+impl Drop for BrokerSocketFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn assert_real_bwrap_bridge_observation(
+    confinement: ExecutionConfinement,
+    request: Option<&[u8]>,
+    ci: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match confinement {
+        ExecutionConfinement::FilesystemConfined => {
+            assert_eq!(request, Some(BRIDGE_REQUEST.as_bytes()));
+            Ok(())
+        }
+        ExecutionConfinement::SandboxRefused {
+            availability: BwrapAvailability::Unusable,
+        } => {
+            real_bwrap_refusal_policy(ci).map_err(std::io::Error::other)?;
+            if request.is_some() {
+                return Err(std::io::Error::other("refused bridge opened a broker tunnel").into());
+            }
+            Ok(())
+        }
+        confinement => Err(format!("unexpected bridge confinement: {confinement:?}").into()),
+    }
+}
+
+#[test]
+fn real_bwrap_bridge_observation_accepts_the_exact_confined_tunnel() {
+    assert!(
+        assert_real_bwrap_bridge_observation(
+            ExecutionConfinement::FilesystemConfined,
+            Some(BRIDGE_REQUEST.as_bytes()),
+            false,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn real_bwrap_bridge_observation_accepts_typed_local_refusal_without_a_tunnel() {
+    assert!(
+        assert_real_bwrap_bridge_observation(
+            ExecutionConfinement::SandboxRefused {
+                availability: BwrapAvailability::Unusable,
+            },
+            None,
+            false,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn real_bwrap_bridge_observation_rejects_a_refused_tunnel() {
+    assert!(
+        assert_real_bwrap_bridge_observation(
+            ExecutionConfinement::SandboxRefused {
+                availability: BwrapAvailability::Unusable,
+            },
+            Some(BRIDGE_REQUEST.as_bytes()),
+            false,
+        )
+        .is_err()
+    );
 }
 
 fn real_bwrap_gate(
