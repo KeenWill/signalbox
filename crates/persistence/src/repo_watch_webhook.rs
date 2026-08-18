@@ -537,7 +537,7 @@ impl PostgresRepoWatchWebhookStore {
                     delivery.body_digest,
                     delivery.receipt_sequence,
                     delivery.received_at,
-                    octet_length(payload.body) AS body_bytes
+                    octet_length(payload.body)::bigint AS body_bytes
                FROM repo_watch_webhook_delivery AS delivery
                JOIN repo_watch_webhook_payload AS payload
                  ON payload.hook_id = delivery.hook_id
