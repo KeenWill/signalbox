@@ -5,8 +5,8 @@ use std::{error::Error, fmt, future::Future, io, pin::Pin, sync::Arc, time::Dura
 use rustix::process::geteuid;
 use signalbox_application::{
     RunnerLeaseClaimRequest, RunnerLeaseClaimService, RunnerLeaseResultRequest,
-    RunnerLeaseResultService, RunnerOperationFailureDetail, RunnerReadyManifestDigest,
-    RunnerWorkspaceCleanupFailure, RunnerWorkspaceCleanupFailureService,
+    RunnerLeaseResultService, RunnerOperationFailureDetail, RunnerOperationFailureDetailInput,
+    RunnerReadyManifestDigest, RunnerWorkspaceCleanupFailure, RunnerWorkspaceCleanupFailureService,
     RunnerWorkspaceReadyReceipt, RunnerWorkspaceReadyService,
     RunnerWorkspaceReleaseAcknowledgement, RunnerWorkspaceReleaseService,
 };
@@ -3165,11 +3165,11 @@ fn workspace_cleanup_failure(failed: &OperationFailed) -> Option<RunnerWorkspace
         return None;
     }
     let payload_json = serde_json::to_string(failed.failure.detail.payload()).ok()?;
-    let detail = RunnerOperationFailureDetail::try_new(
-        failed.failure.detail.code.as_str().to_owned(),
-        failed.failure.detail.message.clone(),
+    let detail = RunnerOperationFailureDetail::try_new(RunnerOperationFailureDetailInput {
+        code: failed.failure.detail.code.as_str().to_owned(),
+        message: failed.failure.detail.message.clone(),
         payload_json,
-    )
+    })
     .ok()?;
     Some(RunnerWorkspaceCleanupFailure::new(
         SessionId::from_uuid(correlation.session_id.into_uuid()),
@@ -5217,11 +5217,11 @@ mod tests {
             WorkspaceManifestId::from_uuid(
                 identity(ARBITRARY_WORKSPACE_MANIFEST_ID_SEED).into_uuid(),
             ),
-            RunnerOperationFailureDetail::try_new(
-                String::from("cleanup.io"),
-                String::from("workspace removal failed"),
-                String::from(r#"{"attempt":1}"#),
-            )
+            RunnerOperationFailureDetail::try_new(RunnerOperationFailureDetailInput {
+                code: String::from("cleanup.io"),
+                message: String::from("workspace removal failed"),
+                payload_json: String::from(r#"{"attempt":1}"#),
+            })
             .expect("the fixture cleanup failure is bounded"),
         )
     }
