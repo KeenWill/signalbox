@@ -2133,15 +2133,13 @@ mod tests {
         };
         let hub = async {
             let _resume = receive_hub_message(&mut hub_io).await;
-            send_hub_message(
-                &mut hub_io,
-                Message::Resumed(Box::new(Resumed {
-                    registration_revision: positive(NEXT_REGISTRATION_REVISION),
-                    connection_epoch: positive(CONNECTION_EPOCH),
-                    directives: retained_failure_directives(&failure, DirectiveAction::Resend),
-                })),
-            )
-            .await;
+            let resumed = Resumed {
+                registration_revision: positive(NEXT_REGISTRATION_REVISION),
+                connection_epoch: positive(CONNECTION_EPOCH),
+                directives: retained_failure_directives(&failure, DirectiveAction::Resend),
+            };
+            let resumed_registration_revision = resumed.registration_revision;
+            send_hub_message(&mut hub_io, Message::Resumed(Box::new(resumed))).await;
             assert_eq!(
                 receive_hub_message(&mut hub_io).await,
                 Message::OperationFailed(OperationFailed { failure })
@@ -2151,8 +2149,9 @@ mod tests {
                 Message::OperationFailureRecorded(OperationFailureRecorded { correlation }),
             )
             .await;
+            resumed_registration_revision
         };
-        let (outcome, ()) = tokio::join!(runner, hub);
+        let (outcome, resumed_registration_revision) = tokio::join!(runner, hub);
 
         assert_eq!(outcome, None);
         assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
@@ -2162,7 +2161,7 @@ mod tests {
                 .receipt()
                 .expect("the advanced registration remains durable")
                 .registration_revision(),
-            positive(NEXT_REGISTRATION_REVISION)
+            resumed_registration_revision
         );
     }
 
