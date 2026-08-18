@@ -174,6 +174,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          shared-key: rust
+          save-if: false
       - name: Check workspace
         run: cargo check --workspace --all-targets --all-features
       - name: Run Clippy
@@ -221,7 +223,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: workspace-tests
+          shared-key: rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run tests
         env:
           SIGNALBOX_RUN_BWRAP_INTEGRATION: "1"
@@ -269,7 +272,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: domain-instruction-counts
+          shared-key: rust
+          save-if: false
       - name: Install Gungraun runner
         run: cargo install --locked --version '=0.19.4' gungraun-runner
       - name: Report domain instruction counts and simulated cache behavior
@@ -332,7 +336,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: postgres-integration
+          shared-key: rust
+          save-if: false
       - name: Install cargo-nextest
         uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
