@@ -1654,7 +1654,7 @@ impl RunnerProtocolStore {
             return Err(RunnerProtocolCorruption::CrossWiredReference.into());
         }
         let current_lease = self
-            .load_current_loss_lease_in(&mut transaction, session, prior_event_ordinal)
+            .load_current_loss_lease_in(&mut transaction, session)
             .await?;
         let interrupted_attempt = current_lease.as_ref().map(RunnerLease::attempt);
         let reconciled = placement
