@@ -464,11 +464,10 @@ jobs:
           name: postgres-integration-archive-${{ matrix.suite }}
           path: ${{ runner.temp }}/archive
       # Flag for flag against the `cargo test` invocation this replaces:
-      # `--run-ignored only` is `-- --ignored`, `--test-threads 4` is
-      # `--test-threads=4`, `--no-fail-fast` is unchanged, and the archive
-      # fixes the package and feature selection at build time. nextest runs
-      # each test in its own process rather than on a shared thread pool, so
-      # four concurrent tests remains the cap.
+      # `--run-ignored only` is `-- --ignored`, `--no-fail-fast` is unchanged,
+      # and the archive fixes the package and feature selection at build time.
+      # nextest runs each test in its own process rather than on a shared
+      # thread pool; eight concurrent tests is the cap.
       - name: Run the ${{ matrix.suite }} partition
         env:
           SUITE: ${{ matrix.suite }}
@@ -482,7 +481,7 @@ jobs:
           --partition "count:$PARTITION/$PARTITIONS"
           --run-ignored only
           --no-fail-fast
-          --test-threads 4
+          --test-threads 8
           -E "$FILTER"
 
   # Preserve the existing required-check name while the suites build once and
