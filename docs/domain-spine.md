@@ -10616,70 +10616,70 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 ## Inventory
 
-| Module                                             | Public types          |
-| -------------------------------------------------- | --------------------- |
-| domain: lib.rs identities                          | 28                    |
-| domain: actor                                      | 1                     |
-| domain: blob                                       | 3                     |
-| domain: program_journal                            | 25                    |
-| domain: imported_conversation                      | 32 (+5 free fn)       |
-| domain: session_template                           | 6                     |
-| domain: session_placement                          | 18                    |
-| domain: git_remote                                 | 4 (+2 free fn)        |
-| domain: session                                    | 22                    |
-| domain: session_delegation                         | 37 (+3 free fn)       |
-| domain: imported_session                           | 18                    |
-| domain: configuration                              | 24                    |
-| domain: model_settings                             | 25                    |
-| domain: accepted_input                             | 5                     |
-| domain: delivery_request                           | 2                     |
-| domain: user_content                               | 4                     |
-| domain: submit_input                               | 34                    |
-| domain: queue_order                                | 5 (+1 free fn)        |
-| domain: repo_watch                                 | 49                    |
-| domain: turn_lifecycle                             | 10                    |
-| domain: turn_eligibility                           | 37                    |
-| domain: turn_attempt                               | 13                    |
-| domain: model_call                                 | 12                    |
-| domain: context_compaction                         | 12                    |
-| domain: model_execution                            | 53                    |
-| domain: context_frontier                           | 6                     |
-| domain: semantic_entry                             | 4                     |
-| domain: tool                                       | 45                    |
-| domain: tool_attempt                               | 27                    |
-| domain: tool_execution                             | 20                    |
-| domain: provider_evidence                          | 5                     |
-| domain: applied_interrupt                          | 2                     |
-| domain: fatal_mismatch                             | 0                     |
-| domain: replace_session_defaults                   | 13                    |
-| domain: goal                                       | 25                    |
-| domain: goal_command                               | 5                     |
-| domain: review_workflow                            | 83 (+1 free fn)       |
-| domain: session_metadata                           | 15                    |
-| domain: runner                                     | 70                    |
-| domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **803 (+12 free fn)** |
-| application: approval_judge                        | 1 (incl. 1 trait)     |
-| application: conversation_import                   | 12 (incl. 4 traits)   |
-| application: create_session                        | 8 (incl. 2 traits)    |
-| application: update_session_placement              | 4 (incl. 1 trait)     |
-| application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
-| application: list_conversations                    | 8 (incl. 2 traits)    |
-| application: load_session                          | 2 (incl. 1 trait)     |
-| application: model_execution                       | 35 (incl. 8 traits)   |
-| application: tool_loop                             | 26 (incl. 5 traits)   |
-| application: operator_failure                      | 2 (incl. 1 trait)     |
-| application: session_delegation                    | 1 (incl. 1 trait)     |
-| application: replace_session_defaults              | 5 (incl. 1 trait)     |
+| Module                                             | Public types                     |
+| -------------------------------------------------- | -------------------------------- |
+| domain: lib.rs identities                          | 28                               |
+| domain: actor                                      | 1                                |
+| domain: blob                                       | 3                                |
+| domain: program_journal                            | 25                               |
+| domain: imported_conversation                      | 32 (+5 free fn)                  |
+| domain: session_template                           | 6                                |
+| domain: session_placement                          | 18                               |
+| domain: git_remote                                 | 4 (+2 free fn)                   |
+| domain: session                                    | 22                               |
+| domain: session_delegation                         | 37 (+3 free fn)                  |
+| domain: imported_session                           | 18                               |
+| domain: configuration                              | 24                               |
+| domain: model_settings                             | 25                               |
+| domain: accepted_input                             | 5                                |
+| domain: delivery_request                           | 2                                |
+| domain: user_content                               | 4                                |
+| domain: submit_input                               | 34                               |
+| domain: queue_order                                | 5 (+1 free fn)                   |
+| domain: repo_watch                                 | 49                               |
+| domain: turn_lifecycle                             | 10                               |
+| domain: turn_eligibility                           | 37                               |
+| domain: turn_attempt                               | 13                               |
+| domain: model_call                                 | 12                               |
+| domain: context_compaction                         | 12                               |
+| domain: model_execution                            | 53                               |
+| domain: context_frontier                           | 6                                |
+| domain: semantic_entry                             | 4                                |
+| domain: tool                                       | 45                               |
+| domain: tool_attempt                               | 27                               |
+| domain: tool_execution                             | 20                               |
+| domain: provider_evidence                          | 5                                |
+| domain: applied_interrupt                          | 2                                |
+| domain: fatal_mismatch                             | 0                                |
+| domain: replace_session_defaults                   | 13                               |
+| domain: goal                                       | 25                               |
+| domain: goal_command                               | 5                                |
+| domain: review_workflow                            | 83 (+1 free fn)                  |
+| domain: session_metadata                           | 15                               |
+| domain: runner                                     | 70                               |
+| domain: workspace                                  | 4                                |
+| **signalbox-domain total**                         | **803 (+12 free fn)**            |
+| application: approval_judge                        | 1 (incl. 1 trait)                |
+| application: conversation_import                   | 12 (incl. 4 traits)              |
+| application: create_session                        | 8 (incl. 2 traits)               |
+| application: update_session_placement              | 4 (incl. 1 trait)                |
+| application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
+| application: list_conversations                    | 8 (incl. 2 traits)               |
+| application: load_session                          | 2 (incl. 1 trait)                |
+| application: model_execution                       | 35 (incl. 8 traits)              |
+| application: tool_loop                             | 26 (incl. 5 traits)              |
+| application: operator_failure                      | 2 (incl. 1 trait)                |
+| application: session_delegation                    | 1 (incl. 1 trait)                |
+| application: replace_session_defaults              | 5 (incl. 1 trait)                |
 | application: repo_watch                            | 38 (+2 free fn) (incl. 4 traits) |
-| application: review_orchestration                  | 37 (incl. 2 traits)   |
-| application: review_workflow                       | 9 (incl. 2 traits)    |
-| application: session_metadata                      | 12 (incl. 4 traits)   |
-| application: scheduler                             | 15 (incl. 5 traits)   |
-| application: start_eligible_turn                   | 5 (incl. 2 traits)    |
-| application: startup_scan                          | 7 (incl. 2 traits)    |
-| application: submit_input                          | 7 (incl. 2 traits)    |
-| application: tool_dispatch_gate                    | 2                     |
-| application: tool_execution_test_support           | 7 (+1 free fn)        |
-| application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **257 (+3 free fn)**  |
+| application: review_orchestration                  | 37 (incl. 2 traits)              |
+| application: review_workflow                       | 9 (incl. 2 traits)               |
+| application: session_metadata                      | 12 (incl. 4 traits)              |
+| application: scheduler                             | 15 (incl. 5 traits)              |
+| application: start_eligible_turn                   | 5 (incl. 2 traits)               |
+| application: startup_scan                          | 7 (incl. 2 traits)               |
+| application: submit_input                          | 7 (incl. 2 traits)               |
+| application: tool_dispatch_gate                    | 2                                |
+| application: tool_execution_test_support           | 7 (+1 free fn)                   |
+| application: tool_loop_ports                       | 8 (incl. 2 traits)               |
+| **signalbox-application total**                    | **257 (+3 free fn)**             |
