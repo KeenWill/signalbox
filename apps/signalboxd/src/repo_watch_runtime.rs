@@ -432,7 +432,14 @@ where
 #[derive(Default)]
 struct WebhookDrainRetry {
     deadline: Option<Instant>,
+    deadline_kind: Option<WebhookRetryDeadlineKind>,
     consecutive_failures: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookRetryDeadlineKind {
+    DrainBackoff,
+    DispatchFollowUp,
 }
 
 impl WebhookDrainRetry {
@@ -458,12 +465,18 @@ impl WebhookDrainRetry {
     fn schedule(&mut self) {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         self.deadline = Some(Instant::now() + self.delay());
+        self.deadline_kind = Some(WebhookRetryDeadlineKind::DrainBackoff);
     }
 
-    /// Whether a drain attempt is already owed, and therefore whether the
-    /// backoff earned by consecutive failures is currently in force.
+    /// Whether projection backoff is currently in force.
+    ///
+    /// A dispatch follow-up also owns a deadline, but it must not suppress
+    /// admission wakes or make a full poll omit healthy drain work.
     const fn is_backing_off(&self) -> bool {
-        self.deadline.is_some()
+        matches!(
+            self.deadline_kind,
+            Some(WebhookRetryDeadlineKind::DrainBackoff)
+        )
     }
 
     /// What a full polling attempt should do about its own drain step.
@@ -487,6 +500,7 @@ impl WebhookDrainRetry {
     fn arm_follow_up(&mut self, now: Instant) {
         self.consecutive_failures = 0;
         self.deadline = Some(now + self.delay());
+        self.deadline_kind = Some(WebhookRetryDeadlineKind::DispatchFollowUp);
     }
 
     /// Marks the owed retry as taken, keeping the delay it has earned.
@@ -499,6 +513,7 @@ impl WebhookDrainRetry {
     /// again at the same delay.
     fn consume(&mut self) {
         self.deadline = None;
+        self.deadline_kind = None;
     }
 
     /// Arms a retry when none is owed, without counting a drain failure.
@@ -516,12 +531,34 @@ impl WebhookDrainRetry {
     fn arm_if_unowed(&mut self, now: Instant) {
         if self.deadline.is_none() {
             self.deadline = Some(now + self.delay());
+            self.deadline_kind = Some(WebhookRetryDeadlineKind::DrainBackoff);
         }
     }
 
     fn clear(&mut self) {
         self.deadline = None;
+        self.deadline_kind = None;
         self.consecutive_failures = 0;
+    }
+
+    fn update_after_poll_drain(
+        &mut self,
+        outcome: WebhookDrainOutcome,
+        trailing_dispatch_failure: Option<RepositoryWatchAttemptError>,
+        now: Instant,
+    ) {
+        match outcome {
+            WebhookDrainOutcome::Drained if trailing_dispatch_failure.is_some() => {
+                self.arm_follow_up(now);
+            }
+            WebhookDrainOutcome::Drained => self.update_after(&Ok(())),
+            WebhookDrainOutcome::DispatchFailedAfterTerminal(_) => {
+                self.arm_follow_up(now);
+            }
+            WebhookDrainOutcome::ProjectionFailed(error) => {
+                self.update_after(&Err(error));
+            }
+        }
     }
 
     fn update_after(&mut self, result: &Result<(), RepositoryWatchAttemptError>) {
@@ -655,13 +692,14 @@ enum RepositoryWatchWake {
 /// kept failing. Deferring a poll costs at most one drain attempt, because
 /// taking the retry reschedules its deadline before the next pass.
 ///
-/// An admission wake is disabled while a retry is owed, so it cannot start a
-/// drain the backoff has deferred. Admission is authenticated but not trusted
-/// to pace this worker: replays are acknowledged at the intake rate, and each
-/// one publishing an immediate drain would drive provider and database work at
-/// that rate for as long as the drain kept failing. Nothing is lost by waiting,
-/// because the wake coalesces and an unobserved one stays observable for the
-/// attempt that follows the retry.
+/// An admission wake is disabled while projection backoff is owed, so it cannot
+/// start a drain the backoff has deferred. A dispatch follow-up remains in this
+/// schedule without activating that suppression. Admission is authenticated but
+/// not trusted to pace this worker: replays are acknowledged at the intake rate,
+/// and each one publishing an immediate drain would drive provider and database
+/// work at that rate for as long as the drain kept failing. Nothing is lost by
+/// waiting, because the wake coalesces and an unobserved one stays observable for
+/// the attempt that follows the retry.
 async fn next_repository_wake(
     shutdown: &mut watch::Receiver<bool>,
     next_poll: Instant,
@@ -939,6 +977,7 @@ impl RepositoryWatchTask {
                     let cycle_started = Instant::now();
                     let drain = webhook_retry.poll_drain();
                     let mut drained = None;
+                    let mut trailing_dispatch_failure = None;
                     let webhook_interrupt = match webhook_retry.is_backing_off() {
                         true => WebhookPollInterrupt::Suppressed,
                         false => WebhookPollInterrupt::Enabled,
@@ -949,6 +988,7 @@ impl RepositoryWatchTask {
                             &mut shutdown,
                             webhook_interrupt,
                             &mut drained,
+                            &mut trailing_dispatch_failure,
                         )
                         .await;
                     let result = match outcome {
@@ -996,9 +1036,14 @@ impl RepositoryWatchTask {
                             // retry state. Only a drain performed by the resumed
                             // poll may disposition that state below.
                             drained = None;
+                            trailing_dispatch_failure = None;
                             let Some(result) = run_until_shutdown(
                                 &mut shutdown,
-                                self.run_attempt(resumed_drain, &mut drained),
+                                self.run_attempt(
+                                    resumed_drain,
+                                    &mut drained,
+                                    &mut trailing_dispatch_failure,
+                                ),
                             )
                             .await
                             else {
@@ -1016,16 +1061,11 @@ impl RepositoryWatchTask {
                     // terminal state would arm a retry with nothing left to
                     // drain, and a projection failure would not be counted.
                     match drained {
-                        Some(WebhookDrainOutcome::Drained) => webhook_retry.update_after(&Ok(())),
-                        // The drain succeeded, so its escalation is spent, but
-                        // the dispatch that failed after it still owes an
-                        // attempt no wake will bring.
-                        Some(WebhookDrainOutcome::DispatchFailedAfterTerminal(_)) => {
-                            webhook_retry.arm_follow_up(Instant::now());
-                        }
-                        Some(WebhookDrainOutcome::ProjectionFailed(error)) => {
-                            webhook_retry.update_after(&Err(error));
-                        }
+                        Some(outcome) => webhook_retry.update_after_poll_drain(
+                            outcome,
+                            trailing_dispatch_failure,
+                            Instant::now(),
+                        ),
                         // The poll deferred its drain to an owed retry, or
                         // failed before reaching it.
                         None => {
@@ -1171,13 +1211,20 @@ impl RepositoryWatchTask {
         &mut self,
         drain: WebhookDrain,
         drained: &mut Option<WebhookDrainOutcome>,
+        trailing_dispatch_failure: &mut Option<RepositoryWatchAttemptError>,
     ) -> Result<(), RepositoryWatchAttemptError> {
         self.poller.begin_attempt();
         let result = async {
             let accelerated = self.run_attempt_prelude(drain, drained).await?;
             let prepared = self.prepare_complete_poll().await?;
-            self.finish_attempt(drain, accelerated, prepared, drained)
-                .await
+            self.finish_attempt(
+                drain,
+                accelerated,
+                prepared,
+                drained,
+                trailing_dispatch_failure,
+            )
+            .await
         }
         .await;
         if result.is_err() {
@@ -1199,6 +1246,7 @@ impl RepositoryWatchTask {
         shutdown: &mut watch::Receiver<bool>,
         webhook_interrupt: WebhookPollInterrupt,
         drained: &mut Option<WebhookDrainOutcome>,
+        trailing_dispatch_failure: &mut Option<RepositoryWatchAttemptError>,
     ) -> PollAttemptWait<Result<(), RepositoryWatchAttemptError>> {
         self.poller.begin_attempt();
         match drain {
@@ -1254,7 +1302,13 @@ impl RepositoryWatchTask {
 
         let Some(result) = run_until_shutdown(
             shutdown,
-            self.finish_attempt(drain, accelerated, prepared, drained),
+            self.finish_attempt(
+                drain,
+                accelerated,
+                prepared,
+                drained,
+                trailing_dispatch_failure,
+            ),
         )
         .await
         else {
@@ -1306,6 +1360,7 @@ impl RepositoryWatchTask {
         accelerated: Result<(), RepositoryWatchAttemptError>,
         prepared: PreparedCompletePoll,
         drained: &mut Option<WebhookDrainOutcome>,
+        trailing_dispatch_failure: &mut Option<RepositoryWatchAttemptError>,
     ) -> Result<(), RepositoryWatchAttemptError> {
         self.commit_complete_poll(prepared).await?;
         // A failed pre-poll drain already earns backoff. Do not spend the same
@@ -1320,7 +1375,13 @@ impl RepositoryWatchTask {
         }
         accelerated?;
         self.process_cutoffs().await?;
-        self.process_dispatches().await
+        match self.process_dispatches().await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                *trailing_dispatch_failure = Some(error);
+                Err(error)
+            }
+        }
     }
 
     async fn run_webhook_attempt(&mut self) -> WebhookAttemptOutcome {
@@ -6712,6 +6773,53 @@ mod tests {
         assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_DELAY);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_dispatch_follow_up_keeps_poll_drains_enabled() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.arm_follow_up(Instant::now());
+
+        let drain = retry.poll_drain();
+
+        assert_eq!(drain, WebhookDrain::Run);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dispatch_follow_up_does_not_suppress_an_admission_wake() {
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let (admissions, admitted) = watch::channel(());
+        let mut webhook_work = Some(admitted);
+        let mut retry = WebhookDrainRetry::default();
+        retry.arm_follow_up(Instant::now());
+        admissions
+            .send(())
+            .expect("the fixture task still holds the wake receiver");
+
+        let wake = next_repository_wake(
+            &mut shutdown_receiver,
+            Instant::now() + POLL_INTERVAL,
+            &retry,
+            &mut webhook_work,
+        )
+        .await;
+
+        assert_eq!(wake, RepositoryWatchWake::WebhookWork);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_trailing_poll_dispatch_failure_arms_a_follow_up() {
+        let armed_at = Instant::now();
+        let mut retry = WebhookDrainRetry::default();
+
+        retry.update_after_poll_drain(
+            WebhookDrainOutcome::Drained,
+            Some(RepositoryWatchAttemptError::Dispatch),
+            armed_at,
+        );
+
+        assert_eq!(retry.deadline, Some(armed_at + WEBHOOK_DRAIN_RETRY_DELAY));
+        assert_eq!(retry.poll_drain(), WebhookDrain::Run);
+    }
+
     /// The retry arm precedes the poll arm, so a deadline left owed once its
     /// retry has been taken selects the same attempt again immediately.
     #[tokio::test(start_paused = true)]
@@ -7106,9 +7214,14 @@ mod tests {
         let mut fixture = webhook_task_against(&pool, deferring.base_url.clone()).await?;
 
         let mut deferred_drain = None;
+        let mut deferred_dispatch_failure = None;
         fixture
             .task
-            .run_attempt(WebhookDrain::Deferred, &mut deferred_drain)
+            .run_attempt(
+                WebhookDrain::Deferred,
+                &mut deferred_drain,
+                &mut deferred_dispatch_failure,
+            )
             .await
             .expect("the polling attempt itself succeeds");
 
@@ -7126,9 +7239,14 @@ mod tests {
         let mut owed_nothing = webhook_task_against(&pool, draining.base_url.clone()).await?;
 
         let mut performed_drain = None;
+        let mut performed_dispatch_failure = None;
         owed_nothing
             .task
-            .run_attempt(WebhookDrain::Run, &mut performed_drain)
+            .run_attempt(
+                WebhookDrain::Run,
+                &mut performed_drain,
+                &mut performed_dispatch_failure,
+            )
             .await
             .expect("the polling attempt drains when no retry is owed");
 
