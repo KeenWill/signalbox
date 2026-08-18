@@ -82,6 +82,7 @@ const PAGE_SIZE: usize = 100;
 const MAX_RESULT_PAGES: u16 = 100;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
+const WEBHOOK_PAYLOAD_PURGE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_ENTITY_TAG_BYTES: usize = 1_024;
 const MAX_REQUESTS_PER_POLL: usize = 20_000;
 const MAX_CACHED_RESOURCES: usize = 20_000;
@@ -328,6 +329,7 @@ struct RepositoryWatchTask {
     webhook_nudge: Option<mpsc::Sender<()>>,
     webhook_shadow: Option<WebhookShadowBaseline>,
     webhook_shadow_superseded: bool,
+    next_payload_purge: Instant,
     rules_activated: bool,
 }
 
@@ -386,6 +388,7 @@ impl RepositoryWatchTask {
             webhook_nudge,
             webhook_shadow: None,
             webhook_shadow_superseded: false,
+            next_payload_purge: Instant::now(),
             rules_activated: false,
         })
     }
@@ -456,10 +459,13 @@ impl RepositoryWatchTask {
                     };
                     let metrics = self.poller.attempt_metrics();
                     match &result {
-                        Ok(()) => tracing::debug!(
-                            repository = %self.repository.as_str(),
-                            "repository-watch polling attempt completed"
-                        ),
+                        Ok(()) => {
+                            tracing::debug!(
+                                repository = %self.repository.as_str(),
+                                "repository-watch polling attempt completed"
+                            );
+                            self.maybe_purge_expired_payloads().await;
+                        }
                         Err(error) => tracing::warn!(
                             repository = %self.repository.as_str(),
                             cause_code = error.cause_code(),
@@ -510,6 +516,37 @@ impl RepositoryWatchTask {
                         return;
                     }
                 }
+            }
+        }
+    }
+
+    /// Deletes expired terminal payload bytes after a successful poll, at most
+    /// once per purge interval, starting with the first poll after boot.
+    ///
+    /// A purge failure never fails the watch: the deletion covers only
+    /// already-terminal deliveries, so it is retried on the next successful
+    /// poll rather than propagated.
+    async fn maybe_purge_expired_payloads(&mut self) {
+        if Instant::now() < self.next_payload_purge {
+            return;
+        }
+        match self.webhook_store.purge_expired_payloads().await {
+            Ok(purged) => {
+                self.next_payload_purge = Instant::now() + WEBHOOK_PAYLOAD_PURGE_INTERVAL;
+                if purged > 0 {
+                    tracing::info!(
+                        repository = %self.repository.as_str(),
+                        purged,
+                        "expired webhook payload bytes deleted"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    repository = %self.repository.as_str(),
+                    error = ?error,
+                    "expired webhook payload purge failed"
+                );
             }
         }
     }
@@ -1424,6 +1461,9 @@ const fn webhook_ignored_reason_code(reason: RepoWatchWebhookIgnoredReasonV1) ->
         RepoWatchWebhookIgnoredReasonV1::UnmappedAction => "unmapped_action",
         RepoWatchWebhookIgnoredReasonV1::NonBranchPush => "non_branch_push",
         RepoWatchWebhookIgnoredReasonV1::ForeignWorkflowRepository => "foreign_workflow_repository",
+        RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadRepository => {
+            "absent_workflow_head_repository"
+        }
     }
 }
 

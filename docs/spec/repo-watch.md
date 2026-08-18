@@ -958,9 +958,10 @@ families polling produces and webhooks are not designed to reproduce —
 mergeability changes, aggregate check rollups, and reaction changes — have no
 delivery to carry it. Event projections intentionally carry no uniqueness
 constraint because separate deliveries may represent one content occurrence.
-Terminal exact payload bytes remain for seven days, after which maintenance may
-delete only the payload; delivery tombstones, digests, projections, and
-dispositions remain append-only.
+Terminal exact payload bytes remain for seven days; after each successful full
+poll, at most once per day and starting with the first poll after boot, the
+daemon deletes only the expired payload bytes. Delivery tombstones, digests,
+projections, and dispositions remain append-only.
 
 **Implemented behavior.** The mapped set is pull-request open, reopen, close,
 synchronize, label, unlabel, edit, draft conversion, and ready-for-review;
@@ -968,17 +969,18 @@ submitted pull-request review; resolved or unresolved review thread; completed
 check run; completed check suite; completed workflow run; branch push, create,
 advance, and delete as represented by GitHub's `push` payload; and ping. Review
 dismissal and ping are mapped no-change. Tag pushes, the separate `create` and
-`delete` event families, foreign-repository workflow heads, and every other
-signature-valid event or action are ignored successfully. Guards make stale
-head, lifecycle, branch, workflow-attempt, and immutable-provider facts
-superseded or duplicate rather than allowing regression. A rerequested check run
-replaces the retained completion only when its provider completion generation is
-no older, so a delayed original completion is superseded instead of regressing
-the baseline; an equal generation still replaces, which is how a conclusion edit
-arrives. A workflow completion whose branch head is already gone is superseded,
-because polling projects workflow runs only for the heads it queries and could
-never reproduce it. A delivered run adopts the workflow name retained state
-already carries for that workflow identity. The occurrence identity deliberately
+`delete` event families, foreign-repository workflow heads, completed workflow
+runs whose head repository is absent, and every other signature-valid event or
+action are ignored successfully. Guards make stale head, lifecycle, branch,
+workflow-attempt, and immutable-provider facts superseded or duplicate rather
+than allowing regression. A rerequested check run replaces the retained
+completion only when its provider completion generation is no older, so a
+delayed original completion is superseded instead of regressing the baseline; an
+equal generation still replaces, which is how a conclusion edit arrives. A
+workflow completion whose branch head is already gone is superseded, because
+polling projects workflow runs only for the heads it queries and could never
+reproduce it. A delivered run adopts the workflow name retained state already
+carries for that workflow identity. The occurrence identity deliberately
 excludes that mutable display name, so this is not what keeps the two sources
 matching; it keeps the shadow observation equal to the one polling stores, so a
 rename cannot make an otherwise duplicate delivery look like a changed fact. A

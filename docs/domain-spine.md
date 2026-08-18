@@ -7500,6 +7500,7 @@ pub enum RepoWatchWebhookIgnoredReasonV1 {
     UnmappedAction,
     NonBranchPush,
     ForeignWorkflowRepository,
+    AbsentWorkflowHeadRepository,
 }
 
 pub enum RepoWatchWebhookMappingV1 {

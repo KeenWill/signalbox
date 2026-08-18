@@ -807,6 +807,7 @@ pub enum RepoWatchWebhookIgnoredReasonV1 {
     UnmappedAction,
     NonBranchPush,
     ForeignWorkflowRepository,
+    AbsentWorkflowHeadRepository,
 }
 
 /// Mapping disposition for one signature-valid admitted delivery.
@@ -1111,11 +1112,16 @@ fn map_workflow_run(
         ));
     }
     let run = object_at(root, &["workflow_run"], "workflow_run")?;
-    let head_repository = repository_at(
+    let Some(head_repository) = optional_repository_at(
         run,
         &["head_repository", "full_name"],
         "workflow_run.head_repository.full_name",
-    )?;
+    )?
+    else {
+        return Ok(RepoWatchWebhookMappingV1::Ignored(
+            RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadRepository,
+        ));
+    };
     if &head_repository != repository {
         return Ok(RepoWatchWebhookMappingV1::Ignored(
             RepoWatchWebhookIgnoredReasonV1::ForeignWorkflowRepository,
@@ -1888,6 +1894,37 @@ mod tests {
         assert_eq!(run.workflow_id().get(), MAPPED_WORKFLOW);
         assert_eq!(run.attempt().get(), MAPPED_WORKFLOW_ATTEMPT);
         assert_eq!(run.conclusion(), CheckConclusion::Failure);
+    }
+
+    #[test]
+    fn completed_workflow_run_with_absent_head_repository_is_ignored() {
+        let payload = format!(
+            r#"{{
+                "action":"completed",
+                "repository":{{"full_name":"{REPOSITORY}"}},
+                "workflow_run":{{
+                    "id":{MAPPED_WORKFLOW_RUN},
+                    "workflow_id":{MAPPED_WORKFLOW},
+                    "run_attempt":{MAPPED_WORKFLOW_ATTEMPT},
+                    "head_branch":"main",
+                    "head_repository":null,
+                    "name":"continuous-integration",
+                    "conclusion":"failure"
+                }}
+            }}"#
+        );
+        let mapping = map_repo_watch_webhook_delivery_v1(
+            &delivery("workflow_run", Some("completed")),
+            payload.as_bytes(),
+        )
+        .expect("a deleted-fork workflow head is not an error");
+
+        assert_eq!(
+            mapping,
+            RepoWatchWebhookMappingV1::Ignored(
+                RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadRepository
+            )
+        );
     }
 
     #[test]
