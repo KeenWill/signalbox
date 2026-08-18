@@ -10,10 +10,11 @@ use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
-    AbandonLostRunnerOutcome, ImportedConversationConverter, ImportedConversationStore,
-    InitialRunnerDispatchRequest, PinnedRunnerDispatchRequest, PromotePendingRunnerOutcome,
+    AbandonLostRunnerOutcome, CompiledTool, CompiledToolCatalog, ExecutableToolSnapshotSource,
+    ImportedConversationConverter, ImportedConversationStore, InitialRunnerDispatchRequest,
+    NoToolCatalog, PinnedRunnerDispatchRequest, PromotePendingRunnerOutcome,
     ReplaceLostRunnerBeforePinOutcome, RunnerLeaseClaimRequest, RunnerLeaseResultRequest,
-    RunnerReplacementProvisioningOutcome,
+    RunnerReplacementProvisioningOutcome, ToolDefinition, ToolInputSchema,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -22,35 +23,36 @@ use signalbox_domain::{
     CancelledModelCallTurnIdentities, CanonicalCloneUrlDigest, ContextFrontierId, CreateSession,
     CreateSessionFromImportedFrontier, CredentialProfileGrant,
     CredentialProfileGrantReconstitutionInput, CredentialProfileName, CredentialProfilePolicy,
-    CredentialToolApproval, DecideToolRequest, DeliveryRequest, DescendantTerminationScope,
-    DirectModelSelection, DurableCommandId, EndedToolAttempt, ImportedConversation,
-    ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId,
-    LostPinnedRunnerPlacement, ModelCallId, ModelSelectionOverride, ModelSelectionRequest,
-    NormalizedToolArguments, PerInputConfigurationChoices, PinnedRunnerPlacement,
-    PromotePendingRunner, PromotePendingRunnerRejection, PromotePendingRunnerResult,
-    PromotedRunnerEnrollment, ProvisionedWorkspace, ReplaceLostRunner,
-    ReplaceLostRunnerBeforePinRejection, ReplaceLostRunnerBeforePinResult,
-    ReplacedLostRunnerBeforePin, ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement,
-    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerDomainError,
-    RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentRequestId, RunnerGeneration, RunnerId,
-    RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
-    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
-    RunnerLostBeforePin, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
-    RunnerPlacementRecoveryState, RunnerRegistrationReconciliation,
-    RunnerReplacementProvisioningRejection, RunnerReplacementTarget,
-    RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry, RunnerSandboxProfile,
-    RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
-    RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
-    RunnerWorkingDirectory, SelectedToolExecutionLocus, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SessionRunnerPin, SessionRunnerPlacement,
-    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
-    SessionRunnerPlacementState, StoredRunnerRegistrationLossEvidence, SubmitInput,
-    ToolAdmissibleLoci, ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolAttemptReconstitutionInput,
-    ToolAttemptReconstitutionState, ToolBatch, ToolBatchPhaseReconstitutionInput,
-    ToolBatchReconstitutionInput, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
+    CredentialToolApproval, DangerousToolAutoApproval, DecideToolRequest, DeliveryRequest,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId, EndedToolAttempt,
+    ImportedConversation, ImportedConversationId, ImportedSessionRelationship,
+    ImportedTranscriptEntryId, InitialToolApproval, LostPinnedRunnerPlacement, ModelCallId,
+    ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
+    PerInputConfigurationChoices, PinnedRunnerPlacement, PromotePendingRunner,
+    PromotePendingRunnerRejection, PromotePendingRunnerResult, PromotedRunnerEnrollment,
+    ProvisionedWorkspace, ReplaceLostRunner, ReplaceLostRunnerBeforePinRejection,
+    ReplaceLostRunnerBeforePinResult, ReplacedLostRunnerBeforePin,
+    ResolvedContextFrontierReconstitutionInput, RunnerAdvertisement, RunnerAuthenticationId,
+    RunnerCapabilityClass, RunnerCatalog, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
+    RunnerEnrollmentRequestId, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation,
+    RunnerLeaseId, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
+    RunnerLeaseRetryPreparation, RunnerLeaseState, RunnerLostBeforePin, RunnerPlacementLossSource,
+    RunnerPlacementReconstitutionHistory, RunnerPlacementRecoveryState,
+    RunnerRegistrationReconciliation, RunnerReplacementProvisioningRejection,
+    RunnerReplacementTarget, RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry,
+    RunnerSandboxProfile, RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverride,
+    RunnerToolPermissionOverrides, RunnerWorkingDirectory, SelectedToolExecutionLocus,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SessionRunnerPin,
+    SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState,
+    StoredRunnerRegistrationLossEvidence, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptEnd, ToolAttemptId,
+    ToolAttemptObservation, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+    ToolBatch, ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput,
+    ToolDispatchGeneration, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
     ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TranscriptAncestry,
     TurnAttemptId, TurnId, UserContent, ValidatedRunnerRegistration, WorkingDirectorySelection,
@@ -76,12 +78,13 @@ use signalbox_persistence::{
     },
     runner_promotion::PromotePendingRunnerRepository,
     runner_protocol::{
-        IssuedRunnerEnrollmentIdentities, PristineRunnerEnrollmentRequest, RunnerConnectionCause,
-        RunnerConnectionEpoch, RunnerConnectionLossSessionDisposition, RunnerConnectionState,
-        RunnerConnectionTransition, RunnerEnrollmentAuthority, RunnerEnrollmentDisposition,
-        RunnerEnrollmentRequestFailure, RunnerProtocolCorruption, RunnerProtocolStore,
-        RunnerProtocolStoreError, RunnerRegistrationReconciliationDisposition,
-        RunnerRegistrationRevision, StoredValidatedRunnerRegistration,
+        IssuedRunnerEnrollmentIdentities, PostgresExecutableToolSnapshotSource,
+        PristineRunnerEnrollmentRequest, RunnerConnectionCause, RunnerConnectionEpoch,
+        RunnerConnectionLossSessionDisposition, RunnerConnectionState, RunnerConnectionTransition,
+        RunnerEnrollmentAuthority, RunnerEnrollmentDisposition, RunnerEnrollmentRequestFailure,
+        RunnerProtocolCorruption, RunnerProtocolStore, RunnerProtocolStoreError,
+        RunnerRegistrationReconciliationDisposition, RunnerRegistrationRevision,
+        StoredValidatedRunnerRegistration,
     },
     session_credentials::{SessionCredentialPin, SessionModelCredential},
     start_eligible_turn::StartEligibleTurnRepository,
@@ -706,6 +709,49 @@ fn model_definition() -> RunnerToolModelDefinition {
     .expect("the fixture model definition is valid")
 }
 
+fn snapshot_advertisement() -> RunnerAdvertisement {
+    RunnerAdvertisement::new(
+        [class()],
+        [tool("inspect"), tool("daemon_fallback")],
+        [profile(), replacement_profile()],
+        [WorkspaceCapability::WorktreePerSession],
+        sandbox_profiles(),
+        [repository_entry()],
+    )
+}
+
+fn snapshot_daemon_definition(name: &str, permission: ToolPermissionDefault) -> ToolDefinition {
+    let model = model_definition();
+    ToolDefinition::new(
+        tool(name),
+        model.description().to_owned(),
+        ToolInputSchema::try_new(model.input_schema().as_str().to_owned())
+            .expect("the runner model schema is a valid application schema"),
+        permission,
+        ToolEffectClass::EffectFree,
+    )
+}
+
+fn accept_snapshot_arguments(
+    _arguments: &NormalizedToolArguments,
+) -> Result<(), ToolExecutionErrorDetail> {
+    Ok(())
+}
+
+fn snapshot_daemon_catalog() -> CompiledToolCatalog {
+    CompiledToolCatalog::try_new([
+        CompiledTool::new(
+            snapshot_daemon_definition("inspect", ToolPermissionDefault::Auto),
+            accept_snapshot_arguments,
+        ),
+        CompiledTool::new(
+            snapshot_daemon_definition("daemon_fallback", ToolPermissionDefault::Confirm),
+            accept_snapshot_arguments,
+        ),
+    ])
+    .expect("the fixture daemon catalog has distinct names")
+}
+
 fn approved_request(facts: PhysicalAttemptFacts) -> ApprovedToolRequest {
     approved_request_for_session(SessionId::from_uuid(uuid(SESSION)), facts)
 }
@@ -1157,6 +1203,17 @@ fn exact_runner_request_with_directory(
     }
 }
 
+fn capability_snapshot_request() -> SessionRunnerPlacementRequest {
+    SessionRunnerPlacementRequest {
+        selector: RunnerSelector::CapabilityClass(class()),
+        working_directory: WorkingDirectorySelection::RunnerDefault,
+        credential_profile: None,
+        workspace: WorkspaceRequirement::None,
+        sandbox: RunnerSandboxProfile::Ambient,
+        permission_overrides: no_permission_overrides(),
+    }
+}
+
 async fn stored_lost_pre_pin_fixture(
     pool: &PgPool,
 ) -> Result<(RunnerProtocolStore, SessionRunnerPlacement), Box<dyn Error>> {
@@ -1170,6 +1227,82 @@ async fn stored_lost_pre_pin_fixture(
     store.store_placement(&placement, None, None).await?;
     append_runner_lost_before_pin_projection(pool, placement.session()).await?;
     Ok((store, placement))
+}
+
+async fn stored_exact_unpinned_snapshot_fixture(
+    pool: &PgPool,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        SessionId,
+        RunnerEnrollmentId,
+        RunnerId,
+        RunnerGeneration,
+        RunnerConnectionEpoch,
+    ),
+    Box<dyn Error>,
+> {
+    stored_exact_unpinned_snapshot_fixture_with(pool, advertisement()).await
+}
+
+async fn stored_exact_unpinned_snapshot_fixture_with(
+    pool: &PgPool,
+    runner_advertisement: RunnerAdvertisement,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        SessionId,
+        RunnerEnrollmentId,
+        RunnerId,
+        RunnerGeneration,
+        RunnerConnectionEpoch,
+    ),
+    Box<dyn Error>,
+> {
+    stored_unpinned_snapshot_fixture_with_request(
+        pool,
+        runner_advertisement,
+        exact_runner_request(enrollment().runner()),
+    )
+    .await
+}
+
+async fn stored_unpinned_snapshot_fixture_with_request(
+    pool: &PgPool,
+    runner_advertisement: RunnerAdvertisement,
+    placement_request: SessionRunnerPlacementRequest,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        SessionId,
+        RunnerEnrollmentId,
+        RunnerId,
+        RunnerGeneration,
+        RunnerConnectionEpoch,
+    ),
+    Box<dyn Error>,
+> {
+    insert_session(pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, runner_advertisement)
+        .await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let session = SessionId::from_uuid(uuid(SESSION));
+    let placement = SessionRunnerPlacement::new(session, placement_request);
+    store.store_placement(&placement, None, None).await?;
+    Ok((
+        store,
+        session,
+        expected_enrollment.enrollment(),
+        expected_enrollment.runner(),
+        registration.registration().revision(),
+        connection.epoch(),
+    ))
 }
 
 fn catalog() -> RunnerCatalog {
@@ -26331,6 +26464,141 @@ async fn s31_inv043_tool_request_locus_rejects_unknown_exact_registration()
     .expect_err("an exact locus requires its historical registration");
 
     assert_foreign_key_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-043: one live exact-identity placement derives the registered
+/// definition, exact current revision, and restricted-sandbox pair policy.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_live_exact_placement_derives_runner_executable_snapshot()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, session, _enrollment, runner, registration_revision, _connection_epoch) =
+        stored_exact_unpinned_snapshot_fixture(&pool).await?;
+    let source = PostgresExecutableToolSnapshotSource::new(store);
+
+    let snapshot = source
+        .executable_tools(session, &NoToolCatalog, DangerousToolAutoApproval::Disabled)
+        .await?;
+
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].definition().name(), &tool("inspect"));
+    assert_eq!(
+        snapshot[0].execution_locus(),
+        &SelectedToolExecutionLocus::ExactRunner {
+            runner,
+            registration_revision,
+        }
+    );
+    assert_eq!(
+        snapshot[0].initial_approval(),
+        InitialToolApproval::PolicyAuto
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-043: an unpinned capability-class placement authenticates one
+/// live matching registration but freezes only its class for first dispatch.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_live_capability_placement_freezes_class_snapshot() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, session, _enrollment, _runner, _registration_revision, _connection_epoch) =
+        stored_unpinned_snapshot_fixture_with_request(
+            &pool,
+            advertisement(),
+            capability_snapshot_request(),
+        )
+        .await?;
+    let source = PostgresExecutableToolSnapshotSource::new(store);
+
+    let snapshot = source
+        .executable_tools(session, &NoToolCatalog, DangerousToolAutoApproval::Disabled)
+        .await?;
+
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].definition().name(), &tool("inspect"));
+    assert_eq!(
+        snapshot[0].execution_locus(),
+        &SelectedToolExecutionLocus::RunnerCapabilityClass { class: class() }
+    );
+    assert_eq!(
+        snapshot[0].initial_approval(),
+        InitialToolApproval::PolicyAuto
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-043: a placement whose exact runner is no longer connected does
+/// not advertise a runner-only definition from stale registration rows.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_disconnected_exact_placement_omits_runner_snapshot()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, session, enrollment, _runner, _registration_revision, connection_epoch) =
+        stored_exact_unpinned_snapshot_fixture(&pool).await?;
+    store
+        .transition_connection(
+            enrollment,
+            connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let source = PostgresExecutableToolSnapshotSource::new(store);
+
+    let snapshot = source
+        .executable_tools(session, &NoToolCatalog, DangerousToolAutoApproval::Disabled)
+        .await?;
+
+    assert_eq!(snapshot.as_ref(), []);
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-043: a shared runner-only name retains the runner locus while a
+/// shared combined-locus declaration selects its available daemon executor.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_snapshot_merges_shared_names_by_declared_locus() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, session, _enrollment, runner, registration_revision, _connection_epoch) =
+        stored_exact_unpinned_snapshot_fixture_with(&pool, snapshot_advertisement()).await?;
+    let source = PostgresExecutableToolSnapshotSource::new(store);
+    let daemon_catalog = snapshot_daemon_catalog();
+
+    let snapshot = source
+        .executable_tools(
+            session,
+            &daemon_catalog,
+            DangerousToolAutoApproval::Disabled,
+        )
+        .await?;
+
+    assert_eq!(snapshot.len(), 2);
+    assert_eq!(snapshot[0].definition().name(), &tool("daemon_fallback"));
+    assert_eq!(
+        snapshot[0].execution_locus(),
+        &SelectedToolExecutionLocus::Daemon
+    );
+    assert_eq!(snapshot[0].initial_approval(), InitialToolApproval::Confirm);
+    assert_eq!(snapshot[1].definition().name(), &tool("inspect"));
+    assert_eq!(
+        snapshot[1].execution_locus(),
+        &SelectedToolExecutionLocus::ExactRunner {
+            runner,
+            registration_revision,
+        }
+    );
+    assert_eq!(
+        snapshot[1].initial_approval(),
+        InitialToolApproval::PolicyAuto
+    );
     drop(pool);
     Ok(())
 }
