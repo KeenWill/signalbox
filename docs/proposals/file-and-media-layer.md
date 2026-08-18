@@ -181,17 +181,16 @@ Detection follows one fixed algorithm:
     Before acquiring blob direct-read admission or beginning store traversal,
     the executor releases its scheduler-pass slot through the same durable
     handoff used by model-originated `blob_read`. Completion, failure, and
-    cancellation reacquire a pass only through that owning path's bounded
-    queue; the request never owns a scheduler-pass slot and a direct-read permit
+    cancellation reacquire a pass only through that owning path's bounded queue;
+    the request never owns a scheduler-pass slot and a direct-read permit
     simultaneously, and reacquisition cannot exceed the inspection-wide
-    deadline.
-    Verification performs at most one complete traversal bounded by the
-    catalog's authenticated `byte_length`; those integrity bytes use the blob
-    layer's traversal accounting and process-wide traversal admission, not the
-    reader-work ceiling. Every later source range is served from the completed
-    snapshot and cannot observe another replica generation. Exhausting the wall
-    deadline returns `ProcessorTimedOut`. Ordinary blob traversal's longer
-    deadline cannot extend the inspection deadline. Missing, corrupt,
+    deadline. Verification performs at most one complete traversal bounded by
+    the catalog's authenticated `byte_length`; those integrity bytes use the
+    blob layer's traversal accounting and process-wide traversal admission, not
+    the reader-work ceiling. Every later source range is served from the
+    completed snapshot and cannot observe another replica generation. Exhausting
+    the wall deadline returns `ProcessorTimedOut`. Ordinary blob traversal's
+    longer deadline cannot extend the inspection deadline. Missing, corrupt,
     unavailable, or no-longer-visible sources propagate as `BlobMissing`,
     `BlobCorrupt`, `BlobUnavailable`, or `BlobNotVisible` before candidate
     selection.
@@ -421,16 +420,16 @@ output kind, emitted media type and registered output reader, and every reason
 code must be declared members. A value outside that declaration is sanitized to
 `ProcessorFailed { reason_code: undeclared_worker_outcome }`; it supplies no
 candidate or evidence and discards all staged output. A clean frame and exit do
-not weaken this declaration-membership check.
-Binary output is likewise committed to ingest only after a valid terminal
-control frame, exact declared length and digest agreement, clean worker exit,
-and independent validation of the staged bytes as the emitted canonical type.
-The view declaration identifies the registered output reader for every emitted
-type, and registry construction rejects a rich view without one. EOF, crash,
-signal, timeout, malformed or extra frame, disagreement, failed output
-validation, and any channel limit breach discard the control result and staged
-binary output. Stderr is bounded, scrubbed diagnostic material and never
-model-visible. Parser messages collapse to registered reason codes.
+not weaken this declaration-membership check. Binary output is likewise
+committed to ingest only after a valid terminal control frame, exact declared
+length and digest agreement, clean worker exit, and independent validation of
+the staged bytes as the emitted canonical type. The view declaration identifies
+the registered output reader for every emitted type, and registry construction
+rejects a rich view without one. EOF, crash, signal, timeout, malformed or extra
+frame, disagreement, failed output validation, and any channel limit breach
+discard the control result and staged binary output. Stderr is bounded, scrubbed
+diagnostic material and never model-visible. Parser messages collapse to
+registered reason codes.
 
 The selected sandbox must prove process/address-space separation, no network or
 ambient credentials, whole-descendant termination, exact one-digest authority,
@@ -614,24 +613,23 @@ reserved before execution rather than inferred from materialized bytes. A short
 completion transaction atomically registers the verified blob, consumes the
 reservation, releases unused bytes, and commits the reference; a known-failure
 completion transaction releases the reservation without registering a blob.
-Every crash-lost authorized
-`ExternalEffect` attempt remains ambiguous and keeps its reservation through the
-owning tool loop's reconciliation lifecycle; it cannot be retried. The bottom
-tool-loop specification diff in the implementation stack must add an explicit,
-durable reconciliation closure before this reservation mechanism can ship. A
-closure that proves success consumes the reservation while committing the exact
-result; one that proves known failure or records an operator's explicit terminal
-abandonment releases it. Abandonment is irreversible, records that no later
-result may be committed for the attempt, and is the only safe release when the
-external effect remains unknowable. Until one of those terminal closures
-commits, the reservation has no timeout and remains charged. This proposal adds
-no pre-effect checkpoint and does not treat daemon restart or elapsed time as
-closure. A publication or completion failure may leave an unreferenced orphan,
-never a dangling result, but capacity rejection registers nothing. Thus every
-committed reference is admissible to its mandatory continuation call, no
-transaction spans processor or store I/O, and crash recovery never erases an
-external effect. Equal output bytes converge by digest, and ambiguous
-publication cannot become tool success.
+Every crash-lost authorized `ExternalEffect` attempt remains ambiguous and keeps
+its reservation through the owning tool loop's reconciliation lifecycle; it
+cannot be retried. The bottom tool-loop specification diff in the implementation
+stack must add an explicit, durable reconciliation closure before this
+reservation mechanism can ship. A closure that proves success consumes the
+reservation while committing the exact result; one that proves known failure or
+records an operator's explicit terminal abandonment releases it. Abandonment is
+irreversible, records that no later result may be committed for the attempt, and
+is the only safe release when the external effect remains unknowable. Until one
+of those terminal closures commits, the reservation has no timeout and remains
+charged. This proposal adds no pre-effect checkpoint and does not treat daemon
+restart or elapsed time as closure. A publication or completion failure may
+leave an unreferenced orphan, never a dangling result, but capacity rejection
+registers nothing. Thus every committed reference is admissible to its mandatory
+continuation call, no transaction spans processor or store I/O, and crash
+recovery never erases an external effect. Equal output bytes converge by digest,
+and ambiguous publication cannot become tool success.
 
 For a rich view that directly presents the verified source instead of producing
 binary output, the broker checks the authenticated source `byte_length` before
@@ -640,9 +638,8 @@ maximum, the presentation kind's process ceiling, and the target-specific
 materialized maximum. The adapter's checked worst-case wire projection of that
 exact length must independently fit the target provider-wire maximum and the
 wire portion of the durable reservation. Failure returns `SourceTooLarge` with
-the effective maximum and commits no reference. A direct reference cannot
-bypass a generated-output channel's bounds merely because its bytes already
-exist.
+the effective maximum and commits no reference. A direct reference cannot bypass
+a generated-output channel's bounds merely because its bytes already exist.
 
 Rendering first emits a bounded textual stub. Preparation then:
 
