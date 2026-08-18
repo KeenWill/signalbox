@@ -17,6 +17,8 @@
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use crate::MAX_HTTPS_PROXY_TUNNELS;
+
     use std::{
         collections::{BTreeMap, BTreeSet},
         ffi::OsString,
@@ -50,7 +52,6 @@ mod linux {
     const DISPATCH_MODE: &str = "--dispatch";
     const DISPATCH_HTTPS_PROXY_MODE: &str = "--dispatch-with-https-proxy";
     const HTTPS_PROXY_PORT: u16 = 18_080;
-    const MAX_HTTPS_PROXY_TUNNELS: usize = 8;
     const CARGO_TEST_RUNNER_MODE: &str = "--cargo-test-runner";
     const LAUNCH_MODE: &str = "--launch";
     const OUTER_MODE: &str = "--outer";
@@ -340,12 +341,7 @@ mod linux {
         };
         for inherited_descriptor in inherited_descriptors {
             if inherited_descriptor > 2 && inherited_descriptor != broker_descriptor_number {
-                // SAFETY: these descriptor numbers were enumerated from this single-threaded
-                // supervisor after the directory iterator was dropped, and the retained broker
-                // descriptor is excluded above. No live handle remains for an inherited descriptor.
-                unsafe {
-                    rustix::io::close(inherited_descriptor);
-                }
+                let _ = nix::unistd::close(inherited_descriptor);
             }
         }
         let broker = PathBuf::from(format!("/proc/self/fd/{}", broker_descriptor_number));

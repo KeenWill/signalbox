@@ -6,9 +6,10 @@
 use std::{cmp, env, error::Error, ffi::OsString, fmt, io, process::ExitCode, time::Duration};
 
 use signalbox_runner::{
-    ArgumentError, ConnectionEnd, EnrollmentOutcome, ProtocolViolation, RunnerConfiguration,
-    RunnerConfigurationError, RunnerConfigurationPath, RunnerConnection, RunnerConnectionError,
-    RunnerStateError, RunnerStateRoot, ServeOutcome, SocketConnectError, connect_verified,
+    ArgumentError, ConnectionEnd, DispatchHttpsEndpoint, DispatchHttpsError, EnrollmentOutcome,
+    HttpsBroker, ProtocolViolation, RunnerConfiguration, RunnerConfigurationError,
+    RunnerConfigurationPath, RunnerConnection, RunnerConnectionError, RunnerStateError,
+    RunnerStateRoot, ServeOutcome, SocketConnectError, connect_verified,
 };
 use signalbox_runner_wire::{ExecutionErrorKind, SandboxProfile, TerminalResult};
 use signalbox_tools_exec::{ExecArguments, SandboxedCommandRunner, TokioProcessRunner};
@@ -49,6 +50,12 @@ async fn run(
         RunnerConfiguration::read(path.as_path()).map_err(RunnerDaemonError::Configuration)?;
     let mut state =
         RunnerStateRoot::open(configuration.runner_root()).map_err(RunnerDaemonError::State)?;
+    DispatchHttpsEndpoint::reclaim_stale(
+        state
+            .duplicate_directory()
+            .map_err(RunnerDaemonError::EndpointRoot)?,
+    )
+    .map_err(RunnerDaemonError::EndpointReclamation)?;
     // Keep both pinned executable identities live across every connection epoch.
     let execution_programs = TokioProcessRunner::try_new_with_bubblewrap(
         configuration.exec_supervisor_executable(),
@@ -111,6 +118,8 @@ async fn run(
                     let execution = execute_dispatch(
                         execution_programs.clone(),
                         configuration.read_only_paths().to_vec(),
+                        state.duplicate_directory(),
+                        configuration.allowed_network_hosts().to_vec(),
                         dispatch.correlation().clone(),
                         dispatch.normalized_arguments().clone(),
                     );
@@ -159,6 +168,8 @@ async fn run(
 async fn execute_dispatch(
     process_runner: TokioProcessRunner,
     read_only_paths: Vec<std::path::PathBuf>,
+    runner_root: io::Result<std::fs::File>,
+    allowed_network_hosts: Vec<signalbox_runner::AllowedNetworkHost>,
     correlation: signalbox_runner_wire::LeaseCorrelation,
     normalized_arguments: serde_json::Value,
 ) -> TerminalResult {
@@ -177,10 +188,29 @@ async fn execute_dispatch(
             };
         }
     };
-    let mut runner = match SandboxedCommandRunner::try_new_runner_restricted(
+    let runner_root = match runner_root {
+        Ok(runner_root) => runner_root,
+        Err(_) => {
+            return TerminalResult::KnownFailure {
+                error_kind: ExecutionErrorKind::ExecutionFailed,
+                detail: None,
+            };
+        }
+    };
+    let endpoint = match DispatchHttpsEndpoint::bind(runner_root, correlation.lease_id) {
+        Ok(endpoint) => endpoint,
+        Err(_) => {
+            return TerminalResult::KnownFailure {
+                error_kind: ExecutionErrorKind::ExecutionFailed,
+                detail: None,
+            };
+        }
+    };
+    let mut runner = match SandboxedCommandRunner::try_new_runner_restricted_with_https_broker(
         process_runner,
         correlation.working_directory.as_str(),
         &read_only_paths,
+        endpoint.socket_path(),
     ) {
         Ok(runner) => runner,
         Err(_) => {
@@ -190,7 +220,29 @@ async fn execute_dispatch(
             };
         }
     };
-    let result = match runner.try_run(arguments).await {
+    let Some(deadline) =
+        tokio::time::Instant::now().checked_add(Duration::from_secs(arguments.timeout_seconds))
+    else {
+        return TerminalResult::KnownFailure {
+            error_kind: ExecutionErrorKind::InvalidArguments,
+            detail: None,
+        };
+    };
+    let (broker_stop, stop_broker) = tokio::sync::oneshot::channel();
+    let broker = tokio::spawn(endpoint.serve(
+        HttpsBroker::production(&allowed_network_hosts),
+        deadline,
+        stop_broker,
+    ));
+    let result = runner.try_run(arguments).await;
+    let _ = broker_stop.send(());
+    if !matches!(broker.await, Ok(Ok(()))) {
+        return TerminalResult::KnownFailure {
+            error_kind: ExecutionErrorKind::ExecutionFailed,
+            detail: None,
+        };
+    }
+    let result = match result {
         Ok(result) => result,
         Err(_) => {
             return TerminalResult::KnownFailure {
@@ -347,6 +399,8 @@ enum RunnerDaemonError {
     Argument(ArgumentError),
     Configuration(RunnerConfigurationError),
     ExecutionPrograms,
+    EndpointRoot(io::Error),
+    EndpointReclamation(DispatchHttpsError),
     State(RunnerStateError),
     Socket(SocketConnectError),
     Connection(RunnerConnectionError),
@@ -361,6 +415,8 @@ impl fmt::Display for RunnerDaemonError {
             Self::Argument(_) => "runner arguments are invalid",
             Self::Configuration(_) => "runner configuration is invalid",
             Self::ExecutionPrograms => "runner execution programs are unavailable",
+            Self::EndpointRoot(_) => "runner HTTPS endpoint root is unavailable",
+            Self::EndpointReclamation(_) => "runner HTTPS endpoint reclamation failed",
             Self::State(_) => "runner durable state is unavailable",
             Self::Socket(_) => "runner socket is unavailable",
             Self::Connection(_) => "runner connection failed",
@@ -376,6 +432,8 @@ impl Error for RunnerDaemonError {
         match self {
             Self::Argument(error) => Some(error),
             Self::Configuration(error) => Some(error),
+            Self::EndpointRoot(error) => Some(error),
+            Self::EndpointReclamation(error) => Some(error),
             Self::State(error) => Some(error),
             Self::Socket(error) => Some(error),
             Self::Connection(error) => Some(error),
