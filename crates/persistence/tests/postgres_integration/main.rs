@@ -15,6 +15,7 @@ mod approval_decisions;
 mod delegated_result_rereads;
 mod delegation_schema;
 mod delegation_transactions;
+mod hub_fence;
 mod model_call_execution_and_recovery;
 mod model_call_usage_and_interrupts;
 mod model_credentials_and_tool_batches;
@@ -42,12 +43,12 @@ use signalbox_application::{
     CreateSessionService, EligibilityNudge, EligibilityNudgeOutcome, EligibilitySweep,
     InProcessAttemptDispatchGate, LoadSessionService, ModelCallAuthorizationReread,
     ModelCallCredentialReference, ModelCallExecutionError, ModelCallExecutionIdGenerator,
-    ModelCallExecutionOutcome, ModelCallExecutionService, ModelConversationMessage,
-    OperatorFailureClass, PromptMemberStatement, ReplaceSessionDefaultsOutcome,
-    ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
-    RetainedModelCallObservationStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
-    SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
+    ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallObservationCommitOutcome,
+    ModelConversationMessage, OperatorFailureClass, PromptMemberStatement,
+    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
+    RetainedCapabilityFailureStatus, RetainedModelCallObservationStatus, ScriptedModelCallProvider,
+    ScriptedModelCallStep, SessionIdGenerator, StartEligibleTurnIdGenerator,
+    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
     SubmitInputRequestError, SubmitInputService, ToolAttemptAuthorizationStatus, ToolCatalog,
     ToolDefinition, ToolInputSchema,
@@ -76,17 +77,18 @@ use signalbox_domain::{
     ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SemanticTranscriptEntryRef, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition,
-    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
-    SessionTemplateProvenance, SettingOverlay, StoppedToolResponsePartIdentity,
-    StoppedToolRoundModelCallIdentities, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
-    ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution, ToolAttemptCrashOutcome,
-    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolBatchExecutionFailure,
-    ToolCallProposal, ToolDecisionRationale, ToolDenialReason, ToolDispatchAuthority,
-    ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
-    ToolName, ToolPermissionDefault, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
-    ToolResultText, ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry,
-    TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
+    SessionPlacement, SessionPlacementPath, SessionSystemPrompt, SessionTemplateContentDigest,
+    SessionTemplateName, SessionTemplateProvenance, SettingOverlay,
+    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, SubmitInput,
+    SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
+    SubmitInputResult, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution,
+    ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
+    ToolBatchExecutionFailure, ToolCallProposal, ToolDecisionRationale, ToolDenialReason,
+    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
+    ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequestId,
+    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
+    TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,
@@ -106,6 +108,7 @@ use signalbox_persistence::{
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
     model_execution::{
+        CredentialPoolRuntimeAction, CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
         PostgresModelCallRepository, PrepareInitialModelCallOutcome,
     },

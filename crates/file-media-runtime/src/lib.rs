@@ -19,9 +19,9 @@ pub use declaration::{
 pub use detection::{
     CancellationSignal, FileInspection, FileInspectionStatus, FileMediaFailure, FileMediaProcessor,
     FileMediaProcessorFuture, FileReadRequest, FileReadResult, InspectionRequest, NeverCancelled,
-    ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadContinuation, SourceReadError, SourceReadFuture, ValidatedFile, ValidationEvidence,
-    VerifiedBlobSource,
+    ProcessorBoundaryFailure, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadContinuation, SourceReadError, SourceReadFuture, ValidatedFile,
+    ValidationEvidence, VerifiedBlobSource,
 };
 pub use limits::{
     FileMediaCeilings, FileMediaProcessCeilings, MAX_AGGREGATE_MEDIA_BYTES_PER_CALL,
@@ -29,10 +29,11 @@ pub use limits::{
     MAX_IMAGE_AXIS, MAX_MEDIA_REFERENCES_PER_CALL, MAX_OBSERVED_CONTAINER_ENTRIES,
     MAX_PRESENTED_AUDIO_BYTES, MAX_PRESENTED_FILE_BYTES, MAX_PRESENTED_IMAGE_BYTES,
     MAX_PROBE_CUMULATIVE_BYTES, MAX_PROBE_PREFIX_BYTES, MAX_PROBE_RANGES, MAX_PROBE_SUFFIX_BYTES,
-    MAX_PROCESSOR_FRAME_BYTES, MAX_READ_OPTIONS_BYTES, MAX_STRUCTURED_DEPTH, MAX_STRUCTURED_NODES,
-    MAX_TEXT_OR_JSON_BYTES, MAX_WORKER_CPU_SECONDS, MAX_WORKER_DESCENDANTS,
-    MAX_WORKER_FILE_DESCRIPTORS, MAX_WORKER_MEMORY_BYTES, MAX_WORKER_STDERR_BYTES,
-    MAX_WORKER_TASKS, MAX_WORKER_WALL_SECONDS,
+    MAX_PROCESSOR_FRAME_BYTES, MAX_READ_OPTIONS_BYTES, MAX_READ_RANGES, MAX_READ_SOURCE_BYTES,
+    MAX_STRUCTURED_DEPTH, MAX_STRUCTURED_NODES, MAX_TEXT_OR_JSON_BYTES,
+    MAX_WORKER_CPU_SECONDS, MAX_WORKER_DESCENDANTS, MAX_WORKER_FILE_DESCRIPTORS,
+    MAX_WORKER_MEMORY_BYTES, MAX_WORKER_STDERR_BYTES, MAX_WORKER_TASKS,
+    MAX_WORKER_WALL_SECONDS,
 };
 pub use registry::{FileMediaRegistry, FileMediaRegistryConstructionError, ProcessorIsolation};
 pub use value::{

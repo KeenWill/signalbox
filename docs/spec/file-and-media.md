@@ -50,7 +50,8 @@ The daemon-side registry stores checked declarations and calls only
 Registry construction sorts unsigned-ASCII provider/reader identities and
 rejects duplicate providers or readers, duplicate exact media-type claims,
 duplicate per-reader types, views, or reason codes, absent or excessive probe
-and output bounds, contradictory image bounds, ambiguous streaming-text
+and output bounds, read source work or range fan-out above their compiled
+lowerable ceilings, contradictory image bounds, ambiguous streaming-text
 fallback, unavailable isolation when any provider is present, and any effective
 ceiling above the compiled version-one value. An empty registry is valid.
 Configuration can therefore disable providers or lower bounds but cannot add a
