@@ -417,16 +417,15 @@ the sweep (INV-007).
   waiting. If none is immediately available, the pass relinquishes its
   scheduler-pass capacity, ends, and leaves only the durable `Prepared` row for
   a later sweep. After acquiring a permit, its task remains in flight for
-  per-session deduplication but relinquishes the scheduler-pass slot during store
-  I/O; after successful verification it reacquires a slot before send
-  authorization and its guarded
-  transaction revalidates authority. A model-originated `blob_read` uses the
-  same slot handoff after it acquires the blob contract's non-waiting
-  direct-read permit: its physical attempt remains in flight during store
-  traversal, and it reacquires a slot before committing correlated result
-  evidence or crash-loss classification. The independent direct-read admission
-  budget remains fixed, so at most 16 direct reads can wait at that
-  reacquisition point regardless of the scheduler-pass override.
+  per-session deduplication but relinquishes the scheduler-pass slot during
+  store I/O; after successful verification it reacquires a slot before send
+  authorization and its guarded transaction revalidates authority. A
+  model-originated `blob_read` uses the same slot handoff after it acquires the
+  blob contract's non-waiting direct-read permit: its physical attempt remains
+  in flight during store traversal, and it reacquires a slot before committing
+  correlated result evidence or crash-loss classification. The independent
+  direct-read admission budget remains fixed, so at most 16 direct reads can
+  wait at that reacquisition point regardless of the scheduler-pass override.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. This recovers a goal disposition when the
