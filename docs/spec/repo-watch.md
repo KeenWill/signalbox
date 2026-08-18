@@ -596,34 +596,39 @@ refusal anywhere in the set, and any startup failure before that commit,
 therefore leaves no deactivation and no activation behind: a configuration that
 never started consumes no revision, and restoring the previous configuration is
 admitted rather than refused as reuse. A lost commit response is resolved by
-running the admission again rather than assuming an outcome, which is exact
-because admission reads current activations and writes only what is missing: the
-rerun commits nothing when the first commit won and performs the admission when
-it never landed. Configuration reconciliation and evaluation are serialized per
-repository: an evaluation already committed may replay, but an already-loaded
-event cannot create a dispatch after deactivation commits. Activation stores a
-digest of the complete versioned matcher, ordered action list, singleton scope,
-and cooldown, plus content-free fingerprints labeled with the exact
-configuration fields they represent. Changing any of those semantics while
-retaining the same rule ID and revision fails in the Configuration phase before
-either local socket binds. The diagnostic names the rule and changed field and
-directs the operator to increment `version`; when multiple fields changed, it
-names the first changed TOML field in canonical fingerprint order. It never
-first appears as a repository-task runtime death. An activation recorded before
-field fingerprints existed cannot produce them from its aggregate digest, so the
-one-time migration introducing fingerprints retires every such activation. No
-active activation lacks fingerprints and the daemon carries no path for that
-shape; a missing fingerprint under any non-deactivated activation is storage
-corruption, checked before reconciliation compares that activation against
-configuration, retires it as an unconfigured rule, or retires it because its
-whole repository left configuration. Retiring an activation retires its
-`(rule ID, revision)` pair, so the first boot after that migration refuses every
-configured rule at its recorded revision as identity reuse, including every rule
-whose semantics did not change, and fails in the Configuration phase before
-either local socket binds. The operator increments `version` once for each
-configured rule on that first upgraded boot; no fingerprint backfill can stand
-in for the bump, because the retained aggregate digest does not carry the
-per-field digests the new revision records.
+rereading the durable active set rather than assuming an outcome. That reread
+commits nothing, so it cannot itself become ambiguous, and it answers the only
+question the outcome turned on: either the active set already equals the
+configured admission, so the commit won and startup proceeds, or it does not, so
+the commit never landed, no revision was consumed, and startup fails against
+untouched history with the previous configuration still admissible. Startup does
+not attempt the admission a second time in that failing case; the next start
+admits the same configuration from that untouched history, and only an
+unreachable database defeats the reread. Configuration reconciliation and
+evaluation are serialized per repository: an evaluation already committed may
+replay, but an already-loaded event cannot create a dispatch after deactivation
+commits. Activation stores a digest of the complete versioned matcher, ordered
+action list, singleton scope, and cooldown, plus content-free fingerprints
+labeled with the exact configuration fields they represent. Changing any of
+those semantics while retaining the same rule ID and revision fails in the
+Configuration phase before either local socket binds. The diagnostic names the
+rule and changed field and directs the operator to increment `version`; when
+multiple fields changed, it names the first changed TOML field in canonical
+fingerprint order. It never first appears as a repository-task runtime death. An
+activation recorded before field fingerprints existed cannot produce them from
+its aggregate digest, so the one-time migration introducing fingerprints retires
+every such activation. No active activation lacks fingerprints and the daemon
+carries no path for that shape; a missing fingerprint under any non-deactivated
+activation is storage corruption, checked before reconciliation compares that
+activation against configuration, retires it as an unconfigured rule, or retires
+it because its whole repository left configuration. Retiring an activation
+retires its `(rule ID, revision)` pair, so the first boot after that migration
+refuses every configured rule at its recorded revision as identity reuse,
+including every rule whose semantics did not change, and fails in the
+Configuration phase before either local socket binds. The operator increments
+`version` once for each configured rule on that first upgraded boot; no
+fingerprint backfill can stand in for the bump, because the retained aggregate
+digest does not carry the per-field digests the new revision records.
 
 **Implemented behavior.** A higher revision under the same rule ID is a
 replacement. Reconciliation appends deactivation of the active old revision and
