@@ -173,7 +173,7 @@ jobs:
         with:
           cache-on-failure: true
           shared-key: rust
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: false
       # Compile the smoke test binary BEFORE the credential store exists, so no
       # repository build script or procedural macro executes while the API key
       # is readable under CODEX_HOME. The later test run is fresh and does not

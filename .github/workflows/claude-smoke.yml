@@ -195,7 +195,7 @@ jobs:
         with:
           cache-on-failure: true
           shared-key: rust
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: false
       # Compile the smoke test binary BEFORE any step carries the credential, so
       # no repository build script or procedural macro executes while the API
       # key is present in a step environment. The later test run is fresh and
