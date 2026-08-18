@@ -168,7 +168,7 @@ impl SandboxedFileMediaProcessor {
                 .wait()
                 .await
                 .map_err(|_| ProcessorFailure::Unavailable)?;
-            if status.success() && observed == expected {
+            if status.success() && observed.as_slice() == expected.as_slice() {
                 Ok(())
             } else {
                 Err(ProcessorFailure::Unavailable)
@@ -629,6 +629,7 @@ async fn finish_diagnostics(
 fn apply_process_limits(ceilings: FileMediaProcessCeilings) -> Result<(), rustix::io::Errno> {
     set_limit(Resource::As, ceilings.memory_bytes())?;
     set_limit(Resource::Cpu, ceilings.cpu_seconds())?;
+    set_limit(Resource::Core, 0)?;
     set_limit(Resource::Nproc, MAX_WORKER_TASKS)?;
     set_limit(Resource::Nofile, ceilings.file_descriptors())
 }

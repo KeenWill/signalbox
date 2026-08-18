@@ -9,12 +9,15 @@ use tokio::sync::Mutex;
 
 use crate::{
     broker::{read_frame, write_frame},
-    protocol::{DaemonFrame, Invocation, WorkerFrame, declaration_fingerprint, decode_bytes},
+    protocol::{
+        DaemonFrame, Invocation, WorkerFrame, declaration_fingerprint_ordered, decode_bytes,
+    },
 };
 
 /// Immutable worker-side inventory of compiled format providers.
 pub struct WorkerCatalog {
     providers: Vec<Box<dyn FileMediaProvider>>,
+    provider_order: Vec<usize>,
     readers: BTreeMap<ReaderIdentity, usize>,
 }
 
@@ -50,7 +53,13 @@ impl WorkerCatalog {
                 }
             }
         }
-        Ok(Self { providers, readers })
+        let mut provider_order = (0..providers.len()).collect::<Vec<_>>();
+        provider_order.sort_by(|left, right| provider_names[*left].cmp(&provider_names[*right]));
+        Ok(Self {
+            providers,
+            provider_order,
+            readers,
+        })
     }
 
     /// Returns declarations in worker construction order for daemon registration.
@@ -59,6 +68,15 @@ impl WorkerCatalog {
             .iter()
             .map(|provider| provider.declaration())
             .collect()
+    }
+
+    fn declaration_fingerprint(&self) -> [u8; 32] {
+        declaration_fingerprint_ordered(
+            self.provider_order.len(),
+            self.provider_order
+                .iter()
+                .map(|index| self.providers[*index].declaration()),
+        )
     }
 
     fn provider(
@@ -128,10 +146,10 @@ pub async fn serve_one(catalog: &WorkerCatalog) -> Result<(), WorkerServiceError
             "--signalbox-file-media-isolation-probe",
         )]
     {
-        let fingerprint = declaration_fingerprint(&catalog.declarations());
+        let fingerprint = catalog.declaration_fingerprint();
         let mut output = tokio::io::stdout();
         output
-            .write_all(&fingerprint)
+            .write_all(fingerprint.as_slice())
             .await
             .map_err(|_| WorkerServiceError::Protocol)?;
         return output

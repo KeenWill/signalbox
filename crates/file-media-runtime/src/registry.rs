@@ -385,10 +385,9 @@ impl FileMediaRegistry {
         source: &dyn VerifiedBlobSource,
         cancellation: &dyn crate::CancellationSignal,
     ) -> Result<FileReadResult, FileMediaFailure> {
-        if !request.options.is_object()
-            || serde_json::to_vec(&request.options)
-                .map_or(true, |encoded| encoded.len() > MAX_READ_OPTIONS_BYTES)
-        {
+        let options_are_bounded = serde_json::to_vec(&request.options)
+            .is_ok_and(|encoded| encoded.len() <= MAX_READ_OPTIONS_BYTES);
+        if !request.options.is_object() || !options_are_bounded {
             return Err(FileMediaFailure::InvalidViewArguments);
         }
         let inspection = self
