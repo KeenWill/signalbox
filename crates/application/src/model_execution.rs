@@ -1895,11 +1895,12 @@ where
         if automatic_tool_round_limit_reached(turn, operation.messages()) {
             return self.commit_capability_known_failure(session, call).await;
         }
-        operation.tools = self
+        let advertised_tools = self
             .executable_tool_snapshot_source
             .executable_tools(session, self.catalog.as_ref(), dangerous_tool_auto_approval)
             .await
             .map_err(ModelCallExecutionError::ExecutableToolSnapshot)?;
+        operation.tools = advertised_tools.clone();
         let preparation_cancellation = self.authorization.cancellation_signal(session, call);
         let capability = match self
             .provider
