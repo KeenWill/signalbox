@@ -12,6 +12,7 @@ CREATE TABLE runner_replacement_workspace_receipt (
     canonical_clone_url_digest text NOT NULL,
     credential_profile_name runner_catalog_name,
     sandbox_profile text NOT NULL,
+    working_directory runner_exact_text NOT NULL,
     relative_path runner_exact_text NOT NULL,
     recovery_kind text NOT NULL,
     branch_name text,
@@ -77,13 +78,18 @@ BEGIN
      WHERE authorization_id = NEW.authorization_id;
     SELECT * INTO command
       FROM replace_lost_runner_command
-     WHERE command_id = staged.command_id;
+     WHERE command_id = staged.command_id
+     -- Terminal-result insertion locks this command row, so this lock also
+     -- serializes the absence check below with replacement terminalization.
+     FOR UPDATE;
     SELECT * INTO enrollment
       FROM runner_enrollment
-     WHERE enrollment_id = staged.enrollment_id;
+     WHERE enrollment_id = staged.enrollment_id
+     FOR SHARE;
     SELECT * INTO connection_head
       FROM runner_connection_authority_head
-     WHERE enrollment_id = staged.enrollment_id;
+     WHERE enrollment_id = staged.enrollment_id
+     FOR SHARE;
     SELECT * INTO connection
       FROM runner_connection_event
      WHERE enrollment_id = connection_head.enrollment_id
@@ -91,10 +97,12 @@ BEGIN
        AND event_ordinal = connection_head.connection_event_ordinal;
     SELECT registration_revision INTO current_registration
       FROM runner_current_registration
-     WHERE enrollment_id = staged.enrollment_id;
+     WHERE enrollment_id = staged.enrollment_id
+     FOR SHARE;
     SELECT event_ordinal INTO current_placement_ordinal
       FROM runner_current_session_placement
-     WHERE session_id = NEW.session_id;
+     WHERE session_id = NEW.session_id
+     FOR SHARE;
     SELECT * INTO placement
       FROM runner_session_placement_record
      WHERE session_id = NEW.session_id
@@ -118,6 +126,7 @@ BEGIN
        OR placement.placement_revision IS DISTINCT FROM
             staged.lost_placement_revision
        OR placement.state_kind IS DISTINCT FROM 'runner_lost'
+       OR placement.workspace_manifest_id IS NOT DISTINCT FROM NEW.manifest_id
        OR enrollment.runner_id IS DISTINCT FROM NEW.runner_id
        OR connection_head.connection_epoch IS DISTINCT FROM
             staged.connection_epoch

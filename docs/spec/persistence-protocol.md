@@ -740,14 +740,17 @@ Representation rules, all enforced in the schema:
   workspace receipt under its single-use provisioning authorization. The row
   preserves the successor revision, runner, stable manifest identity,
   canonical-shaped ready-manifest digest, repository and clone-URL digest,
-  optional credential profile, sandbox, relative workspace path, and exact
-  commit-or-branch recovery facts. Its deferred check accepts the receipt only
+  optional credential profile, sandbox, runner-interpreted working directory,
+  relative workspace path, and exact commit-or-branch recovery facts. Its
+  deferred check locks the mutable authority heads and accepts the receipt only
   while the authorization's lost placement remains current, the selected
   registration and connection are current, the target enrollment retains its
-  active or provisioning-only state, and no terminal replacement result exists.
-  Typed readback rejoins the immutable authorization, command, lost placement,
-  registration, historical connected event, and pending relation before
-  returning the manifest facts. **Committed unimplemented functionality.** No
+  active or provisioning-only state, no terminal replacement result exists, and
+  the successor manifest identity differs from the predecessor's. Typed
+  readback rejoins and fully revalidates the immutable authorization, command,
+  canonical lost-placement repository facts, registration capabilities,
+  historical connected event, and pending relation before returning the
+  manifest facts. **Committed unimplemented functionality.** No
   present production transaction admits `workspace_ready`, sends
   `workspace_recorded`, maps the runner-relative manifest path into execution
   placement facts, or consumes the receipt to terminalize the repository-backed

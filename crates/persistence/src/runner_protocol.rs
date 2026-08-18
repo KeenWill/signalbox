@@ -862,6 +862,7 @@ pub struct StoredWorkspaceProvisioningReceipt {
     canonical_clone_url_digest: CanonicalCloneUrlDigest,
     credential_profile: Option<CredentialProfileName>,
     sandbox: RunnerSandboxProfile,
+    working_directory: RunnerWorkingDirectory,
     relative_path: WorkspaceRelativePath,
     recovery: WorkspaceRecovery,
 }
@@ -915,6 +916,11 @@ impl StoredWorkspaceProvisioningReceipt {
     /// Returns the sandbox profile bound by the authorization.
     pub const fn sandbox(&self) -> RunnerSandboxProfile {
         self.sandbox
+    }
+
+    /// Returns the runner-interpreted workspace working directory.
+    pub const fn working_directory(&self) -> &RunnerWorkingDirectory {
+        &self.working_directory
     }
 
     /// Returns the runner-root-relative workspace path from the manifest.
@@ -3160,7 +3166,8 @@ impl RunnerProtocolStore {
                     receipt.manifest_digest, receipt.repository_key,
                     receipt.canonical_clone_url_digest,
                     receipt.credential_profile_name, receipt.sandbox_profile,
-                    receipt.relative_path, receipt.recovery_kind,
+                    receipt.working_directory, receipt.relative_path,
+                    receipt.recovery_kind,
                     receipt.branch_name, receipt.revision,
                     staged.session_id AS staged_session_id,
                     staged.lost_placement_event_ordinal,
@@ -3216,6 +3223,9 @@ impl RunnerProtocolStore {
         let Some(row) = row else {
             return Ok(None);
         };
+        self.load_workspace_provisioning_authorization(authorization)
+            .await?
+            .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
         let session = session_id(row.decode_column("session_id")?);
         let placement_revision =
             decode_runner_generation(row.decode_column("placement_revision")?)?;
@@ -3234,6 +3244,9 @@ impl RunnerProtocolStore {
             .map_err(RunnerProtocolStoreError::Domain)?;
         let sandbox = runner_sandbox_from_str(&row.decode_column::<String>("sandbox_profile")?)
             .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let working_directory =
+            RunnerWorkingDirectory::try_new(row.decode_column("working_directory")?)
+                .map_err(RunnerProtocolStoreError::Domain)?;
         let relative_path = WorkspaceRelativePath::try_new(row.decode_column("relative_path")?)
             .map_err(RunnerProtocolStoreError::Domain)?;
         let recovery_kind: String = row.decode_column("recovery_kind")?;
@@ -3338,6 +3351,7 @@ impl RunnerProtocolStore {
             canonical_clone_url_digest,
             credential_profile,
             sandbox,
+            working_directory,
             relative_path,
             recovery,
         }))
@@ -3378,10 +3392,10 @@ impl RunnerProtocolStore {
                 (authorization_id, session_id, placement_revision, runner_id,
                  manifest_id, manifest_digest, repository_key,
                  canonical_clone_url_digest, credential_profile_name,
-                 sandbox_profile, relative_path, recovery_kind, branch_name,
-                 revision)
+                 sandbox_profile, working_directory, relative_path,
+                 recovery_kind, branch_name, revision)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                     $12, $13, $14)",
+                     $12, $13, $14, $15)",
         )
         .bind(authorization.into_uuid())
         .bind(workspace.session.into_uuid())
@@ -3398,6 +3412,7 @@ impl RunnerProtocolStore {
                 .map(CredentialProfileName::as_str),
         )
         .bind(runner_sandbox_to_str(workspace.sandbox))
+        .bind(workspace.working_directory.as_str())
         .bind(workspace.relative_path.as_str())
         .bind(recovery_kind)
         .bind(branch_name)
