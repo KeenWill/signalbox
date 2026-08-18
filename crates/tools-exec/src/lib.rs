@@ -57,6 +57,7 @@ pub use process::{
     ExecResult, ExecToolConstructionError, ExecutionConfinement, InvalidExecArguments,
     OutputCapture, OutputEncoding, ProcessEnvironment, ProcessOutcome, ProcessOutput,
     ProcessRequest, ProcessRunResult, ProcessRunner, ProcessSpawnFailure, ProcessStatusProtocol,
-    ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxedCommandRunner, SandboxedExecTool,
-    TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner, UnsandboxedExecTool,
+    ProcessSupervisionFailure, SANDBOXED_EXEC_NAME, SandboxProcessNamespace,
+    SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner, UNSANDBOXED_EXEC_NAME,
+    UnsandboxedCommandRunner, UnsandboxedExecTool,
 };

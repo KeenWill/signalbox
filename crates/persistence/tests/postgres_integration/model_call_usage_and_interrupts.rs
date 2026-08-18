@@ -1595,7 +1595,20 @@ async fn stop_request_schema_keeps_delivery_and_failure_shapes_closed() -> Resul
         !failed_assertion.contains("terminal_disposition_kind IN ('known_failed', 'cancelled')")
     );
     assert!(!failed_assertion.contains("end_disposition IN ('known_failure', 'lost')"));
-    assert!(failed_assertion.contains("attempt_count <> 1"));
+    assert!(failed_assertion.contains("FROM credential_pool_terminal_exhaustion AS exhausted"));
+    assert!(
+        failed_assertion
+            .contains("PERFORM assert_failed_terminal_execution_before_credential_pools(")
+    );
+    assert!(failed_assertion.contains("checked_turn_id"));
+    let ordinary_failed_assertion: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(oid)
+           FROM pg_proc
+          WHERE proname = 'assert_failed_terminal_execution_before_credential_pools'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(ordinary_failed_assertion.contains("attempt_count <> 1"));
 
     let seed = 0x75c0;
     let (failed, failed_repository, failed_authorized) =

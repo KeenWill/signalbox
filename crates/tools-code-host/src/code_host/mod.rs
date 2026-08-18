@@ -138,6 +138,8 @@ const CODE_HOST_REJECTED_DETAIL: &str =
     "code host rejected the request or returned an invalid bounded response";
 const CHANGED_FILE_NOT_FOUND_DETAIL: &str =
     "requested changed file was not found in the change request";
+const THREAD_NOT_IN_CHANGE_REQUEST_DETAIL: &str =
+    "requested review thread was not found in the named change request";
 
 macro_rules! define_code_host_tool_kinds {
     ($( $(#[$attribute:meta])* $variant:ident),+ $(,)?) => {
@@ -513,12 +515,18 @@ pub enum CodeHostTransportFailure {
     Rejected,
     /// A complete changed-file search did not contain the requested path.
     NotFound,
+    /// Complete ownership evidence did not place the named review thread
+    /// inside the named change request, so the mutation was never dispatched.
+    ThreadNotInChangeRequest,
     /// The bounded response did not match the typed result contract.
     InvalidResponse,
     /// Response bytes exceeded the fixed operation cap.
     ResponseTooLarge,
     /// A multi-request read observed the change-request base or head move.
     ChangeRequestRevisionChanged,
+    /// An infrastructure failure before a mutation existed as a request
+    /// proved the mutation was never dispatched, so nothing was written.
+    MutationNotDispatched,
     /// Transport loss left physical dispatch unknown.
     DispatchUnknown,
 }
@@ -582,6 +590,9 @@ impl<Credentials, Transport> CodeHostTools<Credentials, Transport> {
         let changed_file_not_found_detail =
             ToolExecutionErrorDetail::try_new(String::from(CHANGED_FILE_NOT_FOUND_DETAIL))
                 .map_err(|_| CodeHostToolsConstructionError::ErrorDetail)?;
+        let thread_not_in_change_request_detail =
+            ToolExecutionErrorDetail::try_new(String::from(THREAD_NOT_IN_CHANGE_REQUEST_DETAIL))
+                .map_err(|_| CodeHostToolsConstructionError::ErrorDetail)?;
         let mut compiled = Vec::with_capacity(CodeHostToolKind::ALL.len());
         for &kind in CodeHostToolKind::ALL {
             let definition = kind.definition().map_err(|error| match error {
@@ -607,6 +618,7 @@ impl<Credentials, Transport> CodeHostTools<Credentials, Transport> {
                 credential_unavailable_detail,
                 code_host_rejected_detail,
                 changed_file_not_found_detail,
+                thread_not_in_change_request_detail,
             },
         })
     }
@@ -652,6 +664,7 @@ pub struct CodeHostExecutor<Credentials, Transport> {
     credential_unavailable_detail: ToolExecutionErrorDetail,
     code_host_rejected_detail: ToolExecutionErrorDetail,
     changed_file_not_found_detail: ToolExecutionErrorDetail,
+    thread_not_in_change_request_detail: ToolExecutionErrorDetail,
 }
 
 /// Sanitized code-host executor failure.
@@ -727,6 +740,9 @@ where
                     KnownFailureDetail::ChangedFileNotFound => {
                         self.changed_file_not_found_detail.clone()
                     }
+                    KnownFailureDetail::ThreadNotInChangeRequest => {
+                        self.thread_not_in_change_request_detail.clone()
+                    }
                 };
                 return Ok(invocation.bind(ToolExecutorEvidence::KnownFailed {
                     detail: Some(detail),
@@ -766,6 +782,9 @@ enum KnownFailureDetail {
     CodeHostRejected,
     /// A complete changed-file search did not contain the requested path.
     ChangedFileNotFound,
+    /// Complete ownership evidence did not place the named review thread
+    /// inside the named change request.
+    ThreadNotInChangeRequest,
 }
 
 /// Shapes a known-failure detail after its class is known to be non-fatal.
@@ -780,10 +799,14 @@ const fn transport_failure_detail(failure: CodeHostTransportFailure) -> Option<K
             Some(KnownFailureDetail::CredentialUnavailable)
         }
         CodeHostTransportFailure::NotFound => Some(KnownFailureDetail::ChangedFileNotFound),
+        CodeHostTransportFailure::ThreadNotInChangeRequest => {
+            Some(KnownFailureDetail::ThreadNotInChangeRequest)
+        }
         CodeHostTransportFailure::Rejected
         | CodeHostTransportFailure::InvalidResponse
         | CodeHostTransportFailure::ResponseTooLarge => Some(KnownFailureDetail::CodeHostRejected),
         CodeHostTransportFailure::ChangeRequestRevisionChanged
+        | CodeHostTransportFailure::MutationNotDispatched
         | CodeHostTransportFailure::DispatchUnknown => None,
     }
 }
@@ -795,11 +818,20 @@ const fn transport_failure_class(
     match failure {
         CodeHostTransportFailure::InvalidCredential
         | CodeHostTransportFailure::Rejected
-        | CodeHostTransportFailure::NotFound => None,
+        | CodeHostTransportFailure::NotFound
+        | CodeHostTransportFailure::ThreadNotInChangeRequest => None,
         CodeHostTransportFailure::InvalidResponse | CodeHostTransportFailure::ResponseTooLarge
             if !kind.mutates() =>
         {
             None
+        }
+        // The transport proved the mutation never existed as a request, so
+        // the infrastructure failure carries no commit ambiguity even for a
+        // mutating declaration.
+        CodeHostTransportFailure::MutationNotDispatched => {
+            Some(OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            })
         }
         CodeHostTransportFailure::InvalidResponse
         | CodeHostTransportFailure::ResponseTooLarge
@@ -1406,8 +1438,20 @@ mod tests {
                       "pattern": "^[^\\u0000]+$",
                       "type": "string"
                     },
+                    "number": {
+                      "description": "Number of the owning change request.",
+                      "maximum": 2147483647,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "repository": {
+                      "description": "Exact owner/repository spelling of the owning change request.",
+                      "maxLength": 256,
+                      "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+                      "type": "string"
+                    },
                     "thread_id": {
-                      "description": "Opaque review-thread node identity.",
+                      "description": "Opaque review-thread node identity inside the named change request.",
                       "maxLength": 512,
                       "minLength": 1,
                       "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
@@ -1415,6 +1459,8 @@ mod tests {
                     }
                   },
                   "required": [
+                    "repository",
+                    "number",
                     "thread_id",
                     "body"
                   ],
@@ -1432,8 +1478,20 @@ mod tests {
                 {
                   "additionalProperties": false,
                   "properties": {
+                    "number": {
+                      "description": "Number of the owning change request.",
+                      "maximum": 2147483647,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "repository": {
+                      "description": "Exact owner/repository spelling of the owning change request.",
+                      "maxLength": 256,
+                      "pattern": "^(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*/(?:[A-Za-z0-9_-]|\\.[A-Za-z0-9_-]|\\.\\.[A-Za-z0-9._-])[A-Za-z0-9._-]*$",
+                      "type": "string"
+                    },
                     "thread_id": {
-                      "description": "Opaque review-thread node identity.",
+                      "description": "Opaque review-thread node identity inside the named change request.",
                       "maxLength": 512,
                       "minLength": 1,
                       "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$",
@@ -1441,6 +1499,8 @@ mod tests {
                     }
                   },
                   "required": [
+                    "repository",
+                    "number",
                     "thread_id"
                   ],
                   "type": "object"
@@ -1683,6 +1743,11 @@ mod tests {
         let schema = <CodeHostUrl as schemars::JsonSchema>::json_schema(
             &mut schemars::SchemaGenerator::default(),
         );
+        let mut schema = schema.to_value();
+        schema
+            .as_object_mut()
+            .expect("URL schema is an object")
+            .sort_keys();
 
         expect_test::expect![[r#"
             {
@@ -1691,7 +1756,7 @@ mod tests {
               "pattern": "^https://[^/@\\u0000-\\u0020\\u007F-\\u009F]+(?:[/?#]|$)",
               "type": "string"
             }"#]]
-        .assert_eq(&format!("{:#}", schema.to_value()));
+        .assert_eq(&format!("{schema:#}"));
     }
 
     /// Summary arguments decode into a checked repository and positive number.
@@ -1877,20 +1942,45 @@ mod tests {
         );
     }
 
-    /// Thread-reply arguments retain opaque identity and bounded body.
+    /// Thread-reply arguments retain the owning change request beside the
+    /// opaque identity and bounded body.
     #[test]
     fn change_request_thread_reply_typed_decode_accepts_exact_shape() {
         assert_valid(
+            &catalog(),
+            change_request_thread_reply::NAME,
+            r#"{"body":"fixed","number":17,"repository":"owner/repository","thread_id":"PRRT_node"}"#,
+        );
+    }
+
+    /// A thread reply cannot omit the change request whose grant authorizes
+    /// it, because execution validates thread ownership against that target.
+    #[test]
+    fn change_request_thread_reply_typed_decode_requires_the_change_request() {
+        assert_invalid(
             &catalog(),
             change_request_thread_reply::NAME,
             r#"{"body":"fixed","thread_id":"PRRT_node"}"#,
         );
     }
 
-    /// Thread-resolve arguments retain one opaque node identity.
+    /// Thread-resolve arguments retain the owning change request beside one
+    /// opaque node identity.
     #[test]
     fn change_request_thread_resolve_typed_decode_accepts_exact_shape() {
         assert_valid(
+            &catalog(),
+            change_request_thread_resolve::NAME,
+            r#"{"number":17,"repository":"owner/repository","thread_id":"PRRT_node"}"#,
+        );
+    }
+
+    /// A thread resolution cannot omit the change request whose grant
+    /// authorizes it, because execution validates thread ownership against
+    /// that target.
+    #[test]
+    fn change_request_thread_resolve_typed_decode_requires_the_change_request() {
+        assert_invalid(
             &catalog(),
             change_request_thread_resolve::NAME,
             r#"{"thread_id":"PRRT_node"}"#,
@@ -2193,6 +2283,39 @@ mod tests {
                 CodeHostTransportFailure::InvalidResponse,
             ),
             None
+        );
+    }
+
+    /// An ownership refusal is the code host's definitive answer before any
+    /// mutation was dispatched, so it stays a model-visible known failure
+    /// rather than an operator failure.
+    #[test]
+    fn thread_ownership_refusal_is_a_known_failure() {
+        assert_eq!(
+            transport_failure_class(
+                CodeHostToolKind::ThreadResolve,
+                CodeHostTransportFailure::ThreadNotInChangeRequest,
+            ),
+            None
+        );
+        assert_eq!(
+            transport_failure_detail(CodeHostTransportFailure::ThreadNotInChangeRequest),
+            Some(KnownFailureDetail::ThreadNotInChangeRequest)
+        );
+    }
+
+    /// A failure the transport proved happened before the mutation existed as
+    /// a request carries no commit ambiguity even for a mutating declaration.
+    #[test]
+    fn undispatched_mutation_failure_is_not_commit_ambiguous() {
+        assert_eq!(
+            transport_failure_class(
+                CodeHostToolKind::ThreadReply,
+                CodeHostTransportFailure::MutationNotDispatched,
+            ),
+            Some(OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
+            })
         );
     }
 

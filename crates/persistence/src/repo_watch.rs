@@ -71,7 +71,8 @@ impl RepoWatchCursorGeneration {
         Ok(Self(value))
     }
 
-    fn next(self) -> Option<Self> {
+    /// Returns the next durable cursor generation when the storage range permits it.
+    pub fn next(self) -> Option<Self> {
         let next = self.get().checked_add(1)?;
         if next > i64::MAX as u64 {
             return None;
