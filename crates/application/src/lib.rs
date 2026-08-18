@@ -124,7 +124,8 @@ pub use review_workflow::{
 pub use runner_replacement_provisioning::{
     RunnerReplacementProvisioningIdGenerator, RunnerReplacementProvisioningOutcome,
     RunnerReplacementProvisioningRequest, RunnerReplacementProvisioningService,
-    RunnerReplacementProvisioningTransaction, UuidV7RunnerReplacementProvisioningIdGenerator,
+    RunnerReplacementProvisioningStage, RunnerReplacementProvisioningTransaction,
+    UuidV7RunnerReplacementProvisioningIdGenerator,
 };
 pub use scheduler::{
     EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass, EligibilitySweep,

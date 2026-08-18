@@ -27,7 +27,9 @@ transaction was verified against this PR
 (`agent/runner-pending-pre-pin-replacement`). The append-only staged
 workspace-provisioning authorization representation and checked readback were
 verified against this PR
-(`agent/runner-workspace-provisioning-authorization-persistence`).
+(`agent/runner-workspace-provisioning-authorization-persistence`). The atomic
+pinned-replacement command claim and provisioning-stage producer were verified
+against this PR (`agent/runner-replacement-provisioning-transaction`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -592,11 +594,15 @@ Representation rules, all enforced in the schema:
   same-runner arm requires registration-loss lineage; every other arm requires a
   distinct successor. The row rejects update, delete, and truncate, and its
   adapter readback rechecks the immutable joins before returning the stored
-  facts. **Committed unimplemented functionality.** No present production
-  transaction inserts this row. The future command-claim transaction must take
-  the session scheduler before the recorded runner lock order and insert it
-  atomically with the command request; this representation neither authorizes
-  raw caller-prepared inserts nor performs runner I/O.
+  facts. Migration `202608110017` extends the closed replacement-result refusal
+  predicates to pinned loss and adds the production command-claim transaction.
+  That transaction claims the immutable command request, takes the session
+  scheduler before the selected runner and placement authority, and inserts
+  either this nonterminal authorization or an exact durable refusal atomically.
+  Equal replay returns the first authorization or refusal; unequal reuse returns
+  a command conflict. A workspace-free or pre-pin placement rolls the claim back
+  and returns `NotApplicable`, leaving its terminal replacement transaction as
+  the only command claimant. No transaction remains open across runner I/O.
 - The runner-orchestration foundation adds one append-only
   `runner_operation_failure` record for every durably admitted
   `operation_failed` frame. It stores the exact runner, one closed
@@ -1104,9 +1110,14 @@ Locks per transaction, in acquisition order:
 
 - **Runner replace, abandon, and release**: an unseen abandonment command owns
   its durable-command claim and terminalizes in one transaction. An unseen
-  replacement command first claims its immutable request and provisioning
-  authorization in a short transaction, performs no runner I/O under database
-  locks, then its terminal transaction follows the runner total order exactly:
+  repository-backed pinned replacement command first claims its immutable
+  request and provisioning authorization in a short transaction. That staging
+  transaction locks `session_scheduler`, the selected enrollment or pending
+  request, its connection and registration, and then the lost placement; it
+  accepts an ordinary successor only when it differs from the lost runner, and
+  accepts the same runner only for an explicit reenrollment after exact
+  registration-triggered loss. It performs no runner I/O under database locks.
+  The later terminal transaction follows the runner total order exactly:
   `session_scheduler`, enrollment or pending-request heads, relevant runner
   heads in identity order, registration, placement, grant and lease, then
   guarded semantic-frontier and turn rows. Replacement rechecks and atomically

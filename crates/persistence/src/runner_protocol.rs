@@ -16,7 +16,8 @@ use std::{
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
     AbandonLostRunnerOutcome, AbandonLostRunnerTransaction, ReplaceLostRunnerBeforePinOutcome,
-    ReplaceLostRunnerBeforePinTransaction,
+    ReplaceLostRunnerBeforePinTransaction, RunnerReplacementProvisioningOutcome,
+    RunnerReplacementProvisioningStage, RunnerReplacementProvisioningTransaction,
 };
 use signalbox_domain::{
     AbandonLostRunner, AbandonLostRunnerRejection, AbandonLostRunnerResult, AbandonedLostRunner,
@@ -33,19 +34,20 @@ use signalbox_domain::{
     RunnerLeaseLoss, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLeaseState,
     RunnerLostBeforePin, RunnerPlacementLossSource, RunnerPlacementReconstitutionHistory,
     RunnerPlacementRecoveryState, RunnerPrePinReplacementHistory, RunnerRegistrationReconciliation,
-    RunnerReplacementTarget, RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry,
-    RunnerSandboxProfile, RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass,
-    RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
-    RunnerWorkingDirectory, SessionId, SessionRunnerPin, SessionRunnerPlacement,
-    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
-    SessionRunnerPlacementState, StoredRunnerRegistrationLossEvidence, ToolAdmissibleLoci,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptEnd, ToolAttemptId, ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind,
-    ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
-    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
-    WorkingDirectorySelection, WorkspaceBranchName, WorkspaceCapability, WorkspaceManifestId,
-    WorkspaceProvisioningAuthorizationId, WorkspaceRecovery, WorkspaceRelativePath,
-    WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
+    RunnerReplacementProvisioningRejection, RunnerReplacementTarget,
+    RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry, RunnerSandboxProfile,
+    RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass, RunnerToolModelDefinition,
+    RunnerToolPermissionOverride, RunnerToolPermissionOverrides, RunnerWorkingDirectory, SessionId,
+    SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState,
+    StoredRunnerRegistrationLossEvidence, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptEnd, ToolAttemptId,
+    ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind, ToolName,
+    ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
+    ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceBranchName,
+    WorkspaceCapability, WorkspaceManifestId, WorkspaceProvisioningAuthorizationId,
+    WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement,
+    WorkspaceRevision,
 };
 use sqlx::{
     PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction, postgres::PgRow, types::Uuid,
@@ -2705,6 +2707,308 @@ impl RunnerProtocolStore {
         }))
     }
 
+    /// Claims and durably stages one repository-backed pinned replacement.
+    pub async fn stage_runner_replacement_provisioning(
+        &self,
+        command: ReplaceLostRunner,
+        authorization: WorkspaceProvisioningAuthorizationId,
+    ) -> Result<RunnerReplacementProvisioningOutcome, RunnerProtocolStoreError> {
+        if command.command().as_uuid().is_nil() || command.command().as_uuid().is_max() {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        let mut transaction = self.pool.begin().await?;
+        if let Some(outcome) =
+            load_replacement_provisioning_outcome(transaction.as_mut(), command).await?
+        {
+            transaction.rollback().await?;
+            return Ok(outcome);
+        }
+        if inspect_replacement_registry(transaction.as_mut(), command.command())
+            .await?
+            .is_some()
+        {
+            transaction.rollback().await?;
+            return Ok(RunnerReplacementProvisioningOutcome::ConflictingReuse {
+                command: command.command(),
+            });
+        }
+        let claimed = sqlx::query(
+            "INSERT INTO durable_command
+                (command_id, command_kind, storage_version, claimed_at)
+             VALUES ($1, $2, 1, transaction_timestamp())
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(command.command().into_uuid())
+        .bind(REPLACE_LOST_RUNNER_KIND)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected()
+            == 1;
+        if !claimed {
+            let outcome = load_replacement_provisioning_outcome(transaction.as_mut(), command)
+                .await?
+                .unwrap_or(RunnerReplacementProvisioningOutcome::ConflictingReuse {
+                    command: command.command(),
+                });
+            transaction.rollback().await?;
+            return Ok(outcome);
+        }
+        insert_replacement_command(transaction.as_mut(), command).await?;
+
+        let scheduler = sqlx::query(REPLACE_LOST_RUNNER_SCHEDULER)
+            .bind(command.session().into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let session_exists: bool = scheduler.decode_column("session_exists")?;
+        let scheduler_session: Option<Uuid> = scheduler.decode_column("scheduler_session_id")?;
+        if !session_exists {
+            let rejection = RunnerReplacementProvisioningRejection::SessionNotFound {
+                session: command.session(),
+            };
+            insert_replacement_provisioning_rejection(
+                transaction.as_mut(),
+                command,
+                rejection,
+                ReplacementRecordEvidence::default(),
+            )
+            .await?;
+            commit_mutation(transaction).await?;
+            return Ok(RunnerReplacementProvisioningOutcome::Rejected(rejection));
+        }
+        if scheduler_session != Some(command.session().into_uuid()) {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+
+        let target_authority = match command.replacement() {
+            RunnerReplacementTarget::Runner(runner)
+            | RunnerReplacementTarget::SameRunnerReenrollment(runner) => {
+                self.lock_direct_replacement_target(&mut transaction, runner)
+                    .await?
+            }
+            RunnerReplacementTarget::PendingEnrollment(request) => {
+                self.lock_pending_replacement_target(&mut transaction, request)
+                    .await?
+            }
+        };
+        let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
+            .bind(command.session().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let Some(prior) = prior else {
+            let rejection = RunnerReplacementProvisioningRejection::RunnerPlacementNotFound {
+                session: command.session(),
+            };
+            insert_replacement_provisioning_rejection(
+                transaction.as_mut(),
+                command,
+                rejection,
+                ReplacementRecordEvidence::default(),
+            )
+            .await?;
+            commit_mutation(transaction).await?;
+            return Ok(RunnerReplacementProvisioningOutcome::Rejected(rejection));
+        };
+        let state_kind: String = prior.decode_column("state_kind")?;
+        let current_revision =
+            decode_runner_generation(prior.decode_column("placement_revision")?)?;
+        let current_event_ordinal = decode_u64(prior.decode_column("event_ordinal")?)?;
+        let mut evidence = ReplacementRecordEvidence {
+            placement_event_ordinal: Some(current_event_ordinal),
+            placement_revision: Some(current_revision),
+            placement_state_kind: Some(state_kind),
+            ..ReplacementRecordEvidence::default()
+        };
+        if current_revision != command.expected_placement_revision() {
+            let rejection = RunnerReplacementProvisioningRejection::PlacementRevisionMismatch {
+                session: command.session(),
+                expected: command.expected_placement_revision(),
+                current: current_revision,
+            };
+            insert_replacement_provisioning_rejection(
+                transaction.as_mut(),
+                command,
+                rejection,
+                evidence,
+            )
+            .await?;
+            commit_mutation(transaction).await?;
+            return Ok(RunnerReplacementProvisioningOutcome::Rejected(rejection));
+        }
+        let stored = self
+            .decode_stored_placement_in(&mut transaction, &prior)
+            .await?;
+        let (stored_event_ordinal, placement, _, _, _) = stored.into_parts();
+        if stored_event_ordinal != current_event_ordinal {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        let lost = match placement.state() {
+            SessionRunnerPlacementState::RunnerLost(lost) => lost,
+            SessionRunnerPlacementState::RunnerLostBeforePin(_) => {
+                transaction.rollback().await?;
+                return Ok(RunnerReplacementProvisioningOutcome::NotApplicable);
+            }
+            state => {
+                let state = placement_recovery_state(state)
+                    .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+                let rejection = RunnerReplacementProvisioningRejection::PlacementNotLost {
+                    session: command.session(),
+                    placement_revision: current_revision,
+                    state,
+                };
+                insert_replacement_provisioning_rejection(
+                    transaction.as_mut(),
+                    command,
+                    rejection,
+                    evidence,
+                )
+                .await?;
+                commit_mutation(transaction).await?;
+                return Ok(RunnerReplacementProvisioningOutcome::Rejected(rejection));
+            }
+        };
+        let lost_runner = lost.pinned().runner;
+        evidence.prior_runner = Some(lost_runner);
+        evidence.new_runner = target_authority.runner();
+        let selected_same_runner = target_authority.runner() == Some(lost_runner);
+        let ordinary_same_runner = selected_same_runner
+            && !matches!(
+                command.replacement(),
+                RunnerReplacementTarget::SameRunnerReenrollment(_)
+            );
+        let unchecked_same_runner = selected_same_runner
+            && matches!(
+                command.replacement(),
+                RunnerReplacementTarget::SameRunnerReenrollment(_)
+            )
+            && lost.source() != RunnerPlacementLossSource::Registration;
+        if ordinary_same_runner || unchecked_same_runner {
+            let rejection = RunnerReplacementProvisioningRejection::ReplacementSameRunner {
+                session: command.session(),
+                runner: lost_runner,
+            };
+            insert_replacement_provisioning_rejection(
+                transaction.as_mut(),
+                command,
+                rejection,
+                evidence,
+            )
+            .await?;
+            commit_mutation(transaction).await?;
+            return Ok(RunnerReplacementProvisioningOutcome::Rejected(rejection));
+        }
+        let ReplacementTargetAuthority::Current(target) = target_authority else {
+            let reason = target_authority
+                .unavailable_reason()
+                .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+            let rejection = RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+                session: command.session(),
+                target: command.replacement(),
+                reason,
+            };
+            insert_replacement_provisioning_rejection(
+                transaction.as_mut(),
+                command,
+                rejection,
+                evidence,
+            )
+            .await?;
+            commit_mutation(transaction).await?;
+            return Ok(RunnerReplacementProvisioningOutcome::Rejected(rejection));
+        };
+        let target_runner = target.runner;
+        if target.predecessor_runner().is_some() && target.predecessor_runner() != Some(lost_runner)
+        {
+            evidence.new_runner = Some(target_runner);
+            let rejection = RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+                session: command.session(),
+                target: command.replacement(),
+                reason: RunnerReplacementTargetUnavailableReason::PendingRequestMismatch,
+            };
+            insert_replacement_provisioning_rejection(
+                transaction.as_mut(),
+                command,
+                rejection,
+                evidence,
+            )
+            .await?;
+            commit_mutation(transaction).await?;
+            return Ok(RunnerReplacementProvisioningOutcome::Rejected(rejection));
+        }
+        let mut replacement_request = placement.request().clone();
+        replacement_request.selector = RunnerSelector::Identity(target_runner);
+        if matches!(replacement_request.workspace, WorkspaceRequirement::None) {
+            transaction.rollback().await?;
+            return Ok(RunnerReplacementProvisioningOutcome::NotApplicable);
+        }
+        let checked =
+            match command.replacement() {
+                RunnerReplacementTarget::SameRunnerReenrollment(_) => {
+                    let loss_revision = lost.loss_registration_revision().ok_or(
+                        RunnerProtocolStoreError::Domain(RunnerDomainError::InvalidState),
+                    )?;
+                    let loss_registration = load_registration_in(
+                        transaction.as_mut(),
+                        target.enrollment,
+                        RunnerRegistrationRevision::try_from_u64(loss_revision.get())
+                            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+                        None,
+                        &self.catalog,
+                    )
+                    .await?
+                    .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+                    placement.authorize_same_runner_replacement_workspace(
+                        authorization,
+                        &replacement_request,
+                        &signalbox_domain::SameRunnerRegistrationRecovery {
+                            loss_registration: loss_registration.registration().clone(),
+                            current_registration: target.registration.registration().clone(),
+                        },
+                    )
+                }
+                RunnerReplacementTarget::Runner(_)
+                | RunnerReplacementTarget::PendingEnrollment(_) => placement
+                    .authorize_lost_runner_replacement_workspace(
+                        authorization,
+                        &replacement_request,
+                        target.registration.registration(),
+                    ),
+            };
+        let checked = match checked {
+            Ok(checked) => checked,
+            Err(error) if replacement_target_is_unavailable(&error) => {
+                let rejection =
+                    RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+                        session: command.session(),
+                        target: command.replacement(),
+                        reason: RunnerReplacementTargetUnavailableReason::NotAdvertised,
+                    };
+                insert_replacement_provisioning_rejection(
+                    transaction.as_mut(),
+                    command,
+                    rejection,
+                    evidence,
+                )
+                .await?;
+                commit_mutation(transaction).await?;
+                return Ok(RunnerReplacementProvisioningOutcome::Rejected(rejection));
+            }
+            Err(error) => return Err(RunnerProtocolStoreError::Domain(error)),
+        };
+        insert_workspace_provisioning_authorization(
+            transaction.as_mut(),
+            command,
+            current_event_ordinal,
+            &target,
+            &checked,
+        )
+        .await?;
+        let staged = RunnerReplacementProvisioningStage::from_authorization(&checked);
+        commit_mutation(transaction).await?;
+        Ok(RunnerReplacementProvisioningOutcome::Staged(staged))
+    }
+
     /// Replaces one exact runner lost before pinning with a different live runner.
     pub async fn replace_lost_runner_before_pin(
         &self,
@@ -4951,6 +5255,19 @@ impl ReplaceLostRunnerBeforePinTransaction for RunnerProtocolStore {
     }
 }
 
+impl RunnerReplacementProvisioningTransaction for RunnerProtocolStore {
+    type Error = RunnerProtocolStoreError;
+
+    async fn stage(
+        &mut self,
+        command: ReplaceLostRunner,
+        authorization: WorkspaceProvisioningAuthorizationId,
+    ) -> Result<RunnerReplacementProvisioningOutcome, Self::Error> {
+        self.stage_runner_replacement_provisioning(command, authorization)
+            .await
+    }
+}
+
 enum ReplacementTargetAuthority {
     Current(Box<ReplacementTargetEvidence>),
     Unavailable {
@@ -4974,6 +5291,13 @@ impl ReplacementTargetAuthority {
             Self::Unavailable {
                 predecessor_runner, ..
             } => *predecessor_runner,
+        }
+    }
+
+    const fn unavailable_reason(&self) -> Option<RunnerReplacementTargetUnavailableReason> {
+        match self {
+            Self::Current(_) => None,
+            Self::Unavailable { reason, .. } => Some(*reason),
         }
     }
 }
@@ -5255,6 +5579,215 @@ async fn insert_replacement_command(
     .execute(&mut *connection)
     .await?;
     Ok(())
+}
+
+async fn insert_workspace_provisioning_authorization(
+    connection: &mut PgConnection,
+    command: ReplaceLostRunner,
+    lost_event_ordinal: u64,
+    target: &ReplacementTargetEvidence,
+    authorization: &signalbox_domain::WorkspaceProvisioningAuthorization,
+) -> Result<(), RunnerProtocolStoreError> {
+    sqlx::query(
+        "INSERT INTO runner_workspace_provisioning_authorization
+            (authorization_id, command_id, session_id,
+             lost_placement_event_ordinal, lost_placement_revision,
+             successor_placement_revision, enrollment_id, runner_id,
+             registration_revision, connection_epoch,
+             connection_event_ordinal, repository_key, sandbox_profile,
+             credential_profile_name)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                 $13, $14)",
+    )
+    .bind(authorization.authorization().into_uuid())
+    .bind(command.command().into_uuid())
+    .bind(command.session().into_uuid())
+    .bind(Decimal::from(lost_event_ordinal))
+    .bind(Decimal::from(command.expected_placement_revision().get()))
+    .bind(Decimal::from(authorization.placement_revision().get()))
+    .bind(target.enrollment.into_uuid())
+    .bind(target.runner.into_uuid())
+    .bind(Decimal::from(target.registration_revision.get()))
+    .bind(Decimal::from(target.connection_epoch.get()))
+    .bind(Decimal::from(target.connection_event_ordinal))
+    .bind(authorization.repository().as_str())
+    .bind(runner_sandbox_to_str(authorization.sandbox()))
+    .bind(
+        authorization
+            .credential_profile()
+            .map(CredentialProfileName::as_str),
+    )
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+async fn insert_replacement_provisioning_rejection(
+    connection: &mut PgConnection,
+    command: ReplaceLostRunner,
+    rejection: RunnerReplacementProvisioningRejection,
+    evidence: ReplacementRecordEvidence,
+) -> Result<(), RunnerProtocolStoreError> {
+    let rejection = match rejection {
+        RunnerReplacementProvisioningRejection::SessionNotFound { session } => {
+            ReplaceLostRunnerBeforePinRejection::SessionNotFound { session }
+        }
+        RunnerReplacementProvisioningRejection::RunnerPlacementNotFound { session } => {
+            ReplaceLostRunnerBeforePinRejection::RunnerPlacementNotFound { session }
+        }
+        RunnerReplacementProvisioningRejection::PlacementRevisionMismatch {
+            session,
+            expected,
+            current,
+        } => ReplaceLostRunnerBeforePinRejection::PlacementRevisionMismatch {
+            session,
+            expected,
+            current,
+        },
+        RunnerReplacementProvisioningRejection::PlacementNotLost {
+            session,
+            placement_revision,
+            state,
+        } => ReplaceLostRunnerBeforePinRejection::PlacementNotLost {
+            session,
+            placement_revision,
+            state,
+        },
+        RunnerReplacementProvisioningRejection::ReplacementSameRunner { session, runner } => {
+            ReplaceLostRunnerBeforePinRejection::ReplacementSameRunner { session, runner }
+        }
+        RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+            session,
+            target,
+            reason,
+        } => ReplaceLostRunnerBeforePinRejection::ReplacementTargetUnavailable {
+            session,
+            target,
+            reason,
+        },
+    };
+    insert_replacement_result(
+        connection,
+        command,
+        ReplaceLostRunnerBeforePinResult::Rejected(rejection),
+        evidence,
+    )
+    .await
+}
+
+async fn load_replacement_provisioning_outcome(
+    connection: &mut PgConnection,
+    command: ReplaceLostRunner,
+) -> Result<Option<RunnerReplacementProvisioningOutcome>, RunnerProtocolStoreError> {
+    let row = sqlx::query(
+        "SELECT command.session_id, command.expected_placement_revision,
+                command.target_kind, command.target_runner_id,
+                command.target_pending_request_id,
+                staged.authorization_id, staged.successor_placement_revision,
+                staged.enrollment_id, staged.runner_id,
+                staged.registration_revision, staged.repository_key,
+                staged.sandbox_profile, staged.credential_profile_name,
+                result.rejection_kind, result.target_unavailable_reason,
+                result.placement_revision, result.placement_state_kind,
+                result.new_runner_id
+           FROM replace_lost_runner_command AS command
+           LEFT JOIN runner_workspace_provisioning_authorization AS staged
+             ON staged.command_id = command.command_id
+            AND staged.session_id = command.session_id
+           LEFT JOIN replace_lost_runner_result AS result
+             ON result.command_id = command.command_id
+            AND result.session_id = command.session_id
+          WHERE command.command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let stored = ReplaceLostRunner::new(
+        command.command(),
+        session_id(row.decode_column("session_id")?),
+        decode_runner_generation(row.decode_column("expected_placement_revision")?)?,
+        decode_replacement_target(&row)?,
+    );
+    if stored != command {
+        return Ok(Some(
+            RunnerReplacementProvisioningOutcome::ConflictingReuse {
+                command: command.command(),
+            },
+        ));
+    }
+    let staged: Option<Uuid> = row.decode_column("authorization_id")?;
+    if let Some(staged) = staged {
+        let profile: Option<String> = row.decode_column("credential_profile_name")?;
+        let stage = RunnerReplacementProvisioningStage::from_stored(
+            WorkspaceProvisioningAuthorizationId::from_uuid(staged),
+            command.session(),
+            decode_runner_generation(row.decode_column("successor_placement_revision")?)?,
+            runner_enrollment_id(row.decode_column("enrollment_id")?),
+            runner_id(row.decode_column("runner_id")?),
+            decode_runner_generation(row.decode_column("registration_revision")?)?,
+            repository_key(row.decode_column("repository_key")?)?,
+            runner_sandbox_from_str(&row.decode_column::<String>("sandbox_profile")?)
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+            profile.map(profile_name).transpose()?,
+        );
+        return Ok(Some(RunnerReplacementProvisioningOutcome::Staged(stage)));
+    }
+    let rejection: Option<String> = row.decode_column("rejection_kind")?;
+    let Some(rejection) = rejection else {
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+    };
+    let rejection = replace_lost_runner_rejection_from_str(&rejection)
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+    let rejection = match rejection {
+        ReplaceLostRunnerRejectionStorageKind::SessionNotFound => {
+            RunnerReplacementProvisioningRejection::SessionNotFound {
+                session: command.session(),
+            }
+        }
+        ReplaceLostRunnerRejectionStorageKind::RunnerPlacementNotFound => {
+            RunnerReplacementProvisioningRejection::RunnerPlacementNotFound {
+                session: command.session(),
+            }
+        }
+        ReplaceLostRunnerRejectionStorageKind::PlacementRevisionMismatch => {
+            RunnerReplacementProvisioningRejection::PlacementRevisionMismatch {
+                session: command.session(),
+                expected: command.expected_placement_revision(),
+                current: decode_runner_generation(row.decode_column("placement_revision")?)?,
+            }
+        }
+        ReplaceLostRunnerRejectionStorageKind::PlacementNotLost => {
+            let state: String = row.decode_column("placement_state_kind")?;
+            RunnerReplacementProvisioningRejection::PlacementNotLost {
+                session: command.session(),
+                placement_revision: decode_runner_generation(
+                    row.decode_column("placement_revision")?,
+                )?,
+                state: placement_recovery_state_from_str(&state)?,
+            }
+        }
+        ReplaceLostRunnerRejectionStorageKind::ReplacementSameRunner => {
+            RunnerReplacementProvisioningRejection::ReplacementSameRunner {
+                session: command.session(),
+                runner: runner_id(row.decode_column("new_runner_id")?),
+            }
+        }
+        ReplaceLostRunnerRejectionStorageKind::ReplacementTargetUnavailable => {
+            RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+                session: command.session(),
+                target: command.replacement(),
+                reason: replacement_target_reason_from_str(
+                    &row.decode_column::<String>("target_unavailable_reason")?,
+                )?,
+            }
+        }
+    };
+    Ok(Some(RunnerReplacementProvisioningOutcome::Rejected(
+        rejection,
+    )))
 }
 
 async fn insert_replacement_result(
