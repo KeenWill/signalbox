@@ -750,6 +750,7 @@ fn provider_error_script() -> Script {
         exchange: ExchangeFacts::default(),
         reported_model: Some(ProviderReportedModel::new("scripted-tool-loop")),
         kind: ProviderErrorKind::ProviderInternal,
+        non_acceptance_proven: false,
         native: NativeErrorFacts::default(),
         usage: TokenUsage::unreported(),
     }))
@@ -3970,9 +3971,10 @@ async fn s10_inv020_inv021_blanket_posture_runs_confirm_tool_unattended()
 }
 
 /// S05 / INV-005 / INV-006 / INV-024: losing a dispatched effect-free attempt
-/// never retries it; the dispatch path classifies it `known_failed` with
-/// `crash_lost` evidence before releasing its gate, startup preserves that
-/// terminal state idempotently, and a later submit activates and runs.
+/// never retries it; the dispatch path contains the executor failure by
+/// classifying it `known_failed` with `crash_lost` evidence before releasing
+/// its gate, startup preserves that terminal state idempotently, and a later
+/// submit activates and runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s05_inv005_inv006_inv024_failed_tool_round_admits_and_runs_later_turn()
@@ -3989,13 +3991,9 @@ async fn s05_inv005_inv006_inv024_failed_tool_round_admits_and_runs_later_turn()
         tool_catalog,
         crashing.clone(),
     );
-    let first = first_execution
+    first_execution
         .execute(Box::new(fixture.activated.clone()))
-        .await;
-    assert!(
-        first.is_err(),
-        "fixture process loss must escape orchestration"
-    );
+        .await?;
     assert_eq!(crashing.events(), vec![String::from("effect_free")]);
 
     let mut startup = StartupScanService::new(
