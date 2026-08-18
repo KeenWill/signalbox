@@ -54,8 +54,10 @@ followed by exact `workspace_recorded` projection, is verified against this PR
 (`agent/daemon-runner-workspace-ready-routing`). Daemon-side authenticated
 resume classification of one retained `ready_unrecorded` workspace and its
 fail-closed directive is verified against this PR
-(`agent/runner-workspace-ready-resume`). Established-connection routing of those
-inbound claim and result frames through the durable transactions before
+(`agent/runner-workspace-ready-resume`). Runner-local retention of the complete
+ready frame and its exact recorded/stale state transitions are verified against
+this PR (`agent/runner-workspace-ready-spool`). Established-connection routing
+of those inbound claim and result frames through the durable transactions before
 acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
@@ -781,22 +783,30 @@ workspace release, advancing exactly from `release_accepted` to
 slot. A `workspace_cleanup_failed` envelope is admissible only beside the exact
 accepted release it refuses, and its exact failure acknowledgement atomically
 frees both slots. A result acknowledgement preserves this independent workspace
-state. The root rejects provisioning and leak slots, cross-wired correlations,
-and journals belonging to another enrolled runner. The live serving loop
-consumes the exact result, lease-offer-failure, completed-release, and
-release-failure acknowledgements for evidence naming the current runner. Its
-heartbeat repeats an accepted or completed release phase, or the exact
-`failure_unrecorded` release correlation after cleanup failure, from the durable
-journal rather than process memory. On resume the runner sends the complete
-stored inventory. It accepts only matching paired `discard_as_recorded` or
-paired `fail_stale` directives for retained terminal evidence and atomically
-frees both slots. For a retained lease-offer failure, `resend` emits the exact
-stored envelope while retaining it, and `discard_as_recorded` or `fail_stale`
-frees it. Unsupported actions preserve the journal and fail closed. No present
-filesystem producer begins or advances a release, and resumed release directives
-remain unsupported. The only live failure producer is the registration-only
-empty catalog refusing an offered unknown tool; this boundary supplies neither
-workspace cleanup nor a workstation tool inventory.
+state. The same workspace slot can instead retain one complete, validated
+repository `workspace_ready` frame beside its exact `ready_unrecorded` reconnect
+correlation; the journal is invalid unless both representations are present and
+equal. Its exact `workspace_recorded` acknowledgement frees both
+representations. The root rejects in-progress provisioning, provisioning
+failure, and leak slots, cross-wired correlations, and journals belonging to
+another enrolled runner. The live serving loop consumes the exact result,
+lease-offer-failure, completed-release, and release-failure acknowledgements for
+evidence naming the current runner. Its heartbeat repeats an accepted or
+completed release phase, or the exact `failure_unrecorded` release correlation
+after cleanup failure, from the durable journal rather than process memory. On
+resume the runner sends the complete stored inventory. It accepts only matching
+paired `discard_as_recorded` or paired `fail_stale` directives for retained
+terminal evidence and atomically frees both slots. For a retained lease-offer
+failure, `resend` emits the exact stored envelope while retaining it, and
+`discard_as_recorded` or `fail_stale` frees it. Unsupported actions preserve the
+journal and fail closed. The only live failure producer is the registration-only
+empty catalog refusing an offered unknown tool.
+
+**Committed unimplemented functionality.** No present filesystem producer
+creates ready evidence or begins or advances a release, and resumed
+ready-workspace and release directives remain unsupported. This boundary
+supplies neither workspace provisioning, workspace cleanup, nor a workstation
+tool inventory.
 
 **Committed unimplemented functionality.** Future execution support populates
 the bounded inventory that resume already exchanges, containing at most the one
@@ -986,12 +996,16 @@ Canonical stale terminal evidence instead receives `fail_stale` for both items.
 One otherwise-empty repository provisioning inventory at `ready_unrecorded` is
 structurally admitted but receives `fail_stale`: its durable provisioning
 authority names the prior connection event, and no present resume transaction
-reauthorizes the new connection to resend that payload. **Committed
-unimplemented functionality.** The runner does not yet retain the complete ready
-manifest beside this correlation or consume the directive, and the daemon does
-not yet provide that durable reauthorization, so this recovery arm does not make
-provisioning restartable. Every other nonempty inventory shape remains rejected.
-Stored identity mismatch,
+reauthorizes the new connection to resend that payload. The runner state root can
+retain the complete validated ready frame in the same atomic journal as that
+correlation.
+
+**Committed unimplemented functionality.** No present runner protocol path
+resends that payload or consumes the directive, and no present filesystem
+producer creates it, so this recovery path does not yet perform provisioning.
+The daemon does not yet provide durable reauthorization, so this recovery arm
+does not make provisioning restartable. Every other nonempty inventory shape
+remains rejected. Stored identity mismatch,
 revocation, a future revision, or a stale revision paired with changed
 availability fails closed. Equal availability returns the current durable
 revision; changed availability at the current revision atomically appends its
@@ -1850,8 +1864,12 @@ lease-row insert (INV-035, INV-045).
 
 ## Workspace provisioning and recovery
 
-**Committed unimplemented functionality.** No present runner provisions,
-recovers, releases, or reconciles a workspace, and no present daemon producer
+The runner state root can retain a caller-supplied complete ready frame beside
+its exact reconnect correlation.
+
+**Committed unimplemented functionality.** No present runner provisions or
+deletes a workspace, no filesystem producer populates the retained ready frame,
+no live runner protocol path recovers it, and no present daemon producer
 constructs a workspace operation. The outbound broker can transport a
 caller-constructed closed frame but does not authorize or journal it. Every
 remaining behavior in this section constrains that future implementation. The
@@ -1865,8 +1883,11 @@ repository-workspace manifest facts without deriving an execution working
 directory. Its production persistence transaction authenticates those facts
 against the exact durable provisioning stage under the runner lock order,
 commits before acknowledgement, returns the canonical record on equal replay,
-and rejects conflicting reuse. No established-connection runtime invokes that
-boundary yet.
+and rejects conflicting reuse. The established daemon runtime binds a ready
+frame to its physical runner, invokes that transaction, and returns the exact
+recorded acknowledgement after commit or equal replay. No runner filesystem
+producer yet creates or sends the initial ready frame, and no live runner path
+consumes the acknowledgement.
 
 The domain constructs a `WorkspaceProvisioningAuthorization` only for a
 repository-backed successor request that the selected current registration can
@@ -1876,9 +1897,9 @@ credential profile. A distinct successor uses the ordinary pinned-replacement
 check; the same runner additionally requires the exact registration-loss
 recovery evidence. A connection loss cannot authorize a same-runner successor,
 and a stale registration, unsupported request, or request with no repository
-produces no authorization. Dispatch, receipt acknowledgement, receipt
-consumption into replacement terminalization, and restart recovery remain
-unimplemented. The application provisioning service supplies the complete
+produces no authorization. Dispatch, live runner receipt acknowledgement,
+receipt consumption into replacement terminalization, and restart recovery
+remain unimplemented. The application provisioning service supplies the complete
 replacement command and one fresh UUIDv7 authorization candidate to a single
 atomic transaction call. Its closed outcome distinguishes a stored retryable
 authorization, a recorded terminal refusal, conflicting command reuse, and a
