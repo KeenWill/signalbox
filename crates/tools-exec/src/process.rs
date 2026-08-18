@@ -1259,12 +1259,6 @@ impl HttpsBrokerSocketIdentity {
                     source: None,
                 });
             }
-            let destination = path.canonicalize().map_err(|source| {
-                ExecToolConstructionError::HttpsBrokerSocket {
-                    path: path.to_owned(),
-                    source: Some(source),
-                }
-            })?;
             let current_process_descriptors =
                 PathBuf::from(format!("/proc/{}/fd", std::process::id()));
             let descriptor_relative_path = path
@@ -1286,14 +1280,25 @@ impl HttpsBrokerSocketIdentity {
                         && components
                             .all(|component| matches!(component, std::path::Component::Normal(_)))
                 });
-            if destination != path && !descriptor_relative_path {
-                return Err(ExecToolConstructionError::HttpsBrokerSocket {
-                    path: path.to_owned(),
-                    source: None,
-                });
-            }
+            let bind_target = if descriptor_relative_path {
+                path.to_owned()
+            } else {
+                let destination = path.canonicalize().map_err(|source| {
+                    ExecToolConstructionError::HttpsBrokerSocket {
+                        path: path.to_owned(),
+                        source: Some(source),
+                    }
+                })?;
+                if destination != path {
+                    return Err(ExecToolConstructionError::HttpsBrokerSocket {
+                        path: path.to_owned(),
+                        source: None,
+                    });
+                }
+                destination
+            };
             let descriptor = rustix::fs::open(
-                &destination,
+                &bind_target,
                 rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW,
                 rustix::fs::Mode::empty(),
             )
@@ -4907,7 +4912,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn runner_restricted_https_bridge_rechecks_socket_identity_before_probe()
+    async fn runner_restricted_https_bridge_retains_pinned_socket_after_path_replacement()
     -> Result<(), Box<dyn Error>> {
         let workspace = ReplacementWorkspace::new()?;
         let read_only = ReplacementWorkspace::new()?;
@@ -4938,9 +4943,10 @@ mod tests {
 
         let result = command_runner.try_run(arguments).await?;
 
-        assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
-        assert_eq!(observation.recorded_probes(), Vec::new());
-        assert_eq!(observation.recorded_requests(), Vec::new());
+        assert_eq!(result.confinement, ExecutionConfinement::FilesystemConfined);
+        assert_eq!(result.stdout.text, SANDBOXED_STDOUT);
+        assert_eq!(observation.recorded_probes().len(), 1);
+        assert_eq!(observation.recorded_requests().len(), 1);
         Ok(())
     }
 

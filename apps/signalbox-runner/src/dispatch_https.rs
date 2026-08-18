@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rustix::fs::{AtFlags, Mode, OFlags, mkdirat, openat, unlinkat};
+use rustix::fs::{AtFlags, Mode, OFlags, chmodat, fchmod, mkdirat, openat, unlinkat};
 use signalbox_runner_wire::CanonicalUuid;
 use signalbox_tools_exec::MAX_HTTPS_PROXY_TUNNELS;
 use tokio::{net::UnixListener, sync::oneshot, task::JoinSet, time::Instant};
@@ -71,6 +71,54 @@ pub struct DispatchHttpsEndpoint {
 }
 
 impl DispatchHttpsEndpoint {
+    /// Removes recognized endpoint directories left by an earlier terminated runner.
+    ///
+    /// The caller supplies the validated root descriptor after acquiring its
+    /// process-lifetime lock, so every recognized endpoint is stale.
+    pub fn reclaim_stale(root: File) -> Result<(), DispatchHttpsError> {
+        let root_metadata = root.metadata().map_err(DispatchHttpsError::Directory)?;
+        if !root_metadata.is_dir()
+            || root_metadata.uid() != rustix::process::geteuid().as_raw()
+            || root_metadata.permissions().mode() & PERMISSION_MASK != DIRECTORY_MODE
+        {
+            return Err(DispatchHttpsError::InvalidRoot);
+        }
+        let descriptor_path = format!("/proc/self/fd/{}", root.as_raw_fd());
+        for entry in fs::read_dir(descriptor_path).map_err(DispatchHttpsError::Directory)? {
+            let entry = entry.map_err(DispatchHttpsError::Directory)?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(lease) = name.strip_prefix("d-") else {
+                continue;
+            };
+            let Ok(lease) = uuid::Uuid::parse_str(lease) else {
+                continue;
+            };
+            if name != format!("d-{lease}") {
+                continue;
+            }
+            let directory = File::from(
+                openat(
+                    &root,
+                    name.as_str(),
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|error| DispatchHttpsError::Directory(rustix_error(error)))?,
+            );
+            match unlinkat(&directory, SOCKET_FILE, AtFlags::empty()) {
+                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+                Err(error) => {
+                    return Err(DispatchHttpsError::Directory(rustix_error(error)));
+                }
+            }
+            unlinkat(&root, name.as_str(), AtFlags::REMOVEDIR)
+                .map_err(|error| DispatchHttpsError::Directory(rustix_error(error)))?;
+        }
+        Ok(())
+    }
+
     /// Binds the endpoint beneath the already-validated effective-user-private runner root.
     pub fn bind(root: File, lease_id: CanonicalUuid) -> Result<Self, DispatchHttpsError> {
         let root_metadata = root.metadata().map_err(DispatchHttpsError::Directory)?;
@@ -83,6 +131,10 @@ impl DispatchHttpsEndpoint {
         let directory_name = format!("d-{lease_id}");
         mkdirat(&root, directory_name.as_str(), Mode::RWXU)
             .map_err(|error| DispatchHttpsError::Directory(rustix_error(error)))?;
+        if let Err(error) = chmodat(&root, directory_name.as_str(), Mode::RWXU, AtFlags::empty()) {
+            let _ = unlinkat(&root, directory_name.as_str(), AtFlags::REMOVEDIR);
+            return Err(DispatchHttpsError::Directory(rustix_error(error)));
+        }
         let directory = match openat(
             &root,
             directory_name.as_str(),
@@ -95,6 +147,10 @@ impl DispatchHttpsEndpoint {
                 return Err(DispatchHttpsError::Directory(rustix_error(error)));
             }
         };
+        if let Err(error) = fchmod(&directory, Mode::RWXU) {
+            let _ = unlinkat(&root, directory_name.as_str(), AtFlags::REMOVEDIR);
+            return Err(DispatchHttpsError::Directory(rustix_error(error)));
+        }
         let socket = PathBuf::from(format!(
             "/proc/{}/fd/{}/{directory_name}/{SOCKET_FILE}",
             std::process::id(),
@@ -287,6 +343,29 @@ mod tests {
                 .expect("the bounded dispatch endpoint binds");
 
         assert!(endpoint.socket_path().as_os_str().len() < 108);
+    }
+
+    #[tokio::test]
+    async fn startup_reclaims_an_endpoint_stranded_by_termination() {
+        let root = private_root();
+        let endpoint = DispatchHttpsEndpoint::bind(
+            root_descriptor(&root),
+            CanonicalUuid::from_uuid(Uuid::from_u128(LEASE)),
+        )
+        .expect("the dispatch endpoint binds");
+        let socket = endpoint.socket_path().to_owned();
+        std::mem::forget(endpoint);
+
+        DispatchHttpsEndpoint::reclaim_stale(root_descriptor(&root))
+            .expect("the locked-root startup sweep reclaims the stale endpoint");
+
+        assert!(!socket.exists());
+        assert!(
+            fs::read_dir(root.path())
+                .expect("the endpoint fixture root remains inspectable")
+                .next()
+                .is_none()
+        );
     }
 
     #[tokio::test]
