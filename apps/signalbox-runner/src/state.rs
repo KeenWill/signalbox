@@ -36,7 +36,7 @@ where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
 {
-    T::deserialize(deserializer).map(Some)
+    Option::<T>::deserialize(deserializer)
 }
 
 /// Authority carried by the daemon-issued enrollment receipt.
@@ -182,11 +182,7 @@ struct StateDocument {
 struct OperationJournalDocument {
     version: u64,
     inventory: ReconnectInventory,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_present"
-    )]
+    #[serde(deserialize_with = "deserialize_present")]
     ready_workspace: Option<WorkspaceReady>,
 }
 
@@ -1607,19 +1603,18 @@ mod tests {
         }
     }
 
-    fn workspace_recorded() -> WorkspaceRecorded {
-        let ready = workspace_ready();
+    fn workspace_recorded(ready: &WorkspaceReady) -> WorkspaceRecorded {
         WorkspaceRecorded {
-            correlation: ready.correlation,
+            correlation: ready.correlation.clone(),
             manifest_id: ready.ready.manifest.manifest_id,
-            manifest_digest: ready.ready.manifest_digest,
+            manifest_digest: ready.ready.manifest_digest.clone(),
         }
     }
 
-    fn inventory_with_ready() -> ReconnectInventory {
+    fn inventory_with_ready(ready: &WorkspaceReady) -> ReconnectInventory {
         ReconnectInventory {
             workspace_operation: Some(WorkspaceOperation::Provision {
-                correlation: provision_correlation(),
+                correlation: ready.correlation.clone(),
                 phase: ProvisionPhase::ReadyUnrecorded,
             }),
             ..ReconnectInventory::default()
@@ -2073,7 +2068,10 @@ mod tests {
 
         let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
 
-        assert_eq!(reopened.reconnect_inventory(), &inventory_with_ready());
+        assert_eq!(
+            reopened.reconnect_inventory(),
+            &inventory_with_ready(&ready)
+        );
         assert_eq!(reopened.retained_workspace_ready(), Some(&ready));
     }
 
@@ -2082,10 +2080,11 @@ mod tests {
         let parent = TempDir::new().expect("a temporary parent is available");
         let path = root_path(&parent);
         let mut root = enrolled_root(&parent);
-        root.record_workspace_ready(workspace_ready())
+        let ready = workspace_ready();
+        root.record_workspace_ready(ready.clone())
             .expect("the complete ready payload is durable");
 
-        root.acknowledge_workspace_ready(&workspace_recorded())
+        root.acknowledge_workspace_ready(&workspace_recorded(&ready))
             .expect("the exact recorded acknowledgement frees the ready payload");
         drop(root);
         let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
@@ -2125,10 +2124,42 @@ mod tests {
         root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
             .expect("the operation journal is created");
         drop(root);
-        replace_operation_journal(&path, inventory_with_ready());
+        let ready = workspace_ready();
+        replace_operation_journal(&path, inventory_with_ready(&ready));
 
         let error = RunnerStateRoot::open(&path)
             .expect_err("a ready correlation without its full payload fails closed");
+
+        assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
+    }
+
+    #[test]
+    fn s32_operation_journal_without_ready_workspace_field_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the operation journal is created");
+        drop(root);
+        let document = OperationJournalDocument {
+            version: STATE_DOCUMENT_VERSION,
+            inventory: inventory_with_lease(lease_phase(LeasePhaseKind::WaitingDispatch)),
+            ready_workspace: None,
+        };
+        let mut omitted = serde_json::to_value(document).expect("the journal fixture encodes");
+        omitted
+            .as_object_mut()
+            .expect("the journal fixture is an object")
+            .remove("ready_workspace")
+            .expect("the ready-workspace field was encoded");
+        fs::write(
+            path.join(OPERATION_JOURNAL_FILE),
+            serde_json::to_vec(&omitted).expect("the omitted-field fixture encodes"),
+        )
+        .expect("the operation journal fixture is replaced");
+
+        let error = RunnerStateRoot::open(&path)
+            .expect_err("an operation journal omitting the current field fails closed");
 
         assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
     }
@@ -2141,10 +2172,11 @@ mod tests {
         root.record_workspace_ready(workspace_ready())
             .expect("the complete ready payload is durable");
         drop(root);
-        let mut cross_wired = workspace_ready();
+        let ready = workspace_ready();
+        let mut cross_wired = ready.clone();
         cross_wired.correlation.authorization_id =
             CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_AUTHORIZATION_UUID + 1));
-        replace_operation_document(&path, inventory_with_ready(), Some(cross_wired));
+        replace_operation_document(&path, inventory_with_ready(&ready), Some(cross_wired));
 
         let error = RunnerStateRoot::open(&path)
             .expect_err("the full payload must match the reconnect correlation");
@@ -2159,7 +2191,7 @@ mod tests {
         let ready = workspace_ready();
         root.record_workspace_ready(ready.clone())
             .expect("the complete ready payload is durable");
-        let mut mismatched = workspace_recorded();
+        let mut mismatched = workspace_recorded(&ready);
         mismatched.manifest_id =
             CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_MANIFEST_UUID + 1));
 
@@ -2171,7 +2203,7 @@ mod tests {
             error,
             RunnerStateError::OperationCorrelationMismatch
         ));
-        assert_eq!(root.reconnect_inventory(), &inventory_with_ready());
+        assert_eq!(root.reconnect_inventory(), &inventory_with_ready(&ready));
         assert_eq!(root.retained_workspace_ready(), Some(&ready));
     }
 
