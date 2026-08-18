@@ -6,14 +6,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use signalbox_domain::{
     CredentialProfileName, ProvisionedWorkspace, RunnerAdvertisement, RunnerCapabilityClass,
-    RunnerRepositoryEntry, RunnerSandboxProfile, ToolName, WorkspaceBranchName,
+    RunnerRepositoryEntry, RunnerSandboxProfile, ToolName,
     WorkspaceCapability as DomainWorkspaceCapability, WorkspaceRecovery, WorkspaceRelativePath,
     WorkspaceRepositoryKey, WorkspaceRevision,
 };
 
 use crate::value::{
-    CanonicalUuid, CapabilityName, Digest, ManifestLifecycle, ProfileName, RepositoryKey,
-    SandboxProfile, ValueError, WireToolName, WorkspaceCapability,
+    BranchName, CanonicalUuid, CapabilityName, Digest, ManifestLifecycle, ProfileName,
+    RepositoryKey, SandboxProfile, ValueError, WireToolName, WorkspaceCapability,
 };
 
 /// The sole digest encoding version carried by enrollment frames.
@@ -215,14 +215,14 @@ pub enum Recovery {
     /// Validated branch at an exact object identity.
     Branch {
         /// Name without `refs/heads/`.
-        name: String,
+        name: BranchName,
         /// Full lowercase Git object identity.
         revision: String,
     },
     /// Validated branch whose first commit has not yet been born.
     UnbornBranch {
         /// Name without `refs/heads/`.
-        name: String,
+        name: BranchName,
     },
 }
 
@@ -233,13 +233,10 @@ impl Recovery {
                 .map(|_| ())
                 .map_err(|_| ValueError::Result),
             Self::Branch { name, revision } => {
-                WorkspaceBranchName::try_new(name.clone()).map_err(|_| ValueError::Result)?;
                 WorkspaceRevision::try_new(revision.clone()).map_err(|_| ValueError::Result)?;
                 Ok(())
             }
-            Self::UnbornBranch { name } => WorkspaceBranchName::try_new(name.clone())
-                .map(|_| ())
-                .map_err(|_| ValueError::Result),
+            Self::UnbornBranch { .. } => Ok(()),
         }
     }
 }
@@ -324,11 +321,11 @@ impl WorkspaceManifest {
                 revision: revision.as_str().to_owned(),
             },
             WorkspaceRecovery::Branch { name, revision } => Recovery::Branch {
-                name: name.as_str().to_owned(),
+                name: BranchName::try_new(name.as_str().to_owned())?,
                 revision: revision.as_str().to_owned(),
             },
             WorkspaceRecovery::UnbornBranch { name } => Recovery::UnbornBranch {
-                name: name.as_str().to_owned(),
+                name: BranchName::try_new(name.as_str().to_owned())?,
             },
         });
         let manifest = Self {
@@ -630,12 +627,12 @@ fn recovery_record(value: &Recovery) -> Vec<u8> {
         }
         Recovery::Branch { name, revision } => {
             push_field(&mut record, b"branch");
-            push_field(&mut record, name.as_bytes());
+            push_field(&mut record, name.as_str().as_bytes());
             push_field(&mut record, revision.as_bytes());
         }
         Recovery::UnbornBranch { name } => {
             push_field(&mut record, b"unborn_branch");
-            push_field(&mut record, name.as_bytes());
+            push_field(&mut record, name.as_str().as_bytes());
         }
     }
     record

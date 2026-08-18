@@ -334,7 +334,7 @@ pub struct RecoveryUnavailable {
 }
 
 impl RecoveryUnavailable {
-    /// Returns the exact representational gap preventing recovery.
+    /// Returns the exact operational implementation gap preventing recovery.
     pub const fn gap(self) -> RecoveryGap {
         self.gap
     }

@@ -58,6 +58,11 @@ fn repository(value: &str) -> RepositoryKey {
         .unwrap_or_else(|error| panic!("repository fixture is valid: {error}"))
 }
 
+fn branch(value: &str) -> BranchName {
+    BranchName::try_new(value.to_owned())
+        .unwrap_or_else(|error| panic!("branch fixture is valid: {error}"))
+}
+
 fn working_directory(value: &str) -> WorkingDirectory {
     WorkingDirectory::try_new(value.to_owned())
         .unwrap_or_else(|error| panic!("working-directory fixture is valid: {error}"))
@@ -136,7 +141,7 @@ fn manifest() -> WorkspaceManifest {
         sandbox_profile: SandboxProfile::WorkspaceRestricted,
         relative_path: "sessions/00000000-0000-4000-8000-000000000002/3/repo".to_owned(),
         recovery: Some(Recovery::Branch {
-            name: "main".to_owned(),
+            name: branch("main"),
             revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
         }),
     }
@@ -223,7 +228,7 @@ fn frame_round_trip_preserves_closed_message() {
 fn frame_round_trip_preserves_unborn_workspace_recovery() {
     let mut ready_manifest = manifest();
     ready_manifest.recovery = Some(Recovery::UnbornBranch {
-        name: "main".to_owned(),
+        name: branch("main"),
     });
     let ready_digest = workspace_manifest_digest(&ready_manifest)
         .unwrap_or_else(|error| panic!("unborn manifest digests: {error}"));

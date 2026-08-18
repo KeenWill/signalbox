@@ -1,5 +1,7 @@
 -- Represent an empty repository by the branch on which its first commit will
 -- be born. An unborn branch intentionally carries no object revision.
+-- The receipt constraints below supersede their definitions in
+-- 202608110028_runner_replacement_workspace_receipt.sql.
 
 ALTER TABLE runner_replacement_workspace_receipt
     ALTER COLUMN revision DROP NOT NULL,
@@ -33,6 +35,8 @@ ALTER TABLE runner_replacement_workspace_receipt
         )
     );
 
+-- The placement constraint below supersedes its definition in
+-- 202608080100_runner_placement_loss_lifecycle.sql.
 ALTER TABLE runner_session_placement_record
     DROP CONSTRAINT runner_session_placement_workspace_shape,
     ADD CONSTRAINT runner_session_placement_workspace_shape CHECK (
