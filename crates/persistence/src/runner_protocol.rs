@@ -3353,6 +3353,27 @@ impl RunnerProtocolStore {
         let prior_runner = lost.pinned().runner;
         evidence.prior_runner = Some(prior_runner);
         evidence.new_runner = target_authority.runner();
+        if matches!(
+            command.replacement(),
+            RunnerReplacementTarget::PendingEnrollment(_)
+        ) && lost.source() != RunnerPlacementLossSource::Connection
+        {
+            let rejection = RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+                session: command.session(),
+                target: command.replacement(),
+                reason: RunnerReplacementTargetUnavailableReason::PendingRequestMismatch,
+            };
+            insert_replacement_provisioning_rejection(
+                transaction.as_mut(),
+                command,
+                rejection,
+                evidence,
+            )
+            .await?;
+            return Ok(PinnedRunnerReplacementOutcome::Recorded(
+                PinnedRunnerReplacementResult::Rejected(rejection),
+            ));
+        }
         if target_authority.predecessor_runner().is_some()
             && target_authority.predecessor_runner() != Some(prior_runner)
         {
@@ -3483,9 +3504,35 @@ impl RunnerProtocolStore {
                 None,
                 None,
             )
-        }
-        .map_err(RunnerProtocolStoreError::Domain)?;
+        };
+        let replacement = match replacement {
+            Ok(replacement) => replacement,
+            Err(error)
+                if target.pending_activation.is_some()
+                    && replacement_target_is_unavailable(&error) =>
+            {
+                let rejection =
+                    RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+                        session: command.session(),
+                        target: command.replacement(),
+                        reason: RunnerReplacementTargetUnavailableReason::NotAdvertised,
+                    };
+                insert_replacement_provisioning_rejection(
+                    transaction.as_mut(),
+                    command,
+                    rejection,
+                    evidence,
+                )
+                .await?;
+                return Ok(PinnedRunnerReplacementOutcome::Recorded(
+                    PinnedRunnerReplacementResult::Rejected(rejection),
+                ));
+            }
+            Err(error) => return Err(RunnerProtocolStoreError::Domain(error)),
+        };
         if let Some(activation) = target.pending_activation.as_ref() {
+            terminalize_connection_for_revocation(transaction, activation.predecessor.enrollment)
+                .await?;
             activate_pending_replacement_target(transaction.as_mut(), activation).await?;
         }
         let next_event_ordinal = current_event_ordinal
@@ -8001,11 +8048,19 @@ async fn load_pinned_replacement_record(
                 && prior_runner != new_runner
         }
     };
+    let target_enrollment_state_matches = match command.replacement() {
+        RunnerReplacementTarget::PendingEnrollment(_) => {
+            active_candidate_state.as_deref() == Some("active")
+        }
+        RunnerReplacementTarget::Runner(_) | RunnerReplacementTarget::SameRunnerReenrollment(_) => {
+            target_enrollment_state == "active"
+        }
+    };
     if !target_matches
         || target_registration_enrollment != target_enrollment
         || target_registration_runner != new_runner
         || target_enrollment_runner != new_runner
-        || target_enrollment_state != "active"
+        || !target_enrollment_state_matches
         || runner_connection_state_from_str(&target_connection_state)
             != Some(RunnerConnectionState::Connected)
         || lost_event_kind != "runner_lost"
