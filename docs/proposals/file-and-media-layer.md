@@ -150,14 +150,16 @@ later probe and reader ranges from that exact verified generation. It deletes
 the snapshot after the request and never exposes its path to a worker. Before
 traversal, the broker atomically reserves the authenticated exact byte length
 from both per-request and process-wide snapshot pools. Capacity exhaustion
-returns `ProcessorUnavailable` without reading source bytes or creating a
-snapshot. The reservation remains held until the request-local file is removed.
-At startup, the broker removes abandoned files from its owner-private snapshot
-directory before admitting work, so a crash cannot permanently consume the
-pool. This
-preserves verification across range reads even for filesystem replicas and S3
-replicas without immutable version tokens. Detection does not call the process
-protocol, decode base64, expose paths, or hand store credentials to a worker.
+returns `SourceTooLarge { maximum_bytes: 68719476736 }` when the authenticated
+length exceeds the compiled 64 GiB per-request ceiling. Temporary exhaustion of
+the process-wide pool returns `ProcessorUnavailable`. Either rejection occurs
+without reading source bytes or creating a snapshot. The reservation remains
+held until the request-local file is removed. At startup, the broker removes
+abandoned files from its owner-private snapshot directory before admitting work,
+so a crash cannot permanently consume the pool. This preserves verification
+across range reads even for filesystem replicas and S3 replicas without
+immutable version tokens. Detection does not call the process protocol, decode
+base64, expose paths, or hand store credentials to a worker.
 
 Each provider registers bounded probes returning:
 
@@ -191,8 +193,15 @@ Detection follows one fixed algorithm:
     Exceeding any probe-specific request-wide budget is
     `ProcessorFailed { reason_code: probe_budget_exceeded }`; an inspection
     never schedules additional probes after that boundary. Failure to reserve or
-    start a worker propagates as `ProcessorUnavailable`; none of these source or
-    processor outcomes becomes content evidence.
+    start a worker propagates as `ProcessorUnavailable`. Every scheduled
+    relevant probe must complete successfully before candidate classification:
+    timeout, cancellation, crash, signal, malformed or extra framing,
+    output-limit breach, or other operational failure terminates inspection with
+    its exact `ProcessorTimedOut`, `Cancelled`, or sanitized `ProcessorFailed`
+    outcome. A surviving claim is never selected around a failed probe, because
+    the failed probe might have supplied conflicting strong or malformed
+    evidence. None of these source or processor outcomes becomes content
+    evidence.
 03. Partition byte-evidence results—`Strong`, `StructuralCandidate`, and
     `RecognizedMalformed`—by canonical media type and exact `ReaderIdentity`.
     Claims for different types or reader identities conflict and return
@@ -331,10 +340,10 @@ reference of each accepted type. Before processing or reserving a reference,
 `file_read` requires the view's complete emitted-type set to be accepted by the
 selected adapter and each declared presentation-byte maximum to fit both
 target-specific limits, unless the view instead guarantees normalization to one
-accepted type and bound. An unsupported type returns typed
-modality-unsupported failure; an oversized target projection returns
-`SourceTooLarge` with the target-specific maximum. Neither path can publish,
-reserve, or commit a reference.
+accepted type and bound. An unsupported type returns typed modality-unsupported
+failure; an oversized target projection returns `SourceTooLarge` with the
+target-specific maximum. Neither path can publish, reserve, or commit a
+reference.
 
 Registry construction's 786,432-byte body ceiling is only a declaration bound.
 Before committing a successful `file_inspect`, the tool loop prospectively
@@ -402,16 +411,23 @@ the containment boundary.
 
 A CLI parser is itself the fresh worker launched directly by the supervisor; no
 wrapper worker launches it as a child. When the CLI requires a path, the broker
-materializes the exact authorized source into one owner-private, read-only
-temporary file under the inspection deadline and source bounds, passes only that
-path, and removes it after whole-process-tree termination. The CLI inherits the
-same write-only length-delimited control descriptor and optional bounded binary
-descriptor as any other worker. Success requires one valid terminal frame, exact
-binary length/digest agreement when present, clean exit, and no extra output;
-cancellation, signal, timeout, nonzero exit, malformed framing, or descendant
-creation terminates the whole sandbox and discards staged output. The sandbox
-applies the same network, credential, environment, path, descriptor, and zero-
-descendant restrictions to this directly supervised process.
+receives one owner-private path in a broker-backed, read-only metered filesystem
+over the exact authorized snapshot; it never receives an ordinary materialized
+host file. Every open, read, positioned read, mapping fault, and reread is
+mediated and atomically charged against the selected operation's declared range
+and cumulative source-byte limits before bytes are supplied. Cache hits are
+charged again, and crossing either limit supplies no further bytes, terminates
+the worker, and returns `SourceTooLarge`, so seeking or mapping cannot bypass
+the broker's accounting. The mount and path disappear only after
+whole-process-tree termination. The CLI inherits the same write-only
+length-delimited control descriptor and optional bounded binary descriptor as
+any other worker. Success requires one valid terminal frame, exact binary
+length/digest agreement when present, clean exit, and no extra output;
+cancellation, signal, timeout, nonzero exit, malformed framing, descendant
+creation, or metering failure terminates the whole sandbox and discards staged
+output. The sandbox applies the same network, credential, environment, path,
+descriptor, and zero-descendant restrictions to this directly supervised
+process.
 
 ## Agent read surfaces
 
@@ -538,15 +554,22 @@ registers the verified blob, consumes the reservation, releases unused bytes,
 and commits the reference; a known-failure completion transaction releases the
 reservation without registering a blob. Every crash-lost authorized
 `ExternalEffect` attempt remains ambiguous and keeps its reservation through the
-owning tool loop's existing reconciliation lifecycle; it cannot be retried, and
-reconciliation consumes or releases the reservation only when it establishes the
-terminal result. No new pre-effect checkpoint or tool-loop transition is
-introduced by this proposal. A publication or completion failure may leave an
-unreferenced orphan, never a dangling result, but capacity rejection registers
-nothing. Thus every committed reference is admissible to its mandatory
-continuation call, no transaction spans processor or store I/O, and crash
-recovery never erases an external effect. Equal output bytes converge by digest,
-and ambiguous publication cannot become tool success.
+owning tool loop's reconciliation lifecycle; it cannot be retried. The bottom
+tool-loop specification diff in the implementation stack must add an explicit,
+durable reconciliation closure before this reservation mechanism can ship. A
+closure that proves success consumes the reservation while committing the exact
+result; one that proves known failure or records an operator's explicit terminal
+abandonment releases it. Abandonment is irreversible, records that no later
+result may be committed for the attempt, and is the only safe release when the
+external effect remains unknowable. Until one of those terminal closures
+commits, the reservation has no timeout and remains charged. This proposal adds
+no pre-effect checkpoint and does not treat daemon restart or elapsed time as
+closure. A publication or completion failure may leave an unreferenced orphan,
+never a dangling result, but capacity rejection registers nothing. Thus every
+committed reference is admissible to its mandatory continuation call, no
+transaction spans processor or store I/O, and crash recovery never erases an
+external effect. Equal output bytes converge by digest, and ambiguous
+publication cannot become tool success.
 
 Rendering first emits a bounded textual stub. Preparation then:
 
@@ -559,12 +582,12 @@ Rendering first emits a bounded textual stub. Preparation then:
    preparation outcomes without provider traffic; and
 4. materializes only the bounded form required by the selected provider.
 
-Direct adapters may encode bounded bytes; CLI adapters may receive an
-owner-private temporary file removed after the call. Provider wire types remain
-inside their adapter. Referenced bytes do not consume the text-result ceiling,
-but fixed metadata does, and media gets separate per-call bounds. Visibility of
-a later reference derives from the rendered durable result, not global catalog
-presence.
+Direct adapters may encode bounded bytes; CLI adapters may receive only the
+owner-private metered filesystem path described above, removed after the call.
+Provider wire types remain inside their adapter. Referenced bytes do not consume
+the text-result ceiling, but fixed metadata does, and media gets separate
+per-call bounds. Visibility of a later reference derives from the rendered
+durable result, not global catalog presence.
 
 ## Hard ceilings
 
@@ -580,7 +603,7 @@ may lower but never raise these process ceilings:
 | Aggregate probe ranges / source bytes   | 64 / 1,048,576         |
 | Aggregate probe memory / CPU / wall     | 1 GiB / 120 s / 120 s  |
 | Source verification traversals / bytes  | 1 / exact byte length  |
-| Snapshot bytes per request / process     | 64 GiB / 256 GiB       |
+| Snapshot bytes per request / process    | 64 GiB / 256 GiB       |
 | Per-read ranges / cumulative source     | 4,096 / 1,073,741,824  |
 | Control frame / text-or-JSON body       | 1,048,576 / 786,432    |
 | Views / complete inspection JSON        | 64 / 786,432 bytes     |
@@ -603,12 +626,12 @@ immutable request-local snapshot with a deadline-bounded full traversal whose
 byte bound is its authenticated length, provided that length fits the compiled
 64 GiB per-request snapshot ceiling and available process capacity; deployments
 may lower both snapshot bounds. Probe and reader work remain under their smaller
-fixed ceilings. A compatible reader can stream bounded regions from it,
-but no one read may consume more than 1,073,741,824 source bytes; a whole-decode
-view may return `SourceTooLarge` without invalidating the blob. Text/structure
-stops before the first complete semantic unit that would cross output bounds; a
-single oversized unit returns `OutputUnitTooLarge`, never partial UTF-8 or JSON.
-Image and audio limits are checked before decode allocation.
+fixed ceilings. A compatible reader can stream bounded regions from it, but no
+one read may consume more than 1,073,741,824 source bytes; a whole-decode view
+may return `SourceTooLarge` without invalidating the blob. Text/structure stops
+before the first complete semantic unit that would cross output bounds; a single
+oversized unit returns `OutputUnitTooLarge`, never partial UTF-8 or JSON. Image
+and audio limits are checked before decode allocation.
 
 Per-turn governance adds durable typed-read count and source-work reservations.
 One tool request charges once before authorization and is never refunded or
@@ -695,14 +718,20 @@ One shared suite proves every provider and isolation implementation:
   verification traversal and prove every probe/read range still observes only
   the completed verified snapshot;
 - snapshot admission reserves exact bytes before traversal, rejects exhausted
-  per-request or process capacity without source I/O, releases capacity only
-  after deletion, and removes crash leftovers before startup admission;
+  process capacity without source I/O, classifies a length above the 64 GiB
+  per-request ceiling as `SourceTooLarge`, releases capacity only after
+  deletion, and removes crash leftovers before startup admission;
 - declarations above 4,096 reader ranges or 1,073,741,824 reader-source bytes
   are rejected, and runtime exhaustion returns `SourceTooLarge` without another
   source byte;
-- crash, cancellation, timeout, memory/output kill, or framing defect produces
-  no partial success;
-- workers lack network, credentials, database, path, and second-digest access;
+- any scheduled relevant probe's crash, cancellation, timeout, memory/output
+  kill, or framing defect terminates inspection with its exact operational
+  outcome before candidate classification and produces no partial success;
+- workers lack network, credentials, database, arbitrary host-path, and
+  second-digest access;
+- path-based CLI fixtures prove seeks, positioned reads, mappings, and rereads
+  are charged before delivery and cannot exceed the declared cumulative source
+  limit;
 - text/JSON boundaries remain valid, and expansion/pixel/sample limits stop at
   the named value;
 - binary presentation can reach its declared ceiling without entering the
@@ -710,6 +739,9 @@ One shared suite proves every provider and isolation implementation:
   derived publication failure commits no reference, while a later failure leaves
   at most an orphan and equal output deduplicates;
 - durable replay does not rerun parsing or recharge the turn;
+- ambiguous rich-result reservations remain charged until durable reconciliation
+  proves success or failure or records irreversible terminal abandonment, after
+  which the attempt cannot later commit a result;
 - continuation tokens authenticate and resolve only to their bound digest, part
   selector, reader identity, view, normalized initial options, and position;
 - inspection and rich-result commits are rejected prospectively when their
@@ -752,10 +784,11 @@ preparation-failure proofs.
 ## Open questions requiring owner ruling
 
 The authoritative unresolved inventory is
-[`docs/open-questions.md`](../open-questions.md#file-and-media-interpretation). It
-owns the isolation substrate, first formats, parser dependency budget, OCR and
-transcription, provider-native general files, encrypted-file credentials, turn
-budgets, and classification-cache questions. This proposal does not settle them.
+[`docs/open-questions.md`](../open-questions.md#file-and-media-interpretation).
+It owns the isolation substrate, first formats, parser dependency budget, OCR
+and transcription, provider-native general files, encrypted-file credentials,
+turn budgets, and classification-cache questions. This proposal does not settle
+them.
 
 Acceptance settles only this common architecture. Every parser dependency and
 new provider modality still receives a narrow implementation review and updates

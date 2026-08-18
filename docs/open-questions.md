@@ -725,9 +725,9 @@ remain unresolved and bind no implementation:
 - **Parser dependency budget.** Decide whether isolated native decoders are
   admissible. Leaning: pure Rust first, with native libraries approved per
   adapter only when coverage requires them and executable isolation exists.
-- **OCR and transcription.** Choose explicit inference providers, local
-  readers, or absence. Leaning: exclude both because they add selection,
-  credentials, cost, privacy, and nondeterministic replay beyond file reading.
+- **OCR and transcription.** Choose explicit inference providers, local readers,
+  or absence. Leaning: exclude both because they add selection, credentials,
+  cost, privacy, and nondeterministic replay beyond file reading.
 - **Provider-native general files.** Decide which model adapters may receive
   them. Leaning: require an exact per-adapter type inventory and never treat a
   generic provider file surface as accepting unknown bytes.
@@ -735,11 +735,11 @@ remain unresolved and bind no implementation:
   may supply a password. Leaning: keep `EncryptedOrLocked` terminal in version
   one; secrets must not enter tool arguments or results.
 - **File-media turn budgets.** Set cumulative typed-read request and source-work
-  ceilings after first-adapter benchmarks while preserving every per-request
-  and per-call hard ceiling. Blocks production enablement, not interface work.
-- **File classification cache.** Decide whether validated classifications need
-  a cache beyond immutable tool results. Leaning: omit it until measurement
-  proves a need because it adds invalidation and reader-retirement law without
+  ceilings after first-adapter benchmarks while preserving every per-request and
+  per-call hard ceiling. Blocks production enablement, not interface work.
+- **File classification cache.** Decide whether validated classifications need a
+  cache beyond immutable tool results. Leaning: omit it until measurement proves
+  a need because it adds invalidation and reader-retirement law without
   improving correctness.
 
 ## Program substrate and evaluations
