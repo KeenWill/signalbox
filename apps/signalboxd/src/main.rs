@@ -1581,7 +1581,7 @@ async fn run_hub(
         Some(limit) => SchedulerLoop::with_max_in_flight(
             work_source,
             pass,
-            NonZeroUsize::new(limit).expect("positive parsed scheduler limit is nonzero"),
+            NonZeroUsize::new(limit).unwrap_or(NonZeroUsize::MIN),
         ),
         None => SchedulerLoop::new(work_source, pass),
     };
