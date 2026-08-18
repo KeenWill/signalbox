@@ -3766,20 +3766,110 @@ impl RunnerProtocolStore {
             .await?
             .ok_or(RunnerProtocolCorruption::MissingCanonicalPlacement)?;
         let release = sqlx::query(
-            "SELECT runner_id, manifest_id, enrollment_id, connection_epoch
-               FROM runner_workspace_release
-              WHERE session_id = $1 AND placement_revision = $2
-              FOR UPDATE",
+            "SELECT release.runner_id, release.manifest_id,
+                    release.retired_placement_event_ordinal,
+                    release.successor_placement_event_ordinal,
+                    release.enrollment_id, release.connection_epoch,
+                    release.connection_event_ordinal, release.state_kind,
+                    retired.event_kind AS retired_event_kind,
+                    retired.state_kind AS retired_state_kind,
+                    retired.loss_source_kind AS retired_loss_source_kind,
+                    retired.lost_runner_id AS retired_lost_runner_id,
+                    retired.pinned_runner_id AS retired_pinned_runner_id,
+                    retired.registration_enrollment_id AS retired_enrollment_id,
+                    retired.workspace_manifest_id AS retired_manifest_id,
+                    retired.workspace_placement_revision AS retired_workspace_revision,
+                    successor.event_kind AS successor_event_kind,
+                    successor.state_kind AS successor_state_kind,
+                    successor.placement_revision AS successor_revision,
+                    successor.pinned_runner_id AS successor_runner_id,
+                    successor.registration_enrollment_id AS successor_enrollment_id,
+                    successor.workspace_manifest_id AS successor_manifest_id,
+                    successor.workspace_placement_revision AS successor_workspace_revision,
+                    enrollment.runner_id AS enrollment_runner_id,
+                    enrollment.state_kind AS enrollment_state_kind,
+                    connection_head.connection_epoch AS head_connection_epoch,
+                    connection_head.connection_event_ordinal AS head_connection_event_ordinal,
+                    connection.state_kind AS connection_state_kind,
+                    current_placement.event_ordinal AS current_placement_event_ordinal
+               FROM runner_workspace_release AS release
+               JOIN runner_session_placement_record AS retired
+                 ON retired.session_id = release.session_id
+                AND retired.event_ordinal = release.retired_placement_event_ordinal
+                AND retired.placement_revision = release.placement_revision
+               JOIN runner_session_placement_record AS successor
+                 ON successor.session_id = release.session_id
+                AND successor.event_ordinal = release.successor_placement_event_ordinal
+               JOIN runner_current_session_placement AS current_placement
+                 ON current_placement.session_id = release.session_id
+               JOIN runner_enrollment AS enrollment
+                 ON enrollment.enrollment_id = release.enrollment_id
+               JOIN runner_connection_authority_head AS connection_head
+                 ON connection_head.enrollment_id = release.enrollment_id
+               JOIN runner_connection_event AS connection
+                 ON connection.enrollment_id = release.enrollment_id
+                AND connection.connection_epoch = release.connection_epoch
+                AND connection.event_ordinal = release.connection_event_ordinal
+              WHERE release.session_id = $1 AND release.placement_revision = $2
+              FOR UPDATE OF release",
         )
         .bind(acknowledgement.session().into_uuid())
         .bind(Decimal::from(acknowledgement.placement_revision().get()))
         .fetch_optional(&mut *transaction)
         .await?
-        .ok_or(RunnerProtocolStoreError::Domain(
-            RunnerDomainError::CorrelationMismatch,
-        ))?;
+        .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
         let stored_runner = runner_id(release.decode_column("runner_id")?);
         let stored_manifest = WorkspaceManifestId::from_uuid(release.decode_column("manifest_id")?);
+        let retired_placement_event_ordinal =
+            decode_u64(release.decode_column("retired_placement_event_ordinal")?)?;
+        let successor_placement_event_ordinal =
+            decode_u64(release.decode_column("successor_placement_event_ordinal")?)?;
+        let stored_enrollment: Uuid = release.decode_column("enrollment_id")?;
+        let stored_connection_epoch: Decimal = release.decode_column("connection_epoch")?;
+        let stored_connection_event_ordinal: Decimal =
+            release.decode_column("connection_event_ordinal")?;
+        let successor_revision =
+            decode_runner_generation(release.decode_column("successor_revision")?)?;
+        let expected_successor_revision = acknowledgement
+            .placement_revision()
+            .checked_next()
+            .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+        if release.decode_column::<String>("state_kind")? != "pending"
+            || release.decode_column::<String>("retired_event_kind")? != "runner_lost"
+            || release.decode_column::<String>("retired_state_kind")? != "runner_lost"
+            || release.decode_column::<String>("retired_loss_source_kind")? != "registration"
+            || release.decode_column::<Uuid>("retired_lost_runner_id")? != stored_runner.into_uuid()
+            || release.decode_column::<Uuid>("retired_pinned_runner_id")?
+                != stored_runner.into_uuid()
+            || release.decode_column::<Uuid>("retired_enrollment_id")? != stored_enrollment
+            || release.decode_column::<Uuid>("retired_manifest_id")? != stored_manifest.into_uuid()
+            || decode_runner_generation(release.decode_column("retired_workspace_revision")?)?
+                != acknowledgement.placement_revision()
+            || release.decode_column::<String>("successor_event_kind")? != "runner_replaced"
+            || release.decode_column::<String>("successor_state_kind")? != "pinned"
+            || successor_revision != expected_successor_revision
+            || release.decode_column::<Uuid>("successor_runner_id")? != stored_runner.into_uuid()
+            || release.decode_column::<Uuid>("successor_enrollment_id")? != stored_enrollment
+            || release.decode_column::<Uuid>("successor_manifest_id")?
+                == stored_manifest.into_uuid()
+            || decode_runner_generation(release.decode_column("successor_workspace_revision")?)?
+                != successor_revision
+            || release.decode_column::<Uuid>("enrollment_runner_id")? != stored_runner.into_uuid()
+            || release.decode_column::<String>("enrollment_state_kind")? != "active"
+            || release.decode_column::<Decimal>("head_connection_epoch")? != stored_connection_epoch
+            || release.decode_column::<Decimal>("head_connection_event_ordinal")?
+                != stored_connection_event_ordinal
+            || release.decode_column::<String>("connection_state_kind")? != "connected"
+            || decode_u64(release.decode_column("current_placement_event_ordinal")?)?
+                != successor_placement_event_ordinal
+            || successor_placement_event_ordinal
+                != retired_placement_event_ordinal
+                    .checked_add(1)
+                    .ok_or(RunnerProtocolCorruption::GenerationExhausted)?
+            || stored_enrollment != release_enrollment
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
         let recorded = sqlx::query(
             "SELECT runner_id, manifest_id
                FROM runner_workspace_release_acknowledgement
@@ -3816,8 +3906,8 @@ impl RunnerProtocolStore {
                   WHERE enrollment_id = $1 AND connection_epoch = $2
              )",
         )
-        .bind(release_enrollment)
-        .bind(release.decode_column::<Decimal>("connection_epoch")?)
+        .bind(stored_enrollment)
+        .bind(stored_connection_epoch)
         .fetch_one(&mut *transaction)
         .await?;
         if source_was_lost {
@@ -7998,7 +8088,9 @@ fn exact_workspace_release_acknowledgement_replay(
     recorded: RunnerWorkspaceReleaseAcknowledgement,
 ) -> Result<RunnerWorkspaceReleaseAcknowledgement, RunnerProtocolStoreError> {
     if supplied != recorded {
-        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        return Err(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::CorrelationMismatch,
+        ));
     }
     Ok(recorded)
 }
