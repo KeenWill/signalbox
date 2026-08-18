@@ -1883,16 +1883,11 @@ where
         let attempt = prepared.attempt();
         let turn = prepared.turn();
         let prepared_request = (*prepared).clone();
-        let advertised_tools = self
-            .executable_tool_snapshot_source
-            .executable_tools(session, self.catalog.as_ref(), dangerous_tool_auto_approval)
-            .await
-            .map_err(ModelCallExecutionError::ExecutableToolSnapshot)?;
-        let operation = PreparedModelOperation::render(
+        let mut operation = PreparedModelOperation::render(
             *prepared,
             credential_reference,
             system_prompt,
-            advertised_tools.clone(),
+            Box::new([]),
             &tool_entries,
             &runner_placement_entries,
         )
@@ -1900,6 +1895,11 @@ where
         if automatic_tool_round_limit_reached(turn, operation.messages()) {
             return self.commit_capability_known_failure(session, call).await;
         }
+        operation.tools = self
+            .executable_tool_snapshot_source
+            .executable_tools(session, self.catalog.as_ref(), dangerous_tool_auto_approval)
+            .await
+            .map_err(ModelCallExecutionError::ExecutableToolSnapshot)?;
         let preparation_cancellation = self.authorization.cancellation_signal(session, call);
         let capability = match self
             .provider
@@ -5837,10 +5837,10 @@ mod tests {
     }
 
     /// A turn that already recorded the maximum automatic tool rounds
-    /// terminalizes as a capability failure before the provider is entered at
-    /// all. Without this bound a model that keeps requesting tools drives an
-    /// unbounded paid provider loop the operator never asked for and cannot
-    /// stop.
+    /// terminalizes as a capability failure before the fallible executable-tool
+    /// snapshot source or provider is entered at all. Without this bound a model
+    /// that keeps requesting tools drives an unbounded paid provider loop the
+    /// operator never asked for and cannot stop.
     #[tokio::test]
     async fn s15_a_turn_at_the_automatic_tool_round_bound_fails_before_provider_entry() {
         let (request, tool_entries, failed) =
@@ -5864,7 +5864,8 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([]),
             InProcessAttemptDispatchGate::default(),
-        );
+        )
+        .with_executable_tool_snapshot_source(FailingExecutableToolSnapshotSource);
 
         assert_eq!(
             service
