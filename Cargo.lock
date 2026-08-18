@@ -3380,6 +3380,7 @@ dependencies = [
  "signalbox-model-runtime",
  "signalbox-persistence",
  "signalbox-runner-wire",
+ "signalbox-test-bin",
  "signalbox-tools-exec",
  "signalboxd",
  "sqlx",

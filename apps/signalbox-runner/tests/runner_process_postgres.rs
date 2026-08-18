@@ -61,6 +61,7 @@ use signalbox_persistence::{
     submit_input::SubmitInputRepository,
 };
 use signalbox_runner_wire::{Advertise, CanonicalUuid, Enroll, PositiveU64, Registered, Resume};
+use signalbox_test_bin::test_bin_path;
 use signalbox_tools_exec::{
     CaptureCompleteness, ExecResult, ExecutionConfinement, OutputCapture, OutputEncoding,
     ProcessOutcome, SANDBOXED_EXEC_NAME, SandboxedExecTool,
@@ -331,13 +332,13 @@ async fn s30_inv042_spawned_runner_enrolls_against_durable_daemon() -> Result<()
     let socket = directory.path().join("runner.sock");
     let runner_root = directory.path().join("runner-state");
     let configuration_path = directory.path().join("runner.toml");
-    let runner_binary = env!("CARGO_BIN_EXE_signalbox-runner");
+    let runner_binary = test_bin_path!("signalbox-runner");
     let configuration = format!(
         r#"version = 1
 daemon_socket_path = "{}"
 runner_root = "{}"
-exec_supervisor_executable = "{runner_binary}"
-bubblewrap_path = "{runner_binary}"
+exec_supervisor_executable = "{}"
+bubblewrap_path = "{}"
 read_only_paths = ["/usr"]
 allowed_network_hosts = []
 git_author_name = "Signalbox Test Runner"
@@ -347,6 +348,8 @@ repositories = {{}}
 "#,
         socket.display(),
         runner_root.display(),
+        runner_binary.display(),
+        runner_binary.display(),
     );
     fs::write(&configuration_path, configuration)?;
 
@@ -403,13 +406,13 @@ async fn s32_inv042_inv044_spawned_runner_loss_reaches_its_placed_session()
     let runner_root = directory.path().join("runner-state");
     let working_directory = directory.path().join("session-workspace");
     let configuration_path = directory.path().join("runner.toml");
-    let runner_binary = env!("CARGO_BIN_EXE_signalbox-runner");
+    let runner_binary = test_bin_path!("signalbox-runner");
     let configuration = format!(
         r#"version = 1
 daemon_socket_path = "{}"
 runner_root = "{}"
-exec_supervisor_executable = "{runner_binary}"
-bubblewrap_path = "{runner_binary}"
+exec_supervisor_executable = "{}"
+bubblewrap_path = "{}"
 read_only_paths = ["/usr"]
 allowed_network_hosts = []
 git_author_name = "Signalbox Test Runner"
@@ -419,6 +422,8 @@ repositories = {{}}
 "#,
         socket.display(),
         runner_root.display(),
+        runner_binary.display(),
+        runner_binary.display(),
     );
     fs::write(&configuration_path, configuration)?;
 
@@ -540,8 +545,8 @@ async fn s30_s32_inv042_inv043_inv044_spawned_runner_executes_then_stages_replac
     let runner_root = directory.path().join("runner-state");
     let working_directory = directory.path().join("session-workspace");
     let configuration_path = directory.path().join("runner.toml");
-    let runner_binary = std::path::Path::new(env!("CARGO_BIN_EXE_signalbox-runner"));
-    let supervisor_binary = std::path::Path::new(env!("CARGO_BIN_EXE_signalbox-exec-supervisor"));
+    let runner_binary = test_bin_path!("signalbox-runner");
+    let supervisor_binary = test_bin_path!("signalbox-exec-supervisor");
     let bubblewrap_binary = std::path::Path::new("/usr/bin/bwrap");
     fs::create_dir(&working_directory)?;
     fs::write(
@@ -549,7 +554,7 @@ async fn s30_s32_inv042_inv043_inv044_spawned_runner_executes_then_stages_replac
         runner_configuration(
             &socket,
             &runner_root,
-            supervisor_binary,
+            &supervisor_binary,
             bubblewrap_binary,
             "",
         ),
@@ -563,7 +568,7 @@ async fn s30_s32_inv042_inv043_inv044_spawned_runner_executes_then_stages_replac
     let bootstrap_runtime = tokio::spawn(
         RunnerProtocolRuntime::new(bootstrap_listener, bootstrap_service).run(bootstrap_shutdown),
     );
-    let mut bootstrap_runner = Command::new(runner_binary)
+    let mut bootstrap_runner = Command::new(&runner_binary)
         .arg("--config")
         .arg(&configuration_path)
         .stdout(Stdio::null())
@@ -600,7 +605,7 @@ async fn s30_s32_inv042_inv043_inv044_spawned_runner_executes_then_stages_replac
 
     let sandboxed = SandboxedExecTool::try_new_production_with_bubblewrap(
         &working_directory,
-        supervisor_binary,
+        &supervisor_binary,
         bubblewrap_binary,
     )?;
     let (tool_catalog, tool_executor) = sandboxed.into_parts();
@@ -658,12 +663,12 @@ async fn s30_s32_inv042_inv043_inv044_spawned_runner_executes_then_stages_replac
         runner_configuration(
             &socket,
             &runner_root,
-            supervisor_binary,
+            &supervisor_binary,
             bubblewrap_binary,
             "execution_proof = \"generic_sandboxed_exec\"\n",
         ),
     )?;
-    let mut runner = Command::new(runner_binary)
+    let mut runner = Command::new(&runner_binary)
         .arg("--config")
         .arg(&configuration_path)
         .stdout(Stdio::null())
