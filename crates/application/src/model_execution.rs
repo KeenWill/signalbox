@@ -5542,10 +5542,8 @@ mod tests {
             .await
             .expect_err("snapshot failure stops before provider preparation");
 
-        assert_eq!(
-            error.to_string(),
-            "model-call executable-tool snapshot stage failed: executable tool snapshot source failed"
-        );
+        expect![["model-call executable-tool snapshot stage failed: executable tool snapshot source failed"]]
+            .assert_eq(&error.to_string());
         assert_eq!(
             error.operator_failure_class(),
             OperatorFailureClass::Infrastructure {
