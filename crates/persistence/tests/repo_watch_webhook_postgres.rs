@@ -750,6 +750,7 @@ async fn primary_targeted_commit_records_evidence_before_its_base_branch()
             branch_heads: Vec::new(),
         })?,
     );
+    let assessment = merge_ready_assessment(41, HEAD_SHA)?;
 
     let committed = committed_cursor(
         event_store
@@ -762,7 +763,7 @@ async fn primary_targeted_commit_records_evidence_before_its_base_branch()
                 ),
                 key,
                 Vec::new(),
-                &[merge_ready_assessment(41, HEAD_SHA)?],
+                std::slice::from_ref(&assessment),
             )
             .await?,
     );
@@ -782,7 +783,13 @@ async fn primary_targeted_commit_records_evidence_before_its_base_branch()
     .fetch_one(&pool)
     .await?;
 
-    assert_eq!(assessments, vec![(HEAD_SHA.to_owned(), "main".to_owned())]);
+    assert_eq!(
+        assessments,
+        vec![(
+            assessment.head_sha().as_str().to_owned(),
+            assessment.base_branch().as_str().to_owned(),
+        )]
+    );
     assert_eq!(disposition_generation, committed.generation().get() as i64);
     Ok(())
 }
