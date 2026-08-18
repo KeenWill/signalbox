@@ -56,8 +56,8 @@ export SIGNALBOX_SOCKET_PATH='/absolute/path/to/signalbox.sock'
 There is no maintainer-approved network transport reachable by a remote or
 mobile client. iPhone and iPad **Debug** builds run against the in-memory
 process-protocol harness. The harness is compiled out of Release builds, so a
-Release iPhone or iPad build has no backend at all — that configuration is not a
-supported way to run the app, and shipping one is gated on the same design
+Release iPhone or iPad build has no backend at all — that configuration is not
+a supported way to run the app, and shipping one is gated on the same design
 decision. Real remote/mobile connectivity remains a maintainer design gate
 recorded in
 [Protocols and persistence](../../docs/open-questions.md#protocols-and-persistence);
@@ -117,9 +117,9 @@ recorded without it.
 The suite runs as a report-only step in CI, which uploads the reference, the
 failed rendering, and their difference as an artifact when a comparison fails.
 Re-record the goldens after an intended visual change. Reviewing what you are
-about to bless is [rule 11](../../docs/agents/testing-style.md#expect-tests),
-which owns that rule for every snapshot in the repository and is the only place
-it is stated.
+about to bless is
+[rule 11](../../docs/agents/testing-style.md#expect-tests), which owns that
+rule for every snapshot in the repository and is the only place it is stated.
 
 ```bash
 scripts/record-snapshots.sh
