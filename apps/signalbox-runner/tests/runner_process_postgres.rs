@@ -76,7 +76,7 @@ async fn s30_inv042_spawned_runner_enrolls_against_durable_daemon() -> Result<()
         r#"version = 1
 daemon_socket_path = "{}"
 runner_root = "{}"
-bubblewrap_path = "{runner_binary}"
+bubblewrap_path = "{}"
 read_only_paths = ["/usr"]
 allowed_network_hosts = []
 git_author_name = "Signalbox Test Runner"
@@ -86,6 +86,7 @@ repositories = {{}}
 "#,
         socket.display(),
         runner_root.display(),
+        runner_binary.display(),
     );
     fs::write(&configuration_path, configuration)?;
 
