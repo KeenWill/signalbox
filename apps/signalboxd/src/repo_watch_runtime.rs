@@ -22,12 +22,12 @@ use sha2::{Digest, Sha256};
 use signalbox_application::{
     EligibilityNudge, InProcessEligibilityNudge, RepoWatchBranchHead,
     RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchDispatchService, RepoWatchDispatchTransaction,
-    RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
-    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateInput, RepoWatchReviewObservation, RepoWatchRuleEvaluation,
-    RepoWatchRuleEvaluationOutcome, RepoWatchThreadObservation, RepoWatchThreadState,
-    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
+    RepoWatchCheckSuiteObservation, RepoWatchDifferFailureKind, RepoWatchDispatchService,
+    RepoWatchDispatchTransaction, RepoWatchObservation, RepoWatchPullRequestLifecycle,
+    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchThreadObservation,
+    RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
     UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
 };
 use signalbox_domain::{
@@ -510,6 +510,10 @@ impl RepositoryWatchTask {
             .as_ref()
             .map(|cursor| cursor.candidate().observation());
         let cursor_generation = cursor.as_ref().map(|cursor| cursor.generation());
+        let mut event_identity_frontier = cursor
+            .as_ref()
+            .map(|cursor| cursor.candidate().event_identity_frontier().clone())
+            .unwrap_or_default();
         let observation = self
             .poller
             .poll_against_cursor(previous, cursor_generation)
@@ -518,16 +522,34 @@ impl RepositoryWatchTask {
             &self.repository,
             previous,
             &observation,
+            &mut event_identity_frontier,
             &mut UuidV7RepoWatchEventIdGenerator,
         )
-        .map_err(|_| RepositoryWatchAttemptError::Differ)?;
+        .map_err(|error| match error.kind() {
+            RepoWatchDifferFailureKind::EventConstruction => RepositoryWatchAttemptError::Differ,
+            // Its own cause code, because the frontier and a differ defect call
+            // for different operator responses. The attempt stays retryable: a
+            // later observation introducing no new stream still succeeds.
+            RepoWatchDifferFailureKind::IdentityFrontier => {
+                tracing::error!(
+                    repository = %self.repository.as_str(),
+                    cause_code = "repository_identity_frontier_exhausted",
+                    error = %error,
+                    "repository-watch identity frontier cannot assign another occurrence; an observation introducing no new stream can still succeed"
+                );
+                RepositoryWatchAttemptError::IdentityFrontier
+            }
+        })?;
         let outcome = self
             .store
             .commit(
                 &self.repository,
                 RepoWatchCommitRequest::new(
                     cursor_generation,
-                    RepoWatchCursorCandidate::new(observation),
+                    RepoWatchCursorCandidate::with_event_identity_frontier(
+                        observation,
+                        event_identity_frontier,
+                    ),
                     events,
                 ),
             )
@@ -953,10 +975,12 @@ enum RepositoryWatchAttemptError {
     Normalization,
     PullRequestFetchAbandoned,
     Differ,
+    IdentityFrontier,
     Dispatch,
     Persistence,
     RetiredRuleIdentity,
     ChangedRuleIdentity,
+    RegressedRuleVersion,
 }
 
 impl RepositoryWatchAttemptError {
@@ -973,15 +997,56 @@ impl RepositoryWatchAttemptError {
             Self::Normalization => "repository_state_invalid",
             Self::PullRequestFetchAbandoned => "repository_pull_request_fetch_abandoned",
             Self::Differ => "repository_differ_failed",
+            Self::IdentityFrontier => "repository_identity_frontier_exhausted",
             Self::Dispatch => "repository_dispatch_failed",
             Self::Persistence => "repository_watch_persistence_failed",
             Self::RetiredRuleIdentity => "repository_watch_rule_identity_retired",
             Self::ChangedRuleIdentity => "repository_watch_rule_identity_changed",
+            Self::RegressedRuleVersion => "repository_watch_rule_version_regressed",
         }
     }
 
+    /// Whether this failure should stop repository watching altogether.
+    ///
+    /// This is not "retrying cannot help". Returning `true` ends this
+    /// repository's task, and `run_repository_watch` answers a task that ends
+    /// before shutdown by aborting every other repository task and reporting
+    /// `RepositoryTaskExited`, which the runtime treats as a lifecycle defect.
+    /// The blast radius is therefore all repository watching, so only a
+    /// failure that indicts the configuration behind every task belongs here.
+    ///
+    /// A rule identity that no longer matches its durable record is such a
+    /// failure: the rules this daemon was started with no longer describe the
+    /// database, and continuing would dispatch against a stale contract.
+    ///
+    /// An exhausted identity frontier is not. `StreamLimit` refuses only an
+    /// observation that introduces a stream the frontier has never counted;
+    /// streams already counted keep advancing at the ceiling, so a later
+    /// observation that adds no new stream — the new label or reaction is
+    /// removed, say — succeeds. Stopping on it would let one repository's
+    /// transient over-limit observation disable every other repository's watch
+    /// until restart. The recorded `repository_identity_frontier_exhausted`
+    /// cause code is the operator's signal instead.
     const fn is_permanent(self) -> bool {
-        matches!(self, Self::RetiredRuleIdentity | Self::ChangedRuleIdentity)
+        match self {
+            Self::RetiredRuleIdentity | Self::ChangedRuleIdentity | Self::RegressedRuleVersion => {
+                true
+            }
+            Self::Credential
+            | Self::Request
+            | Self::Rejected
+            | Self::ResponseTooLarge
+            | Self::InvalidResponse
+            | Self::InvalidEntityTag
+            | Self::MissingCachedResource
+            | Self::ResourceLimit
+            | Self::Normalization
+            | Self::PullRequestFetchAbandoned
+            | Self::Differ
+            | Self::IdentityFrontier
+            | Self::Dispatch
+            | Self::Persistence => false,
+        }
     }
 }
 
@@ -993,7 +1058,19 @@ fn rule_activation_error(error: RepoWatchDispatchRepositoryError) -> RepositoryW
         RepoWatchDispatchRepositoryError::ChangedRuleIdentity { .. } => {
             RepositoryWatchAttemptError::ChangedRuleIdentity
         }
-        _ => RepositoryWatchAttemptError::Persistence,
+        RepoWatchDispatchRepositoryError::RegressedRuleVersion { .. } => {
+            RepositoryWatchAttemptError::RegressedRuleVersion
+        }
+        RepoWatchDispatchRepositoryError::Database(_)
+        | RepoWatchDispatchRepositoryError::CommitAmbiguous(_)
+        | RepoWatchDispatchRepositoryError::EventStore(_)
+        | RepoWatchDispatchRepositoryError::SessionCreation(_)
+        | RepoWatchDispatchRepositoryError::InitialInput(_)
+        | RepoWatchDispatchRepositoryError::GoalCommission(_)
+        | RepoWatchDispatchRepositoryError::GoalCutoff(_)
+        | RepoWatchDispatchRepositoryError::Corruption(_) => {
+            RepositoryWatchAttemptError::Persistence
+        }
     }
 }
 
@@ -2936,11 +3013,12 @@ mod tests {
         owed_dispatch_context_json_parts, remaining_interval, rule_activation_error,
         supervise_repository_tasks,
     };
+    use signalbox_application::RepoWatchEventIdentityFrontierV1;
     use signalbox_domain::{
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
         PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionSubject,
         RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindV1, RepoWatchRuleId,
-        RepoWatchRuleVersion,
+        RepoWatchRuleIdentityField, RepoWatchRuleVersion,
     };
     use signalbox_model_runtime::CredentialReference;
     use signalbox_persistence::repo_watch_dispatch::RepoWatchDispatchRepositoryError;
@@ -4543,9 +4621,28 @@ mod tests {
         let error = rule_activation_error(RepoWatchDispatchRepositoryError::ChangedRuleIdentity {
             rule_id,
             rule_version: RepoWatchRuleVersion::V1,
+            field: RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf,
         });
 
         assert_eq!(error, RepositoryWatchAttemptError::ChangedRuleIdentity);
+        assert!(error.is_permanent());
+    }
+
+    #[test]
+    fn regressed_rule_version_terminates_repository_attempts() {
+        let rule_id = RepoWatchRuleId::try_new(String::from("regressed-rule"))
+            .expect("fixture rule ID is valid");
+        let latest_version = RepoWatchRuleVersion::new(
+            NonZeroU64::new(2).expect("recorded fixture version is positive"),
+        )
+        .expect("recorded fixture version is within the durable range");
+        let error = rule_activation_error(RepoWatchDispatchRepositoryError::RegressedRuleVersion {
+            rule_id,
+            rule_version: RepoWatchRuleVersion::V1,
+            latest_version,
+        });
+
+        assert_eq!(error, RepositoryWatchAttemptError::RegressedRuleVersion);
         assert!(error.is_permanent());
     }
 
@@ -5065,10 +5162,12 @@ mod tests {
             .await
             .expect("the deferred remote state is fetched");
         server.finish().await;
+        let mut event_identity_frontier = RepoWatchEventIdentityFrontierV1::default();
         let events = derive_repo_watch_events(
             &fixture.poller.repository,
             Some(&previous),
             &current,
+            &mut event_identity_frontier,
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .expect("the deferred review wave forms events");
@@ -5077,7 +5176,7 @@ mod tests {
 
         assert_eq!(events.len(), deferred_reviews.len());
         assert_eq!(
-            events[0].kind(),
+            events[0].event().kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
                 reviewer: deferred_reviews[0].reviewer().clone(),
                 state: deferred_reviews[0]
@@ -5087,7 +5186,7 @@ mod tests {
             }
         );
         assert_eq!(
-            events[1].kind(),
+            events[1].event().kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
                 reviewer: deferred_reviews[1].reviewer().clone(),
                 state: deferred_reviews[1]
@@ -5097,7 +5196,7 @@ mod tests {
             }
         );
         assert_eq!(
-            events[2].kind(),
+            events[2].event().kind(),
             &RepoWatchEventKindV1::ReviewSubmitted {
                 reviewer: deferred_reviews[2].reviewer().clone(),
                 state: deferred_reviews[2]
