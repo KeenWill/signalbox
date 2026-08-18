@@ -207,10 +207,19 @@ pub enum AttachmentDisplayFilenameFailure {
 }
 
 /// Failed display-filename construction retaining the rejected value.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct AttachmentDisplayFilenameError {
     value: String,
     failure: AttachmentDisplayFilenameFailure,
+}
+
+impl fmt::Debug for AttachmentDisplayFilenameError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AttachmentDisplayFilenameError")
+            .field("failure", &self.failure)
+            .finish()
+    }
 }
 
 impl AttachmentDisplayFilenameError {
@@ -486,6 +495,17 @@ mod tests {
             .expect("a basename is valid");
 
         assert!(!format!("{filename:?}").contains(basename));
+    }
+
+    #[test]
+    fn rejected_attachment_display_filename_debug_is_redacted() {
+        let rejected = "../private-chart.png";
+        let error = AttachmentDisplayFilename::try_new(String::from(rejected))
+            .expect_err("a path spelling is rejected");
+        let debug = format!("{error:?}");
+
+        assert!(!debug.contains(rejected));
+        assert!(debug.contains("ContainsPathSeparator"));
     }
 
     #[test]
