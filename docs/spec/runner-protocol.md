@@ -727,12 +727,15 @@ registration and advertisement, and the complete durable lease correlation under
 the owning session lock. It returns only the canonical `Claimed` lease as
 repeatable-read reconstitution evidence. The read does not authorize later
 projection by itself. For a lease-only inventory at `waiting_dispatch` or
-`dispatch_received`, the daemon validates this evidence before resume, returns
-an exact `await` directive, opens the successor connection, then repeats the
-complete checked readback before projecting anything. It writes `resumed`,
-rechecks the new connection epoch, writes the canonical `lease_claimed`,
-rechecks the epoch again, and writes the canonical immutable `dispatch`. An
-exact inventory whose claimed lease is already stale instead receives
+`dispatch_received`, the daemon validates this evidence before resume. If resume
+advances the registration, it returns `fail_stale`; otherwise it returns an
+exact `await` directive, opens the successor connection, then repeats the
+complete checked readback before projecting anything. After writing `resumed`,
+it holds successor-connection admission while rechecking the new connection
+epoch and writing the canonical `lease_claimed`, then rechecking the epoch and
+writing the canonical immutable `dispatch`. A failed replay write durably closes
+that epoch as transport loss. An exact inventory whose claimed lease is already
+stale instead receives
 `fail_stale` and no replayed operation frame. An `execution_may_have_started`
 lease without a result remains unavailable until the loss-classification slice
 consumes it. The runner does not yet consume the lease-only `await` directive or

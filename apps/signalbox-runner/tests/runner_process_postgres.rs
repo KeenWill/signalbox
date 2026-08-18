@@ -34,7 +34,8 @@ use signalboxd::{
     LocalProcessListener,
     runner_protocol_runtime::{
         PostgresRunnerRegistrationService, RunnerEnrollmentAccepted, RunnerProtocolRuntime,
-        RunnerRegistrationFuture, RunnerRegistrationService, RunnerResumeAccepted,
+        RunnerRegistrationFuture, RunnerRegistrationService, RunnerReplayAdmissionFuture,
+        RunnerResumeAccepted,
     },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -101,6 +102,10 @@ impl RunnerRegistrationService for LossObservedRegistrationService {
                 .expect("the loss observer remains live");
             Ok(outcome)
         })
+    }
+
+    fn claimed_replay_admission(&self) -> RunnerReplayAdmissionFuture<'_> {
+        self.inner.claimed_replay_admission()
     }
 }
 

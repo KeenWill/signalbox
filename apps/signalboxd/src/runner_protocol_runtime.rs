@@ -32,7 +32,7 @@ use sqlx::PgPool;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
     net::{UnixStream, unix::OwnedReadHalf, unix::OwnedWriteHalf},
-    sync::{Mutex, watch},
+    sync::{Mutex, OwnedMutexGuard, watch},
     task::{JoinError, JoinSet},
     time::{MissedTickBehavior, interval, timeout},
 };
@@ -218,6 +218,31 @@ pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
         epoch: PositiveU64,
         transition: RunnerConnectionTransition,
     ) -> RunnerRegistrationFuture<'_, RunnerConnectionTransitionOutcome>;
+
+    /// Serializes replay writes with successor connection admission.
+    fn claimed_replay_admission(&self) -> RunnerReplayAdmissionFuture<'_>;
+}
+
+/// Boxed future returning the guard that fences claimed-lease replay writes.
+pub type RunnerReplayAdmissionFuture<'a> =
+    Pin<Box<dyn Future<Output = RunnerReplayAdmission> + Send + 'a>>;
+
+/// Admission retained while a claimed-lease replay validates and writes.
+pub struct RunnerReplayAdmission {
+    _guard: Option<OwnedMutexGuard<()>>,
+}
+
+impl RunnerReplayAdmission {
+    fn guarded(guard: OwnedMutexGuard<()>) -> Self {
+        Self {
+            _guard: Some(guard),
+        }
+    }
+
+    #[cfg(test)]
+    const fn unguarded() -> Self {
+        Self { _guard: None }
+    }
 }
 
 /// Durable resume receipt plus any canonical claimed lease to replay.
@@ -540,7 +565,7 @@ impl PostgresRunnerRegistrationService {
             RunnerId::from_uuid(request.runner_id.into_uuid()),
             RunnerAuthenticationId::from_uuid(request.authentication_id.into_uuid()),
         );
-        let (directives, claimed_correlation) = match resume_operation {
+        let (mut directives, mut claimed_correlation) = match resume_operation {
             ResumeOperation::RetainedResult(result) => {
                 let result = RunnerDispatchWireAdapter::result_request(result).map_err(|_| {
                     RunnerRegistrationFailure::new(
@@ -660,6 +685,17 @@ impl PostgresRunnerRegistrationService {
             .map_err(|error| {
                 store_failure(RunnerInboundFrameKind::Resume, correlation.clone(), error)
             })?;
+        if claimed_correlation.is_some() && receipt.registration().revision() != prior {
+            directives = claimed_lease_directives(&request.inventory, DirectiveAction::FailStale)
+                .map_err(|code| {
+                RunnerRegistrationFailure::new(
+                    RunnerInboundFrameKind::Resume,
+                    correlation.clone(),
+                    code,
+                )
+            })?;
+            claimed_correlation = None;
+        }
         self.propagate_pending_registration_reconciliations()
             .await
             .map_err(|error| {
@@ -971,6 +1007,11 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
         transition: RunnerConnectionTransition,
     ) -> RunnerRegistrationFuture<'_, RunnerConnectionTransitionOutcome> {
         Box::pin(self.transition_connection_durably(enrollment, epoch, transition))
+    }
+
+    fn claimed_replay_admission(&self) -> RunnerReplayAdmissionFuture<'_> {
+        let admission = Arc::clone(&self.registration_admission);
+        Box::pin(async move { RunnerReplayAdmission::guarded(admission.lock_owned().await) })
     }
 }
 
@@ -1911,6 +1952,7 @@ where
                     if let Some(claimed_lease) = claimed_lease {
                         let [claim_acknowledgement, dispatch] =
                             claimed_resume_messages(&claimed_lease)?;
+                        let _replay_admission = service.claimed_replay_admission().await;
                         if !transition_is_current(
                             &service,
                             context,
@@ -1920,7 +1962,16 @@ where
                         {
                             return Ok(());
                         }
-                        write_message(&mut writer, claim_acknowledgement).await?;
+                        if let Err(error) = write_message(&mut writer, claim_acknowledgement).await
+                        {
+                            transition_is_current(
+                                &service,
+                                context,
+                                RunnerConnectionTransition::TransportClosed,
+                            )
+                            .await?;
+                            return Err(error);
+                        }
                         if !transition_is_current(
                             &service,
                             context,
@@ -1930,7 +1981,15 @@ where
                         {
                             return Ok(());
                         }
-                        write_message(&mut writer, dispatch).await?;
+                        if let Err(error) = write_message(&mut writer, dispatch).await {
+                            transition_is_current(
+                                &service,
+                                context,
+                                RunnerConnectionTransition::TransportClosed,
+                            )
+                            .await?;
+                            return Err(error);
+                        }
                     }
                     (context, attachment)
                 }
@@ -3016,6 +3075,10 @@ mod tests {
                     current: epoch,
                 },
             )))
+        }
+
+        fn claimed_replay_admission(&self) -> RunnerReplayAdmissionFuture<'_> {
+            Box::pin(std::future::ready(RunnerReplayAdmission::unguarded()))
         }
     }
 
