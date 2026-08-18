@@ -957,6 +957,7 @@ enum RepositoryWatchAttemptError {
     Persistence,
     RetiredRuleIdentity,
     ChangedRuleIdentity,
+    RegressedRuleVersion,
 }
 
 impl RepositoryWatchAttemptError {
@@ -977,11 +978,34 @@ impl RepositoryWatchAttemptError {
             Self::Persistence => "repository_watch_persistence_failed",
             Self::RetiredRuleIdentity => "repository_watch_rule_identity_retired",
             Self::ChangedRuleIdentity => "repository_watch_rule_identity_changed",
+            Self::RegressedRuleVersion => "repository_watch_rule_version_regressed",
         }
     }
 
+    /// Whether retrying the repository attempt can ever succeed.
+    ///
+    /// Enumerated rather than defaulted: a later variant that is permanent
+    /// would otherwise compile as transient and leave the task retrying it
+    /// forever.
     const fn is_permanent(self) -> bool {
-        matches!(self, Self::RetiredRuleIdentity | Self::ChangedRuleIdentity)
+        match self {
+            Self::RetiredRuleIdentity | Self::ChangedRuleIdentity | Self::RegressedRuleVersion => {
+                true
+            }
+            Self::Credential
+            | Self::Request
+            | Self::Rejected
+            | Self::ResponseTooLarge
+            | Self::InvalidResponse
+            | Self::InvalidEntityTag
+            | Self::MissingCachedResource
+            | Self::ResourceLimit
+            | Self::Normalization
+            | Self::PullRequestFetchAbandoned
+            | Self::Differ
+            | Self::Dispatch
+            | Self::Persistence => false,
+        }
     }
 }
 
@@ -993,7 +1017,19 @@ fn rule_activation_error(error: RepoWatchDispatchRepositoryError) -> RepositoryW
         RepoWatchDispatchRepositoryError::ChangedRuleIdentity { .. } => {
             RepositoryWatchAttemptError::ChangedRuleIdentity
         }
-        _ => RepositoryWatchAttemptError::Persistence,
+        RepoWatchDispatchRepositoryError::RegressedRuleVersion { .. } => {
+            RepositoryWatchAttemptError::RegressedRuleVersion
+        }
+        RepoWatchDispatchRepositoryError::Database(_)
+        | RepoWatchDispatchRepositoryError::CommitAmbiguous(_)
+        | RepoWatchDispatchRepositoryError::EventStore(_)
+        | RepoWatchDispatchRepositoryError::SessionCreation(_)
+        | RepoWatchDispatchRepositoryError::InitialInput(_)
+        | RepoWatchDispatchRepositoryError::GoalCommission(_)
+        | RepoWatchDispatchRepositoryError::GoalCutoff(_)
+        | RepoWatchDispatchRepositoryError::Corruption(_) => {
+            RepositoryWatchAttemptError::Persistence
+        }
     }
 }
 
@@ -2940,7 +2976,7 @@ mod tests {
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
         PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionSubject,
         RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindV1, RepoWatchRuleId,
-        RepoWatchRuleVersion,
+        RepoWatchRuleIdentityField, RepoWatchRuleVersion,
     };
     use signalbox_model_runtime::CredentialReference;
     use signalbox_persistence::repo_watch_dispatch::RepoWatchDispatchRepositoryError;
@@ -4543,9 +4579,28 @@ mod tests {
         let error = rule_activation_error(RepoWatchDispatchRepositoryError::ChangedRuleIdentity {
             rule_id,
             rule_version: RepoWatchRuleVersion::V1,
+            field: RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf,
         });
 
         assert_eq!(error, RepositoryWatchAttemptError::ChangedRuleIdentity);
+        assert!(error.is_permanent());
+    }
+
+    #[test]
+    fn regressed_rule_version_terminates_repository_attempts() {
+        let rule_id = RepoWatchRuleId::try_new(String::from("regressed-rule"))
+            .expect("fixture rule ID is valid");
+        let latest_version = RepoWatchRuleVersion::new(
+            NonZeroU64::new(2).expect("recorded fixture version is positive"),
+        )
+        .expect("recorded fixture version is within the durable range");
+        let error = rule_activation_error(RepoWatchDispatchRepositoryError::RegressedRuleVersion {
+            rule_id,
+            rule_version: RepoWatchRuleVersion::V1,
+            latest_version,
+        });
+
+        assert_eq!(error, RepositoryWatchAttemptError::RegressedRuleVersion);
         assert!(error.is_permanent());
     }
 

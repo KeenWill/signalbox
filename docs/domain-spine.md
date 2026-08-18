@@ -9461,7 +9461,7 @@ impl RepoWatchPattern {
 pub struct RepoWatchRuleVersion(/* private NonZeroU64 */);
 impl RepoWatchRuleVersion {
     pub const V1: Self;
-    pub const fn new(value: NonZeroU64) -> Self;
+    pub const fn new(value: NonZeroU64) -> Option<Self>;
     pub const fn get(self) -> u64;
 }
 
@@ -9738,10 +9738,38 @@ impl RepoWatchRuleContentDigest {
     pub const fn as_bytes(&self) -> &[u8; 32];
 }
 
+pub enum RepoWatchRuleIdentityField {
+    MatcherEventKinds,
+    MatcherRepository,
+    MatcherBaseBranch,
+    MatcherHeadBranchRegex,
+    MatcherTitleRegex,
+    MatcherBodyRegex,
+    MatcherLabelsAnyOf,
+    MatcherLabelsAllOf,
+    MatcherLabelsNoneOf,
+    MatcherDraft,
+    MatcherAuthor,
+    MatcherMergeableStateAnyOf,
+    MatcherConclusionAnyOf,
+    Actions,
+    SingletonPer,
+    CooldownSeconds,
+}
+impl RepoWatchRuleIdentityField {
+    pub const fn configuration_path(self) -> &'static str;
+}
+
+pub struct RepoWatchRuleIdentityFieldDigest(/* private [u8; 32] */);
+impl RepoWatchRuleIdentityFieldDigest {
+    pub const fn as_bytes(&self) -> &[u8; 32];
+}
+
 pub struct RepoWatchRule { /* private */ }
 impl RepoWatchRule {
     pub fn try_new(
         id: RepoWatchRuleId,
+        version: RepoWatchRuleVersion,
         matcher: RepoWatchMatcherV1,
         actions: Vec<RepoWatchRuleActionV1>,
         singleton_per: RepoWatchSingletonScope,
@@ -9753,6 +9781,9 @@ impl RepoWatchRule {
         declarations: &[RepoWatchTemplateContextDeclaration],
     ) -> Result<(), RepoWatchRuleValidationError>;
     pub fn content_digest(&self) -> RepoWatchRuleContentDigest;
+    pub fn identity_field_digests(
+        &self,
+    ) -> Vec<(RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest)>;
     pub fn actions_for_event(
         &self,
         event: &RepoWatchEvent,
@@ -10583,7 +10614,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: user_content                               | 4                     |
 | domain: submit_input                               | 34                    |
 | domain: queue_order                                | 5 (+1 free fn)        |
-| domain: repo_watch                                 | 49                    |
+| domain: repo_watch                                 | 51                    |
 | domain: turn_lifecycle                             | 10                    |
 | domain: turn_eligibility                           | 37                    |
 | domain: turn_attempt                               | 13                    |
@@ -10605,7 +10636,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **803 (+12 free fn)** |
+| **signalbox-domain total**                         | **805 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
