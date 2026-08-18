@@ -201,6 +201,148 @@ pub enum RepoWatchThreadState {
     Resolved,
 }
 
+/// GitHub's aggregate review decision for one pull-request head.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchReviewDecision {
+    None,
+    Approved,
+    ReviewRequired,
+    ChangesRequested,
+}
+
+/// Durable repository-watch convergence classification for one exact head.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchConvergenceVerdict {
+    NotConverged,
+    InternallyConverged,
+    MergeReady,
+}
+
+const MERGE_READY_BASE_BRANCH: &str = "main";
+
+/// Field-labeled construction input for one exact-head convergence assessment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchConvergenceAssessmentInput {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub base_branch: BranchName,
+    pub base_revision: CommitSha,
+    pub mergeable_state: MergeableState,
+    pub review_decision: RepoWatchReviewDecision,
+    pub unresolved_threads: Vec<ReviewThreadId>,
+    pub gating_check_count: u64,
+    pub non_green_gating_checks: Vec<CheckRunName>,
+}
+
+/// Complete evidence and derived judgement for one exact pull-request head.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchConvergenceAssessment {
+    number: PullRequestNumber,
+    head_sha: CommitSha,
+    base_branch: BranchName,
+    base_revision: CommitSha,
+    mergeable_state: MergeableState,
+    review_decision: RepoWatchReviewDecision,
+    unresolved_threads: Box<[ReviewThreadId]>,
+    gating_check_count: u64,
+    non_green_gating_checks: Box<[CheckRunName]>,
+    verdict: RepoWatchConvergenceVerdict,
+}
+
+impl RepoWatchConvergenceAssessment {
+    /// Validates complete evidence and derives the reference convergence rule.
+    pub fn try_new(
+        mut input: RepoWatchConvergenceAssessmentInput,
+    ) -> Result<Self, RepoWatchConvergenceAssessmentError> {
+        input.unresolved_threads.sort();
+        input.unresolved_threads.dedup();
+        input
+            .non_green_gating_checks
+            .sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        if input.non_green_gating_checks.len() as u64 > input.gating_check_count {
+            return Err(RepoWatchConvergenceAssessmentError);
+        }
+        let blocked = !input.unresolved_threads.is_empty()
+            || !input.non_green_gating_checks.is_empty()
+            || input.mergeable_state == MergeableState::Conflicting
+            || input.review_decision == RepoWatchReviewDecision::ChangesRequested;
+        let verdict = if blocked {
+            RepoWatchConvergenceVerdict::NotConverged
+        } else if input.base_branch.as_str() == MERGE_READY_BASE_BRANCH {
+            RepoWatchConvergenceVerdict::MergeReady
+        } else {
+            RepoWatchConvergenceVerdict::InternallyConverged
+        };
+        Ok(Self {
+            number: input.number,
+            head_sha: input.head_sha,
+            base_branch: input.base_branch,
+            base_revision: input.base_revision,
+            mergeable_state: input.mergeable_state,
+            review_decision: input.review_decision,
+            unresolved_threads: input.unresolved_threads.into_boxed_slice(),
+            gating_check_count: input.gating_check_count,
+            non_green_gating_checks: input.non_green_gating_checks.into_boxed_slice(),
+            verdict,
+        })
+    }
+
+    pub const fn number(&self) -> PullRequestNumber {
+        self.number
+    }
+
+    pub const fn head_sha(&self) -> &CommitSha {
+        &self.head_sha
+    }
+
+    pub const fn base_branch(&self) -> &BranchName {
+        &self.base_branch
+    }
+
+    pub const fn base_revision(&self) -> &CommitSha {
+        &self.base_revision
+    }
+
+    pub const fn mergeable_state(&self) -> MergeableState {
+        self.mergeable_state
+    }
+
+    pub const fn review_decision(&self) -> RepoWatchReviewDecision {
+        self.review_decision
+    }
+
+    pub fn unresolved_threads(&self) -> &[ReviewThreadId] {
+        &self.unresolved_threads
+    }
+
+    pub const fn gating_check_count(&self) -> u64 {
+        self.gating_check_count
+    }
+
+    pub fn non_green_gating_checks(&self) -> &[CheckRunName] {
+        &self.non_green_gating_checks
+    }
+
+    pub const fn verdict(&self) -> RepoWatchConvergenceVerdict {
+        self.verdict
+    }
+}
+
+/// Incoherent convergence evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepoWatchConvergenceAssessmentError;
+
+impl fmt::Display for RepoWatchConvergenceAssessmentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "repository-watch convergence evidence is incoherent"
+        )
+    }
+}
+
+impl Error for RepoWatchConvergenceAssessmentError {}
+
 /// One current review-thread projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchThreadObservation {
@@ -1303,6 +1445,7 @@ pub enum RepoWatchRuleEvaluationOutcome {
     Inactive,
     NotMatched,
     TargetClosed,
+    TargetConverged,
     Occupied,
     Cooldown,
     Dispatched {
@@ -1705,6 +1848,105 @@ mod tests {
     const WORKFLOW_ID: u64 = 106;
     const OTHER_WORKFLOW_ID: u64 = 107;
     const WORKFLOW_IDENTITIES: [u64; 2] = [WORKFLOW_ID, OTHER_WORKFLOW_ID];
+
+    struct ConvergenceFacts {
+        base_branch: &'static str,
+        mergeable_state: MergeableState,
+        review_decision: RepoWatchReviewDecision,
+        unresolved_threads: Vec<ReviewThreadId>,
+        gating_check_count: u64,
+        non_green_gating_checks: Vec<CheckRunName>,
+    }
+
+    fn convergence_assessment(
+        facts: ConvergenceFacts,
+    ) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+        Ok(RepoWatchConvergenceAssessment::try_new(
+            RepoWatchConvergenceAssessmentInput {
+                number: pull_request_number(PULL_REQUEST_NUMBER),
+                head_sha: CommitSha::try_new(String::from(INITIAL_HEAD))?,
+                base_branch: BranchName::try_new(String::from(facts.base_branch))?,
+                base_revision: CommitSha::try_new(String::from(CHANGED_HEAD))?,
+                mergeable_state: facts.mergeable_state,
+                review_decision: facts.review_decision,
+                unresolved_threads: facts.unresolved_threads,
+                gating_check_count: facts.gating_check_count,
+                non_green_gating_checks: facts.non_green_gating_checks,
+            },
+        )?)
+    }
+
+    #[test]
+    fn exact_green_main_head_is_merge_ready_without_an_approval() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Unknown,
+            review_decision: RepoWatchReviewDecision::None,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::MergeReady
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exact_green_stacked_head_is_only_internally_converged() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: FIRST_STACK_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::Approved,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::InternallyConverged
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_thread_blocks_an_otherwise_green_head() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::Approved,
+            unresolved_threads: vec![ReviewThreadId::try_new(String::from(THREAD_ID))?],
+            gating_check_count: 0,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::NotConverged
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stale_blocking_review_blocks_an_otherwise_green_head() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::NotConverged
+        );
+        Ok(())
+    }
 
     /// Deterministic event identities; their values are arbitrary and only their order matters.
     struct FixedEventIds {

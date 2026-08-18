@@ -75,16 +75,18 @@ pub use replace_session_defaults::{
 pub use repo_watch::{
     RepoWatchBranchHead, RepoWatchCheckCompletionGeneration,
     RepoWatchCheckCompletionGenerationError, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchDifferError, RepoWatchDispatchIdGenerator,
+    RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment,
+    RepoWatchConvergenceAssessmentError, RepoWatchConvergenceAssessmentInput,
+    RepoWatchConvergenceVerdict, RepoWatchDifferError, RepoWatchDispatchIdGenerator,
     RepoWatchDispatchPreparationError, RepoWatchDispatchService, RepoWatchDispatchServiceError,
     RepoWatchDispatchTransaction, RepoWatchEventIdGenerator, RepoWatchObservation,
     RepoWatchPreparedDispatchAction, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
     RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
     RepoWatchRepositoryStateError, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
-    RepoWatchReviewObservation, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchSingletonKey, RepoWatchTemplateResolver, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    RepoWatchReviewDecision, RepoWatchReviewObservation, RepoWatchRuleEvaluation,
+    RepoWatchRuleEvaluationOutcome, RepoWatchSingletonKey, RepoWatchTemplateResolver,
+    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
 };
 pub use review_orchestration::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,

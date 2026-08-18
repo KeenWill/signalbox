@@ -5,7 +5,10 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
-use signalbox_application::{RepoWatchPullRequestLifecycle, RepoWatchThreadState};
+use signalbox_application::{
+    RepoWatchConvergenceVerdict, RepoWatchPullRequestLifecycle, RepoWatchReviewDecision,
+    RepoWatchThreadState,
+};
 use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
     CodexCliServiceTier, DangerousToolAutoApproval, DelegateApprovalRecommendation,
@@ -1055,6 +1058,7 @@ pub(crate) fn repo_watch_lifecycle_cutoff_disposition_from_str(
 pub(crate) enum RepoWatchEvaluationOutcomeStorageKind {
     NotMatched,
     TargetClosed,
+    TargetConverged,
     Occupied,
     Coalesced,
     Cooldown,
@@ -1067,6 +1071,7 @@ pub(crate) const fn repo_watch_evaluation_outcome_to_str(
     match value {
         RepoWatchEvaluationOutcomeStorageKind::NotMatched => "not_matched",
         RepoWatchEvaluationOutcomeStorageKind::TargetClosed => "target_closed",
+        RepoWatchEvaluationOutcomeStorageKind::TargetConverged => "target_converged",
         RepoWatchEvaluationOutcomeStorageKind::Occupied => "occupied",
         RepoWatchEvaluationOutcomeStorageKind::Coalesced => "coalesced",
         RepoWatchEvaluationOutcomeStorageKind::Cooldown => "cooldown",
@@ -1080,6 +1085,7 @@ pub(crate) fn repo_watch_evaluation_outcome_from_str(
     match value {
         "not_matched" => Some(RepoWatchEvaluationOutcomeStorageKind::NotMatched),
         "target_closed" => Some(RepoWatchEvaluationOutcomeStorageKind::TargetClosed),
+        "target_converged" => Some(RepoWatchEvaluationOutcomeStorageKind::TargetConverged),
         "occupied" => Some(RepoWatchEvaluationOutcomeStorageKind::Occupied),
         "coalesced" => Some(RepoWatchEvaluationOutcomeStorageKind::Coalesced),
         "cooldown" => Some(RepoWatchEvaluationOutcomeStorageKind::Cooldown),
@@ -1093,6 +1099,7 @@ pub(crate) fn repo_watch_evaluation_outcome_from_str(
 pub(crate) enum RepoWatchObligationSettlementStorageKind {
     Deactivated,
     TargetClosed,
+    TargetConverged,
     Dispatched,
 }
 
@@ -1102,6 +1109,7 @@ pub(crate) const fn repo_watch_obligation_settlement_to_str(
     match value {
         RepoWatchObligationSettlementStorageKind::Deactivated => "deactivated",
         RepoWatchObligationSettlementStorageKind::TargetClosed => "target_closed",
+        RepoWatchObligationSettlementStorageKind::TargetConverged => "target_converged",
         RepoWatchObligationSettlementStorageKind::Dispatched => "dispatched",
     }
 }
@@ -1112,6 +1120,7 @@ pub(crate) fn repo_watch_obligation_settlement_from_str(
     match value {
         "deactivated" => Some(RepoWatchObligationSettlementStorageKind::Deactivated),
         "target_closed" => Some(RepoWatchObligationSettlementStorageKind::TargetClosed),
+        "target_converged" => Some(RepoWatchObligationSettlementStorageKind::TargetConverged),
         "dispatched" => Some(RepoWatchObligationSettlementStorageKind::Dispatched),
         _ => None,
     }
@@ -1220,6 +1229,46 @@ pub(crate) fn repo_watch_mergeable_state_from_str(value: &str) -> Option<Mergeab
         "mergeable" => Some(MergeableState::Mergeable),
         "conflicting" => Some(MergeableState::Conflicting),
         "unknown" => Some(MergeableState::Unknown),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_review_decision_to_str(
+    value: RepoWatchReviewDecision,
+) -> &'static str {
+    match value {
+        RepoWatchReviewDecision::None => "none",
+        RepoWatchReviewDecision::Approved => "approved",
+        RepoWatchReviewDecision::ReviewRequired => "review_required",
+        RepoWatchReviewDecision::ChangesRequested => "changes_requested",
+    }
+}
+
+pub fn repo_watch_review_decision_from_str(value: &str) -> Option<RepoWatchReviewDecision> {
+    match value {
+        "none" => Some(RepoWatchReviewDecision::None),
+        "approved" => Some(RepoWatchReviewDecision::Approved),
+        "review_required" => Some(RepoWatchReviewDecision::ReviewRequired),
+        "changes_requested" => Some(RepoWatchReviewDecision::ChangesRequested),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_convergence_verdict_to_str(
+    value: RepoWatchConvergenceVerdict,
+) -> &'static str {
+    match value {
+        RepoWatchConvergenceVerdict::NotConverged => "not_converged",
+        RepoWatchConvergenceVerdict::InternallyConverged => "internally_converged",
+        RepoWatchConvergenceVerdict::MergeReady => "merge_ready",
+    }
+}
+
+pub fn repo_watch_convergence_verdict_from_str(value: &str) -> Option<RepoWatchConvergenceVerdict> {
+    match value {
+        "not_converged" => Some(RepoWatchConvergenceVerdict::NotConverged),
+        "internally_converged" => Some(RepoWatchConvergenceVerdict::InternallyConverged),
+        "merge_ready" => Some(RepoWatchConvergenceVerdict::MergeReady),
         _ => None,
     }
 }
@@ -2190,7 +2239,10 @@ mod tests {
     use std::{collections::BTreeSet, str::FromStr};
 
     use rust_decimal::Decimal;
-    use signalbox_application::{RepoWatchPullRequestLifecycle, RepoWatchThreadState};
+    use signalbox_application::{
+        RepoWatchConvergenceVerdict, RepoWatchPullRequestLifecycle, RepoWatchReviewDecision,
+        RepoWatchThreadState,
+    };
     use signalbox_domain::{
         AcceptedInputId, BoundChildAction, CheckConclusion, ChecksOutcome,
         DelegateApprovalRecommendation, DelegationMessageDirection, DelegationOutcomeKind,
@@ -2237,14 +2289,16 @@ mod tests {
         model_settings_from_json, model_settings_overlay_from_json, model_settings_to_json,
         plan_event_kind_from_str, plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
         repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
-        repo_watch_checks_outcome_to_str, repo_watch_evaluation_outcome_from_str,
+        repo_watch_checks_outcome_to_str, repo_watch_convergence_verdict_from_str,
+        repo_watch_convergence_verdict_to_str, repo_watch_evaluation_outcome_from_str,
         repo_watch_evaluation_outcome_to_str, repo_watch_event_kind_from_str,
         repo_watch_event_kind_to_str, repo_watch_lifecycle_cutoff_disposition_from_str,
         repo_watch_lifecycle_cutoff_disposition_to_str, repo_watch_mergeable_state_from_str,
         repo_watch_mergeable_state_to_str, repo_watch_obligation_settlement_from_str,
         repo_watch_obligation_settlement_to_str, repo_watch_pull_request_lifecycle_from_str,
         repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
-        repo_watch_reaction_change_to_str, repo_watch_review_state_from_str,
+        repo_watch_reaction_change_to_str, repo_watch_review_decision_from_str,
+        repo_watch_review_decision_to_str, repo_watch_review_state_from_str,
         repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
         repo_watch_thread_state_to_str, runner_loss_propagation_state_from_str,
         runner_loss_propagation_state_to_str, runner_placement_loss_source_from_str,
@@ -3300,6 +3354,58 @@ mod tests {
             Some(RunnerPlacementLossSource::Registration),
         );
         assert_eq!(runner_placement_loss_source_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn repository_watch_review_decision_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
+                RepoWatchReviewDecision::None,
+            )),
+            Some(RepoWatchReviewDecision::None),
+        );
+        assert_eq!(
+            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
+                RepoWatchReviewDecision::Approved,
+            )),
+            Some(RepoWatchReviewDecision::Approved),
+        );
+        assert_eq!(
+            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
+                RepoWatchReviewDecision::ReviewRequired,
+            )),
+            Some(RepoWatchReviewDecision::ReviewRequired),
+        );
+        assert_eq!(
+            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
+                RepoWatchReviewDecision::ChangesRequested,
+            )),
+            Some(RepoWatchReviewDecision::ChangesRequested),
+        );
+        assert_eq!(repo_watch_review_decision_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn repository_watch_convergence_verdict_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_convergence_verdict_from_str(repo_watch_convergence_verdict_to_str(
+                RepoWatchConvergenceVerdict::NotConverged,
+            )),
+            Some(RepoWatchConvergenceVerdict::NotConverged),
+        );
+        assert_eq!(
+            repo_watch_convergence_verdict_from_str(repo_watch_convergence_verdict_to_str(
+                RepoWatchConvergenceVerdict::InternallyConverged,
+            )),
+            Some(RepoWatchConvergenceVerdict::InternallyConverged),
+        );
+        assert_eq!(
+            repo_watch_convergence_verdict_from_str(repo_watch_convergence_verdict_to_str(
+                RepoWatchConvergenceVerdict::MergeReady,
+            )),
+            Some(RepoWatchConvergenceVerdict::MergeReady),
+        );
+        assert_eq!(repo_watch_convergence_verdict_from_str("unknown"), None);
     }
 
     #[test]
