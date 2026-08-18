@@ -855,7 +855,9 @@ impl PostgresModelCallRepository {
                 provider_failure_cause,
             )
             .await?;
-            if let Some(finalizer) = &self.runner_observation_finalizer {
+            if let Some(finalizer) = &self.runner_observation_finalizer
+                && !matches!(outcome, ModelCallTerminalOutcome::ToolRound(_))
+            {
                 let boundary = model_observation_boundary(&outcome)?;
                 finalizer
                     .finalize_workspace_free_replacements_after_model_observation(
