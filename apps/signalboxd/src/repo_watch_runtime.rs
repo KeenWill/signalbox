@@ -5450,7 +5450,7 @@ mod tests {
         assert_eq!(
             pull.threads()[0]
                 .originating_review_id()
-                .map(GitHubObjectId::get),
+                .map(signalbox_domain::GitHubObjectId::get),
             Some(RETAINED_REVIEW_IDS[0])
         );
         assert_eq!(pull.threads()[1].thread().as_str(), RESOLVED_REVIEW_THREAD);
@@ -5458,7 +5458,7 @@ mod tests {
         assert_eq!(
             pull.threads()[1]
                 .originating_review_id()
-                .map(GitHubObjectId::get),
+                .map(signalbox_domain::GitHubObjectId::get),
             Some(RETAINED_REVIEW_IDS[1])
         );
     }
