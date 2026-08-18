@@ -29,14 +29,13 @@ use signalbox_persistence::{
     },
     session_credentials::{SessionCredentialPin, SessionModelCredential},
 };
-use signalbox_runner_wire::{
-    Advertise, CanonicalUuid, Enroll, PositiveU64, Registered, Resume, Resumed,
-};
+use signalbox_runner_wire::{Advertise, CanonicalUuid, Enroll, PositiveU64, Registered, Resume};
 use signalboxd::{
     LocalProcessListener,
     runner_protocol_runtime::{
         PostgresRunnerRegistrationService, RunnerEnrollmentAccepted, RunnerProtocolRuntime,
-        RunnerRegistrationFuture, RunnerRegistrationService,
+        RunnerRegistrationFuture, RunnerRegistrationService, RunnerReplayAdmissionFuture,
+        RunnerResumeAccepted,
     },
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -69,7 +68,7 @@ impl RunnerRegistrationService for LossObservedRegistrationService {
         self.inner.enroll(request)
     }
 
-    fn resume(&self, request: Resume) -> RunnerRegistrationFuture<'_, Resumed> {
+    fn resume(&self, request: Resume) -> RunnerRegistrationFuture<'_, RunnerResumeAccepted> {
         self.inner.resume(request)
     }
 
@@ -103,6 +102,10 @@ impl RunnerRegistrationService for LossObservedRegistrationService {
                 .expect("the loss observer remains live");
             Ok(outcome)
         })
+    }
+
+    fn claimed_replay_admission(&self) -> RunnerReplayAdmissionFuture<'_> {
+        self.inner.claimed_replay_admission()
     }
 }
 
