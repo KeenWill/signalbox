@@ -36,6 +36,11 @@ pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION: &str =
       WHERE obligation_id = $1
       FOR UPDATE";
 
+pub(crate) const REPO_WATCH_WEBHOOK_DELIVERY: &str = "SELECT receipt_sequence
+       FROM repo_watch_webhook_delivery
+      WHERE hook_id = $1 AND delivery_id = $2
+      FOR UPDATE";
+
 pub(crate) const START_ELIGIBLE_TURN: &str = "SELECT
             EXISTS (
                 SELECT 1
