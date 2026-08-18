@@ -163,11 +163,11 @@ use signalbox_process_protocol::{
     ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_BLOB_READ_BYTES,
-    MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
-    ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
-    ModelCapabilities as WireModelCapabilities, ModelChangeAdjustment as WireModelChangeAdjustment,
-    ModelSelection as WireModelSelection, ModelSettingSource as WireModelSettingSource,
-    ModelSettingsOverlay as WireModelSettingsOverlay,
+    MAX_CONCURRENT_SNAPSHOT_READERS, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter,
+    ModelCallCostLabel, ModelCallDisposition, ModelCallDollarCost, ModelCallState,
+    ModelCallTokenUsage, ModelCapabilities as WireModelCapabilities,
+    ModelChangeAdjustment as WireModelChangeAdjustment, ModelSelection as WireModelSelection,
+    ModelSettingSource as WireModelSettingSource, ModelSettingsOverlay as WireModelSettingsOverlay,
     ModelSettingsPrecedence as WireModelSettingsPrecedence,
     ModelSettingsSnapshot as WireModelSettingsSnapshot, PositiveCanonicalU64, ProtocolVersion,
     ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
@@ -1306,7 +1306,9 @@ fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
     if available == 0 {
         return None;
     }
-    usize::try_from(available).ok()
+    usize::try_from(available)
+        .ok()
+        .map(|available| available.min(MAX_CONCURRENT_SNAPSHOT_READERS))
 }
 
 const fn is_review_mutation(request: &ClientRequest) -> bool {
@@ -15036,17 +15038,17 @@ mod tests {
         ConversionFailureDisposition, GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
         ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_BLOB_READS,
-        MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES,
-        MAX_IMPORT_ADMISSION_WAITERS, MAX_SUBMITTED_INPUT_BYTES, OperationalImportError,
-        PendingConversationImport, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
-        ProtocolError, RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES,
-        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, ReviewCommandAdmission,
-        SnapshotReaderAdmission, SnapshotSpoolError, SubmitInputModelExecutionDiagnostic,
-        acquire_import_permit, acquire_import_waiter_permit, acquire_inbound_frame_permit,
-        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
-        acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
-        admit_snapshot_reader, admitted_user_content, blob_read_budget,
-        blob_upload_begin_preflight, canonical_review_request_digest,
+        MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_CONCURRENT_SNAPSHOT_READERS,
+        MAX_FRAME_BYTES, MAX_IMPORT_ADMISSION_WAITERS, MAX_SUBMITTED_INPUT_BYTES,
+        OperationalImportError, PendingConversationImport, ProcessConnectionError,
+        ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
+        RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
+        RequestId, ReviewCommandAdmission, SnapshotReaderAdmission, SnapshotSpoolError,
+        SubmitInputModelExecutionDiagnostic, acquire_import_permit, acquire_import_waiter_permit,
+        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
+        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
+        acquire_snapshot_reader_permit, admit_snapshot_reader, admitted_user_content,
+        blob_read_budget, blob_upload_begin_preflight, canonical_review_request_digest,
         claude_conversion_failure_disposition, codex_conversion_failure_disposition,
         consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
         foreground_peer_activity, handle_append_conversation_import,
@@ -16072,6 +16074,19 @@ mod tests {
                 .is_none()
         );
         Ok(())
+    }
+
+    #[test]
+    fn enlarged_pool_preserves_the_snapshot_reader_effective_ceiling() {
+        let enlarged_pool_connections = u32::try_from(MAX_CONCURRENT_SNAPSHOT_READERS)
+            .expect("the effective ceiling fits PostgreSQL pool capacity")
+            + RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS
+            + 1;
+
+        assert_eq!(
+            snapshot_reader_capacity(enlarged_pool_connections),
+            Some(MAX_CONCURRENT_SNAPSHOT_READERS)
+        );
     }
 
     /// The wire vocabulary as text. The review read verbs are enumerated from

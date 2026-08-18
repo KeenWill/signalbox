@@ -85,6 +85,15 @@ pub const MAX_BLOB_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 // numeric-bound: derived ceiling from MAX_FRAME_BYTES
 pub const MAX_BLOB_READ_BYTES: usize = MAX_FRAME_BYTES / 2;
 
+/// Tunable effective ceiling for concurrent process-protocol snapshot readers.
+///
+/// This operational admission bound is not a hard safety ceiling. The daemon
+/// additionally reserves pool connections outside snapshot work; this
+/// protocol-owned ceiling prevents a larger pool from expanding snapshot
+/// admission beyond the implemented contract.
+// numeric-bound: tunable - controls concurrent snapshot-reader admission
+pub const MAX_CONCURRENT_SNAPSHOT_READERS: usize = 8;
+
 /// Maximum replica count representable by the version-one deployment catalog.
 // numeric-bound: ceiling - restates blob-store's durable catalog capacity
 pub const MAX_BLOB_REPLICA_COUNT: u64 = signalbox_blob_store::MAX_BLOB_STORES as u64;
