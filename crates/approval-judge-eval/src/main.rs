@@ -1,3 +1,5 @@
+//! Offline operator CLI for replaying recorded approval-judge responses.
+
 use std::{env, error::Error, fs, io};
 
 use serde::Deserialize;
@@ -18,6 +20,12 @@ use signalboxd::approval_judge_eval::ApprovalJudgeEvalBinding;
 use uuid::Uuid;
 
 const OFFLINE_PROVIDER_MODEL: &str = "offline-recorded-approval-judge";
+// Tunable effective ceiling: recorded judge decisions are short, so this bounds
+// accidental output growth without representing a provider or safety limit.
+const OFFLINE_MAX_OUTPUT_TOKENS: u32 = 256;
+// Tunable effective ceiling: the synthetic corpus needs only a small context, so
+// this bounds offline runtime allocation without representing a safety limit.
+const OFFLINE_CONTEXT_WINDOW_TOKENS: u32 = 4_096;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -110,9 +118,13 @@ fn offline_model(
 > {
     let target =
         ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(30)));
-    let definition =
-        RuntimeModelDefinition::try_new(target, String::from(OFFLINE_PROVIDER_MODEL), 256, 4_096)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let definition = RuntimeModelDefinition::try_new(
+        target,
+        String::from(OFFLINE_PROVIDER_MODEL),
+        OFFLINE_MAX_OUTPUT_TOKENS,
+        OFFLINE_CONTEXT_WINDOW_TOKENS,
+    )
+    .map_err(|error| io::Error::other(error.to_string()))?;
     let catalog = RuntimeModelCatalog::try_from_definitions([definition])
         .map_err(|error| io::Error::other(error.to_string()))?;
     Ok((
