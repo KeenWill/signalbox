@@ -1351,22 +1351,32 @@ where
                                 correlation.clone(),
                                 signalbox_runner_wire::ReleasePhase::ReleaseCompleted,
                             )?;
-                            send_message(
-                                &mut self.io,
-                                Message::WorkspaceReleased(WorkspaceReleased {
-                                    correlation,
-                                }),
-                            )
-                            .await?;
+                            if !matches!(
+                                deferred_shutdown,
+                                Some(ConnectionEnd::StaleConnectionRejected { .. })
+                            ) {
+                                send_message(
+                                    &mut self.io,
+                                    Message::WorkspaceReleased(WorkspaceReleased {
+                                        correlation,
+                                    }),
+                                )
+                                .await?;
+                            }
                         }
                         Err(_) => {
                             let failure = workspace_cleanup_failure(correlation)?;
                             state.record_workspace_release_failure(failure.clone())?;
-                            send_message(
-                                &mut self.io,
-                                Message::OperationFailed(OperationFailed { failure }),
-                            )
-                            .await?;
+                            if !matches!(
+                                deferred_shutdown,
+                                Some(ConnectionEnd::StaleConnectionRejected { .. })
+                            ) {
+                                send_message(
+                                    &mut self.io,
+                                    Message::OperationFailed(OperationFailed { failure }),
+                                )
+                                .await?;
+                            }
                         }
                     }
                     self.deferred_connection_end = deferred_shutdown;
@@ -4449,7 +4459,8 @@ mod tests {
     }
 
     /// INV-011 / INV-024: cleanup serving rejects a stale daemon epoch while
-    /// retaining cleanup until the accepted release reaches a durable result.
+    /// retaining cleanup until the accepted release reaches a durable result,
+    /// without projecting another frame on the terminalized connection.
     #[tokio::test]
     async fn inv011_inv024_workspace_cleanup_rejects_stale_shutdown_before_projection() {
         let parent = TempDir::new().expect("a temporary parent is available");
@@ -4515,13 +4526,13 @@ mod tests {
             )
             .await;
             let rejected = receive_hub_message(&mut hub_io).await;
+            drop(hub_io);
             complete_cleanup
                 .send(())
                 .expect("cleanup remains live after stale shutdown rejection");
-            let released = receive_hub_message(&mut hub_io).await;
-            (rejected, released)
+            rejected
         };
-        let (outcome, (rejected, released)) = tokio::join!(runner, hub);
+        let (outcome, rejected) = tokio::join!(runner, hub);
 
         assert_eq!(
             rejected,
@@ -4529,12 +4540,6 @@ mod tests {
                 offending_kind: MessageKind::Shutdown.to_string(),
                 available_correlation: AvailableCorrelation::ConnectionEpoch(stale_epoch),
                 code: RejectionCode::StaleConnection,
-            })
-        );
-        assert_eq!(
-            released,
-            Message::WorkspaceReleased(WorkspaceReleased {
-                correlation: correlation.clone(),
             })
         );
         assert_eq!(
