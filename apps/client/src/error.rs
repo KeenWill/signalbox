@@ -8,7 +8,7 @@ use std::{
 use signalbox_process_protocol::{
     AnthropicServiceTier, CodexCliServiceTier, ConversationImportRejectionClass, ErrorCode,
     ErrorDetail, FailedModelCallCause, FrameDecodeError, FrameEncodeError, GoalCommandRejection,
-    OpenAiServiceTier, ReasoningLevel, RejectionDetail, ServiceTier,
+    MAX_BLOB_READ_BYTES, OpenAiServiceTier, ReasoningLevel, RejectionDetail, ServiceTier,
 };
 
 #[derive(Debug)]
@@ -16,6 +16,10 @@ pub(crate) enum ClientError {
     Io(io::Error),
     SourceFile(io::Error),
     BlobSourceFile {
+        path: PathBuf,
+        source: io::Error,
+    },
+    BlobOutputFile {
         path: PathBuf,
         source: io::Error,
     },
@@ -50,6 +54,7 @@ pub(crate) enum ClientError {
     },
     AmbiguousMutation,
     Input(&'static str),
+    BlobReadLengthOutOfRange,
     TurnRecoveryRequired,
     RunnerRecoveryRequired,
     TurnFailed(Option<FailedModelCallCause>),
@@ -73,6 +78,13 @@ impl ClientError {
 
     pub(crate) fn blob_source_file(path: &Path, source: io::Error) -> Self {
         Self::BlobSourceFile {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
+    pub(crate) fn blob_output_file(path: &Path, source: io::Error) -> Self {
+        Self::BlobOutputFile {
             path: path.to_path_buf(),
             source,
         }
@@ -124,6 +136,7 @@ impl ClientError {
             Self::Remote { .. }
             | Self::SourceFile(_)
             | Self::BlobSourceFile { .. }
+            | Self::BlobOutputFile { .. }
             | Self::SystemPromptFile(_)
             | Self::GoalTextFile { .. }
             | Self::DelegationContentFile { .. }
@@ -140,6 +153,7 @@ impl ClientError {
             | Self::Protocol(_)
             | Self::AmbiguousMutation
             | Self::Input(_)
+            | Self::BlobReadLengthOutOfRange
             | Self::TurnRecoveryRequired
             | Self::RunnerRecoveryRequired
             | Self::TurnFailed(_)
@@ -164,6 +178,11 @@ impl fmt::Display for ClientError {
             Self::BlobSourceFile { path, source } => write!(
                 formatter,
                 "the blob upload source file '{}' could not be read: {source}",
+                path.display()
+            ),
+            Self::BlobOutputFile { path, source } => write!(
+                formatter,
+                "the blob range output file '{}' could not be written: {source}",
                 path.display()
             ),
             Self::SystemPromptFile(_) => {
@@ -225,6 +244,10 @@ impl fmt::Display for ClientError {
                  arguments and exact input, using any printed recovery values",
             ),
             Self::Input(message) => formatter.write_str(message),
+            Self::BlobReadLengthOutOfRange => write!(
+                formatter,
+                "blob read length must be between 1 and {MAX_BLOB_READ_BYTES} bytes"
+            ),
             Self::TurnRecoveryRequired => formatter.write_str(
                 "the submitted turn requires model-call recovery that the terminal cannot perform",
             ),
@@ -258,6 +281,7 @@ impl Error for ClientError {
             | Self::ReviewInputFile(error)
             | Self::ScanDirectory(error) => Some(error),
             Self::BlobSourceFile { source, .. } => Some(source),
+            Self::BlobOutputFile { source, .. } => Some(source),
             Self::DelegationContentFileUtf8 { source, .. } => Some(source),
             Self::ReviewInputJson(error) => Some(error),
             Self::Encode(error) => Some(error),
@@ -266,6 +290,7 @@ impl Error for ClientError {
             | Self::Remote { .. }
             | Self::AmbiguousMutation
             | Self::Input(_)
+            | Self::BlobReadLengthOutOfRange
             | Self::ReviewInputExceedsFrame
             | Self::SourceExceedsFrame
             | Self::ScanIncomplete { .. }
@@ -318,6 +343,8 @@ const fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::UnsupportedVersion => "unsupported_version",
         ErrorCode::InvalidRequest => "invalid_request",
         ErrorCode::NotFound => "not_found",
+        ErrorCode::BlobMissing => "blob_missing",
+        ErrorCode::BlobCorrupt => "blob_corrupt",
         ErrorCode::ConflictingReuse => "conflicting_reuse",
         ErrorCode::Rejected => "rejected",
         ErrorCode::ResyncRequired => "resync_required",
@@ -687,6 +714,28 @@ impl fmt::Display for RejectionDisplay {
             } => write!(
                 formatter,
                 "blob_upload_digest_mismatch expected_digest={expected_digest} actual_digest={actual_digest}"
+            ),
+            RejectionDetail::BlobReadLengthOutOfRange {
+                min_length_bytes,
+                max_length_bytes,
+                requested_length_bytes,
+            } => write!(
+                formatter,
+                "blob_read_length_out_of_range min_length_bytes={} max_length_bytes={} requested_length_bytes={}",
+                min_length_bytes.value(),
+                max_length_bytes.value(),
+                requested_length_bytes.value()
+            ),
+            RejectionDetail::BlobReadRangeOutOfBounds {
+                offset_bytes,
+                length_bytes,
+                blob_length_bytes,
+            } => write!(
+                formatter,
+                "blob_read_range_out_of_bounds offset_bytes={} length_bytes={} blob_length_bytes={}",
+                offset_bytes.value(),
+                length_bytes.value(),
+                blob_length_bytes.value()
             ),
         }
     }

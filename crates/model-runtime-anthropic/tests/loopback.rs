@@ -418,6 +418,7 @@ async fn assert_anthropic_error_body_falls_back_to_status(body: &[u8]) {
         panic!("a complete terminal error status remains definitive");
     };
     assert_eq!(error.kind, ProviderErrorKind::RateLimited);
+    assert!(!error.non_acceptance_proven);
     assert_eq!(error.native.error_token, None);
     assert_eq!(error.exchange.http_status, Some(status));
 }

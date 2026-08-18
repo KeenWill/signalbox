@@ -12,6 +12,7 @@ use std::{
     future::Future,
     num::NonZeroU64,
     sync::{Arc, Weak},
+    time::Duration,
 };
 
 // numeric-bound: ceiling - protects against an unbounded paid provider loop
@@ -19,9 +20,10 @@ const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 32;
 
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
-    AuthorizedModelCall, CompletedModelCallIdentities, ContextCompactionRange, ContextFrontierId,
-    ContextFrontierProjection, ContextFrontierProjectionFailure,
-    CorrelatedModelCallTerminalObservation, DangerousToolAutoApproval, DelegationContent,
+    AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, CompletedModelCallIdentities,
+    ContextCompactionRange, ContextFrontierId, ContextFrontierProjection,
+    ContextFrontierProjectionFailure, CorrelatedModelCallTerminalObservation,
+    CredentialPoolExhaustedModelCallTurn, DangerousToolAutoApproval, DelegationContent,
     DelegationMessageId, DelegationOutcome, DelegationWaitMode, DirectModelSelection,
     FailedModelCallTurn, FailedModelCallTurnIdentities, ImportedSourceAttestation, ImportedSpeaker,
     ImportedText, ImportedTranscriptContent, ImportedTranscriptEntryId, InitialToolApproval,
@@ -642,6 +644,10 @@ impl ClassifyOperatorFailure for ModelFrontierRenderingError {
 pub enum PrepareModelCallOutcome {
     /// The scheduling hint no longer identifies runnable work.
     NoWork,
+    /// A durable availability-successor deadline has not elapsed.
+    RetryBackoff(Duration),
+    /// No credential-pool member was available for this call-free attempt.
+    PoolExhausted(Box<CredentialPoolExhaustedModelCallTurn>),
     /// A new exact `Prepared` call committed; this invocation stops here.
     Checkpointed(ModelCallId),
     /// A previously committed `Prepared` request may prepare its capability.
@@ -802,6 +808,17 @@ pub enum ModelCallTerminalIdentityCandidates {
         /// Applied-interrupt terminal closure identities.
         stopped: StoppedToolRoundModelCallIdentities,
     },
+    /// Both legal closures for one classified availability failure.
+    ///
+    /// Persistence validates the call-pinned pool policy under its lock. A
+    /// configured `switch_now` consumes the fresh successor attempt; every
+    /// other action consumes the ordinary failed-turn identities.
+    Availability {
+        /// Ordinary terminal failure when policy does not authorize a successor.
+        failed: FailedModelCallTurnIdentities,
+        /// Fresh physical attempt for an authorized availability successor.
+        successor_attempt: TurnAttemptId,
+    },
 }
 
 /// Fresh transaction committing a provider-neutral terminal observation.
@@ -819,7 +836,7 @@ pub trait CommitModelCallObservationTransaction {
         observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentityCandidates,
         next_reclassified_turn: NextTurn,
-    ) -> impl Future<Output = Result<Option<ModelCallTerminalOutcome>, Self::Error>> + Send
+    ) -> impl Future<Output = Result<Option<ModelCallObservationCommitOutcome>, Self::Error>> + Send
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
 
@@ -838,6 +855,15 @@ pub enum RetainedModelCallObservationStatus {
     Pending,
     /// The exact observation is already represented durably.
     AlreadyCommitted,
+    /// The observation committed and its availability successor is durable.
+    ///
+    /// Distinct from `AlreadyCommitted` because the turn is still active on
+    /// the successor attempt: the caller must keep driving it after the
+    /// enclosed remaining delay rather than treating the turn as finished.
+    AvailabilitySuccessorCommitted {
+        /// Remaining wait before the successor attempt may prepare.
+        retry_backoff: Duration,
+    },
     /// A newer logical terminal proof made the retained provider result inert.
     DiscardedByLogicalTerminal,
 }
@@ -892,7 +918,7 @@ enum RetainedModelCallExecutionStateKind {
         /// Session owning the exact issued call.
         session: SessionId,
         /// Unchanged correlated observation returned by provider work.
-        observation: CorrelatedModelCallTerminalObservation,
+        observation: Box<CorrelatedModelCallTerminalObservation>,
         /// Frozen policy outcomes for each tool proposal, in proposal order.
         tool_approvals: Box<[InitialToolApproval]>,
     },
@@ -1057,6 +1083,10 @@ impl AttemptDispatchGate for InProcessAttemptDispatchGate {
 pub enum ModelCallExecutionOutcome {
     /// The scheduling hint no longer identifies runnable work.
     NoWork,
+    /// Durable retry backoff remains before the successor may be prepared.
+    RetryBackoff(Duration),
+    /// The pool admitted no member; this is not a member provider failure.
+    PoolExhausted(Box<CredentialPoolExhaustedOutcome>),
     /// A new prepared checkpoint committed and requires a later invocation.
     Checkpointed(ModelCallId),
     /// Target resolution failed before call creation.
@@ -1071,6 +1101,8 @@ pub enum ModelCallExecutionOutcome {
     ToolRoundLimitAlreadyCommitted(ModelCallId),
     /// The provider observation committed its authoritative result.
     ObservationCommitted(Box<ModelCallTerminalOutcome>),
+    /// An availability failure committed and left the turn on a fresh attempt.
+    AvailabilitySuccessor(Box<AvailabilitySuccessorOutcome>),
     /// A retained observation's earlier commit was proven to have landed.
     ObservationAlreadyCommitted(ModelCallId),
 }
@@ -1496,9 +1528,22 @@ where
                             retained.call(),
                         ));
                     }
+                    Ok(RetainedModelCallObservationStatus::AvailabilitySuccessorCommitted {
+                        retry_backoff,
+                    }) => {
+                        // The commit landed with its successor, so the turn is
+                        // active on a new attempt rather than terminal. Waiting
+                        // out the remaining delay returns the caller to ordinary
+                        // preparation, which owns the successor from here.
+                        return Ok(ModelCallExecutionOutcome::RetryBackoff(retry_backoff));
+                    }
                     Ok(RetainedModelCallObservationStatus::Pending) => {
                         return self
-                            .commit_terminal_observation(retained_session, retained, tool_approvals)
+                            .commit_terminal_observation(
+                                retained_session,
+                                *retained,
+                                tool_approvals,
+                            )
                             .await;
                     }
                     Ok(RetainedModelCallObservationStatus::DiscardedByLogicalTerminal) => {
@@ -1514,7 +1559,7 @@ where
                         });
                         return Err(ModelCallExecutionError::ObservationCommit {
                             error,
-                            retained_observation: retained,
+                            retained_observation: *retained,
                         });
                     }
                 },
@@ -1535,6 +1580,19 @@ where
             {
                 Ok(PrepareModelCallOutcome::NoWork) => {
                     return Ok(ModelCallExecutionOutcome::NoWork);
+                }
+                Ok(PrepareModelCallOutcome::RetryBackoff(delay)) => {
+                    return Ok(ModelCallExecutionOutcome::RetryBackoff(delay));
+                }
+                Ok(PrepareModelCallOutcome::PoolExhausted(exhausted)) => {
+                    report_turn_terminalization(
+                        exhausted.failed().session(),
+                        exhausted.failed().turn(),
+                        TurnTerminalOutcome::Failed,
+                    );
+                    return Ok(ModelCallExecutionOutcome::PoolExhausted(Box::new(
+                        CredentialPoolExhaustedOutcome::BeforeCall(exhausted),
+                    )));
                 }
                 Ok(PrepareModelCallOutcome::Checkpointed(call)) => {
                     return Ok(ModelCallExecutionOutcome::Checkpointed(call));
@@ -1798,8 +1856,31 @@ where
         >,
     > {
         loop {
-            let identities =
+            let mut identities =
                 self.next_terminal_identities(observation.observation(), &tool_approvals);
+            // Every classified pool trigger evaluates its frozen action, not
+            // only the ones that could substitute a member on this turn.
+            // `switch_next_turn`, `avoid_new_sessions`, and `quarantine`
+            // terminalize the call and persist a durable exclusion, so gating
+            // them on substitution proof silently degraded them to `stay`.
+            // Persistence still requires the proof before creating a successor.
+            if matches!(
+                observation.provider_failure_cause(),
+                Some(
+                    signalbox_domain::ProviderModelCallFailureCause::RateLimited
+                        | signalbox_domain::ProviderModelCallFailureCause::QuotaExhausted
+                        | signalbox_domain::ProviderModelCallFailureCause::Overloaded
+                        | signalbox_domain::ProviderModelCallFailureCause::CredentialRejected
+                )
+            ) && let ModelCallTerminalIdentityCandidates::Exact(
+                signalbox_domain::ModelCallTerminalIdentities::Failed(failed),
+            ) = identities
+            {
+                identities = ModelCallTerminalIdentityCandidates::Availability {
+                    failed,
+                    successor_attempt: self.ids.next_turn_attempt_id(),
+                };
+            }
             let ids = &mut self.ids;
             let next_turn = move |_| ids.next_turn_id();
             match self
@@ -1807,10 +1888,19 @@ where
                 .commit_observation(session, observation.clone(), identities, next_turn)
                 .await
             {
-                Ok(Some(outcome)) => {
+                Ok(Some(ModelCallObservationCommitOutcome::Terminal(outcome))) => {
                     report_model_call_terminalization(&outcome);
-                    return Ok(ModelCallExecutionOutcome::ObservationCommitted(Box::new(
-                        outcome,
+                    return Ok(ModelCallExecutionOutcome::ObservationCommitted(outcome));
+                }
+                Ok(Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(successor))) => {
+                    return Ok(ModelCallExecutionOutcome::AvailabilitySuccessor(successor));
+                }
+                Ok(Some(ModelCallObservationCommitOutcome::PoolExhausted(exhausted))) => {
+                    if let CredentialPoolExhaustedOutcome::AfterCall { terminal, .. } = &exhausted {
+                        report_model_call_terminalization(terminal);
+                    }
+                    return Ok(ModelCallExecutionOutcome::PoolExhausted(Box::new(
+                        exhausted,
                     )));
                 }
                 Ok(None) => return Ok(ModelCallExecutionOutcome::NoWork),
@@ -1824,7 +1914,7 @@ where
                     self.retained_state = Some(RetainedModelCallExecutionState {
                         state: RetainedModelCallExecutionStateKind::TerminalObservation {
                             session,
-                            observation: observation.clone(),
+                            observation: Box::new(observation.clone()),
                             tool_approvals,
                         },
                     });
@@ -1974,6 +2064,55 @@ where
                 }
             })
             .collect()
+    }
+}
+
+/// One durable result of committing a correlated model-call observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelCallObservationCommitOutcome {
+    /// The observation reached an ordinary terminal or durable-wait outcome.
+    Terminal(Box<ModelCallTerminalOutcome>),
+    /// Pool policy authorized a distinct availability successor attempt.
+    AvailabilitySuccessor(Box<AvailabilitySuccessorOutcome>),
+    /// Every member is unavailable; the pool, not one member, terminalized.
+    PoolExhausted(CredentialPoolExhaustedOutcome),
+}
+
+/// Typed pool-wide terminal cause, distinct from one account's failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CredentialPoolExhaustedOutcome {
+    /// Selection found no member before creating a call.
+    BeforeCall(Box<CredentialPoolExhaustedModelCallTurn>),
+    /// A qualifying member failure consumed the last available member.
+    AfterCall {
+        /// Deployment-owned pool name.
+        pool_name: Arc<str>,
+        /// Ordinary terminal projection retaining the last call's evidence.
+        terminal: Box<ModelCallTerminalOutcome>,
+    },
+}
+
+/// One committed availability successor and its capped retry delay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AvailabilitySuccessorOutcome {
+    successor: AvailabilitySuccessorModelCallTurn,
+    backoff: Duration,
+}
+
+impl AvailabilitySuccessorOutcome {
+    /// Creates the application result after persistence freezes the deadline.
+    pub const fn new(successor: AvailabilitySuccessorModelCallTurn, backoff: Duration) -> Self {
+        Self { successor, backoff }
+    }
+
+    /// Borrows the exact predecessor/successor lifecycle transition.
+    pub const fn successor(&self) -> &AvailabilitySuccessorModelCallTurn {
+        &self.successor
+    }
+
+    /// Returns the capped delay frozen with the durable successor.
+    pub const fn backoff(&self) -> Duration {
+        self.backoff
     }
 }
 
@@ -3525,7 +3664,7 @@ mod tests {
             _observation: CorrelatedModelCallTerminalObservation,
             _identities: ModelCallTerminalIdentityCandidates,
             _next_reclassified_turn: NextTurn,
-        ) -> Result<Option<ModelCallTerminalOutcome>, Self::Error>
+        ) -> Result<Option<ModelCallObservationCommitOutcome>, Self::Error>
         where
             NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
         {
@@ -3559,7 +3698,7 @@ mod tests {
             observation: CorrelatedModelCallTerminalObservation,
             _identities: ModelCallTerminalIdentityCandidates,
             _next_reclassified_turn: NextTurn,
-        ) -> Result<Option<ModelCallTerminalOutcome>, Self::Error>
+        ) -> Result<Option<ModelCallObservationCommitOutcome>, Self::Error>
         where
             NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
         {
@@ -5589,7 +5728,7 @@ mod tests {
                     observation,
                     ..
                 },
-            }) if observation == retained_observation
+            }) if observation.as_ref() == &retained_observation
         ));
     }
 

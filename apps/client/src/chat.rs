@@ -36,7 +36,7 @@ use crate::{
 
 // numeric-bound: ceiling - protects terminal input buffering from oversized commands
 const MAX_CHAT_LINE_BYTES: usize = MAX_INPUT_CONTENT_BYTES + ":steer ".len();
-// numeric-bound: ceiling - protects memory through single-item stdin backpressure
+// numeric-bound: tunable - controls terminal stdin backpressure
 const TERMINAL_INPUT_CHANNEL_CAPACITY: usize = 1;
 
 const COMMANDS: &str = ":stop TEXT | :steer TEXT | :approve ID | :deny ID REASON | \
