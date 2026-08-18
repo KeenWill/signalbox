@@ -152,16 +152,20 @@ pub(crate) async fn inspect(
         .await?)
 }
 
+pub(crate) struct ReadInput<'a> {
+    pub(crate) media_type: &'a str,
+    pub(crate) view: &'a str,
+}
+
 pub(crate) async fn read(
     source: &MemorySource,
-    media_type: &str,
-    view: &str,
+    input: ReadInput<'_>,
     processor: &DirectProcessor,
 ) -> Result<FileReadResult, FileMediaFailure> {
     let source_use = source
-        .file_use(media_type)
+        .file_use(input.media_type)
         .map_err(|_| FileMediaFailure::ProcessorFailed)?;
-    let view = ReadViewName::try_new(view).map_err(|_| FileMediaFailure::ProcessorFailed)?;
+    let view = ReadViewName::try_new(input.view).map_err(|_| FileMediaFailure::ProcessorFailed)?;
     registry()
         .map_err(|_| FileMediaFailure::ProcessorFailed)?
         .read(

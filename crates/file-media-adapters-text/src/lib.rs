@@ -10,10 +10,11 @@ use std::{error::Error, str::FromStr};
 use signalbox_file_media_runtime::{
     CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider, FileMediaProviderDeclaration,
     FileMediaProviderFuture, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    FileReaderName, FileReaderProviderName, FileReaderRevision, ProbeDeclaration, ProcessorFailure,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
-    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
-    ReaderIdentity, ReasonCode, StreamingTextFallback, VerifiedBlobSource,
+    FileReaderName, FileReaderProviderName, FileReaderRevision, MAX_STRUCTURED_NODES,
+    ProbeDeclaration, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
+    ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
+    StreamingTextFallback, VerifiedBlobSource,
 };
 
 const PROVIDER_NAME: &str = "signalbox_text";
@@ -193,7 +194,7 @@ fn structured_view(description: &str) -> Result<ReadViewDeclaration, Box<dyn Err
             source_bytes: MAX_TEXT_FAMILY_BYTES,
             output_bytes: MAX_TEXT_FAMILY_BYTES as usize,
             depth: json_adapter::MAX_STRUCTURED_DEPTH,
-            nodes: 100_000,
+            nodes: MAX_STRUCTURED_NODES,
             string_bytes: MAX_TEXT_FAMILY_BYTES as usize,
         },
     )?)

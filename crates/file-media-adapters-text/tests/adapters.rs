@@ -4,7 +4,7 @@ mod support;
 use std::error::Error;
 
 use signalbox_file_media_runtime::{FileMediaFailure, ReasonCode};
-use support::{DirectProcessor, MemorySource};
+use support::{DirectProcessor, MemorySource, ReadInput};
 
 #[tokio::test]
 async fn utf8_text_detects_validates_and_reads_exact_bytes() -> Result<(), Box<dyn Error>> {
@@ -14,7 +14,15 @@ async fn utf8_text_detects_validates_and_reads_exact_bytes() -> Result<(), Box<d
 
     let inspection = support::inspect(&source, "text/plain").await?;
     support::assert_validated_media(inspection, "text/plain");
-    let result = support::read(&source, "text/plain", "text", &DirectProcessor::provider()).await?;
+    let result = support::read(
+        &source,
+        ReadInput {
+            media_type: "text/plain",
+            view: "text",
+        },
+        &DirectProcessor::provider(),
+    )
+    .await?;
     support::assert_text(result, &expected);
     Ok(())
 }
@@ -46,8 +54,10 @@ async fn json_detects_validates_and_returns_structured_data() -> Result<(), Box<
     support::assert_validated_media(inspection, "application/json");
     let result = support::read(
         &source,
-        "application/json",
-        "structured",
+        ReadInput {
+            media_type: "application/json",
+            view: "structured",
+        },
         &DirectProcessor::provider(),
     )
     .await?;
@@ -63,8 +73,10 @@ async fn json_preserves_arbitrary_precision_numbers() -> Result<(), Box<dyn Erro
 
     let result = support::read(
         &source,
-        "application/json",
-        "structured",
+        ReadInput {
+            media_type: "application/json",
+            view: "structured",
+        },
         &DirectProcessor::provider(),
     )
     .await?;
@@ -145,8 +157,10 @@ async fn json_read_reports_the_declared_depth_limit() -> Result<(), Box<dyn Erro
 
     let result = support::read(
         &source,
-        "application/json",
-        "structured",
+        ReadInput {
+            media_type: "application/json",
+            view: "structured",
+        },
         &DirectProcessor::provider(),
     )
     .await;
@@ -168,8 +182,10 @@ async fn deeply_nested_valid_json_reports_the_declared_depth_limit() -> Result<(
     support::assert_validated_media(inspection, "application/json");
     let result = support::read(
         &source,
-        "application/json",
-        "structured",
+        ReadInput {
+            media_type: "application/json",
+            view: "structured",
+        },
         &DirectProcessor::provider(),
     )
     .await;
@@ -234,8 +250,10 @@ async fn json_read_reports_the_container_entry_limit() -> Result<(), Box<dyn Err
 
     let result = support::read(
         &source,
-        "application/json",
-        "structured",
+        ReadInput {
+            media_type: "application/json",
+            view: "structured",
+        },
         &DirectProcessor::provider(),
     )
     .await;
@@ -258,8 +276,10 @@ async fn extremely_deep_json_reports_depth_limit_without_stack_walk() -> Result<
     support::assert_validated_media(inspection, "application/json");
     let result = support::read(
         &source,
-        "application/json",
-        "structured",
+        ReadInput {
+            media_type: "application/json",
+            view: "structured",
+        },
         &DirectProcessor::provider(),
     )
     .await;
@@ -281,8 +301,10 @@ async fn csv_detects_validates_and_returns_headers_and_rows() -> Result<(), Box<
     support::assert_validated_media(inspection, "text/csv");
     let result = support::read(
         &source,
-        "text/csv",
-        "structured",
+        ReadInput {
+            media_type: "text/csv",
+            view: "structured",
+        },
         &DirectProcessor::provider(),
     )
     .await?;
@@ -334,7 +356,15 @@ async fn comma_bearing_prose_uses_the_text_fallback() -> Result<(), Box<dyn Erro
 
     let inspection = support::inspect(&source, "text/plain").await?;
     support::assert_validated_media(inspection, "text/plain");
-    let result = support::read(&source, "text/plain", "text", &DirectProcessor::provider()).await?;
+    let result = support::read(
+        &source,
+        ReadInput {
+            media_type: "text/plain",
+            view: "text",
+        },
+        &DirectProcessor::provider(),
+    )
+    .await?;
     support::assert_text(result, &expected);
     Ok(())
 }
@@ -379,8 +409,10 @@ async fn registry_sanitizer_keeps_injection_shaped_json_as_data() -> Result<(), 
 
     let result = support::read(
         &source,
-        "application/json",
-        "structured",
+        ReadInput {
+            media_type: "application/json",
+            view: "structured",
+        },
         &DirectProcessor::injecting(decoder_output),
     )
     .await?;
@@ -395,8 +427,10 @@ async fn registry_sanitizer_rejects_nul_bearing_decoder_output() -> Result<(), B
 
     let result = support::read(
         &source,
-        "application/json",
-        "structured",
+        ReadInput {
+            media_type: "application/json",
+            view: "structured",
+        },
         &DirectProcessor::injecting(decoder_output),
     )
     .await;

@@ -28,52 +28,23 @@ pub(crate) async fn probe(
 
 fn has_json_structure(prefix: &[u8], complete: bool) -> bool {
     let prefix = trim_ascii_start(prefix);
+    let Ok(text) = std::str::from_utf8(prefix) else {
+        return false;
+    };
     if complete {
-        let Ok(text) = std::str::from_utf8(prefix) else {
-            return false;
-        };
         return validate_json(text).is_ok();
     }
-    let Some((&opening, rest)) = prefix.split_first() else {
+    if !matches!(prefix.first(), Some(b'{' | b'[')) {
         return false;
-    };
-    let rest = trim_ascii_start(rest);
-    match (opening, rest.first()) {
-        (b'{', Some(_)) => rest.iter().enumerate().any(|(index, byte)| {
-            *byte == b':' && serde_json::from_slice::<String>(&rest[..index]).is_ok()
-        }),
-        (b'[', Some(_)) => has_array_structure(rest, complete),
-        _ => false,
     }
+    incomplete_json_prefix(text)
 }
 
-fn has_array_structure(rest: &[u8], complete: bool) -> bool {
-    let Some(first_end) = parse_value_prefix(rest) else {
-        return false;
-    };
-    let after_first = trim_ascii_start(&rest[first_end..]);
-    match after_first.split_first() {
-        Some((b']', trailing)) => complete && trailing.iter().all(u8::is_ascii_whitespace),
-        Some((b',', after_comma)) => {
-            let after_comma = trim_ascii_start(after_comma);
-            let Some(second_end) = parse_value_prefix(after_comma) else {
-                return false;
-            };
-            let after_second = trim_ascii_start(&after_comma[second_end..]);
-            match after_second.split_first() {
-                Some((b',', _)) => true,
-                Some((b']', trailing)) => complete && trailing.iter().all(u8::is_ascii_whitespace),
-                _ => false,
-            }
-        }
-        _ => false,
-    }
-}
-
-fn parse_value_prefix(bytes: &[u8]) -> Option<usize> {
-    let mut values = serde_json::Deserializer::from_slice(bytes).into_iter::<serde_json::Value>();
-    values.next()?.ok()?;
-    Some(values.byte_offset())
+fn incomplete_json_prefix(text: &str) -> bool {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    deserializer.disable_recursion_limit();
+    serde::de::IgnoredAny::deserialize(serde_stacker::Deserializer::new(&mut deserializer))
+        .is_err_and(|error| error.is_eof())
 }
 
 fn trim_ascii_start(bytes: &[u8]) -> &[u8] {
