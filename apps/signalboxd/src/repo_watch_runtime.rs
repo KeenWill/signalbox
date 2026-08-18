@@ -4867,40 +4867,6 @@ mod tests {
         )?)
     }
 
-    /// Closes the pull request the canonical observation holds open, so a drain
-    /// that projects it commits a lifecycle cutoff no earlier pass could see.
-    fn closed_admission(delivery: u128) -> Result<RepoWatchWebhookAdmission, Box<dyn Error>> {
-        let body = serde_json::json!({
-            "action": "closed",
-            "number": PULL_NUMBER,
-            "repository": {"full_name": WATCHED_REPOSITORY},
-            "pull_request": {
-                "title": PULL_TITLE,
-                "body": PULL_BODY,
-                "draft": false,
-                "merged": false,
-                "user": {"login": PROVIDER_PULL_AUTHOR},
-                "labels": [],
-                "base": {"ref": BASE_BRANCH},
-                "head": {
-                    "sha": HEAD_SHA,
-                    "ref": HEAD_BRANCH,
-                    "repo": {"full_name": PROVIDER_HEAD_REPOSITORY}
-                }
-            }
-        })
-        .to_string()
-        .into_bytes();
-        Ok(RepoWatchWebhookAdmission::try_new(
-            webhook_delivery_key(delivery),
-            RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?,
-            "pull_request".to_owned(),
-            Some("closed".to_owned()),
-            [WEBHOOK_BODY_DIGEST_FILL; 32],
-            body,
-        )?)
-    }
-
     struct WebhookTaskFixture {
         task: RepositoryWatchTask,
         // The poller resolves its credential from a file in this directory on
@@ -6950,21 +6916,21 @@ mod tests {
     /// and will wake no later attempt, so an attempt that let this failure
     /// escape would report a bare `Drained`, clear the deadline the committed
     /// work needs, and leave that work to an unrelated admission or the next
-    /// poll. The cutoff the drain itself commits is what the attempt's earlier
-    /// cutoff pass could not have processed already.
+    /// poll. The fixture fault arms itself from the drain's terminal write, so
+    /// the cutoff pass this attempt ran before its drain is left succeeding.
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn a_trailing_poll_cutoff_failure_arms_a_follow_up() -> Result<(), Box<dyn Error>> {
         let (_container, pool) = migrated_postgres().await?;
         let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
-        let closing = closed_admission(FIRST_WEBHOOK_DELIVERY)?;
-        webhook_store.admit(&closing).await?;
+        let admission = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&admission).await?;
         let server = ScriptedServer::start(complete_typed_observation_responses()).await;
         let mut fixture = webhook_task_against(&pool, server.base_url.clone()).await?;
         fixture
             .task
             .dispatch_store
-            .inject_lifecycle_cutoff_rejection()
+            .inject_post_drain_lifecycle_cutoff_fault()
             .await?;
 
         let mut drained = None;
@@ -6986,7 +6952,10 @@ mod tests {
             Some(RepositoryWatchAttemptError::Persistence),
             "the cutoff that failed after the drain committed is reported, not swallowed"
         );
-        assert!(webhook_disposition_exists(&webhook_store, closing.key()).await?);
+        assert!(
+            webhook_disposition_exists(&webhook_store, admission.key()).await?,
+            "the drain committed the work whose follow-up this failure owes"
+        );
         let armed_at = Instant::now();
         let mut retry = WebhookDrainRetry::default();
         retry.update_after_poll_drain(
