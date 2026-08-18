@@ -15,22 +15,24 @@ use std::{
 
 use signalbox_application::{
     EligibilityPass, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
-    InProcessToolDispatchGate, ModelCallCredentialReference, RunnerLeaseClaimRequest,
-    RunnerLeaseResultRequest, StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolCatalog, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7SubmitInputIdGenerator,
+    InProcessToolDispatchGate, ModelCallCredentialReference, PinnedRunnerReplacementIdentities,
+    PinnedRunnerReplacementOutcome, RunnerLeaseClaimRequest, RunnerLeaseResultRequest,
+    StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+    ToolCatalog, UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
-    CreateSession, DirectModelSelection, DurableCommandId, ModelCallId, ModelSelectionOverride,
-    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
-    ProviderModelIdentity, ResolvedProviderTarget, RunnerCatalog, RunnerLease,
-    RunnerLeaseCorrelation, RunnerSandboxProfile, RunnerSelector, RunnerToolDeclaration,
+    ContextFrontierId, CreateSession, DirectModelSelection, DurableCommandId, ModelCallId,
+    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
+    PerInputConfigurationChoices, ProviderModelIdentity, ReplaceLostRunner, ResolvedProviderTarget,
+    RunnerCatalog, RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation,
+    RunnerReplacementTarget, RunnerSandboxProfile, RunnerSelector, RunnerToolDeclaration,
     RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverrides,
-    RunnerWorkingDirectory, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SessionRunnerPlacementRequest,
-    SessionRunnerPlacementState, SubmitInputAppliedResult, SubmitInputResult, ToolAdmissibleLoci,
-    ToolEffectClass, ToolName, ToolRequestId, TranscriptAncestry, UserContent,
-    WorkingDirectorySelection, WorkspaceRequirement,
+    RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SessionRunnerPlacementRequest, SessionRunnerPlacementState,
+    SubmitInputAppliedResult, SubmitInputResult, ToolAdmissibleLoci, ToolEffectClass, ToolName,
+    ToolRequestId, TranscriptAncestry, UserContent, WorkingDirectorySelection,
+    WorkspaceRequirement,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -95,13 +97,17 @@ const PROOF_MODEL_TARGET: u128 = 0x541;
 const PROOF_SESSION: u128 = 0x542;
 const PROOF_SESSION_COMMAND: u128 = 0x543;
 const PROOF_INPUT_COMMAND: u128 = 0x544;
+const PROOF_REPLACEMENT_COMMAND: u128 = 0x545;
+const PROOF_REPLACEMENT_RUNNER: u128 = 0x546;
+const PROOF_REPLACEMENT_ENTRY: u128 = 0x547;
+const PROOF_REPLACEMENT_FRONTIER: u128 = 0x548;
 const PROOF_USER_CONTENT: &str = "run the generic sandboxed exec proof";
 const PROOF_OUTPUT: &str = "runner-proof";
 
 #[derive(Clone)]
 struct LossObservedRegistrationService {
     inner: PostgresRunnerRegistrationService,
-    completed: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    transitions: watch::Sender<Option<RunnerConnectionTransition>>,
 }
 
 impl RunnerRegistrationService for LossObservedRegistrationService {
@@ -129,18 +135,12 @@ impl RunnerRegistrationService for LossObservedRegistrationService {
         transition: RunnerConnectionTransition,
     ) -> RunnerRegistrationFuture<'_, RunnerConnectionTransitionOutcome> {
         let inner = self.inner.clone();
-        let completed = Arc::clone(&self.completed);
+        let transitions = self.transitions.clone();
         Box::pin(async move {
             let outcome = inner
                 .transition_connection(enrollment, epoch, transition)
                 .await?;
-            completed
-                .lock()
-                .expect("the loss-observation sender lock remains available")
-                .take()
-                .expect("the runtime reports one terminal connection transition")
-                .send(())
-                .expect("the loss observer remains live");
+            let _ = transitions.send(Some(transition));
             Ok(outcome)
         })
     }
@@ -258,6 +258,39 @@ fn completion_script() -> Script {
         content: vec![AssistantPart::Text(String::from("runner result observed"))],
         usage: TokenUsage::unreported(),
     }))
+}
+
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct RunnerLossFacts {
+    state_kind: String,
+    pinned_runner_id: uuid::Uuid,
+    loss_source_kind: String,
+    placement_revision: i64,
+}
+
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct ReplacementCounts {
+    staged_rows: i64,
+    terminal_results: i64,
+}
+
+async fn kill_runner_and_wait_for_loss(
+    runner: &mut tokio::process::Child,
+    loss_observer: &mut watch::Receiver<Option<RunnerConnectionTransition>>,
+) -> Result<(), Box<dyn Error>> {
+    runner.start_kill()?;
+    timeout(PROCESS_TIMEOUT, runner.wait())
+        .await
+        .expect("the proof runner stops before the loss deadline")?;
+    timeout(
+        PROCESS_TIMEOUT,
+        loss_observer
+            .wait_for(|observed| observed == &Some(RunnerConnectionTransition::TransportClosed)),
+    )
+    .await
+    .expect("the daemon propagates runner loss before the integration deadline")
+    .expect("the loss observer remains connected");
+    Ok(())
 }
 
 async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
@@ -393,10 +426,10 @@ repositories = {{}}
     let inner = PostgresRunnerRegistrationService::registration_only(pool.clone())
         .expect("the registration-only runner catalog is valid");
     let store = inner.protocol_store();
-    let (loss_sender, loss_observer) = oneshot::channel();
+    let (loss_sender, mut loss_observer) = watch::channel(None);
     let service = LossObservedRegistrationService {
         inner,
-        completed: Arc::new(Mutex::new(Some(loss_sender))),
+        transitions: loss_sender,
     };
     let (shutdown_sender, shutdown) = watch::channel(false);
     let runtime = tokio::spawn(RunnerProtocolRuntime::new(listener, service).run(shutdown));
@@ -456,9 +489,14 @@ repositories = {{}}
     timeout(PROCESS_TIMEOUT, runner.wait())
         .await
         .expect("the runner process stops before the loss deadline")?;
-    timeout(PROCESS_TIMEOUT, loss_observer)
-        .await
-        .expect("the daemon propagates runner loss before the integration deadline")?;
+    timeout(
+        PROCESS_TIMEOUT,
+        loss_observer
+            .wait_for(|observed| observed == &Some(RunnerConnectionTransition::TransportClosed)),
+    )
+    .await
+    .expect("the daemon propagates runner loss before the integration deadline")
+    .expect("the loss observer remains connected");
     let connection = store
         .load_connection(enrollment.enrollment())
         .await?
@@ -488,12 +526,13 @@ repositories = {{}}
     Ok(())
 }
 
-/// S30 / INV-042 / INV-043: a session placed on an actually spawned runner
-/// completes one generic exec-family call inside the restricted bubblewrap
-/// profile, and the transcript retains the exact runner execution object.
+/// S30 / S32 / INV-042 / INV-043 / INV-044: a session placed on an actually
+/// spawned runner completes one generic exec-family call inside the restricted
+/// bubblewrap profile, retains the exact runner execution object, then crosses
+/// durable loss and stages one replay-safe replacement command.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL, bubblewrap, and the packaged runner binaries"]
-async fn s30_inv042_inv043_spawned_runner_executes_restricted_generic_dispatch()
+async fn s30_s32_inv042_inv043_inv044_spawned_runner_executes_then_stages_replacement()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = postgres().await?;
     let directory = private_tempdir()?;
@@ -595,7 +634,11 @@ async fn s30_inv042_inv043_spawned_runner_executes_restricted_generic_dispatch()
     )
     .expect("the exact proof runner catalog is internally consistent");
     let store = RunnerProtocolStore::new(pool.clone(), runner_catalog);
-    let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+    let (loss_sender, mut loss_observer) = watch::channel(None);
+    let service = LossObservedRegistrationService {
+        inner: PostgresRunnerRegistrationService::new(store.clone(), []),
+        transitions: loss_sender,
+    };
     let broker = RunnerConnectionBroker::new();
     let (result_sender, result_observer) = oneshot::channel();
     let operations = ResultObservedLeaseOperations {
@@ -805,15 +848,84 @@ async fn s30_inv042_inv043_spawned_runner_executes_restricted_generic_dispatch()
     );
     assert_eq!(model_runtime.received_operations().len(), 2);
 
+    kill_runner_and_wait_for_loss(&mut runner, &mut loss_observer).await?;
+    let lost_placement = store
+        .load_placement(session)
+        .await?
+        .expect("the pinned proof placement remains reconstitutable after loss");
+    let loss_facts: RunnerLossFacts = sqlx::query_as(
+        "SELECT placement.state_kind AS state_kind,
+                placement.pinned_runner_id AS pinned_runner_id,
+                placement.loss_source_kind AS loss_source_kind,
+                placement.placement_revision::bigint AS placement_revision
+           FROM runner_current_session_placement AS current_head
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = current_head.session_id
+            AND placement.event_ordinal = current_head.event_ordinal
+          WHERE current_head.session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        lost_placement.placement().revision(),
+        completed_correlation.placement_revision
+    );
+    assert_eq!(loss_facts.state_kind, "runner_lost");
+    assert_eq!(loss_facts.pinned_runner_id, enrollment.runner().into_uuid());
+    assert_eq!(loss_facts.loss_source_kind, "connection");
+    assert_eq!(
+        loss_facts.placement_revision,
+        i64::try_from(completed_correlation.placement_revision.get())
+            .expect("the proof placement revision fits PostgreSQL bigint")
+    );
+
+    let replacement_command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid::Uuid::from_u128(PROOF_REPLACEMENT_COMMAND)),
+        session,
+        completed_correlation.placement_revision,
+        RunnerReplacementTarget::Runner(RunnerId::from_uuid(uuid::Uuid::from_u128(
+            PROOF_REPLACEMENT_RUNNER,
+        ))),
+    );
+    let replacement_identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid::Uuid::from_u128(PROOF_REPLACEMENT_ENTRY)),
+        ContextFrontierId::from_uuid(uuid::Uuid::from_u128(PROOF_REPLACEMENT_FRONTIER)),
+    );
+    let staged = store
+        .stage_workspace_free_pinned_replacement(replacement_command, replacement_identities)
+        .await?;
+    let replayed = store
+        .stage_workspace_free_pinned_replacement(replacement_command, replacement_identities)
+        .await?;
+    let replacement_counts: ReplacementCounts = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM runner_workspace_free_replacement_stage
+               WHERE command_id = $1) AS staged_rows,
+             (SELECT count(*) FROM replace_lost_runner_result
+               WHERE command_id = $1) AS terminal_results",
+    )
+    .bind(replacement_command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let expected_stage = PinnedRunnerReplacementOutcome::Staged {
+        command: replacement_command.command(),
+    };
+    assert_eq!(staged, expected_stage);
+    assert_eq!(replayed, expected_stage);
+    assert_eq!(
+        replacement_counts,
+        ReplacementCounts {
+            staged_rows: 1,
+            terminal_results: 0,
+        }
+    );
+
     shutdown_sender.send(true)?;
     timeout(PROCESS_TIMEOUT, runtime)
         .await
         .expect("the proof daemon runtime stops before the integration deadline")
         .expect("the proof daemon runtime task joins")?;
-    let runner_status = timeout(PROCESS_TIMEOUT, runner.wait())
-        .await
-        .expect("the proof runner stops after daemon shutdown")?;
-    assert!(runner_status.success());
     pool.close().await;
     drop(container);
     Ok(())
