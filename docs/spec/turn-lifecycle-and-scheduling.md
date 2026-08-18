@@ -417,9 +417,9 @@ the sweep (INV-007).
   waiting. If none is immediately available, the pass relinquishes its
   scheduler-pass capacity, ends, and leaves only the durable `Prepared` row for
   a later sweep. After acquiring a permit, its task remains in flight for
-  per-session deduplication
-  but relinquishes the scheduler-pass slot during store I/O; after successful
-  verification it reacquires a slot before send authorization and its guarded
+  per-session deduplication but relinquishes the scheduler-pass slot during store
+  I/O; after successful verification it reacquires a slot before send
+  authorization and its guarded
   transaction revalidates authority. A model-originated `blob_read` uses the
   same slot handoff after it acquires the blob contract's non-waiting
   direct-read permit: its physical attempt remains in flight during store
