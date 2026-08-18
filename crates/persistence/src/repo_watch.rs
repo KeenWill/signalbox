@@ -676,7 +676,9 @@ impl PostgresRepoWatchStore {
                 )
                 .await?;
             }
-            if let Some(assessments) = assessments {
+            if let Some(assessments) = assessments
+                && current_generation == Some(cursor.generation())
+            {
                 Self::record_convergence_assessments_in_transaction(
                     &mut transaction,
                     repository,
