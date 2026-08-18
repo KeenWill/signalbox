@@ -155,7 +155,12 @@ BEGIN
              WHERE generation.session_id = NEW.session_id
                AND generation.placement_event_ordinal =
                     NEW.retired_placement_event_ordinal
-               AND lease_event.state_kind IN ('offered', 'claimed')
+               AND lease_event.state_kind IN (
+                    'offered',
+                    'claimed',
+                    'lost_execution_possible',
+                    'lost_claimed'
+               )
        )
     THEN
         RAISE EXCEPTION 'workspace release lacks exact retired placement authority'
