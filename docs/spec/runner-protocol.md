@@ -44,7 +44,7 @@ the durable transactions before acknowledgement is re-verified through this PR
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
 contract was re-verified through PR #322 (`agent/docs-discipline`; pinned and
-pinned-loss request mismatches). Owner-private storage of the one retained lease
+pinned-loss request mismatches). Runner-private storage of the one retained lease
 and its monotonic fsynced phases is re-verified through this PR
 (`agent/runner-operation-journal`). Matching terminal-result retention and
 atomic acknowledgement clearing are re-verified through this PR
@@ -885,7 +885,7 @@ selected runner authority, and placement in the runner lock order, authenticates
 either a distinct live successor or the registration-loss-only same-runner
 exception, and returns the original durable stage on equal replay. A
 workspace-free placement returns `NotApplicable` without claiming the command,
-so its later terminal transaction remains the sole owner. The runner provisions
+so its later terminal transaction remains the sole finalizer. The runner provisions
 and spools `workspace_ready` under that limited authority. Only a later
 transaction can activate the pending enrollment: it rechecks the lost
 predecessor and connected candidate, consumes the exact workspace receipt,
@@ -1586,7 +1586,8 @@ for an exact `sandboxed_exec` dispatch carrying `WorkspaceRestricted`, using the
 correlation's exact working directory as the writable root and the configured
 read-only paths. The shipped catalog remains empty, so the runner does not yet
 advertise or newly receive that tool. The HTTPS broker and resource limits
-remain separate work, with first-release resource limits still owner-gated in
+remain separate work, with first-release resource limits still requiring a user
+decision in
 [open questions](../open-questions.md#identity-credentials-and-resource-governance).
 
 Confinement is defined over that writable root, which need not be a repository.
