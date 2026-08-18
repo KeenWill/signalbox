@@ -18,8 +18,8 @@ use signalbox_file_media_runtime::{
     DeclaredMediaType, FileDigest, FileMediaCeilings, FileMediaFailure, FileMediaProcessCeilings,
     FileMediaProcessLimitOverrides, FileMediaProcessor, FileMediaProviderDeclaration,
     FileMediaRegistry, FileReaderName, FileReaderProviderName, FileReaderRevision, FileUse,
-    InspectionRequest, NeverCancelled, ProbeDeclaration, ProbeStrength, ProcessorFailure,
-    ProcessorIsolation, ProcessorProbeOutput, ReadAccessPattern, ReadViewBounds,
+    InspectionRequest, NeverCancelled, ProbeDeclaration, ProbeStrength, ProcessorBoundaryFailure,
+    ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput, ReadAccessPattern, ReadViewBounds,
     ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity,
     ReasonCode, SourceReadError, SourceReadFuture, StreamingTextFallback, VerifiedBlobSource,
 };
@@ -128,7 +128,12 @@ async fn worker_crash_scenario() -> Result<(), Box<dyn Error>> {
     let output = processor
         .probe(&reader, &BytesSource(vec![b'C']), &NeverCancelled)
         .await;
-    assert_eq!(output, Err(ProcessorFailure::Failed));
+    assert_eq!(
+        output,
+        Err(ProcessorBoundaryFailure::Processor(
+            ProcessorFailure::Failed
+        ))
+    );
     Ok(())
 }
 
@@ -147,7 +152,12 @@ async fn worker_timeout_scenario() -> Result<(), Box<dyn Error>> {
     let output = processor
         .probe(&reader, &BytesSource(vec![b'T']), &NeverCancelled)
         .await;
-    assert_eq!(output, Err(ProcessorFailure::TimedOut));
+    assert_eq!(
+        output,
+        Err(ProcessorBoundaryFailure::Processor(
+            ProcessorFailure::TimedOut
+        ))
+    );
     Ok(())
 }
 
@@ -208,7 +218,12 @@ async fn worker_cancellation_scenario() -> Result<(), Box<dyn Error>> {
         .probe(&reader, &BytesSource(vec![b'T']), cancellation.as_ref())
         .await;
     cancellation_task.await?;
-    assert_eq!(output, Err(ProcessorFailure::Cancelled));
+    assert_eq!(
+        output,
+        Err(ProcessorBoundaryFailure::Processor(
+            ProcessorFailure::Cancelled
+        ))
+    );
     Ok(())
 }
 

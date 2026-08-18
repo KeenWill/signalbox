@@ -1,0 +1,115 @@
+mod fixtures;
+mod support;
+
+use std::error::Error;
+
+use fixtures::FixtureFormat;
+use support::{DirectProcessor, MemorySource};
+
+#[tokio::test]
+async fn png_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
+    assert_valid(FixtureFormat::Png).await
+}
+
+#[tokio::test]
+async fn jpeg_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
+    assert_valid(FixtureFormat::Jpeg).await
+}
+
+#[tokio::test]
+async fn webp_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
+    assert_valid(FixtureFormat::WebP).await
+}
+
+#[tokio::test]
+async fn gif_detects_validates_and_reads_metadata() -> Result<(), Box<dyn Error>> {
+    assert_valid(FixtureFormat::Gif).await
+}
+
+#[tokio::test]
+async fn png_hostile_inputs_fail_typed_within_ceilings() -> Result<(), Box<dyn Error>> {
+    assert_hostile(FixtureFormat::Png).await
+}
+
+#[tokio::test]
+async fn jpeg_hostile_inputs_fail_typed_within_ceilings() -> Result<(), Box<dyn Error>> {
+    assert_hostile(FixtureFormat::Jpeg).await
+}
+
+#[tokio::test]
+async fn webp_hostile_inputs_fail_typed_within_ceilings() -> Result<(), Box<dyn Error>> {
+    assert_hostile(FixtureFormat::WebP).await
+}
+
+#[tokio::test]
+async fn gif_hostile_inputs_fail_typed_within_ceilings() -> Result<(), Box<dyn Error>> {
+    assert_hostile(FixtureFormat::Gif).await
+}
+
+#[tokio::test]
+async fn registry_sanitizer_keeps_injection_shaped_metadata_as_data() -> Result<(), Box<dyn Error>>
+{
+    let format = FixtureFormat::Png;
+    let source = MemorySource::new(fixtures::valid(format)?);
+    let expected = serde_json::json!({
+        "path":"../../etc/passwd",
+        "text":"</tool><script>alert(1)</script>"
+    });
+    let decoder_output = serde_json::to_string(&expected)?;
+
+    let result = support::read(
+        &source,
+        format.media_type(),
+        &DirectProcessor::injecting(decoder_output),
+    )
+    .await?;
+    support::assert_structured(result, &expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn registry_sanitizer_rejects_nul_bearing_decoder_output() -> Result<(), Box<dyn Error>> {
+    let format = FixtureFormat::Png;
+    let source = MemorySource::new(fixtures::valid(format)?);
+    let decoder_output = String::from("{\"text\":\"prefix\0suffix\"}");
+
+    let result = support::read(
+        &source,
+        format.media_type(),
+        &DirectProcessor::injecting(decoder_output),
+    )
+    .await;
+    support::assert_processor_failed(result);
+    Ok(())
+}
+
+async fn assert_valid(format: FixtureFormat) -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::valid(format)?);
+    let expected = fixtures::expected_metadata(format);
+
+    let inspection = support::inspect(&source, format.media_type()).await?;
+    support::assert_validated_media(inspection, format.media_type());
+    let result = support::read(&source, format.media_type(), &DirectProcessor::provider()).await?;
+    support::assert_structured(result, &expected);
+    Ok(())
+}
+
+async fn assert_hostile(format: FixtureFormat) -> Result<(), Box<dyn Error>> {
+    let truncated = MemorySource::new(fixtures::truncated(format)?);
+    let malformed = MemorySource::new(fixtures::malformed(format));
+    let oversized = MemorySource::new(fixtures::oversized(format)?);
+    let dimension_bomb = MemorySource::new(fixtures::dimension_bomb(format)?);
+    let pixel_bomb = MemorySource::new(fixtures::pixel_bomb(format)?);
+
+    let truncated_result = support::inspect(&truncated, format.media_type()).await?;
+    support::assert_malformed_reason(truncated_result, "malformed_image");
+    let malformed_result = support::inspect(&malformed, format.media_type()).await?;
+    support::assert_malformed_reason(malformed_result, "malformed_image");
+    let oversized_result = support::inspect(&oversized, format.media_type()).await?;
+    support::assert_malformed_reason(oversized_result, "source_too_large");
+    let bomb_result = support::inspect(&dimension_bomb, format.media_type()).await?;
+    support::assert_malformed_reason(bomb_result, "dimension_limit_exceeded");
+    let pixel_result = support::inspect(&pixel_bomb, format.media_type()).await?;
+    support::assert_malformed_reason(pixel_result, "pixel_limit_exceeded");
+    Ok(())
+}

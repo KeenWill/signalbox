@@ -10,10 +10,7 @@ use std::{
     time::Duration,
 };
 
-use rustix::{
-    fd::AsFd as _,
-    process::{Resource, Rlimit, geteuid},
-};
+use rustix::{fd::AsFd as _, process::geteuid};
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProcessCeilings, FileMediaProcessor, FileMediaProcessorFuture,
     FileMediaProviderDeclaration, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
@@ -37,6 +34,7 @@ use crate::{
 };
 
 const WORKER_SANDBOX_PATH: &str = "/signalbox-file-media-worker";
+const PRLIMIT_PATH: &str = "/usr/bin/prlimit";
 const BWRAP_PROBE_ARGUMENT: &str = "--signalbox-file-media-isolation-probe";
 const CANCELLATION_POLL: Duration = Duration::from_millis(5);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -97,6 +95,7 @@ impl SandboxedFileMediaProcessor {
         }
         let bubblewrap = bubblewrap.into();
         validate_executable(&bubblewrap, ConstructionTarget::Bubblewrap)?;
+        validate_executable(Path::new(PRLIMIT_PATH), ConstructionTarget::Prlimit)?;
         let mut workers = BTreeMap::new();
         let mut worker_declarations = BTreeMap::<PathBuf, Vec<FileMediaProviderDeclaration>>::new();
         let mut readers = BTreeMap::new();
@@ -149,7 +148,7 @@ impl SandboxedFileMediaProcessor {
     ) -> Result<(), ProcessorFailure> {
         let mut running = self.spawn(worker, true).await?;
         running.release_startup()?;
-        let mut stdout = running
+        let stdout = running
             .child
             .stdout
             .take()
@@ -303,11 +302,19 @@ impl SandboxedFileMediaProcessor {
             worker,
             seccomp.as_raw_fd(),
             block_read.as_raw_fd(),
-            self.ceilings.memory_bytes(),
+            self.ceilings,
             probe,
         );
-        let mut command = Command::new(&self.bubblewrap);
+        let memory = worker_memory_budget(self.ceilings.memory_bytes());
+        let mut command = Command::new(PRLIMIT_PATH);
         command
+            .arg(format!("--as={}", memory.address_space_bytes))
+            .arg(format!("--cpu={}", self.ceilings.cpu_seconds()))
+            .arg("--core=0")
+            .arg(format!("--nproc={MAX_WORKER_TASKS}"))
+            .arg(format!("--nofile={}", self.ceilings.file_descriptors()))
+            .arg("--")
+            .arg(&self.bubblewrap)
             .args(profile)
             .current_dir("/")
             .env_clear()
@@ -315,13 +322,7 @@ impl SandboxedFileMediaProcessor {
             .stdout(Stdio::piped())
             .stderr(if probe { Stdio::null() } else { Stdio::piped() })
             .kill_on_drop(true);
-        let ceilings = self.ceilings;
         command.as_std_mut().process_group(0);
-        unsafe {
-            command
-                .as_std_mut()
-                .pre_exec(move || apply_process_limits(ceilings).map_err(std::io::Error::from));
-        }
         let child = command.spawn().map_err(|_| ProcessorFailure::Unavailable)?;
         drop(block_read);
         let raw_pid = child.id().ok_or(ProcessorFailure::Unavailable)?;
@@ -367,7 +368,7 @@ impl FileMediaProcessor for SandboxedFileMediaProcessor {
             {
                 CompletedOutput::Probe(output) => Ok(output),
                 CompletedOutput::Validation(_) | CompletedOutput::Read(_) => {
-                    Err(ProcessorFailure::Protocol)
+                    Err(ProcessorFailure::Protocol.into())
                 }
             }
         })
@@ -395,7 +396,7 @@ impl FileMediaProcessor for SandboxedFileMediaProcessor {
             {
                 CompletedOutput::Validation(output) => Ok(output),
                 CompletedOutput::Probe(_) | CompletedOutput::Read(_) => {
-                    Err(ProcessorFailure::Protocol)
+                    Err(ProcessorFailure::Protocol.into())
                 }
             }
         })
@@ -428,7 +429,7 @@ impl FileMediaProcessor for SandboxedFileMediaProcessor {
             {
                 CompletedOutput::Read(output) => Ok(output),
                 CompletedOutput::Probe(_) | CompletedOutput::Validation(_) => {
-                    Err(ProcessorFailure::Protocol)
+                    Err(ProcessorFailure::Protocol.into())
                 }
             }
         })
@@ -630,33 +631,14 @@ async fn finish_diagnostics(
     }
 }
 
-fn apply_process_limits(ceilings: FileMediaProcessCeilings) -> Result<(), rustix::io::Errno> {
-    let memory = worker_memory_budget(ceilings.memory_bytes());
-    set_limit(Resource::As, memory.address_space_bytes)?;
-    set_limit(Resource::Cpu, ceilings.cpu_seconds())?;
-    set_limit(Resource::Core, 0)?;
-    set_limit(Resource::Nproc, MAX_WORKER_TASKS)?;
-    set_limit(Resource::Nofile, ceilings.file_descriptors())
-}
-
-fn set_limit(resource: Resource, value: u64) -> Result<(), rustix::io::Errno> {
-    rustix::process::setrlimit(
-        resource,
-        Rlimit {
-            current: Some(value),
-            maximum: Some(value),
-        },
-    )
-}
-
 fn sandbox_arguments(
     worker: &Path,
     seccomp_fd: i32,
     block_fd: i32,
-    memory_bytes: u64,
+    ceilings: FileMediaProcessCeilings,
     probe: bool,
 ) -> Vec<std::ffi::OsString> {
-    let memory = worker_memory_budget(memory_bytes);
+    let memory = worker_memory_budget(ceilings.memory_bytes());
     let mut arguments = [
         "--die-with-parent",
         "--new-session",
@@ -892,6 +874,7 @@ fn validate_executable(
             ConstructionTarget::Bubblewrap => {
                 SandboxedFileMediaProcessorConstructionError::Bubblewrap
             }
+            ConstructionTarget::Prlimit => SandboxedFileMediaProcessorConstructionError::Prlimit,
             ConstructionTarget::Worker => SandboxedFileMediaProcessorConstructionError::Worker,
         })
     }
@@ -900,6 +883,7 @@ fn validate_executable(
 #[derive(Clone, Copy)]
 enum ConstructionTarget {
     Bubblewrap,
+    Prlimit,
     Worker,
 }
 
@@ -910,6 +894,8 @@ pub enum SandboxedFileMediaProcessorConstructionError {
     Unsupported,
     /// Bubblewrap was not an absolute executable file.
     Bubblewrap,
+    /// The resource-limit wrapper was not an absolute executable file.
+    Prlimit,
     /// A worker was not an absolute executable file.
     Worker,
     /// A process ceiling was zero or exceeded its compiled maximum.
@@ -927,6 +913,7 @@ impl fmt::Display for SandboxedFileMediaProcessorConstructionError {
         formatter.write_str(match self {
             Self::Unsupported => "file-media sandbox is unsupported",
             Self::Bubblewrap => "file-media bubblewrap executable is invalid",
+            Self::Prlimit => "file-media resource-limit executable is invalid",
             Self::Worker => "file-media worker executable is invalid",
             Self::Ceilings => "file-media process ceilings are invalid",
             Self::TaskCeiling => "file-media task ceiling is unenforceable for this identity",
@@ -959,8 +946,13 @@ mod tests {
 
     #[test]
     fn sandbox_profile_clears_authority_before_the_exact_worker() {
-        let arguments =
-            sandbox_arguments(Path::new("/fixture/worker"), 8, 9, 512 * 1024 * 1024, false);
+        let arguments = sandbox_arguments(
+            Path::new("/fixture/worker"),
+            8,
+            9,
+            signalbox_file_media_runtime::FileMediaProcessCeilings::version_one(),
+            false,
+        );
         let expected_prefix = [
             "--die-with-parent",
             "--new-session",
