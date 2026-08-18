@@ -3239,7 +3239,7 @@ mod tests {
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
         let enrolled = service
             .enroll(Enroll {
-                request_id: identity(1),
+                request_id: identity(ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED),
                 digest_version: DIGEST_VERSION,
                 advertisement: empty_advertisement(),
             })
