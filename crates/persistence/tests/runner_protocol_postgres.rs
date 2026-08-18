@@ -23037,7 +23037,8 @@ async fn s32_inv044_workspace_release_rejects_a_cross_wired_manifest() -> Result
 /// cleanup-owning connection has become durably unreachable.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv044_workspace_release_rejects_a_lost_cleanup_owner() -> Result<(), Box<dyn Error>> {
+async fn s32_inv044_workspace_release_rejects_a_lost_cleanup_connection()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let fixture = workspace_release_projection_fixture(&pool).await?;
     fixture
@@ -23059,7 +23060,7 @@ async fn s32_inv044_workspace_release_rejects_a_lost_cleanup_owner() -> Result<(
             fixture.connection_event_ordinal,
         )
         .await
-        .expect_err("a lost cleanup owner cannot receive a durable release");
+        .expect_err("a lost cleanup connection cannot receive a durable release");
 
     assert_store_check_violation(rejected);
     drop(pool);
