@@ -324,7 +324,7 @@ impl RunnerDispatchReady {
 /// Closed local recovery gap; no wire recovery facts are fabricated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryGap {
-    UnbornHeadNotRepresentable,
+    WorkspaceProducerUnavailable,
 }
 
 /// Typed proof that recovery is deliberately unavailable.
@@ -334,7 +334,7 @@ pub struct RecoveryUnavailable {
 }
 
 impl RecoveryUnavailable {
-    /// Returns the exact representational gap preventing recovery.
+    /// Returns the exact operational implementation gap preventing recovery.
     pub const fn gap(self) -> RecoveryGap {
         self.gap
     }
@@ -342,7 +342,7 @@ impl RecoveryUnavailable {
 
 impl fmt::Display for RecoveryUnavailable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("runner recovery is unavailable because unborn HEAD is unrepresentable")
+        formatter.write_str("runner recovery is unavailable because no workspace producer exists")
     }
 }
 
@@ -785,7 +785,7 @@ where
     /// Reports the recovery design gap without constructing wire recovery facts.
     pub const fn recovery_unavailable(&self) -> RecoveryUnavailable {
         RecoveryUnavailable {
-            gap: RecoveryGap::UnbornHeadNotRepresentable,
+            gap: RecoveryGap::WorkspaceProducerUnavailable,
         }
     }
 
@@ -4465,7 +4465,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_seam_names_the_unborn_head_gap() {
+    async fn recovery_seam_names_the_missing_workspace_producer() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let mut state = state_root(&parent);
         let receipt = issued_receipt(state.state().request_id());
@@ -4494,7 +4494,7 @@ mod tests {
 
         assert_eq!(
             connection.recovery_unavailable().gap(),
-            RecoveryGap::UnbornHeadNotRepresentable
+            RecoveryGap::WorkspaceProducerUnavailable
         );
     }
 
@@ -4651,7 +4651,7 @@ mod tests {
         assert!(matches!(
             error,
             RunnerConnectionError::RecoveryUnavailable(RecoveryUnavailable {
-                gap: RecoveryGap::UnbornHeadNotRepresentable,
+                gap: RecoveryGap::WorkspaceProducerUnavailable,
             })
         ));
     }

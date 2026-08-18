@@ -5,7 +5,7 @@ use std::{error::Error, fmt, num::NonZeroU64};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use signalbox_domain::{
     CredentialProfileName, RunnerCapabilityClass, RunnerWorkingDirectory, ToolName,
-    WorkspaceRepositoryKey,
+    WorkspaceBranchName, WorkspaceRepositoryKey,
 };
 use uuid::Uuid;
 
@@ -315,6 +315,34 @@ impl RepositoryKey {
 }
 
 impl<'de> Deserialize<'de> for RepositoryKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A domain-validated Git branch name without the `refs/heads/` prefix.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct BranchName(String);
+
+impl BranchName {
+    /// Checks and stores the complete branch-name spelling.
+    pub fn try_new(value: String) -> Result<Self, ValueError> {
+        WorkspaceBranchName::try_new(value.clone())
+            .map(|_| Self(value))
+            .map_err(|_| ValueError::Result)
+    }
+
+    /// Returns the checked branch name without `refs/heads/`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for BranchName {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
