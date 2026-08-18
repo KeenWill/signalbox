@@ -219,10 +219,40 @@ pub struct BlobCatalogRepository {
     pool: PgPool,
 }
 
+/// Test-only ownership token for a deliberately unavailable blob catalog.
+#[cfg(feature = "test-support")]
+pub struct BlobCatalogRegistrationFault {
+    pool: PgPool,
+}
+
+#[cfg(feature = "test-support")]
+impl BlobCatalogRegistrationFault {
+    /// Restores the catalog after the registration-failure assertion.
+    pub async fn restore(self) -> Result<(), BlobCatalogRepositoryError> {
+        sqlx::query("ALTER TABLE blob_registration_unavailable RENAME TO blob")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+}
+
 impl BlobCatalogRepository {
     /// Uses the supplied pool for independent registration and read operations.
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Makes registration unavailable for a composed integration test.
+    #[cfg(feature = "test-support")]
+    pub async fn inject_registration_fault(
+        &self,
+    ) -> Result<BlobCatalogRegistrationFault, BlobCatalogRepositoryError> {
+        sqlx::query("ALTER TABLE blob RENAME TO blob_registration_unavailable")
+            .execute(&self.pool)
+            .await?;
+        Ok(BlobCatalogRegistrationFault {
+            pool: self.pool.clone(),
+        })
     }
 
     /// Reports whether no namespace binding or blob identity has been recorded.

@@ -1471,10 +1471,14 @@ enum ExpectedCodeHostOperation {
         purpose: ReviewGatePurpose,
     },
     ThreadReply {
+        repository: &'static str,
+        number: u32,
         thread_id: &'static str,
         body: &'static str,
     },
     ThreadResolve {
+        repository: &'static str,
+        number: u32,
         thread_id: &'static str,
     },
     CiJobLog {
@@ -1590,15 +1594,28 @@ fn assert_code_host_operation(actual: &CodeHostOperation, expected: ExpectedCode
         }
         (
             CodeHostOperation::ThreadReply(arguments),
-            ExpectedCodeHostOperation::ThreadReply { thread_id, body },
+            ExpectedCodeHostOperation::ThreadReply {
+                repository,
+                number,
+                thread_id,
+                body,
+            },
         ) => {
+            assert_eq!(arguments.repository().as_str(), repository);
+            assert_eq!(arguments.number().get(), number);
             assert_eq!(arguments.thread_id().as_str(), thread_id);
             assert_eq!(arguments.body().as_str(), body);
         }
         (
             CodeHostOperation::ThreadResolve(arguments),
-            ExpectedCodeHostOperation::ThreadResolve { thread_id },
+            ExpectedCodeHostOperation::ThreadResolve {
+                repository,
+                number,
+                thread_id,
+            },
         ) => {
+            assert_eq!(arguments.repository().as_str(), repository);
+            assert_eq!(arguments.number().get(), number);
             assert_eq!(arguments.thread_id().as_str(), thread_id);
         }
         (
@@ -3159,7 +3176,13 @@ async fn tier_one_change_request_thread_reply_completes_offline_tool_loop()
 -> Result<(), Box<dyn Error>> {
     code_host_tool_completes_offline(
         CHANGE_REQUEST_THREAD_REPLY_NAME,
-        serde_json::json!({"body": "fixed offline", "thread_id": "PRRT_thread"}).to_string(),
+        serde_json::json!({
+            "body": "fixed offline",
+            "number": 17,
+            "repository": "owner/repository",
+            "thread_id": "PRRT_thread",
+        })
+        .to_string(),
         thread_reply_result(),
         serde_json::json!({
             "comment_id": 7002,
@@ -3168,6 +3191,8 @@ async fn tier_one_change_request_thread_reply_completes_offline_tool_loop()
             "url": "https://github.example/comment/7002"
         }),
         ExpectedCodeHostOperation::ThreadReply {
+            repository: "owner/repository",
+            number: 17,
             thread_id: "PRRT_thread",
             body: "fixed offline",
         },
@@ -3184,10 +3209,17 @@ async fn tier_one_change_request_thread_resolve_completes_offline_tool_loop()
 -> Result<(), Box<dyn Error>> {
     code_host_tool_completes_offline(
         CHANGE_REQUEST_THREAD_RESOLVE_NAME,
-        serde_json::json!({"thread_id": "PRRT_thread"}).to_string(),
+        serde_json::json!({
+            "number": 17,
+            "repository": "owner/repository",
+            "thread_id": "PRRT_thread",
+        })
+        .to_string(),
         thread_resolve_result(),
         serde_json::json!({"resolved": true, "thread_id": "PRRT_thread"}),
         ExpectedCodeHostOperation::ThreadResolve {
+            repository: "owner/repository",
+            number: 17,
             thread_id: "PRRT_thread",
         },
         ExpectedCodeHostApproval::Confirm,

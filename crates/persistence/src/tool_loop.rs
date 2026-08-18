@@ -2181,17 +2181,16 @@ async fn decode_approval(
                 .ok_or(ToolLoopCorruption::Missing("delegate approval request"))?;
             let recommendation = match decision {
                 ToolApprovalDecision::Approve => DelegateApprovalRecommendation::Approve,
-                ToolApprovalDecision::Deny { ref reason } if reason.is_none() => {
-                    DelegateApprovalRecommendation::Deny
-                }
-                ToolApprovalDecision::Deny { .. } => {
-                    return Err(ToolLoopCorruption::Inconsistent("delegate denial payload").into());
-                }
+                ToolApprovalDecision::Deny { .. } => DelegateApprovalRecommendation::Deny,
             };
             let rationale = signalbox_domain::ToolDecisionRationale::try_new(
                 rationale.ok_or(ToolLoopCorruption::Missing("delegate rationale"))?,
             )
             .map_err(|_| ToolLoopCorruption::Inconsistent("delegate rationale"))?;
+            let stored_denial_reason = match &decision {
+                ToolApprovalDecision::Approve => None,
+                ToolApprovalDecision::Deny { reason } => reason.clone(),
+            };
             let approval = DelegateToolApproval::try_new(
                 request_record,
                 DirectModelSelection::from_uuid(
@@ -2204,7 +2203,7 @@ async fn decode_approval(
                 rationale,
             )
             .map_err(|_| ToolLoopCorruption::Inconsistent("delegate authority"))?;
-            ToolApprovalResolutionReconstitutionInput::delegate(approval)
+            ToolApprovalResolutionReconstitutionInput::delegate(approval, stored_denial_reason)
         }
         ToolApprovalDecisionSourceStorageKind::PolicyAuto
         | ToolApprovalDecisionSourceStorageKind::SessionBlanket => {

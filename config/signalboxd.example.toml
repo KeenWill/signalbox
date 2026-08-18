@@ -16,6 +16,26 @@
 # requires, up to but never above the model's cap.
 version = 1
 
+# Blob bytes live outside PostgreSQL. Each deployment generates and then keeps
+# one namespace UUID per physical store. Both directories must already exist,
+# be owned by the daemon user, and have exact mode 0700.
+[blob_storage]
+version = 1
+staging_directory = "/var/lib/signalbox/blob-staging"
+max_blob_bytes = 1099511627776
+
+[[blob_storage.stores]]
+name = "primary"
+namespace_id = "5a100001-0000-4000-8000-000000000001"
+kind = "filesystem"
+root_directory = "/var/lib/signalbox/blobs-primary"
+
+[blob_storage.routes]
+user_attachment = "primary"
+tool_artifact = "primary"
+imported_source = "primary"
+generated_artifact = "primary"
+
 # Omitted members inherit. Nullable knobs also accept "provider_default" to
 # preserve an explicit clear in durable provenance; fast_mode accepts
 # "enabled" or "disabled". A service tier is a provider-tagged inline table,

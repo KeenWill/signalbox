@@ -29,9 +29,10 @@ use signalbox_application::{
     StartEligibleTurnService, StartupScanService, UuidV7ModelCallExecutionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
+use signalbox_blob_store::BlobObjectKey;
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
-    ActiveTurnPhase, Actor, AssistantResponsePart, AssistantText, ContextCompactionId,
+    ActiveTurnPhase, Actor, AssistantResponsePart, AssistantText, BlobDigest, ContextCompactionId,
     ContextCompactionTokenUsage, ContextFrontierId, DirectModelSelection, DurableCommandId,
     FailedModelCallTurnIdentities, ImportedConversationFormat, ImportedConversationId,
     ImportedSessionRelationship, ImportedTranscriptEntryId, InitialToolApproval, ModelCallId,
@@ -51,6 +52,7 @@ use signalbox_model_runtime::{
     TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss,
 };
 use signalbox_persistence::{
+    blob::BlobCatalogRepository,
     context_compaction::{
         ContextCompactionCorruption, ContextCompactionRepository, ContextCompactionRepositoryError,
         FailedContextCompactionDisposition, PrepareContextCompactionOutcome,
@@ -66,38 +68,39 @@ use signalbox_persistence::{
     startup::PostgresStartupScanRepository,
 };
 use signalbox_process_protocol::{
-    CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId,
-    ConversationImportFormat, ConversationImportSource, ConversationOriginFilter,
-    ConversationSummary, CurrentModelCallState, DescendantTerminationScope, EffectiveModelSettings,
-    ErrorCode, FastMode, GoalHistoryEvent, GoalLifecycleState, ImportedContentKind,
-    ImportedConversationSourceFormat, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-    InputContent, InputDelivery, MetadataActor, ModelChangeAdjustment, ModelSelection,
-    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot,
-    ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
-    ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput,
-    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
-    ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
-    ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
-    ReviewOrchestrationState, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
-    ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
-    ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent,
-    SessionMetadata, SessionPlacement, SettingOverlay, SystemPromptMember, SystemPromptText,
-    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
-    encode_client_line,
+    BlobChunk, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame,
+    ClientRequest, CommandId, ConversationImportFormat, ConversationImportSource,
+    ConversationOriginFilter, ConversationSummary, CurrentModelCallState,
+    DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail, FastMode,
+    GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
+    ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+    MetadataActor, ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
+    ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion, ReasoningLevel,
+    RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
+    ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
+    ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
+    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
+    ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
+    ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
+    ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
+    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SessionPlacement,
+    SettingOverlay, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
+    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
-    ActivatedTurnPass, ContextGuardedTurnPass, ContextGuardedTurnPassError,
-    FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
-    PostgresProviderModelExecution, ProcessProviderTextDeltaSink, ProcessRuntime,
-    ProcessRuntimeError, SessionTemplateConfiguration,
+    ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
+    ContextGuardedTurnPassError, FatalExecutionSupervisor, HubModelConfiguration,
+    LocalProcessListener, PostgresProviderModelExecution, ProcessProviderTextDeltaSink,
+    ProcessRuntime, ProcessRuntimeError, SessionTemplateConfiguration,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use tempfile::TempDir;
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{
         UnixStream,
         unix::{OwnedReadHalf, OwnedWriteHalf},
@@ -564,6 +567,14 @@ struct RunningRuntime {
     runtime_task: JoinHandle<Result<(), ProcessRuntimeError>>,
     work_source: Option<InProcessEligibilityWorkSource<PostgresEligibilitySweep>>,
     provider_text_deltas: ProcessProviderTextDeltaSink,
+    blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+    blob_storage_root: Option<BlobStorageFixture>,
+}
+
+#[derive(Clone, Copy)]
+enum BlobStorageFixtureMode {
+    Disabled,
+    Enabled,
 }
 
 impl RunningRuntime {
@@ -580,12 +591,40 @@ impl RunningRuntime {
     async fn start_with_optional_compaction(
         compaction_model: Option<ScriptedModel<ModelCallId>>,
     ) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_options(compaction_model, BlobStorageFixtureMode::Disabled).await
+    }
+
+    async fn start_with_blob_storage() -> Result<Self, Box<dyn Error>> {
+        Self::start_with_options(None, BlobStorageFixtureMode::Enabled).await
+    }
+
+    async fn start_with_options(
+        compaction_model: Option<ScriptedModel<ModelCallId>>,
+        blob_storage: BlobStorageFixtureMode,
+    ) -> Result<Self, Box<dyn Error>> {
         let (container, pool) = postgres().await?;
         let socket_directory = SocketDirectory::create()?;
         let listener = LocalProcessListener::bind(socket_directory.socket())?;
         let sweep = PostgresEligibilitySweep::new(pool.clone());
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-        let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+        let blob_storage_root = match blob_storage {
+            BlobStorageFixtureMode::Disabled => None,
+            BlobStorageFixtureMode::Enabled => Some(BlobStorageFixture::create()?),
+        };
+        let configuration = blob_storage_root.as_ref().map_or_else(
+            || String::from(MODEL_CONFIGURATION),
+            BlobStorageFixture::model_configuration,
+        );
+        let model_configuration = HubModelConfiguration::parse(&configuration)?;
+        let blob_store_registry = match blob_storage {
+            BlobStorageFixtureMode::Disabled => None,
+            BlobStorageFixtureMode::Enabled => BlobStoreRegistry::initialize_for_conformance(
+                model_configuration.blob_storage(),
+                pool.clone(),
+            )
+            .await?
+            .map(Arc::new),
+        };
         let runtime_models = model_configuration.runtime_model_catalog();
         let template_configuration = session_template_configuration(&model_configuration)?;
         let mut runtime = ProcessRuntime::new_with_templates(
@@ -602,6 +641,9 @@ impl RunningRuntime {
                 runtime_models,
             ));
         }
+        if let Some(registry) = blob_store_registry.as_ref() {
+            runtime = runtime.with_blob_store_registry(Arc::clone(registry));
+        }
         let provider_text_deltas = runtime.provider_text_delta_sink();
         let (shutdown, shutdown_receiver) = watch::channel(false);
         let runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
@@ -613,6 +655,8 @@ impl RunningRuntime {
             runtime_task,
             work_source: Some(work_source),
             provider_text_deltas,
+            blob_store_registry,
+            blob_storage_root,
         })
     }
 
@@ -643,7 +687,7 @@ impl RunningRuntime {
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
         let model_configuration = HubModelConfiguration::parse(configuration)?;
         let template_configuration = session_template_configuration(&model_configuration)?;
-        let runtime = ProcessRuntime::new_with_templates(
+        let mut runtime = ProcessRuntime::new_with_templates(
             listener,
             self.pool.clone(),
             eligibility_nudge,
@@ -651,6 +695,9 @@ impl RunningRuntime {
             model_configuration,
             template_configuration,
         );
+        if let Some(registry) = self.blob_store_registry.as_ref() {
+            runtime = runtime.with_blob_store_registry(Arc::clone(registry));
+        }
         let provider_text_deltas = runtime.provider_text_delta_sink();
         let (shutdown, shutdown_receiver) = watch::channel(false);
         self.shutdown = shutdown;
@@ -670,14 +717,251 @@ impl RunningRuntime {
         self.provider_text_deltas.clone()
     }
 
+    fn blob_store_registry(&self) -> Arc<BlobStoreRegistry> {
+        Arc::clone(
+            self.blob_store_registry
+                .as_ref()
+                .expect("the fixture enables blob storage"),
+        )
+    }
+
     async fn stop(self) -> Result<(), Box<dyn Error>> {
         self.shutdown.send(true)?;
         timeout(Duration::from_secs(10), self.runtime_task).await???;
         self.pool.close().await;
         self.socket_directory.cleanup()?;
+        drop(self.blob_storage_root);
         drop(self.container);
         Ok(())
     }
+}
+
+struct BlobStorageFixture {
+    _root: TempDir,
+    staging: PathBuf,
+    store: PathBuf,
+}
+
+impl BlobStorageFixture {
+    fn create() -> Result<Self, io::Error> {
+        let root = TempDir::new()?;
+        let staging = root.path().join("staging");
+        let store = root.path().join("primary");
+        fs::create_dir(&staging)?;
+        fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))?;
+        fs::create_dir(&store)?;
+        fs::set_permissions(&store, fs::Permissions::from_mode(0o700))?;
+        Ok(Self {
+            _root: root,
+            staging,
+            store,
+        })
+    }
+
+    fn model_configuration(&self) -> String {
+        format!(
+            r#"{MODEL_CONFIGURATION}
+[blob_storage]
+version = 1
+staging_directory = "{}"
+max_blob_bytes = 268435456
+
+[[blob_storage.stores]]
+name = "primary"
+namespace_id = "5a100001-0000-4000-8000-000000000001"
+kind = "filesystem"
+root_directory = "{}"
+
+[blob_storage.routes]
+user_attachment = "primary"
+tool_artifact = "primary"
+imported_source = "primary"
+generated_artifact = "primary"
+"#,
+            self.staging.display(),
+            self.store.display(),
+        )
+    }
+}
+
+async fn append_blob_upload(
+    connection: &mut Connection,
+    request_id: u64,
+    bytes: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    connection
+        .request(
+            request_id,
+            ClientRequest::AppendBlobUpload {
+                chunk: BlobChunk::new(bytes.to_vec()),
+            },
+        )
+        .await?;
+    let response = connection.response().await?;
+    assert_eq!(
+        response.message(),
+        &ServerMessage::BlobUploadAppended {
+            assembled_length_bytes: CanonicalU64::new(u64::try_from(bytes.len())?),
+        }
+    );
+    Ok(())
+}
+
+async fn commit_blob_upload(
+    connection: &mut Connection,
+    wire_digest: CanonicalBlobDigest,
+    expected_length: CanonicalU64,
+    bytes: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    connection
+        .request(
+            1,
+            ClientRequest::BeginBlobUpload {
+                expected_digest: wire_digest,
+                expected_length_bytes: expected_length,
+            },
+        )
+        .await?;
+    assert_eq!(
+        connection.response().await?.message(),
+        &ServerMessage::BlobUploadBegun {
+            expected_digest: wire_digest,
+            expected_length_bytes: expected_length,
+        }
+    );
+    append_blob_upload(connection, 2, bytes).await?;
+    connection
+        .request(3, ClientRequest::CommitBlobUpload {})
+        .await?;
+    assert_eq!(
+        connection.response().await?.message(),
+        &ServerMessage::BlobUploadCommitted {
+            digest: wire_digest,
+            byte_length: expected_length,
+        }
+    );
+    Ok(())
+}
+
+/// INV-060: the daemon streams exact bytes through one upload lifecycle and
+/// registers one immutable identity.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv060_blob_upload_round_trips_exact_bytes() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start_with_blob_storage().await?;
+    let bytes = b"exact immutable upload bytes";
+    let digest = BlobDigest::digest(bytes);
+    let wire_digest = CanonicalBlobDigest::from_digest(digest);
+    let expected_length = CanonicalU64::new(u64::try_from(bytes.len())?);
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    commit_blob_upload(&mut connection, wire_digest, expected_length, bytes).await?;
+
+    let catalog = BlobCatalogRepository::new(runtime.pool.clone())
+        .find(digest)
+        .await?
+        .expect("the committed upload is catalogued");
+    assert_eq!(catalog.expected().byte_length(), expected_length.value());
+    assert_eq!(catalog.replicas().len(), 1);
+    let registry = runtime.blob_store_registry();
+    let (store_name, store) = registry.routed_store(BlobStorageClass::UserAttachment);
+    assert_eq!(catalog.replicas()[0].store(), store_name);
+    let opened = store.open(catalog.replicas()[0].object_key()).await?;
+    let mut observed = Vec::new();
+    opened.into_reader().read_to_end(&mut observed).await?;
+    assert_eq!(observed, bytes);
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-060: an exact retry against the routed store short-circuits as already
+/// present without accepting another upload body.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv060_blob_upload_exact_retry_is_already_present() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start_with_blob_storage().await?;
+    let bytes = b"exact immutable upload retry bytes";
+    let wire_digest = CanonicalBlobDigest::from_digest(BlobDigest::digest(bytes));
+    let expected_length = CanonicalU64::new(u64::try_from(bytes.len())?);
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    commit_blob_upload(&mut connection, wire_digest, expected_length, bytes).await?;
+
+    connection
+        .request(
+            4,
+            ClientRequest::BeginBlobUpload {
+                expected_digest: wire_digest,
+                expected_length_bytes: expected_length,
+            },
+        )
+        .await?;
+
+    assert_eq!(
+        connection.response().await?.message(),
+        &ServerMessage::BlobUploadAlreadyPresent {
+            digest: wire_digest,
+            byte_length: expected_length,
+        }
+    );
+    drop(connection);
+    runtime.stop().await
+}
+
+/// INV-060: failure to register after verified publication leaves an orphan
+/// object and never a dangling catalog reference.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn inv060_registration_failure_after_publication_leaves_only_an_orphan()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start_with_blob_storage().await?;
+    let bytes = b"published before unavailable catalog";
+    let digest = BlobDigest::digest(bytes);
+    let wire_digest = CanonicalBlobDigest::from_digest(digest);
+    let expected_length = CanonicalU64::new(u64::try_from(bytes.len())?);
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request(
+            1,
+            ClientRequest::BeginBlobUpload {
+                expected_digest: wire_digest,
+                expected_length_bytes: expected_length,
+            },
+        )
+        .await?;
+    assert_eq!(
+        connection.response().await?.message(),
+        &ServerMessage::BlobUploadBegun {
+            expected_digest: wire_digest,
+            expected_length_bytes: expected_length,
+        }
+    );
+    append_blob_upload(&mut connection, 2, bytes).await?;
+    let catalog = BlobCatalogRepository::new(runtime.pool.clone());
+    let catalog_fault = catalog.inject_registration_fault().await?;
+    connection
+        .request(3, ClientRequest::CommitBlobUpload {})
+        .await?;
+    assert_eq!(
+        connection.response().await?.message(),
+        &ServerMessage::Error {
+            code: ErrorCode::Unavailable,
+            message: String::from("the requested operation is unavailable"),
+            detail: ErrorDetail::none(),
+        }
+    );
+    catalog_fault.restore().await?;
+
+    assert!(catalog.find(digest).await?.is_none());
+    let registry = runtime.blob_store_registry();
+    let (_store_name, store) = registry.routed_store(BlobStorageClass::UserAttachment);
+    let orphan = store.open(&BlobObjectKey::for_digest(digest)).await?;
+    let mut observed = Vec::new();
+    orphan.into_reader().read_to_end(&mut observed).await?;
+    assert_eq!(observed, bytes);
+    drop(connection);
+    runtime.stop().await
 }
 
 async fn create_alias_session(

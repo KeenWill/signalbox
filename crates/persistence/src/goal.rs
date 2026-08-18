@@ -1055,7 +1055,15 @@ async fn block_goal_continuation(
     })
 }
 
-async fn lock_session(
+/// Locks the session row `FOR NO KEY UPDATE`, returning whether it exists.
+///
+/// Every goal transition serializes on this row and nothing else, so a
+/// transaction outside this module that must exclude goal transitions —
+/// approval-judge completion, which rechecks the authority in force before
+/// committing a decision — takes this lock, and takes it before any
+/// `session_scheduler` lock, following the session-before-scheduler pair
+/// order stated in `lock_inventory`.
+pub(crate) async fn lock_session(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<bool, sqlx::Error> {

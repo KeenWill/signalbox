@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+test-support = [
+    "signalbox-blob-store-filesystem/test-support",
+    "signalbox-persistence/test-support",
+]
+
 [dependencies]
 opentelemetry = { version = "0.32.0", default-features = false, features = [
     "trace",
@@ -33,6 +39,8 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 sha2 = "0.11.0"
 signalbox-application = { path = "../../crates/application" }
+signalbox-blob-store = { path = "../../crates/blob-store" }
+signalbox-blob-store-filesystem = { path = "../../crates/blob-store-filesystem" }
 signalbox-conversation-import-claude-code = { path = "../../crates/conversation-import-claude-code" }
 signalbox-conversation-import-codex = { path = "../../crates/conversation-import-codex" }
 signalbox-domain = { path = "../../crates/domain" }
@@ -90,6 +98,7 @@ url = "2.5.8"
 uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
 
 [dev-dependencies]
+signalbox-blob-store-filesystem = { path = "../../crates/blob-store-filesystem", features = ["test-support"] }
 expect-test = "1.5.1"
 git2 = { version = "0.21.0", default-features = false, features = ["unstable-sha256"] }
 # The shared executor-driving harness lives in the application crate so sibling

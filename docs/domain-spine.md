@@ -4586,6 +4586,7 @@ pub struct ToolDenialReason(/* private */);
 impl ToolDenialReason {
     pub const MAX_UTF8_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, ToolDenialReasonError>;
+    pub fn from_rationale(rationale: &ToolDecisionRationale) -> Option<Self>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> String;
 }
@@ -4610,7 +4611,10 @@ impl ToolApprovalResolution {
 pub struct ToolApprovalResolutionReconstitutionInput { /* private */ }
 impl ToolApprovalResolutionReconstitutionInput {
     pub const fn user_command(command: PreparedDecideToolRequest) -> Self;
-    pub fn delegate(approval: DelegateToolApproval) -> Self;
+    pub fn delegate(
+        approval: DelegateToolApproval,
+        stored_denial_reason: Option<ToolDenialReason>,
+    ) -> Self;
     pub const fn policy_auto(request: ToolRequestId) -> Self;
     pub const fn session_blanket(
         request: ToolRequestId,

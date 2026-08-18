@@ -15,6 +15,10 @@ use signalbox_process_protocol::{
 pub(crate) enum ClientError {
     Io(io::Error),
     SourceFile(io::Error),
+    BlobSourceFile {
+        path: PathBuf,
+        source: io::Error,
+    },
     SystemPromptFile(io::Error),
     GoalTextFile {
         path: PathBuf,
@@ -67,6 +71,13 @@ impl ClientError {
         Self::SourceFile(error)
     }
 
+    pub(crate) fn blob_source_file(path: &Path, source: io::Error) -> Self {
+        Self::BlobSourceFile {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
     pub(crate) fn system_prompt_file(error: io::Error) -> Self {
         Self::SystemPromptFile(error)
     }
@@ -107,11 +118,12 @@ impl ClientError {
     pub(crate) fn mutation(self) -> Self {
         match self {
             Self::Remote {
-                code: ErrorCode::CommitAmbiguous,
+                code: ErrorCode::PublicationAmbiguous | ErrorCode::CommitAmbiguous,
                 ..
             } => Self::AmbiguousMutation,
             Self::Remote { .. }
             | Self::SourceFile(_)
+            | Self::BlobSourceFile { .. }
             | Self::SystemPromptFile(_)
             | Self::GoalTextFile { .. }
             | Self::DelegationContentFile { .. }
@@ -149,6 +161,11 @@ impl fmt::Display for ClientError {
             Self::SourceFile(_) => {
                 formatter.write_str("the conversation import source file could not be read")
             }
+            Self::BlobSourceFile { path, source } => write!(
+                formatter,
+                "the blob upload source file '{}' could not be read: {source}",
+                path.display()
+            ),
             Self::SystemPromptFile(_) => {
                 formatter.write_str("the system prompt file could not be read")
             }
@@ -240,6 +257,7 @@ impl Error for ClientError {
             | Self::DelegationContentFile { source: error, .. }
             | Self::ReviewInputFile(error)
             | Self::ScanDirectory(error) => Some(error),
+            Self::BlobSourceFile { source, .. } => Some(source),
             Self::DelegationContentFileUtf8 { source, .. } => Some(source),
             Self::ReviewInputJson(error) => Some(error),
             Self::Encode(error) => Some(error),
@@ -304,6 +322,7 @@ const fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::Rejected => "rejected",
         ErrorCode::ResyncRequired => "resync_required",
         ErrorCode::Unavailable => "unavailable",
+        ErrorCode::PublicationAmbiguous => "publication_ambiguous",
         ErrorCode::CommitAmbiguous => "commit_ambiguous",
         ErrorCode::Internal => "internal",
     }
@@ -622,6 +641,53 @@ impl fmt::Display for RejectionDisplay {
                 conversation_import_rejection_class_name(class),
                 record_ordinal.value()
             ),
+            RejectionDetail::BulkIngestAlreadyInProgress { active_kind } => write!(
+                formatter,
+                "bulk_ingest_already_in_progress active_kind={}",
+                active_kind.as_str()
+            ),
+            RejectionDetail::BlobUploadAlreadyInProgress {} => {
+                formatter.write_str("blob_upload_already_in_progress")
+            }
+            RejectionDetail::BlobUploadNotInProgress {} => {
+                formatter.write_str("blob_upload_not_in_progress")
+            }
+            RejectionDetail::BlobUploadLengthOutOfRange {
+                min_length_bytes,
+                max_length_bytes,
+                declared_length_bytes,
+            } => write!(
+                formatter,
+                "blob_upload_length_out_of_range min_length_bytes={} max_length_bytes={} declared_length_bytes={}",
+                min_length_bytes.value(),
+                max_length_bytes.value(),
+                declared_length_bytes.value()
+            ),
+            RejectionDetail::BlobUploadSizeExceeded {
+                expected_length_bytes,
+                actual_length_bytes,
+            } => write!(
+                formatter,
+                "blob_upload_size_exceeded expected_length_bytes={} actual_length_bytes={}",
+                expected_length_bytes.value(),
+                actual_length_bytes.value()
+            ),
+            RejectionDetail::BlobUploadLengthMismatch {
+                expected_length_bytes,
+                actual_length_bytes,
+            } => write!(
+                formatter,
+                "blob_upload_length_mismatch expected_length_bytes={} actual_length_bytes={}",
+                expected_length_bytes.value(),
+                actual_length_bytes.value()
+            ),
+            RejectionDetail::BlobUploadDigestMismatch {
+                expected_digest,
+                actual_digest,
+            } => write!(
+                formatter,
+                "blob_upload_digest_mismatch expected_digest={expected_digest} actual_digest={actual_digest}"
+            ),
         }
     }
 }
@@ -779,6 +845,20 @@ mod tests {
         let error = ClientError::remote(
             ErrorCode::CommitAmbiguous,
             "the commit response was lost".to_owned(),
+            ErrorDetail::none(),
+        )
+        .mutation();
+
+        expect![[r#"
+            the mutation outcome may be ambiguous; retry the original command with the same arguments and exact input, using any printed recovery values"#]]
+        .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn publication_ambiguous_mutation_names_the_complete_replay_inputs() {
+        let error = ClientError::remote(
+            ErrorCode::PublicationAmbiguous,
+            "the publication response was lost".to_owned(),
             ErrorDetail::none(),
         )
         .mutation();

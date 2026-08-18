@@ -513,12 +513,17 @@ them.
 review, comment, or review-thread identity acknowledged by the provider. A
 repository-watch cursor that observes a matching review write, thread reply, or
 thread resolution durably links every resulting event to the creating tool
-attempt. Each receipt records its first matching cursor once. A published
-review's immutable receipt remains directly correlatable to each exact child
-thread without recurring per-generation observation rows, so the review and a
-delayed inline-thread event carry the same cause once each. An unchanged poll
-still consumes a mutable thread receipt when it is the first cursor containing
-that exact thread, whether or not the requested transition remains visible, so a
+attempt. For mutable thread resolutions, receipt ordering is compared with the
+database-clock instant immediately after the provider snapshot is observed, not
+with the start of the whole poll. A receipt completed during the poll but before
+that instant can therefore cause the state contained in the snapshot, while a
+receipt completed after the snapshot cannot suppress an earlier user resolution.
+Each receipt records its first matching cursor once. A published review's
+immutable receipt remains directly correlatable to each exact child thread
+without recurring per-generation observation rows, so the review and a delayed
+inline-thread event carry the same cause once each. An unchanged poll still
+consumes a mutable thread receipt when it is the first cursor containing that
+exact thread, whether or not the requested transition remains visible, so a
 later user transition remains dispatchable.
 
 Evaluation defers an event without recording an outcome while a potentially
@@ -548,6 +553,26 @@ user-authored generation. Cutoff completion and each applied stop are
 append-only audit records. Stopping a queued commission makes its delivery turn
 non-runtime-relevant and releases the dispatch singleton in the same
 transaction, while a running turn may finish but cannot schedule a successor.
+
+**Committed unimplemented functionality.** The structured-rule dispatch surface
+converges onto the program substrate by replacing each rule with a subscription
+whose action is a built-in dispatch program. This page owns that ingress
+cutover. Shadowing is validation only and never owns delivery. Cutover commits
+in one durable transaction at an event frontier after requiring a terminal
+evaluation outcome for every old-rule event through that frontier: it records
+deactivation of the old rule after the frontier, activation of the replacement
+subscription strictly after it, and the mapping from rule identity and version
+to the exact program registration. The same transaction transfers every occupied
+singleton batch, its responsible sessions, and any recorded cooldown boundary to
+substrate-owned dispatch state without recreating sessions or changing
+append-only audit identities. Events at or before the frontier remain owned only
+by rule evaluation; later events are owned only by subscription matching.
+Reconciliation, rule evaluation, event commit, and subscription matching
+serialize against this transaction, so a crash or concurrent poll may retry it
+but cannot omit or dispatch a boundary event twice or release an occupied
+singleton. After this transaction, the mapped rule is a subscription;
+subscription identity, delivery, continuation cursor inheritance, and
+cancellation follow the [program substrate](program-substrate.md).
 
 ## First live rule
 

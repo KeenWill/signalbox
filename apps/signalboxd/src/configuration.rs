@@ -57,6 +57,7 @@ use tokio::io::AsyncReadExt;
 use toml_edit::{DocumentMut, Item, Table};
 use uuid::Uuid;
 
+use crate::blob_storage_configuration::BlobStorageConfiguration;
 use crate::credential_pools::{
     CredentialDelivery, CredentialPool, CredentialProfile, parse_credential_pools,
     parse_credential_profiles,
@@ -554,6 +555,7 @@ pub struct HubModelConfiguration {
     tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
     approval_judge_selection: Option<DirectModelSelection>,
     repository_watch: Option<RepositoryWatchConfiguration>,
+    blob_storage: Option<BlobStorageConfiguration>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -596,6 +598,7 @@ impl HubModelConfiguration {
                 "tool_approval_postures",
                 "approval_judge",
                 "repository_watch",
+                "blob_storage",
             ],
         )?;
         if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
@@ -639,6 +642,11 @@ impl HubModelConfiguration {
             })
             .transpose()?
             .unwrap_or(DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES);
+        let minimum_blob_bytes = u64::try_from(conversation_import_max_source_bytes)
+            .map_err(|_| HubModelConfigurationError::InvalidBlobStorageConfiguration)?;
+        let blob_storage =
+            BlobStorageConfiguration::parse(document.get("blob_storage"), minimum_blob_bytes)
+                .map_err(|_| HubModelConfigurationError::InvalidBlobStorageConfiguration)?;
         let web_fetch_egress_policy = document
             .get("web_fetch")
             .map(|item| {
@@ -1197,6 +1205,7 @@ impl HubModelConfiguration {
             tool_approval_postures,
             approval_judge_selection,
             repository_watch,
+            blob_storage,
         })
     }
 
@@ -1512,6 +1521,11 @@ impl HubModelConfiguration {
     /// Returns the maximum assembled source bytes for one conversation import.
     pub const fn conversation_import_max_source_bytes(&self) -> usize {
         self.conversation_import_max_source_bytes
+    }
+
+    /// Returns the validated blob-store registry and write routes, when enabled.
+    pub const fn blob_storage(&self) -> Option<&BlobStorageConfiguration> {
+        self.blob_storage.as_ref()
     }
 
     /// Returns the exact deployment-owned automatic web-fetch egress policy.
@@ -3076,6 +3090,8 @@ pub enum HubModelConfigurationError {
     InvalidCompactionPrompt,
     /// The optional conversation-import byte bound was absent, zero, or invalid.
     InvalidConversationImportLimit,
+    /// The optional blob-store registry or its routes were malformed.
+    InvalidBlobStorageConfiguration,
     /// The optional web-fetch table was malformed or named an invalid origin.
     InvalidWebFetchPolicy,
     /// The optional version-one repository-watch section was malformed.
@@ -3256,6 +3272,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidConversationImportLimit => {
                 "model configuration contains an invalid conversation import byte limit"
+            }
+            Self::InvalidBlobStorageConfiguration => {
+                "model configuration contains invalid blob-storage settings"
             }
             Self::InvalidWebFetchPolicy => {
                 "model configuration contains an invalid web_fetch egress policy"

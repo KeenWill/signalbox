@@ -150,23 +150,6 @@ request against a quiet `main` rather than inside the compaction stack.
 Raised as a review finding and dispositioned with this condition attached:
 https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 
-## Goal mode
-
-- **What a consumer does when its generation closes mid-operation.** A consumer
-  reads the authority a turn ran under, works, and commits afterwards, so a
-  generation stopped or achieved in between was open when read and closed when
-  committed. Binding the read to the commit is committed unimplemented
-  functionality in [goal mode](spec/goal-mode.md); what the consumer should then
-  do is not decided. Escalating treats the closure as a reason to ask a human,
-  which is safe but turns an ordinary stop into an interruption for work already
-  performed. Refusing treats it as withdrawn authority, which is stricter but
-  discards a decision the model already paid for. The choice is observable and
-  belongs to whichever consumer binds it first. Blocks nothing today, because no
-  consumer rechecks.
-
-Raised as a review finding on the dispatch-goal work:
-https://github.com/KeenWill/signalbox/pull/562#discussion_r3760635157
-
 ## Session organization, visibility, and retention
 
 - **Creation-attributed default visibility.** The implemented visibility and
@@ -717,6 +700,20 @@ the implemented session and external-link evidence.
   constraint; mark/sweep rather than reference counting is nonbinding
   exploration guidance only.
 
+## Program substrate and evaluations
+
+The substrate and evaluation contracts are owned by
+[program-substrate](spec/program-substrate.md) and
+[eval-system](spec/eval-system.md). Two edges remain deferred:
+
+- **Remote and out-of-process program hosts.** The frame protocol is the seam;
+  only the in-daemon host is committed. Hosting programs in a separate
+  supervised process or on remote execution infrastructure requires a future
+  transport decision. Blocks nothing committed.
+- **Evaluation exporters.** Run scalars and per-case tables toward external
+  experiment trackers are deferred; the SQL surface is the contract until a
+  concrete tracker need appears. Blocks nothing committed.
+
 ## Destination features (target model)
 
 These unresolved foundation requirements are authoritative here. The
@@ -726,8 +723,12 @@ and ordering.
 - **Goal identity and lifecycle.** Durable persistent-objective identity and
   lifecycle require a future foundation decision. Blocks platform goal mode.
 - **Standing update-subscription lifecycle.** Identity, lifetime, delivery, and
-  cancellation for standing update subscriptions require a future foundation
-  decision. Blocks the planned callback surface.
+  cancellation for client-facing standing update subscriptions require a future
+  foundation decision. Blocks the planned callback surface. Narrowed: durable
+  program event subscriptions — identity, wake delivery, and cancellation for
+  registered programs — are decided and owned by
+  [program-substrate](spec/program-substrate.md), and are no longer part of this
+  question.
 - **Review-workflow orchestration.** The
   [review-workflow foundation](spec/review-workflows.md) fixes the target, run,
   pass, finding, external-link, and store contracts. The caller-driven

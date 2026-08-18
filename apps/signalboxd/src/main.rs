@@ -49,11 +49,11 @@ use signalboxd::runner_protocol_runtime::{
     RunnerRegistrationFailureCause,
 };
 use signalboxd::{
-    ActivatedTurnPass, BaseDaemonCredentialInputs, CODE_HOST_CREDENTIAL_REFERENCE,
-    ConfiguredApprovalPostureError, DaemonToolCatalog, DaemonToolComposition, DaemonTools,
-    DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
-    FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
-    HubModelConfigurationError, LocalProcessListener, LocalSocketError,
+    ActivatedTurnPass, BaseDaemonCredentialInputs, BlobStoreRegistry,
+    CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError, DaemonToolCatalog,
+    DaemonToolComposition, DaemonTools, DaemonToolsConstructionError, FatalExecutionSupervisor,
+    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport,
+    HubModelConfiguration, HubModelConfigurationError, LocalProcessListener, LocalSocketError,
     MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
     RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
@@ -643,6 +643,16 @@ const fn database_close_failure_outcome(outcome: ShutdownOutcome) -> ShutdownOut
     }
 }
 
+const fn staging_sweep_failure_outcome(outcome: ShutdownOutcome) -> ShutdownOutcome {
+    match outcome {
+        ShutdownOutcome::ExecutionFailed
+        | ShutdownOutcome::ExecutionFailedAfterGraceWindow
+        | ShutdownOutcome::RuntimeDefect
+        | ShutdownOutcome::RuntimeDefectAfterGraceWindow => outcome,
+        _ => ShutdownOutcome::RuntimeFailed,
+    }
+}
+
 /// Records database-close failure without displacing its initiating cause.
 ///
 /// `SingleHubGuardError` has a static sanitized Display that excludes SQLx
@@ -716,10 +726,40 @@ where
 
 async fn wait_for_guard_loss(database: &mut FencedHubDatabase) {
     loop {
-        sleep(GUARD_CHECK_INTERVAL).await;
         if database.check_guard().await.is_err() {
             return;
         }
+        sleep(GUARD_CHECK_INTERVAL).await;
+    }
+}
+
+enum GuardedAwait<T> {
+    Completed(T),
+    GuardLost,
+}
+
+async fn await_while_guarded<T>(
+    database: &mut FencedHubDatabase,
+    operation: impl Future<Output = T>,
+) -> GuardedAwait<T> {
+    let guard_loss = wait_for_guard_loss(database);
+    pin!(guard_loss);
+    pin!(operation);
+    select! {
+        biased;
+        () = &mut guard_loss => GuardedAwait::GuardLost,
+        output = &mut operation => GuardedAwait::Completed(output),
+    }
+}
+
+async fn disarm_staging_sweep_unless_guarded(
+    database: &mut FencedHubDatabase,
+    registry: &mut Option<Arc<BlobStoreRegistry>>,
+) {
+    if database.check_guard().await.is_err()
+        && let Some(registry) = registry.as_mut()
+    {
+        registry.disarm_staging_sweep();
     }
 }
 
@@ -1304,6 +1344,32 @@ async fn run_hub(
         return Err(error);
     }
 
+    if database.check_guard().await.is_err() {
+        let _ = database.close().await;
+        return Ok(ShutdownOutcome::GuardLost);
+    }
+    let blob_store_registry = match await_while_guarded(
+        &mut database,
+        BlobStoreRegistry::initialize(model_configuration.blob_storage(), pool.clone()),
+    )
+    .await
+    {
+        GuardedAwait::Completed(Ok(registry)) => registry,
+        GuardedAwait::Completed(Err(_)) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("blob_storage_startup_reconciliation_failed"),
+            );
+            let _ = database.close().await;
+            return Err(failure);
+        }
+        GuardedAwait::GuardLost => {
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
+    };
+    let mut blob_store_registry = blob_store_registry.map(Arc::new);
+
     let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
         Ok(service) => service,
         Err(_) => {
@@ -1311,21 +1377,37 @@ async fn run_hub(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::Static("runner_catalog_construction_failed"),
             );
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
         }
     };
-    if runner_service
-        .mark_orphaned_connections_lost()
-        .await
-        .is_err()
+    match await_while_guarded(
+        &mut database,
+        runner_service.mark_orphaned_connections_lost(),
+    )
+    .await
     {
-        let failure = erase_startup_cause(
-            RuntimePhase::StartupScan,
-            SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
-        );
-        let _ = database.close().await;
-        return Err(failure);
+        GuardedAwait::Completed(Ok(_)) => {}
+        GuardedAwait::Completed(Err(_)) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
+            );
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Err(failure);
+        }
+        GuardedAwait::GuardLost => {
+            if let Some(registry) = blob_store_registry.as_ref() {
+                registry.disarm_staging_sweep();
+            }
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
     }
     let runner_listener = match LocalProcessListener::bind(configuration.runner_socket_path()) {
         Ok(listener) => listener,
@@ -1334,6 +1416,8 @@ async fn run_hub(
                 RuntimePhase::SocketBinding,
                 SanitizedStartupCause::Socket(&error),
             );
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
         }
@@ -1346,6 +1430,8 @@ async fn run_hub(
                 SanitizedStartupCause::Socket(&error),
             );
             let _ = runner_listener.cleanup();
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
         }
@@ -1368,19 +1454,37 @@ async fn run_hub(
         pool.clone(),
         model_configuration.session_credential_pin(),
     );
-    if repository_watch_store
-        .deactivate_unconfigured_repositories(&configured_repositories)
-        .await
-        .is_err()
+    match await_while_guarded(
+        &mut database,
+        repository_watch_store.deactivate_unconfigured_repositories(&configured_repositories),
+    )
+    .await
     {
-        let failure = erase_startup_cause(
-            RuntimePhase::StartupScan,
-            SanitizedStartupCause::Static("repository_watch_configuration_reconciliation_failed"),
-        );
-        let _ = listener.cleanup();
-        let _ = runner_listener.cleanup();
-        let _ = database.close().await;
-        return Err(failure);
+        GuardedAwait::Completed(Ok(())) => {}
+        GuardedAwait::Completed(Err(_)) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static(
+                    "repository_watch_configuration_reconciliation_failed",
+                ),
+            );
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Err(failure);
+        }
+        GuardedAwait::GuardLost => {
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            if let Some(registry) = blob_store_registry.as_ref() {
+                registry.disarm_staging_sweep();
+            }
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
     }
     let scheduler_pool = pool.clone();
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
@@ -1403,6 +1507,8 @@ async fn run_hub(
                 );
                 let _ = listener.cleanup();
                 let _ = runner_listener.cleanup();
+                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+                drop(blob_store_registry);
                 let _ = database.close().await;
                 return Err(failure);
             }
@@ -1421,6 +1527,10 @@ async fn run_hub(
     .with_context_compaction_model(Arc::clone(&context_compaction_model));
     let process_runtime = match prometheus_runtime.as_ref() {
         Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
+        None => process_runtime,
+    };
+    let process_runtime = match blob_store_registry {
+        Some(ref registry) => process_runtime.with_blob_store_registry(Arc::clone(registry)),
         None => process_runtime,
     };
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
@@ -1587,13 +1697,36 @@ async fn run_hub(
     // extend the shutdown window. Guard loss is different: tasks are cancelled
     // immediately and the old fenced sessions must be terminated before
     // returning control to process exit.
+    if outcome != ShutdownOutcome::GuardLost && database.check_guard().await.is_err() {
+        outcome = ShutdownOutcome::GuardLost;
+    }
     if outcome == ShutdownOutcome::GuardLost {
+        if let Some(registry) = blob_store_registry.as_ref() {
+            registry.disarm_staging_sweep();
+        }
+        drop(blob_store_registry);
         let _ = database.close().await;
-    } else if should_close_pool(&Ok(outcome))
-        && let Err(error) = database.close().await
-    {
-        report_database_close_failure(&error);
-        outcome = database_close_failure_outcome(outcome);
+    } else {
+        let close_pool = should_close_pool(&Ok(outcome));
+        if let Some(registry) = blob_store_registry.as_ref()
+            && registry.sweep_staging().is_err()
+        {
+            let failure_class = OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            };
+            tracing::error!(
+                phase = ?RuntimePhase::Runtime,
+                ?failure_class,
+                cause = "blob_staging_sweep_failed",
+                "daemon staging cleanup failed"
+            );
+            outcome = staging_sweep_failure_outcome(outcome);
+        }
+        drop(blob_store_registry);
+        if close_pool && let Err(error) = database.close().await {
+            report_database_close_failure(&error);
+            outcome = database_close_failure_outcome(outcome);
+        }
     }
     Ok(outcome)
 }
@@ -1895,6 +2028,7 @@ mod tests {
         erase_startup_cause, migrate_scan_then_schedule, openai_construction_cause,
         operator_filter, process_runtime_failure_class, report_database_close_failure,
         run_scheduler_until_shutdown, runner_lifecycle_failure_class, should_close_pool,
+        staging_sweep_failure_outcome,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
 
@@ -2696,6 +2830,38 @@ mod tests {
     fn ordinary_database_close_failure_remains_a_runtime_failure() {
         assert_eq!(
             database_close_failure_outcome(ShutdownOutcome::Clean),
+            ShutdownOutcome::RuntimeFailed
+        );
+    }
+
+    #[test]
+    fn staging_sweep_failure_preserves_higher_signal_initiating_causes() {
+        assert_eq!(
+            staging_sweep_failure_outcome(ShutdownOutcome::RuntimeDefect),
+            ShutdownOutcome::RuntimeDefect
+        );
+        assert_eq!(
+            staging_sweep_failure_outcome(ShutdownOutcome::ExecutionFailed),
+            ShutdownOutcome::ExecutionFailed
+        );
+    }
+
+    #[test]
+    fn clean_staging_sweep_failure_becomes_a_runtime_failure() {
+        assert_eq!(
+            staging_sweep_failure_outcome(ShutdownOutcome::Clean),
+            ShutdownOutcome::RuntimeFailed
+        );
+    }
+
+    #[test]
+    fn staging_sweep_failure_preserves_the_expired_drain_decision() {
+        let outcome = ShutdownOutcome::GraceWindowExpired;
+        let close_pool = should_close_pool(&Ok(outcome));
+
+        assert!(!close_pool);
+        assert_eq!(
+            staging_sweep_failure_outcome(outcome),
             ShutdownOutcome::RuntimeFailed
         );
     }

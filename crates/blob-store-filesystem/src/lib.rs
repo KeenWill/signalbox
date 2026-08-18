@@ -3,24 +3,34 @@
 //! The normative specification is `docs/spec/blob-storage.md`.
 
 use std::{
-    collections::BTreeSet,
-    ffi::{CString, OsStr, OsString},
+    ffi::{OsStr, OsString},
     fmt::Write as _,
-    fs, io,
-    mem::MaybeUninit,
+    fs,
+    io::{self, Read as _, Write as _},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+#[cfg(target_os = "linux")]
+use std::{
+    collections::BTreeSet,
+    ffi::CString,
+    io::{Seek as _, SeekFrom},
+    mem::MaybeUninit,
+    os::unix::ffi::OsStringExt,
 };
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
 use rustix::fs::{
-    AtFlags, Mode, OFlags, RawDir, RenameFlags, chmodat, fchmod, mkdirat, open, openat, renameat,
-    renameat_with, unlinkat,
+    AtFlags, Mode, OFlags, RenameFlags, fchmod, open, openat, renameat, renameat_with, unlinkat,
 };
 #[cfg(target_os = "linux")]
-use rustix::fs::{ResolveFlags, openat2};
+use rustix::fs::{FlockOperation, RawDir, ResolveFlags, chmodat, flock, mkdirat, openat2};
 #[cfg(unix)]
 use rustix::process::geteuid;
 use sha2::{Digest, Sha256};
@@ -29,21 +39,37 @@ use signalbox_blob_store::{
     BlobVerificationFailure, ExpectedBlob, MAX_BLOB_RANGE_BYTES, OpenedBlob,
 };
 use signalbox_domain::BlobDigest;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use uuid::Uuid;
 
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 const DIRECTORY_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;
 const PUBLICATION_DIRECTORY: &str = ".publish-v1";
+const UPLOADS_DIRECTORY: &str = "uploads-v1";
 const NAMESPACE_MARKER: &str = ".signalbox-blob-namespace-v1";
+const MAX_NAMESPACE_MARKER_BYTES: u64 = 128;
 const TEMPORARY_NAME_ATTEMPTS: usize = 16;
 const MAX_BACKING_DEVICE_NODES: usize = 64;
+const MAX_MOUNTINFO_BYTES: u64 = 1_048_576;
 
 struct TemporaryBlobFile {
     directory: Arc<fs::File>,
     name: OsString,
     linked: bool,
+}
+
+#[cfg(target_os = "linux")]
+struct PublicationDirectoryLock {
+    descriptor: fs::File,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for PublicationDirectoryLock {
+    fn drop(&mut self) {
+        let _ = flock(&self.descriptor, FlockOperation::Unlock);
+    }
 }
 
 impl TemporaryBlobFile {
@@ -97,15 +123,7 @@ impl Drop for TemporaryBlobFile {
             return;
         }
         self.linked = false;
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let directory = self.directory.clone();
-            let name = std::mem::take(&mut self.name);
-            drop(runtime.spawn_blocking(move || {
-                let _ = unlinkat(&directory, &name, AtFlags::empty());
-            }));
-        } else {
-            let _ = unlinkat(&self.directory, &self.name, AtFlags::empty());
-        }
+        let _ = unlinkat(&self.directory, &self.name, AtFlags::empty());
     }
 }
 
@@ -114,6 +132,208 @@ impl Drop for TemporaryBlobFile {
 pub struct FilesystemBlobStore {
     root: Arc<fs::File>,
     publication_directory: Arc<fs::File>,
+}
+
+/// Whether startup already has a durable binding for one configured namespace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NamespaceBindingState {
+    /// The database binding exists, so the backend marker must already exist.
+    Recorded,
+    /// No database binding exists, so startup may create the marker once.
+    New,
+}
+
+/// Descriptor-authenticated identity of one opened filesystem namespace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FilesystemNamespaceIdentity {
+    canonical_path: PathBuf,
+    device: u64,
+    inode: u64,
+    physical_path: PathBuf,
+}
+
+/// Validated filesystem root retained unopened-for-mutation until namespaces are compared.
+pub struct OpenedFilesystemBlobRoot {
+    configured_path: PathBuf,
+    descriptor: fs::File,
+    identity: FilesystemNamespaceIdentity,
+}
+
+impl std::fmt::Debug for OpenedFilesystemBlobRoot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OpenedFilesystemBlobRoot { root: <redacted> }")
+    }
+}
+
+impl OpenedFilesystemBlobRoot {
+    /// Opens and authenticates one root without creating, changing, or sweeping children.
+    pub fn open(root: PathBuf) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        Self::open_with_locality_policy(root, true)
+    }
+
+    /// Opens a fixture root without host-locality classification.
+    #[cfg(feature = "test-support")]
+    pub fn open_without_locality_check_for_test(
+        root: PathBuf,
+    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        Self::open_with_locality_policy(root, false)
+    }
+
+    fn open_with_locality_policy(
+        root: PathBuf,
+        require_local_backing: bool,
+    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        let (descriptor, identity) = open_validated_root(&root, require_local_backing)?;
+        Ok(Self {
+            configured_path: root,
+            descriptor,
+            identity,
+        })
+    }
+
+    /// Returns the descriptor-authenticated namespace identity.
+    pub const fn identity(&self) -> &FilesystemNamespaceIdentity {
+        &self.identity
+    }
+}
+
+/// Private crash-recovered staging namespace for connection-local uploads.
+pub struct FilesystemBlobStaging {
+    uploads_directory: Arc<fs::File>,
+    identity: FilesystemNamespaceIdentity,
+    sweep_on_drop: AtomicBool,
+}
+
+impl std::fmt::Debug for FilesystemBlobStaging {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("FilesystemBlobStaging { root: <redacted> }")
+    }
+}
+
+impl FilesystemBlobStaging {
+    /// Opens the configured staging root and removes proven crash leftovers.
+    pub fn try_new(root: PathBuf) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        Self::try_new_with_locality_policy(root, true)
+    }
+
+    /// Opens a fixture staging namespace without host-locality classification.
+    #[cfg(feature = "test-support")]
+    pub fn try_new_without_locality_check_for_test(
+        root: PathBuf,
+    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        Self::try_new_with_locality_policy(root, false)
+    }
+
+    fn try_new_with_locality_policy(
+        root: PathBuf,
+        require_local_backing: bool,
+    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        let opened =
+            OpenedFilesystemBlobRoot::open_with_locality_policy(root, require_local_backing)?;
+        Self::from_opened(opened)
+    }
+
+    /// Prepares and sweeps a root only after its identity has been compared.
+    pub fn from_opened(
+        opened: OpenedFilesystemBlobRoot,
+    ) -> Result<Self, FilesystemBlobStoreConstructionError> {
+        let uploads_directory =
+            prepare_staging_directory(&opened.descriptor).map_err(|source| {
+                FilesystemBlobStoreConstructionError::PrepareStagingDirectory {
+                    root: opened.configured_path,
+                    source,
+                }
+            })?;
+        Ok(Self {
+            uploads_directory: Arc::new(uploads_directory),
+            identity: opened.identity,
+            sweep_on_drop: AtomicBool::new(true),
+        })
+    }
+
+    /// Returns the descriptor-authenticated staging namespace identity.
+    pub const fn identity(&self) -> &FilesystemNamespaceIdentity {
+        &self.identity
+    }
+
+    /// Removes every proven regular upload spool before clean shutdown.
+    pub fn sweep(&self) -> io::Result<()> {
+        sweep_private_temporary_directory(&self.uploads_directory)?;
+        self.uploads_directory.sync_all()
+    }
+
+    /// Creates one private connection-local upload spool.
+    pub async fn create_upload(&self) -> io::Result<FilesystemBlobUpload> {
+        let directory = self.uploads_directory.clone();
+        let (temporary, file) =
+            tokio::task::spawn_blocking(move || create_temporary_blob_file(directory))
+                .await
+                .map_err(io::Error::other)??;
+        Ok(FilesystemBlobUpload {
+            temporary,
+            file: tokio::fs::File::from_std(file),
+        })
+    }
+
+    /// Prevents cleanup after the daemon has lost its exclusive staging guard.
+    pub fn disarm_sweep_on_drop(&self) {
+        self.sweep_on_drop.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for FilesystemBlobStaging {
+    fn drop(&mut self) {
+        if !self.sweep_on_drop.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = sweep_private_temporary_directory(&self.uploads_directory);
+        let _ = self.uploads_directory.sync_all();
+    }
+}
+
+/// One create-new private upload spool, removed when its connection state drops.
+pub struct FilesystemBlobUpload {
+    temporary: TemporaryBlobFile,
+    file: tokio::fs::File,
+}
+
+impl std::fmt::Debug for FilesystemBlobUpload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("FilesystemBlobUpload { path: <redacted> }")
+    }
+}
+
+impl FilesystemBlobUpload {
+    /// Appends one already-bounded chunk in exact physical order.
+    pub async fn append(&mut self, chunk: &[u8]) -> io::Result<()> {
+        self.file.write_all(chunk).await
+    }
+
+    /// Flushes the spool and returns its descriptor at offset zero as a stream.
+    pub async fn into_reader(mut self) -> io::Result<BlobReader> {
+        self.file.flush().await?;
+        self.file.seek(std::io::SeekFrom::Start(0)).await?;
+        self.temporary.remove()?;
+        Ok(Box::new(self.file))
+    }
+}
+
+impl FilesystemNamespaceIdentity {
+    /// Returns the canonical path resolving to the opened directory generation.
+    pub fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+
+    /// Returns the opened directory's device and inode identity.
+    pub const fn device_inode(&self) -> (u64, u64) {
+        (self.device, self.inode)
+    }
+
+    /// Returns the path within the underlying mounted filesystem, resolving
+    /// bind-mount aliases to their shared physical ancestry.
+    pub fn physical_path(&self) -> &Path {
+        &self.physical_path
+    }
 }
 
 impl std::fmt::Debug for FilesystemBlobStore {
@@ -126,6 +346,43 @@ impl FilesystemBlobStore {
     /// Constructs a store at an absolute existing directory.
     pub fn try_new(root: PathBuf) -> Result<Self, FilesystemBlobStoreConstructionError> {
         Self::try_new_with_locality_policy(root, true)
+    }
+
+    /// Opens one configured store and establishes or verifies its namespace marker.
+    pub fn try_new_bound(
+        root: PathBuf,
+        namespace_id: Uuid,
+        binding_state: NamespaceBindingState,
+    ) -> Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
+        Self::from_opened_bound(
+            OpenedFilesystemBlobRoot::open(root)?,
+            namespace_id,
+            binding_state,
+        )
+    }
+
+    /// Establishes a namespace marker and publication area after identity comparison.
+    pub fn from_opened_bound(
+        opened: OpenedFilesystemBlobRoot,
+        namespace_id: Uuid,
+        binding_state: NamespaceBindingState,
+    ) -> Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
+        Self::from_opened_bound_inner(opened, namespace_id, binding_state)
+    }
+
+    /// Opens a conformance namespace while retaining every check except host
+    /// backing-device locality, which shared CI cannot establish.
+    #[cfg(feature = "test-support")]
+    pub fn try_new_bound_for_conformance(
+        root: PathBuf,
+        namespace_id: Uuid,
+        binding_state: NamespaceBindingState,
+    ) -> Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
+        Self::from_opened_bound(
+            OpenedFilesystemBlobRoot::open_without_locality_check_for_test(root)?,
+            namespace_id,
+            binding_state,
+        )
     }
 
     /// Constructs a conformance fixture while retaining every check except
@@ -141,42 +398,7 @@ impl FilesystemBlobStore {
         root: PathBuf,
         require_local_backing: bool,
     ) -> Result<Self, FilesystemBlobStoreConstructionError> {
-        if !root.is_absolute() {
-            return Err(FilesystemBlobStoreConstructionError::NotAbsolute { root });
-        }
-        let root_descriptor = open(
-            &root,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map(fs::File::from)
-        .map_err(io::Error::from)
-        .map_err(|source| FilesystemBlobStoreConstructionError::Inspect {
-            root: root.clone(),
-            source,
-        })?;
-        let metadata = root_descriptor.metadata().map_err(|source| {
-            FilesystemBlobStoreConstructionError::Inspect {
-                root: root.clone(),
-                source,
-            }
-        })?;
-        if !metadata.is_dir() {
-            return Err(FilesystemBlobStoreConstructionError::NotDirectory { root });
-        }
-        if !private_directory_metadata(&metadata) {
-            return Err(FilesystemBlobStoreConstructionError::NotPrivate { root });
-        }
-        let positively_local = !require_local_backing
-            || positively_classified_local_filesystem(&root_descriptor).map_err(|source| {
-                FilesystemBlobStoreConstructionError::Inspect {
-                    root: root.clone(),
-                    source,
-                }
-            })?;
-        if !positively_local {
-            return Err(FilesystemBlobStoreConstructionError::UnclassifiedFilesystem { root });
-        }
+        let (root_descriptor, _) = open_validated_root(&root, require_local_backing)?;
         let root_descriptor = Arc::new(root_descriptor);
         let publication_directory = Arc::new(
             prepare_publication_directory(&root_descriptor).map_err(|source| {
@@ -190,6 +412,35 @@ impl FilesystemBlobStore {
             root: root_descriptor,
             publication_directory,
         })
+    }
+
+    fn from_opened_bound_inner(
+        opened: OpenedFilesystemBlobRoot,
+        namespace_id: Uuid,
+        binding_state: NamespaceBindingState,
+    ) -> Result<(Self, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
+        initialize_namespace_marker(&opened.descriptor, namespace_id, binding_state).map_err(
+            |source| FilesystemBlobStoreConstructionError::PrepareNamespaceMarker {
+                root: opened.configured_path.clone(),
+                source,
+            },
+        )?;
+        let root_descriptor = Arc::new(opened.descriptor);
+        let publication_directory = Arc::new(
+            prepare_publication_directory(&root_descriptor).map_err(|source| {
+                FilesystemBlobStoreConstructionError::PreparePublicationDirectory {
+                    root: opened.configured_path,
+                    source,
+                }
+            })?,
+        );
+        Ok((
+            Self {
+                root: root_descriptor,
+                publication_directory,
+            },
+            opened.identity,
+        ))
     }
 
     async fn put_inner(
@@ -237,6 +488,15 @@ impl FilesystemBlobStore {
                 false
             };
 
+        #[cfg(target_os = "linux")]
+        let _publication_lock = acquire_publication_lock(
+            self.publication_directory.clone(),
+            FlockOperation::LockShared,
+        )
+        .await?;
+        #[cfg(not(target_os = "linux"))]
+        let _publication_lock =
+            acquire_publication_lock(self.publication_directory.clone(), ()).await?;
         let publication_directory = self.publication_directory.clone();
         let (temporary, standard_file) =
             tokio::task::spawn_blocking(move || create_temporary_blob_file(publication_directory))
@@ -713,6 +973,266 @@ fn object_file_name(key: &BlobObjectKey) -> Option<OsString> {
     Path::new(key.as_str()).file_name().map(OsStr::to_os_string)
 }
 
+fn open_validated_root(
+    root: &Path,
+    require_local_backing: bool,
+) -> Result<(fs::File, FilesystemNamespaceIdentity), FilesystemBlobStoreConstructionError> {
+    if !root.is_absolute() {
+        return Err(FilesystemBlobStoreConstructionError::NotAbsolute {
+            root: root.to_path_buf(),
+        });
+    }
+    let inspect = |source| FilesystemBlobStoreConstructionError::Inspect {
+        root: root.to_path_buf(),
+        source,
+    };
+    let root_descriptor = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(fs::File::from)
+    .map_err(io::Error::from)
+    .map_err(inspect)?;
+    let metadata = root_descriptor.metadata().map_err(inspect)?;
+    if !metadata.is_dir() {
+        return Err(FilesystemBlobStoreConstructionError::NotDirectory {
+            root: root.to_path_buf(),
+        });
+    }
+    if !private_directory_metadata(&metadata) {
+        return Err(FilesystemBlobStoreConstructionError::NotPrivate {
+            root: root.to_path_buf(),
+        });
+    }
+    let positively_local = !require_local_backing
+        || positively_classified_local_filesystem(&root_descriptor).map_err(inspect)?;
+    if !positively_local {
+        return Err(
+            FilesystemBlobStoreConstructionError::UnclassifiedFilesystem {
+                root: root.to_path_buf(),
+            },
+        );
+    }
+    let canonical_path = fs::canonicalize(root).map_err(inspect)?;
+    let canonical_descriptor = open(
+        &canonical_path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(fs::File::from)
+    .map_err(io::Error::from)
+    .map_err(inspect)?;
+    let canonical_metadata = canonical_descriptor.metadata().map_err(inspect)?;
+    let (device, inode) = metadata_device_inode(&metadata);
+    let mount_id = descriptor_mount_id(&root_descriptor).map_err(inspect)?;
+    let physical_path = physical_namespace_path(&canonical_path, mount_id).map_err(inspect)?;
+    if metadata_device_inode(&canonical_metadata) != (device, inode) {
+        return Err(FilesystemBlobStoreConstructionError::UnstableIdentity {
+            root: root.to_path_buf(),
+        });
+    }
+    Ok((
+        root_descriptor,
+        FilesystemNamespaceIdentity {
+            canonical_path,
+            device,
+            inode,
+            physical_path,
+        },
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn descriptor_mount_id(descriptor: &fs::File) -> io::Result<u64> {
+    let facts = rustix::fs::statx(
+        descriptor,
+        "",
+        AtFlags::EMPTY_PATH,
+        rustix::fs::StatxFlags::MNT_ID,
+    )
+    .map_err(io::Error::from)?;
+    if facts.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() != 0 {
+        Ok(facts.stx_mnt_id)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "filesystem mount identity is unavailable",
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn physical_namespace_path(canonical_path: &Path, mount_id: u64) -> io::Result<PathBuf> {
+    let mut mountinfo = fs::File::open("/proc/self/mountinfo")?;
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut mountinfo)
+        .take(MAX_MOUNTINFO_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    let byte_length = u64::try_from(bytes.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "mount inventory byte count is unrepresentable",
+        )
+    })?;
+    if byte_length > MAX_MOUNTINFO_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "mount inventory exceeds its startup bound",
+        ));
+    }
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let fields = line
+            .split(|byte| byte.is_ascii_whitespace())
+            .collect::<Vec<_>>();
+        if fields.len() < 6 || parse_decimal_u64(fields[0]) != Some(mount_id) {
+            continue;
+        }
+        let root = PathBuf::from(OsString::from_vec(decode_mountinfo_path(fields[3])?));
+        let mount_point = PathBuf::from(OsString::from_vec(decode_mountinfo_path(fields[4])?));
+        let relative = canonical_path.strip_prefix(&mount_point).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "opened namespace is outside its reported mount point",
+            )
+        })?;
+        return Ok(root.join(relative));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "opened namespace mount is absent from the process mount inventory",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
+    if bytes.is_empty() {
+        return None;
+    }
+    bytes.iter().try_fold(0_u64, |value, byte| {
+        let digit = byte.checked_sub(b'0')?;
+        if digit > 9 {
+            return None;
+        }
+        value.checked_mul(10)?.checked_add(u64::from(digit))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn decode_mountinfo_path(encoded: &[u8]) -> io::Result<Vec<u8>> {
+    let mut decoded = Vec::with_capacity(encoded.len());
+    let mut index = 0;
+    while index < encoded.len() {
+        if encoded[index] != b'\\' {
+            decoded.push(encoded[index]);
+            index += 1;
+            continue;
+        }
+        let Some(octal) = encoded.get(index + 1..index + 4) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "mount inventory contains a truncated path escape",
+            ));
+        };
+        let value = octal.iter().try_fold(0_u8, |value, digit| {
+            value
+                .checked_mul(8)?
+                .checked_add(digit.checked_sub(b'0').filter(|digit| *digit < 8)?)
+        });
+        let Some(value) = value else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "mount inventory contains an invalid path escape",
+            ));
+        };
+        decoded.push(value);
+        index += 4;
+    }
+    Ok(decoded)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn descriptor_mount_id(_descriptor: &fs::File) -> io::Result<u64> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem mount identity requires Linux statx",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn physical_namespace_path(_canonical_path: &Path, _mount_id: u64) -> io::Result<PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem mount ancestry requires Linux mount inventory",
+    ))
+}
+
+#[cfg(unix)]
+fn metadata_device_inode(metadata: &fs::Metadata) -> (u64, u64) {
+    (metadata.dev(), metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn metadata_device_inode(_metadata: &fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+fn initialize_namespace_marker(
+    root: &fs::File,
+    namespace_id: Uuid,
+    binding_state: NamespaceBindingState,
+) -> io::Result<()> {
+    let expected = format!("{}\n", namespace_id.hyphenated());
+    if binding_state == NamespaceBindingState::New {
+        match create_namespace_marker(root, expected.as_bytes()) {
+            Ok(()) => return Ok(()),
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(source) => return Err(source),
+        }
+    }
+    verify_namespace_marker(root, expected.as_bytes())
+}
+
+fn create_namespace_marker(root: &fs::File, expected: &[u8]) -> io::Result<()> {
+    let (temporary, mut marker) = create_temporary_blob_file(Arc::new(root.try_clone()?))?;
+    fchmod(&marker, Mode::RUSR | Mode::WUSR).map_err(io::Error::from)?;
+    if !private_regular_file_metadata(&marker.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "temporary namespace marker is not a private regular file",
+        ));
+    }
+    marker.write_all(expected)?;
+    marker.sync_all()?;
+    match temporary.publish_noclobber(root, OsStr::new(NAMESPACE_MARKER))? {
+        None => root.sync_all(),
+        Some(temporary) => {
+            temporary.remove()?;
+            root.sync_all()?;
+            Err(io::Error::from(io::ErrorKind::AlreadyExists))
+        }
+    }
+}
+
+fn verify_namespace_marker(root: &fs::File, expected: &[u8]) -> io::Result<()> {
+    let mut marker = open_relative_regular_name(root, OsStr::new(NAMESPACE_MARKER))?;
+    if !private_regular_file_metadata(&marker.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "namespace marker is not a private regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::take(&mut marker, MAX_NAMESPACE_MARKER_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "namespace marker disagrees with the configured identity",
+        ));
+    }
+    Ok(())
+}
+
 fn create_temporary_blob_file(
     directory: Arc<fs::File>,
 ) -> io::Result<(TemporaryBlobFile, fs::File)> {
@@ -749,6 +1269,7 @@ fn create_temporary_blob_file(
     ))
 }
 
+#[cfg(target_os = "linux")]
 fn random_temporary_name() -> io::Result<OsString> {
     let mut random = [0_u8; 16];
     let mut filled = 0;
@@ -770,6 +1291,14 @@ fn random_temporary_name() -> io::Result<OsString> {
         write!(&mut name, "{byte:02x}").map_err(io::Error::other)?;
     }
     Ok(OsString::from(name))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn random_temporary_name() -> io::Result<OsString> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem blob staging requires Linux descriptor-relative directories",
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -914,6 +1443,100 @@ fn prepare_publication_directory(root: &fs::File) -> io::Result<fs::File> {
     Ok(publication)
 }
 
+#[cfg(target_os = "linux")]
+fn lock_publication_directory(
+    directory: &fs::File,
+    operation: FlockOperation,
+) -> io::Result<PublicationDirectoryLock> {
+    let descriptor = fs::File::from(
+        openat2(
+            directory,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+        )
+        .map_err(io::Error::from)?,
+    );
+    flock(&descriptor, operation).map_err(io::Error::from)?;
+    Ok(PublicationDirectoryLock { descriptor })
+}
+
+#[cfg(target_os = "linux")]
+async fn acquire_publication_lock(
+    directory: Arc<fs::File>,
+    operation: FlockOperation,
+) -> Result<PublicationDirectoryLock, BlobStoreError> {
+    tokio::task::spawn_blocking(move || lock_publication_directory(&directory, operation))
+        .await
+        .map_err(|source| BlobStoreError::io("join publication lock acquisition", source))?
+        .map_err(|source| BlobStoreError::io("acquire publication lock", source))
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn acquire_publication_lock(
+    _directory: Arc<fs::File>,
+    _operation: (),
+) -> Result<(), BlobStoreError> {
+    Err(BlobStoreError::io(
+        "acquire publication lock",
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "filesystem blob publication locking requires Linux",
+        ),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_staging_directory(root: &fs::File) -> io::Result<fs::File> {
+    let created = match mkdirat(
+        root,
+        UPLOADS_DIRECTORY,
+        Mode::RUSR | Mode::WUSR | Mode::XUSR,
+    ) {
+        Ok(()) => true,
+        Err(source) if source == rustix::io::Errno::EXIST => false,
+        Err(source) => return Err(io::Error::from(source)),
+    };
+    if created {
+        chmodat(
+            root,
+            UPLOADS_DIRECTORY,
+            Mode::RUSR | Mode::WUSR | Mode::XUSR,
+            AtFlags::empty(),
+        )
+        .map_err(io::Error::from)?;
+    }
+    let uploads = fs::File::from(
+        openat2(
+            root,
+            UPLOADS_DIRECTORY,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+        )
+        .map_err(io::Error::from)?,
+    );
+    if !private_directory_metadata(&uploads.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "blob upload directory is not private",
+        ));
+    }
+    root.sync_all()?;
+    sweep_private_temporary_directory(&uploads)?;
+    uploads.sync_all()?;
+    Ok(uploads)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn prepare_staging_directory(_root: &fs::File) -> io::Result<fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem blob staging requires Linux descriptor-relative directories",
+    ))
+}
+
 #[cfg(not(target_os = "linux"))]
 fn prepare_publication_directory(_root: &fs::File) -> io::Result<fs::File> {
     Err(io::Error::new(
@@ -924,6 +1547,14 @@ fn prepare_publication_directory(_root: &fs::File) -> io::Result<fs::File> {
 
 #[cfg(target_os = "linux")]
 fn sweep_publication_directory(directory: &fs::File) -> io::Result<()> {
+    let _publication_lock = lock_publication_directory(directory, FlockOperation::LockExclusive)?;
+    sweep_private_temporary_directory(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn sweep_private_temporary_directory(directory: &fs::File) -> io::Result<()> {
+    let mut directory_offset = directory;
+    directory_offset.seek(SeekFrom::Start(0))?;
     let mut buffer = [MaybeUninit::<u8>::uninit(); 8192];
     let mut entries = RawDir::new(directory, &mut buffer);
     while let Some(entry) = entries.next() {
@@ -950,6 +1581,14 @@ fn sweep_publication_directory(directory: &fs::File) -> io::Result<()> {
         unlinkat(directory, &name, AtFlags::empty()).map_err(io::Error::from)?;
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sweep_private_temporary_directory(_directory: &fs::File) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "filesystem blob staging requires Linux descriptor-relative directories",
+    ))
 }
 
 #[cfg(unix)]
@@ -1082,6 +1721,12 @@ pub enum FilesystemBlobStoreConstructionError {
     NotPrivate { root: PathBuf },
     /// The host could not positively classify the root as local kernel storage.
     UnclassifiedFilesystem { root: PathBuf },
+    /// The configured path changed generations while startup authenticated it.
+    UnstableIdentity { root: PathBuf },
+    /// The backend namespace marker could not be established or authenticated.
+    PrepareNamespaceMarker { root: PathBuf, source: io::Error },
+    /// The private crash-recovery upload directory could not be prepared.
+    PrepareStagingDirectory { root: PathBuf, source: io::Error },
     /// The private crash-recovery publication directory could not be prepared.
     PreparePublicationDirectory { root: PathBuf, source: io::Error },
 }
@@ -1095,6 +1740,15 @@ impl std::fmt::Debug for FilesystemBlobStoreConstructionError {
             Self::NotPrivate { .. } => "FilesystemBlobStoreConstructionError::NotPrivate",
             Self::UnclassifiedFilesystem { .. } => {
                 "FilesystemBlobStoreConstructionError::UnclassifiedFilesystem"
+            }
+            Self::UnstableIdentity { .. } => {
+                "FilesystemBlobStoreConstructionError::UnstableIdentity"
+            }
+            Self::PrepareNamespaceMarker { .. } => {
+                "FilesystemBlobStoreConstructionError::PrepareNamespaceMarker"
+            }
+            Self::PrepareStagingDirectory { .. } => {
+                "FilesystemBlobStoreConstructionError::PrepareStagingDirectory"
             }
             Self::PreparePublicationDirectory { .. } => {
                 "FilesystemBlobStoreConstructionError::PreparePublicationDirectory"
@@ -1120,6 +1774,15 @@ impl std::fmt::Display for FilesystemBlobStoreConstructionError {
             }
             Self::UnclassifiedFilesystem { .. } => formatter
                 .write_str("filesystem blob-store root is not positively classified as local"),
+            Self::UnstableIdentity { .. } => {
+                formatter.write_str("filesystem blob-store root identity changed during startup")
+            }
+            Self::PrepareNamespaceMarker { .. } => {
+                formatter.write_str("filesystem blob-store namespace marker cannot be prepared")
+            }
+            Self::PrepareStagingDirectory { .. } => {
+                formatter.write_str("filesystem blob staging directory cannot be prepared")
+            }
             Self::PreparePublicationDirectory { .. } => formatter
                 .write_str("filesystem blob-store publication directory cannot be prepared"),
         }
@@ -1129,13 +1792,15 @@ impl std::fmt::Display for FilesystemBlobStoreConstructionError {
 impl std::error::Error for FilesystemBlobStoreConstructionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Inspect { source, .. } | Self::PreparePublicationDirectory { source, .. } => {
-                Some(source)
-            }
+            Self::Inspect { source, .. }
+            | Self::PrepareNamespaceMarker { source, .. }
+            | Self::PrepareStagingDirectory { source, .. }
+            | Self::PreparePublicationDirectory { source, .. } => Some(source),
             Self::NotAbsolute { .. }
             | Self::NotDirectory { .. }
             | Self::NotPrivate { .. }
-            | Self::UnclassifiedFilesystem { .. } => None,
+            | Self::UnclassifiedFilesystem { .. }
+            | Self::UnstableIdentity { .. } => None,
         }
     }
 }
@@ -1143,6 +1808,277 @@ impl std::error::Error for FilesystemBlobStoreConstructionError {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const PRIMARY_NAMESPACE: u128 = 0x5a10_0001;
+    const SECONDARY_NAMESPACE: u128 = 0x5a10_0002;
+
+    fn open_bound_fixture(
+        root: &Path,
+        namespace: u128,
+        state: NamespaceBindingState,
+    ) -> Result<
+        (FilesystemBlobStore, FilesystemNamespaceIdentity),
+        FilesystemBlobStoreConstructionError,
+    > {
+        let opened =
+            OpenedFilesystemBlobRoot::open_with_locality_policy(root.to_path_buf(), false)?;
+        FilesystemBlobStore::from_opened_bound(opened, Uuid::from_u128(namespace), state)
+    }
+
+    /// INV-059: descriptor-authenticated root inspection is mutation-free so
+    /// registry overlap checks always precede marker creation and recovery sweeps.
+    #[test]
+    fn inv059_opened_root_defers_every_namespace_mutation() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let publication = root.path().join(PUBLICATION_DIRECTORY);
+        fs::create_dir(&publication).expect("the fixture publication directory is created");
+        fs::set_permissions(&publication, fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture publication directory is private");
+        let sentinel = publication.join("pre-validation-sentinel");
+        let sentinel_content = b"must remain before validation";
+        fs::write(&sentinel, sentinel_content).expect("the sentinel is written");
+        fs::set_permissions(&sentinel, fs::Permissions::from_mode(FILE_MODE))
+            .expect("the sentinel is private");
+
+        let opened =
+            OpenedFilesystemBlobRoot::open_with_locality_policy(root.path().to_path_buf(), false)
+                .expect("the private root can be inspected");
+
+        assert_eq!(opened.identity().canonical_path(), root.path());
+        assert_eq!(
+            fs::read(&sentinel).expect("inspection leaves the sentinel intact"),
+            sentinel_content
+        );
+        assert!(!root.path().join(NAMESPACE_MARKER).exists());
+    }
+
+    #[test]
+    fn new_namespace_marker_is_durable_and_reopens_as_recorded() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+
+        let (_, created_identity) =
+            open_bound_fixture(root.path(), PRIMARY_NAMESPACE, NamespaceBindingState::New)
+                .expect("a new namespace marker is established");
+        let marker =
+            fs::read(root.path().join(NAMESPACE_MARKER)).expect("the namespace marker is readable");
+        let (_, recorded_identity) = open_bound_fixture(
+            root.path(),
+            PRIMARY_NAMESPACE,
+            NamespaceBindingState::Recorded,
+        )
+        .expect("the exact recorded namespace reopens");
+        let expected_marker = format!("{}\n", Uuid::from_u128(PRIMARY_NAMESPACE));
+
+        assert_eq!(marker, expected_marker.as_bytes());
+        assert_eq!(recorded_identity, created_identity);
+    }
+
+    #[test]
+    fn inv059_namespace_initialization_leaves_another_attempts_temporary_file_untouched() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let temporary = root.path().join(".tmp-concurrent-marker-attempt");
+        let concurrent_content = b"another initializer still owns this file";
+        fs::write(&temporary, concurrent_content)
+            .expect("the fixture writes another attempt's temporary marker");
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(FILE_MODE))
+            .expect("the other attempt's marker is private");
+
+        open_bound_fixture(root.path(), PRIMARY_NAMESPACE, NamespaceBindingState::New)
+            .expect("new startup publishes through its own temporary marker");
+        let marker =
+            fs::read(root.path().join(NAMESPACE_MARKER)).expect("the final marker is readable");
+        let expected_marker = format!("{}\n", Uuid::from_u128(PRIMARY_NAMESPACE));
+
+        assert_eq!(marker, expected_marker.as_bytes());
+        assert_eq!(
+            fs::read(temporary).expect("the other attempt's marker remains readable"),
+            concurrent_content
+        );
+    }
+
+    #[test]
+    fn recorded_namespace_requires_an_existing_marker() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+
+        let error = open_bound_fixture(
+            root.path(),
+            PRIMARY_NAMESPACE,
+            NamespaceBindingState::Recorded,
+        )
+        .expect_err("a recorded namespace cannot create its missing marker");
+
+        assert!(matches!(
+            error,
+            FilesystemBlobStoreConstructionError::PrepareNamespaceMarker { .. }
+        ));
+        assert!(!root.path().join(NAMESPACE_MARKER).exists());
+    }
+
+    #[test]
+    fn namespace_marker_rejects_another_configured_identity() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        open_bound_fixture(root.path(), PRIMARY_NAMESPACE, NamespaceBindingState::New)
+            .expect("the first namespace marker is established");
+
+        let error =
+            open_bound_fixture(root.path(), SECONDARY_NAMESPACE, NamespaceBindingState::New)
+                .expect_err("an existing marker cannot be clobbered");
+
+        assert!(matches!(
+            error,
+            FilesystemBlobStoreConstructionError::PrepareNamespaceMarker { .. }
+        ));
+    }
+
+    #[test]
+    fn staging_startup_sweeps_proven_regular_spools() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let uploads = root.path().join(UPLOADS_DIRECTORY);
+        fs::create_dir(&uploads).expect("the fixture creates the upload directory");
+        fs::set_permissions(&uploads, fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the upload directory is private");
+        let spool = uploads.join("orphan");
+        fs::write(&spool, b"partial upload").expect("the fixture creates an orphan spool");
+        fs::set_permissions(&spool, fs::Permissions::from_mode(FILE_MODE))
+            .expect("the orphan spool is private");
+
+        let staging =
+            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
+                .expect("the staging namespace opens");
+
+        assert!(!spool.exists());
+        assert_eq!(staging.identity().canonical_path(), root.path());
+    }
+
+    #[test]
+    fn staging_drop_sweeps_proven_regular_spools() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let staging =
+            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
+                .expect("the staging namespace opens");
+        let spool = root.path().join(UPLOADS_DIRECTORY).join("active-upload");
+        fs::write(&spool, b"partial upload").expect("the fixture creates an active spool");
+        fs::set_permissions(&spool, fs::Permissions::from_mode(FILE_MODE))
+            .expect("the active spool is private");
+
+        drop(staging);
+
+        assert!(!spool.exists());
+    }
+
+    /// INV-060: an active upload retains only one private linked spool, then
+    /// hands its descriptor to publication after unlinking the staging name.
+    #[tokio::test]
+    async fn inv060_upload_spool_streams_exact_bytes_after_unlink() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let staging =
+            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
+                .expect("the staging namespace opens");
+        let mut upload = staging
+            .create_upload()
+            .await
+            .expect("one private upload spool is created");
+        upload
+            .append(b"first")
+            .await
+            .expect("the first bounded chunk appends");
+        upload
+            .append(b"-second")
+            .await
+            .expect("the second bounded chunk appends");
+        let linked_count = fs::read_dir(root.path().join(UPLOADS_DIRECTORY))
+            .expect("the uploads directory is readable")
+            .count();
+        let mut reader = upload
+            .into_reader()
+            .await
+            .expect("the unlinked descriptor becomes a reader");
+        let unlinked_count = fs::read_dir(root.path().join(UPLOADS_DIRECTORY))
+            .expect("the uploads directory remains readable")
+            .count();
+        let mut bytes = Vec::new();
+        reader
+            .read_to_end(&mut bytes)
+            .await
+            .expect("the unlinked descriptor remains readable");
+
+        assert_eq!(linked_count, 1);
+        assert_eq!(unlinked_count, 0);
+        assert_eq!(bytes, b"first-second");
+    }
+
+    /// INV-060: abandoning one connection-local upload removes its linked
+    /// private spool without needing a daemon-wide sweep.
+    #[tokio::test]
+    async fn inv060_dropped_upload_spool_is_removed() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let staging =
+            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
+                .expect("the staging namespace opens");
+        let mut upload = staging
+            .create_upload()
+            .await
+            .expect("one private upload spool is created");
+        upload
+            .append(b"partial")
+            .await
+            .expect("one bounded chunk appends");
+        let linked_count = fs::read_dir(root.path().join(UPLOADS_DIRECTORY))
+            .expect("the uploads directory is readable")
+            .count();
+        drop(upload);
+        let dropped_count = fs::read_dir(root.path().join(UPLOADS_DIRECTORY))
+            .expect("the uploads directory remains readable")
+            .count();
+
+        assert_eq!(linked_count, 1);
+        assert_eq!(dropped_count, 0);
+    }
+
+    #[test]
+    fn disarmed_staging_drop_leaves_spools_for_the_guard_holder() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let staging =
+            FilesystemBlobStaging::try_new_with_locality_policy(root.path().to_path_buf(), false)
+                .expect("the staging namespace opens");
+        let spool = root
+            .path()
+            .join(UPLOADS_DIRECTORY)
+            .join("replacement-upload");
+        let spool_content = b"owned by the replacement daemon";
+        fs::write(&spool, spool_content).expect("the fixture creates a replacement spool");
+        fs::set_permissions(&spool, fs::Permissions::from_mode(FILE_MODE))
+            .expect("the replacement spool is private");
+
+        staging.disarm_sweep_on_drop();
+        drop(staging);
+
+        assert_eq!(
+            fs::read(spool).expect("disarmed cleanup leaves the replacement spool"),
+            spool_content
+        );
+    }
 
     #[test]
     fn inv059_filesystem_rejects_mounted_child_directories() {
@@ -1295,5 +2231,82 @@ mod tests {
             .expect("the interrupted private temporary file is recoverable");
 
         assert!(!temporary_path.exists());
+    }
+
+    /// INV-059: cancelling a publication unlinks its temporary file before the
+    /// publication lock can leave scope.
+    #[test]
+    fn inv059_temporary_publication_drop_unlinks_before_returning() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        let directory = Arc::new(fs::File::from(
+            open(
+                root.path(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .expect("the temporary directory opens"),
+        ));
+        let (temporary, output) = create_temporary_blob_file(directory)
+            .expect("the fixture creates a publication temporary file");
+        let temporary_path = root.path().join(&temporary.name);
+        assert!(temporary_path.exists());
+
+        drop(output);
+        drop(temporary);
+
+        assert!(!temporary_path.exists());
+    }
+
+    /// INV-059: recovery sweeps for one publication namespace serialize even
+    /// when a replacement process begins opening the same bound store.
+    #[test]
+    fn inv059_publication_recovery_waits_for_the_namespace_lock() {
+        let root = tempfile::TempDir::new().expect("the fixture creates a temporary root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(DIRECTORY_MODE))
+            .expect("the fixture root is private");
+        let publication_path = root.path().join(PUBLICATION_DIRECTORY);
+        fs::create_dir(&publication_path).expect("the publication directory is created");
+        fs::set_permissions(
+            &publication_path,
+            fs::Permissions::from_mode(DIRECTORY_MODE),
+        )
+        .expect("the publication directory is private");
+        let publication = fs::File::from(
+            open(
+                &publication_path,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .expect("the publication directory opens"),
+        );
+        let publication_lock = lock_publication_directory(&publication, FlockOperation::LockShared)
+            .expect("the fixture holds an active publication lock");
+        let replacement_root = root.path().to_path_buf();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let replacement = std::thread::spawn(move || {
+            let outcome = open_bound_fixture(
+                &replacement_root,
+                PRIMARY_NAMESPACE,
+                NamespaceBindingState::New,
+            )
+            .map(|_| ());
+            sender
+                .send(outcome)
+                .expect("the replacement reports its construction outcome");
+        });
+
+        let blocked = receiver
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .expect_err("the replacement cannot sweep while the lock is held");
+        assert_eq!(blocked, std::sync::mpsc::RecvTimeoutError::Timeout);
+
+        drop(publication_lock);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the replacement completes after the lock is released")
+            .expect("the replacement store opens");
+        replacement
+            .join()
+            .expect("the replacement construction thread completes");
     }
 }

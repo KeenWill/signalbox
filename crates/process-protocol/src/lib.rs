@@ -17,7 +17,7 @@ use serde::{
 };
 use serde_json::value::RawValue;
 use signalbox_domain::{
-    CredentialProfileName as DomainCredentialProfileName,
+    BlobDigest, CredentialProfileName as DomainCredentialProfileName,
     RunnerCapabilityClass as DomainRunnerCapabilityClass,
     RunnerWorkingDirectory as DomainRunnerWorkingDirectory, ToolDecisionRationale,
     ToolDenialReason, WorkspaceRepositoryKey as DomainWorkspaceRepositoryKey,
@@ -74,6 +74,9 @@ pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// The half-frame raw-byte bound leaves fixed headroom for canonical padded
 /// base64, the request envelope, and the maximum-width correlation identity.
 pub const MAX_CONVERSATION_IMPORT_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
+
+/// Maximum decoded bytes carried by one immutable-blob append.
+pub const MAX_BLOB_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum number of simultaneously open JSON objects and arrays in one frame.
 pub const MAX_JSON_CONTAINER_DEPTH: usize = 127;
@@ -334,6 +337,58 @@ impl TryFrom<String> for CanonicalDigest {
 impl From<CanonicalDigest> for String {
     fn from(value: CanonicalDigest) -> Self {
         value.0
+    }
+}
+
+/// Exact external blob identity including its fixed SHA-256 algorithm tag.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CanonicalBlobDigest(BlobDigest);
+
+impl CanonicalBlobDigest {
+    /// Constructs the exact SHA-256 identity from an already-computed digest.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(BlobDigest::from_bytes(bytes))
+    }
+
+    /// Wraps one validated domain digest for the process boundary.
+    pub const fn from_digest(value: BlobDigest) -> Self {
+        Self(value)
+    }
+
+    /// Returns the validated digest for an explicit adapter mapping.
+    pub const fn into_digest(self) -> BlobDigest {
+        self.0
+    }
+}
+
+impl fmt::Display for CanonicalBlobDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Serialize for CanonicalBlobDigest {
+    fn serialize<SerializerT>(
+        &self,
+        serializer: SerializerT,
+    ) -> Result<SerializerT::Ok, SerializerT::Error>
+    where
+        SerializerT: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for CanonicalBlobDigest {
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value
+            .parse::<BlobDigest>()
+            .map(Self)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -1377,6 +1432,28 @@ impl<'de> Deserialize<'de> for ConversationImportSource {
         }
 
         deserializer.deserialize_str(ConversationImportSourceVisitor)
+    }
+}
+
+/// One bounded immutable-blob upload chunk encoded as canonical padded base64.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BlobChunk(ConversationImportSource);
+
+impl BlobChunk {
+    /// Wraps exact decoded bytes without interpreting them.
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(ConversationImportSource::new(bytes))
+    }
+
+    /// Borrows the exact decoded bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+
+    /// Transfers ownership of the exact decoded bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0.into_bytes()
     }
 }
 
@@ -2579,11 +2656,21 @@ fn validate_tool_approval_event_shape(
             } => rationale.is_none() && ToolDenialReason::try_new(reason.clone()).is_ok(),
         },
         ToolApprovalEventDecider::Delegate { .. } => match decision {
-            ToolApprovalEventDecision::Approve {}
-            | ToolApprovalEventDecision::Deny { reason: None } => rationale
+            ToolApprovalEventDecision::Approve {} => rationale
                 .as_ref()
                 .is_some_and(|rationale| ToolDecisionRationale::try_new(rationale.clone()).is_ok()),
-            ToolApprovalEventDecision::Deny { reason: Some(_) } => false,
+            // A delegate denial's reason is exactly the derivation from its
+            // rationale: absent only when the rationale derives nothing.
+            ToolApprovalEventDecision::Deny { reason } => {
+                rationale.as_ref().is_some_and(|rationale| {
+                    ToolDecisionRationale::try_new(rationale.clone()).is_ok_and(|rationale| {
+                        ToolDenialReason::from_rationale(&rationale)
+                            .as_ref()
+                            .map(ToolDenialReason::as_str)
+                            == reason.as_deref()
+                    })
+                })
+            }
         },
     };
     if !shape_matches {
@@ -3234,6 +3321,22 @@ pub enum ClientRequest {
     CommitConversationImport {},
     /// Discard the connection's in-progress import without conversion.
     AbortConversationImport {},
+    /// Begin one connection-local immutable user-attachment upload.
+    BeginBlobUpload {
+        /// Exact content identity the caller computed before upload.
+        expected_digest: CanonicalBlobDigest,
+        /// Exact positive byte length the caller will append.
+        expected_length_bytes: CanonicalU64,
+    },
+    /// Append one bounded chunk to the connection's active blob upload.
+    AppendBlobUpload {
+        /// Next exact bytes in physical order.
+        chunk: BlobChunk,
+    },
+    /// Verify, publish, and catalogue the active blob upload.
+    CommitBlobUpload {},
+    /// Discard the connection's active blob upload.
+    AbortBlobUpload {},
     /// Read one immutable imported conversation's complete entry inventory.
     ///
     /// The read exposes the ordinals `create_session_from_imported_frontier`
@@ -3523,6 +3626,10 @@ impl ClientRequest {
             | Self::AppendConversationImport { .. }
             | Self::CommitConversationImport {}
             | Self::AbortConversationImport {}
+            | Self::BeginBlobUpload { .. }
+            | Self::AppendBlobUpload { .. }
+            | Self::CommitBlobUpload {}
+            | Self::AbortBlobUpload {}
             | Self::ReadImportedConversation { .. }
             | Self::CreateSessionFromImportedFrontier { .. }
             | Self::ReconcileTurn { .. }
@@ -3593,6 +3700,11 @@ impl ClientRequest {
                 || chunk.as_bytes().len() > MAX_CONVERSATION_IMPORT_CHUNK_BYTES)
         {
             return Err(FrameValidationError::ConversationImportShape);
+        }
+        if let Self::AppendBlobUpload { chunk } = self
+            && (chunk.as_bytes().is_empty() || chunk.as_bytes().len() > MAX_BLOB_CHUNK_BYTES)
+        {
+            return Err(FrameValidationError::BlobUploadShape);
         }
         if let Self::CreateSessionFromImportedFrontier {
             through_position, ..
@@ -3946,16 +4058,38 @@ pub enum ErrorCode {
     ResyncRequired,
     /// Infrastructure prevented completion.
     Unavailable,
+    /// A remote store may have accepted a deterministic publication.
+    PublicationAmbiguous,
     /// Infrastructure obscured whether a requested mutation committed.
     CommitAmbiguous,
     /// Fail-closed corruption or a hub defect stopped the request.
     Internal,
 }
 
+/// Closed connection-local holder of the process-wide bulk-ingest permit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkIngestKind {
+    ConversationImport,
+    BlobUpload,
+}
+
+impl BulkIngestKind {
+    /// Returns the exact lowercase wire token for terminal diagnostics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConversationImport => "conversation_import",
+            Self::BlobUpload => "blob_upload",
+        }
+    }
+}
+
 /// Typed durable submit rejection details.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RejectionDetail {
+    /// Another chunked bulk-ingest kind already owns this connection.
+    BulkIngestAlreadyInProgress { active_kind: BulkIngestKind },
     /// An explicit reasoning value is unsupported by the selected model.
     UnsupportedReasoningLevel {
         selection_id: CanonicalUuid,
@@ -4223,9 +4357,50 @@ pub enum RejectionDetail {
         #[serde(deserialize_with = "deserialize_required_nullable")]
         record_ordinal: Option<CanonicalU64>,
     },
+    /// This connection already has one in-progress blob upload.
+    BlobUploadAlreadyInProgress {},
+    /// This connection has no in-progress blob upload.
+    BlobUploadNotInProgress {},
+    /// The declared blob length fell outside the configured inclusive range.
+    BlobUploadLengthOutOfRange {
+        min_length_bytes: CanonicalU64,
+        max_length_bytes: CanonicalU64,
+        declared_length_bytes: CanonicalU64,
+    },
+    /// Appending the chunk would exceed the length declared at begin.
+    BlobUploadSizeExceeded {
+        expected_length_bytes: CanonicalU64,
+        actual_length_bytes: CanonicalU64,
+    },
+    /// The appended byte count differed from the length declared at begin.
+    BlobUploadLengthMismatch {
+        expected_length_bytes: CanonicalU64,
+        actual_length_bytes: CanonicalU64,
+    },
+    /// The assembled bytes differed from the digest declared at begin.
+    BlobUploadDigestMismatch {
+        expected_digest: CanonicalBlobDigest,
+        actual_digest: CanonicalBlobDigest,
+    },
 }
 
 impl RejectionDetail {
+    const fn is_bulk_ingest(self) -> bool {
+        matches!(self, Self::BulkIngestAlreadyInProgress { .. })
+    }
+
+    const fn is_blob_upload(self) -> bool {
+        matches!(
+            self,
+            Self::BlobUploadAlreadyInProgress {}
+                | Self::BlobUploadNotInProgress {}
+                | Self::BlobUploadLengthOutOfRange { .. }
+                | Self::BlobUploadSizeExceeded { .. }
+                | Self::BlobUploadLengthMismatch { .. }
+                | Self::BlobUploadDigestMismatch { .. }
+        )
+    }
+
     const fn is_conversation_import(self) -> bool {
         match self {
             Self::ConversationImportAlreadyInProgress {}
@@ -4233,7 +4408,14 @@ impl RejectionDetail {
             | Self::ConversationImportSourceTooLarge { .. }
             | Self::ConversationImportSourceSizeMismatch { .. }
             | Self::ConversationImportConversionFailed { .. } => true,
-            Self::SessionNotFound { .. }
+            Self::BlobUploadAlreadyInProgress {}
+            | Self::BlobUploadNotInProgress {}
+            | Self::BlobUploadLengthOutOfRange { .. }
+            | Self::BlobUploadSizeExceeded { .. }
+            | Self::BlobUploadLengthMismatch { .. }
+            | Self::BlobUploadDigestMismatch { .. }
+            | Self::BulkIngestAlreadyInProgress { .. }
+            | Self::SessionNotFound { .. }
             | Self::UnsupportedReasoningLevel { .. }
             | Self::UnsupportedFastMode { .. }
             | Self::UnsupportedServiceTier { .. }
@@ -6946,6 +7128,27 @@ pub enum ServerMessage {
     },
     /// One per-connection chunked import was discarded.
     ConversationImportAborted {},
+    /// One connection-local immutable-blob upload was initialized.
+    BlobUploadBegun {
+        expected_digest: CanonicalBlobDigest,
+        expected_length_bytes: CanonicalU64,
+    },
+    /// The routed store already held a verified replica, so no chunks are owed.
+    BlobUploadAlreadyPresent {
+        digest: CanonicalBlobDigest,
+        byte_length: CanonicalU64,
+    },
+    /// One bounded chunk was appended to the connection-local spool.
+    BlobUploadAppended {
+        assembled_length_bytes: CanonicalU64,
+    },
+    /// The exact assembled bytes were published and catalogued.
+    BlobUploadCommitted {
+        digest: CanonicalBlobDigest,
+        byte_length: CanonicalU64,
+    },
+    /// One connection-local immutable-blob upload was discarded.
+    BlobUploadAborted {},
     /// Begins one imported-conversation entry sequence.
     ImportedConversationStart {
         /// Inspected imported conversation.
@@ -7436,6 +7639,23 @@ impl ServerMessage {
             } if assembled_size_bytes.value() == 0 => {
                 return Err(FrameValidationError::ConversationImportShape);
             }
+            Self::BlobUploadBegun {
+                expected_length_bytes,
+                ..
+            }
+            | Self::BlobUploadAlreadyPresent {
+                byte_length: expected_length_bytes,
+                ..
+            }
+            | Self::BlobUploadCommitted {
+                byte_length: expected_length_bytes,
+                ..
+            }
+            | Self::BlobUploadAppended {
+                assembled_length_bytes: expected_length_bytes,
+            } if expected_length_bytes.value() == 0 => {
+                return Err(FrameValidationError::BlobUploadShape);
+            }
             Self::TranscriptModelCallUsage { usage, cost, .. }
                 if cost.is_some()
                     && usage.input_tokens.is_none()
@@ -7560,11 +7780,20 @@ impl ServerFrame {
                     }
                 }
                 if let Some(detail) = detail.value() {
-                    if detail.is_conversation_import() {
+                    if detail.is_bulk_ingest() {
+                        if *code != ErrorCode::InvalidRequest {
+                            return Err(FrameValidationError::ErrorDetailShape);
+                        }
+                    } else if detail.is_conversation_import() {
                         if *code != ErrorCode::InvalidRequest {
                             return Err(FrameValidationError::ErrorDetailShape);
                         }
                         validate_conversation_import_detail(detail)?;
+                    } else if detail.is_blob_upload() {
+                        if *code != ErrorCode::InvalidRequest {
+                            return Err(FrameValidationError::ErrorDetailShape);
+                        }
+                        validate_blob_upload_detail(detail)?;
                     } else if *code != ErrorCode::Rejected {
                         return Err(FrameValidationError::ErrorDetailShape);
                     } else {
@@ -7660,7 +7889,14 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::ConversationImportNotInProgress {}
         | RejectionDetail::ConversationImportSourceTooLarge { .. }
         | RejectionDetail::ConversationImportSourceSizeMismatch { .. }
-        | RejectionDetail::ConversationImportConversionFailed { .. } => false,
+        | RejectionDetail::ConversationImportConversionFailed { .. }
+        | RejectionDetail::BulkIngestAlreadyInProgress { .. }
+        | RejectionDetail::BlobUploadAlreadyInProgress {}
+        | RejectionDetail::BlobUploadNotInProgress {}
+        | RejectionDetail::BlobUploadLengthOutOfRange { .. }
+        | RejectionDetail::BlobUploadSizeExceeded { .. }
+        | RejectionDetail::BlobUploadLengthMismatch { .. }
+        | RejectionDetail::BlobUploadDigestMismatch { .. } => false,
     };
     if valid {
         Ok(())
@@ -7752,11 +7988,56 @@ fn validate_conversation_import_detail(
         | RejectionDetail::DefaultsVersionExhausted { .. }
         | RejectionDetail::ImportedConversationNotFound { .. }
         | RejectionDetail::ImportedFrontierPositionOutOfRange { .. } => false,
+        RejectionDetail::BulkIngestAlreadyInProgress { .. }
+        | RejectionDetail::BlobUploadAlreadyInProgress {}
+        | RejectionDetail::BlobUploadNotInProgress {}
+        | RejectionDetail::BlobUploadLengthOutOfRange { .. }
+        | RejectionDetail::BlobUploadSizeExceeded { .. }
+        | RejectionDetail::BlobUploadLengthMismatch { .. }
+        | RejectionDetail::BlobUploadDigestMismatch { .. } => false,
     };
     if valid {
         Ok(())
     } else {
         Err(FrameValidationError::ConversationImportShape)
+    }
+}
+
+fn validate_blob_upload_detail(detail: RejectionDetail) -> Result<(), FrameValidationError> {
+    let valid = match detail {
+        RejectionDetail::BlobUploadAlreadyInProgress {}
+        | RejectionDetail::BlobUploadNotInProgress {} => true,
+        RejectionDetail::BlobUploadLengthOutOfRange {
+            min_length_bytes,
+            max_length_bytes,
+            declared_length_bytes,
+        } => {
+            min_length_bytes.value() > 0
+                && min_length_bytes.value() <= max_length_bytes.value()
+                && (declared_length_bytes.value() < min_length_bytes.value()
+                    || declared_length_bytes.value() > max_length_bytes.value())
+        }
+        RejectionDetail::BlobUploadSizeExceeded {
+            expected_length_bytes,
+            actual_length_bytes,
+        } => {
+            expected_length_bytes.value() > 0
+                && actual_length_bytes.value() > expected_length_bytes.value()
+        }
+        RejectionDetail::BlobUploadLengthMismatch {
+            expected_length_bytes,
+            actual_length_bytes,
+        } => expected_length_bytes.value() > 0 && expected_length_bytes != actual_length_bytes,
+        RejectionDetail::BlobUploadDigestMismatch {
+            expected_digest,
+            actual_digest,
+        } => expected_digest != actual_digest,
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(FrameValidationError::BlobUploadShape)
     }
 }
 
@@ -7784,6 +8065,8 @@ pub enum FrameValidationError {
     SystemPromptShape,
     /// A chunked conversation-import frame carried a contradictory shape.
     ConversationImportShape,
+    /// A chunked immutable-blob frame carried a contradictory shape.
+    BlobUploadShape,
     /// An imported-frontier request carried a nonpositive position.
     ImportedFrontierShape,
     /// A context-compaction request carried a nonpositive position.
@@ -7830,6 +8113,7 @@ impl fmt::Display for FrameValidationError {
             }
             Self::SystemPromptShape => "frame omits its required system-prompt member",
             Self::ConversationImportShape => "conversation-import frame shape is inconsistent",
+            Self::BlobUploadShape => "blob-upload frame shape is inconsistent",
             Self::ImportedFrontierShape => "imported frontier position is not positive",
             Self::ContextCompactionShape => "compaction through position is not positive",
             Self::ImportedConversationEntryShape => {
@@ -8250,31 +8534,31 @@ pub fn recover_bounded_client_protocol_version(content: &[u8]) -> Option<Protoco
 #[cfg(test)]
 mod tests {
     use super::{
-        BillingRateVersion, CanonicalDigest, CanonicalDollarAmount, CanonicalU64, CanonicalUuid,
-        CanonicalValueError, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ConversationCursor, ConversationImportFormat, ConversationImportRejectionClass,
-        ConversationImportSource, ConversationOrigin, ConversationOriginFilter,
-        ConversationSummary, CurrentModelCall, CurrentModelCallState, DelegationMessageDirection,
-        DelegationOutcome, DelegationPolicy, DelegationProvenance, DelegationReason,
-        DelegationToolRequestState, DelegationWaitMode, DescendantTerminationScope,
-        EffectiveModelSettings, ErrorCode, ErrorDetail, FailedModelCallCause,
-        FailedModelCallDisposition, FailedTerminalModelCall, FastMode, FastModeOverlay,
-        FrameDecodeErrorKind, FrameEncodeError, FrameValidationError, GoalBlockedProvenance,
-        GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent, GoalLifecycleState,
-        ImportedContentKind, ImportedConversationSourceFormat, ImportedSessionRelationship,
-        ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
-        MAX_CONTENT_FRAGMENT_BYTES, MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS,
-        MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES, MAX_JSON_CONTAINER_DEPTH,
-        MAX_SESSION_METADATA_ATTRIBUTES, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
-        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TAGS,
-        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor,
-        MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition, ModelCallDollarCost,
-        ModelCallState, ModelCallTokenUsage, ModelCapabilities, ModelChangeAdjustment,
-        ModelSelection, ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence,
-        ModelSettingsSnapshot, OpenAiServiceTier, PROTOCOL_VERSION, PositiveCanonicalU64,
-        ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
-        ReviewFindingEvent, ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
-        ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+        BillingRateVersion, BlobChunk, BulkIngestKind, CanonicalBlobDigest, CanonicalDigest,
+        CanonicalDollarAmount, CanonicalU64, CanonicalUuid, CanonicalValueError, ClientFrame,
+        ClientRequest, CommandId, ContentFragment, ConversationCursor, ConversationImportFormat,
+        ConversationImportRejectionClass, ConversationImportSource, ConversationOrigin,
+        ConversationOriginFilter, ConversationSummary, CurrentModelCall, CurrentModelCallState,
+        DelegationMessageDirection, DelegationOutcome, DelegationPolicy, DelegationProvenance,
+        DelegationReason, DelegationToolRequestState, DelegationWaitMode,
+        DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail,
+        FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall, FastMode,
+        FastModeOverlay, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
+        GoalBlockedProvenance, GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent,
+        GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
+        ImportedSessionRelationship, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
+        InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
+        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES,
+        MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
+        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
+        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
+        MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
+        ModelCallDisposition, ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
+        ModelCapabilities, ModelChangeAdjustment, ModelSelection, ModelSettingSource,
+        ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot, OpenAiServiceTier,
+        PROTOCOL_VERSION, PositiveCanonicalU64, ProtocolVersion, ReasoningLevel, RejectionDetail,
+        RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
+        ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
         ReviewOrchestrationStageTemplateDigests, ReviewOrchestrationState, ReviewPassLifecycle,
@@ -9687,6 +9971,27 @@ mod tests {
     }
 
     #[test]
+    fn inv060_publication_ambiguity_has_one_stable_error_code()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::PublicationAmbiguous,
+                message: "ambiguous publication".to_owned(),
+                detail: ErrorDetail::none(),
+            },
+        )?;
+        let encoded = encode_server_line(&frame)?;
+        assert!(
+            encoded
+                .windows(br#""code":"publication_ambiguous""#.len())
+                .any(|window| window == br#""code":"publication_ambiguous""#)
+        );
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
     fn inv033_uncorrelated_identity_is_reserved_for_server_errors()
     -> Result<(), Box<dyn std::error::Error>> {
         let error = ServerFrame::try_new(
@@ -10333,6 +10638,296 @@ mod tests {
                 },
             ),
             Err(FrameValidationError::ConversationImportShape)
+        );
+        Ok(())
+    }
+
+    /// INV-060: blob upload requests carry one exact tagged digest, positive
+    /// length, and canonical bounded chunk without an implicit blob class.
+    #[test]
+    fn inv060_blob_upload_requests_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        let begin = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(1)?,
+            ClientRequest::BeginBlobUpload {
+                expected_digest: digest,
+                expected_length_bytes: CanonicalU64::new(2),
+            },
+        )?;
+        let append = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(2)?,
+            ClientRequest::AppendBlobUpload {
+                chunk: BlobChunk::new(vec![0, 255]),
+            },
+        )?;
+        let commit = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(3)?,
+            ClientRequest::CommitBlobUpload {},
+        )?;
+        let abort = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(4)?,
+            ClientRequest::AbortBlobUpload {},
+        )?;
+
+        let encoded_begin = encode_client_line(&begin)?;
+        let encoded_append = encode_client_line(&append)?;
+        let encoded_commit = encode_client_line(&commit)?;
+        let encoded_abort = encode_client_line(&abort)?;
+        assert_eq!(
+            String::from_utf8(encoded_begin.clone())?,
+            format!(
+                "{{\"version\":1,\"request_id\":\"1\",\"request\":{{\"type\":\"begin_blob_upload\",\"expected_digest\":\"{digest}\",\"expected_length_bytes\":\"2\"}}}}\n"
+            )
+        );
+        assert_eq!(
+            String::from_utf8(encoded_append.clone())?,
+            "{\"version\":1,\"request_id\":\"2\",\"request\":{\"type\":\"append_blob_upload\",\"chunk\":\"AP8=\"}}\n"
+        );
+        assert_eq!(
+            String::from_utf8(encoded_commit.clone())?,
+            "{\"version\":1,\"request_id\":\"3\",\"request\":{\"type\":\"commit_blob_upload\"}}\n"
+        );
+        assert_eq!(
+            String::from_utf8(encoded_abort.clone())?,
+            "{\"version\":1,\"request_id\":\"4\",\"request\":{\"type\":\"abort_blob_upload\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded_begin)?, begin);
+        assert_eq!(decode_client_line(&encoded_append)?, append);
+        assert_eq!(decode_client_line(&encoded_commit)?, commit);
+        assert_eq!(decode_client_line(&encoded_abort)?, abort);
+        assert!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::One,
+                request(5)?,
+                ClientRequest::BeginBlobUpload {
+                    expected_digest: digest,
+                    expected_length_bytes: CanonicalU64::new(0),
+                },
+            )
+            .is_ok()
+        );
+        Ok(())
+    }
+
+    /// INV-060: one maximum decoded blob chunk fits the frame cap, while an
+    /// empty or one-byte-larger append is rejected before encoding.
+    #[test]
+    fn inv060_blob_upload_chunk_bound_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
+        let maximum = ClientRequest::AppendBlobUpload {
+            chunk: BlobChunk::new(vec![b'x'; super::MAX_BLOB_CHUNK_BYTES]),
+        };
+        let oversized = ClientRequest::AppendBlobUpload {
+            chunk: BlobChunk::new(vec![b'x'; super::MAX_BLOB_CHUNK_BYTES + 1]),
+        };
+        let empty = ClientRequest::AppendBlobUpload {
+            chunk: BlobChunk::new(Vec::new()),
+        };
+        let maximum_frame = ClientFrame::try_new_for_version(
+            ProtocolVersion::One,
+            RequestId::try_new(u64::MAX)?,
+            maximum,
+        )?;
+
+        assert!(encode_client_line(&maximum_frame)?.len() <= super::MAX_FRAME_BYTES);
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, oversized),
+            Err(FrameValidationError::BlobUploadShape)
+        );
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(2)?, empty),
+            Err(FrameValidationError::BlobUploadShape)
+        );
+        Ok(())
+    }
+
+    /// INV-060: upload lifecycle receipts echo the exact verified identity and
+    /// positive cumulative sizes.
+    #[test]
+    fn inv060_blob_upload_acknowledgements_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::BlobUploadBegun {
+                expected_digest: digest,
+                expected_length_bytes: CanonicalU64::new(9),
+            },
+            &format!(
+                "{{\"type\":\"blob_upload_begun\",\"expected_digest\":\"{digest}\",\"expected_length_bytes\":\"9\"}}"
+            ),
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::BlobUploadAlreadyPresent {
+                digest,
+                byte_length: CanonicalU64::new(9),
+            },
+            &format!(
+                "{{\"type\":\"blob_upload_already_present\",\"digest\":\"{digest}\",\"byte_length\":\"9\"}}"
+            ),
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::BlobUploadAppended {
+                assembled_length_bytes: CanonicalU64::new(7),
+            },
+            r#"{"type":"blob_upload_appended","assembled_length_bytes":"7"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::BlobUploadCommitted {
+                digest,
+                byte_length: CanonicalU64::new(9),
+            },
+            &format!(
+                "{{\"type\":\"blob_upload_committed\",\"digest\":\"{digest}\",\"byte_length\":\"9\"}}"
+            ),
+        )?;
+        assert_server_message_round_trip(
+            request(5)?,
+            ServerMessage::BlobUploadAborted {},
+            r#"{"type":"blob_upload_aborted"}"#,
+        )?;
+        Ok(())
+    }
+
+    /// INV-060: bulk-ingest ownership and every upload lifecycle failure use
+    /// one exhaustive content-silent invalid-request vocabulary.
+    #[test]
+    fn inv060_blob_upload_refusals_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let expected_digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        let actual_digest = CanonicalBlobDigest::from_bytes([0xcd; 32]);
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("bulk ingest was rejected"),
+                detail: ErrorDetail::invalid_request(
+                    RejectionDetail::BulkIngestAlreadyInProgress {
+                        active_kind: BulkIngestKind::BlobUpload,
+                    },
+                ),
+            },
+            r#"{"type":"error","code":"invalid_request","message":"bulk ingest was rejected","detail":{"type":"bulk_ingest_already_in_progress","active_kind":"blob_upload"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("blob upload was rejected"),
+                detail: ErrorDetail::invalid_request(
+                    RejectionDetail::BlobUploadAlreadyInProgress {},
+                ),
+            },
+            r#"{"type":"error","code":"invalid_request","message":"blob upload was rejected","detail":{"type":"blob_upload_already_in_progress"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("blob upload was rejected"),
+                detail: ErrorDetail::invalid_request(RejectionDetail::BlobUploadNotInProgress {}),
+            },
+            r#"{"type":"error","code":"invalid_request","message":"blob upload was rejected","detail":{"type":"blob_upload_not_in_progress"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("blob upload was rejected"),
+                detail: ErrorDetail::invalid_request(RejectionDetail::BlobUploadLengthOutOfRange {
+                    min_length_bytes: CanonicalU64::new(1),
+                    max_length_bytes: CanonicalU64::new(8),
+                    declared_length_bytes: CanonicalU64::new(9),
+                }),
+            },
+            r#"{"type":"error","code":"invalid_request","message":"blob upload was rejected","detail":{"type":"blob_upload_length_out_of_range","min_length_bytes":"1","max_length_bytes":"8","declared_length_bytes":"9"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(5)?,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("blob upload was rejected"),
+                detail: ErrorDetail::invalid_request(RejectionDetail::BlobUploadSizeExceeded {
+                    expected_length_bytes: CanonicalU64::new(8),
+                    actual_length_bytes: CanonicalU64::new(9),
+                }),
+            },
+            r#"{"type":"error","code":"invalid_request","message":"blob upload was rejected","detail":{"type":"blob_upload_size_exceeded","expected_length_bytes":"8","actual_length_bytes":"9"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(6)?,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("blob upload was rejected"),
+                detail: ErrorDetail::invalid_request(RejectionDetail::BlobUploadLengthMismatch {
+                    expected_length_bytes: CanonicalU64::new(8),
+                    actual_length_bytes: CanonicalU64::new(7),
+                }),
+            },
+            r#"{"type":"error","code":"invalid_request","message":"blob upload was rejected","detail":{"type":"blob_upload_length_mismatch","expected_length_bytes":"8","actual_length_bytes":"7"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(7)?,
+            ServerMessage::Error {
+                code: ErrorCode::InvalidRequest,
+                message: String::from("blob upload was rejected"),
+                detail: ErrorDetail::invalid_request(RejectionDetail::BlobUploadDigestMismatch {
+                    expected_digest,
+                    actual_digest,
+                }),
+            },
+            &format!(
+                "{{\"type\":\"error\",\"code\":\"invalid_request\",\"message\":\"blob upload was rejected\",\"detail\":{{\"type\":\"blob_upload_digest_mismatch\",\"expected_digest\":\"{expected_digest}\",\"actual_digest\":\"{actual_digest}\"}}}}"
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// INV-060: a size-exceeded refusal cannot claim the impossible zero
+    /// expected length that begin-upload admission rejects.
+    #[test]
+    fn inv060_blob_upload_size_exceeded_rejects_zero_expected_length()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            message: String::from("blob upload was rejected"),
+            detail: ErrorDetail::invalid_request(RejectionDetail::BlobUploadSizeExceeded {
+                expected_length_bytes: CanonicalU64::new(0),
+                actual_length_bytes: CanonicalU64::new(1),
+            }),
+        };
+
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message),
+            Err(FrameValidationError::BlobUploadShape)
+        );
+        Ok(())
+    }
+
+    /// INV-060: a length-mismatch refusal cannot claim the impossible zero
+    /// expected length that begin-upload admission rejects.
+    #[test]
+    fn inv060_blob_upload_length_mismatch_rejects_zero_expected_length()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message = ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            message: String::from("blob upload was rejected"),
+            detail: ErrorDetail::invalid_request(RejectionDetail::BlobUploadLengthMismatch {
+                expected_length_bytes: CanonicalU64::new(0),
+                actual_length_bytes: CanonicalU64::new(1),
+            }),
+        };
+
+        assert_eq!(
+            ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message),
+            Err(FrameValidationError::BlobUploadShape)
         );
         Ok(())
     }
@@ -12372,7 +12967,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_deny_event_round_trips_with_rationale()
+    fn inv033_tool_approval_delegate_deny_event_round_trips_null_reason_for_empty_derivation()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(4)?,
@@ -12387,10 +12982,10 @@ mod tests {
                         model_selection_id: uuid(10),
                         model_call_id: uuid(11),
                     },
-                    rationale: Some(String::from("request exceeds the stated scope")),
+                    rationale: Some(String::from("   ")),
                 },
             },
-            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"request exceeds the stated scope"}}"#,
+            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"   "}}"#,
         )
     }
 
@@ -12415,11 +13010,11 @@ mod tests {
                             model_selection_id: uuid(11),
                             model_call_id: uuid(12),
                         },
-                        rationale: Some(String::from("request exceeds the stated scope")),
+                        rationale: Some(String::from("   ")),
                     }),
                 },
             },
-            r#"{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000006","entry_id":"00000000-0000-0000-0000-000000000007","entry":{"type":"assistant_tool_use","turn_id":"00000000-0000-0000-0000-000000000008","model_call_id":"00000000-0000-0000-0000-000000000009","tool_request_id":"00000000-0000-0000-0000-00000000000a","tool_name":"publish","arguments":"{}","approval":{"decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000b","model_call_id":"00000000-0000-0000-0000-00000000000c"},"rationale":"request exceeds the stated scope"}}}"#,
+            r#"{"type":"transcript_entry","entry_index":"2","source_session_id":"00000000-0000-0000-0000-000000000006","entry_id":"00000000-0000-0000-0000-000000000007","entry":{"type":"assistant_tool_use","turn_id":"00000000-0000-0000-0000-000000000008","model_call_id":"00000000-0000-0000-0000-000000000009","tool_request_id":"00000000-0000-0000-0000-00000000000a","tool_name":"publish","arguments":"{}","approval":{"decision":{"type":"deny","reason":null},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000b","model_call_id":"00000000-0000-0000-0000-00000000000c"},"rationale":"   "}}}"#,
         )
     }
 
@@ -12445,7 +13040,32 @@ mod tests {
     }
 
     #[test]
-    fn inv033_tool_approval_delegate_denial_rejects_user_reason() {
+    fn inv033_tool_approval_delegate_deny_event_round_trips_with_derived_reason()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(9),
+                session_id: uuid(6),
+                event: SessionEvent::ToolApprovalDecided {
+                    turn_id: uuid(7),
+                    tool_request_id: uuid(8),
+                    decision: ToolApprovalEventDecision::Deny {
+                        reason: Some(String::from("request exceeds the stated scope")),
+                    },
+                    decider: ToolApprovalEventDecider::Delegate {
+                        model_selection_id: uuid(10),
+                        model_call_id: uuid(11),
+                    },
+                    rationale: Some(String::from("request exceeds the stated scope")),
+                },
+            },
+            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"request exceeds the stated scope"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"request exceeds the stated scope"}}"#,
+        )
+    }
+
+    #[test]
+    fn inv033_tool_approval_delegate_denial_rejects_underived_reason() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"7","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":"forged user reason"},"decider":{"type":"delegate","model_selection_id":"00000000-0000-0000-0000-00000000000a","model_call_id":"00000000-0000-0000-0000-00000000000b"},"rationale":"bounded rationale"}}}"#,
         );
