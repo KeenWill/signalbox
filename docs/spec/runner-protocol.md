@@ -17,10 +17,13 @@ placement facts are re-verified against the parent slice
 reconstitution fences are re-verified through this PR
 (`agent/runner-lease-domain-correlation`). Existing-pin attempt-and-offer
 atomicity is re-verified through this PR
-(`agent/runner-pinned-dispatch-transaction`). Durable lease-claim admission is
-re-verified through this PR (`agent/runner-lease-claim-transaction`). The atomic
-claimed-lease and physical-attempt result boundary is re-verified through this
-PR (`agent/runner-lease-result-transaction`). Immutable normalized dispatch
+(`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch request's
+execution authority is re-verified against its frozen runner identity and
+registration revision through this PR (`agent/runner-offer-locus-binding`).
+Durable lease-claim admission is re-verified through this PR
+(`agent/runner-lease-claim-transaction`). The atomic claimed-lease and
+physical-attempt result boundary is re-verified through this PR
+(`agent/runner-lease-result-transaction`). Immutable normalized dispatch
 arguments on every lease and its durable readback are re-verified through this
 PR (`agent/runner-lease-argument-binding`). Exact daemon projection of sealed
 lease facts into `lease_offer`, `lease_claimed`, `dispatch`, and
@@ -234,11 +237,14 @@ exact durable connection epoch is current. Heartbeat deadlines take priority
 over outbound queue work. Dropping the socket task retires only that exact
 route. The lease-offer dispatcher is the first production-capable operation
 producer: it accepts only the atomic pinned-dispatch request, projects the
-returned canonical offered lease, resolves the then-current connected route, and
-hands the frame to the broker. No daemon composition constructs it and no
-tool-loop locus invokes it yet. Inbound workspace and operation-failure frames
-remain unimplemented and fail closed. Inbound `lease_claim` and `result` instead
-take the durable boundaries described under
+returned canonical offered lease, uses the transaction-returned enrollment only
+to resolve the then-current connected route, and hands the frame to the broker.
+The request itself supplies the selected runner and registration revision from
+the executable-tool snapshot; it cannot substitute an enrollment identity for
+that frozen locus. No daemon composition constructs it and no tool-loop locus
+invokes it yet. Inbound workspace and operation-failure frames remain
+unimplemented and fail closed. Inbound `lease_claim` and `result` instead take
+the durable boundaries described under
 [runner leases](#effect-classes-and-runner-leases).
 
 **Committed unimplemented functionality.** No present tool-loop locus invokes
@@ -766,8 +772,8 @@ selected runner authority, and placement in the runner lock order, authenticates
 either a distinct live successor or the registration-loss-only same-runner
 exception, and returns the original durable stage on equal replay. A
 workspace-free placement returns `NotApplicable` without claiming the command,
-so its later terminal transaction remains the sole owner. The runner provisions
-and spools `workspace_ready` under that limited authority. Only a later
+so only its later terminal transaction is authorized to finish it. The runner
+provisions and spools `workspace_ready` under that limited authority. Only a later
 transaction can activate the pending enrollment: it rechecks the lost
 predecessor and connected candidate, consumes the exact workspace receipt,
 revokes the predecessor, constructs the active enrollment and validated
@@ -1077,16 +1083,19 @@ attempt evidence together. Duplicate or cross-wired evidence advances neither
 aggregate; ambiguous external-effect evidence enters the exact tool-recovery
 wait in the same transaction. Generic projection cannot originate completion.
 The daemon lease-offer dispatcher invokes the pinned-dispatch transaction before
-projecting or handing off any frame. Authorization refusal therefore emits no
-offer. A returned lease cross-wired to another session, turn, attempt, or frozen
-registration also emits no frame and is retained as an authority invariant
-failure. Once authorization commits, projection, current-route lookup, absence
-of a live connection, queue backpressure, and process-local transport failure
-are all delivery observations rather than rollback claims: the outcome retains
-the canonical offered lease for a later durable recovery surface. No present
-redelivery scan consumes that retained outcome. The route is resolved after
-commit so a replaced physical connection can receive the still-valid offer; the
-connection task rechecks its exact epoch again before writing.
+projecting or handing off any frame. The transaction resolves the enrollment
+from the request's exact runner and positive registration revision and returns
+that routing identity beside the canonical lease. Authorization refusal
+therefore emits no offer. A returned lease cross-wired to another session, turn,
+attempt, runner, or frozen registration also emits no frame and is retained as
+an authority invariant failure. Once authorization commits, projection,
+current-route lookup, absence of a live connection, queue backpressure, and
+process-local transport failure are all delivery observations rather than
+rollback claims: the outcome retains the canonical offered lease for a later
+durable recovery surface. No present redelivery scan consumes that retained
+outcome. The route is resolved after commit so a replaced physical connection
+can receive the still-valid offer; the connection task rechecks its exact epoch
+again before writing.
 
 The established daemon connection accepts those two runner frames only when the
 complete correlation names the runner admitted by its handshake and that exact

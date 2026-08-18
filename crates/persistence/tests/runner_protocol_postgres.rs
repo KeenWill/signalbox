@@ -2100,14 +2100,14 @@ async fn stored_claimed_pinned_dispatch_fixture_with_authorization(
         pin.placement.session(),
         TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
         ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt)),
-        expected_enrollment.enrollment(),
+        expected_enrollment.runner(),
         registration.registration().revision(),
     );
     let offered = store
         .authorize_pinned_dispatch(request, RunnerLeaseId::from_uuid(uuid(LEASE + 5)))
         .await?;
     let claimed = store
-        .claim_lease(RunnerLeaseClaimRequest::new(offered.correlation()))
+        .claim_lease(RunnerLeaseClaimRequest::new(offered.lease().correlation()))
         .await?;
     Ok((store, claimed))
 }
@@ -6586,6 +6586,12 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
     MIGRATOR
         .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
         .await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         ADD COLUMN offer_registration_revision numeric(20, 0)",
+    )
+    .execute(&pool)
+    .await?;
     let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
@@ -6595,6 +6601,12 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
         expected_enrollment.enrollment(),
         connection.epoch(),
     )
+    .await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         DROP COLUMN offer_registration_revision",
+    )
+    .execute(&pool)
     .await?;
     let refusal = migrate(&pool)
         .await
@@ -7990,6 +8002,12 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(&pool).await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         ADD COLUMN offer_registration_revision numeric(20, 0)",
+    )
+    .execute(&pool)
+    .await?;
     let (store, _, registration, pin) = prepared_pin_fixture_with_authorization(
         &pool,
         authorized,
@@ -8000,6 +8018,12 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
     .await?;
     store.store_pin(&pin, &registration).await?;
     drop_pre_loss_fence_compatibility_tables(&pool).await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         DROP COLUMN offer_registration_revision",
+    )
+    .execute(&pool)
+    .await?;
     let refusal = migrate(&pool)
         .await
         .expect_err("an outstanding legacy offer has no reconstructible issue baseline");
@@ -18007,7 +18031,7 @@ async fn s31_inv043_pinned_dispatch_atomically_authorizes_attempt_and_lease()
         pin.placement.session(),
         TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
         ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt)),
-        expected_enrollment.enrollment(),
+        expected_enrollment.runner(),
         registration.registration().revision(),
     );
     let expected_arguments = approved_request(PINNED_DISPATCH_PHYSICAL_ATTEMPT)
@@ -18026,9 +18050,10 @@ async fn s31_inv043_pinned_dispatch_atomically_authorizes_attempt_and_lease()
             .fetch_one(&pool)
             .await?;
 
-    assert_eq!(offered.state(), RunnerLeaseState::Offered);
-    assert_eq!(offered.arguments(), &expected_arguments);
-    assert_eq!(loaded, offered);
+    assert_eq!(offered.enrollment(), expected_enrollment.enrollment());
+    assert_eq!(offered.lease().state(), RunnerLeaseState::Offered);
+    assert_eq!(offered.lease().arguments(), &expected_arguments);
+    assert_eq!(&loaded, offered.lease());
     assert_eq!(attempt_state, "in_flight");
     drop(pool);
     Ok(())
@@ -18059,7 +18084,7 @@ async fn s31_inv043_pinned_dispatch_rejects_stale_registration_atomically()
         pin.placement.session(),
         TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
         ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt)),
-        expected_enrollment.enrollment(),
+        expected_enrollment.runner(),
         registration.registration().revision(),
     );
     let lease = RunnerLeaseId::from_uuid(uuid(LEASE + 5));
@@ -18379,6 +18404,56 @@ async fn s31_inv021_inv043_generic_lease_store_rejects_completed_state()
     Ok(())
 }
 
+/// INV-043: a caller cannot substitute an enrollment for the frozen runner locus.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv043_pinned_dispatch_rejects_an_unknown_exact_runner_atomically()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, _expected_enrollment, registration, pin, _) =
+        stored_active_pin_fixture_with_authorization(
+            &pool,
+            authorized,
+            catalog(),
+            no_permission_overrides(),
+            "effect_free",
+        )
+        .await?;
+    terminalize_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    append_prepared_pinned_dispatch_attempt(&pool).await?;
+    let request = PinnedRunnerDispatchRequest::new(
+        pin.placement.session(),
+        TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
+        ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt)),
+        RunnerId::from_uuid(uuid(FOREIGN_RUNNER)),
+        registration.registration().revision(),
+    );
+    let lease = RunnerLeaseId::from_uuid(uuid(LEASE + 5));
+    let rejected = store
+        .authorize_pinned_dispatch(request, lease)
+        .await
+        .expect_err("an unknown frozen runner cannot select an enrollment");
+    let attempt_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt))
+            .fetch_one(&pool)
+            .await?;
+    let lease_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM runner_lease_generation WHERE lease_id = $1")
+            .bind(lease.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_store_corruption(
+        rejected,
+        RunnerProtocolCorruption::MissingCanonicalRegistration,
+    );
+    assert_eq!(attempt_state, "prepared");
+    assert_eq!(lease_count, 0);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-007 / INV-043: a lease append rejected after attempt authorization
 /// rolls the attempt back to Prepared instead of exposing partial authority.
 #[tokio::test]
@@ -18401,7 +18476,7 @@ async fn s31_inv007_inv043_pinned_dispatch_rolls_back_attempt_when_lease_is_reje
         pin.placement.session(),
         TurnId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.turn)),
         ToolAttemptId::from_uuid(uuid(PINNED_DISPATCH_PHYSICAL_ATTEMPT.attempt)),
-        expected_enrollment.enrollment(),
+        expected_enrollment.runner(),
         registration.registration().revision(),
     );
     let conflicting_lease = pin.lease.correlation().lease;
@@ -18522,7 +18597,7 @@ async fn s31_inv043_later_lease_event_rejects_cross_wired_dispatch_fence()
         .expect("the exact lease fence claims");
     let cross_wired = lease_with_cross_wired_dispatch(&claimed, registration.registration());
     let rejected = store
-        .store_lease(&cross_wired)
+        .store_claimed_lease_projection_for_test(&cross_wired)
         .await
         .expect_err("a later event must match every canonical dispatch-fence field");
 
@@ -22410,14 +22485,14 @@ async fn s31_inv043_first_generation_requires_null_predecessor() -> Result<(), B
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name,
+             offer_registration_revision, credential_profile_name,
              credential_grant_lineage_origin_ordinal,
              credential_grant_revision, credential_approval_kind,
              predecessor_generation)
          SELECT $2, 1, attempt_id, session_id, runner_id,
                 tool_name, effect_class, placement_event_ordinal,
                 registration_enrollment_id, registration_revision,
-                credential_profile_name,
+                offer_registration_revision, credential_profile_name,
                 credential_grant_lineage_origin_ordinal,
                 credential_grant_revision, credential_approval_kind, 0
            FROM runner_lease_generation

@@ -16,7 +16,7 @@ use std::{
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_application::{
     AbandonLostRunnerOutcome, AbandonLostRunnerTransaction, PinnedRunnerDispatchRequest,
-    PinnedRunnerDispatchTransaction, ReplaceLostRunnerBeforePinOutcome,
+    PinnedRunnerDispatchTransaction, PinnedRunnerLeaseOffer, ReplaceLostRunnerBeforePinOutcome,
     ReplaceLostRunnerBeforePinTransaction, RunnerLeaseClaimRequest, RunnerLeaseClaimTransaction,
     RunnerLeaseResultRequest, RunnerLeaseResultTransaction, RunnerReplacementProvisioningOutcome,
     RunnerReplacementProvisioningStage, RunnerReplacementProvisioningTransaction,
@@ -4733,12 +4733,26 @@ impl RunnerProtocolStore {
         &self,
         request: PinnedRunnerDispatchRequest,
         lease: RunnerLeaseId,
-    ) -> Result<RunnerLease, RunnerProtocolStoreError> {
+    ) -> Result<PinnedRunnerLeaseOffer, RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
         crate::tool_loop::lock_tool_session(transaction.as_mut(), request.session())
             .await
             .map_err(map_runner_tool_loop_error)?;
-        let enrollment_id = request.enrollment();
+        let requested_registration =
+            RunnerRegistrationRevision::try_from_u64(request.registration_revision().get())
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let enrollment_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT enrollment_id
+               FROM runner_registration
+              WHERE runner_id = $1
+                AND registration_revision = $2",
+        )
+        .bind(request.runner().into_uuid())
+        .bind(Decimal::from(requested_registration.get()))
+        .fetch_optional(&mut *transaction)
+        .await?
+        .map(RunnerEnrollmentId::from_uuid)
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
         let enrollment_locked = sqlx::query(RUNNER_ENROLLMENT)
             .bind(enrollment_id.into_uuid())
             .fetch_optional(&mut *transaction)
@@ -4791,9 +4805,6 @@ impl RunnerProtocolStore {
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
-        let requested_registration =
-            RunnerRegistrationRevision::try_from_u64(request.registration_revision().get())
-                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
         if decode_registration_revision(current_registration)? != requested_registration {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::RegistrationChanged,
@@ -4857,7 +4868,7 @@ impl RunnerProtocolStore {
             .map_err(RunnerProtocolStoreError::Domain)?;
         append_lease_event_in(&mut transaction, &offered).await?;
         commit_mutation(transaction).await?;
-        Ok(offered)
+        Ok(PinnedRunnerLeaseOffer::new(enrollment_id, offered))
     }
 
     async fn load_current_loss_lease_in(
@@ -5591,7 +5602,7 @@ impl PinnedRunnerDispatchTransaction for RunnerProtocolStore {
         &mut self,
         request: PinnedRunnerDispatchRequest,
         lease: RunnerLeaseId,
-    ) -> Result<RunnerLease, Self::Error> {
+    ) -> Result<PinnedRunnerLeaseOffer, Self::Error> {
         self.authorize_pinned_dispatch(request, lease).await
     }
 }
