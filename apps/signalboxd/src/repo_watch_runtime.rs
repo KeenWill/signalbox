@@ -1302,10 +1302,8 @@ impl RepositoryWatchTask {
             // has run.
             let leading_failure = if let Err(error) = self.process_cutoffs().await {
                 Some(error)
-            } else if let Err(error) = self.process_dispatches().await {
-                Some(error)
             } else {
-                None
+                self.process_dispatches().await.err()
             };
             match self.process_webhook_deliveries().await {
                 WebhookDrainOutcome::Drained => {}
