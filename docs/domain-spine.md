@@ -9514,6 +9514,10 @@ pub struct ProvisionedWorkspace {
     pub manifest_id: WorkspaceManifestId,
     pub recovery: Option<WorkspaceRecovery>,
 }
+pub struct RunnerWorkspaceReleaseCandidate { /* private */ }
+impl RunnerWorkspaceReleaseCandidate {
+    // accessors: session(), placement_revision(), runner(), manifest_id()
+}
 pub struct WorkspaceProvisioningAuthorization { /* private */ }
 impl WorkspaceProvisioningAuthorization {
     // accessors: authorization(), session(), placement_revision(), enrollment(),
@@ -9694,6 +9698,11 @@ pub struct RunnerPrePinReplacement {
 }
 pub struct RunnerPlacementReplacement {
     /* public placement, change, optional replacement grant, and optional complete grant change */
+}
+impl RunnerPlacementReplacement {
+    pub fn workspace_release_candidate(
+        &self,
+    ) -> Option<RunnerWorkspaceReleaseCandidate>;
 }
 pub struct RunnerPlacementChange {
     /* public before-and-after request and pinned facts */
@@ -11218,9 +11227,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: goal_command                               | 5                     |
 | domain: review_workflow                            | 83 (+1 free fn)       |
 | domain: session_metadata                           | 15                    |
-| domain: runner                                     | 96                    |
+| domain: runner                                     | 97                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **800 (+12 free fn)** |
+| **signalbox-domain total**                         | **801 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
