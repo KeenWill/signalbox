@@ -1291,6 +1291,10 @@ impl RepositoryWatchTask {
         let mut deferred: HashSet<RepoWatchWebhookDeliveryKey> = HashSet::new();
         let mut first_failure: Option<RepositoryWatchAttemptError> = None;
         let mut dispatch_failure: Option<RepositoryWatchAttemptError> = None;
+        // The chronological first failure of either kind, because the drain's
+        // error-level record names the first cause while the outcome keeps
+        // projection priority for backoff classification.
+        let mut chronological_first: Option<RepositoryWatchAttemptError> = None;
         let mut pages = 0_usize;
         // Every receipt this drain has visited, so a deferred head cannot be
         // reloaded ahead of what follows it. A page bounded by bytes can hold
@@ -1359,6 +1363,9 @@ impl RepositoryWatchTask {
                         }
                     }
                 }
+                if chronological_first.is_none() {
+                    chronological_first = first_failure.or(dispatch_failure);
+                }
             }
             pages += 1;
             if pages >= WEBHOOK_DRAIN_PAGE_LIMIT {
@@ -1370,6 +1377,8 @@ impl RepositoryWatchTask {
         }
         // A projection failure outranks a dispatch one: it is the failure a
         // later drain can still retry, and it is what the backoff spaces out.
+        // The error-level record instead names the chronological first cause,
+        // which the drain contract promises an error-only sink.
         match first_failure.or(dispatch_failure) {
             // Emitted here rather than by the caller because all three callers
             // — startup, wake, and retry — reach the drain through this one
@@ -1379,7 +1388,7 @@ impl RepositoryWatchTask {
             Some(error) => {
                 tracing::error!(
                     repository = %self.repository.as_str(),
-                    cause_code = error.cause_code(),
+                    cause_code = chronological_first.unwrap_or(error).cause_code(),
                     "repository-watch webhook drain page retained a failed delivery"
                 );
                 match first_failure {
