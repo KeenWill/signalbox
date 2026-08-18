@@ -335,6 +335,7 @@ impl ReaderDeclaration {
 pub struct FileMediaProviderDeclaration {
     provider: FileReaderProviderName,
     readers: Vec<ReaderDeclaration>,
+    observed_container_entries: Option<u64>,
 }
 
 impl FileMediaProviderDeclaration {
@@ -342,6 +343,15 @@ impl FileMediaProviderDeclaration {
     pub fn try_new(
         provider: FileReaderProviderName,
         readers: Vec<ReaderDeclaration>,
+    ) -> Result<Self, RegistryDeclarationError> {
+        Self::try_new_with_container_entries(provider, readers, None)
+    }
+
+    /// Constructs one provider with an optional maximum observed container inventory.
+    pub fn try_new_with_container_entries(
+        provider: FileReaderProviderName,
+        readers: Vec<ReaderDeclaration>,
+        observed_container_entries: Option<u64>,
     ) -> Result<Self, RegistryDeclarationError> {
         if readers.is_empty() {
             return Err(RegistryDeclarationError::EmptyInventory);
@@ -352,7 +362,11 @@ impl FileMediaProviderDeclaration {
         {
             return Err(RegistryDeclarationError::ForeignReader);
         }
-        Ok(Self { provider, readers })
+        Ok(Self {
+            provider,
+            readers,
+            observed_container_entries,
+        })
     }
 
     /// Borrows the provider identity.
@@ -363,6 +377,11 @@ impl FileMediaProviderDeclaration {
     /// Borrows declared readers.
     pub fn readers(&self) -> &[ReaderDeclaration] {
         &self.readers
+    }
+
+    /// Returns the provider's maximum observed container inventory, when applicable.
+    pub const fn observed_container_entries(&self) -> Option<u64> {
+        self.observed_container_entries
     }
 
     pub(crate) fn sort_readers(&mut self) {

@@ -33,6 +33,13 @@ where
     for declaration in declarations {
         let declaration = declaration.borrow();
         fingerprint_field(&mut fingerprint, declaration.provider().as_str().as_bytes());
+        match declaration.observed_container_entries() {
+            None => fingerprint_field(&mut fingerprint, b"no_container_entries"),
+            Some(entries) => {
+                fingerprint_field(&mut fingerprint, b"container_entries");
+                fingerprint_u64(&mut fingerprint, entries);
+            }
+        }
         fingerprint_len(&mut fingerprint, declaration.readers().len());
         for reader in declaration.readers() {
             fingerprint_field(

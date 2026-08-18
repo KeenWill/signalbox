@@ -76,6 +76,14 @@ impl FileMediaRegistry {
             if provider.readers().len() > MAX_READERS_PER_PROVIDER {
                 return Err(FileMediaRegistryConstructionError::Inventory);
             }
+            if provider
+                .observed_container_entries()
+                .is_some_and(|entries| {
+                    entries == 0 || entries > ceilings.observed_container_entries
+                })
+            {
+                return Err(FileMediaRegistryConstructionError::ContainerBounds);
+            }
             for reader in provider.readers() {
                 validate_reader(reader, ceilings)?;
                 let identity = reader.identity().clone();
@@ -895,6 +903,8 @@ pub enum FileMediaRegistryConstructionError {
     ProbeBounds,
     /// View bounds were absent, contradictory, or excessive.
     ViewBounds,
+    /// A provider container-entry bound was zero or excessive.
+    ContainerBounds,
     /// Text fallback registration was absent or ambiguous.
     TextFallback,
 }
@@ -911,6 +921,7 @@ impl fmt::Display for FileMediaRegistryConstructionError {
             Self::DuplicateReaderMember => "file media reader member is duplicated",
             Self::ProbeBounds => "file media probe bounds are invalid",
             Self::ViewBounds => "file media view bounds are invalid",
+            Self::ContainerBounds => "file media container bounds are invalid",
             Self::TextFallback => "file media text fallback is invalid",
         })
     }

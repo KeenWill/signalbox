@@ -149,7 +149,7 @@ impl SandboxedFileMediaProcessor {
     ) -> Result<(), ProcessorFailure> {
         let mut running = self.spawn(worker, true).await?;
         running.release_startup()?;
-        let mut stdout = running
+        let stdout = running
             .child
             .stdout
             .take()
