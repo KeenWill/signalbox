@@ -70,7 +70,7 @@ pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DaemonToolConfiguration, DerivedModelCallCost,
     FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError, ModelAdapter,
     ModelBillingRates, OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration,
-    WatchedRepositoryConfiguration,
+    WatchedRepositoryConfiguration, WorkspaceInstructionConfiguration,
 };
 pub use context_guard::{ContextGuardedTurnPass, ContextGuardedTurnPassError};
 pub use conversation_introspection::{

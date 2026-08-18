@@ -39,9 +39,8 @@ The blob catalog and input-modality grammar below are the foundation proposal
 from PR #553 (`agent/blob-storage-foundation`) and become verified with its
 implementing child stack.
 
-The configured workspace-instruction root grammar below is the foundation
-proposal from PR #796 (`agent/agent-docs-skills-spec`) and becomes verified with
-its first implementing child, PR #798 (`agent/agent-docs-skills-foundation`).
+The configured workspace-instruction root grammar below is verified against PR
+#798 (`agent/agent-docs-skills-foundation`).
 
 The runtime-bridge invalid-schema diagnostic fields and redaction boundary are
 verified against this PR (`agent/tool-evals-mcp`).
