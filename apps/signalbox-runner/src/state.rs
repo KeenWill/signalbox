@@ -14,7 +14,10 @@ use rustix::{
     process::geteuid,
 };
 use serde::{Deserialize, Serialize};
-use signalbox_runner_wire::{CanonicalUuid, Digest, PositiveU64};
+use signalbox_runner_wire::{
+    CanonicalUuid, Digest, LeaseCorrelation, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES,
+    PositiveU64, ReconnectInventory,
+};
 use uuid::Uuid;
 
 const STATE_DOCUMENT_VERSION: u64 = 1;
@@ -22,7 +25,9 @@ const ROOT_MODE: u32 = 0o700;
 const STATE_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;
 const STATE_FILE: &str = "enrollment-state.json";
+const OPERATION_JOURNAL_FILE: &str = "operation-journal.json";
 const MAX_STATE_BYTES: u64 = 16 * 1024;
+const MAX_OPERATION_JOURNAL_BYTES: u64 = MAX_FRAME_BYTES as u64;
 
 /// Authority carried by the daemon-issued enrollment receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -162,6 +167,13 @@ struct StateDocument {
     state: RunnerState,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperationJournalDocument {
+    version: u64,
+    inventory: ReconnectInventory,
+}
+
 /// Resource named by a durable-state I/O failure without exposing configured paths.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StateResource {
@@ -173,6 +185,10 @@ pub enum StateResource {
     StateDocument,
     /// Single-use replacement document used for atomic publication.
     TemporaryDocument,
+    /// Current durable operation journal.
+    OperationJournal,
+    /// Single-use replacement journal used for atomic publication.
+    TemporaryOperationJournal,
 }
 
 impl fmt::Display for StateResource {
@@ -182,6 +198,8 @@ impl fmt::Display for StateResource {
             Self::RootParent => "runner state root parent",
             Self::StateDocument => "runner state document",
             Self::TemporaryDocument => "runner temporary state document",
+            Self::OperationJournal => "runner operation journal",
+            Self::TemporaryOperationJournal => "runner temporary operation journal",
         })
     }
 }
@@ -229,17 +247,27 @@ pub enum RunnerStateError {
     StateDisappeared,
     /// The durable document was not a regular owner-only file.
     InvalidStateIdentity,
+    /// The operation journal was not a regular owner-only file.
+    InvalidOperationJournalIdentity,
     /// The durable document exceeded its closed size bound.
     StateTooLarge,
+    /// The operation journal exceeded the runner frame-size bound.
+    OperationJournalTooLarge,
     /// JSON shape, version, or typed field decoding failed.
     CorruptState,
+    /// Operation-journal shape, version, or retained item validation failed.
+    CorruptOperationJournal,
     /// A returned receipt did not name the journaled request.
     RequestMismatch,
     /// A lifecycle update was attempted in the wrong state.
     InvalidTransition,
+    /// A retained operation does not name the current registration or slot.
+    OperationCorrelationMismatch,
     /// Atomic rename completed, but durability of the published state is unknown.
     CommitAmbiguous {
-        /// Directory-fsync failure after the state-document rename.
+        /// Exact document whose rename preceded the directory-fsync failure.
+        resource: StateResource,
+        /// Directory-fsync failure after the document rename.
         source: io::Error,
     },
     /// One exact resource operation failed and retains its source error.
@@ -264,16 +292,28 @@ impl fmt::Display for RunnerStateError {
             Self::InvalidStateIdentity => {
                 formatter.write_str("runner state document identity or permissions are invalid")
             }
+            Self::InvalidOperationJournalIdentity => {
+                formatter.write_str("runner operation journal identity or permissions are invalid")
+            }
             Self::StateTooLarge => formatter.write_str("runner state document exceeds its bound"),
+            Self::OperationJournalTooLarge => {
+                formatter.write_str("runner operation journal exceeds its bound")
+            }
             Self::CorruptState => formatter.write_str("runner state document is corrupt"),
+            Self::CorruptOperationJournal => {
+                formatter.write_str("runner operation journal is corrupt")
+            }
             Self::RequestMismatch => {
                 formatter.write_str("enrollment receipt request correlation is invalid")
             }
             Self::InvalidTransition => {
                 formatter.write_str("runner durable-state transition is invalid")
             }
-            Self::CommitAmbiguous { .. } => {
-                formatter.write_str("runner durable-state commit outcome is ambiguous")
+            Self::OperationCorrelationMismatch => {
+                formatter.write_str("runner operation correlation is invalid")
+            }
+            Self::CommitAmbiguous { resource, .. } => {
+                write!(formatter, "{resource} commit outcome is ambiguous")
             }
             Self::Io {
                 operation,
@@ -287,16 +327,20 @@ impl fmt::Display for RunnerStateError {
 impl Error for RunnerStateError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Io { source, .. } | Self::CommitAmbiguous { source } => Some(source),
+            Self::Io { source, .. } | Self::CommitAmbiguous { source, .. } => Some(source),
             Self::InvalidRootPath
             | Self::InvalidRootIdentity
             | Self::RootBusy
             | Self::StateDisappeared
             | Self::InvalidStateIdentity
+            | Self::InvalidOperationJournalIdentity
             | Self::StateTooLarge
+            | Self::OperationJournalTooLarge
             | Self::CorruptState
+            | Self::CorruptOperationJournal
             | Self::RequestMismatch
-            | Self::InvalidTransition => None,
+            | Self::InvalidTransition
+            | Self::OperationCorrelationMismatch => None,
         }
     }
 }
@@ -306,6 +350,7 @@ impl Error for RunnerStateError {
 pub struct RunnerStateRoot {
     directory: File,
     state: RunnerState,
+    inventory: ReconnectInventory,
 }
 
 impl RunnerStateRoot {
@@ -431,12 +476,38 @@ impl RunnerStateRoot {
                 });
             }
         };
-        Ok(Self { directory, state })
+        let inventory = match openat(
+            &directory,
+            OPERATION_JOURNAL_FILE,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(descriptor) => read_operation_journal(File::from(descriptor), effective_user)?,
+            Err(rustix::io::Errno::NOENT) => ReconnectInventory::default(),
+            Err(error) => {
+                return Err(RunnerStateError::Io {
+                    operation: StateOperation::Open,
+                    resource: StateResource::OperationJournal,
+                    source: rustix_error(error),
+                });
+            }
+        };
+        validate_operation_journal_runner(&state, &inventory)?;
+        Ok(Self {
+            directory,
+            state,
+            inventory,
+        })
     }
 
     /// Borrows the exact current in-memory copy of fsynced state.
     pub const fn state(&self) -> &RunnerState {
         &self.state
+    }
+
+    /// Borrows the exact current in-memory copy of the fsynced operation slots.
+    pub const fn reconnect_inventory(&self) -> &ReconnectInventory {
+        &self.inventory
     }
 
     /// Atomically fsyncs the first exact daemon-issued receipt.
@@ -474,6 +545,73 @@ impl RunnerStateRoot {
         self.state = next;
         Ok(receipt)
     }
+
+    /// Atomically journals one exact lease phase without opening another slot.
+    pub fn record_lease_phase(&mut self, next: LeasePhase) -> Result<(), RunnerStateError> {
+        self.validate_current_lease_correlation(&next.correlation)?;
+        match self.inventory.lease.as_ref() {
+            None if next.phase == LeasePhaseKind::WaitingDispatch => {}
+            None => return Err(RunnerStateError::InvalidTransition),
+            Some(current) if current == &next => return Ok(()),
+            Some(current) if current.correlation != next.correlation => {
+                return Err(RunnerStateError::OperationCorrelationMismatch);
+            }
+            Some(current)
+                if matches!(
+                    (current.phase, next.phase),
+                    (
+                        LeasePhaseKind::WaitingDispatch,
+                        LeasePhaseKind::DispatchReceived
+                    ) | (
+                        LeasePhaseKind::DispatchReceived,
+                        LeasePhaseKind::ExecutionMayHaveStarted
+                    )
+                ) => {}
+            Some(_) => return Err(RunnerStateError::InvalidTransition),
+        }
+        let mut inventory = self.inventory.clone();
+        inventory.lease = Some(next);
+        write_operation_journal(&self.directory, &inventory)?;
+        self.inventory = inventory;
+        Ok(())
+    }
+
+    fn validate_current_lease_correlation(
+        &self,
+        correlation: &LeaseCorrelation,
+    ) -> Result<(), RunnerStateError> {
+        let receipt = self
+            .state
+            .receipt()
+            .ok_or(RunnerStateError::InvalidTransition)?;
+        if correlation.runner_id == receipt.runner_id()
+            && correlation.registration_revision == receipt.registration_revision()
+        {
+            Ok(())
+        } else {
+            Err(RunnerStateError::OperationCorrelationMismatch)
+        }
+    }
+}
+
+fn validate_operation_journal_runner(
+    state: &RunnerState,
+    inventory: &ReconnectInventory,
+) -> Result<(), RunnerStateError> {
+    match (state.receipt(), inventory.lease.as_ref()) {
+        (_, None) => Ok(()),
+        (Some(receipt), Some(lease)) if lease.correlation.runner_id == receipt.runner_id() => {
+            Ok(())
+        }
+        (None | Some(_), Some(_)) => Err(RunnerStateError::CorruptOperationJournal),
+    }
+}
+
+fn operation_journal_has_only_supported_slots(inventory: &ReconnectInventory) -> bool {
+    inventory.result.is_none()
+        && inventory.workspace_operation.is_none()
+        && inventory.operation_failure.is_none()
+        && inventory.leak_page.is_none()
 }
 
 fn read_state(mut file: File, effective_user: u32) -> Result<RunnerState, RunnerStateError> {
@@ -509,6 +647,47 @@ fn read_state(mut file: File, effective_user: u32) -> Result<RunnerState, Runner
         return Err(RunnerStateError::CorruptState);
     }
     Ok(document.state)
+}
+
+fn read_operation_journal(
+    mut file: File,
+    effective_user: u32,
+) -> Result<ReconnectInventory, RunnerStateError> {
+    let metadata = file.metadata().map_err(|source| RunnerStateError::Io {
+        operation: StateOperation::Inspect,
+        resource: StateResource::OperationJournal,
+        source,
+    })?;
+    if !metadata.is_file()
+        || metadata.uid() != effective_user
+        || metadata.mode() & PERMISSION_MASK != STATE_MODE
+    {
+        return Err(RunnerStateError::InvalidOperationJournalIdentity);
+    }
+    if metadata.len() > MAX_OPERATION_JOURNAL_BYTES {
+        return Err(RunnerStateError::OperationJournalTooLarge);
+    }
+    let mut content = Vec::new();
+    Read::by_ref(&mut file)
+        .take(MAX_OPERATION_JOURNAL_BYTES + 1)
+        .read_to_end(&mut content)
+        .map_err(|source| RunnerStateError::Io {
+            operation: StateOperation::Read,
+            resource: StateResource::OperationJournal,
+            source,
+        })?;
+    if content.len() as u64 > MAX_OPERATION_JOURNAL_BYTES {
+        return Err(RunnerStateError::OperationJournalTooLarge);
+    }
+    let document: OperationJournalDocument =
+        serde_json::from_slice(&content).map_err(|_| RunnerStateError::CorruptOperationJournal)?;
+    if document.version != STATE_DOCUMENT_VERSION
+        || document.inventory.validate().is_err()
+        || !operation_journal_has_only_supported_slots(&document.inventory)
+    {
+        return Err(RunnerStateError::CorruptOperationJournal);
+    }
+    Ok(document.inventory)
 }
 
 fn write_state(directory: &File, state: &RunnerState) -> Result<(), RunnerStateError> {
@@ -566,7 +745,86 @@ fn write_state(directory: &File, state: &RunnerState) -> Result<(), RunnerStateE
     }
     directory
         .sync_all()
-        .map_err(|source| RunnerStateError::CommitAmbiguous { source })
+        .map_err(|source| RunnerStateError::CommitAmbiguous {
+            resource: StateResource::StateDocument,
+            source,
+        })
+}
+
+fn write_operation_journal(
+    directory: &File,
+    inventory: &ReconnectInventory,
+) -> Result<(), RunnerStateError> {
+    inventory
+        .validate()
+        .map_err(|_| RunnerStateError::CorruptOperationJournal)?;
+    let document = OperationJournalDocument {
+        version: STATE_DOCUMENT_VERSION,
+        inventory: inventory.clone(),
+    };
+    let mut encoded =
+        serde_json::to_vec(&document).map_err(|_| RunnerStateError::CorruptOperationJournal)?;
+    encoded.push(b'\n');
+    if encoded.len() as u64 > MAX_OPERATION_JOURNAL_BYTES {
+        return Err(RunnerStateError::OperationJournalTooLarge);
+    }
+    let temporary_name = format!(".operation-journal-{}.tmp", Uuid::now_v7());
+    let descriptor = openat(
+        directory,
+        temporary_name.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(|error| RunnerStateError::Io {
+        operation: StateOperation::Create,
+        resource: StateResource::TemporaryOperationJournal,
+        source: rustix_error(error),
+    })?;
+    rustix::fs::fchmod(&descriptor, Mode::RUSR | Mode::WUSR).map_err(|error| {
+        RunnerStateError::Io {
+            operation: StateOperation::ConfigurePermissions,
+            resource: StateResource::TemporaryOperationJournal,
+            source: rustix_error(error),
+        }
+    })?;
+    let mut temporary = File::from(descriptor);
+    let prepared = (|| {
+        temporary
+            .write_all(&encoded)
+            .map_err(|source| RunnerStateError::Io {
+                operation: StateOperation::Write,
+                resource: StateResource::TemporaryOperationJournal,
+                source,
+            })?;
+        temporary.sync_all().map_err(|source| RunnerStateError::Io {
+            operation: StateOperation::Sync,
+            resource: StateResource::TemporaryOperationJournal,
+            source,
+        })
+    })();
+    if let Err(error) = prepared {
+        let _ = unlinkat(directory, temporary_name.as_str(), AtFlags::empty());
+        return Err(error);
+    }
+    if let Err(error) = renameat(
+        directory,
+        temporary_name.as_str(),
+        directory,
+        OPERATION_JOURNAL_FILE,
+    ) {
+        let _ = unlinkat(directory, temporary_name.as_str(), AtFlags::empty());
+        return Err(RunnerStateError::Io {
+            operation: StateOperation::Rename,
+            resource: StateResource::OperationJournal,
+            source: rustix_error(error),
+        });
+    }
+    directory
+        .sync_all()
+        .map_err(|source| RunnerStateError::CommitAmbiguous {
+            resource: StateResource::OperationJournal,
+            source,
+        })
 }
 
 fn rustix_error(error: rustix::io::Errno) -> io::Error {
@@ -575,7 +833,10 @@ fn rustix_error(error: rustix::io::Errno) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use signalbox_runner_wire::{Advertisement, advertisement_digest};
+    use signalbox_runner_wire::{
+        Advertisement, RetainedResult, SandboxProfile, TerminalResult, WireToolName,
+        WorkingDirectory, advertisement_digest,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -586,7 +847,16 @@ mod tests {
     const ARBITRARY_RUNNER_UUID: u128 = 0x200;
     /// Arbitrary daemon-issued authentication-reference identity used throughout state tests.
     const ARBITRARY_AUTHENTICATION_UUID: u128 = 0x300;
+    const ARBITRARY_LEASE_UUID: u128 = 0x400;
+    const ARBITRARY_OTHER_LEASE_UUID: u128 = 0x401;
+    const ARBITRARY_SESSION_UUID: u128 = 0x500;
+    const ARBITRARY_TURN_UUID: u128 = 0x600;
+    const ARBITRARY_REQUEST_UUID: u128 = 0x700;
+    const ARBITRARY_ATTEMPT_UUID: u128 = 0x800;
+    const ARBITRARY_ISSUING_ATTEMPT_UUID: u128 = 0x900;
+    const ARBITRARY_OTHER_RUNNER_UUID: u128 = 0xa00;
     const INITIAL_REGISTRATION_REVISION: u64 = 1;
+    const SUCCESSOR_REGISTRATION_REVISION: u64 = 2;
 
     fn root_path(parent: &TempDir) -> std::path::PathBuf {
         parent.path().join("runner-state")
@@ -626,6 +896,66 @@ mod tests {
         )
     }
 
+    fn positive(value: u64) -> PositiveU64 {
+        PositiveU64::try_new(value).expect("the fixture value is positive")
+    }
+
+    fn lease_correlation() -> LeaseCorrelation {
+        LeaseCorrelation {
+            registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+            lease_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_LEASE_UUID)),
+            lease_generation: positive(1),
+            runner_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_RUNNER_UUID)),
+            placement_revision: positive(1),
+            working_directory: WorkingDirectory::try_new("sessions/example".to_owned())
+                .expect("the fixture working directory is valid"),
+            sandbox_profile: SandboxProfile::WorkspaceRestricted,
+            tool_name: WireToolName::try_new("sandboxed_exec".to_owned())
+                .expect("the generic exec-family fixture name is valid"),
+            session_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_SESSION_UUID)),
+            turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_TURN_UUID)),
+            tool_request_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_REQUEST_UUID)),
+            tool_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_ATTEMPT_UUID)),
+            issuing_turn_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(
+                ARBITRARY_ISSUING_ATTEMPT_UUID,
+            )),
+            tool_dispatch_generation: positive(1),
+        }
+    }
+
+    fn lease_phase(phase: LeasePhaseKind) -> LeasePhase {
+        LeasePhase {
+            correlation: lease_correlation(),
+            phase,
+        }
+    }
+
+    fn enrolled_root(parent: &TempDir) -> RunnerStateRoot {
+        let mut root =
+            RunnerStateRoot::open(&root_path(parent)).expect("the private state root opens");
+        let issued = receipt(root.state().request_id());
+        root.record_receipt(issued)
+            .expect("the enrollment receipt is durable");
+        root
+    }
+
+    fn inventory_with_lease(lease: LeasePhase) -> ReconnectInventory {
+        ReconnectInventory {
+            lease: Some(lease),
+            ..ReconnectInventory::default()
+        }
+    }
+
+    fn replace_operation_journal(path: &Path, inventory: ReconnectInventory) {
+        let document = OperationJournalDocument {
+            version: STATE_DOCUMENT_VERSION,
+            inventory,
+        };
+        let encoded = serde_json::to_vec(&document).expect("the journal fixture encodes");
+        fs::write(path.join(OPERATION_JOURNAL_FILE), encoded)
+            .expect("the operation journal fixture is replaced");
+    }
+
     #[test]
     fn pristine_request_identity_survives_reopen() {
         let parent = TempDir::new().expect("a temporary parent is available");
@@ -653,6 +983,147 @@ mod tests {
         let reopened = RunnerStateRoot::open(&path).expect("the private root reopens");
 
         assert_eq!(reopened.state().receipt(), Some(&issued));
+        assert_eq!(
+            reopened.reconnect_inventory(),
+            &ReconnectInventory::default()
+        );
+    }
+
+    /// INV-011 / INV-024: a claim acknowledgement is durable before the runner
+    /// treats the lease as waiting for dispatch.
+    #[test]
+    fn inv011_inv024_waiting_dispatch_phase_survives_reopen() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        let waiting = lease_phase(LeasePhaseKind::WaitingDispatch);
+        root.record_lease_phase(waiting.clone())
+            .expect("the waiting-dispatch phase is durable");
+        drop(root);
+
+        let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
+
+        assert_eq!(
+            reopened.reconnect_inventory(),
+            &inventory_with_lease(waiting)
+        );
+    }
+
+    /// INV-011 / INV-024: dispatch receipt advances only from the durable
+    /// waiting phase and survives process restart exactly.
+    #[test]
+    fn inv011_inv024_dispatch_received_phase_survives_reopen() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the waiting-dispatch predecessor is durable");
+        let received = lease_phase(LeasePhaseKind::DispatchReceived);
+        root.record_lease_phase(received.clone())
+            .expect("the dispatch-received phase is durable");
+        drop(root);
+
+        let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
+
+        assert_eq!(
+            reopened.reconnect_inventory(),
+            &inventory_with_lease(received)
+        );
+    }
+
+    /// INV-011 / INV-024: the execution-possible boundary advances from the
+    /// exact received dispatch and survives process restart exactly.
+    #[test]
+    fn inv011_inv024_execution_may_have_started_phase_survives_reopen() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the waiting-dispatch predecessor is durable");
+        root.record_lease_phase(lease_phase(LeasePhaseKind::DispatchReceived))
+            .expect("the dispatch-received predecessor is durable");
+        let started = lease_phase(LeasePhaseKind::ExecutionMayHaveStarted);
+        root.record_lease_phase(started.clone())
+            .expect("the execution-possible phase is durable");
+        drop(root);
+
+        let reopened = RunnerStateRoot::open(&path).expect("the private state root reopens");
+
+        assert_eq!(
+            reopened.reconnect_inventory(),
+            &inventory_with_lease(started)
+        );
+    }
+
+    #[test]
+    fn lease_journal_rejects_a_phase_skip() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = enrolled_root(&parent);
+
+        let error = root
+            .record_lease_phase(lease_phase(LeasePhaseKind::DispatchReceived))
+            .expect_err("dispatch cannot precede its claim acknowledgement");
+
+        assert!(matches!(error, RunnerStateError::InvalidTransition));
+        assert_eq!(root.reconnect_inventory(), &ReconnectInventory::default());
+    }
+
+    #[test]
+    fn lease_journal_rejects_a_phase_regression() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = enrolled_root(&parent);
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the waiting-dispatch predecessor is durable");
+        let received = lease_phase(LeasePhaseKind::DispatchReceived);
+        root.record_lease_phase(received.clone())
+            .expect("the dispatch-received phase is durable");
+
+        let error = root
+            .record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect_err("a durable lease phase cannot regress");
+
+        assert!(matches!(error, RunnerStateError::InvalidTransition));
+        assert_eq!(root.reconnect_inventory(), &inventory_with_lease(received));
+    }
+
+    #[test]
+    fn occupied_lease_slot_rejects_another_correlation() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = enrolled_root(&parent);
+        let waiting = lease_phase(LeasePhaseKind::WaitingDispatch);
+        root.record_lease_phase(waiting.clone())
+            .expect("the first lease occupies the serial slot");
+        let mut foreign = waiting.clone();
+        foreign.correlation.lease_id =
+            CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_OTHER_LEASE_UUID));
+
+        let error = root
+            .record_lease_phase(foreign)
+            .expect_err("another lease cannot replace the occupied slot");
+
+        assert!(matches!(
+            error,
+            RunnerStateError::OperationCorrelationMismatch
+        ));
+        assert_eq!(root.reconnect_inventory(), &inventory_with_lease(waiting));
+    }
+
+    #[test]
+    fn lease_journal_rejects_another_registration() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = enrolled_root(&parent);
+        let mut foreign = lease_phase(LeasePhaseKind::WaitingDispatch);
+        foreign.correlation.registration_revision = positive(SUCCESSOR_REGISTRATION_REVISION);
+
+        let error = root
+            .record_lease_phase(foreign)
+            .expect_err("another registration cannot journal a lease");
+
+        assert!(matches!(
+            error,
+            RunnerStateError::OperationCorrelationMismatch
+        ));
+        assert_eq!(root.reconnect_inventory(), &ReconnectInventory::default());
     }
 
     #[test]
@@ -715,6 +1186,108 @@ mod tests {
             RunnerStateRoot::open(&path).expect_err("a malformed state document fails closed");
 
         assert!(matches!(error, RunnerStateError::CorruptState));
+    }
+
+    #[test]
+    fn operation_journal_with_open_permissions_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the operation journal is created");
+        drop(root);
+        fs::set_permissions(
+            path.join(OPERATION_JOURNAL_FILE),
+            fs::Permissions::from_mode(permission_bits(Mode::RUSR | Mode::WUSR | Mode::RGRP)),
+        )
+        .expect("the fixture journal permissions change");
+
+        let error = RunnerStateRoot::open(&path)
+            .expect_err("an operation journal visible to the group fails closed");
+
+        assert!(matches!(
+            error,
+            RunnerStateError::InvalidOperationJournalIdentity
+        ));
+    }
+
+    #[test]
+    fn oversized_operation_journal_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the operation journal is created");
+        drop(root);
+        fs::write(
+            path.join(OPERATION_JOURNAL_FILE),
+            vec![b'x'; (MAX_OPERATION_JOURNAL_BYTES + 1) as usize],
+        )
+        .expect("the oversized operation journal fixture is written");
+
+        let error =
+            RunnerStateRoot::open(&path).expect_err("an oversized operation journal fails closed");
+
+        assert!(matches!(error, RunnerStateError::OperationJournalTooLarge));
+    }
+
+    #[test]
+    fn malformed_operation_journal_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the operation journal is created");
+        drop(root);
+        fs::write(path.join(OPERATION_JOURNAL_FILE), b"{")
+            .expect("the malformed operation journal fixture is written");
+
+        let error =
+            RunnerStateRoot::open(&path).expect_err("a malformed operation journal fails closed");
+
+        assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
+    }
+
+    #[test]
+    fn operation_journal_for_another_runner_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the operation journal is created");
+        drop(root);
+        let mut foreign = lease_phase(LeasePhaseKind::WaitingDispatch);
+        foreign.correlation.runner_id =
+            CanonicalUuid::from_uuid(Uuid::from_u128(ARBITRARY_OTHER_RUNNER_UUID));
+        replace_operation_journal(&path, inventory_with_lease(foreign));
+
+        let error = RunnerStateRoot::open(&path)
+            .expect_err("another runner's operation journal fails closed");
+
+        assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
+    }
+
+    #[test]
+    fn unsupported_operation_journal_slot_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let mut root = enrolled_root(&parent);
+        root.record_lease_phase(lease_phase(LeasePhaseKind::WaitingDispatch))
+            .expect("the operation journal is created");
+        drop(root);
+        let unsupported = ReconnectInventory {
+            result: Some(RetainedResult {
+                correlation: lease_correlation(),
+                result: TerminalResult::Ambiguous,
+            }),
+            ..ReconnectInventory::default()
+        };
+        replace_operation_journal(&path, unsupported);
+
+        let error = RunnerStateRoot::open(&path)
+            .expect_err("an unauthored operation-journal slot fails closed");
+
+        assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
     }
 
     #[test]
