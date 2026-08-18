@@ -633,6 +633,12 @@ fn apply_review_union(
         if retained == review {
             return Ok(ChangeApplyDispositionV1::Duplicate);
         }
+        if retained.state().is_none() {
+            // A dismissed review is retained with no state; a submission
+            // observed after the dismissal is history the dismissal already
+            // superseded, not a conflicting identity.
+            return Ok(ChangeApplyDispositionV1::Superseded);
+        }
         return Err(RepoWatchWebhookApplyError::ConflictingImmutableFact(
             "review identity",
         ));
@@ -926,6 +932,8 @@ pub enum RepoWatchWebhookIgnoredReasonV1 {
     NonBranchPush,
     ForeignWorkflowRepository,
     AbsentWorkflowBranch,
+    AbsentWorkflowHeadRepository,
+    AbsentWorkflowHeadBranch,
 }
 
 /// Mapping disposition for one signature-valid admitted delivery.
@@ -1257,21 +1265,34 @@ fn map_workflow_run(
         ));
     }
     let run = object_at(root, &["workflow_run"], "workflow_run")?;
-    let head_repository = repository_at(
+    let Some(head_repository) = optional_repository_at(
         run,
         &["head_repository", "full_name"],
         "workflow_run.head_repository.full_name",
-    )?;
+    )?
+    else {
+        return Ok(RepoWatchWebhookMappingV1::Ignored(
+            RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadRepository,
+        ));
+    };
     if &head_repository != repository {
         return Ok(RepoWatchWebhookMappingV1::Ignored(
             RepoWatchWebhookIgnoredReasonV1::ForeignWorkflowRepository,
         ));
     }
+    let Some(head_branch) = optional_text_at(run, &["head_branch"], "workflow_run.head_branch")?
+    else {
+        return Ok(RepoWatchWebhookMappingV1::Ignored(
+            RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadBranch,
+        ));
+    };
+    let head_branch = BranchName::try_new(head_branch.to_owned())
+        .map_err(|_| RepoWatchWebhookMappingError::InvalidField("workflow_run.head_branch"))?;
     let run = RepoWatchWorkflowRunObservation::new(
         object_id_at(run, &["id"], "workflow_run.id")?,
         object_id_at(run, &["workflow_id"], "workflow_run.workflow_id")?,
         workflow_attempt_at(run, &["run_attempt"], "workflow_run.run_attempt")?,
-        branch_at(run, &["head_branch"], "workflow_run.head_branch")?,
+        head_branch,
         WorkflowName::try_new(string_at(run, &["name"], "workflow_run.name")?.to_owned())
             .map_err(|_| RepoWatchWebhookMappingError::InvalidField("workflow_run.name"))?,
         check_conclusion(string_at(run, &["conclusion"], "workflow_run.conclusion")?)?,
@@ -1543,15 +1564,6 @@ fn branch_at(
     field: &'static str,
 ) -> Result<BranchName, RepoWatchWebhookMappingError> {
     BranchName::try_new(string_at(root, path, field)?.to_owned())
-        .map_err(|_| RepoWatchWebhookMappingError::InvalidField(field))
-}
-
-fn repository_at(
-    root: &Map<String, Value>,
-    path: &[&str],
-    field: &'static str,
-) -> Result<RepositorySlug, RepoWatchWebhookMappingError> {
-    RepositorySlug::try_new(string_at(root, path, field)?.to_owned())
         .map_err(|_| RepoWatchWebhookMappingError::InvalidField(field))
 }
 
@@ -2210,6 +2222,68 @@ mod tests {
         assert_eq!(run.workflow_id().get(), MAPPED_WORKFLOW);
         assert_eq!(run.attempt().get(), MAPPED_WORKFLOW_ATTEMPT);
         assert_eq!(run.conclusion(), CheckConclusion::Failure);
+    }
+
+    #[test]
+    fn completed_workflow_run_with_absent_head_repository_is_ignored() {
+        let payload = format!(
+            r#"{{
+                "action":"completed",
+                "repository":{{"full_name":"{REPOSITORY}"}},
+                "workflow_run":{{
+                    "id":{MAPPED_WORKFLOW_RUN},
+                    "workflow_id":{MAPPED_WORKFLOW},
+                    "run_attempt":{MAPPED_WORKFLOW_ATTEMPT},
+                    "head_branch":"main",
+                    "head_repository":null,
+                    "name":"continuous-integration",
+                    "conclusion":"failure"
+                }}
+            }}"#
+        );
+        let mapping = map_repo_watch_webhook_delivery_v1(
+            &delivery("workflow_run", Some("completed")),
+            payload.as_bytes(),
+        )
+        .expect("a deleted-fork workflow head is not an error");
+
+        assert_eq!(
+            mapping,
+            RepoWatchWebhookMappingV1::Ignored(
+                RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadRepository
+            )
+        );
+    }
+
+    #[test]
+    fn completed_workflow_run_with_absent_head_branch_is_ignored() {
+        let payload = format!(
+            r#"{{
+                "action":"completed",
+                "repository":{{"full_name":"{REPOSITORY}"}},
+                "workflow_run":{{
+                    "id":{MAPPED_WORKFLOW_RUN},
+                    "workflow_id":{MAPPED_WORKFLOW},
+                    "run_attempt":{MAPPED_WORKFLOW_ATTEMPT},
+                    "head_branch":null,
+                    "head_repository":{{"full_name":"{REPOSITORY}"}},
+                    "name":"continuous-integration",
+                    "conclusion":"failure"
+                }}
+            }}"#
+        );
+        let mapping = map_repo_watch_webhook_delivery_v1(
+            &delivery("workflow_run", Some("completed")),
+            payload.as_bytes(),
+        )
+        .expect("a deleted source ref is not an error");
+
+        assert_eq!(
+            mapping,
+            RepoWatchWebhookMappingV1::Ignored(
+                RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadBranch
+            )
+        );
     }
 
     #[test]
@@ -2954,5 +3028,61 @@ mod tests {
             error,
             RepoWatchWebhookApplyError::ConflictingImmutableFact("review identity")
         );
+    }
+
+    #[test]
+    fn a_submission_observed_after_dismissal_is_superseded() {
+        let previous = canonical_observation(CURRENT_HEAD);
+        let mut pull_requests = previous.state().pull_requests().to_vec();
+        let reviewer = RepoWatchAuthorLogin::try_new(String::from(SIGNAL_REVIEWER))
+            .expect("fixture reviewer is valid");
+        let dismissed = RepoWatchReviewObservation::new(
+            object_id(RETAINED_REVIEW),
+            reviewer.clone(),
+            None,
+            CommitSha::try_new(String::from(CURRENT_HEAD)).expect("fixture SHA is valid"),
+        );
+        let retained = &pull_requests[0];
+        let rebuilt = rebuild_pull_request(
+            retained,
+            retained.context().clone(),
+            retained.lifecycle(),
+            retained.completed_check_runs().to_vec(),
+            vec![dismissed],
+            retained.threads().to_vec(),
+        )
+        .expect("fixture rebuild is valid");
+        pull_requests[0] = rebuilt;
+        let previous = RepoWatchObservation::new(
+            previous.signal_reviewers().to_vec(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+                pull_requests,
+                workflow_runs: previous.state().workflow_runs().to_vec(),
+                branch_heads: previous.state().branch_heads().to_vec(),
+            })
+            .expect("fixture state is valid"),
+        );
+        let late_submission = RepoWatchReviewObservation::new(
+            object_id(RETAINED_REVIEW),
+            reviewer,
+            Some(ReviewState::Approved),
+            CommitSha::try_new(String::from(CURRENT_HEAD)).expect("fixture SHA is valid"),
+        );
+        let patch = RepoWatchObservationPatchV1::new(
+            vec![RepoWatchObservationChangeV1::ReviewUnion {
+                pull_request: PullRequestNumber::new(
+                    NonZeroU64::new(PULL_REQUEST).expect("fixture PR is positive"),
+                ),
+                expected_head: CommitSha::try_new(String::from(CURRENT_HEAD))
+                    .expect("fixture SHA is valid"),
+                review: late_submission,
+            }],
+            Vec::new(),
+        );
+
+        let applied = apply_repo_watch_observation_patch_v1(&previous, &patch)
+            .expect("a dismissal supersedes its late submission");
+
+        assert_eq!(applied, RepoWatchObservationApplyV1::Superseded);
     }
 }

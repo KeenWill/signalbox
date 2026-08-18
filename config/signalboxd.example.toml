@@ -321,10 +321,15 @@ allowed_origins = [
 # poll_interval_seconds = 60
 # credential_file = "/run/credentials/repository-watch-namespace-project"
 # webhook_hook_id = 123456789
-# webhook_secret_file = "/home/wkg/.config/signalbox/github-webhook-secret"
+# webhook_secret_file = "/etc/signalbox/github-webhook-secret"
 #
 # [[repository_watch.rules]]
 # id = "merge-forward-on-base-advance"
+# Increment this revision whenever matcher, actions, singleton_per, or cooldown
+# changes. Keeping the ID preserves history; startup retires the old revision
+# and activates the new one after the current event tail.
+# The schema upgrade that introduced rule fingerprints retires every existing
+# revision, so increment each configured rule's version once on the first boot.
 # version = 1
 # singleton_per = "pull_request"
 # cooldown_seconds = 0

@@ -29,9 +29,11 @@ completion generations are verified against PR #541
 (`fix/check-run-updated-at`). Eager merge-forward dispatch is verified against
 PR #886 (`agent/eager-merge-forward`). Requeue after non-converged dispatch
 termination is verified against PR #894
-(`agent/dispatch-requeue-on-invalidation`). The source-independent event
-occurrence identity, its durable frontier, the commit-time coalescing of a
-restated occurrence, and the storage migration are verified against this PR
+(`agent/dispatch-requeue-on-invalidation`). Safe rule revision admission and
+configuration diagnostics are verified against PR #863
+(`agent/repo-watch-rule-robustness`). The source-independent event occurrence
+identity, its durable frontier, the commit-time coalescing of a restated
+occurrence, and the storage migration are verified against PR #870
 (`agent/repo-watch-content-identity`). The authenticated webhook intake, its
 ingress ceilings, shadow projection, parity view and causes, and targeted
 refresh behavior are verified against this PR
@@ -65,7 +67,10 @@ exist.
 Invalid rules, unknown fields, duplicate rule identities, unsupported versions,
 more than 128 rules, more than 32 actions per rule, non-whole-second cooldowns,
 or cooldowns beyond signed 64-bit seconds fail startup configuration before
-polling begins.
+polling begins. A rule revision is a positive integer within signed 64-bit
+range. Changing the revision does not select a different matcher grammar: the
+section and its rule shape remain version one, while the revision distinguishes
+successive semantics under one stable operator-assigned rule identity.
 
 **Implemented behavior.** Repository identities normalize to ASCII lowercase at
 construction. Both slug segments are nonempty ASCII letters, digits, dots,
@@ -102,8 +107,8 @@ and verifies requests but knows nothing about tunnels or exposure providers. The
 reference deployment exposes public path `/github/webhooks` through Tailscale
 Funnel `--set-path`, which strips that prefix; its configured local path is
 therefore `/`. The reference secret file is
-`/home/wkg/.config/signalbox/github-webhook-secret`. Public reachability and its
-availability belong to deployment, not to the daemon.
+`/etc/signalbox/github-webhook-secret`. Public reachability and its availability
+belong to deployment, not to the daemon.
 
 ## Poll transport and differ
 
@@ -269,14 +274,15 @@ derived from an equal cursor frontier have the same content identity even when
 their candidate UUIDs differ. Persistence rejects duplicate UUID or content
 identity members within one batch, and the relational store uniquely constrains
 `(content_identity_version, content_identity)` across batches. Exact replay
-compares the cursor candidate and accounts for every requested occurrence: one
-the replayed generation stored is compared on its whole UUID-bearing event value
-and its content identity, and one that generation coalesced is required to be
-durable in an earlier generation under the same content identity and identified
-content. A coalesced occurrence's own candidate UUID is not compared, because it
-was never written — the fact it restates is durable under the UUID of the
-occurrence that first recorded it, so a request whose occurrences are all
-coalesced replays on candidate and content identity alone.
+compares the cursor candidate and accounts for every requested occurrence. If
+the replayed generation stored the occurrence, the stored event's whole
+UUID-bearing value and content identity are compared. If that generation
+coalesced the occurrence, it must be durable in an earlier generation under the
+same content identity and identified content. A coalesced occurrence's own
+candidate UUID is neither persisted nor compared, because the fact it restates
+is durable under the UUID of the occurrence that first recorded it, so a request
+whose occurrences are all coalesced replays on candidate and content identity
+alone.
 
 **Implemented behavior.** The version-one cursor reader remains compatible with
 the earlier version-one workflow record that lacked a workflow-definition ID. It
@@ -708,18 +714,65 @@ redispatches an evaluated fact nor treats pre-activation history as a new live
 signal. An obligation is a separate collapsed delivery identity, not a request
 to reevaluate its occupied facts. Reconciliation records an append-only
 deactivation when a configured identity or its repository disappears. Guarded
-daemon startup reconciles the complete repository set before any watch task
-starts, including the empty set when the repository-watch section is absent; the
-absent section still starts no watch runtime or polling task. Configuration
-reconciliation and evaluation are serialized per repository: an evaluation
-already committed may replay, but an already-loaded event cannot create a
-dispatch after deactivation commits. Activation stores a digest of the complete
-versioned matcher, ordered action list, singleton scope, and cooldown; changing
-any of those semantics while retaining an active identity is a permanent
-configuration failure. A deactivated rule identity and version cannot be
-configured again; either kind of replacement uses a new identity so no events
-can be evaluated under semantics different from the activation that admitted
-them.
+daemon startup admits the complete repository set in two phases, including the
+empty set when the repository-watch section is absent; the absent section still
+starts no watch runtime or polling task. It first validates the whole set in one
+transaction it discards, in the Configuration phase before either local socket
+binds, so every refusal is reported there against untouched history. It then
+commits the deactivations and activations in one transaction after every
+remaining fallible startup step succeeds and before any watch task starts. A
+refusal anywhere in the set, and any startup failure before that commit,
+therefore leaves no deactivation and no activation behind: a configuration that
+never started consumes no revision, and restoring the previous configuration is
+admitted rather than refused as reuse. A lost commit response is resolved by
+rereading the durable active set rather than assuming an outcome. That reread
+commits nothing, so it cannot itself become ambiguous, and it answers the only
+question the outcome turned on: either the active set already equals the
+configured admission, so the commit won and startup proceeds, or it does not, so
+the commit never landed, no revision was consumed, and startup fails against
+untouched history with the previous configuration still admissible. Startup does
+not attempt the admission a second time in that failing case; the next start
+admits the same configuration from that untouched history, and only an
+unreachable database defeats the reread. Configuration reconciliation and
+evaluation are serialized per repository: an evaluation already committed may
+replay, but an already-loaded event cannot create a dispatch after deactivation
+commits. Activation stores a digest of the complete versioned matcher, ordered
+action list, singleton scope, and cooldown, plus content-free fingerprints
+labeled with the exact configuration fields they represent. Changing any of
+those semantics while retaining the same rule ID and revision fails in the
+Configuration phase before either local socket binds. The diagnostic names the
+rule and changed field and directs the operator to increment `version`; when
+multiple fields changed, it names the first changed TOML field in canonical
+fingerprint order. It never first appears as a repository-task runtime death. An
+activation recorded before field fingerprints existed cannot produce them from
+its aggregate digest, so the one-time migration introducing fingerprints retires
+every such activation. No active activation lacks fingerprints and the daemon
+carries no path for that shape; a missing fingerprint under any non-deactivated
+activation is storage corruption, checked before reconciliation compares that
+activation against configuration, retires it as an unconfigured rule, or retires
+it because its whole repository left configuration. Retiring an activation
+retires its `(rule ID, revision)` pair, so the first boot after that migration
+refuses every configured rule at its recorded revision as identity reuse,
+including every rule whose semantics did not change, and fails in the
+Configuration phase before either local socket binds. The operator increments
+`version` once for each configured rule on that first upgraded boot; no
+fingerprint backfill can stand in for the bump, because the retained aggregate
+digest does not carry the per-field digests the new revision records.
+
+**Implemented behavior.** A higher revision under the same rule ID is a
+replacement. Reconciliation appends deactivation of the active old revision and
+activation of the configured new revision after the current event tail. The old
+activation, deactivation, evaluations, dispatches, and sessions remain joined by
+the same rule ID and their original revisions, while only later events are
+eligible for the replacement. A deactivated `(rule ID, revision)` pair cannot be
+configured again, and a revision below the highest revision ever recorded for
+that rule ID in that repository is refused, so only a higher revision replaces
+the active rule. Rule identity is per repository throughout: activation,
+deactivation, fingerprints, and evaluation are keyed by repository, so the same
+rule ID first configured in a newly watched repository starts its own lineage at
+any revision instead of inheriting another repository's history. A fresh rule ID
+remains an admitted replacement path, but a revision bump is the ordinary way to
+preserve stable identity and history.
 
 **Committed unimplemented functionality.** The structured-rule dispatch surface
 converges onto the program substrate by replacing each rule with a subscription
@@ -908,9 +961,10 @@ families polling produces and webhooks are not designed to reproduce —
 mergeability changes, aggregate check rollups, and reaction changes — have no
 delivery to carry it. Event projections intentionally carry no uniqueness
 constraint because separate deliveries may represent one content occurrence.
-Terminal exact payload bytes remain for seven days, after which maintenance may
-delete only the payload; delivery tombstones, digests, projections, and
-dispositions remain append-only.
+Terminal exact payload bytes remain for seven days; after each successful full
+poll, at most once per day and starting with the first poll after boot, the
+daemon deletes only the expired payload bytes. Delivery tombstones, digests,
+projections, and dispositions remain append-only.
 
 **Implemented behavior.** Projection coverage is closed by delivery family and
 action:
@@ -933,7 +987,8 @@ action:
 
 Ordinary issue comments, other actions in those families, tag pushes, the
 separate `create` and `delete` event families, foreign-repository workflow
-heads, workflow runs whose head branch is absent from the observed branch set,
+heads, completed workflow runs whose payload head repository or head branch is
+absent, workflow runs whose head branch is absent from the observed branch set,
 and every other signature-valid event are ignored successfully. That last one
 holds the two producers to the same fact set: polling admits a workflow run only
 for a branch it currently observes, so a run on a deleted branch is a fact

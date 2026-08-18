@@ -4174,6 +4174,7 @@ dependencies = [
  "expect-test",
  "git2",
  "hmac",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "opentelemetry",

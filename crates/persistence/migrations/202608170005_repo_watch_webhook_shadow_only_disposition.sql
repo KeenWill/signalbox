@@ -34,10 +34,11 @@ ALTER TABLE repo_watch_webhook_projection
     ADD CONSTRAINT repo_watch_webhook_projection_cause_code_check
         CHECK (
             cause_code IS NULL
+            -- poll_only_family is excluded: the parity view derives it for
+            -- poll-side rows, and no delivery may store it on a projection.
             OR cause_code IN (
                 'compressed_transition',
                 'context_drift',
-                'poll_only_family',
                 'cross_drain_shadow_gap'
             )
         );
