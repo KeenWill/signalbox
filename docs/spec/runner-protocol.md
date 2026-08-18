@@ -1772,14 +1772,15 @@ remain separate work, with first-release resource limits still owner-gated in
 
 The reusable process core can add one explicit environment value only to the
 runner-restricted dispatch request. The name is a canonical uppercase
-environment identifier and cannot replace `HOME`, `HTTPS_PROXY`, `LANG`,
-`LC_ALL`, or `PATH`; the UTF-8 value is nonempty, NUL-free, and at most 65,536
-bytes. The bubblewrap process receives it through the exact cleared environment,
-not argv, while the availability probe receives no caller value. Debug output
-retains only the name and a redaction marker. The daemon-local sandbox profile
-cannot use this channel. This core does not resolve credential files or redact
-captured command output; the runner preparer that owns a selected credential
-must do both before and after this boundary.
+environment identifier of at most 4,096 UTF-8 bytes and cannot replace `HOME`,
+`HTTPS_PROXY`, `LANG`, `LC_ALL`, or `PATH`; every `LD_*` name is also reserved.
+The UTF-8 value is nonempty, NUL-free, and at most 65,536 bytes. The bubblewrap
+process receives it through the exact cleared environment, not argv, while the
+availability probe receives no caller value. Debug output retains only the name
+and a redaction marker. The daemon-local sandbox profile cannot use this
+channel. This core does not resolve credential files or redact captured command
+output; the runner preparer that owns a selected credential must do both before
+and after this boundary.
 
 Confinement is defined over that writable root, which need not be a repository.
 The root is the provisioned repository when the placement requires a worktree,
