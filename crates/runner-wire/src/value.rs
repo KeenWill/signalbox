@@ -4,7 +4,8 @@ use std::{error::Error, fmt, num::NonZeroU64};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use signalbox_domain::{
-    CredentialProfileName, RunnerCapabilityClass, ToolName, WorkspaceRepositoryKey,
+    CredentialProfileName, RunnerCapabilityClass, RunnerWorkingDirectory, ToolName,
+    WorkspaceRepositoryKey,
 };
 use uuid::Uuid;
 
@@ -19,6 +20,8 @@ pub enum ValueError {
     Digest,
     /// A portable checked name was invalid for its domain role.
     PortableName,
+    /// A runner working directory violated the bounded exact-text contract.
+    WorkingDirectory,
     /// A sorted inventory was unordered, duplicated, or over its cap.
     Inventory,
     /// A terminal result bound differed from version one's fixed contract.
@@ -38,6 +41,7 @@ impl fmt::Display for ValueError {
             Self::PositiveInteger => "integer must be positive",
             Self::Digest => "digest must be 64 lowercase hexadecimal bytes",
             Self::PortableName => "portable name is invalid",
+            Self::WorkingDirectory => "runner working directory is invalid",
             Self::Inventory => "inventory is not sorted, unique, and within its cap",
             Self::ResultBounds => "result bounds differ from runner-wire version one",
             Self::Result => "terminal result is outside its closed domain shape",
@@ -311,6 +315,37 @@ impl RepositoryKey {
 }
 
 impl<'de> Deserialize<'de> for RepositoryKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A domain-validated exact runner working directory.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct WorkingDirectory(String);
+
+impl WorkingDirectory {
+    /// Maximum UTF-8 bytes admitted by an exact runner working directory.
+    pub const MAX_BYTES: usize = RunnerWorkingDirectory::MAX_BYTES;
+
+    /// Checks and stores the bounded nonempty runner-interpreted directory.
+    pub fn try_new(value: String) -> Result<Self, ValueError> {
+        RunnerWorkingDirectory::try_new(value.clone())
+            .map(|_| Self(value))
+            .map_err(|_| ValueError::WorkingDirectory)
+    }
+
+    /// Returns the exact directory text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkingDirectory {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
