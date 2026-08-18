@@ -15115,18 +15115,22 @@ async fn s32_inv044_runner_placement_boundary_round_trips_exact_successor_facts(
         .read_selected_transcript_entries(&[1], &[source])
         .await?;
 
-    assert_eq!(
-        loaded.as_ref(),
-        &[ProcessTranscriptEntry::RunnerPlacementChanged {
-            entry_index: 0,
-            source_session: session,
-            entry,
-            prior_runner: registration.registration().runner(),
-            new_runner: registration.registration().runner(),
-            placement_revision: revision,
-            sandbox: RunnerSandboxProfile::Ambient,
-        }]
-    );
+    let expected = [ProcessTranscriptEntry::RunnerPlacementChanged {
+        entry_index: 0,
+        source_session: session,
+        entry,
+        prior_runner: registration.registration().runner(),
+        new_runner: registration.registration().runner(),
+        placement_revision: revision,
+        sandbox: RunnerSandboxProfile::Ambient,
+    }];
+    assert_eq!(loaded.as_ref(), &expected);
+
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the idle session has an authoritative transcript");
+    assert_eq!(transcript.entries(), expected);
     drop(pool);
     Ok(())
 }

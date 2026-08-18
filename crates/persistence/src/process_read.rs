@@ -1350,6 +1350,12 @@ impl ProcessTranscriptReader {
                 current_frontier,
             )
             .await?;
+            let latest_frontier = advance_through_latest_runner_placement(
+                self.transaction_mut()?,
+                session,
+                latest_frontier,
+            )
+            .await?;
             self.latest_frontier = latest_frontier;
             self.entry_count = Some(match latest_frontier {
                 Some(frontier) => {
@@ -1470,6 +1476,65 @@ async fn advance_through_latest_compaction(
         _ => {
             Err(ProcessReadCorruption::Inconsistent("turn and compaction frontier lineage").into())
         }
+    }
+}
+
+async fn advance_through_latest_runner_placement(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+    current: Option<ContextFrontierId>,
+) -> Result<Option<ContextFrontierId>, ProcessReadError> {
+    let latest: Option<Uuid> = sqlx::query_scalar(
+        "SELECT context_frontier_id
+           FROM session_runner_placement_frontier
+          WHERE session_id = $1
+          ORDER BY placement_revision DESC
+          LIMIT 1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(latest) = latest.map(ContextFrontierId::from_uuid) else {
+        return Ok(current);
+    };
+    let Some(current) = current else {
+        return Ok(Some(latest));
+    };
+    if current == latest {
+        return Ok(Some(current));
+    }
+    let lineage: (bool, bool) = sqlx::query_as(
+        "SELECT NOT EXISTS (
+                SELECT 1
+                  FROM resolve_context_frontier_members($1, $2) AS earlier
+                  LEFT JOIN resolve_context_frontier_members($1, $3) AS later
+                    ON later.member_position = earlier.member_position
+                   AND later.source_session_id = earlier.source_session_id
+                   AND later.semantic_entry_id = earlier.semantic_entry_id
+                 WHERE later.member_position IS NULL
+            ),
+            NOT EXISTS (
+                SELECT 1
+                  FROM resolve_context_frontier_members($1, $3) AS earlier
+                  LEFT JOIN resolve_context_frontier_members($1, $2) AS later
+                    ON later.member_position = earlier.member_position
+                   AND later.source_session_id = earlier.source_session_id
+                   AND later.semantic_entry_id = earlier.semantic_entry_id
+                 WHERE later.member_position IS NULL
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(current.into_uuid())
+    .bind(latest.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await?;
+    match lineage {
+        (true, false) => Ok(Some(latest)),
+        (false, true) => Ok(Some(current)),
+        _ => Err(
+            ProcessReadCorruption::Inconsistent("turn and runner placement frontier lineage")
+                .into(),
+        ),
     }
 }
 

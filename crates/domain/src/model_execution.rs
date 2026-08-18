@@ -3709,13 +3709,19 @@ fn frontier_closes_latest_tool_round(
             | SemanticTranscriptEntryPayload::TurnCancelled { .. } => None,
         })
         .collect::<Vec<_>>();
-    let Some(results_end) = response_end.checked_add(requests.len()) else {
-        return Ok(false);
-    };
-    if requests.is_empty() || results_end > suffix.len() {
+    if requests.is_empty() {
         return Ok(false);
     }
-    for (entry, request) in suffix[response_end..results_end].iter().zip(&requests) {
+    let mut remaining = suffix[response_end..].iter();
+    for request in &requests {
+        let Some(entry) = remaining.find(|entry| {
+            !matches!(
+                entry.payload(),
+                SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
+            )
+        }) else {
+            return Ok(false);
+        };
         let valid = match entry.payload() {
             SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => {
                 let Some(correlation) = tool_result_correlations.get(attempt) else {
@@ -3746,7 +3752,6 @@ fn frontier_closes_latest_tool_round(
             }
             | SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
             | SemanticTranscriptEntryPayload::ContextSummary { .. }
-            | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::Imported { .. }
@@ -3759,10 +3764,11 @@ fn frontier_closes_latest_tool_round(
             return Ok(false);
         }
     }
-    Ok(suffix[results_end..].iter().all(|entry| {
+    Ok(remaining.all(|entry| {
         matches!(
             entry.payload(),
             SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+                | SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. }
         )
     }))
 }
@@ -4993,6 +4999,46 @@ mod tests {
                 delegation_result_entry(&execution, DelegationWaitMode::Foreground),
             ])
             .collect::<Vec<_>>();
+        assert_eq!(
+            frontier_closes_latest_tool_round(
+                &execution.starting_snapshot,
+                &entries,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+            ),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn runner_placement_inside_results_closes_exact_tool_continuation_round() {
+        let execution = active_execution();
+        let tool_use = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(30),
+            execution.session(),
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call: model_call_id(29),
+                request: tool_request_id(35),
+            },
+        );
+        let placement = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(31),
+            execution.session(),
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                placement_revision: crate::RunnerGeneration::try_from_u64(2)
+                    .expect("the fixture placement revision is positive"),
+            },
+        );
+        let entries = execution
+            .frontier_entries()
+            .cloned()
+            .chain([
+                tool_use,
+                placement,
+                delegation_result_entry(&execution, DelegationWaitMode::Foreground),
+            ])
+            .collect::<Vec<_>>();
+
         assert_eq!(
             frontier_closes_latest_tool_round(
                 &execution.starting_snapshot,

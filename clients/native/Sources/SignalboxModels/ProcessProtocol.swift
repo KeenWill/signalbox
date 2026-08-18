@@ -3154,6 +3154,12 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
     defaultsVersion: SignalboxCanonicalUInt64,
     selectedModelID: SignalboxCanonicalUUID
   )
+  case runnerPlacementChanged(
+    priorRunnerID: SignalboxCanonicalUUID,
+    newRunnerID: SignalboxCanonicalUUID,
+    placementRevision: SignalboxCanonicalUInt64,
+    sandboxProfile: SignalboxRunnerSandboxProfile
+  )
   case assistantToolUse(
     turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID,
     toolRequestID: SignalboxCanonicalUUID, toolName: String, arguments: String,
@@ -3283,6 +3289,31 @@ public enum SignalboxTranscriptEntry: Decodable, Equatable, Sendable {
           turnID: try decoder.decode("turn_id"),
           defaultsVersion: defaultsVersion,
           selectedModelID: try decoder.decode("selected_model_id")
+        )
+      case "runner_placement_changed":
+        try tagged.rejectUnadmittedFields(
+          [
+            "type", "prior_runner_id", "new_runner_id", "placement_revision",
+            "sandbox_profile",
+          ],
+          decoder: decoder
+        )
+        let placementRevision: SignalboxCanonicalUInt64 = try decoder.decode(
+          "placement_revision")
+        guard placementRevision.rawValue > 0 else {
+          throw DecodingError.dataCorrupted(
+            .init(
+              codingPath: decoder.codingPath
+                + [SignalboxDynamicCodingKey("placement_revision")],
+              debugDescription: "A runner placement revision must be greater than zero."
+            )
+          )
+        }
+        self = .runnerPlacementChanged(
+          priorRunnerID: try decoder.decode("prior_runner_id"),
+          newRunnerID: try decoder.decode("new_runner_id"),
+          placementRevision: placementRevision,
+          sandboxProfile: try decoder.decode("sandbox_profile")
         )
       case "assistant_tool_use":
         try tagged.rejectUnadmittedFields(
