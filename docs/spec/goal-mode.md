@@ -12,7 +12,9 @@ turn's authority resolves to were verified through PR #562
 generation was verified through PR #578 (`agent/commission-binding`). Resolving
 that authority again when a consumer commits is verified against this PR
 (`agent/judge-completion-recheck`). This bottom specification diff owns both
-stack slices. Identity and durable-command mechanics remain owned by
+stack slices. Repository-watch withdrawal of its own commission on pull-request
+closure is verified against this PR (`agent/repo-watch-lifecycle-cutoff`).
+Identity and durable-command mechanics remain owned by
 [identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
 by [tool loop](tool-loop.md), and framing by
@@ -145,9 +147,12 @@ source turn and cannot be constructed from a model declaration.
 **Implemented behavior.** Stop and supersede are explicit user authority. Stop
 yields `user_stopped`, distinct from model-declared achievement and blocking;
 supersede is admitted only while the current generation is pursuing or blocked.
-Resume is admitted only while blocked, and its optional guidance becomes the
-next turn's input. Existing steer behavior is unchanged and remains the only
-mid-pursuit guidance path.
+Repository watch may compose that same durable parent-only stop solely to
+withdraw a generation-one commission it created when the target pull request
+closes or merges. It cannot stop descendants or a later user-authored
+generation. Resume is admitted only while blocked, and its optional guidance
+becomes the next turn's input. Existing steer behavior is unchanged and remains
+the only mid-pursuit guidance path.
 
 ## Scheduler continuation
 

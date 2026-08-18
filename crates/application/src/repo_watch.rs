@@ -1310,6 +1310,7 @@ pub enum RepoWatchRuleEvaluationOutcome {
     NotMatched,
     SelfCaused,
     PendingSelfCause,
+    TargetClosed,
     Occupied,
     Cooldown,
     Dispatched {

@@ -31,12 +31,12 @@ use signalbox_application::{
     UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
 };
 use signalbox_domain::{
-    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
-    MergeableState, ModelAlias, PullRequestBody, PullRequestEventContext,
-    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionChange,
-    ReactionContent, ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventKindV1,
-    RepoWatchEventTarget, RepoWatchRule, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState,
-    ReviewThreadId, UserContent, WorkflowName,
+    BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, DurableCommandId,
+    GitHubObjectId, LabelName, MergeableState, ModelAlias, PullRequestBody,
+    PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
+    ReactionChange, ReactionContent, ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent,
+    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchWorkflowRunAttempt,
+    RepositorySlug, ReviewState, ReviewThreadId, UserContent, WorkflowName,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
@@ -359,8 +359,10 @@ impl RepositoryWatchTask {
                 self.activate_rules().await?;
                 self.rules_activated = true;
             }
+            self.process_cutoffs().await?;
             self.process_dispatches().await?;
             self.poll_and_commit().await?;
+            self.process_cutoffs().await?;
             self.process_dispatches().await
         }
         .await;
@@ -370,6 +372,18 @@ impl RepositoryWatchTask {
             self.poller.invalidate_freshness();
         }
         result
+    }
+
+    async fn process_cutoffs(&self) -> Result<(), RepositoryWatchAttemptError> {
+        while self
+            .dispatch_store
+            .process_next_lifecycle_cutoff(&self.repository, || {
+                DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+            })
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+        {}
+        Ok(())
     }
 
     async fn activate_rules(&self) -> Result<(), RepositoryWatchAttemptError> {
@@ -435,6 +449,7 @@ impl RepositoryWatchTask {
             | RepoWatchRuleEvaluationOutcome::Inactive
             | RepoWatchRuleEvaluationOutcome::SelfCaused
             | RepoWatchRuleEvaluationOutcome::PendingSelfCause
+            | RepoWatchRuleEvaluationOutcome::TargetClosed
             | RepoWatchRuleEvaluationOutcome::Occupied
             | RepoWatchRuleEvaluationOutcome::Cooldown => {}
         }
@@ -5435,7 +5450,7 @@ mod tests {
         assert_eq!(
             pull.threads()[0]
                 .originating_review_id()
-                .map(GitHubObjectId::get),
+                .map(signalbox_domain::GitHubObjectId::get),
             Some(RETAINED_REVIEW_IDS[0])
         );
         assert_eq!(pull.threads()[1].thread().as_str(), RESOLVED_REVIEW_THREAD);
@@ -5443,7 +5458,7 @@ mod tests {
         assert_eq!(
             pull.threads()[1]
                 .originating_review_id()
-                .map(GitHubObjectId::get),
+                .map(signalbox_domain::GitHubObjectId::get),
             Some(RETAINED_REVIEW_IDS[1])
         );
     }
