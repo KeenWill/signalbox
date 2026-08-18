@@ -40,6 +40,8 @@ PR (`agent/runner-lease-argument-binding`). Exact daemon projection of sealed
 lease facts into `lease_offer`, `lease_claimed`, `dispatch`, and
 `result_recorded`, plus fail-closed reconstitution of `lease_claim` and
 `result`, is re-verified through this PR (`agent/runner-dispatch-wire-adapter`).
+The runner-local workspace-release journal and exact acknowledgement boundary
+are verified against this PR (`agent/runner-workspace-operation-journal`).
 Established-connection routing of those inbound claim and result frames through
 the durable transactions before acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
@@ -760,19 +762,26 @@ one matching bounded terminal envelope only after execution may have started. An
 exact `result_recorded` acknowledgement atomically frees both slots. The root
 also retains at most one pre-claim lease-offer `operation_failed` envelope only
 while both lease slots are empty. Its exact `operation_failure_recorded`
-acknowledgement frees that failure slot. The root rejects workspace and leak
-slots, provisioning or release failures, cross-wired correlations, and journals
-belonging to another enrolled runner. The live serving loop consumes either
-exact acknowledgement for evidence produced on the current connection. On resume
-the runner sends the complete stored inventory. It accepts only matching paired
-`discard_as_recorded` or paired `fail_stale` directives for retained terminal
-evidence and atomically frees both slots. For a retained lease-offer failure,
-`resend` emits the exact stored envelope while retaining it, and
-`discard_as_recorded` or `fail_stale` frees it. Unsupported actions preserve the
-journal and fail closed. The only live producer is the registration-only empty
-catalog refusing an offered unknown tool; no successful offer admission or
-execution path populates this inventory, so the failure boundary supplies
-neither lease admission nor a workstation tool inventory.
+acknowledgement frees that failure slot. Independently, the root can retain one
+workspace release, advancing exactly from `release_accepted` to
+`release_completed`; the exact release acknowledgement frees that workspace
+slot. A `workspace_cleanup_failed` envelope is admissible only beside the exact
+accepted release it refuses, and its exact failure acknowledgement atomically
+frees both slots. A result acknowledgement preserves this independent workspace
+state. The root rejects provisioning and leak slots, cross-wired correlations,
+and journals belonging to another enrolled runner. The live serving loop
+consumes the exact result and lease-offer-failure acknowledgements for evidence
+produced on the current connection. On resume the runner sends the complete
+stored inventory. It accepts only matching paired `discard_as_recorded` or
+paired `fail_stale` directives for retained terminal evidence and atomically
+frees both slots. For a retained lease-offer failure, `resend` emits the exact
+stored envelope while retaining it, and `discard_as_recorded` or `fail_stale`
+frees it. Unsupported actions preserve the journal and fail closed. No present
+serving-loop or filesystem producer invokes the release journal methods or
+consumes their resumed directives or wire acknowledgements. The only live
+failure producer is the registration-only empty catalog refusing an offered
+unknown tool; this boundary supplies neither workspace cleanup nor a workstation
+tool inventory.
 
 **Committed unimplemented functionality.** Future execution support populates
 the bounded inventory that resume already exchanges, containing at most the one
