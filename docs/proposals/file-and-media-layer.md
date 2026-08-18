@@ -496,11 +496,14 @@ must bind the same digest, selector, reader identity, and view.
   reviewed general-file input contract; it never silently becomes text.
 
 Before any request in one tool batch executes worker or store I/O, one short
-batch-admission transaction visits requests in stable request order. It starts
-from the pinned target and current frontier, reserves mandatory
-continuation-call framing and output capacity once for the batch, and
-cumulatively reserves each sibling's complete maximum rendered result: the
-registry-bounded inspection projection, the selected text or structured view
+batch-admission transaction visits every request in stable request order,
+including siblings for tools outside this file-media layer. It starts from the
+pinned target and current frontier, reserves mandatory continuation-call framing
+and output capacity once for the batch, and cumulatively reserves each sibling's
+complete maximum rendered result. Existing tools use the finite durable-result
+and rendered-projection bound from their registered tool contract; a tool with no
+finite target projection cannot be admitted in the batch. File-media tools use
+the registry-bounded inspection projection, the selected text or structured view
 bound, or the rich-reference projection and media bounds below. A request that
 cannot obtain its cumulative reservation returns `OutputUnitTooLarge`, performs
 no external I/O, and commits no result or continuation state. Reservations for
@@ -551,9 +554,14 @@ BlobReference {
 presentation. `source_validation` authenticates the inspected source.
 `presentation_validation` always authenticates the exact bytes named by
 `digest`; it equals the source evidence for direct presentation. For a derived
-artifact, the broker independently validates the completed staged bytes with the
-registered output reader for the emitted canonical type after clean producer
-exit and before registration. Derived output admits only `StrongSignature` or
+artifact, after clean producer exit and before registration, the broker runs the
+complete relevant-probe classification and selection algorithm over the
+completed staged bytes under the ordinary output-validation isolation and
+resource bounds. The result must uniquely select the declared emitted canonical
+type and its registered output `ReaderIdentity`; ambiguity, another selected type
+or reader, or any failed relevant probe discards the staged output and commits no
+reference. The broker then validates once with that uniquely selected output
+reader. Derived output admits only `StrongSignature` or
 `StructuralValidation`; a producer's type claim, length, or digest is not
 validation evidence. Both evidence values are content-silent and protected by
 durable-result integrity, so preparation authenticates the evidence for the
@@ -592,6 +600,15 @@ committed reference is admissible to its mandatory continuation call, no
 transaction spans processor or store I/O, and crash recovery never erases an
 external effect. Equal output bytes converge by digest, and ambiguous
 publication cannot become tool success.
+
+For a rich view that directly presents the verified source instead of producing
+binary output, the broker checks the authenticated source `byte_length` before
+committing the reference. The length must fit the view's declared presentation
+maximum, the presentation kind's process ceiling, both target-specific
+materialized and provider-wire maxima, and the exact durable byte reservation.
+Failure returns `SourceTooLarge` with the effective maximum and commits no
+reference. A direct reference cannot bypass a generated-output channel's bounds
+merely because its bytes already exist.
 
 Rendering first emits a bounded textual stub. Preparation then:
 
@@ -768,9 +785,14 @@ One shared suite proves every provider and isolation implementation:
 - text/JSON boundaries remain valid, and expansion/pixel/sample limits stop at
   the named value;
 - binary presentation can reach its declared ceiling without entering the
-  control frame; derived bytes are independently type-validated before commit,
-  derived publication failure commits no reference, while a later failure leaves
-  at most an orphan and equal output deduplicates;
+  control frame; derived bytes run the complete relevant-probe ambiguity
+  algorithm and uniquely match the declared output type and reader before
+  validation and commit; conflicting polyglot evidence or a failed relevant
+  probe commits no reference; derived publication failure commits no reference,
+  while a later failure leaves at most an orphan and equal output deduplicates;
+- direct rich references compare the authenticated source length with the view,
+  process, target materialized, target wire, and durable reservation maxima
+  before commit, and an oversized source commits no reference;
 - durable replay does not rerun parsing or recharge the turn;
 - ambiguous rich-result reservations remain charged until durable reconciliation
   proves success or failure or records irreversible terminal abandonment, after
@@ -778,11 +800,11 @@ One shared suite proves every provider and isolation implementation:
 - continuation tokens authenticate and resolve only to their bound digest, part
   selector, reader identity, view, normalized initial options, and position;
 - one pre-execution batch admission reserves target-input capacity cumulatively
-  in stable request order for every inspection, text, structured, and rich
-  sibling plus one mandatory continuation frame; independently fitting results
-  cannot overfill the combined call, and rich views are also rejected before
-  processing when their maximum exceeds a target-specific materialized or
-  wire-byte limit; and
+  in stable request order for every sibling tool result, including non-file
+  tools, plus one mandatory continuation frame; a tool without a finite rendered
+  projection is not admitted, independently fitting results cannot overfill the
+  combined call, and rich views are also rejected before processing when their
+  maximum exceeds a target-specific materialized or wire-byte limit; and
 - preparation rejects missing, corrupt, malformed, oversized, and
   modality-unsupported references before send authorization.
 
