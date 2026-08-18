@@ -3993,8 +3993,8 @@ async fn s05_inv005_inv006_inv024_failed_tool_round_admits_and_runs_later_turn()
         .execute(Box::new(fixture.activated.clone()))
         .await;
     assert!(
-        first.is_err(),
-        "fixture process loss must escape orchestration"
+        first.is_ok(),
+        "committed crash classification must contain the executor loss"
     );
     assert_eq!(crashing.events(), vec![String::from("effect_free")]);
 
