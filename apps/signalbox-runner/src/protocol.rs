@@ -568,6 +568,7 @@ impl RunnerConnectionError {
 /// Established serial runner connection and exact active receipt.
 pub struct RunnerConnection<S> {
     io: BufReader<S>,
+    receive_buffer: Vec<u8>,
     receipt: EnrollmentReceipt,
     advertisement: Advertisement,
     outcome: EnrollmentOutcome,
@@ -679,6 +680,7 @@ where
         };
         Ok(Self {
             io,
+            receive_buffer: Vec::new(),
             receipt,
             advertisement: advertisement.clone(),
             outcome,
@@ -794,7 +796,7 @@ where
         tokio::pin!(shutdown);
         loop {
             let message = tokio::select! {
-                message = receive_message(&mut self.io) => message?,
+                message = receive_message_buffered(&mut self.io, &mut self.receive_buffer) => message?,
                 () = &mut shutdown => return Ok(ServeOutcome::ShutdownReady),
             };
             if let Some(outcome) = self.serve_message(state, message).await? {
@@ -808,7 +810,7 @@ where
         &mut self,
         state: &mut RunnerStateRoot,
     ) -> Result<Option<ServeOutcome>, RunnerConnectionError> {
-        let message = receive_message(&mut self.io).await?;
+        let message = receive_message_buffered(&mut self.io, &mut self.receive_buffer).await?;
         self.serve_message(state, message).await
     }
 
@@ -1097,14 +1099,16 @@ where
     /// The durable execution-possible phase commits immediately before the
     /// future can first be polled. Terminal evidence then commits before its
     /// wire projection; a transport failure therefore retains exact replay.
-    pub async fn execute_while_serving<F>(
+    pub async fn execute_while_serving<F, G>(
         &mut self,
         state: &mut RunnerStateRoot,
         dispatch: RunnerDispatchReady,
         execution: F,
+        shutdown: G,
     ) -> Result<Option<ServeOutcome>, RunnerConnectionError>
     where
         F: Future<Output = TerminalResult>,
+        G: Future<Output = ()>,
     {
         if dispatch.connection_epoch != self.connection_epoch {
             return Err(RunnerConnectionError::Violation(
@@ -1118,6 +1122,7 @@ where
             })
             .map_err(RunnerConnectionError::State)?;
         tokio::pin!(execution);
+        tokio::pin!(shutdown);
         loop {
             tokio::select! {
                 result = &mut execution => {
@@ -1138,11 +1143,12 @@ where
                     .await?;
                     return Ok(None);
                 }
-                message = receive_message(&mut self.io) => {
+                message = receive_message_buffered(&mut self.io, &mut self.receive_buffer) => {
                     if let Some(outcome) = self.serve_message(state, message?).await? {
                         return Ok(Some(outcome));
                     }
                 }
+                () = &mut shutdown => return Ok(Some(ServeOutcome::ShutdownReady)),
             }
         }
     }
@@ -1416,17 +1422,30 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut line = Vec::new();
-    let mut bounded = io.take((MAX_FRAME_BYTES + 1) as u64);
+    receive_message_buffered(io, &mut line).await
+}
+
+async fn receive_message_buffered<S>(
+    io: &mut BufReader<S>,
+    line: &mut Vec<u8>,
+) -> Result<Message, RunnerConnectionError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let remaining = (MAX_FRAME_BYTES + 1).saturating_sub(line.len());
+    let mut bounded = io.take(remaining as u64);
     let bytes = bounded
-        .read_until(b'\n', &mut line)
+        .read_until(b'\n', line)
         .await
         .map_err(RunnerConnectionError::Read)?;
-    if bytes == 0 {
+    if bytes == 0 && line.is_empty() {
         return Err(RunnerConnectionError::PeerClosed);
     }
-    decode_line(&line)
+    let decoded = decode_line(line)
         .map(|frame| frame.message)
-        .map_err(RunnerConnectionError::Decode)
+        .map_err(RunnerConnectionError::Decode);
+    line.clear();
+    decoded
 }
 
 #[cfg(test)]
@@ -2435,7 +2454,9 @@ mod tests {
             .await;
             send_hub_message(
                 &mut hub_io,
-                Message::LeaseClaimed(LeaseClaimed { correlation }),
+                Message::LeaseClaimed(LeaseClaimed {
+                    correlation: correlation.clone(),
+                }),
             )
             .await;
             send_hub_message(&mut hub_io, Message::Dispatch(dispatch)).await;
@@ -2558,7 +2579,7 @@ mod tests {
                 terminal
             };
             connection
-                .execute_while_serving(&mut state, ready, execution)
+                .execute_while_serving(&mut state, ready, execution, std::future::pending())
                 .await
                 .expect("terminal evidence is durably projected");
             Ok::<_, &'static str>(claimed)
@@ -2662,7 +2683,12 @@ mod tests {
                 .into_dispatch_ready()
                 .map_err(|_| "dispatch did not yield its executor handoff")?;
             connection
-                .execute_while_serving(&mut state, ready, std::future::pending::<TerminalResult>())
+                .execute_while_serving(
+                    &mut state,
+                    ready,
+                    std::future::pending::<TerminalResult>(),
+                    std::future::pending(),
+                )
                 .await
                 .map_err(|_| "daemon shutdown was not propagated")
         };
@@ -2712,6 +2738,201 @@ mod tests {
             }),
         );
         assert_eq!(state.reconnect_inventory().result, None);
+    }
+
+    #[tokio::test]
+    async fn local_shutdown_preempts_dispatch_execution() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let advertisement = advertisement_with_exec_tool();
+        let mut state = enrolled_state_for(&parent, &advertisement);
+        let correlation = retained_lease_correlation();
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: correlation.clone(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        let dispatch = retained_dispatch();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume accepts the exact retained lease");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the canonical claim acknowledgement is accepted");
+            let ready = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the canonical dispatch is accepted")
+                .expect("dispatch yields one executor handoff")
+                .into_dispatch_ready()
+                .map_err(|_| "dispatch did not yield its executor handoff")?;
+            connection
+                .execute_while_serving(
+                    &mut state,
+                    ready,
+                    std::future::pending::<TerminalResult>(),
+                    std::future::ready(()),
+                )
+                .await
+                .map_err(|_| "local shutdown was not observed")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_lease_directives(DirectiveAction::Await),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::LeaseClaimed(LeaseClaimed {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::Dispatch(dispatch)).await;
+        };
+        let (outcome, ()) = tokio::join!(runner, hub);
+
+        assert_eq!(
+            outcome.expect("the execution harness completes"),
+            Some(ServeOutcome::ShutdownReady),
+        );
+        assert_eq!(
+            state.reconnect_inventory().lease,
+            Some(LeasePhase {
+                correlation,
+                phase: LeasePhaseKind::ExecutionMayHaveStarted,
+            }),
+        );
+        assert_eq!(state.reconnect_inventory().result, None);
+    }
+
+    #[tokio::test]
+    async fn execution_completion_preserves_a_partial_heartbeat_frame() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let advertisement = advertisement_with_exec_tool();
+        let mut state = enrolled_state_for(&parent, &advertisement);
+        let correlation = retained_lease_correlation();
+        state
+            .record_lease_phase(LeasePhase {
+                correlation: correlation.clone(),
+                phase: LeasePhaseKind::WaitingDispatch,
+            })
+            .expect("the waiting-dispatch phase is durable");
+        let dispatch = retained_dispatch();
+        let terminal = TerminalResult::Success {
+            text: String::from("fixture-result"),
+        };
+        let expected_terminal = terminal.clone();
+        let heartbeat = Frame::try_new(Message::Heartbeat(Heartbeat {
+            sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+            last_accepted_peer_sequence: NO_ACCEPTED_PEER_SEQUENCE,
+        }))
+        .expect("the heartbeat frame is valid");
+        let heartbeat_bytes = encode_line(&heartbeat).expect("the heartbeat frame encodes");
+        let split = heartbeat_bytes.len() - 1;
+        let (release_execution, execution_released) = tokio::sync::oneshot::channel();
+        let (runner_io, hub_io) = tokio::io::duplex(1);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume accepts the exact retained lease");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the canonical claim acknowledgement is accepted");
+            let ready = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the canonical dispatch is accepted")
+                .expect("dispatch yields one executor handoff")
+                .into_dispatch_ready()
+                .map_err(|_| "dispatch did not yield its executor handoff")?;
+            let execution = async {
+                execution_released
+                    .await
+                    .expect("the partial frame releases execution");
+                terminal
+            };
+            connection
+                .execute_while_serving(&mut state, ready, execution, std::future::pending())
+                .await
+                .map_err(|_| "execution did not complete")?;
+            connection
+                .serve_one(&mut state)
+                .await
+                .map_err(|_| "the completed heartbeat frame was not preserved")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: retained_lease_directives(DirectiveAction::Await),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::LeaseClaimed(LeaseClaimed {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await;
+            send_hub_message(&mut hub_io, Message::Dispatch(dispatch)).await;
+            hub_io
+                .get_mut()
+                .write_all(&heartbeat_bytes[..split])
+                .await
+                .expect("the heartbeat prefix is written");
+            release_execution
+                .send(())
+                .expect("the execution future remains live");
+            let result = receive_hub_message(&mut hub_io).await;
+            hub_io
+                .get_mut()
+                .write_all(&heartbeat_bytes[split..])
+                .await
+                .expect("the heartbeat suffix is written");
+            let acknowledgement = receive_hub_message(&mut hub_io).await;
+            (result, acknowledgement)
+        };
+        let (outcome, (result, acknowledgement)) = tokio::join!(runner, hub);
+
+        assert_eq!(outcome.expect("the execution harness completes"), None);
+        assert_eq!(
+            result,
+            Message::Result(ResultFrame {
+                correlation: correlation.clone(),
+                result: expected_terminal,
+            }),
+        );
+        assert_eq!(
+            acknowledgement,
+            Message::HeartbeatAck(HeartbeatAck {
+                challenge_sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                runner_sequence: positive(FIRST_RUNNER_SEQUENCE),
+                lease_phase: Some(LeasePhase {
+                    correlation,
+                    phase: LeasePhaseKind::ExecutionMayHaveStarted,
+                }),
+                workspace_phase: None,
+            }),
+        );
     }
 
     /// INV-011 / INV-024 / INV-043: resume sends the exact retained terminal

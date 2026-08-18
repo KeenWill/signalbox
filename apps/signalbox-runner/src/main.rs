@@ -116,8 +116,14 @@ async fn run(
                         dispatch.correlation().clone(),
                         dispatch.normalized_arguments().clone(),
                     );
+                    let shutdown = async {
+                        tokio::select! {
+                            _ = terminate.recv() => {}
+                            _ = interrupt.recv() => {}
+                        }
+                    };
                     match connection
-                        .execute_while_serving(&mut state, *dispatch, execution)
+                        .execute_while_serving(&mut state, *dispatch, execution, shutdown)
                         .await
                     {
                         Ok(Some(outcome)) => break Ok(outcome),
