@@ -429,7 +429,9 @@ jobs:
       postgres-integration
       (${{ matrix.suite }} ${{ matrix.partition }}/${{ matrix.partitions }})
     needs: postgres-integration-build
-    runs-on: signalbox-docker
+    # The generated matrix routes one persistence shard through node-local
+    # NVMe while every other shard remains on the production Docker pool.
+    runs-on: ${{ matrix.runner }}
     # Keep security-sensitive sockets and filesystem fixtures off the NFS
     # workspace: their permission and atomicity contracts require local /tmp.
     env:

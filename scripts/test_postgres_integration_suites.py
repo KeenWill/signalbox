@@ -272,6 +272,7 @@ class RunMatrixTests(unittest.TestCase):
                         "partition": 1,
                         "partitions": 1,
                         "filter": "all()",
+                        "runner": "signalbox-docker",
                     }
                 ]
             },
@@ -291,6 +292,15 @@ class RunMatrixTests(unittest.TestCase):
         matrix = run_matrix((suite(name="a", shards=3), suite(name="b")))
 
         self.assertEqual(len(matrix["include"]), 4)
+
+    def test_only_the_first_persistence_shard_uses_the_nvme_canary(self) -> None:
+        matrix = run_matrix((suite(name="persistence", shards=3),))
+
+        self.assertEqual(
+            matrix["include"][0]["runner"], "signalbox-docker-nvme-canary"
+        )
+        self.assertEqual(matrix["include"][1]["runner"], "signalbox-docker")
+        self.assertEqual(matrix["include"][2]["runner"], "signalbox-docker")
 
 
 class ArchivePlanTests(unittest.TestCase):
@@ -316,7 +326,7 @@ class ArchivePlanTests(unittest.TestCase):
 AGREEING_WORKFLOW = """
 jobs:
   postgres-integration-run:
-    runs-on: signalbox-docker
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix: ${{ fromJSON(needs.postgres-integration-build.outputs.matrix) }}
     steps:
@@ -700,7 +710,8 @@ class WorkflowAgreementTests(unittest.TestCase):
     def test_run_job_leaving_signalbox_docker_is_reported(self) -> None:
         failures = self.disagreements(
             AGREEING_WORKFLOW.replace(
-                "  postgres-integration-run:\n    runs-on: signalbox-docker\n",
+                "  postgres-integration-run:\n"
+                "    runs-on: ${{ matrix.runner }}\n",
                 "  postgres-integration-run:\n    runs-on: windows-latest\n",
             )
         )
@@ -889,7 +900,8 @@ class WorkflowAgreementTests(unittest.TestCase):
     def test_an_integration_job_leaving_signalbox_docker_is_reported(self) -> None:
         failures = self.disagreements(
             AGREEING_WORKFLOW.replace(
-                "  postgres-integration-run:\n    runs-on: signalbox-docker\n",
+                "  postgres-integration-run:\n"
+                "    runs-on: ${{ matrix.runner }}\n",
                 "  postgres-integration-run:\n    runs-on: macos-latest\n",
             )
         )
@@ -1373,7 +1385,7 @@ class CommandLineTests(unittest.TestCase):
         self.assertTrue(matrix["include"])
         self.assertEqual(
             sorted(matrix["include"][0]),
-            ["filter", "partition", "partitions", "suite"],
+            ["filter", "partition", "partitions", "runner", "suite"],
         )
 
     def test_archive_plan_emits_one_row_per_suite(self) -> None:

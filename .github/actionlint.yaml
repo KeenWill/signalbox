@@ -2,3 +2,4 @@ self-hosted-runner:
   labels:
     - signalbox
     - signalbox-docker
+    - signalbox-docker-nvme-canary
