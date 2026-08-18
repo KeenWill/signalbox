@@ -17,11 +17,11 @@ use crate::{
     ActiveTurnPhase, ApprovedToolRequest, AuthorizedToolAttempt, CurrentToolAttempt,
     CurrentToolAttemptState, DecideToolRequest, DecideToolRequestResult, DelegateToolApproval,
     EndedToolAttempt, PreparedDecideToolRequest, ReconstitutedToolAttempt,
-    ResolvedContextFrontierSnapshot, RunnerToolAttemptAuthorization, SemanticTranscriptEntry,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
-    ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId,
-    ToolDispatchAuthority, ToolEffectClass, ToolExecutionErrorKind, ToolRequest, ToolRequestId,
-    TurnAttemptId, TurnId, tool::MAX_TOOL_REQUESTS_PER_RESPONSE,
+    ResolvedContextFrontierSnapshot, RunnerToolAttemptAuthorization, RunnerToolResultAuthority,
+    SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId,
+    ToolApprovalDecision, ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptEnd,
+    ToolAttemptId, ToolDispatchAuthority, ToolEffectClass, ToolExecutionErrorKind, ToolRequest,
+    ToolRequestId, TurnAttemptId, TurnId, tool::MAX_TOOL_REQUESTS_PER_RESPONSE,
     tool_attempt::RUNNER_ISSUANCE_AVAILABLE, tool_attempt::RUNNER_ISSUANCE_ISSUED,
     tool_attempt::RUNNER_ISSUANCE_RETIRED,
 };
@@ -834,6 +834,40 @@ impl ToolBatch {
     ) -> Result<RunnerToolAttemptAuthorization, ToolBatchExecutionError> {
         let authorized = self.resume_in_flight_attempt(attempt)?;
         self.bind_runner_authorization(authorized)
+    }
+
+    /// Restores one in-flight runner attempt solely for terminal-result admission.
+    pub fn resume_runner_result_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<RunnerToolResultAuthority, ToolBatchExecutionError> {
+        let authorized = self.resume_in_flight_attempt(attempt)?;
+        let request = self
+            .requests
+            .iter()
+            .find(|request| request.id() == authorized.correlation().request())
+            .cloned()
+            .ok_or(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptMissing,
+            })?;
+        let approval =
+            self.approvals
+                .get(&request.id())
+                .cloned()
+                .ok_or(ToolBatchExecutionError {
+                    failure: ToolBatchExecutionFailure::ApprovalMismatch,
+                })?;
+        let approved =
+            ApprovedToolRequest::try_from_resolution(request, approval).map_err(|_| {
+                ToolBatchExecutionError {
+                    failure: ToolBatchExecutionFailure::ApprovalMismatch,
+                }
+            })?;
+        RunnerToolResultAuthority::try_new(approved, authorized).map_err(|_| {
+            ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptStageMismatch,
+            }
+        })
     }
 
     pub(crate) fn reauthorize_unclaimed_runner_attempt(

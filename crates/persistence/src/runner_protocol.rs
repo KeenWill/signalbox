@@ -18,8 +18,8 @@ use signalbox_application::{
     AbandonLostRunnerOutcome, AbandonLostRunnerTransaction, PinnedRunnerDispatchRequest,
     PinnedRunnerDispatchTransaction, ReplaceLostRunnerBeforePinOutcome,
     ReplaceLostRunnerBeforePinTransaction, RunnerLeaseClaimRequest, RunnerLeaseClaimTransaction,
-    RunnerReplacementProvisioningOutcome, RunnerReplacementProvisioningStage,
-    RunnerReplacementProvisioningTransaction,
+    RunnerLeaseResultRequest, RunnerLeaseResultTransaction, RunnerReplacementProvisioningOutcome,
+    RunnerReplacementProvisioningStage, RunnerReplacementProvisioningTransaction,
 };
 use signalbox_domain::{
     AbandonLostRunner, AbandonLostRunnerRejection, AbandonLostRunnerResult, AbandonedLostRunner,
@@ -32,8 +32,8 @@ use signalbox_domain::{
     RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
     RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
     RunnerEnrollmentReconstitutionInput, RunnerEnrollmentRequestId, RunnerEnrollmentState,
-    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
-    RunnerLeaseLoss, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
+    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCompletion, RunnerLeaseCorrelation,
+    RunnerLeaseId, RunnerLeaseLoss, RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput,
     RunnerLeaseRetryPreparation, RunnerLeaseState, RunnerLostBeforePin, RunnerPlacementLossSource,
     RunnerPlacementReconstitutionHistory, RunnerPlacementRecoveryState,
     RunnerPrePinReplacementHistory, RunnerRegistrationReconciliation,
@@ -4558,7 +4558,9 @@ impl RunnerProtocolStore {
     pub async fn store_lease(&self, lease: &RunnerLease) -> Result<(), RunnerProtocolStoreError> {
         if matches!(
             lease.state(),
-            RunnerLeaseState::Claimed | RunnerLeaseState::LostUnclaimed
+            RunnerLeaseState::Claimed
+                | RunnerLeaseState::Completed
+                | RunnerLeaseState::LostUnclaimed
         ) {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
@@ -4575,6 +4577,21 @@ impl RunnerProtocolStore {
         lease: &RunnerLease,
     ) -> Result<(), RunnerProtocolStoreError> {
         if lease.state() != RunnerLeaseState::Claimed {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        self.store_lease_without_proof(lease).await
+    }
+
+    /// Stores a checked completed-lease projection for PostgreSQL integration tests.
+    #[cfg(feature = "postgres-integration")]
+    #[doc(hidden)]
+    pub async fn store_completed_lease_projection_for_test(
+        &self,
+        lease: &RunnerLease,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        if lease.state() != RunnerLeaseState::Completed {
             return Err(RunnerProtocolStoreError::Domain(
                 RunnerDomainError::InvalidState,
             ));
@@ -4632,6 +4649,82 @@ impl RunnerProtocolStore {
         append_lease_event_in(&mut transaction, &claimed).await?;
         commit_mutation(transaction).await?;
         Ok(claimed)
+    }
+
+    /// Atomically commits one exact runner result before acknowledgement.
+    pub async fn commit_lease_result(
+        &self,
+        request: RunnerLeaseResultRequest,
+    ) -> Result<RunnerLeaseCompletion, RunnerProtocolStoreError> {
+        let (correlation, observation) = request.into_parts();
+        let mut transaction = self.pool.begin().await?;
+        crate::tool_loop::lock_tool_session(transaction.as_mut(), correlation.dispatch.session())
+            .await
+            .map_err(map_runner_tool_loop_error)?;
+        let lease_head = sqlx::query(RUNNER_LEASE_HEAD)
+            .bind(correlation.lease.into_uuid())
+            .bind(Decimal::from(correlation.generation.get()))
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ))?;
+        let state: String = lease_head.decode_column("state_kind")?;
+        let lease = self
+            .load_lease_in(&mut transaction, correlation.lease, correlation.generation)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalLoss)?;
+        if state == "completed" {
+            let attempt_id = correlation.dispatch.attempt();
+            let mut attempts =
+                crate::tool_loop::load_attempts_by_id(transaction.as_mut(), &[attempt_id])
+                    .await
+                    .map_err(map_runner_tool_loop_error)?;
+            let attempt = attempts
+                .remove(&attempt_id)
+                .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+            let signalbox_domain::ReconstitutedToolAttempt::Ended(attempt) = attempt else {
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+            };
+            let completion = lease
+                .verify_completed_observation(attempt, correlation, observation)
+                .map_err(RunnerProtocolStoreError::Domain)?;
+            transaction.rollback().await?;
+            return Ok(completion);
+        }
+        if state != "claimed" {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ));
+        }
+        let batch = crate::tool_loop::load_active_batch_from_connection(
+            transaction.as_mut(),
+            correlation.dispatch.session(),
+            correlation.dispatch.turn(),
+        )
+        .await
+        .map_err(map_runner_tool_loop_error)?
+        .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+        let authorization = batch
+            .resume_runner_result_attempt(correlation.dispatch.attempt())
+            .map_err(|_| RunnerProtocolStoreError::Domain(RunnerDomainError::InvalidState))?;
+        let completion = lease
+            .complete_with_observation(authorization, correlation, observation)
+            .map_err(RunnerProtocolStoreError::Domain)?;
+        crate::tool_loop::persist_ended_attempt(transaction.as_mut(), completion.attempt())
+            .await
+            .map_err(map_runner_tool_loop_error)?;
+        if completion.attempt().end() == &ToolAttemptEnd::Ambiguous {
+            crate::tool_loop::persist_ambiguous_tool_recovery_wait(
+                transaction.as_mut(),
+                completion.attempt(),
+            )
+            .await
+            .map_err(map_runner_tool_loop_error)?;
+        }
+        append_lease_event_in(&mut transaction, completion.lease()).await?;
+        commit_mutation(transaction).await?;
+        Ok(completion)
     }
 
     /// Atomically authorizes one prepared tool attempt and stores its offered
@@ -5509,6 +5602,17 @@ impl RunnerLeaseClaimTransaction for RunnerProtocolStore {
         request: RunnerLeaseClaimRequest,
     ) -> Result<RunnerLease, Self::Error> {
         self.claim_lease(request).await
+    }
+}
+
+impl RunnerLeaseResultTransaction for RunnerProtocolStore {
+    type Error = RunnerProtocolStoreError;
+
+    async fn commit_result(
+        &mut self,
+        request: RunnerLeaseResultRequest,
+    ) -> Result<RunnerLeaseCompletion, Self::Error> {
+        self.commit_lease_result(request).await
     }
 }
 

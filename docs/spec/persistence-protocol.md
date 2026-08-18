@@ -34,7 +34,9 @@ lease-offer registration and execution-placement reconstitution facts are
 verified against this PR (`agent/runner-lease-domain-correlation`). Existing-pin
 attempt-and-offer atomicity is verified against this PR
 (`agent/runner-pinned-dispatch-transaction`). Durable lease-claim admission is
-verified against this PR (`agent/runner-lease-claim-transaction`).
+verified against this PR (`agent/runner-lease-claim-transaction`). Atomic
+claimed-lease and physical-attempt result admission is verified against this PR
+(`agent/runner-lease-result-transaction`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -1114,15 +1116,17 @@ Locks per transaction, in acquisition order:
   preserve an offer, so claim serializes on the current registration head
   without replacing the offer's immutable registration revision. Claim and
   connection loss therefore serialize, and the winner determines whether an
-  execution capability exists. The generic lease-projection writer refuses to
-  originate a claimed state. **Committed unimplemented functionality.** No
-  present transaction performs the initial dispatch boundary that consumes a
-  workspace receipt when present and stores pin, grant, `InFlight` attempt, and
-  offered lease together. Result admission likewise has no present transaction;
-  its future implementation takes the session scheduler first, then the
-  applicable runner and lease rows without acquiring an earlier omitted lock,
-  and commits the checked terminal attempt observation and claimed-lease
-  completion together before acknowledgement.
+  execution capability exists. Result admission locks the session scheduler and
+  current lease head, loads the canonical claimed lease and active tool batch,
+  derives result-only authority from the exact in-flight attempt, and commits
+  the lease completion and terminal attempt together. Duplicate, stale, or
+  cross-wired evidence advances neither aggregate. Ambiguous external-effect
+  evidence also ends the issuing turn attempt and enters the exact
+  `awaiting_tool_recovery` wait in that transaction. The generic
+  lease-projection writer refuses to originate a claimed or completed state.
+  **Committed unimplemented functionality.** No present transaction performs the
+  initial dispatch boundary that consumes a workspace receipt when present and
+  stores pin, grant, `InFlight` attempt, and offered lease together.
 
 - **Runner loss**: one short transaction locks only the current connection/loss
   head, advances a positive durable loss epoch, and thereby makes every trigger
