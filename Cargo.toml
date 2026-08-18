@@ -24,6 +24,7 @@ members = [
     "crates/model-provider-runtime",
     "crates/persistence",
     "crates/process-protocol",
+    "crates/program-runtime",
     "crates/runner-wire",
     "crates/test-bin",
     "crates/tool-contract",

@@ -1,12 +1,21 @@
 use std::{error::Error, fmt, num::NonZeroU64, str::FromStr, sync::Arc};
 
+use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
+
 const SHA256_PREFIX: &str = "sha256:";
+// numeric-bound: not-a-bound - fixed lowercase SHA-256 hexadecimal width
 const SHA256_HEX_BYTES: usize = 64;
+// numeric-bound: ceiling - bounds retained caller media-type text
 const MAX_DECLARED_MEDIA_TYPE_BYTES: usize = 255;
+// numeric-bound: ceiling - bounds retained caller display-name text
 const MAX_DISPLAY_FILENAME_BYTES: usize = 255;
+// numeric-bound: ceiling - bounds registry identity and selector storage
 const MAX_NAME_BYTES: usize = 64;
+// numeric-bound: ceiling - bounds retained reader-revision text
 const MAX_REVISION_BYTES: usize = 32;
+// numeric-bound: ceiling - bounds retained and parsed view-schema memory
 const MAX_SCHEMA_BYTES: usize = 65_536;
+// numeric-bound: ceiling - bounds retained and parsed processor-metadata memory
 const MAX_METADATA_BYTES: usize = 16_384;
 
 /// SHA-256 identity at the provider-neutral boundary.
@@ -68,8 +77,6 @@ fn lowercase_hex(byte: u8) -> Option<u8> {
 pub enum AttachmentKind {
     /// Image intent.
     Image,
-    /// Audio intent.
-    Audio,
     /// Document intent.
     Document,
     /// General file intent.
@@ -401,8 +408,8 @@ impl CanonicalJsonObjectSchema {
         if value.len() > MAX_SCHEMA_BYTES || value.contains('\0') {
             return Err(RegistryValueError::Schema);
         }
-        let parsed: serde_json::Value =
-            serde_json::from_str(value).map_err(|_| RegistryValueError::Schema)?;
+        let parsed =
+            parse_json_without_duplicate_members(value).map_err(|_| RegistryValueError::Schema)?;
         let object = parsed.as_object().ok_or(RegistryValueError::Schema)?;
         if object.get("type").and_then(serde_json::Value::as_str) != Some("object") {
             return Err(RegistryValueError::Schema);
@@ -441,8 +448,8 @@ impl BoundedMetadata {
         if value.len() > MAX_METADATA_BYTES || value.contains('\0') {
             return Err(RegistryValueError::Metadata);
         }
-        let parsed: serde_json::Value =
-            serde_json::from_str(value).map_err(|_| RegistryValueError::Metadata)?;
+        let parsed = parse_json_without_duplicate_members(value)
+            .map_err(|_| RegistryValueError::Metadata)?;
         if !parsed.is_object() {
             return Err(RegistryValueError::Metadata);
         }
@@ -464,6 +471,104 @@ impl BoundedMetadata {
     /// Borrows the parsed object.
     pub const fn value(&self) -> &serde_json::Value {
         &self.value
+    }
+}
+
+pub(crate) fn parse_json_without_duplicate_members(
+    value: &str,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(value);
+    let parsed = DuplicateAwareJson.deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(parsed)
+}
+
+struct DuplicateAwareJson;
+
+impl<'de> DeserializeSeed<'de> for DuplicateAwareJson {
+    type Value = serde_json::Value;
+
+    fn deserialize<Deserializer>(
+        self,
+        deserializer: Deserializer,
+    ) -> Result<Self::Value, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DuplicateAwareJsonVisitor)
+    }
+}
+
+struct DuplicateAwareJsonVisitor;
+
+impl<'de> Visitor<'de> for DuplicateAwareJsonVisitor {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JSON without duplicate object members")
+    }
+
+    fn visit_bool<Error>(self, value: bool) -> Result<Self::Value, Error> {
+        Ok(serde_json::Value::Bool(value))
+    }
+
+    fn visit_i64<Error>(self, value: i64) -> Result<Self::Value, Error> {
+        Ok(serde_json::Value::Number(value.into()))
+    }
+
+    fn visit_u64<Error>(self, value: u64) -> Result<Self::Value, Error> {
+        Ok(serde_json::Value::Number(value.into()))
+    }
+
+    fn visit_f64<Error>(self, value: f64) -> Result<Self::Value, Error>
+    where
+        Error: serde::de::Error,
+    {
+        serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| Error::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<Error>(self, value: &str) -> Result<Self::Value, Error> {
+        Ok(serde_json::Value::String(value.to_owned()))
+    }
+
+    fn visit_string<Error>(self, value: String) -> Result<Self::Value, Error> {
+        Ok(serde_json::Value::String(value))
+    }
+
+    fn visit_none<Error>(self) -> Result<Self::Value, Error> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_unit<Error>(self) -> Result<Self::Value, Error> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_seq<Access>(self, mut sequence: Access) -> Result<Self::Value, Access::Error>
+    where
+        Access: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element_seed(DuplicateAwareJson)? {
+            values.push(value);
+        }
+        Ok(serde_json::Value::Array(values))
+    }
+
+    fn visit_map<Access>(self, mut object: Access) -> Result<Self::Value, Access::Error>
+    where
+        Access: MapAccess<'de>,
+    {
+        let mut values = serde_json::Map::new();
+        while let Some(name) = object.next_key::<String>()? {
+            if values.contains_key(&name) {
+                return Err(Access::Error::custom("duplicate JSON object member"));
+            }
+            let value = object.next_value_seed(DuplicateAwareJson)?;
+            values.insert(name, value);
+        }
+        Ok(serde_json::Value::Object(values))
     }
 }
 
@@ -552,5 +657,21 @@ mod tests {
             metadata.value()["note"],
             serde_json::Value::String(String::from("</tool><script>alert(1)</script>"))
         );
+    }
+
+    #[test]
+    fn metadata_rejects_duplicate_object_members() {
+        let outcome = BoundedMetadata::try_new(r#"{"kind":"safe","kind":"attacker"}"#);
+
+        assert_eq!(outcome, Err(RegistryValueError::Metadata));
+    }
+
+    #[test]
+    fn schema_rejects_nested_duplicate_object_members() {
+        let outcome = CanonicalJsonObjectSchema::try_new(
+            r#"{"type":"object","properties":{"value":{"type":"string","type":"number"}}}"#,
+        );
+
+        assert_eq!(outcome, Err(RegistryValueError::Schema));
     }
 }

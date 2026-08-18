@@ -383,6 +383,11 @@ impl FileMediaProviderDeclaration {
     pub const fn observed_container_entries(&self) -> Option<u64> {
         self.observed_container_entries
     }
+
+    pub(crate) fn sort_readers(&mut self) {
+        self.readers
+            .sort_by(|left, right| left.identity().cmp(right.identity()));
+    }
 }
 
 /// Provider request to validate one candidate selected by the registry.
