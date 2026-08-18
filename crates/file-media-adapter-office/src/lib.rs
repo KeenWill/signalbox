@@ -21,7 +21,7 @@ use signalbox_file_media_runtime::{
     ReaderDeclarationInput, ReaderIdentity, ReasonCode, StreamingTextFallback, ValidationEvidence,
     VerifiedBlobSource,
 };
-use zip::ZipArchive;
+use zip::{CompressionMethod, ZipArchive};
 
 const PROVIDER_NAME: &str = "office-open-xml";
 const READER_REVISION: &str = "zip-8-quick-xml-0-41-v1";
@@ -47,6 +47,7 @@ const ZIP_SUFFIX_BYTES: u64 = 65_536;
 const VALIDATION_SOURCE_BYTES: u64 = 262_144;
 const CONTENT_TYPES_COMPRESSED_BYTES: u64 = 64 * 1024;
 const LOCAL_HEADER_BYTES: u64 = 30;
+const CONTENT_TYPES_NAME_BYTES: u64 = 19;
 const READ_SOURCE_BYTES: u64 = 8 * 1024 * 1024;
 const SOURCE_CHUNK_BYTES: u64 = 256 * 1024;
 const MAX_ENTRY_BYTES: u64 = 4 * 1024 * 1024;
@@ -232,7 +233,7 @@ fn reader_declaration(
         probe: ProbeDeclaration::new(
             ZIP_PREFIX_BYTES,
             ZIP_SUFFIX_BYTES,
-            5,
+            6,
             VALIDATION_SOURCE_BYTES,
         ),
         views: vec![text_view, metadata_view],
@@ -410,6 +411,7 @@ async fn read_central_inventory(
                 - ZIP_SUFFIX_BYTES
                 - ZIP_PREFIX_BYTES
                 - LOCAL_HEADER_BYTES
+                - CONTENT_TYPES_NAME_BYTES
                 - CONTENT_TYPES_COMPRESSED_BYTES
     {
         return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
@@ -430,12 +432,18 @@ async fn read_central_inventory(
         inventory.kinds = recognized;
         return Ok(inventory);
     }
-    let content_types = read_content_types(source, cancellation, &inventory)
-        .await
-        .map_err(|issue| CentralReadError::Validation {
-            issue,
-            kinds: recognized.clone(),
-        })?;
+    let content_types = match read_content_types(source, cancellation, &inventory).await {
+        Ok(content_types) => content_types,
+        Err(CentralReadError::Validation { issue, .. }) => {
+            return Err(CentralReadError::Validation {
+                issue,
+                kinds: recognized,
+            });
+        }
+        Err(CentralReadError::Processor(error)) => {
+            return Err(CentralReadError::Processor(error));
+        }
+    };
     inventory.kinds =
         validate_content_types(&content_types, &inventory.entries_by_name).map_err(|issue| {
             CentralReadError::Validation {
@@ -506,6 +514,12 @@ fn parse_central_directory(
                     kinds: recognized.clone(),
                 })?;
         if decoded_entry_name(&entry.name) {
+            if !matches!(entry.compression, 0 | 8) {
+                return Err(CentralParseError {
+                    issue: ValidationIssue::Malformed(MALFORMED_REASON),
+                    kinds: recognized,
+                });
+            }
             if entry.expanded_bytes > MAX_ENTRY_BYTES {
                 return Err(CentralParseError {
                     issue: ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT),
@@ -530,6 +544,15 @@ fn parse_central_directory(
         offset = parsed.next_offset;
     }
     if entries_by_name.len() != expected_entries {
+        return Err(CentralParseError {
+            issue: ValidationIssue::Malformed(MALFORMED_REASON),
+            kinds: marker_kinds(&entries_by_name),
+        });
+    }
+    if entries_by_name
+        .iter()
+        .any(|entry| macro_project_name(&entry.name))
+    {
         return Err(CentralParseError {
             issue: ValidationIssue::Malformed(MALFORMED_REASON),
             kinds: marker_kinds(&entries_by_name),
@@ -591,7 +614,14 @@ fn parse_central_entry(bytes: &[u8], offset: usize) -> Result<ParsedCentralEntry
 }
 
 fn decoded_entry_name(name: &str) -> bool {
-    name == CONTENT_TYPES || name.ends_with(".xml")
+    name == CONTENT_TYPES || name.ends_with(".xml") || name.ends_with(".rels")
+}
+
+fn macro_project_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "word/vbaproject.bin" | "xl/vbaproject.bin" | "ppt/vbaproject.bin"
+    )
 }
 
 fn kind_for_marker(name: &str) -> Option<OfficeKind> {
@@ -611,7 +641,7 @@ async fn read_content_types(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
     inventory: &CentralInventory,
-) -> Result<Vec<u8>, ValidationIssue> {
+) -> Result<Vec<u8>, CentralReadError> {
     let entry = inventory
         .entries_by_name
         .iter()
@@ -621,17 +651,15 @@ async fn read_content_types(
         || entry.compressed_bytes > CONTENT_TYPES_COMPRESSED_BYTES
         || entry.expanded_bytes > MAX_ENTRY_BYTES
     {
-        return Err(ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT));
+        return Err(ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT).into());
     }
-    require_active(cancellation).map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
-    let local = read_range(source, entry.local_offset, LOCAL_HEADER_BYTES)
-        .await
-        .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+    require_active(cancellation)?;
+    let local = read_range(source, entry.local_offset, LOCAL_HEADER_BYTES).await?;
     if local.get(0..4) != Some(b"PK\x03\x04")
         || le_u16(&local, 6)? != entry.flags
         || le_u16(&local, 8)? != entry.compression
     {
-        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
     }
     let name_length = u64::from(le_u16(&local, 26)?);
     let extra_length = u64::from(le_u16(&local, 28)?);
@@ -639,11 +667,9 @@ async fn read_content_types(
         .local_offset
         .checked_add(LOCAL_HEADER_BYTES)
         .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
-    let local_name = read_range(source, local_name_offset, name_length)
-        .await
-        .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+    let local_name = read_range(source, local_name_offset, name_length).await?;
     if local_name.as_slice() != entry.name.as_bytes() {
-        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
     }
     let data_offset = entry
         .local_offset
@@ -651,9 +677,7 @@ async fn read_content_types(
         .and_then(|value| value.checked_add(name_length))
         .and_then(|value| value.checked_add(extra_length))
         .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
-    let compressed = read_range(source, data_offset, entry.compressed_bytes)
-        .await
-        .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+    let compressed = read_range(source, data_offset, entry.compressed_bytes).await?;
     let bytes = match entry.compression {
         0 => compressed,
         8 => {
@@ -664,15 +688,15 @@ async fn read_content_types(
                 .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
             decoded
         }
-        _ => return Err(ValidationIssue::Malformed(MALFORMED_REASON)),
+        _ => return Err(ValidationIssue::Malformed(MALFORMED_REASON).into()),
     };
     if u64::try_from(bytes.len()).ok() != Some(entry.expanded_bytes)
         || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ENTRY_BYTES
     {
-        return Err(ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT));
+        return Err(ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT).into());
     }
     if crc32fast::hash(&bytes) != entry.crc32 {
-        return Err(ValidationIssue::Malformed(MALFORMED_REASON));
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
     }
     Ok(bytes)
 }
@@ -886,6 +910,12 @@ fn validate_archive<R: Read + std::io::Seek>(
             return Err(ReadIssue::Failed);
         }
         if decoded_entry_name(name) {
+            if !matches!(
+                file.compression(),
+                CompressionMethod::Stored | CompressionMethod::Deflated
+            ) {
+                return Err(ReadIssue::Failed);
+            }
             if file.size() > MAX_ENTRY_BYTES {
                 return Err(ReadIssue::Expansion(DECOMPRESSED_SIZE_LIMIT));
             }
@@ -898,6 +928,9 @@ fn validate_archive<R: Read + std::io::Seek>(
         }
         has_content_types |= name == CONTENT_TYPES;
         has_marker |= name == kind.marker();
+        if macro_project_name(name) {
+            return Err(ReadIssue::Failed);
+        }
     }
     if !has_content_types || !has_marker {
         return Err(ReadIssue::Failed);
@@ -910,12 +943,15 @@ fn read_text<R: Read + std::io::Seek>(
     kind: OfficeKind,
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorReadOutput, ProcessorFailure> {
-    let mut names = match kind {
+    let names = match kind {
         OfficeKind::Docx => vec![String::from(kind.marker())],
-        OfficeKind::Xlsx => selected_names(archive, "xl/worksheets/", "xl/sharedStrings.xml")?,
-        OfficeKind::Pptx => selected_names(archive, "ppt/slides/slide", "")?,
+        OfficeKind::Xlsx => {
+            let mut names = selected_names(archive, "xl/worksheets/", "xl/sharedStrings.xml")?;
+            names.sort();
+            names
+        }
+        OfficeKind::Pptx => presentation_slide_names(archive)?,
     };
-    names.sort();
     let mut output = String::new();
     for name in names {
         require_active(cancellation)?;
@@ -928,7 +964,7 @@ fn read_text<R: Read + std::io::Seek>(
             }
             Err(ReadIssue::Failed) => return Err(ProcessorFailure::Failed),
         };
-        let part = match extract_xml_text(&bytes) {
+        let part = match extract_xml_text(&bytes, kind) {
             Ok(part) => part,
             Err(XmlIssue::OutputTooLarge) => return Ok(ProcessorReadOutput::OutputUnitTooLarge),
             Err(XmlIssue::Malformed) => return Err(ProcessorFailure::Failed),
@@ -964,6 +1000,144 @@ fn selected_names<R: Read + std::io::Seek>(
     Ok(names)
 }
 
+fn presentation_slide_names<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<Vec<String>, ProcessorFailure> {
+    let presentation =
+        read_entry(archive, "ppt/presentation.xml").map_err(|_| ProcessorFailure::Failed)?;
+    let relationships = read_entry(archive, "ppt/_rels/presentation.xml.rels")
+        .map_err(|_| ProcessorFailure::Failed)?;
+    let relationship_ids =
+        presentation_relationship_ids(&presentation).map_err(|_| ProcessorFailure::Failed)?;
+    let targets =
+        presentation_relationship_targets(&relationships).map_err(|_| ProcessorFailure::Failed)?;
+    let mut names = Vec::with_capacity(relationship_ids.len());
+    for relationship_id in relationship_ids {
+        let target = targets
+            .iter()
+            .find_map(|(candidate, target)| (candidate == &relationship_id).then_some(target))
+            .ok_or(ProcessorFailure::Failed)?;
+        archive
+            .by_name(target)
+            .map_err(|_| ProcessorFailure::Failed)?;
+        names.push(target.clone());
+    }
+    Ok(names)
+}
+
+fn presentation_relationship_ids(bytes: &[u8]) -> Result<Vec<String>, XmlIssue> {
+    let transcoded = transcode_xml(bytes)?;
+    let mut reader = Reader::from_reader(Cursor::new(transcoded.as_ref()));
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut ids = Vec::new();
+    loop {
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|_| XmlIssue::Malformed)?
+        {
+            Event::Start(element) | Event::Empty(element)
+                if local_name(element.name().as_ref()) == b"sldId" =>
+            {
+                let mut relationship_id = None;
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
+                    let name = attribute.key.as_ref();
+                    if name.contains(&b':') && local_name(name) == b"id" {
+                        relationship_id = Some(
+                            attribute
+                                .decode_and_unescape_value(reader.decoder())
+                                .map_err(|_| XmlIssue::Malformed)?
+                                .into_owned(),
+                        );
+                    }
+                }
+                ids.push(relationship_id.ok_or(XmlIssue::Malformed)?);
+            }
+            Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(ids)
+}
+
+fn presentation_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, String)>, XmlIssue> {
+    let transcoded = transcode_xml(bytes)?;
+    let mut reader = Reader::from_reader(Cursor::new(transcoded.as_ref()));
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut targets = Vec::new();
+    loop {
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|_| XmlIssue::Malformed)?
+        {
+            Event::Start(element) | Event::Empty(element)
+                if local_name(element.name().as_ref()) == b"Relationship" =>
+            {
+                let mut id = None;
+                let mut target = None;
+                let mut relationship_type = None;
+                let mut external = false;
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
+                    let value = attribute
+                        .decode_and_unescape_value(reader.decoder())
+                        .map_err(|_| XmlIssue::Malformed)?;
+                    match local_name(attribute.key.as_ref()) {
+                        b"Id" => id = Some(value.into_owned()),
+                        b"Target" => target = Some(value.into_owned()),
+                        b"Type" => relationship_type = Some(value.into_owned()),
+                        b"TargetMode" => external = value.eq_ignore_ascii_case("external"),
+                        _ => {}
+                    }
+                }
+                if relationship_type
+                    .as_deref()
+                    .is_some_and(|value| value.ends_with("/slide"))
+                {
+                    if external {
+                        return Err(XmlIssue::Malformed);
+                    }
+                    let id = id.ok_or(XmlIssue::Malformed)?;
+                    if targets.iter().any(|(candidate, _)| candidate == &id) {
+                        return Err(XmlIssue::Malformed);
+                    }
+                    targets.push((
+                        id,
+                        presentation_target_name(&target.ok_or(XmlIssue::Malformed)?)?,
+                    ));
+                }
+            }
+            Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(targets)
+}
+
+fn presentation_target_name(target: &str) -> Result<String, XmlIssue> {
+    if target.contains('\\') {
+        return Err(XmlIssue::Malformed);
+    }
+    let name = target
+        .strip_prefix('/')
+        .map_or_else(|| format!("ppt/{target}"), String::from);
+    if !name.starts_with("ppt/slides/")
+        || !name.ends_with(".xml")
+        || std::path::Path::new(&name)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(XmlIssue::Malformed);
+    }
+    Ok(name)
+}
+
 fn read_entry<R: Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
     name: &str,
@@ -979,7 +1153,7 @@ fn read_entry<R: Read + std::io::Seek>(
     Ok(bytes)
 }
 
-fn extract_xml_text(bytes: &[u8]) -> Result<String, XmlIssue> {
+fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> {
     let transcoded = transcode_xml(bytes)?;
     let mut reader = Reader::from_reader(Cursor::new(transcoded.as_ref()));
     reader.config_mut().trim_text(false);
@@ -1011,7 +1185,11 @@ fn extract_xml_text(bytes: &[u8]) -> Result<String, XmlIssue> {
                 let name = local_name(qualified_name.as_ref());
                 if name == b"t" {
                     text_depth = text_depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
-                } else if name == b"p" && !output.ends_with('\n') {
+                } else if (name == b"p"
+                    || (kind == OfficeKind::Xlsx && (name == b"si" || name == b"c")))
+                    && !output.is_empty()
+                    && !output.ends_with('\n')
+                {
                     append_xml_text(&mut output, "\n")?;
                 }
             }
@@ -1292,6 +1470,25 @@ fn malformed_validation(kind: OfficeKind, reason: &str) -> ProcessorValidationOu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signalbox_file_media_runtime::{
+        FileDigest, NeverCancelled, SourceReadError, SourceReadFuture,
+    };
+
+    struct UnavailableSource;
+
+    impl VerifiedBlobSource for UnavailableSource {
+        fn digest(&self) -> FileDigest {
+            FileDigest::from_bytes([0x4f; 32])
+        }
+
+        fn byte_length(&self) -> NonZeroU64 {
+            NonZeroU64::MIN
+        }
+
+        fn read_range(&self, _offset: u64, _length: NonZeroU64) -> SourceReadFuture<'_> {
+            Box::pin(async { Err(SourceReadError::Unavailable) })
+        }
+    }
 
     #[test]
     fn content_types_requires_the_opc_namespace() {
@@ -1325,10 +1522,80 @@ mod tests {
     }
 
     #[test]
+    fn decoded_xml_rejects_unsupported_compression_during_inventory_parsing() {
+        let name = b"word/document.xml";
+        let mut central = vec![0_u8; 46 + name.len()];
+        central[0..4].copy_from_slice(b"PK\x01\x02");
+        central[10..12].copy_from_slice(&99_u16.to_le_bytes());
+        central[28..30].copy_from_slice(
+            &u16::try_from(name.len())
+                .expect("fixture entry name fits in a ZIP length")
+                .to_le_bytes(),
+        );
+        central[46..].copy_from_slice(name);
+
+        let result = parse_central_directory(&central, 1);
+
+        assert!(matches!(
+            result,
+            Err(CentralParseError {
+                issue: ValidationIssue::Malformed(MALFORMED_REASON),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn probe_budget_reserves_the_content_types_local_filename() {
+        let admitted_central_bytes = VALIDATION_SOURCE_BYTES
+            - ZIP_SUFFIX_BYTES
+            - ZIP_PREFIX_BYTES
+            - LOCAL_HEADER_BYTES
+            - CONTENT_TYPES_NAME_BYTES
+            - CONTENT_TYPES_COMPRESSED_BYTES;
+
+        assert_eq!(
+            ZIP_PREFIX_BYTES
+                + ZIP_SUFFIX_BYTES
+                + admitted_central_bytes
+                + LOCAL_HEADER_BYTES
+                + CONTENT_TYPES_NAME_BYTES
+                + CONTENT_TYPES_COMPRESSED_BYTES,
+            VALIDATION_SOURCE_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn content_type_source_failure_remains_a_processor_failure() {
+        let inventory = CentralInventory {
+            entries: 1,
+            expanded_bytes: 1,
+            entries_by_name: vec![CentralEntry {
+                name: String::from(CONTENT_TYPES),
+                flags: 0,
+                compression: 0,
+                crc32: 0,
+                compressed_bytes: 1,
+                expanded_bytes: 1,
+                local_offset: 0,
+            }],
+            kinds: vec![OfficeKind::Docx],
+            encrypted: false,
+        };
+
+        let result = read_content_types(&UnavailableSource, &NeverCancelled, &inventory).await;
+
+        assert!(matches!(
+            result,
+            Err(CentralReadError::Processor(ProcessorFailure::Failed))
+        ));
+    }
+
+    #[test]
     fn text_extraction_decodes_numeric_references() {
         let xml = b"<w:document><w:t>&#65;&#x42;</w:t></w:document>";
 
-        let result = extract_xml_text(xml);
+        let result = extract_xml_text(xml, OfficeKind::Docx);
 
         assert!(matches!(result, Ok(text) if text == "AB"));
     }
@@ -1337,7 +1604,7 @@ mod tests {
     fn text_extraction_preserves_cdata() {
         let xml = b"<w:document><w:t><![CDATA[A&B]]></w:t></w:document>";
 
-        let result = extract_xml_text(xml);
+        let result = extract_xml_text(xml, OfficeKind::Docx);
 
         assert!(matches!(result, Ok(text) if text == "A&B"));
     }
@@ -1348,7 +1615,7 @@ mod tests {
         let mut bytes = vec![0xff, 0xfe];
         bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
 
-        let result = extract_xml_text(&bytes);
+        let result = extract_xml_text(&bytes, OfficeKind::Docx);
 
         assert!(matches!(result, Ok(text) if text == "wide text"));
     }

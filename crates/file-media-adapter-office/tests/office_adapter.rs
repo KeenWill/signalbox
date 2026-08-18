@@ -126,8 +126,42 @@ async fn generated_xlsx_detects_and_extracts_embedded_text() -> Result<(), Box<d
 }
 
 #[tokio::test]
+async fn adjacent_spreadsheet_string_items_are_separated() -> Result<(), Box<dyn Error>> {
+    let fixture = OfficeFixture::adjacent_shared_strings_xlsx()?;
+    let expected_text = fixture.expected_text();
+    let source = fixture.into_source()?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "text",
+        serde_json::json!({}),
+    )
+    .await?;
+
+    assert_eq!(complete_text(result)?, expected_text);
+    Ok(())
+}
+
+#[tokio::test]
 async fn generated_pptx_detects_and_extracts_embedded_text() -> Result<(), Box<dyn Error>> {
     assert_valid_text(OfficeFixture::pptx()?).await
+}
+
+#[tokio::test]
+async fn presentation_relationship_order_controls_slide_text_order() -> Result<(), Box<dyn Error>> {
+    let fixture = OfficeFixture::reordered_pptx()?;
+    let expected_text = fixture.expected_text();
+    let source = fixture.into_source()?;
+    let result = read(
+        &DirectProcessor::new(),
+        &source,
+        "text",
+        serde_json::json!({}),
+    )
+    .await?;
+
+    assert_eq!(complete_text(result)?, expected_text);
+    Ok(())
 }
 
 #[tokio::test]
@@ -167,6 +201,11 @@ async fn locked_docx_is_terminal_without_a_password_channel() -> Result<(), Box<
 #[tokio::test]
 async fn macro_enabled_docx_is_not_accepted_as_macro_free_docx() -> Result<(), Box<dyn Error>> {
     assert_malformed(OfficeFixture::macro_enabled_docx()?).await
+}
+
+#[tokio::test]
+async fn vba_part_is_rejected_despite_a_macro_free_main_override() -> Result<(), Box<dyn Error>> {
+    assert_malformed(OfficeFixture::vba_part_in_macro_free_docx()?).await
 }
 
 #[tokio::test]
