@@ -509,6 +509,8 @@ ALLOWLIST = (
             r"attachment owner must match the aggregate link|terminal-record owner,|"
             r"loss before and after pin, owner replacement|complete owner facts|"
             r"operation-owner facts|"
+            r"validate_operation_journal_owner|operation_journal_owner|"
+            r"the only command owner|"
             r"(?:defaults|pending steering|snapshot) owner cross-wired|"
             r"OwnerMismatch|"
             r"ModelCallOwners|attempt_owners|wrong_owner|wrong_terminal_owner|"
@@ -538,6 +540,14 @@ ALLOWLIST = (
             r"validated owner projection|inside the validated owner$|"
             r"the checked owner placement|application-level file-owner proof",
             re.IGNORECASE,
+        ),
+    ),
+    Allowance(
+        "runner-protocol durable-record ownership phrasing",
+        re.compile(r"^docs/spec/runner-protocol[.]md$"),
+        re.compile(
+            r"Owner-private storage of the one retained lease|"
+            r"terminal transaction remains the sole owner"
         ),
     ),
     Allowance(
