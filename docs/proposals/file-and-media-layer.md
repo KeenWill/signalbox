@@ -495,12 +495,19 @@ must bind the same digest, selector, reader identity, and view.
 - `File` returns a reference only when the selected model adapter supports a
   reviewed general-file input contract; it never silently becomes text.
 
-Before committing any successful `Text` or `Structured` page, the tool loop
-prospectively projects the complete rendered result, continuation framing, and
-reserved output into the pinned target and current frontier. If that exact page
-cannot fit the target's remaining input capacity, the request returns
-`OutputUnitTooLarge` and commits neither the page nor continuation state;
-automatic compaction is not admission.
+Before any request in one tool batch executes worker or store I/O, one short
+batch-admission transaction visits requests in stable request order. It starts
+from the pinned target and current frontier, reserves mandatory
+continuation-call framing and output capacity once for the batch, and
+cumulatively reserves each sibling's complete maximum rendered result: the
+registry-bounded inspection projection, the selected text or structured view
+bound, or the rich-reference projection and media bounds below. A request that
+cannot obtain its cumulative reservation returns `OutputUnitTooLarge`, performs
+no external I/O, and commits no result or continuation state. Reservations for
+admitted siblings remain charged until their completion transactions consume the
+actual result and release unused capacity, so independently fitting siblings can
+never overfill the combined continuation call. Automatic compaction and
+completion order are not admission mechanisms.
 
 Pagination uses a common opaque authenticated cursor of at most 1,024 bytes. The
 cursor is only a random token for bounded process-local state; it does not embed
@@ -725,10 +732,11 @@ One shared suite proves every provider and isolation implementation:
   specified, independent of registration order;
 - fixtures cover malformed claims from different readers, a strong claim with a
   conflicting structural claim, a declaration-only candidate alongside a unique
-  strong mismatch, duplicate same-reader claims with different probe state,
-  distinct probe names producing multiple winning capabilities, duplicate
-  compatible strong claims, successful and failed structural-candidate
-  validation, and failed declared-candidate validation;
+  strong mismatch, a valid declared type with no byte-evidence candidate,
+  duplicate same-reader claims with different probe state, distinct probe names
+  producing multiple winning capabilities, duplicate compatible strong claims,
+  successful and failed structural-candidate validation, and failed
+  declared-candidate validation;
 - an encrypted or locked fixture returns `EncryptedOrLocked` terminally without
   a password channel, permissive parser recovery, or text fallback;
 - source visibility, missing, corruption, availability, worker-startup, and
@@ -769,10 +777,12 @@ One shared suite proves every provider and isolation implementation:
   which the attempt cannot later commit a result;
 - continuation tokens authenticate and resolve only to their bound digest, part
   selector, reader identity, view, normalized initial options, and position;
-- inspection, text, structured, and rich-result commits are rejected
-  prospectively when their mandatory continuation cannot fit the pinned target
-  context, and rich views are rejected before processing when their maximum
-  exceeds a target-specific materialized or wire-byte limit; and
+- one pre-execution batch admission reserves target-input capacity cumulatively
+  in stable request order for every inspection, text, structured, and rich
+  sibling plus one mandatory continuation frame; independently fitting results
+  cannot overfill the combined call, and rich views are also rejected before
+  processing when their maximum exceeds a target-specific materialized or
+  wire-byte limit; and
 - preparation rejects missing, corrupt, malformed, oversized, and
   modality-unsupported references before send authorization.
 
