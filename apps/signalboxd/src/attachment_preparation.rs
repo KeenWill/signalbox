@@ -302,7 +302,9 @@ async fn verify_replica_candidates(
             Ok(Err(error)) => match error.kind() {
                 BlobStoreFailureKind::NotFound => saw_missing = true,
                 BlobStoreFailureKind::VerificationFailed => saw_corrupt = true,
-                BlobStoreFailureKind::Unavailable => saw_unavailable = true,
+                BlobStoreFailureKind::PublicationAmbiguous | BlobStoreFailureKind::Unavailable => {
+                    saw_unavailable = true
+                }
             },
             Err(_) => saw_unavailable = true,
         }
@@ -330,6 +332,7 @@ mod tests {
     enum StoreOutcome {
         Missing,
         Corrupt,
+        PublicationAmbiguous,
         Unavailable,
     }
 
@@ -362,6 +365,9 @@ mod tests {
                         "test_open_range",
                         BlobVerificationFailure::new(expected, None, expected.byte_length()),
                     )),
+                    StoreOutcome::PublicationAmbiguous => {
+                        Err(BlobStoreError::publication_ambiguous("test_open_range"))
+                    }
                     StoreOutcome::Unavailable => {
                         Err(BlobStoreError::unavailable("test_open_range"))
                     }
@@ -437,6 +443,21 @@ mod tests {
 
         assert_eq!(
             verify_replica_candidates(expected, &mixed, deadline).await,
+            ReplicaVerification::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn inv062_publication_ambiguity_is_typed_unavailable() {
+        let expected = ExpectedBlob::new(digest(1), NonZeroU64::MIN);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let ambiguous = [(
+            Arc::new(FakeStore(StoreOutcome::PublicationAmbiguous)) as Arc<dyn BlobStore>,
+            key(),
+        )];
+
+        assert_eq!(
+            verify_replica_candidates(expected, &ambiguous, deadline).await,
             ReplicaVerification::Unavailable
         );
     }
