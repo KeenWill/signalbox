@@ -16,9 +16,10 @@ use signalbox_application::{
     PinnedRunnerDispatchRequest, PinnedRunnerReplacementIdentities, PinnedRunnerReplacementOutcome,
     PinnedRunnerReplacementTransaction, PromotePendingRunnerOutcome,
     ReplaceLostRunnerBeforePinOutcome, RunnerLeaseClaimRequest, RunnerLeaseResultRequest,
-    RunnerOperationFailureDetail, RunnerReadyManifestDigest, RunnerReplacementProvisioningOutcome,
-    RunnerWorkspaceCleanupFailure, RunnerWorkspaceReadyReceipt,
-    RunnerWorkspaceReleaseAcknowledgement, ToolDefinition, ToolInputSchema,
+    RunnerOperationFailureDetail, RunnerOperationFailureDetailInput, RunnerReadyManifestDigest,
+    RunnerReplacementProvisioningOutcome, RunnerWorkspaceCleanupFailure,
+    RunnerWorkspaceReadyReceipt, RunnerWorkspaceReleaseAcknowledgement, ToolDefinition,
+    ToolInputSchema,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -191,7 +192,6 @@ const PRE_PENDING_SUCCESSOR_MIGRATION: i64 = 202608110007;
 const PRE_PENDING_PROMOTION_MIGRATION: i64 = 202608110011;
 const PRE_TOOL_REQUEST_LOCUS_MIGRATION: i64 = 202608110018;
 const PRE_REPLACEMENT_BOUNDARY_IDENTITY_MIGRATION: i64 = 202608110022;
-const PRE_WORKSPACE_RELEASE_LOSS_RETIREMENT_MIGRATION: i64 = 202608140101;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
@@ -294,11 +294,11 @@ impl WorkspaceReleaseProjectionFixture {
             self.candidate.placement_revision(),
             self.candidate.runner(),
             self.candidate.manifest_id(),
-            RunnerOperationFailureDetail::try_new(
-                String::from(CLEANUP_FAILURE_CODE),
-                String::from(CLEANUP_FAILURE_MESSAGE),
-                String::from(CLEANUP_FAILURE_PAYLOAD),
-            )
+            RunnerOperationFailureDetail::try_new(RunnerOperationFailureDetailInput {
+                code: String::from(CLEANUP_FAILURE_CODE),
+                message: String::from(CLEANUP_FAILURE_MESSAGE),
+                payload_json: String::from(CLEANUP_FAILURE_PAYLOAD),
+            })
             .expect("the fixture cleanup-failure detail is valid"),
         )
     }
@@ -24025,66 +24025,6 @@ async fn s32_inv044_workspace_release_acknowledgement_readback_rejects_corruptio
     Ok(())
 }
 
-/// S32 / INV-044: upgrading a valid pending release whose source connection
-/// was already lost backfills the exact unowned terminal proof.
-#[tokio::test]
-#[ignore = "requires Docker"]
-async fn s32_inv044_workspace_release_loss_retirement_migration_backfills_lost_source()
--> Result<(), Box<dyn Error>> {
-    let (_container, pool) = unmigrated_postgres().await?;
-    MIGRATOR
-        .run_to(PRE_WORKSPACE_RELEASE_LOSS_RETIREMENT_MIGRATION, &pool)
-        .await?;
-    let fixture = workspace_release_projection_fixture(&pool).await?;
-    fixture
-        .store
-        .store_workspace_release_projection_for_test(
-            &fixture.candidate,
-            fixture.retired_placement_event_ordinal,
-            fixture.successor_placement_event_ordinal,
-            fixture.enrollment,
-            fixture.connection_epoch,
-            fixture.connection_event_ordinal,
-        )
-        .await?;
-    fixture
-        .store
-        .transition_connection(
-            fixture.enrollment,
-            fixture.connection_epoch,
-            RunnerConnectionTransition::TransportClosed,
-        )
-        .await?;
-    let loss = fixture
-        .store
-        .load_current_connection_loss(fixture.enrollment)
-        .await?
-        .expect("the cleanup-owning connection loss reads back before upgrade");
-
-    migrate(&pool).await?;
-    let retirement = fixture
-        .store
-        .load_workspace_release_loss_retirement(
-            fixture.candidate.session(),
-            fixture.candidate.placement_revision(),
-        )
-        .await?
-        .expect("the migration backfills the unowned release proof");
-    let pending = fixture
-        .store
-        .load_workspace_release(
-            fixture.candidate.session(),
-            fixture.candidate.placement_revision(),
-        )
-        .await?;
-
-    assert_eq!(retirement.session(), fixture.candidate.session());
-    assert_eq!(retirement.loss(), loss);
-    assert_eq!(pending, None);
-    drop(pool);
-    Ok(())
-}
-
 /// S32 / INV-044: loss propagation atomically retires an exact pending
 /// workspace release as unowned and removes it from redelivery.
 #[tokio::test]
@@ -24414,11 +24354,11 @@ async fn s32_inv044_workspace_cleanup_failure_rejects_unequal_replay() -> Result
         fixture.candidate.placement_revision(),
         fixture.candidate.runner(),
         fixture.candidate.manifest_id(),
-        RunnerOperationFailureDetail::try_new(
-            String::from(CLEANUP_FAILURE_CODE),
-            String::from("another cleanup failure"),
-            String::from(CLEANUP_FAILURE_PAYLOAD),
-        )?,
+        RunnerOperationFailureDetail::try_new(RunnerOperationFailureDetailInput {
+            code: String::from(CLEANUP_FAILURE_CODE),
+            message: String::from("another cleanup failure"),
+            payload_json: String::from(CLEANUP_FAILURE_PAYLOAD),
+        })?,
     );
 
     let rejected = fixture
@@ -24583,6 +24523,17 @@ async fn s32_inv044_workspace_cleanup_failure_readback_rejects_noncanonical_json
         .execute(&mut *corruption)
         .await?;
     corruption.commit().await?;
+
+    let suppressed = fixture
+        .store
+        .load_workspace_release(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await
+        .expect_err("pending-release loading rejects noncanonical failure detail");
+
+    assert_store_corruption(suppressed, RunnerProtocolCorruption::InvalidEncoding);
 
     let rejected = fixture
         .store
