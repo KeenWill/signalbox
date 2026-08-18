@@ -65,8 +65,11 @@ Descriptor-relative private-root publication and exact ready-manifest replay are
 verified against this PR (`agent/runner-workspace-filesystem-producer`).
 Journal-authorized private-root trash publication, deletion, and exact replay
 are verified against this PR (`agent/runner-private-workspace-release`).
-Established-connection routing of those inbound claim and result frames through
-the durable transactions before acknowledgement is re-verified through this PR
+Accepted-release protocol handoff, heartbeat-serving cleanup, and success and
+failure journaling before projection are verified against this PR
+(`agent/runner-live-workspace-release-handoff`). Established-connection routing
+of those inbound claim and result frames through the durable transactions before
+acknowledgement is re-verified through this PR
 (`agent/runner-runtime-lease-operations`). Durable authorization followed by
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
@@ -743,15 +746,15 @@ is terminalized as `protocol_failure` and closed.
 
 The daemon sends a heartbeat challenge every five seconds. The runner replies
 with its monotonically increasing heartbeat sequence and the exact current
-journaled lease phase when one exists; it still reports no workspace phase. The
-phase must name the active connection's runner and registration or the runner
-fails closed before sending. An acknowledgement must name the exact outstanding
-challenge, and a second challenge is not issued while the first remains
-unanswered. One missed interval durably records `suspect`; the third consecutive
-miss, fifteen seconds after the challenge, records `lost`. An exact late
-acknowledgement before the third miss appends `connected` with
-`heartbeat_recovered`. No present live path populates an operation phase because
-this runtime advertises and serves no operation provider.
+journaled lease phase when one exists. It also reports an accepted or completed
+workspace release, or its exact unrecorded cleanup failure, from the durable
+journal. A lease phase must name the active connection's runner and registration
+or the runner fails closed before sending. An acknowledgement must name the
+exact outstanding challenge, and a second challenge is not issued while the
+first remains unanswered. One missed interval durably records `suspect`; the
+third consecutive miss, fifteen seconds after the challenge, records `lost`. An
+exact late acknowledgement before the third miss appends `connected` with
+`heartbeat_recovered`.
 
 An unannounced transport close or protocol failure durably records `lost`; an
 epoch-targeted shutdown from either side durably records `shutdown`. On hub
@@ -814,16 +817,18 @@ accepts only matching paired `discard_as_recorded` or paired `fail_stale`
 directives for retained terminal evidence and atomically frees both slots. For a
 retained lease-offer failure, `resend` emits the exact stored envelope while
 retaining it, and `discard_as_recorded` or `fail_stale` frees it. Unsupported
-actions preserve the journal and fail closed. The only live failure producer is
-the registration-only empty catalog refusing an offered unknown tool. For
+actions preserve the journal and fail closed. Live failure producers are the
+registration-only empty catalog refusing an offered unknown tool and accepted
+workspace cleanup returning failure. For
 retained ready-workspace evidence, `resend` emits the complete stored frame
 while retaining it and `fail_stale` frees the exact correlation and payload
 together; every other action preserves them and fails closed.
 
 **Committed unimplemented functionality.** No present filesystem producer
-creates ready evidence or begins or advances a release, and resumed release
-directives remain unsupported. This boundary supplies neither workspace
-provisioning, workspace cleanup, nor a workstation tool inventory.
+creates ready evidence, and resumed release directives remain unsupported. This
+boundary supplies neither workspace provisioning nor a workstation tool
+inventory; accepted cleanup is supplied by the release handoff composed by its
+caller.
 
 **Committed unimplemented functionality.** Future execution support populates
 the bounded inventory that resume already exchanges, containing at most the one
@@ -1909,12 +1914,13 @@ versioned protected manifest through `staging` to `ready`, and returns the exact
 canonical ready-manifest digest. Reopening the store authenticates and replays
 that same ready manifest instead of creating another root.
 
-**Committed unimplemented functionality.** No live protocol path invokes the
-private-root producer or cleanup adapter, and no path places a produced ready
-manifest into the retained ready frame. No present runner provisions or deletes
-a repository workspace, no present daemon producer constructs a workspace
-operation, and startup staging/leak reconciliation remains absent. The typed
-`RecoveryUnavailable` seam therefore remains on live workspace operations.
+**Committed unimplemented functionality.** The top-level runner process invokes
+neither the private-root producer nor cleanup adapter, and no path places a
+produced ready manifest into the retained ready frame. No present runner
+provisions or deletes a repository workspace, no present daemon producer
+constructs a workspace operation, and startup staging/leak reconciliation
+remains absent. The typed `RecoveryUnavailable` seam therefore remains on live
+workspace provisioning.
 
 The application receipt boundary accepts complete already-validated
 repository-workspace manifest facts without deriving an execution working
@@ -2055,9 +2061,10 @@ resumes the authenticated releasing trash entry or accepts the already-absent
 placement as completed deletion; absence is not a fifth lifecycle token.
 
 **Committed unimplemented functionality.** Durable `workspace_recorded`
-admission will advance the protected manifest to `active`. No live protocol path
-connects an inbound release to the private-root cleanup adapter, no repository
-cleanup adapter exists, and no startup scanner resumes the accepted journal.
+admission will advance the protected manifest to `active`. The top-level runner
+process does not connect the accepted-release handoff to the private-root
+cleanup adapter, no repository cleanup adapter exists, and no startup scanner
+resumes the accepted journal.
 
 **Committed unimplemented functionality.** The guarded Git invocation contract
 in the following paragraphs remains absent. No present runner surface provides
@@ -2226,21 +2233,24 @@ durable record that is redelivered after every restart and that nothing can ever
 clear — the leak this design already accepts, converted into a queue entry that
 outlives it.
 
-The state and filesystem adapters enforce the irreversible boundary locally: the
-accepted journal precedes the private-root trash rename and deletion, the same
-journal can then advance to `release_completed`, and the existing heartbeat and
-acknowledgement adapters retain or clear that exact correlation. Deletion replay
-therefore uses the journal rather than a manifest the runner may already have
-deleted.
+The connection validates an inbound release against the physical runner, fsyncs
+the exact accepted journal, and only then returns its cleanup handoff. Its
+cleanup-serving adapter continues answering heartbeats while the caller's
+cleanup future runs. Success advances the same journal to `release_completed`
+before projecting `workspace_released`; failure retains the accepted release
+beside the bounded `workspace_cleanup_failed` failure before projecting it. The
+existing acknowledgement adapters retain or clear those exact correlations. The
+state and filesystem adapters therefore enforce the irreversible boundary
+locally, and deletion replay uses the journal rather than a manifest the runner
+may already have deleted.
 
-**Committed unimplemented functionality.** The live runner does not yet compose
-those adapters for an inbound `workspace_release`, send `workspace_released`
-after cleanup, or translate a cleanup error into `workspace_cleanup_failed`.
-Repository-workspace cleanup also remains absent. When composed, a cleanup
-failure's `operation_failure_recorded` acknowledgement retires the accepted
-release and failure together and frees the slot. Startup will resume deletion
-for trash proven by a manifest or retained release entry, may remove staging
-whose manifest proves it was never published, and will report every unknown,
+**Committed unimplemented functionality.** The top-level runner process does not
+yet invoke the private-root cleanup future from that handoff, and repository
+workspace cleanup remains absent. A cleanup failure's existing
+`operation_failure_recorded` acknowledgement retires the accepted release and
+failure together and frees the slot. Startup will resume deletion for trash
+proven by a manifest or retained release entry, may remove staging whose
+manifest proves it was never published, and will report every unknown,
 retired-but-present, conflicting, or otherwise unreconciled workspace as a typed
 leak. It will never silently delete a reported leak, and the report remains
 visible even when no session can be resumed.
