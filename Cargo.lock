@@ -3376,6 +3376,7 @@ dependencies = [
  "serde_json",
  "signalbox-persistence",
  "signalbox-runner-wire",
+ "signalbox-test-bin",
  "signalboxd",
  "sqlx",
  "tempfile",
