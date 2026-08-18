@@ -1133,6 +1133,29 @@ pub(crate) const fn repo_watch_event_target_to_str(
     }
 }
 
+/// Which producer recorded one repository-watch event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchEventProducerStorageKind {
+    Poll,
+}
+
+pub(crate) const fn repo_watch_event_producer_to_str(
+    value: RepoWatchEventProducerStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchEventProducerStorageKind::Poll => "poll",
+    }
+}
+
+pub(crate) fn repo_watch_event_producer_from_str(
+    value: &str,
+) -> Option<RepoWatchEventProducerStorageKind> {
+    match value {
+        "poll" => Some(RepoWatchEventProducerStorageKind::Poll),
+        _ => None,
+    }
+}
+
 pub(crate) fn repo_watch_event_target_from_str(
     value: &str,
 ) -> Option<RepoWatchEventTargetStorageKind> {
