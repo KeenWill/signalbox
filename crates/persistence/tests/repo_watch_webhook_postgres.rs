@@ -794,6 +794,31 @@ fn caused_event_projection(
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn a_stored_projection_rejects_the_derived_poll_only_cause() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x701);
+    admit_fixture(&store, key).await?;
+
+    let rejected = store
+        .record_terminal(
+            key,
+            &projected_request(vec![caused_event_projection(
+                WEBHOOK_ONLY_IDENTITY,
+                RepoWatchWebhookParityCauseV1::PollOnlyFamily,
+            )?])?,
+        )
+        .await;
+
+    assert!(
+        rejected.is_err(),
+        "poll_only_family is derived for poll-side parity rows and must never be stored"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_webhook_only_row_reports_the_cause_its_delivery_recorded() -> Result<(), Box<dyn Error>>
 {
     let (_container, pool) = migrated_postgres().await?;

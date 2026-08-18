@@ -508,6 +508,7 @@ async fn admit_webhook(
     {
         Ok(body) => body,
         Err(WebhookBodyRejection::TooLarge) => return StatusCode::PAYLOAD_TOO_LARGE,
+        Err(WebhookBodyRejection::Unreadable) => return StatusCode::SERVICE_UNAVAILABLE,
         Err(WebhookBodyRejection::Deadline) => return StatusCode::REQUEST_TIMEOUT,
     };
     if headers
@@ -604,6 +605,7 @@ async fn admit_webhook(
 pub(crate) enum WebhookBodyRejection {
     Deadline,
     TooLarge,
+    Unreadable,
 }
 
 /// Reads the exact request body under the per-request deadline, so a peer that
@@ -615,12 +617,27 @@ pub(crate) async fn read_body_within_deadline<Read, Failure>(
 ) -> Result<Bytes, WebhookBodyRejection>
 where
     Read: Future<Output = Result<Bytes, Failure>>,
+    Failure: std::error::Error + 'static,
 {
     match timeout(deadline, read).await {
         Ok(Ok(body)) => Ok(body),
-        Ok(Err(_)) => Err(WebhookBodyRejection::TooLarge),
+        Ok(Err(error)) => Err(classify_body_read_failure(&error)),
         Err(_) => Err(WebhookBodyRejection::Deadline),
     }
+}
+
+/// Distinguishes the collector's length-limit rejection from transport failure,
+/// so an oversized body is refused as the peer's fault while a read the server
+/// could not complete is not misreported as one.
+fn classify_body_read_failure(error: &(dyn std::error::Error + 'static)) -> WebhookBodyRejection {
+    let mut source = Some(error);
+    while let Some(current) = source {
+        if current.is::<http_body_util::LengthLimitError>() {
+            return WebhookBodyRejection::TooLarge;
+        }
+        source = current.source();
+    }
+    WebhookBodyRejection::Unreadable
 }
 
 /// How much of the shared body-memory budget one request must reserve.
@@ -774,7 +791,11 @@ fn header_text(value: &HeaderValue) -> Result<&str, WebhookHttpRejection> {
 
 fn require_content_type(headers: &HeaderMap) -> Result<(), WebhookHttpRejection> {
     let content_type = header_text(required_header(headers, HEADER_CONTENT_TYPE)?)?;
-    if content_type != JSON_CONTENT_TYPE {
+    let media_type = content_type
+        .split_once(';')
+        .map_or(content_type, |(media_type, _)| media_type)
+        .trim();
+    if !media_type.eq_ignore_ascii_case(JSON_CONTENT_TYPE) {
         return Err(WebhookHttpRejection::InvalidContentType);
     }
     Ok(())
@@ -1640,6 +1661,31 @@ mod tests {
             .expect_err("a body that never completes must not hold its permit");
 
         assert_eq!(rejection, WebhookBodyRejection::Deadline);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_body_is_rejected_as_too_large() {
+        let body = axum::body::Body::from(vec![0u8; 64]);
+
+        let rejection =
+            read_body_within_deadline(axum::body::to_bytes(body, 8), WEBHOOK_BODY_READ_TIMEOUT)
+                .await
+                .expect_err("a body over its collection limit must be refused");
+
+        assert_eq!(rejection, WebhookBodyRejection::TooLarge);
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_is_unreadable_rather_than_too_large() {
+        let failed = std::future::ready(Err::<axum::body::Bytes, std::io::Error>(
+            std::io::Error::other("connection reset"),
+        ));
+
+        let rejection = read_body_within_deadline(failed, WEBHOOK_BODY_READ_TIMEOUT)
+            .await
+            .expect_err("a broken transport must not produce body bytes");
+
+        assert_eq!(rejection, WebhookBodyRejection::Unreadable);
     }
 
     #[test]

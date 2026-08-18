@@ -21,10 +21,10 @@ use signalbox_domain::{
     ModelTargetDefinition, OpenAiServiceTier, ProviderModelIdentity, ReasoningLevel,
     RepoWatchAuthorLogin, RepoWatchEventKindNameV1, RepoWatchLabelMatcher,
     RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope,
-    RepoWatchTemplateContextDeclaration, RepositorySlug, ResolvedProviderTarget, ServiceTier,
-    SessionTemplateName, SettingOverlay, ToolApprovalPosture, ToolName, UnsupportedModelSetting,
-    ValidatedModelSettings,
+    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion,
+    RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration, RepositorySlug,
+    ResolvedProviderTarget, ServiceTier, SessionTemplateName, SettingOverlay, ToolApprovalPosture,
+    ToolName, UnsupportedModelSetting, ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
@@ -1987,9 +1987,6 @@ fn parse_repository_watch_rules(
             ],
         )
         .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
-        if table.get("version").and_then(Item::as_integer) != Some(1) {
-            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
-        }
         let id = RepoWatchRuleId::try_new(
             required_string(table, "id")
                 .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?
@@ -1999,6 +1996,18 @@ fn parse_repository_watch_rules(
         if !identities.insert(id.clone()) {
             return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
         }
+        let version = table
+            .get("version")
+            .and_then(Item::as_integer)
+            .and_then(|value| u64::try_from(value).ok())
+            .and_then(NonZeroU64::new)
+            .and_then(RepoWatchRuleVersion::new)
+            .ok_or_else(|| HubModelConfigurationError::InvalidRepositoryWatchRule {
+                rule: id.as_str().to_owned(),
+                reason: String::from(
+                    "field `version` must be a positive integer within signed 64-bit range",
+                ),
+            })?;
         let matcher = table
             .get("matcher")
             .and_then(Item::as_table)
@@ -2023,13 +2032,20 @@ fn parse_repository_watch_rules(
             })
             .transpose()?
             .unwrap_or(Duration::ZERO);
-        let rule = RepoWatchRule::try_new(id.clone(), matcher, actions, singleton_per, cooldown)
-            .map_err(
-                |error| HubModelConfigurationError::InvalidRepositoryWatchRule {
-                    rule: id.as_str().to_owned(),
-                    reason: error.to_string(),
-                },
-            )?;
+        let rule = RepoWatchRule::try_new(
+            id.clone(),
+            version,
+            matcher,
+            actions,
+            singleton_per,
+            cooldown,
+        )
+        .map_err(
+            |error| HubModelConfigurationError::InvalidRepositoryWatchRule {
+                rule: id.as_str().to_owned(),
+                reason: error.to_string(),
+            },
+        )?;
         rules.push(rule);
     }
     Ok(rules)
@@ -3729,8 +3745,8 @@ mod tests {
         AnthropicServiceTier, DirectModelSelection, FastMode, FastModeOverlay, MergeableState,
         ModelAlias, ModelSelectionRequest, ModelSettingSource, ModelSettingsOverlay,
         ReasoningLevel, RepoWatchDispatchContextShape, RepoWatchEventKindNameV1,
-        RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration, ServiceTier,
-        SessionTemplateName, SettingOverlay, ToolApprovalPosture,
+        RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
+        ServiceTier, SessionTemplateName, SettingOverlay, ToolApprovalPosture,
     };
     use signalbox_model_runtime::{CredentialAccess, CredentialAccessFailure, CredentialReference};
     use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
@@ -4812,6 +4828,29 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             [MergeableState::Conflicting]
         );
         assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
+    }
+
+    #[test]
+    fn repository_watch_accepts_a_positive_rule_revision() {
+        let revision =
+            RepoWatchRuleVersion::new(NonZeroU64::new(2).expect("configured revision is positive"))
+                .expect("configured revision is within the durable range");
+        let configured = configuration_with_repository_watch_rule().replace(
+            &format!(
+                "id = \"{WATCH_RULE_ID}\"\nversion = {}",
+                RepoWatchRuleVersion::V1.get()
+            ),
+            &format!("id = \"{WATCH_RULE_ID}\"\nversion = {}", revision.get()),
+        );
+        let configured = HubModelConfiguration::parse(&configured)
+            .expect("repository-watch revision fixture is valid");
+        let rule = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .rules()[0];
+
+        assert_eq!(rule.id().as_str(), WATCH_RULE_ID);
+        assert_eq!(rule.version(), revision);
     }
 
     #[test]

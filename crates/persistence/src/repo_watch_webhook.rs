@@ -346,6 +346,9 @@ pub enum RepoWatchWebhookParityCauseV1 {
     /// A hashed context field differed between the two sources.
     ContextDrift,
     /// An event family polling produces and webhooks are not designed to.
+    ///
+    /// Derived by the parity view for poll-side rows only; the projection
+    /// store's constraint rejects it, since no delivery carries this cause.
     PollOnlyFamily,
     /// The shadow baseline was re-seeded between the two occurrences.
     CrossDrainShadowGap,
@@ -612,7 +615,8 @@ impl PostgresRepoWatchWebhookStore {
                     delivery.action_name,
                     delivery.body_digest,
                     delivery.receipt_sequence,
-                    delivery.received_at
+                    delivery.received_at,
+                    octet_length(payload.body)::bigint AS body_bytes
                FROM repo_watch_webhook_delivery AS delivery
                JOIN repo_watch_webhook_payload AS payload
                  ON payload.hook_id = delivery.hook_id
@@ -636,6 +640,15 @@ impl PostgresRepoWatchWebhookStore {
         for header in headers {
             let hook_id = header.hook_id;
             let delivery_id = header.delivery_id;
+            // The stored length gates the page before the bytes exist in
+            // memory, so two near-limit payloads never coexist just to prove
+            // the second one does not fit.
+            let declared = usize::try_from(header.body_bytes).unwrap_or(usize::MAX);
+            if !deliveries.is_empty()
+                && retained_bytes.saturating_add(declared) > MAX_PENDING_PAGE_BYTES
+            {
+                break;
+            }
             let body = sqlx::query_scalar::<_, Vec<u8>>(
                 "SELECT body
                    FROM repo_watch_webhook_payload
@@ -649,9 +662,9 @@ impl PostgresRepoWatchWebhookStore {
                 continue;
             };
             // The oldest delivery is always kept, so one body at the admission
-            // ceiling still drains instead of wedging the queue head. Every
-            // later body is discarded rather than allowed to overshoot, so the
-            // page retains no more than the ceiling states.
+            // ceiling still drains instead of wedging the queue head. The
+            // declared length was checked before the fetch; the fetched length
+            // is re-checked in case the payload changed between the two reads.
             if !deliveries.is_empty()
                 && retained_bytes.saturating_add(body.len()) > MAX_PENDING_PAGE_BYTES
             {
@@ -974,6 +987,7 @@ struct PendingHeaderRow {
     hook_id: Decimal,
     delivery_id: Uuid,
     repository: String,
+    body_bytes: i64,
     event_name: String,
     action_name: Option<String>,
     body_digest: Vec<u8>,
