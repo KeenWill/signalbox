@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     error::Error,
     fmt, fs,
     io::{Seek as _, SeekFrom, Write as _},
@@ -12,13 +12,14 @@ use std::{
 
 use rustix::{
     fd::AsFd as _,
-    process::{Resource, Rlimit},
+    process::{Resource, Rlimit, geteuid},
 };
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProcessCeilings, FileMediaProcessor, FileMediaProcessorFuture,
     FileMediaProviderDeclaration, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, ReaderDeclaration, ReaderIdentity, VerifiedBlobSource,
+    MAX_WORKER_TASKS, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ReaderDeclaration, ReaderIdentity,
+    VerifiedBlobSource,
 };
 use tokio::{
     io::AsyncReadExt as _,
@@ -29,13 +30,17 @@ use tokio::{
 
 use crate::{
     broker::{BrokerError, RangeBroker, read_frame_with_limit, write_frame_with_limit},
-    protocol::{DaemonFrame, Invocation, WireReadEnvelope, WireSource, WorkerFrame, encode_bytes},
+    protocol::{
+        DaemonFrame, Invocation, WireReadEnvelope, WireSource, WorkerFrame,
+        declaration_fingerprint, encode_bytes,
+    },
 };
 
 const WORKER_SANDBOX_PATH: &str = "/signalbox-file-media-worker";
 const BWRAP_PROBE_ARGUMENT: &str = "--signalbox-file-media-isolation-probe";
 const CANCELLATION_POLL: Duration = Duration::from_millis(5);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+const WRITABLE_TMPFS_BUDGET_DIVISOR: u64 = 2;
 
 /// One checked mapping from a provider declaration to its worker executable.
 #[derive(Clone, Debug)]
@@ -69,6 +74,7 @@ impl WorkerBinding {
 pub struct SandboxedFileMediaProcessor {
     bubblewrap: PathBuf,
     workers: Arc<BTreeMap<signalbox_file_media_runtime::FileReaderProviderName, PathBuf>>,
+    worker_declarations: Arc<BTreeMap<PathBuf, Vec<FileMediaProviderDeclaration>>>,
     readers: Arc<BTreeMap<ReaderIdentity, ReaderDeclaration>>,
     ceilings: FileMediaProcessCeilings,
 }
@@ -83,16 +89,20 @@ impl SandboxedFileMediaProcessor {
         if !cfg!(target_os = "linux") || bindings.is_empty() {
             return Err(SandboxedFileMediaProcessorConstructionError::Unsupported);
         }
+        if !task_ceiling_is_enforceable(geteuid().as_raw()) {
+            return Err(SandboxedFileMediaProcessorConstructionError::TaskCeiling);
+        }
         if !FileMediaProcessCeilings::version_one().admits(ceilings) {
             return Err(SandboxedFileMediaProcessorConstructionError::Ceilings);
         }
         let bubblewrap = bubblewrap.into();
         validate_executable(&bubblewrap, ConstructionTarget::Bubblewrap)?;
         let mut workers = BTreeMap::new();
+        let mut worker_declarations = BTreeMap::<PathBuf, Vec<FileMediaProviderDeclaration>>::new();
         let mut readers = BTreeMap::new();
         for binding in bindings {
             let provider = binding.declaration.provider().clone();
-            if workers.insert(provider, binding.program).is_some() {
+            if workers.insert(provider, binding.program.clone()).is_some() {
                 return Err(SandboxedFileMediaProcessorConstructionError::DuplicateProvider);
             }
             for reader in binding.declaration.readers() {
@@ -103,10 +113,15 @@ impl SandboxedFileMediaProcessor {
                     return Err(SandboxedFileMediaProcessorConstructionError::DuplicateReader);
                 }
             }
+            worker_declarations
+                .entry(binding.program)
+                .or_default()
+                .push(binding.declaration);
         }
         Ok(Self {
             bubblewrap,
             workers: Arc::new(workers),
+            worker_declarations: Arc::new(worker_declarations),
             readers: Arc::new(readers),
             ceilings,
         })
@@ -114,12 +129,8 @@ impl SandboxedFileMediaProcessor {
 
     /// Proves that the exact configured profile can start every registered worker.
     pub async fn verify_isolation(&self) -> ProcessorIsolation {
-        let mut unique = BTreeSet::new();
-        for worker in self.workers.values() {
-            unique.insert(worker.clone());
-        }
-        for worker in unique {
-            if self.run_probe(&worker).await.is_err() {
+        for (worker, declarations) in self.worker_declarations.iter() {
+            if self.run_probe(worker, declarations).await.is_err() {
                 return ProcessorIsolation::Unavailable;
             }
         }
@@ -131,14 +142,45 @@ impl SandboxedFileMediaProcessor {
         self.ceilings
     }
 
-    async fn run_probe(&self, worker: &Path) -> Result<(), ProcessorFailure> {
+    async fn run_probe(
+        &self,
+        worker: &Path,
+        declarations: &[FileMediaProviderDeclaration],
+    ) -> Result<(), ProcessorFailure> {
         let mut running = self.spawn(worker, true).await?;
         running.release_startup()?;
+        let mut stdout = running
+            .child
+            .stdout
+            .take()
+            .ok_or(ProcessorFailure::Unavailable)?;
+        let expected = declaration_fingerprint(declarations);
+        let output_limit = u64::try_from(expected.len())
+            .map_err(|_| ProcessorFailure::Unavailable)?
+            .checked_add(1)
+            .ok_or(ProcessorFailure::Unavailable)?;
         let deadline = Duration::from_secs(self.ceilings.wall_seconds());
-        let waited = tokio::time::timeout(deadline, running.child.wait()).await;
+        let waited = tokio::time::timeout(deadline, async {
+            let mut observed = Vec::new();
+            stdout
+                .take(output_limit)
+                .read_to_end(&mut observed)
+                .await
+                .map_err(|_| ProcessorFailure::Unavailable)?;
+            let status = running
+                .child
+                .wait()
+                .await
+                .map_err(|_| ProcessorFailure::Unavailable)?;
+            if status.success() && observed.as_slice() == expected.as_slice() {
+                Ok(())
+            } else {
+                Err(ProcessorFailure::Unavailable)
+            }
+        })
+        .await;
         let result = match waited {
-            Ok(Ok(status)) if status.success() => Ok(()),
-            Ok(Ok(_)) | Ok(Err(_)) => Err(ProcessorFailure::Unavailable),
+            Ok(result) => result,
             Err(_) => Err(ProcessorFailure::TimedOut),
         };
         if result.is_err() {
@@ -223,12 +265,18 @@ impl SandboxedFileMediaProcessor {
             cancellation_poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
-                    result = &mut session => break result,
+                    biased;
                     () = tokio::time::sleep_until(deadline) => break Err(ProcessorFailure::TimedOut),
                     _ = cancellation_poll.tick() => {
                         if cancellation.is_cancelled() {
                             break Err(ProcessorFailure::Cancelled);
                         }
+                    }
+                    result = &mut session => {
+                        if Instant::now() >= deadline {
+                            break Err(ProcessorFailure::TimedOut);
+                        }
+                        break result;
                     }
                 }
             }
@@ -237,6 +285,7 @@ impl SandboxedFileMediaProcessor {
             running.terminate().await;
         }
         let diagnostics = finish_diagnostics(&mut stderr_task).await;
+        let outcome = admit_completed(outcome, cancellation);
         match (outcome, diagnostics) {
             (Ok(output), Ok(())) => Ok(output),
             (Err(error), _) => Err(error),
@@ -250,14 +299,20 @@ impl SandboxedFileMediaProcessor {
             rustix::pipe::pipe().map_err(|_| ProcessorFailure::Unavailable)?;
         rustix::io::fcntl_setfd(block_write.as_fd(), rustix::io::FdFlags::CLOEXEC)
             .map_err(|_| ProcessorFailure::Unavailable)?;
-        let profile = sandbox_arguments(worker, seccomp.as_raw_fd(), block_read.as_raw_fd(), probe);
+        let profile = sandbox_arguments(
+            worker,
+            seccomp.as_raw_fd(),
+            block_read.as_raw_fd(),
+            self.ceilings.memory_bytes(),
+            probe,
+        );
         let mut command = Command::new(&self.bubblewrap);
         command
             .args(profile)
             .current_dir("/")
             .env_clear()
             .stdin(if probe { Stdio::null() } else { Stdio::piped() })
-            .stdout(if probe { Stdio::null() } else { Stdio::piped() })
+            .stdout(Stdio::piped())
             .stderr(if probe { Stdio::null() } else { Stdio::piped() })
             .kill_on_drop(true);
         let ceilings = self.ceilings;
@@ -278,6 +333,17 @@ impl SandboxedFileMediaProcessor {
             startup: Some(block_write),
             _seccomp: seccomp,
         })
+    }
+}
+
+fn admit_completed(
+    outcome: Result<CompletedOutput, ProcessorFailure>,
+    cancellation: &dyn CancellationSignal,
+) -> Result<CompletedOutput, ProcessorFailure> {
+    if cancellation.is_cancelled() {
+        Err(ProcessorFailure::Cancelled)
+    } else {
+        outcome
     }
 }
 
@@ -570,8 +636,11 @@ async fn finish_diagnostics(
 }
 
 fn apply_process_limits(ceilings: FileMediaProcessCeilings) -> Result<(), rustix::io::Errno> {
-    set_limit(Resource::As, ceilings.memory_bytes())?;
+    let memory = worker_memory_budget(ceilings.memory_bytes());
+    set_limit(Resource::As, memory.address_space_bytes)?;
     set_limit(Resource::Cpu, ceilings.cpu_seconds())?;
+    set_limit(Resource::Core, 0)?;
+    set_limit(Resource::Nproc, MAX_WORKER_TASKS)?;
     set_limit(Resource::Nofile, ceilings.file_descriptors())
 }
 
@@ -589,8 +658,10 @@ fn sandbox_arguments(
     worker: &Path,
     seccomp_fd: i32,
     block_fd: i32,
+    memory_bytes: u64,
     probe: bool,
 ) -> Vec<std::ffi::OsString> {
+    let memory = worker_memory_budget(memory_bytes);
     let mut arguments = [
         "--die-with-parent",
         "--new-session",
@@ -605,10 +676,6 @@ fn sandbox_arguments(
         "/proc",
         "--dev",
         "/dev",
-        "--tmpfs",
-        "/tmp",
-        "--tmpfs",
-        "/run",
         "--ro-bind-try",
         "/lib",
         "/lib",
@@ -626,6 +693,14 @@ fn sandbox_arguments(
     .map(std::ffi::OsString::from)
     .collect::<Vec<_>>();
     arguments.extend([
+        std::ffi::OsString::from("--size"),
+        std::ffi::OsString::from(memory.first_tmpfs_bytes.to_string()),
+        std::ffi::OsString::from("--tmpfs"),
+        std::ffi::OsString::from("/tmp"),
+        std::ffi::OsString::from("--size"),
+        std::ffi::OsString::from(memory.second_tmpfs_bytes.to_string()),
+        std::ffi::OsString::from("--tmpfs"),
+        std::ffi::OsString::from("/run"),
         std::ffi::OsString::from("--ro-bind"),
         worker.as_os_str().to_owned(),
         std::ffi::OsString::from(WORKER_SANDBOX_PATH),
@@ -648,6 +723,28 @@ fn sandbox_arguments(
         arguments.push(std::ffi::OsString::from(BWRAP_PROBE_ARGUMENT));
     }
     arguments
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WorkerMemoryBudget {
+    address_space_bytes: u64,
+    first_tmpfs_bytes: u64,
+    second_tmpfs_bytes: u64,
+}
+
+const fn worker_memory_budget(memory_bytes: u64) -> WorkerMemoryBudget {
+    let tmpfs_bytes = memory_bytes / WRITABLE_TMPFS_BUDGET_DIVISOR;
+    let first_tmpfs_bytes = tmpfs_bytes / 2;
+    let second_tmpfs_bytes = tmpfs_bytes - first_tmpfs_bytes;
+    WorkerMemoryBudget {
+        address_space_bytes: memory_bytes - tmpfs_bytes,
+        first_tmpfs_bytes,
+        second_tmpfs_bytes,
+    }
+}
+
+const fn task_ceiling_is_enforceable(effective_uid: u32) -> bool {
+    effective_uid != 0
 }
 
 fn process_creation_filter() -> Result<fs::File, std::io::Error> {
@@ -822,6 +919,8 @@ pub enum SandboxedFileMediaProcessorConstructionError {
     Worker,
     /// A process ceiling was zero or exceeded its compiled maximum.
     Ceilings,
+    /// The current identity is exempt from the configured task ceiling.
+    TaskCeiling,
     /// Two worker bindings claimed the same provider.
     DuplicateProvider,
     /// Two worker bindings claimed the same reader identity.
@@ -835,6 +934,7 @@ impl fmt::Display for SandboxedFileMediaProcessorConstructionError {
             Self::Bubblewrap => "file-media bubblewrap executable is invalid",
             Self::Worker => "file-media worker executable is invalid",
             Self::Ceilings => "file-media process ceilings are invalid",
+            Self::TaskCeiling => "file-media task ceiling is unenforceable for this identity",
             Self::DuplicateProvider => "file-media worker provider is duplicated",
             Self::DuplicateReader => "file-media worker reader is duplicated",
         })
@@ -847,11 +947,25 @@ impl Error for SandboxedFileMediaProcessorConstructionError {}
 mod tests {
     use std::{ffi::OsStr, path::Path};
 
-    use super::{sandbox_arguments, seccomp_instructions};
+    use signalbox_file_media_runtime::{CancellationSignal, ProcessorFailure};
+
+    use super::{
+        CompletedOutput, admit_completed, sandbox_arguments, seccomp_instructions,
+        task_ceiling_is_enforceable, worker_memory_budget,
+    };
+
+    struct Cancelled;
+
+    impl CancellationSignal for Cancelled {
+        fn is_cancelled(&self) -> bool {
+            true
+        }
+    }
 
     #[test]
     fn sandbox_profile_clears_authority_before_the_exact_worker() {
-        let arguments = sandbox_arguments(Path::new("/fixture/worker"), 8, 9, false);
+        let arguments =
+            sandbox_arguments(Path::new("/fixture/worker"), 8, 9, 512 * 1024 * 1024, false);
         let expected_prefix = [
             "--die-with-parent",
             "--new-session",
@@ -879,6 +993,53 @@ mod tests {
             &arguments[arguments.len() - 2..],
             [OsStr::new("--"), OsStr::new("/signalbox-file-media-worker")]
         );
+        assert!(arguments.windows(4).any(|window| {
+            window
+                == [
+                    OsStr::new("--size"),
+                    OsStr::new("134217728"),
+                    OsStr::new("--tmpfs"),
+                    OsStr::new("/tmp"),
+                ]
+        }));
+        assert!(arguments.windows(4).any(|window| {
+            window
+                == [
+                    OsStr::new("--size"),
+                    OsStr::new("134217728"),
+                    OsStr::new("--tmpfs"),
+                    OsStr::new("/run"),
+                ]
+        }));
+    }
+
+    #[test]
+    fn completed_output_is_not_admitted_after_cancellation() {
+        let outcome = admit_completed(
+            Ok(CompletedOutput::Probe(
+                signalbox_file_media_runtime::ProcessorProbeOutput::NoMatch,
+            )),
+            &Cancelled,
+        );
+        assert!(matches!(outcome, Err(ProcessorFailure::Cancelled)));
+    }
+
+    #[test]
+    fn memory_budget_combines_address_space_and_writable_tmpfs() {
+        let budget = worker_memory_budget(512 * 1024 * 1024);
+        assert_eq!(budget.address_space_bytes, 256 * 1024 * 1024);
+        assert_eq!(budget.first_tmpfs_bytes, 128 * 1024 * 1024);
+        assert_eq!(budget.second_tmpfs_bytes, 128 * 1024 * 1024);
+        assert_eq!(
+            budget.address_space_bytes + budget.first_tmpfs_bytes + budget.second_tmpfs_bytes,
+            512 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn root_identity_cannot_claim_an_enforced_task_ceiling() {
+        assert!(!task_ceiling_is_enforceable(0));
+        assert!(task_ceiling_is_enforceable(1_000));
     }
 
     #[test]

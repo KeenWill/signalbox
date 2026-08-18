@@ -23,6 +23,7 @@ pub mod model_execution;
 pub mod outbox;
 pub mod plan;
 pub mod process_read;
+pub mod program_journal;
 pub mod replace_session_defaults;
 pub mod repo_watch;
 pub mod repo_watch_dispatch;

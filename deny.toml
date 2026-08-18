@@ -8,7 +8,14 @@ all-features = true
 # Version-2 defaults: vulnerabilities, unmaintained crates, unsound crates,
 # and yanked releases are all errors. Every ignore added here must carry a
 # comment stating the advisory ID and the reason it is acceptable.
-ignore = []
+ignore = [
+  # deno_core 0.410.0 directly retains completed bincode 1.3.3; the advisory
+  # reports maintenance status and offers no safe upgrade.
+  "RUSTSEC-2025-0141",
+  # The V8 crate pinned through deno_core 0.410.0 retains paste 1.0.15; the
+  # advisory reports maintenance status and offers no safe upgrade.
+  "RUSTSEC-2024-0436",
+]
 
 [bans]
 # No crate is banned today; the list exists so a compromised or rejected
@@ -47,6 +54,9 @@ exceptions = [
   # serde_stacker's build-only native-stack helper uses the LLVM exception.
   # Pinning the crate version keeps that license unavailable to other crates.
   { allow = ["Apache-2.0 WITH LLVM-exception"], crate = "ar_archive_writer@0.5.2" },
+  # deno_core's task-waker helper is file-level copyleft. Pinning the crate
+  # version keeps MPL-2.0 unavailable to every other dependency.
+  { allow = ["MPL-2.0"], crate = "cooked-waker@5.0.0" },
 ]
 
 [sources]

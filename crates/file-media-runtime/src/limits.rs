@@ -1,38 +1,44 @@
 //! Compiled upper bounds shared by declarations and processor supervision.
 
-/// Maximum prefix bytes one probe may request.
+/// Hard safety ceiling; bounds prefix reads to protect broker memory and I/O.
 pub const MAX_PROBE_PREFIX_BYTES: u64 = 65_536;
-/// Maximum suffix bytes one probe may request.
+/// Hard safety ceiling; bounds suffix reads to protect broker memory and I/O.
 pub const MAX_PROBE_SUFFIX_BYTES: u64 = 65_536;
-/// Maximum arbitrary ranges one probe may request.
+/// Hard safety ceiling; bounds range fan-out to protect broker I/O scheduling.
 pub const MAX_PROBE_RANGES: u32 = 16;
-/// Maximum cumulative bytes one probe may request.
+/// Hard safety ceiling; bounds aggregate probe reads to protect broker resources.
 pub const MAX_PROBE_CUMULATIVE_BYTES: u64 = 262_144;
-/// Maximum length-delimited processor frame.
+/// Hard safety ceiling; bounds one view's aggregate source I/O.
+pub const MAX_READ_SOURCE_BYTES: u64 = 1_073_741_824;
+/// Hard safety ceiling; bounds one random-access view's range fan-out.
+pub const MAX_READ_RANGES: u32 = 4_096;
+/// Hard safety ceiling; bounds one processor frame to protect daemon memory.
 pub const MAX_PROCESSOR_FRAME_BYTES: usize = 1_048_576;
-/// Maximum admitted text or compact JSON body.
-pub const MAX_TEXT_OR_JSON_BYTES: usize = 786_432;
-/// Maximum structured output nesting.
+/// Hard safety ceiling; bounds serialized read options before processor framing.
+pub const MAX_READ_OPTIONS_BYTES: usize = 65_536;
+/// Hard safety ceiling; reserves worst-case JSON escaping space in one processor frame.
+pub const MAX_TEXT_OR_JSON_BYTES: usize = 170_000;
+/// Hard safety ceiling; bounds JSON nesting to protect recursive traversal.
 pub const MAX_STRUCTURED_DEPTH: u32 = 64;
-/// Maximum structured output nodes.
+/// Hard safety ceiling; bounds JSON nodes to protect traversal work and memory.
 pub const MAX_STRUCTURED_NODES: u64 = 100_000;
-/// Maximum observed entries in one container.
+/// Hard safety ceiling; bounds one JSON container to protect concentrated fan-out.
 pub const MAX_OBSERVED_CONTAINER_ENTRIES: u64 = 10_000;
-/// Maximum decoded image axis.
+/// Hard safety ceiling; bounds one image axis to protect decoder allocation.
 pub const MAX_IMAGE_AXIS: u32 = 8_192;
-/// Maximum decoded image pixels.
+/// Hard safety ceiling; bounds decoded image area to protect decoder memory.
 pub const MAX_DECODED_IMAGE_PIXELS: u64 = 16_777_216;
-/// Maximum presented image bytes.
+/// Hard safety ceiling; bounds presented image payloads to protect result memory.
 pub const MAX_PRESENTED_IMAGE_BYTES: u64 = 8_388_608;
-/// Maximum decoded audio channels.
+/// Hard safety ceiling; bounds channel fan-out to protect decoder memory and work.
 pub const MAX_AUDIO_CHANNELS: u16 = 8;
-/// Maximum decoded audio sample rate.
+/// Hard safety ceiling; bounds samples per second to protect decoder work.
 pub const MAX_AUDIO_SAMPLE_RATE_HZ: u32 = 192_000;
-/// Maximum presented audio duration.
+/// Hard safety ceiling; bounds clip duration to protect decoder work and memory.
 pub const MAX_AUDIO_CLIP_SECONDS: u32 = 60;
-/// Maximum presented audio bytes.
+/// Hard safety ceiling; bounds presented audio payloads to protect result memory.
 pub const MAX_PRESENTED_AUDIO_BYTES: u64 = 8_388_608;
-/// Maximum presented general-file bytes.
+/// Hard safety ceiling; bounds presented file payloads to protect result memory.
 pub const MAX_PRESENTED_FILE_BYTES: u64 = 8_388_608;
 /// Maximum durable media references emitted by one model call.
 pub const MAX_MEDIA_REFERENCES_PER_CALL: u16 = 16;
@@ -46,6 +52,8 @@ pub const MAX_WORKER_CPU_SECONDS: u64 = 60;
 pub const MAX_WORKER_WALL_SECONDS: u64 = 120;
 /// Maximum isolated worker descendants. Threads remain permitted.
 pub const MAX_WORKER_DESCENDANTS: u32 = 0;
+/// Maximum kernel tasks available to one isolated worker process tree.
+pub const MAX_WORKER_TASKS: u64 = 64;
 /// Maximum file descriptors available to an isolated worker.
 pub const MAX_WORKER_FILE_DESCRIPTORS: u64 = 32;
 /// Maximum retained diagnostic bytes from an isolated worker.
@@ -62,6 +70,10 @@ pub struct FileMediaCeilings {
     pub probe_ranges: u32,
     /// Maximum cumulative probe bytes.
     pub probe_cumulative_bytes: u64,
+    /// Maximum cumulative source bytes for one read view.
+    pub read_source_bytes: u64,
+    /// Maximum exact ranges for one random-access read view.
+    pub read_ranges: u32,
     /// Maximum result body bytes.
     pub text_or_json_bytes: usize,
     /// Maximum structured nesting.
@@ -100,6 +112,8 @@ impl FileMediaCeilings {
             probe_suffix_bytes: MAX_PROBE_SUFFIX_BYTES,
             probe_ranges: MAX_PROBE_RANGES,
             probe_cumulative_bytes: MAX_PROBE_CUMULATIVE_BYTES,
+            read_source_bytes: MAX_READ_SOURCE_BYTES,
+            read_ranges: MAX_READ_RANGES,
             text_or_json_bytes: MAX_TEXT_OR_JSON_BYTES,
             structured_depth: MAX_STRUCTURED_DEPTH,
             structured_nodes: MAX_STRUCTURED_NODES,
@@ -127,6 +141,10 @@ impl FileMediaCeilings {
             && candidate.probe_ranges <= self.probe_ranges
             && candidate.probe_cumulative_bytes > 0
             && candidate.probe_cumulative_bytes <= self.probe_cumulative_bytes
+            && candidate.read_source_bytes > 0
+            && candidate.read_source_bytes <= self.read_source_bytes
+            && candidate.read_ranges > 0
+            && candidate.read_ranges <= self.read_ranges
             && candidate.text_or_json_bytes > 0
             && candidate.text_or_json_bytes <= self.text_or_json_bytes
             && candidate.structured_depth > 0
@@ -158,7 +176,22 @@ impl FileMediaCeilings {
     }
 }
 
-/// Daemon-supervised process limits, all lowerable from compiled maxima.
+/// Labeled deployment overrides for lowerable worker resource limits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileMediaProcessLimitOverrides {
+    /// Address-space byte limit applied before worker startup.
+    pub memory_bytes: u64,
+    /// CPU-second limit applied before worker startup.
+    pub cpu_seconds: u64,
+    /// Daemon wall-clock deadline in seconds.
+    pub wall_seconds: u64,
+    /// File-descriptor limit applied before worker startup.
+    pub file_descriptors: u64,
+    /// Retained, never-model-visible diagnostic byte limit.
+    pub stderr_bytes: usize,
+}
+
+/// Daemon-supervised process limits with a fixed protocol frame and lowerable resources.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileMediaProcessCeilings {
     frame_bytes: usize,
@@ -182,22 +215,15 @@ impl FileMediaProcessCeilings {
         }
     }
 
-    /// Constructs an effective set only when every value is positive and lowerable.
-    pub const fn try_lower(
-        frame_bytes: usize,
-        memory_bytes: u64,
-        cpu_seconds: u64,
-        wall_seconds: u64,
-        file_descriptors: u64,
-        stderr_bytes: usize,
-    ) -> Option<Self> {
+    /// Constructs an effective set with the fixed protocol frame and lowerable resources.
+    pub const fn try_lower(overrides: FileMediaProcessLimitOverrides) -> Option<Self> {
         let candidate = Self {
-            frame_bytes,
-            memory_bytes,
-            cpu_seconds,
-            wall_seconds,
-            file_descriptors,
-            stderr_bytes,
+            frame_bytes: MAX_PROCESSOR_FRAME_BYTES,
+            memory_bytes: overrides.memory_bytes,
+            cpu_seconds: overrides.cpu_seconds,
+            wall_seconds: overrides.wall_seconds,
+            file_descriptors: overrides.file_descriptors,
+            stderr_bytes: overrides.stderr_bytes,
         };
         if Self::version_one().admits(candidate) {
             Some(candidate)
@@ -206,10 +232,10 @@ impl FileMediaProcessCeilings {
         }
     }
 
-    /// Returns whether every candidate value is positive and no greater.
+    /// Returns whether the protocol frame remains fixed and every resource value is positive
+    /// and no greater.
     pub const fn admits(self, candidate: Self) -> bool {
-        candidate.frame_bytes > 0
-            && candidate.frame_bytes <= self.frame_bytes
+        candidate.frame_bytes == self.frame_bytes
             && candidate.memory_bytes > 0
             && candidate.memory_bytes <= self.memory_bytes
             && candidate.cpu_seconds > 0
@@ -222,7 +248,7 @@ impl FileMediaProcessCeilings {
             && candidate.stderr_bytes <= self.stderr_bytes
     }
 
-    /// Returns the maximum length-delimited frame bytes.
+    /// Returns the fixed maximum length-delimited protocol frame bytes.
     pub const fn frame_bytes(self) -> usize {
         self.frame_bytes
     }
@@ -268,10 +294,10 @@ impl Default for FileMediaCeilings {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileMediaCeilings, FileMediaProcessCeilings, MAX_AGGREGATE_MEDIA_BYTES_PER_CALL,
-        MAX_MEDIA_REFERENCES_PER_CALL, MAX_PROCESSOR_FRAME_BYTES, MAX_WORKER_CPU_SECONDS,
-        MAX_WORKER_FILE_DESCRIPTORS, MAX_WORKER_MEMORY_BYTES, MAX_WORKER_STDERR_BYTES,
-        MAX_WORKER_WALL_SECONDS,
+        FileMediaCeilings, FileMediaProcessCeilings, FileMediaProcessLimitOverrides,
+        MAX_AGGREGATE_MEDIA_BYTES_PER_CALL, MAX_MEDIA_REFERENCES_PER_CALL,
+        MAX_PROCESSOR_FRAME_BYTES, MAX_WORKER_CPU_SECONDS, MAX_WORKER_FILE_DESCRIPTORS,
+        MAX_WORKER_MEMORY_BYTES, MAX_WORKER_STDERR_BYTES, MAX_WORKER_WALL_SECONDS,
     };
 
     /// INV-072: deployment configuration can lower but never raise a compiled ceiling.
@@ -287,15 +313,25 @@ mod tests {
             MAX_AGGREGATE_MEDIA_BYTES_PER_CALL
         );
         assert_eq!(
-            FileMediaProcessCeilings::try_lower(
-                MAX_PROCESSOR_FRAME_BYTES,
-                MAX_WORKER_MEMORY_BYTES,
-                MAX_WORKER_CPU_SECONDS + 1,
-                MAX_WORKER_WALL_SECONDS,
-                MAX_WORKER_FILE_DESCRIPTORS,
-                MAX_WORKER_STDERR_BYTES,
-            ),
+            FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
+                memory_bytes: MAX_WORKER_MEMORY_BYTES,
+                cpu_seconds: MAX_WORKER_CPU_SECONDS + 1,
+                wall_seconds: MAX_WORKER_WALL_SECONDS,
+                file_descriptors: MAX_WORKER_FILE_DESCRIPTORS,
+                stderr_bytes: MAX_WORKER_STDERR_BYTES,
+            }),
             None
+        );
+        assert_eq!(
+            FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
+                memory_bytes: MAX_WORKER_MEMORY_BYTES,
+                cpu_seconds: MAX_WORKER_CPU_SECONDS,
+                wall_seconds: MAX_WORKER_WALL_SECONDS,
+                file_descriptors: MAX_WORKER_FILE_DESCRIPTORS,
+                stderr_bytes: MAX_WORKER_STDERR_BYTES,
+            })
+            .map(FileMediaProcessCeilings::frame_bytes),
+            Some(MAX_PROCESSOR_FRAME_BYTES)
         );
     }
 }

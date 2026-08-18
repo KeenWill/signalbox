@@ -1,14 +1,170 @@
-use std::{num::NonZeroU64, str::FromStr};
+use std::{borrow::Borrow, num::NonZeroU64, str::FromStr};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use signalbox_file_media_runtime::{
     AttachmentKind, BoundedMetadata, CanonicalMediaType, DeclaredMediaType, DisplayFilename,
-    FileDigest, FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileReaderName,
-    FileReaderProviderName, FileReaderRevision, FileUse, ProbeDeclaration, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadViewDeclaration,
-    ReadViewName, ReaderIdentity, RegistryValueError, ValidationEvidence,
+    FileDigest, FileMediaProviderDeclaration, FileMediaProviderReadRequest,
+    FileMediaProviderValidationRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
+    FileUse, ProbeDeclaration, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadAccessPattern, ReadOutputKind, ReadViewBounds,
+    ReadViewDeclaration, ReadViewName, ReaderIdentity, RegistryValueError, StreamingTextFallback,
+    ValidationEvidence,
 };
+
+pub(crate) fn declaration_fingerprint(declarations: &[FileMediaProviderDeclaration]) -> [u8; 32] {
+    let mut declarations = declarations.iter().collect::<Vec<_>>();
+    declarations.sort_by(|left, right| left.provider().cmp(right.provider()));
+    declaration_fingerprint_ordered(declarations.len(), declarations)
+}
+
+pub(crate) fn declaration_fingerprint_ordered<I, D>(
+    declaration_count: usize,
+    declarations: I,
+) -> [u8; 32]
+where
+    I: IntoIterator<Item = D>,
+    D: Borrow<FileMediaProviderDeclaration>,
+{
+    let mut fingerprint = Sha256::new();
+    fingerprint_field(&mut fingerprint, b"signalbox-file-media-catalog-v1");
+    fingerprint_len(&mut fingerprint, declaration_count);
+    for declaration in declarations {
+        let declaration = declaration.borrow();
+        fingerprint_field(&mut fingerprint, declaration.provider().as_str().as_bytes());
+        fingerprint_len(&mut fingerprint, declaration.readers().len());
+        for reader in declaration.readers() {
+            fingerprint_field(
+                &mut fingerprint,
+                reader.identity().provider().as_str().as_bytes(),
+            );
+            fingerprint_field(
+                &mut fingerprint,
+                reader.identity().reader().as_str().as_bytes(),
+            );
+            fingerprint_field(
+                &mut fingerprint,
+                reader.identity().revision().as_str().as_bytes(),
+            );
+            fingerprint_len(&mut fingerprint, reader.media_types().len());
+            for media_type in reader.media_types() {
+                fingerprint_field(&mut fingerprint, media_type.as_str().as_bytes());
+            }
+            let probe = reader.probe();
+            fingerprint_u64(&mut fingerprint, probe.prefix_bytes());
+            fingerprint_u64(&mut fingerprint, probe.suffix_bytes());
+            fingerprint_u64(&mut fingerprint, u64::from(probe.range_count()));
+            fingerprint_u64(&mut fingerprint, probe.cumulative_bytes());
+            fingerprint_len(&mut fingerprint, reader.views().len());
+            for view in reader.views() {
+                fingerprint_field(&mut fingerprint, view.name().as_str().as_bytes());
+                fingerprint_field(&mut fingerprint, view.description().as_bytes());
+                fingerprint_field(
+                    &mut fingerprint,
+                    view.arguments_schema().as_str().as_bytes(),
+                );
+                match view.access() {
+                    ReadAccessPattern::Streaming => {
+                        fingerprint_field(&mut fingerprint, b"streaming");
+                    }
+                    ReadAccessPattern::RandomAccess { maximum_ranges } => {
+                        fingerprint_field(&mut fingerprint, b"random_access");
+                        fingerprint_u64(&mut fingerprint, u64::from(maximum_ranges));
+                    }
+                }
+                fingerprint_field(
+                    &mut fingerprint,
+                    match view.output_kind() {
+                        ReadOutputKind::Text => b"text",
+                        ReadOutputKind::Structured => b"structured",
+                        ReadOutputKind::Image => b"image",
+                        ReadOutputKind::Audio => b"audio",
+                        ReadOutputKind::File => b"file",
+                    },
+                );
+                fingerprint_view_bounds(&mut fingerprint, view.bounds());
+            }
+            fingerprint_len(&mut fingerprint, reader.reason_codes().len());
+            for reason in reader.reason_codes() {
+                fingerprint_field(&mut fingerprint, reason.as_str().as_bytes());
+            }
+            fingerprint_field(
+                &mut fingerprint,
+                match reader.streaming_text_fallback() {
+                    StreamingTextFallback::Disabled => b"disabled",
+                    StreamingTextFallback::Enabled => b"enabled",
+                },
+            );
+        }
+    }
+    fingerprint.finalize().into()
+}
+
+fn fingerprint_view_bounds(fingerprint: &mut Sha256, bounds: ReadViewBounds) {
+    fingerprint_u64(fingerprint, bounds.source_bytes());
+    match bounds {
+        ReadViewBounds::Text { output_bytes, .. } => {
+            fingerprint_usize(fingerprint, output_bytes);
+        }
+        ReadViewBounds::Structured {
+            output_bytes,
+            depth,
+            nodes,
+            string_bytes,
+            ..
+        } => {
+            fingerprint_usize(fingerprint, output_bytes);
+            fingerprint_u64(fingerprint, u64::from(depth));
+            fingerprint_u64(fingerprint, nodes);
+            fingerprint_usize(fingerprint, string_bytes);
+        }
+        ReadViewBounds::Image {
+            width,
+            height,
+            pixels,
+            output_bytes,
+            ..
+        } => {
+            fingerprint_u64(fingerprint, u64::from(width));
+            fingerprint_u64(fingerprint, u64::from(height));
+            fingerprint_u64(fingerprint, pixels);
+            fingerprint_u64(fingerprint, output_bytes);
+        }
+        ReadViewBounds::Audio {
+            channels,
+            sample_rate_hz,
+            duration_seconds,
+            output_bytes,
+            ..
+        } => {
+            fingerprint_u64(fingerprint, u64::from(channels));
+            fingerprint_u64(fingerprint, u64::from(sample_rate_hz));
+            fingerprint_u64(fingerprint, u64::from(duration_seconds));
+            fingerprint_u64(fingerprint, output_bytes);
+        }
+        ReadViewBounds::File { output_bytes, .. } => {
+            fingerprint_u64(fingerprint, output_bytes);
+        }
+    }
+}
+
+fn fingerprint_field(fingerprint: &mut Sha256, value: &[u8]) {
+    fingerprint_len(fingerprint, value.len());
+    fingerprint.update(value);
+}
+
+fn fingerprint_len(fingerprint: &mut Sha256, value: usize) {
+    fingerprint_usize(fingerprint, value);
+}
+
+fn fingerprint_usize(fingerprint: &mut Sha256, value: usize) {
+    fingerprint_u64(fingerprint, u64::try_from(value).unwrap_or(u64::MAX));
+}
+
+fn fingerprint_u64(fingerprint: &mut Sha256, value: u64) {
+    fingerprint.update(value.to_be_bytes());
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
