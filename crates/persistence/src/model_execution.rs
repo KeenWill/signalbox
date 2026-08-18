@@ -4224,8 +4224,13 @@ async fn load_origin_contents(
         }
         let command: Option<Uuid> = row.try_get("accepting_command_id")?;
         let goal_turn: Option<Uuid> = row.try_get("goal_turn_id")?;
+        // An accepting command decides provenance whether or not a generation
+        // owns the turn. A goal turn bound to a turn a command already accepted
+        // — the shape repository-watch dispatch commits — has both, and its
+        // text was authored by that command; the `goal_turn` row records which
+        // generation the turn runs under, not where its input came from.
         let provenance = match (command, goal_turn) {
-            (Some(command), None) => {
+            (Some(command), _) => {
                 let command = durable_command_id_from_uuid(command)
                     .map_err(|_| ModelCallCorruption::Inconsistent("accepting command identity"))?;
                 StoredAcceptedInputProvenance::Command(command)
@@ -4235,7 +4240,7 @@ async fn load_origin_contents(
                     .map_err(|_| ModelCallCorruption::Inconsistent("goal input content"))?;
                 StoredAcceptedInputProvenance::Goal(content)
             }
-            (Some(_), Some(_)) | (None, None) => {
+            (None, None) => {
                 return Err(ModelCallCorruption::Inconsistent("accepted input provenance").into());
             }
         };
@@ -6814,7 +6819,8 @@ async fn terminalize_lifecycle(
     .execute(&mut *connection)
     .await?
     .rows_affected();
-    require_single(rows, "terminal model-call lifecycle")
+    require_single(rows, "terminal model-call lifecycle")?;
+    Ok(())
 }
 
 async fn append_terminal_call_event(

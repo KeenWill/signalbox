@@ -57,6 +57,7 @@ use tokio::io::AsyncReadExt;
 use toml_edit::{DocumentMut, Item, Table};
 use uuid::Uuid;
 
+use crate::blob_storage_configuration::BlobStorageConfiguration;
 use crate::credential_pools::{
     CredentialDelivery, CredentialPool, CredentialProfile, parse_credential_pools,
     parse_credential_profiles,
@@ -554,6 +555,7 @@ pub struct HubModelConfiguration {
     tool_approval_postures: BTreeMap<ToolName, ToolApprovalPosture>,
     approval_judge_selection: Option<DirectModelSelection>,
     repository_watch: Option<RepositoryWatchConfiguration>,
+    blob_storage: Option<BlobStorageConfiguration>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -596,6 +598,7 @@ impl HubModelConfiguration {
                 "tool_approval_postures",
                 "approval_judge",
                 "repository_watch",
+                "blob_storage",
             ],
         )?;
         if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
@@ -639,6 +642,11 @@ impl HubModelConfiguration {
             })
             .transpose()?
             .unwrap_or(DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES);
+        let minimum_blob_bytes = u64::try_from(conversation_import_max_source_bytes)
+            .map_err(|_| HubModelConfigurationError::InvalidBlobStorageConfiguration)?;
+        let blob_storage =
+            BlobStorageConfiguration::parse(document.get("blob_storage"), minimum_blob_bytes)
+                .map_err(|_| HubModelConfigurationError::InvalidBlobStorageConfiguration)?;
         let web_fetch_egress_policy = document
             .get("web_fetch")
             .map(|item| {
@@ -1197,6 +1205,7 @@ impl HubModelConfiguration {
             tool_approval_postures,
             approval_judge_selection,
             repository_watch,
+            blob_storage,
         })
     }
 
@@ -1512,6 +1521,11 @@ impl HubModelConfiguration {
     /// Returns the maximum assembled source bytes for one conversation import.
     pub const fn conversation_import_max_source_bytes(&self) -> usize {
         self.conversation_import_max_source_bytes
+    }
+
+    /// Returns the validated blob-store registry and write routes, when enabled.
+    pub const fn blob_storage(&self) -> Option<&BlobStorageConfiguration> {
+        self.blob_storage.as_ref()
     }
 
     /// Returns the exact deployment-owned automatic web-fetch egress policy.
@@ -3076,6 +3090,8 @@ pub enum HubModelConfigurationError {
     InvalidCompactionPrompt,
     /// The optional conversation-import byte bound was absent, zero, or invalid.
     InvalidConversationImportLimit,
+    /// The optional blob-store registry or its routes were malformed.
+    InvalidBlobStorageConfiguration,
     /// The optional web-fetch table was malformed or named an invalid origin.
     InvalidWebFetchPolicy,
     /// The optional version-one repository-watch section was malformed.
@@ -3256,6 +3272,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidConversationImportLimit => {
                 "model configuration contains an invalid conversation import byte limit"
+            }
+            Self::InvalidBlobStorageConfiguration => {
+                "model configuration contains invalid blob-storage settings"
             }
             Self::InvalidWebFetchPolicy => {
                 "model configuration contains an invalid web_fetch egress policy"
@@ -3511,7 +3530,9 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const DUPLICATE_PROVIDER_WATCH_REPOSITORY: &str = "NAMESPACE/PROJECT";
     const DUPLICATE_PROVIDER_SIGNAL_REVIEWER: &str = "SIGNAL-REVIEWER";
     const RELATIVE_WATCH_CREDENTIAL_FILE: &str = "relative/watch-token";
-    const WATCH_RULE_ID: &str = "merge-forward-on-conflict";
+    const WATCH_RULE_ID: &str = "watch-forward";
+    const EAGER_WATCH_RULE_ID: &str = "merge-forward-on-base-advance";
+    const EAGER_WATCH_HEAD_PATTERN: &str = "^agent/.+$";
     const WATCH_TEMPLATE: &str = "merge-forward";
     const CONFIGURATION: &str = r#"
 version = 1
@@ -3883,6 +3904,29 @@ template = "{WATCH_TEMPLATE}"
         )
     }
 
+    fn configuration_with_eager_merge_forward_rule() -> String {
+        format!(
+            r#"{}
+
+[[repository_watch.rules]]
+id = "{EAGER_WATCH_RULE_ID}"
+version = 1
+singleton_per = "pull_request"
+cooldown_seconds = 0
+
+[repository_watch.rules.matcher]
+event_kinds = ["base_advanced"]
+repo = "{PROVIDER_WATCH_REPOSITORY}"
+head_branch_regex = "{EAGER_WATCH_HEAD_PATTERN}"
+
+[[repository_watch.rules.actions]]
+kind = "dispatch_session"
+template = "{WATCH_TEMPLATE}"
+"#,
+            configuration_with_repository_watch()
+        )
+    }
+
     fn watch_interval_fixture() -> Duration {
         Duration::from_secs(WATCH_INTERVAL_SECONDS)
     }
@@ -4061,7 +4105,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
     }
 
     #[test]
-    fn repository_watch_parses_the_conflict_only_live_rule() {
+    fn repository_watch_parses_the_structured_rule_fields() {
         let configured = HubModelConfiguration::parse(&configuration_with_repository_watch_rule())
             .expect("repository-watch rule fixture is valid");
         let rule = &configured
@@ -4081,6 +4125,37 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             rule.matcher().mergeable_state(),
             [MergeableState::Conflicting]
         );
+        assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
+    }
+
+    #[test]
+    fn repository_watch_parses_the_eager_merge_forward_rule() {
+        let configured =
+            HubModelConfiguration::parse(&configuration_with_eager_merge_forward_rule())
+                .expect("eager merge-forward rule fixture is valid");
+        let rule = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .rules()[0];
+
+        assert_eq!(rule.id().as_str(), EAGER_WATCH_RULE_ID);
+        assert_eq!(rule.version().get(), 1);
+        assert_eq!(rule.singleton_per(), RepoWatchSingletonScope::PullRequest);
+        assert_eq!(rule.cooldown(), Duration::ZERO);
+        assert_eq!(
+            rule.matcher().event_kinds(),
+            [RepoWatchEventKindNameV1::BaseAdvanced]
+        );
+        assert_eq!(
+            rule.matcher()
+                .head_branch()
+                .expect("live rule narrows dispatched pull requests")
+                .as_str(),
+            EAGER_WATCH_HEAD_PATTERN
+        );
+        assert_eq!(rule.matcher().base_branch(), None);
+        assert!(rule.matcher().mergeable_state().is_empty());
+        assert!(rule.matcher().conclusion().is_empty());
         assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
     }
 
