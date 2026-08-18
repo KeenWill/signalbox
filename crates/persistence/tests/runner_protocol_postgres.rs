@@ -48,10 +48,10 @@ use signalbox_domain::{
     RunnerReplacementTarget, RunnerReplacementTargetUnavailableReason, RunnerRepositoryEntry,
     RunnerSandboxProfile, RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration,
     RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverride,
-    RunnerToolPermissionOverrides, RunnerWorkingDirectory, SelectedToolExecutionLocus,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SessionRunnerPin,
-    SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
+    RunnerToolPermissionOverrides, RunnerWorkingDirectory, RunnerWorkspaceReleaseCandidate,
+    SelectedToolExecutionLocus, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
     SessionRunnerPlacementRequest, SessionRunnerPlacementState,
     StoredRunnerRegistrationLossEvidence, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
     ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
@@ -254,11 +254,22 @@ struct WorkspaceProvisioningAuthorizationFixture {
     enrollment: RunnerEnrollmentId,
     runner: RunnerId,
     registration_revision: RunnerGeneration,
+    loss_registration_revision: Option<RunnerRegistrationRevision>,
     connection_epoch: RunnerConnectionEpoch,
     connection_event_ordinal: u64,
     repository: WorkspaceRepositoryKey,
     sandbox: RunnerSandboxProfile,
     credential_profile: Option<CredentialProfileName>,
+}
+
+struct WorkspaceReleaseProjectionFixture {
+    store: RunnerProtocolStore,
+    candidate: RunnerWorkspaceReleaseCandidate,
+    retired_placement_event_ordinal: u64,
+    successor_placement_event_ordinal: u64,
+    enrollment: RunnerEnrollmentId,
+    connection_epoch: RunnerConnectionEpoch,
+    connection_event_ordinal: u64,
 }
 
 async fn pending_promotion_fixture(
@@ -1796,6 +1807,7 @@ async fn workspace_provisioning_authorization_fixture(
         enrollment: successor.enrollment(),
         runner: successor.runner(),
         registration_revision: successor_registration.registration().revision(),
+        loss_registration_revision: None,
         connection_epoch: connection.epoch(),
         connection_event_ordinal: connection_event_ordinal
             .to_u64()
@@ -1879,7 +1891,7 @@ async fn same_runner_workspace_provisioning_authorization_fixture(
         )
         .expect("the same-runner repository placement pins");
     store.store_pin(&pin, &predecessor_registration).await?;
-    store
+    let loss_registration = store
         .register(&predecessor, narrowed_advertisement())
         .await?;
     append_runner_registration_loss_projection(&store, &predecessor_registration, &pin).await?;
@@ -1916,6 +1928,7 @@ async fn same_runner_workspace_provisioning_authorization_fixture(
         enrollment: predecessor.enrollment(),
         runner: predecessor.runner(),
         registration_revision: recovered_registration.registration().revision(),
+        loss_registration_revision: Some(loss_registration.revision()),
         connection_epoch: connection.epoch(),
         connection_event_ordinal: connection_event_ordinal
             .to_u64()
@@ -1923,6 +1936,105 @@ async fn same_runner_workspace_provisioning_authorization_fixture(
         repository,
         sandbox,
         credential_profile: None,
+    })
+}
+
+async fn workspace_release_projection_fixture(
+    pool: &PgPool,
+) -> Result<WorkspaceReleaseProjectionFixture, Box<dyn Error>> {
+    let fixture = same_runner_workspace_provisioning_authorization_fixture(pool).await?;
+    let enrollment = fixture
+        .store
+        .load_enrollment(fixture.enrollment)
+        .await?
+        .expect("the release fixture enrollment reads back");
+    let loss_registration = fixture
+        .store
+        .load_registration(
+            &enrollment,
+            fixture
+                .loss_registration_revision
+                .expect("the same-runner fixture states its loss registration"),
+        )
+        .await?
+        .expect("the release fixture loss registration reads back");
+    let current_registration = fixture
+        .store
+        .load_registration(
+            &enrollment,
+            RunnerRegistrationRevision::try_from_u64(fixture.registration_revision.get())
+                .expect("the release fixture current registration is positive"),
+        )
+        .await?
+        .expect("the release fixture current registration reads back");
+    let stored = fixture
+        .store
+        .load_placement(fixture.session)
+        .await?
+        .expect("the release fixture lost placement reads back");
+    let (_, placement, _, _, _) = stored.into_parts();
+    let successor_directory =
+        RunnerWorkingDirectory::try_new("/workspace/same-runner-replacement-successor".to_owned())
+            .expect("the release fixture successor directory is valid");
+    let successor_workspace = ProvisionedWorkspace {
+        session: fixture.session,
+        placement_revision: fixture.successor_placement_revision,
+        runner: fixture.runner,
+        repository: Some(fixture.repository.clone()),
+        canonical_clone_url_digest: Some(
+            CanonicalCloneUrlDigest::try_new("c".repeat(64))
+                .expect("the release fixture clone URL digest is canonical"),
+        ),
+        credential_profile: None,
+        sandbox: fixture.sandbox,
+        working_directory: successor_directory.clone(),
+        relative_path: WorkspaceRelativePath::try_new(format!(
+            "sessions/{}/2/repo",
+            fixture.session.as_uuid()
+        ))
+        .expect("the release fixture successor path is relative"),
+        manifest_id: WorkspaceManifestId::from_uuid(uuid(0x9382)),
+        recovery: Some(WorkspaceRecovery::Commit {
+            revision: WorkspaceRevision::try_new("d".repeat(40))
+                .expect("the release fixture successor revision is canonical"),
+        }),
+    };
+    let replacement = placement
+        .clone()
+        .replace_lost_runner_after_same_runner_registration_recovery(
+            placement.request().clone(),
+            signalbox_domain::SameRunnerRegistrationRecovery {
+                loss_registration: loss_registration.registration().clone(),
+                current_registration: current_registration.registration().clone(),
+            },
+            successor_directory,
+            Some(successor_workspace),
+            None,
+        )
+        .expect("the checked release fixture replacement is valid");
+    let candidate = replacement
+        .workspace_release_candidate()
+        .expect("the managed predecessor yields a release candidate");
+    let successor_placement_event_ordinal = fixture
+        .lost_placement_event_ordinal
+        .checked_add(1)
+        .expect("the release fixture event ordinal advances");
+    fixture
+        .store
+        .store_runner_replacement_projection_for_test(
+            &replacement.placement,
+            &current_registration,
+            replacement.grant.as_ref(),
+        )
+        .await?;
+    Ok(WorkspaceReleaseProjectionFixture {
+        store: fixture.store,
+        candidate,
+        retired_placement_event_ordinal: fixture.lost_placement_event_ordinal,
+        successor_placement_event_ordinal,
+        enrollment: fixture.enrollment,
+        connection_epoch: fixture.connection_epoch,
+        connection_event_ordinal: fixture.connection_event_ordinal,
     })
 }
 
@@ -22831,6 +22943,177 @@ async fn s32_inv044_profileless_workspace_provisioning_authorization_round_trips
     assert_eq!(loaded.repository(), &fixture.repository);
     assert_eq!(loaded.sandbox(), fixture.sandbox);
     assert_eq!(loaded.credential_profile(), None);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: a managed predecessor release retains and independently
+/// reads every wire and storage-only authority correlation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_pending_workspace_release_round_trips() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .store_workspace_release_projection_for_test(
+            &fixture.candidate,
+            fixture.retired_placement_event_ordinal,
+            fixture.successor_placement_event_ordinal,
+            fixture.enrollment,
+            fixture.connection_epoch,
+            fixture.connection_event_ordinal,
+        )
+        .await?;
+    let loaded = fixture
+        .store
+        .load_workspace_release(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await?
+        .expect("the pending workspace release reads back");
+
+    assert_eq!(loaded.session(), fixture.candidate.session());
+    assert_eq!(
+        loaded.placement_revision(),
+        fixture.candidate.placement_revision()
+    );
+    assert_eq!(loaded.runner(), fixture.candidate.runner());
+    assert_eq!(loaded.manifest_id(), fixture.candidate.manifest_id());
+    assert_eq!(
+        loaded.retired_placement_event_ordinal(),
+        fixture.retired_placement_event_ordinal
+    );
+    assert_eq!(
+        loaded.successor_placement_event_ordinal(),
+        fixture.successor_placement_event_ordinal
+    );
+    assert_eq!(loaded.enrollment(), fixture.enrollment);
+    assert_eq!(loaded.connection_epoch(), fixture.connection_epoch);
+    assert_eq!(
+        loaded.connection_event_ordinal(),
+        fixture.connection_event_ordinal
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: a release cannot substitute another manifest for the exact
+/// managed predecessor selected by the retired placement.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_release_rejects_a_cross_wired_manifest() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    let rejected = sqlx::query(
+        "INSERT INTO runner_workspace_release
+            (session_id, placement_revision, runner_id, manifest_id,
+             retired_placement_event_ordinal,
+             successor_placement_event_ordinal, enrollment_id,
+             connection_epoch, connection_event_ordinal, state_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')",
+    )
+    .bind(fixture.candidate.session().into_uuid())
+    .bind(Decimal::from(fixture.candidate.placement_revision().get()))
+    .bind(fixture.candidate.runner().into_uuid())
+    .bind(uuid(0x9383))
+    .bind(Decimal::from(fixture.retired_placement_event_ordinal))
+    .bind(Decimal::from(fixture.successor_placement_event_ordinal))
+    .bind(fixture.enrollment.into_uuid())
+    .bind(Decimal::from(fixture.connection_epoch.get()))
+    .bind(Decimal::from(fixture.connection_event_ordinal))
+    .execute(&pool)
+    .await
+    .expect_err("another manifest cannot acquire the predecessor release");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: a managed predecessor release cannot be enqueued after its
+/// cleanup-owning connection has become durably unreachable.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_release_rejects_a_lost_cleanup_connection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .transition_connection(
+            fixture.enrollment,
+            fixture.connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let rejected = fixture
+        .store
+        .store_workspace_release_projection_for_test(
+            &fixture.candidate,
+            fixture.retired_placement_event_ordinal,
+            fixture.successor_placement_event_ordinal,
+            fixture.enrollment,
+            fixture.connection_epoch,
+            fixture.connection_event_ordinal,
+        )
+        .await
+        .expect_err("a lost cleanup connection cannot receive a durable release");
+
+    assert_store_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: typed release readback does not trust a stored manifest
+/// identity after relational protections have been bypassed by corruption.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_release_readback_rejects_a_corrupted_manifest()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture
+        .store
+        .store_workspace_release_projection_for_test(
+            &fixture.candidate,
+            fixture.retired_placement_event_ordinal,
+            fixture.successor_placement_event_ordinal,
+            fixture.enrollment,
+            fixture.connection_epoch,
+            fixture.connection_event_ordinal,
+        )
+        .await?;
+    let mut corruption = pool.begin().await?;
+    sqlx::raw_sql("ALTER TABLE runner_workspace_release DISABLE TRIGGER ALL")
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_workspace_release
+            SET manifest_id = $3
+          WHERE session_id = $1 AND placement_revision = $2",
+    )
+    .bind(fixture.candidate.session().into_uuid())
+    .bind(Decimal::from(fixture.candidate.placement_revision().get()))
+    .bind(uuid(0x9383))
+    .execute(&mut *corruption)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE runner_workspace_release ENABLE TRIGGER ALL")
+        .execute(&mut *corruption)
+        .await?;
+    corruption.commit().await?;
+    let rejected = fixture
+        .store
+        .load_workspace_release(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await
+        .expect_err("typed readback rejects the corrupted manifest identity");
+
+    assert_store_corruption(rejected, RunnerProtocolCorruption::CrossWiredReference);
     drop(pool);
     Ok(())
 }
