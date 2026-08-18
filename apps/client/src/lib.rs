@@ -23,7 +23,7 @@ use presentation::{
 };
 use rustix::{
     fd::OwnedFd,
-    fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fstat, openat, statat},
+    fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fchmod, fstat, openat, statat},
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
@@ -58,16 +58,22 @@ mod error;
 mod presentation;
 mod transcript;
 
+// numeric-bound: ceiling - protects request memory and durable input storage
 const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
+// numeric-bound: ceiling - protects frame memory while decoding review input
 const MAX_REVIEW_JSON_INPUT_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
+// numeric-bound: ceiling - protects frame memory while reading import source
 const MAX_SINGLE_FRAME_IMPORT_SOURCE_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 /// Bounded memory used while hashing one client-local blob source.
 const BLOB_HASH_BUFFER_BYTES: usize = 64 * 1024;
 /// Smallest bounded metadata page the process protocol admits.
+// numeric-bound: tunable - controls the smallest requested metadata page
 const MIN_METADATA_PAGE_SIZE: u64 = 1;
 /// Largest bounded metadata page the process protocol admits.
+// numeric-bound: tunable - controls the largest requested metadata page
 const MAX_METADATA_PAGE_SIZE: u64 = 100;
 /// Largest finding inventory one review run can own.
+// numeric-bound: ceiling - protects memory and writes from runaway model findings
 const MAX_REVIEW_FINDINGS_PER_RUN: u64 = 32;
 
 #[derive(Deserialize)]
@@ -388,6 +394,7 @@ fn delegation_rejection_matches(
         | RejectionDetail::BlobUploadSizeExceeded { .. }
         | RejectionDetail::BlobUploadLengthMismatch { .. }
         | RejectionDetail::BlobUploadDigestMismatch { .. }
+        | RejectionDetail::BlobReadLengthOutOfRange { .. }
         | RejectionDetail::BlobReadRangeOutOfBounds { .. } => false,
     }
 }
@@ -1447,9 +1454,7 @@ async fn read_blob_chunk(
     length_bytes: CanonicalU64,
 ) -> Result<Vec<u8>, ClientError> {
     if !(1..=MAX_BLOB_READ_BYTES as u64).contains(&length_bytes.value()) {
-        return Err(ClientError::Input(
-            "blob read length must be between 1 and 4194304 bytes",
-        ));
+        return Err(ClientError::BlobReadLengthOutOfRange);
     }
     let mut connection = client
         .setup_request(ClientRequest::ReadBlobChunk {
@@ -1481,21 +1486,37 @@ async fn read_blob_chunk(
 }
 
 async fn write_blob_output(path: &Path, bytes: &[u8]) -> Result<(), ClientError> {
-    let descriptor = openat(
-        CWD,
-        path,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
-        Mode::RUSR | Mode::WUSR,
-    )
-    .map_err(std::io::Error::from)
-    .map_err(|source| ClientError::blob_output_file(path, source))?;
-    let mut file = tokio::fs::File::from_std(File::from(descriptor));
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
+    fchmod(temporary.as_file(), Mode::RUSR | Mode::WUSR)
+        .map_err(std::io::Error::from)
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
+    let mut file = tokio::fs::File::from_std(
+        temporary
+            .reopen()
+            .map_err(|source| ClientError::blob_output_file(path, source))?,
+    );
     file.write_all(bytes)
         .await
         .map_err(|source| ClientError::blob_output_file(path, source))?;
     file.sync_all()
         .await
-        .map_err(|source| ClientError::blob_output_file(path, source))
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
+    drop(file);
+    temporary
+        .persist_noclobber(path)
+        .map_err(|error| ClientError::blob_output_file(path, error.error))?;
+    tokio::fs::File::open(parent)
+        .await
+        .map_err(|source| ClientError::blob_output_file(path, source))?
+        .sync_all()
+        .await
+        .map_err(|source| ClientError::blob_output_file(path, source))?;
+    Ok(())
 }
 
 async fn hash_blob_source(
@@ -7403,7 +7424,7 @@ mod tests {
                 model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
-                    content: InputContent::new(String::from("queued selected input")),
+                    content: UserInputContent::text(String::from("queued selected input")),
                 },
             }],
         )
@@ -8357,6 +8378,8 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let socket = directory.path().join("client.sock");
         let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        let byte_length = CanonicalU64::new(9);
+        let replica_count = CanonicalU64::new(1);
         let listener = UnixListener::bind(&socket)?;
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
@@ -8374,8 +8397,8 @@ mod tests {
                 metadata.request_id(),
                 ServerMessage::BlobMetadata {
                     digest,
-                    byte_length: CanonicalU64::new(9),
-                    replica_count: CanonicalU64::new(1),
+                    byte_length,
+                    replica_count,
                 },
             )
             .map_err(io::Error::other)?;
@@ -8393,7 +8416,11 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(stdout)?,
-            format!("digest={digest} byte_length=9 replica_count=1\n")
+            format!(
+                "digest={digest} byte_length={} replica_count={}\n",
+                byte_length.value(),
+                replica_count.value()
+            )
         );
         assert!(stderr.is_empty());
         server.await??;

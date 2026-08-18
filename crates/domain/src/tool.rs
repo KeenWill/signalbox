@@ -5,7 +5,9 @@
 //! execution lives in `tool_attempt`; persistence, registry lookup, and
 //! executor selection remain outside the domain boundary.
 
-use serde::{Deserialize, Serialize, de::IgnoredAny};
+use serde::{
+    Deserialize, Serialize, Serializer, de::IgnoredAny, ser::SerializeMap, ser::SerializeSeq,
+};
 
 use crate::{
     AssistantText, DurableCommandId, ModelCallId, SessionId, ToolAttemptId, ToolRequestId, TurnId,
@@ -161,7 +163,7 @@ impl NormalizedToolArguments {
         let mut canonical = Vec::with_capacity(value.len());
         let mut serializer = serde_json::Serializer::new(&mut canonical);
         let serializer = serde_stacker::Serializer::new(&mut serializer);
-        let serialization = decoded.serialize(serializer);
+        let serialization = LexicallyOrderedJson(&decoded).serialize(serializer);
         drop_json_value_iteratively(decoded);
         serialization.map_err(|_| ToolArgumentsError {
             value: value.clone(),
@@ -218,6 +220,43 @@ impl NormalizedToolArguments {
     /// Returns the tag and stored text.
     pub fn into_parts(self) -> (ToolArgumentsKind, String) {
         (self.kind, self.value)
+    }
+}
+
+/// A stacker-compatible view that restores the lexical object ordering which
+/// canonical tool JSON promises independently of serde_json's map backend.
+struct LexicallyOrderedJson<'a>(&'a serde_json::Value);
+
+impl Serialize for LexicallyOrderedJson<'_> {
+    fn serialize<SerializerType>(
+        &self,
+        serializer: SerializerType,
+    ) -> Result<SerializerType::Ok, SerializerType::Error>
+    where
+        SerializerType: Serializer,
+    {
+        match self.0 {
+            serde_json::Value::Null => serializer.serialize_unit(),
+            serde_json::Value::Bool(value) => serializer.serialize_bool(*value),
+            serde_json::Value::Number(value) => value.serialize(serializer),
+            serde_json::Value::String(value) => serializer.serialize_str(value),
+            serde_json::Value::Array(values) => {
+                let mut sequence = serializer.serialize_seq(Some(values.len()))?;
+                for value in values {
+                    sequence.serialize_element(&Self(value))?;
+                }
+                sequence.end()
+            }
+            serde_json::Value::Object(object) => {
+                let mut entries = object.iter().collect::<Vec<_>>();
+                entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+                let mut map = serializer.serialize_map(Some(entries.len()))?;
+                for (key, value) in entries {
+                    map.serialize_entry(key, &Self(value))?;
+                }
+                map.end()
+            }
+        }
     }
 }
 
@@ -808,6 +847,40 @@ impl ToolDenialReason {
     pub fn into_string(self) -> String {
         self.0
     }
+
+    /// Derives the deterministic denial reason carried by a delegate denial.
+    ///
+    /// A rationale admits control characters and up to
+    /// [`ToolDecisionRationale::MAX_UTF8_BYTES`] bytes, so this conversion is
+    /// lossy exactly where the two bounds disagree: control characters become
+    /// spaces, edge characters the reason validator forbids are trimmed, and
+    /// the text is cut to [`Self::MAX_UTF8_BYTES`] on a character boundary.
+    /// After control mapping the only forbidden edge character left is the
+    /// space itself, so admissible non-POSIX edge whitespace such as NBSP is
+    /// preserved verbatim. A rationale that is entirely control characters
+    /// and spaces derives no reason.
+    pub fn from_rationale(rationale: &ToolDecisionRationale) -> Option<Self> {
+        let sanitized = rationale
+            .as_str()
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect::<String>();
+        let mut trimmed = sanitized.trim_matches(' ');
+        while trimmed.len() > Self::MAX_UTF8_BYTES {
+            let mut cut = Self::MAX_UTF8_BYTES;
+            while !trimmed.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            trimmed = trimmed[..cut].trim_end_matches(' ');
+        }
+        (!trimmed.is_empty()).then(|| Self(String::from(trimmed)))
+    }
 }
 
 /// Why a denial reason is unsafe or outside its bound.
@@ -868,7 +941,8 @@ pub enum ToolApprovalDecision {
     Approve,
     /// Execution is permanently prohibited for this request.
     Deny {
-        /// Optional bounded user explanation rendered to the model.
+        /// Optional bounded denial explanation rendered to the model; its
+        /// author — user or judge — follows from the decision source.
         reason: Option<ToolDenialReason>,
     },
 }
@@ -921,7 +995,9 @@ impl ToolApprovalResolution {
     pub(crate) fn delegate(approval: &DelegateToolApproval) -> Option<Self> {
         let decision = match approval.recommendation {
             DelegateApprovalRecommendation::Approve => ToolApprovalDecision::Approve,
-            DelegateApprovalRecommendation::Deny => ToolApprovalDecision::Deny { reason: None },
+            DelegateApprovalRecommendation::Deny => ToolApprovalDecision::Deny {
+                reason: ToolDenialReason::from_rationale(&approval.rationale),
+            },
             DelegateApprovalRecommendation::EscalateToHuman => return None,
         };
         Some(Self {
@@ -977,7 +1053,10 @@ pub struct ToolApprovalResolutionReconstitutionInput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum StoredToolApprovalEvidence {
     UserCommand(PreparedDecideToolRequest),
-    Delegate(Box<DelegateToolApproval>),
+    Delegate {
+        approval: Box<DelegateToolApproval>,
+        stored_denial_reason: Option<ToolDenialReason>,
+    },
     PolicyAuto(ToolRequestId),
     SessionBlanket {
         request: ToolRequestId,
@@ -993,10 +1072,22 @@ impl ToolApprovalResolutionReconstitutionInput {
         }
     }
 
-    /// Supplies one authority-checked delegate decision and its recorded call.
-    pub fn delegate(approval: DelegateToolApproval) -> Self {
+    /// Supplies one authority-checked delegate decision, its recorded call,
+    /// and the denial reason exactly as stored beside the decision.
+    ///
+    /// Reconstitution requires the stored reason to equal the derivation
+    /// from the recorded rationale — null exactly when the rationale
+    /// derives nothing — so a row missing its current evidence fails closed
+    /// instead of restoring as an unexplained denial.
+    pub fn delegate(
+        approval: DelegateToolApproval,
+        stored_denial_reason: Option<ToolDenialReason>,
+    ) -> Self {
         Self {
-            evidence: StoredToolApprovalEvidence::Delegate(Box::new(approval)),
+            evidence: StoredToolApprovalEvidence::Delegate {
+                approval: Box::new(approval),
+                stored_denial_reason,
+            },
         }
     }
 
@@ -1050,9 +1141,23 @@ impl ToolApprovalResolutionReconstitutionInput {
                 }
                 DecideToolRequestResult::Applied(_) | DecideToolRequestResult::Rejected(_) => None,
             },
-            StoredToolApprovalEvidence::Delegate(approval) => {
-                ToolApprovalResolution::delegate(approval)
-            }
+            StoredToolApprovalEvidence::Delegate {
+                approval,
+                stored_denial_reason,
+            } => ToolApprovalResolution::delegate(approval).and_then(|resolution| {
+                // The stored reason must equal the derivation exactly — a
+                // null admitted only when the rationale derives nothing — so
+                // a row missing its current evidence is corruption, never an
+                // unexplained denial.
+                match &resolution.decision {
+                    ToolApprovalDecision::Approve => {
+                        stored_denial_reason.is_none().then_some(resolution)
+                    }
+                    ToolApprovalDecision::Deny { reason } => {
+                        (reason == stored_denial_reason).then_some(resolution)
+                    }
+                }
+            }),
             StoredToolApprovalEvidence::PolicyAuto(request) => {
                 Some(ToolApprovalResolution::policy_auto(*request))
             }
@@ -1716,9 +1821,14 @@ mod tests {
             rationale.clone(),
         )
         .expect("delegated authority may deny");
-        let resolution = ToolApprovalResolutionReconstitutionInput::delegate(approval)
-            .reconstitute()
-            .expect("checked delegate evidence restores its decision");
+        let stored_reason = ToolDenialReason::try_new(String::from(JUDGE_RATIONALE))
+            .expect("fixture rationale is an admitted reason");
+        let resolution = ToolApprovalResolutionReconstitutionInput::delegate(
+            approval,
+            Some(stored_reason.clone()),
+        )
+        .reconstitute()
+        .expect("checked delegate evidence restores its decision");
 
         assert_eq!(
             resolution.decider(),
@@ -1727,8 +1837,136 @@ mod tests {
         assert_eq!(resolution.rationale(), Some(&rationale));
         assert_eq!(
             resolution.decision(),
-            &ToolApprovalDecision::Deny { reason: None }
+            &ToolApprovalDecision::Deny {
+                reason: Some(stored_reason)
+            }
         );
+    }
+
+    /// One delegate denial whose recorded rationale is "scope exceeded".
+    fn denied_delegate_fixture() -> DelegateToolApproval {
+        const SUBJECT_REQUEST_SEED: u128 = 60;
+        const SUBJECT_SESSION_SEED: u128 = 1;
+        const SUBJECT_TURN_SEED: u128 = 2;
+        const ISSUING_CALL_SEED: u128 = 3;
+        const SUBJECT_TOOL_NAME: &str = "current_time";
+        const SUBJECT_ARGUMENTS: &str = "{}";
+        const JUDGE_MODEL_SEED: u128 = 61;
+        const JUDGE_CALL_SEED: u128 = 62;
+        const JUDGE_RATIONALE: &str = "scope exceeded";
+
+        let request = ToolRequestReconstitutionInput::new(
+            tool_request_id(SUBJECT_REQUEST_SEED),
+            session_id(SUBJECT_SESSION_SEED),
+            turn_id(SUBJECT_TURN_SEED),
+            model_call_id(ISSUING_CALL_SEED),
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from(SUBJECT_TOOL_NAME)).expect("fixture name is valid"),
+            NormalizedToolArguments::try_from_provider_text(String::from(SUBJECT_ARGUMENTS))
+                .expect("fixture arguments are valid"),
+        )
+        .with_approval_posture(ToolApprovalPosture::Delegated)
+        .into_request();
+        DelegateToolApproval::try_new(
+            &request,
+            DirectModelSelection::from_uuid(uuid::Uuid::from_u128(JUDGE_MODEL_SEED)),
+            model_call_id(JUDGE_CALL_SEED),
+            DelegateApprovalRecommendation::Deny,
+            ToolDecisionRationale::try_new(String::from(JUDGE_RATIONALE))
+                .expect("fixture rationale is admitted"),
+        )
+        .expect("delegated authority may deny")
+    }
+
+    /// A stored null reason is admitted exactly when the rationale derives
+    /// nothing; a null beside a deriving rationale is missing evidence and
+    /// fails closed.
+    #[test]
+    fn delegate_reconstitution_admits_null_only_for_empty_derivation() {
+        let denial = denied_delegate_fixture();
+        let missing_evidence = ToolApprovalResolutionReconstitutionInput::delegate(denial, None)
+            .reconstitute()
+            .expect_err("a null reason beside a deriving rationale is rejected");
+        drop(missing_evidence);
+    }
+
+    /// A stored delegate denial reason the recorded rationale cannot derive
+    /// is corruption, not a decision to restore.
+    #[test]
+    fn delegate_reconstitution_rejects_an_unrelated_stored_reason() {
+        let mismatched = ToolApprovalResolutionReconstitutionInput::delegate(
+            denied_delegate_fixture(),
+            Some(
+                ToolDenialReason::try_new(String::from("unrelated stored text"))
+                    .expect("fixture reason is admitted"),
+            ),
+        )
+        .reconstitute()
+        .expect_err("a stored reason the rationale cannot derive is rejected");
+        drop(mismatched);
+    }
+
+    fn admitted_rationale(value: &str) -> ToolDecisionRationale {
+        ToolDecisionRationale::try_new(String::from(value)).expect("fixture rationale is admitted")
+    }
+
+    /// A rationale already inside the reason bounds derives verbatim.
+    #[test]
+    fn denial_reason_derivation_preserves_admissible_text_verbatim() {
+        assert_eq!(
+            ToolDenialReason::from_rationale(&admitted_rationale("scope exceeded"))
+                .map(ToolDenialReason::into_string),
+            Some(String::from("scope exceeded"))
+        );
+    }
+
+    /// Control characters become spaces and forbidden edge spaces trim.
+    #[test]
+    fn denial_reason_derivation_maps_control_characters_and_trims_edges() {
+        assert_eq!(
+            ToolDenialReason::from_rationale(&admitted_rationale("  first\nsecond\tthird  "))
+                .map(ToolDenialReason::into_string),
+            Some(String::from("first second third"))
+        );
+    }
+
+    /// A rationale of only control characters and spaces derives nothing.
+    #[test]
+    fn denial_reason_derivation_of_whitespace_only_text_is_empty() {
+        assert_eq!(
+            ToolDenialReason::from_rationale(&admitted_rationale(" \n \t ")),
+            None
+        );
+    }
+
+    /// Admitted non-POSIX edge whitespace such as NBSP is preserved.
+    #[test]
+    fn denial_reason_derivation_preserves_admitted_edge_whitespace() {
+        assert_eq!(
+            ToolDenialReason::from_rationale(&admitted_rationale("\u{00a0}denied\u{00a0}"))
+                .map(ToolDenialReason::into_string),
+            Some(String::from("\u{00a0}denied\u{00a0}"))
+        );
+    }
+
+    /// Oversized text cuts to the reason bound on a character boundary.
+    #[test]
+    fn denial_reason_derivation_truncates_on_a_character_boundary() {
+        let truncation_prefix = "a".repeat(1023);
+        let oversized = ToolDecisionRationale::try_new(format!("{truncation_prefix}é"))
+            .expect("fixture rationale is admitted");
+        let truncated =
+            ToolDenialReason::from_rationale(&oversized).expect("nonempty text derives a reason");
+        assert_eq!(truncated.as_str(), truncation_prefix);
+    }
+
+    /// Every derived reason re-admits through the reason validator.
+    #[test]
+    fn denial_reason_derivation_output_is_always_admissible() {
+        let derived =
+            ToolDenialReason::from_rationale(&admitted_rationale("  first\nsecond\tthird  "))
+                .expect("nonempty text derives a reason");
+        assert!(ToolDenialReason::try_new(derived.into_string()).is_ok());
     }
 
     /// S10 / INV-020: a restored session-blanket approval requires the

@@ -396,7 +396,7 @@ impl CredentialProfile {
 pub enum CredentialPoolTieBreak {
     /// The earliest tied member in declaration order.
     FirstListed,
-    /// Successive turns rotate through the tied members.
+    /// Reserved spelling for a future durable priority cursor.
     RoundRobin,
     /// The tied member with the most remaining reported capacity.
     LeastUsed,
@@ -404,12 +404,16 @@ pub enum CredentialPoolTieBreak {
 
 impl CredentialPoolTieBreak {
     fn parse(value: &str) -> Result<Self, HubModelConfigurationError> {
-        match value {
-            "first_listed" => Ok(Self::FirstListed),
-            "round_robin" => Ok(Self::RoundRobin),
-            "least_used" => Ok(Self::LeastUsed),
-            _ => Err(HubModelConfigurationError::InvalidCredentialPoolPolicy),
+        let tie_break = match value {
+            "first_listed" => Self::FirstListed,
+            "round_robin" => Self::RoundRobin,
+            "least_used" => Self::LeastUsed,
+            _ => return Err(HubModelConfigurationError::InvalidCredentialPoolPolicy),
+        };
+        if tie_break == Self::RoundRobin {
+            return Err(HubModelConfigurationError::InvalidCredentialPoolPolicy);
         }
+        Ok(tie_break)
     }
 
     /// Reports whether resolving a tie this way needs observed capacity.
@@ -605,12 +609,9 @@ impl CredentialPool {
     /// lowest priority value, earliest in declaration order among equals.
     ///
     /// Configuration parsing calls this once per mapping to derive the family's
-    /// pinned reference; preparation resolves that pin and never consults the
-    /// pool. This build observes no trigger and records no rotation state, so
-    /// every tie-break resolves here to the first-listed member of the
-    /// preferred rank. Selection proper — exclusion, stickiness, and rotation —
-    /// is not implemented, so a multi-member pool presently behaves as this
-    /// member alone.
+    /// initial pin. Persistence then consults the complete pool policy for each
+    /// fresh availability chain and records exclusions and successor state as
+    /// specified by `docs/spec/credential-availability.md`.
     pub fn preferred_member(&self) -> Option<&CredentialPoolMember> {
         self.members.iter().min_by_key(|member| member.priority)
     }

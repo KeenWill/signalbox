@@ -71,6 +71,9 @@ The coherent review-orchestration snapshot's single-transaction construction,
 the pool capacity it draws, and the writer independence that follows from both
 are verified against this PR (`agent/review-snapshot-mvcc`).
 
+The snapshot-reader effective ceiling and minimum non-snapshot pool reservation
+are verified against this PR (`agent/hub-pool-active-capacity`).
+
 Signalbox admits one process-protocol version, integer `1`. Its closed
 vocabulary contains every request, response, event, and required field
 implemented in this tree. The version field remains required on every frame and
@@ -335,6 +338,7 @@ that variant.
 | `list_model_aliases`                    | none                                                                                                                                                                                                                                                                                                          | Read the deployment's complete configured alias-to-direct-selection catalog.                                                                                                                                                                                                                                                                                                    |
 | `list_model_capabilities`               | none                                                                                                                                                                                                                                                                                                          | Read the deployment's complete configured per-direct-selection settings-capability catalog.                                                                                                                                                                                                                                                                                     |
 | `compact_session`                       | `command_id` and `session_id` (canonical UUID strings), `through_position` (positive canonical decimal string or null)                                                                                                                                                                                        | Append a dedicated-call summary through the exact requested safe position, or through the latest safe boundary for null, without deleting or rewriting transcript history.                                                                                                                                                                                                      |
+| `cancel_program_run`                    | `command_id` and `run_id` (canonical UUID strings)                                                                                                                                                                                                                                                            | Terminally cancel the exact named program run without overwriting an existing terminal outcome.                                                                                                                                                                                                                                                                                 |
 | `read_runner_status` (proposed)         | `page_size` (canonical decimal string) and `after` (runner-evidence cursor object or null)                                                                                                                                                                                                                    | Read the active and optional pending runner registrations, connection/loss state, advertised availability, retained operation failures, and startup workspace-leak reports, with one bounded evidence page.                                                                                                                                                                     |
 | `replace_lost_runner` (proposed)        | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string), and `replacement` (target object)                                                                                                                                                  | Replace the exact current lost placement with a different live runner, atomically activate one pending replacement enrollment, or — for a registration-triggered loss, where it is the only version-one recovery — re-enroll the same runner against its current connection; pinned loss provisions a new workspace boundary, while pre-pin loss returns to unpinned selection. |
 | `abandon_lost_runner` (proposed)        | `command_id` and `session_id` (canonical UUID strings), `expected_placement_revision` (positive canonical decimal string)                                                                                                                                                                                     | Terminalize the exact lost placement only after the existing turn-control algebra has left no active turn; queued work remains and later sees only daemon-executable tools.                                                                                                                                                                                                     |
@@ -625,11 +629,15 @@ repeatable-read transaction, so every reported fact comes from a single database
 snapshot and no two of them can disagree. That read is pure and acquires no lock
 any writer waits on: submitting input, starting or advancing a turn, recording
 an approval, and every review mutation proceed unimpeded while a snapshot is
-under construction. Snapshot construction consumes one unit from the shared
-pool-capacity budget, leaving two connections reserved for non-snapshot work; a
-pool with fewer than three configured connections cannot start the process
-listener. Daemon shutdown cancels the capacity wait and releases its
-reservation.
+under construction.
+
+<a id="snapshot-reader-capacity"></a>
+
+Snapshot construction consumes one unit from the shared pool-capacity budget.
+That budget admits at most eight concurrent snapshot readers and is also bounded
+to leave at least two configured connections outside snapshot work; a pool with
+fewer than three configured connections cannot start the process listener.
+Daemon shutdown cancels the capacity wait and releases its reservation.
 
 Target subjects, workflows, pass and finding state, finding content, events, and
 external-link vocabularies are the distinct wire representations of the
@@ -986,12 +994,12 @@ request, or blob-upload transport request — `create_session`,
 `create_session_from_template`, `create_session_from_imported_frontier`,
 `submit_input`, `reconcile_turn`, `stop_turn`, `decide_tool_request`,
 `replace_session_metadata`, `replace_session_defaults`, `compact_session`,
-`update_session_placement`, `import_conversation`, `begin_conversation_import`,
-`append_conversation_import`, `commit_conversation_import`,
-`abort_conversation_import`, `begin_blob_upload`, `append_blob_upload`,
-`commit_blob_upload`, `abort_blob_upload`, `spawn_session`, `await_session`,
-`send_session_message`, `replace_lost_runner`, `abandon_lost_runner`, or
-`promote_pending_runner` — produces exactly one of:
+`cancel_program_run`, `update_session_placement`, `import_conversation`,
+`begin_conversation_import`, `append_conversation_import`,
+`commit_conversation_import`, `abort_conversation_import`, `begin_blob_upload`,
+`append_blob_upload`, `commit_blob_upload`, `abort_blob_upload`,
+`spawn_session`, `await_session`, `send_session_message`, `replace_lost_runner`,
+`abandon_lost_runner`, or `promote_pending_runner` — produces exactly one of:
 
 - `session_created` with `session_id` and the complete installed
   `model_settings` snapshot;
@@ -1023,6 +1031,17 @@ request, or blob-upload transport request — `create_session`,
   `summary_entry_id`, and complete `result_frontier_id`; an equal replay returns
   these original values before resolving configuration needed only for a fresh
   call;
+- `program_run_cancellation_receipt` with the request's `command_id` and
+  `run_id`, plus exactly one closed `outcome` object:
+  `{ "kind": "applied", "terminal_state": "cancelled", "result": null }`;
+  `{ "kind": "not_found" }`; or
+  `{ "kind": "already_terminal", "terminal_state": <standing terminal state>, "result": <standing terminal result> }`;
+  under the command-identity claim protocol in
+  [identity and commands](identity-and-commands.md), an identical
+  `cancel_program_run` request bearing the same `command_id` is a replay and
+  returns the originally stored receipt even if the run's standing state later
+  changes; reuse of that `command_id` with a different `run_id` or other payload
+  is conflicting reuse and is rejected as such;
 - `conversation_import_inserted` with `imported_conversation_id`;
 - `conversation_import_already_imported` with `imported_conversation_id`;
 - `conversation_import_begun` with the admitted `declared_size_bytes`;
@@ -1741,9 +1760,9 @@ draws the same single unit. The session-metadata read is admitted on the same
 ground as the rest and not for its result size: it opens a transaction, fixes a
 repeatable-read snapshot, selects, and commits. The session-defaults read is the
 single-statement case; it returns its connection immediately and takes no
-admission. The exact reservation is owned by this contract, and every request
-states its admission class before dispatch, so no read verb reaches the pool by
-omission.
+admission. The [snapshot-reader capacity budget](#snapshot-reader-capacity) owns
+the admission formula. Every request states its admission class before dispatch,
+so no read verb reaches the pool by omission.
 
 Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 
@@ -2178,13 +2197,17 @@ superseding transaction publishes this event before its replacement
 and ignore the replacement activation.
 
 The `tool_approval_decided` decision is exactly `approve {}` or
-`deny { reason }`, where `reason` is required-nullable because delegate denials
-carry no user-authored reason. Its decider is exactly `user { command_id }` or
+`deny { reason }`, where `reason` is required-nullable: a user denial may
+decline to give one. Its decider is exactly `user { command_id }` or
 `delegate { model_selection_id, model_call_id }`; `rationale` is
-required-nullable and present only for a delegate decision. A delegate denial
-has a null `reason`; its rationale is 1 through 4,096 UTF-8 bytes and contains
-no U+0000. A present user denial reason is nonempty, at most 1,024 UTF-8 bytes,
-contains no Unicode control scalar, and has no surrounding POSIX whitespace.
+required-nullable and present only for a delegate decision. A delegate rationale
+is 1 through 4,096 UTF-8 bytes and contains no U+0000; a delegate denial's
+`reason` is derived deterministically from that rationale (control characters
+become spaces, forbidden edge spaces are trimmed, the text is cut to 1,024 bytes
+on a character boundary) and is null exactly when the rationale sanitizes to
+nothing. Every present denial reason — user-authored or derived — is nonempty,
+at most 1,024 UTF-8 bytes, contains no Unicode control scalar, and has no
+surrounding POSIX whitespace.
 
 The protocol additionally admits
 `context_compacted { context_compaction_id, model_call_id, through_position, summary_entry_id, result_frontier_id }`.
@@ -2328,6 +2351,23 @@ behind a new authoritative snapshot after `resync_required`. Final durable
 content is deduplicated by source-qualified semantic-entry identity while
 transition-only events remain visible instead of being suppressed by a newer
 side snapshot.
+
+## Program-run cancellation
+
+**Committed unimplemented functionality.** No present wire surface names program
+runs. Protocol version `1` adds the `cancel_program_run` request and
+`program_run_cancellation_receipt` server message cataloged above; both carry
+the required top-level version `1`, and a later incompatible shape requires a
+new process-protocol version under the ordinary version rules. The request names
+canonical UUID `run_id` and durable canonical UUID `command_id`. Its receipt
+answers from a closed outcome vocabulary: applied (the run is now terminally
+cancelled), `not_found` (no such run), or `already_terminal` naming the standing
+terminal state and result the command found. The run-state semantics — that a
+cancel never overwrites a terminal outcome and that an applied cancel is
+journaled and replayed — are owned by the substrate page; this contract owns the
+message pair, its versioned encoding, and the closed receipt algebra, which
+client and daemon must implement together in the release that makes runs
+nameable on the wire.
 
 ## Terminal client
 
