@@ -864,18 +864,18 @@ impl PostgresRepoWatchStore {
                 "SELECT EXISTS (
                     SELECT 1
                       FROM (
-                            SELECT base_branch, base_revision, mergeable_state,
+                            SELECT head_sha, base_branch, base_revision, mergeable_state,
                                    review_decision, unresolved_threads,
                                    gating_check_count, non_green_gating_checks,
                                    verdict_kind
-                              FROM repo_watch_pull_request_convergence_assessment
+                             FROM repo_watch_pull_request_convergence_assessment
                              WHERE repository = $1
                                AND pull_request_number = $2
-                               AND head_sha = $3
                              ORDER BY recorded_at DESC, assessment_id DESC
                              LIMIT 1
                            ) AS current
-                     WHERE current.base_revision = $4
+                     WHERE current.head_sha = $3
+                       AND current.base_revision = $4
                        AND current.base_branch = $5
                        AND current.mergeable_state = $6
                        AND current.review_decision = $7

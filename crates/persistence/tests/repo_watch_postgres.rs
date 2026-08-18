@@ -817,9 +817,18 @@ async fn evidence_replay_after_a_head_round_trip_uses_the_candidate_head()
     .bind(INITIAL_HEAD)
     .fetch_one(&pool)
     .await?;
+    let latest_assessment_head: String = sqlx::query_scalar(
+        "SELECT head_sha
+           FROM repo_watch_pull_request_convergence_assessment
+          ORDER BY recorded_at DESC, assessment_id DESC
+          LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await?;
 
-    assert_eq!(assessment_count, 2);
-    assert_eq!(first_head_assessment_count, 1);
+    assert_eq!(assessment_count, 3);
+    assert_eq!(first_head_assessment_count, 2);
+    assert_eq!(latest_assessment_head, INITIAL_HEAD);
     Ok(())
 }
 
