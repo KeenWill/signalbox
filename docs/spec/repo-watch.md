@@ -41,7 +41,9 @@ refresh behavior are verified against this PR
 pull-request issue-comment behavior, per-page hydration coalescing, and
 workflow-run branch symmetry below are verified against PR #891
 (`agent/webhook-event-mapping`). Webhook drain liveness and stall reporting are
-verified against this PR (`agent/webhook-projection-drain`).
+verified against PR #896 (`agent/webhook-projection-drain`). Webhook preemption
+of slow complete reconciliation is verified against this PR
+(`agent/webhook-projection-preemption-review`).
 
 ## Configuration and credential boundary
 
@@ -151,8 +153,16 @@ reaches or exceeds the interval cannot hold that cadence, and starts a fresh
 interval from its own completion rather than following immediately: a poll
 deadline left in the past would win every scheduling decision the repository
 task makes and starve the durable webhook drain. A webhook wake serializes with
-the same repository task and does not reset the full-poll deadline; a failed or
-unavailable webhook endpoint therefore loses acceleration, not reconciliation.
+the same repository task, but may preempt the read-only provider sweep of an
+in-flight complete poll so admitted durable work cannot wait behind that slow
+sweep. Rule activation, dispatch, webhook projection, and cursor commit remain
+outside that cancellation region. The task joins the cancelled poll's spawned
+fetches, invalidates its partial pull-request freshness, drains webhook work,
+and resumes the still-due complete poll without another preemption. A drain
+retry in backoff suppresses preemption, and the original cycle start remains the
+cadence anchor. The wake therefore loses acceleration when its endpoint is
+failed or unavailable, while reconciliation remains bounded and cannot be
+starved by a sustained stream.
 
 **Implemented behavior.** One attempt fetches up to eight open pull requests
 concurrently. The fetch sequence within a single pull request stays ordered, and
@@ -903,7 +913,10 @@ unprocessable receipt cannot pin the head of the queue and starve every later
 one; the attempt still reports the first such failure. A signature-valid
 delivery whose event or action is outside the mapped set, including a broadly
 subscribed `workflow_job`, is still acknowledged successfully and is cheaply
-logged and recorded as ignored rather than treated as an intake failure.
+logged and recorded as ignored rather than treated as an intake failure. A
+webhook-enabled shadow wake may also preempt the read-only provider sweep of an
+in-flight complete poll, without resetting that poll's deadline, so the durable
+delivery drains before bounded reconciliation resumes.
 
 **Implemented behavior.** A drain page attempts every loaded delivery even when
 one delivery fails. Each failure is logged at warning level with the delivery
