@@ -56,6 +56,7 @@ uuid = { version = "1.24.0", default-features = false, features = [
 url = "2.5.8"
 
 [dev-dependencies]
+expect-test = "1.5.1"
 signalbox-application = { path = "../../crates/application" }
 signalbox-domain = { path = "../../crates/domain" }
 signalbox-model-provider-runtime = { path = "../../crates/model-provider-runtime" }
