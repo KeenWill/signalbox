@@ -68,6 +68,15 @@ const WEBHOOK_ONLY_IDENTITY: [u8; 32] = [0x32; 32];
 const POLL_ONLY_IDENTITY: [u8; 32] = [0x33; 32];
 const LEGACY_IDENTITY: [u8; 32] = [0x34; 32];
 const HISTORICAL_IDENTITY: [u8; 32] = [0x35; 32];
+const TARGETED_DELIVERY_SEED: u128 = 0x306;
+const TARGETED_PULL_REQUEST: u64 = 41;
+const TARGETED_HEAD_BRANCH: &str = "agent/targeted";
+
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+struct PersistedAssessmentFields {
+    head_sha: String,
+    base_branch: String,
+}
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -728,7 +737,7 @@ async fn primary_targeted_commit_records_evidence_before_its_base_branch()
     let (_container, pool) = migrated_postgres().await?;
     let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
     let event_store = PostgresRepoWatchStore::new(pool.clone());
-    let key = delivery_key(0x306);
+    let key = delivery_key(TARGETED_DELIVERY_SEED);
     admit_fixture(&webhook_store, key).await?;
     let baseline = RepoWatchCursorCandidate::new(RepoWatchObservation::new(
         Vec::new(),
@@ -745,12 +754,16 @@ async fn primary_targeted_commit_records_evidence_before_its_base_branch()
     let observation = RepoWatchObservation::new(
         Vec::new(),
         RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
-            pull_requests: vec![pull_request(41, HEAD_SHA, "agent/targeted")?],
+            pull_requests: vec![pull_request(
+                TARGETED_PULL_REQUEST,
+                HEAD_SHA,
+                TARGETED_HEAD_BRANCH,
+            )?],
             workflow_runs: Vec::new(),
             branch_heads: Vec::new(),
         })?,
     );
-    let assessment = merge_ready_assessment(41, HEAD_SHA)?;
+    let assessment = merge_ready_assessment(TARGETED_PULL_REQUEST, HEAD_SHA)?;
 
     let committed = committed_cursor(
         event_store
@@ -767,7 +780,7 @@ async fn primary_targeted_commit_records_evidence_before_its_base_branch()
             )
             .await?,
     );
-    let assessments = sqlx::query_as::<_, (String, String)>(
+    let assessments = sqlx::query_as::<_, PersistedAssessmentFields>(
         "SELECT head_sha, base_branch
            FROM repo_watch_pull_request_convergence_assessment",
     )
@@ -785,10 +798,10 @@ async fn primary_targeted_commit_records_evidence_before_its_base_branch()
 
     assert_eq!(
         assessments,
-        vec![(
-            assessment.head_sha().as_str().to_owned(),
-            assessment.base_branch().as_str().to_owned(),
-        )]
+        vec![PersistedAssessmentFields {
+            head_sha: assessment.head_sha().as_str().to_owned(),
+            base_branch: assessment.base_branch().as_str().to_owned(),
+        }]
     );
     assert_eq!(disposition_generation, committed.generation().get() as i64);
     Ok(())
