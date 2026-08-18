@@ -13,6 +13,7 @@ members = [
     "crates/domain",
     "crates/expect-table",
     "crates/file-media-runtime",
+    "crates/file-media-adapter-svg",
     "crates/file-media-provider-runtime",
     "crates/file-media-processor-runtime",
     "crates/model-runtime",
