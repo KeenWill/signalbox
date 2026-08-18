@@ -187,16 +187,23 @@ fn create_private_workspace(
     .map_err(rustix_io)?;
     let staging = open_created_directory(session, &staging_name)?;
     let mut manifest = private_manifest(ManifestLifecycle::Staging, manifest_id, request);
-    write_manifest(&staging, &manifest)?;
-    let work = open_or_create_directory(&staging, PRIVATE_WORKSPACE_DIRECTORY)?;
-    work.sync_all().map_err(RunnerWorkspaceError::Io)?;
-    manifest.lifecycle = ManifestLifecycle::Ready;
-    write_manifest(&staging, &manifest)?;
-    staging.sync_all().map_err(RunnerWorkspaceError::Io)?;
-    if !path_names_directory(&staging, PRIVATE_WORKSPACE_DIRECTORY, &work)?
-        || !path_names_directory(session, &staging_name, &staging)?
-    {
-        return Err(RunnerWorkspaceError::ManifestConflict);
+    let prepared = (|| {
+        write_manifest(&staging, &manifest)?;
+        let work = open_or_create_directory(&staging, PRIVATE_WORKSPACE_DIRECTORY)?;
+        work.sync_all().map_err(RunnerWorkspaceError::Io)?;
+        manifest.lifecycle = ManifestLifecycle::Ready;
+        write_manifest(&staging, &manifest)?;
+        staging.sync_all().map_err(RunnerWorkspaceError::Io)?;
+        if !path_names_directory(&staging, PRIVATE_WORKSPACE_DIRECTORY, &work)?
+            || !path_names_directory(session, &staging_name, &staging)?
+        {
+            return Err(RunnerWorkspaceError::ManifestConflict);
+        }
+        Ok(())
+    })();
+    if let Err(error) = prepared {
+        cleanup_unpublished_workspace(session, &staging_name, &staging)?;
+        return Err(error);
     }
     if let Err(error) = renameat_with(
         session,
@@ -205,6 +212,7 @@ fn create_private_workspace(
         placement_name,
         RenameFlags::NOREPLACE,
     ) {
+        cleanup_unpublished_workspace(session, &staging_name, &staging)?;
         return Err(RunnerWorkspaceError::Io(io::Error::from_raw_os_error(
             error.raw_os_error(),
         )));
@@ -214,6 +222,26 @@ fn create_private_workspace(
         .map_err(RunnerWorkspaceError::CommitAmbiguous)?;
     let placement = open_directory(session, placement_name).map_err(RunnerWorkspaceError::Io)?;
     read_ready_private_workspace(&placement, request)
+}
+
+fn cleanup_unpublished_workspace(
+    session: &File,
+    staging_name: &str,
+    staging: &File,
+) -> Result<(), RunnerWorkspaceError> {
+    match unlinkat(staging, MANIFEST_FILE, AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+        Err(error) => return Err(rustix_io(error)),
+    }
+    match unlinkat(staging, PRIVATE_WORKSPACE_DIRECTORY, AtFlags::REMOVEDIR) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+        Err(error) => return Err(rustix_io(error)),
+    }
+    if path_names_directory(session, staging_name, staging)? {
+        unlinkat(session, staging_name, AtFlags::REMOVEDIR).map_err(rustix_io)?;
+        session.sync_all().map_err(RunnerWorkspaceError::Io)?;
+    }
+    Ok(())
 }
 
 fn private_manifest(
@@ -431,7 +459,8 @@ mod tests {
     use crate::RunnerStateRoot;
 
     use super::{
-        MANIFEST_FILE, PrivateWorkspaceRequest, RunnerWorkspaceError, open_created_directory,
+        MANIFEST_FILE, PRIVATE_WORKSPACE_DIRECTORY, PrivateWorkspaceRequest, RunnerWorkspaceError,
+        cleanup_unpublished_workspace, open_created_directory,
     };
 
     const SESSION: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00e1;
@@ -515,6 +544,26 @@ mod tests {
             & 0o7777;
 
         assert_eq!(reopened_mode, 0o700);
+    }
+
+    #[test]
+    fn unpublished_workspace_cleanup_removes_the_staging_tree() {
+        let (parent, _state) = fixture_root();
+        let session_path = parent.path().join("runner-state").join("cleanup-session");
+        let staging_path = session_path.join(".cleanup.staging");
+        fs::create_dir(&session_path).expect("the cleanup session fixture exists");
+        fs::create_dir(&staging_path).expect("the cleanup staging fixture exists");
+        fs::create_dir(staging_path.join(PRIVATE_WORKSPACE_DIRECTORY))
+            .expect("the unpublished work fixture exists");
+        fs::write(staging_path.join(MANIFEST_FILE), b"unpublished")
+            .expect("the unpublished manifest fixture exists");
+        let session = fs::File::open(&session_path).expect("the cleanup session opens");
+        let staging = fs::File::open(&staging_path).expect("the cleanup staging directory opens");
+
+        cleanup_unpublished_workspace(&session, ".cleanup.staging", &staging)
+            .expect("the definitely unpublished staging tree is removed");
+
+        assert!(!staging_path.exists());
     }
 
     #[test]
