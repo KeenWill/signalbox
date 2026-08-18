@@ -160,7 +160,8 @@ jobs:
             exit 1
           }
   rust-checks:
-    runs-on: signalbox
+    # Exercise the node-local-NVMe workspace before the production pool moves.
+    runs-on: signalbox-nvme-canary
     # The self-hosted pool starts with cold caches; give the workspace check
     # headroom until they warm.
     timeout-minutes: 30
@@ -258,7 +259,8 @@ jobs:
   domain-instruction-counts:
     name: Domain instruction counts (report only)
     continue-on-error: true
-    runs-on: signalbox
+    # Exercise bubblewrap and callgrind on the node-local-NVMe workspace too.
+    runs-on: signalbox-nvme-canary
     timeout-minutes: 20
     steps:
       - name: Check out repository
@@ -429,7 +431,7 @@ jobs:
       postgres-integration
       (${{ matrix.suite }} ${{ matrix.partition }}/${{ matrix.partitions }})
     needs: postgres-integration-build
-    # The generated matrix routes one persistence shard through node-local
+    # The generated matrix routes four persistence shards through node-local
     # NVMe while every other shard remains on the production Docker pool.
     runs-on: ${{ matrix.runner }}
     # Keep security-sensitive sockets and filesystem fixtures off the NFS

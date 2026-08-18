@@ -124,7 +124,7 @@ BUILD_JOB = "postgres-integration-build"
 PRODUCTION_RUNNER = "signalbox-docker"
 NVME_CANARY_RUNNER = "signalbox-docker-nvme-canary"
 NVME_CANARY_SUITE = "persistence"
-NVME_CANARY_PARTITION = 1
+NVME_CANARY_PARTITIONS = frozenset({1, 2, 3, 4})
 BUILD_RUNNER = PRODUCTION_RUNNER
 RUN_RUNNER = "${{ matrix.runner }}"
 # A step or job that may fail without failing anything above it. The archived
@@ -334,9 +334,9 @@ def run_matrix(suites: tuple[Suite, ...]) -> dict[str, list[dict[str, object]]]:
     """Expand the suites into the workflow's `strategy.matrix` object.
 
     One entry per shard, so a suite declaring one shard costs exactly one
-    runner and stays in the same machinery as a sharded one. The first
-    persistence shard is the bounded node-local-NVMe canary; every other shard
-    remains on the production Docker pool.
+    runner and stays in the same machinery as a sharded one. The first four
+    persistence shards are the bounded node-local-NVMe canary load; every other
+    shard remains on the production Docker pool.
     """
     include: list[dict[str, object]] = []
     for suite in suites:
@@ -350,7 +350,7 @@ def run_matrix(suites: tuple[Suite, ...]) -> dict[str, list[dict[str, object]]]:
                     "runner": (
                         NVME_CANARY_RUNNER
                         if suite.name == NVME_CANARY_SUITE
-                        and partition == NVME_CANARY_PARTITION
+                        and partition in NVME_CANARY_PARTITIONS
                         else PRODUCTION_RUNNER
                     ),
                 }

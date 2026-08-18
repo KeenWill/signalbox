@@ -293,14 +293,23 @@ class RunMatrixTests(unittest.TestCase):
 
         self.assertEqual(len(matrix["include"]), 4)
 
-    def test_only_the_first_persistence_shard_uses_the_nvme_canary(self) -> None:
-        matrix = run_matrix((suite(name="persistence", shards=3),))
+    def test_first_four_persistence_shards_use_the_nvme_canary(self) -> None:
+        matrix = run_matrix((suite(name="persistence", shards=6),))
 
         self.assertEqual(
             matrix["include"][0]["runner"], "signalbox-docker-nvme-canary"
         )
-        self.assertEqual(matrix["include"][1]["runner"], "signalbox-docker")
-        self.assertEqual(matrix["include"][2]["runner"], "signalbox-docker")
+        self.assertEqual(
+            matrix["include"][1]["runner"], "signalbox-docker-nvme-canary"
+        )
+        self.assertEqual(
+            matrix["include"][2]["runner"], "signalbox-docker-nvme-canary"
+        )
+        self.assertEqual(
+            matrix["include"][3]["runner"], "signalbox-docker-nvme-canary"
+        )
+        self.assertEqual(matrix["include"][4]["runner"], "signalbox-docker")
+        self.assertEqual(matrix["include"][5]["runner"], "signalbox-docker")
 
 
 class ArchivePlanTests(unittest.TestCase):
