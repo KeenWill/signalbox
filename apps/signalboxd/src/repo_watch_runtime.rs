@@ -27,9 +27,9 @@ use signalbox_application::{
     RepoWatchObservation, RepoWatchObservationApplyV1, RepoWatchPullRequestLifecycle,
     RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
     RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
-    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTargetedRefreshV1,
-    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWebhookDeliveryV1,
-    RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTargetedRefreshCoalescerV1,
+    RepoWatchTargetedRefreshV1, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
     RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
     RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
     UuidV7RepoWatchEventIdGenerator, apply_repo_watch_observation_patch_v1,
@@ -664,12 +664,13 @@ impl RepositoryWatchTask {
                 }
                 break;
             }
+            let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
             for delivery in &deliveries {
                 after_receipt = Some(delivery.receipt().sequence());
                 if deferred.contains(&delivery.key()) {
                     continue;
                 }
-                match self.process_webhook_delivery(delivery).await {
+                match self.process_webhook_delivery(delivery, &mut page).await {
                     Ok(()) => {}
                     Err(error) => {
                         // A delivery whose targeted refresh cannot succeed stays
@@ -750,6 +751,7 @@ impl RepositoryWatchTask {
     async fn process_webhook_delivery(
         &mut self,
         pending: &PendingRepoWatchWebhookDelivery,
+        page: &mut RepoWatchTargetedRefreshCoalescerV1,
     ) -> Result<(), RepositoryWatchAttemptError> {
         let delivery = RepoWatchWebhookDeliveryV1::new(RepoWatchWebhookDeliveryV1Input {
             repository: pending.repository().clone(),
@@ -843,6 +845,18 @@ impl RepositoryWatchTask {
                         )
                         .await
                     }
+                    RepoWatchObservationApplyV1::Ignored(reason) => {
+                        // Projecting nothing is the point: polling could never
+                        // produce this fact, so a projection would stand as a
+                        // webhook-only parity row nothing can ever match.
+                        self.record_webhook_terminal(
+                            pending,
+                            Vec::new(),
+                            RepoWatchWebhookDisposition::Ignored,
+                            Some(webhook_ignored_reason_code(reason)),
+                        )
+                        .await
+                    }
                     RepoWatchObservationApplyV1::Applied(observation) => {
                         let (projections, identity_frontier) = shadow_event_projections(
                             &self.repository,
@@ -880,11 +894,12 @@ impl RepositoryWatchTask {
                             &observation,
                             cause,
                         )?;
+                        let unissued = page.unissued(&refreshes);
                         // The provider query runs before anything is recorded, so
                         // a transient fetch failure leaves this delivery pending
                         // and retryable instead of terminal with a targeted query
                         // that never happened.
-                        let prepared = match self.prepare_targeted_refresh(&refreshes).await? {
+                        let prepared = match self.prepare_targeted_refresh(&unissued).await? {
                             PreparedTargetedRefreshOutcome::SupersededTarget => {
                                 // The provider proved a targeted head stale
                                 // before anything was recorded: the derived
@@ -903,14 +918,16 @@ impl RepositoryWatchTask {
                             PreparedTargetedRefreshOutcome::NoTargets => None,
                             PreparedTargetedRefreshOutcome::Prepared(prepared) => Some(prepared),
                         };
-                        // Only refreshes actually sent are recorded, so a
-                        // branch-only delivery naming no pull request cannot
-                        // claim a query the poller never issued.
+                        // Only refreshes actually sent are recorded, so neither a
+                        // branch-only delivery naming no pull request nor one
+                        // whose hydration this page already issued can claim a
+                        // query the poller never made.
+                        let issued = prepared
+                            .as_ref()
+                            .map(|prepared| prepared.queried.clone())
+                            .unwrap_or_default();
                         projections.extend(
-                            prepared
-                                .as_ref()
-                                .map(|prepared| prepared.queried.as_slice())
-                                .unwrap_or_default()
+                            issued
                                 .iter()
                                 .map(targeted_query_projection)
                                 .collect::<Result<Vec<_>, _>>()?,
@@ -922,6 +939,10 @@ impl RepositoryWatchTask {
                             // is kept rather than reloaded; the next full poll is
                             // the complete sweep that replaces it.
                             self.commit_targeted_refresh(prepared).await?;
+                            // Recorded only once the refresh has landed, so a
+                            // failure above leaves the hydration for the page's
+                            // remaining deliveries to reissue.
+                            page.record_issued(&issued);
                         }
                         // The delivery becomes terminal only once every durable
                         // write it asked for has landed, so a failed cursor commit
@@ -1028,6 +1049,9 @@ impl RepositoryWatchTask {
         &mut self,
         refreshes: &[RepoWatchTargetedRefreshV1],
     ) -> Result<PreparedTargetedRefreshOutcome, RepositoryWatchAttemptError> {
+        if refreshes.is_empty() {
+            return Ok(PreparedTargetedRefreshOutcome::NoTargets);
+        }
         let cursor = self
             .store
             .load_cursor(&self.repository)
@@ -1551,6 +1575,7 @@ const fn webhook_ignored_reason_code(reason: RepoWatchWebhookIgnoredReasonV1) ->
         RepoWatchWebhookIgnoredReasonV1::UnmappedAction => "unmapped_action",
         RepoWatchWebhookIgnoredReasonV1::NonBranchPush => "non_branch_push",
         RepoWatchWebhookIgnoredReasonV1::ForeignWorkflowRepository => "foreign_workflow_repository",
+        RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowBranch => "absent_workflow_branch",
         RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadRepository => {
             "absent_workflow_head_repository"
         }
