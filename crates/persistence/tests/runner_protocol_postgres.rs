@@ -4644,7 +4644,7 @@ fn assert_store_domain_error(error: RunnerProtocolStoreError, expected: RunnerDo
 #[track_caller]
 fn assert_store_corruption(error: RunnerProtocolStoreError, expected: RunnerProtocolCorruption) {
     let RunnerProtocolStoreError::Corruption(actual) = error else {
-        panic!("the adapter must return typed corruption for malformed durable evidence")
+        panic!("the adapter must return typed corruption for malformed durable evidence: {error:?}")
     };
     assert_eq!(actual, expected);
 }
@@ -18502,7 +18502,7 @@ async fn s31_inv043_later_lease_event_rejects_cross_wired_dispatch_fence()
         .expect("the exact lease fence claims");
     let cross_wired = lease_with_cross_wired_dispatch(&claimed, registration.registration());
     let rejected = store
-        .store_lease(&cross_wired)
+        .store_claimed_lease_projection_for_test(&cross_wired)
         .await
         .expect_err("a later event must match every canonical dispatch-fence field");
 
