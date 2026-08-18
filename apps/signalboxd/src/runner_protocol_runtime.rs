@@ -49,6 +49,7 @@ use crate::{
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const HEARTBEAT_MISSES_BEFORE_LOSS: u8 = 3;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const CLAIMED_REPLAY_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAXIMUM_CONCURRENT_CONNECTIONS: usize = 64;
 const REGISTRATION_ONLY_CREDENTIAL_PROFILE: &str = "github-runner";
@@ -1962,7 +1963,8 @@ where
                         {
                             return Ok(());
                         }
-                        if let Err(error) = write_message(&mut writer, claim_acknowledgement).await
+                        if let Err(error) =
+                            write_claimed_replay_message(&mut writer, claim_acknowledgement).await
                         {
                             transition_is_current(
                                 &service,
@@ -1981,7 +1983,9 @@ where
                         {
                             return Ok(());
                         }
-                        if let Err(error) = write_message(&mut writer, dispatch).await {
+                        if let Err(error) =
+                            write_claimed_replay_message(&mut writer, dispatch).await
+                        {
                             transition_is_current(
                                 &service,
                                 context,
@@ -2442,6 +2446,7 @@ const fn connection_failure_transition(
     match error {
         RunnerProtocolRuntimeError::Read(_)
         | RunnerProtocolRuntimeError::Write(_)
+        | RunnerProtocolRuntimeError::ClaimedReplayWriteTimeout
         | RunnerProtocolRuntimeError::Closed => Some(RunnerConnectionTransition::TransportClosed),
         RunnerProtocolRuntimeError::Decode(_)
         | RunnerProtocolRuntimeError::Encode(_)
@@ -2777,6 +2782,15 @@ async fn write_message(
         .map_err(RunnerProtocolRuntimeError::Write)
 }
 
+async fn write_claimed_replay_message(
+    writer: &mut OwnedWriteHalf,
+    message: Message,
+) -> Result<(), RunnerProtocolRuntimeError> {
+    timeout(CLAIMED_REPLAY_WRITE_TIMEOUT, write_message(writer, message))
+        .await
+        .map_err(|_| RunnerProtocolRuntimeError::ClaimedReplayWriteTimeout)?
+}
+
 fn available_correlation(message: &Message) -> AvailableCorrelation {
     match message {
         Message::Enroll(value) => AvailableCorrelation::Enrollment(value.request_id),
@@ -2909,6 +2923,7 @@ pub enum RunnerProtocolRuntimeError {
     OwnershipUnavailable,
     Broker(RunnerConnectionBrokerError),
     DispatchWire(RunnerDispatchWireError),
+    ClaimedReplayWriteTimeout,
     HeartbeatSequenceExhausted,
     ConnectionTask(JoinError),
     ConnectionDrainTimeout {
@@ -2934,6 +2949,9 @@ impl fmt::Display for RunnerProtocolRuntimeError {
             }
             Self::Broker(_) => formatter.write_str("runner connection broker failed"),
             Self::DispatchWire(_) => formatter.write_str("runner lease wire projection failed"),
+            Self::ClaimedReplayWriteTimeout => {
+                formatter.write_str("runner claimed-lease replay write timed out")
+            }
             Self::HeartbeatSequenceExhausted => {
                 formatter.write_str("runner heartbeat sequence exhausted")
             }
@@ -2963,6 +2981,7 @@ impl Error for RunnerProtocolRuntimeError {
             Self::Closed
             | Self::HandshakeTimeout
             | Self::OwnershipUnavailable
+            | Self::ClaimedReplayWriteTimeout
             | Self::HeartbeatSequenceExhausted
             | Self::ConnectionDrainTimeout {
                 initiating: None, ..
@@ -4029,6 +4048,14 @@ mod tests {
         assert_eq!(
             rejection_terminal_transition(RunnerRegistrationFailureCause::Database),
             RunnerConnectionTransition::TransportClosed,
+        );
+    }
+
+    #[test]
+    fn claimed_replay_write_timeout_terminalizes_the_transport() {
+        assert_eq!(
+            connection_failure_transition(&RunnerProtocolRuntimeError::ClaimedReplayWriteTimeout),
+            Some(RunnerConnectionTransition::TransportClosed),
         );
     }
 
