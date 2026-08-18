@@ -128,6 +128,13 @@ concurrency:
 
 permissions: {}
 
+# Matches the Rust workflow, whose workspace-tests job writes the shared
+# cache: both the cache key and cargo's own artifact fingerprints
+# incorporate RUSTFLAGS, so restore-only jobs must build identically
+# to reuse it.
+env:
+  RUSTFLAGS: "-D warnings"
+
 jobs:
   eligibility:
     name: Tool eval eligibility
@@ -207,7 +214,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: daemon-tool-eval-${{ matrix.family }}
+          shared-key: rust
+          save-if: false
       - name: Build the tool-eval binary without credentials
         id: build
         run: |
