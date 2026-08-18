@@ -9,6 +9,7 @@ use std::{error::Error, fs, os::unix::fs::PermissionsExt as _, process::Stdio, t
 use signalbox_persistence::{
     disposable_test_container_labels, local_test_connection_options, migrate,
 };
+use signalbox_test_bin::test_bin_path;
 use signalboxd::{
     LocalProcessListener,
     runner_protocol_runtime::{PostgresRunnerRegistrationService, RunnerProtocolRuntime},
@@ -70,7 +71,7 @@ async fn s30_inv042_spawned_runner_enrolls_against_durable_daemon() -> Result<()
     let socket = directory.path().join("runner.sock");
     let runner_root = directory.path().join("runner-state");
     let configuration_path = directory.path().join("runner.toml");
-    let runner_binary = env!("CARGO_BIN_EXE_signalbox-runner");
+    let runner_binary = test_bin_path!("signalbox-runner");
     let configuration = format!(
         r#"version = 1
 daemon_socket_path = "{}"
