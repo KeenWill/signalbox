@@ -1,4 +1,4 @@
-//! Explicit mapping between sealed runner lease authority and version-one wire frames.
+//! Explicit mapping between sealed runner lease authority and version-two wire frames.
 
 use std::{error::Error, fmt};
 
@@ -17,7 +17,7 @@ use signalbox_runner_wire::{
     ResultRecorded, SandboxProfile, TerminalResult, ValueError, WireToolName, WorkingDirectory,
 };
 
-/// A sealed domain lease could not be represented by the closed version-one wire.
+/// A sealed domain lease could not be represented by the closed version-two wire.
 #[derive(Debug)]
 pub enum RunnerDispatchWireError {
     /// The requested frame is not valid for the lease's durable lifecycle state.
@@ -40,7 +40,7 @@ impl fmt::Display for RunnerDispatchWireError {
             Self::InvalidLeaseState => "runner lease state cannot emit the requested frame",
             Self::ArgumentsNotJson => "runner lease arguments are not dispatchable JSON",
             Self::ArgumentsDecode(_) => "runner lease arguments could not be decoded",
-            Self::Wire(_) => "runner lease facts violate the version-one wire",
+            Self::Wire(_) => "runner lease facts violate the version-two wire",
             Self::Correlation => "runner wire correlation is not valid domain evidence",
             Self::Result => "runner wire result is not valid domain evidence",
         })
@@ -487,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn s16_inv043_offered_lease_projects_the_complete_version_one_frame() {
+    fn s16_inv043_offered_lease_projects_the_complete_version_two_frame() {
         let lease = lease(RunnerLeaseState::Offered);
         let expected_correlation = lease.correlation();
         let message = RunnerDispatchWireAdapter::lease_offer(&lease)
