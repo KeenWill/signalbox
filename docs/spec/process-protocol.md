@@ -21,6 +21,9 @@ this PR (`agent/delegation-process-wire-v2`).
 The goal-mode process and terminal surface was re-verified through PR #384
 (`agent/goal-mode-runtime`).
 
+The repository-watch operator-status process and terminal surface was verified
+against PR #861 (`agent/operator-status-command`).
+
 The descendant-termination command scope was re-verified through this PR
 (`agent/delegation-command-scope`).
 
@@ -294,6 +297,7 @@ that variant.
 | `create_session`                        | `command_id` (canonical UUID string), `initial_model_selection` (selection object), `model_settings` (settings overlay), `system_prompt` (string or null), optional `placement` (session-placement object; omission means pathless), `runner_placement` (proposed; runner-placement object or null)           | Create a user-initiated session with no ancestry and establish defaults version one.                                                                                                                                                                                                                                                                                            |
 | `create_session_from_template`          | `command_id` (canonical UUID string), `template_name` (template-name string), optional `placement` (session-placement object; omission means pathless), `runner_placement` (proposed; runner-placement object or null)                                                                                        | Resolve one daemon-held template and copy its complete bundle into a user-initiated session's defaults version one.                                                                                                                                                                                                                                                             |
 | `list_sessions`                         | none                                                                                                                                                                                                                                                                                                          | Read all current sessions as basic summaries, ordered by session identity.                                                                                                                                                                                                                                                                                                      |
+| `read_operator_status`                  | none                                                                                                                                                                                                                                                                                                          | Read one coherent repository-watch operator-status snapshot.                                                                                                                                                                                                                                                                                                                    |
 | `update_session_placement`              | `command_id` and `session_id` (canonical UUID strings), `expected_placement_version` (positive canonical decimal string), `replacement` (session-placement object)                                                                                                                                            | Append one immutable placement event conditional on the exact current placement version.                                                                                                                                                                                                                                                                                        |
 | `list_templates`                        | none                                                                                                                                                                                                                                                                                                          | Read every available template's name and version in name order.                                                                                                                                                                                                                                                                                                                 |
 | `attach_goal`                           | `command_id` and `session_id` (canonical UUID strings), `statement` (string)                                                                                                                                                                                                                                  | Attach the first immutable commissioned statement and begin pursuing it.                                                                                                                                                                                                                                                                                                        |
@@ -1253,6 +1257,37 @@ row at a time before client output. A slow client therefore retains temporary
 disk rather than the complete session catalog in request heap or an open
 database transaction. The sequence becomes authoritative only after the end
 message and count validate. This avoids an aggregate frame-size limit.
+
+A successful `read_operator_status` response consists of `operator_status`
+messages: `kind=start`, zero or more rows from each section in this fixed order,
+then `kind=end` with one count per section. The row kinds are `held_slot`,
+`queued_obligation`, `pull_request_convergence`, and
+`pending_stale_review_clearance`. The daemon reads the four repository-watch
+views bearing those respective concepts in one read-only repeatable-read
+transaction. It streams their rows through server-side cursors into a
+temporary-file spool before writing the first response frame, so a database or
+encoding failure produces no partial successful snapshot and the request retains
+neither an unbounded row inventory nor a database transaction while the client
+reads.
+
+A held-slot row carries dispatch, repository, pull request, rule, singleton,
+ordered session, whole-second held duration, and the independently failing
+release clauses. A queued-obligation row carries obligation, rule, singleton,
+first and latest event, collapsed match count, whole-second wait duration,
+occupying dispatch and sessions, positive remaining cooldown when any, and the
+view's ready decision. An infinite eligibility timestamp is represented as a
+never-eligible cooldown rather than a numeric duration. A convergence row
+carries repository and pull request, head and base revisions, base branch,
+mergeable state, review decision, unresolved-thread and gating-check counts,
+sorted non-green check names, verdict, optional matching durable seal, and
+whole-second assessment age. Each non-green check name is canonical padded
+base64 of its exact UTF-8 bytes on the wire, keeping the complete admitted
+10,000-name inventory below the frame cap even under worst-case JSON escaping.
+A pending-clearance row carries repository and pull request, current and
+reviewed heads, review identity, reviewer, and whole-second pending duration.
+Every duration is clamped nonnegative and sampled against the database
+transaction timestamp, not a client clock.
+
 Identifiers are canonical UUID strings. Request identities, ordinal versions,
 indices, counts, and outbox cursors are canonical decimal strings, preserving
 their full unsigned 64-bit range without JSON-number precision loss.
@@ -2499,6 +2534,20 @@ that the turn remains queued; active-only `:stop` and `:steer` remain
 unavailable until activation. Once the followed turn terminalizes, the client
 presents its exact durable terminal material and accepts another ordinary input
 line.
+
+`status` sends exactly one `read_operator_status` request through the configured
+owner-only daemon socket; it never opens the database itself. It validates the
+fixed section order and all four terminal counts before printing anything. The
+first output line names those counts, followed by one human-scannable line per
+row with `held`, `queued`, `convergence`, or `stale_review_clearance` as its
+kind. A convergence line prints `non_green_count` beside the comma-joined
+`non_green` field, so an empty inventory cannot collide with a check literally
+named `none`. Durations use compact day, hour, minute, and second units.
+Process-derived text uses terminal-safe field escaping unless `--raw-output` is
+selected. The final `model_usage=omitted` line states that no cheap status
+aggregate is available: model usage crosses this protocol only inside each
+complete session transcript, and `status` does not issue one transcript read per
+session.
 
 `list` remains the complete unfiltered summary sequence. `search` is the
 separate verb for `list_session_metadata`, whose filters, bounded page, and

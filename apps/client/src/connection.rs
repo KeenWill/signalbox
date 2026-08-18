@@ -204,6 +204,7 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::CreateSessionFromTemplate { .. }
         | ClientRequest::ListTemplates {}
         | ClientRequest::ListSessions {}
+        | ClientRequest::ReadOperatorStatus {}
         | ClientRequest::UpdateSessionPlacement { .. }
         | ClientRequest::AttachGoal { .. }
         | ClientRequest::ReadGoal { .. }

@@ -34,6 +34,11 @@ use signalbox_persistence::{
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
+    operator_status::{
+        ProcessOperatorStatusHeldSlot, ProcessOperatorStatusHeldSlotBlocker,
+        ProcessOperatorStatusItem, ProcessOperatorStatusQueuedObligation,
+        ProcessOperatorStatusRepository,
+    },
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
         RepoWatchCursorCandidate, RepoWatchCursorGeneration,
@@ -3859,6 +3864,64 @@ async fn occupied_matches_collapse_into_one_visible_dispatch_obligation()
     assert_eq!(visible.4, session_uuids(&fixture));
     assert!(!visible.5);
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_status_reader_projects_dispatch_visibility() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let occupied = evaluate_conflict(&fixture, 102, SECOND_HEAD).await?;
+    let mut reader = ProcessOperatorStatusRepository::new(fixture.pool.clone())
+        .open()
+        .await?;
+    let held = held_status_item(
+        reader
+            .next_item()
+            .await?
+            .expect("the active fixture dispatch holds one slot"),
+    );
+    let queued = queued_status_item(
+        reader
+            .next_item()
+            .await?
+            .expect("the occupied match creates one queued obligation"),
+    );
+
+    assert_eq!(held.dispatch_id(), *fixture.dispatch_id.as_uuid());
+    assert_eq!(held.session_ids(), session_uuids(&fixture));
+    assert_eq!(
+        held.blockers(),
+        [
+            ProcessOperatorStatusHeldSlotBlocker::DeliveryTurnRuntimeRelevant,
+            ProcessOperatorStatusHeldSlotBlocker::LiveRuntimeTurn,
+            ProcessOperatorStatusHeldSlotBlocker::PursuingGoal,
+        ]
+    );
+    assert_eq!(queued.latest_event_id(), *occupied.event_id.as_uuid());
+    assert_eq!(occupied.outcome, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(
+        queued.occupying_dispatch_id(),
+        Some(*fixture.dispatch_id.as_uuid())
+    );
+    assert_eq!(queued.occupying_session_ids(), session_uuids(&fixture));
+    assert!(!queued.ready());
+    Ok(())
+}
+
+#[track_caller]
+fn held_status_item(item: ProcessOperatorStatusItem) -> ProcessOperatorStatusHeldSlot {
+    match item {
+        ProcessOperatorStatusItem::HeldSlot(item) => item,
+        item => panic!("fixture expected held status first, got {item:?}"),
+    }
+}
+
+#[track_caller]
+fn queued_status_item(item: ProcessOperatorStatusItem) -> ProcessOperatorStatusQueuedObligation {
+    match item {
+        ProcessOperatorStatusItem::QueuedObligation(item) => item,
+        item => panic!("fixture expected queued status second, got {item:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

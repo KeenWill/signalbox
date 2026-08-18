@@ -75,17 +75,20 @@ use signalbox_process_protocol::{
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
     ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
     MetadataActor, ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
-    ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion, ReasoningLevel,
-    RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
-    ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
-    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
-    ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
-    ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
-    ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
-    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SessionPlacement,
-    SettingOverlay, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
-    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
+    ModelSettingsPrecedence, ModelSettingsSnapshot, OperatorStatusConvergenceVerdict,
+    OperatorStatusEndMessage, OperatorStatusMergeableState, OperatorStatusMessage,
+    OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
+    OperatorStatusReviewDecision, ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId,
+    ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent,
+    ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
+    ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+    ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts,
+    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassTerminalOutcome,
+    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
+    ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame,
+    ServerMessage, SessionEvent, SessionMetadata, SessionPlacement, SettingOverlay,
+    SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry,
+    TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
@@ -2887,6 +2890,160 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
         &ServerMessage::SessionsEnd {
             session_count: CanonicalU64::new(1),
         }
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn process_runtime_reads_an_empty_operator_status_snapshot() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request(1, ClientRequest::ReadOperatorStatus {})
+        .await?;
+
+    let start = response_within(&mut connection).await?;
+    assert_eq!(
+        start.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::Start {}))
+    );
+    let end = response_within(&mut connection).await?;
+    assert_eq!(
+        end.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
+            OperatorStatusEndMessage {
+                held_slot_count: CanonicalU64::new(0),
+                queued_obligation_count: CanonicalU64::new(0),
+                pull_request_convergence_count: CanonicalU64::new(0),
+                pending_stale_review_clearance_count: CanonicalU64::new(0),
+            },
+        ))))
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn process_runtime_reads_populated_convergence_status_rows() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let assessment_id = Uuid::from_u128(0x901);
+    sqlx::query(
+        "INSERT INTO repo_watch_cursor (
+            repository, generation, storage_version, cursor_payload,
+            recording_transaction_id
+         ) VALUES ('example/repo', 1, 1, '{\"storage_version\": 1}',
+                   pg_current_xact_id())",
+    )
+    .execute(&runtime.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_pull_request_convergence_assessment (
+            assessment_id, repository, cursor_generation, pull_request_number,
+            head_sha, base_branch, base_revision, mergeable_state,
+            review_decision, unresolved_threads, gating_check_count,
+            non_green_gating_checks, verdict_kind, recorded_at
+         ) VALUES ($1, 'example/repo', 1, 41,
+                   '1111111111111111111111111111111111111111', 'main',
+                   '2222222222222222222222222222222222222222', 'mergeable',
+                   'changes_requested', ARRAY[]::text[], 1, ARRAY['ci'],
+                   'not_converged', transaction_timestamp())",
+    )
+    .bind(assessment_id)
+    .execute(&runtime.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_pull_request_convergence_identity (
+            identity_id, repository, cursor_generation, pull_request_number,
+            assessment_id
+         ) VALUES ($1, 'example/repo', 1, 41, $2)",
+    )
+    .bind(Uuid::from_u128(0x903))
+    .bind(assessment_id)
+    .execute(&runtime.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_stale_review_clearance (
+            clearance_id, assessment_id, repository, pull_request_number,
+            current_head_sha, base_revision, review_node_id, reviewer,
+            reviewed_head_sha, dismissal_message, planned_at
+         ) VALUES ($1, $2, 'example/repo', 41,
+                   '1111111111111111111111111111111111111111',
+                   '2222222222222222222222222222222222222222',
+                   'PRR_node', 'reviewer',
+                   '3333333333333333333333333333333333333333',
+                   'Superseded by the current head.',
+                   transaction_timestamp())",
+    )
+    .bind(Uuid::from_u128(0x902))
+    .bind(assessment_id)
+    .execute(&runtime.pool)
+    .await?;
+
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection
+        .request(1, ClientRequest::ReadOperatorStatus {})
+        .await?;
+
+    let start = response_within(&mut connection).await?;
+    assert_eq!(
+        start.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::Start {}))
+    );
+    let convergence = response_within(&mut connection).await?;
+    assert_eq!(
+        convergence.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
+            Box::new(OperatorStatusPullRequestConvergenceMessage {
+                repository: String::from("example/repo"),
+                pull_request_number: CanonicalU64::new(41),
+                head_sha: String::from("1111111111111111111111111111111111111111"),
+                base_branch: String::from("main"),
+                base_revision: String::from("2222222222222222222222222222222222222222"),
+                mergeable_state: OperatorStatusMergeableState::Mergeable,
+                review_decision: OperatorStatusReviewDecision::ChangesRequested,
+                unresolved_thread_count: CanonicalU64::new(0),
+                gating_check_count: CanonicalU64::new(1),
+                non_green_gating_checks: vec![String::from("ci")],
+                verdict: OperatorStatusConvergenceVerdict::NotConverged,
+                seal: None,
+                assessed_seconds_ago: CanonicalU64::new(0),
+            },)
+        ),))
+    );
+    let clearance = response_within(&mut connection).await?;
+    assert_eq!(
+        clearance.message(),
+        &ServerMessage::OperatorStatus(Box::new(
+            OperatorStatusMessage::PendingStaleReviewClearance(Box::new(
+                OperatorStatusPendingStaleReviewClearanceMessage {
+                    repository: String::from("example/repo"),
+                    pull_request_number: CanonicalU64::new(41),
+                    current_head_sha: String::from("1111111111111111111111111111111111111111"),
+                    review_node_id: String::from("PRR_node"),
+                    reviewer: String::from("reviewer"),
+                    reviewed_head_sha: String::from("3333333333333333333333333333333333333333"),
+                    pending_for_seconds: CanonicalU64::new(0),
+                },
+            )),
+        ))
+    );
+    let end = response_within(&mut connection).await?;
+    assert_eq!(
+        end.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
+            OperatorStatusEndMessage {
+                held_slot_count: CanonicalU64::new(0),
+                queued_obligation_count: CanonicalU64::new(0),
+                pull_request_convergence_count: CanonicalU64::new(1),
+                pending_stale_review_clearance_count: CanonicalU64::new(1),
+            },
+        ))))
     );
 
     drop(connection);
