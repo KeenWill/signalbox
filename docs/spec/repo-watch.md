@@ -39,9 +39,11 @@ projection, parity view, and targeted refresh behavior are verified against this
 PR (`agent/repo-watch-webhook-receiver`). Webhook-primary commits, including
 their atomic delivery disposition, slow complete reconciliation, and webhook
 preemption of that reconciliation are verified against PR #854
-(`agent/daemon-ops-overnight`). Webhook drain liveness and stall reporting are
-also verified against this PR. Eager merge-forward dispatch is verified against
-PR #886 (`agent/eager-merge-forward`).
+(`agent/daemon-ops-overnight`). Targeted replay supersession and missing-base
+evidence deferral are verified against this PR
+(`agent/webhook-convergence-replay-guard`). Webhook drain liveness and stall
+reporting are also verified against this PR. Eager merge-forward dispatch is
+verified against PR #886 (`agent/eager-merge-forward`).
 
 ## Configuration and credential boundary
 
@@ -874,8 +876,13 @@ then commit in one database transaction; a provider or database failure leaves
 the delivery pending for replay. This lets targeted refreshes suppress dispatch
 for newly converged heads without waiting for the next complete sweep. The
 repository task evaluates committed webhook events through the same dispatch
-path as poll events. An exact replay may attach the terminal disposition to
-state won by a concurrent equivalent commit, but cannot duplicate its events.
+path as poll events. A targeted read that proves every guarded head has already
+moved records the delivery superseded rather than committing its stale patch. A
+targeted pull-request observation whose named base branch is absent from the
+cursor commits without convergence evidence; the next complete sweep supplies
+the branch head before recording that evidence. An exact replay may attach the
+terminal disposition to state won by a concurrent equivalent commit, but cannot
+duplicate its events.
 
 **Implemented behavior.** The mapped set is pull-request open, reopen, close,
 synchronize, label, unlabel, edit, draft conversion, and ready-for-review;

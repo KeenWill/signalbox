@@ -1046,7 +1046,18 @@ impl RepositoryWatchTask {
                             )
                             .await
                         } else {
-                            self.targeted_refresh_and_commit(&refreshes).await?;
+                            if self.targeted_refresh_and_commit(&refreshes).await?
+                                == TargetedRefreshCommitOutcome::Superseded
+                            {
+                                return self
+                                    .record_webhook_terminal(
+                                        pending,
+                                        Vec::new(),
+                                        RepoWatchWebhookDisposition::Superseded,
+                                        None,
+                                    )
+                                    .await;
+                            }
                             self.process_dispatches().await?;
                             self.record_webhook_terminal(
                                 pending,
@@ -1073,11 +1084,32 @@ impl RepositoryWatchTask {
         self.poller.invalidate_freshness();
         let mut convergence = Vec::new();
         if !refreshes.is_empty() {
-            let targeted = self
-                .resolve_targeted_webhook_observation(observation, refreshes)
-                .await?;
-            observation = targeted.observation;
-            convergence = targeted.convergence;
+            match self
+                .resolve_targeted_webhook_observation(
+                    cursor.candidate().observation(),
+                    observation,
+                    refreshes,
+                )
+                .await?
+            {
+                TargetedPolledRepository::Refreshed {
+                    observation: targeted_observation,
+                    convergence: targeted_convergence,
+                } => {
+                    observation = targeted_observation;
+                    convergence = targeted_convergence;
+                }
+                TargetedPolledRepository::Superseded => {
+                    return self
+                        .record_webhook_terminal(
+                            pending,
+                            Vec::new(),
+                            RepoWatchWebhookDisposition::Superseded,
+                            None,
+                        )
+                        .await;
+                }
+            }
         }
         let mut event_identity_frontier = cursor.candidate().event_identity_frontier().clone();
         let events = derive_repo_watch_events(
@@ -1121,18 +1153,19 @@ impl RepositoryWatchTask {
 
     async fn resolve_targeted_webhook_observation(
         &self,
+        baseline: &RepoWatchObservation,
         observation: RepoWatchObservation,
         refreshes: &[RepoWatchTargetedRefreshV1],
     ) -> Result<TargetedPolledRepository, RepositoryWatchAttemptError> {
         let targets = targeted_pull_requests(&observation, refreshes)?;
         if targets.is_empty() {
-            return Ok(TargetedPolledRepository {
+            return Ok(TargetedPolledRepository::Refreshed {
                 observation,
                 convergence: Vec::new(),
             });
         }
         self.poller
-            .poll_targeted_pull_requests_against_cursor(&observation, &targets)
+            .poll_targeted_pull_requests_against_cursor(baseline, &observation, &targets)
             .await
     }
 
@@ -1159,7 +1192,7 @@ impl RepositoryWatchTask {
     async fn targeted_refresh_and_commit(
         &mut self,
         refreshes: &[RepoWatchTargetedRefreshV1],
-    ) -> Result<(), RepositoryWatchAttemptError> {
+    ) -> Result<TargetedRefreshCommitOutcome, RepositoryWatchAttemptError> {
         let cursor = self
             .store
             .load_cursor(&self.repository)
@@ -1168,14 +1201,26 @@ impl RepositoryWatchTask {
             .ok_or(RepositoryWatchAttemptError::Persistence)?;
         let targets = targeted_pull_requests(cursor.candidate().observation(), refreshes)?;
         if targets.is_empty() {
-            return Ok(());
+            return Ok(TargetedRefreshCommitOutcome::Committed);
         }
         let mut event_identity_frontier = cursor.candidate().event_identity_frontier().clone();
-        let observation = self
+        let observation = match self
             .poller
-            .poll_targeted_pull_requests_against_cursor(cursor.candidate().observation(), &targets)
+            .poll_targeted_pull_requests_against_cursor(
+                cursor.candidate().observation(),
+                cursor.candidate().observation(),
+                &targets,
+            )
             .await?
-            .observation;
+        {
+            TargetedPolledRepository::Refreshed {
+                observation,
+                convergence: _,
+            } => observation,
+            TargetedPolledRepository::Superseded => {
+                return Ok(TargetedRefreshCommitOutcome::Superseded);
+            }
+        };
         let events = derive_repo_watch_events(
             &self.repository,
             Some(cursor.candidate().observation()),
@@ -1204,7 +1249,7 @@ impl RepositoryWatchTask {
             | RepoWatchCommitOutcome::Replayed(cursor)
             | RepoWatchCommitOutcome::Unchanged(cursor) => {
                 self.poller.publish_freshness(cursor.generation());
-                Ok(())
+                Ok(TargetedRefreshCommitOutcome::Committed)
             }
             RepoWatchCommitOutcome::Conflict { current: _ } => {
                 Err(RepositoryWatchAttemptError::Persistence)
@@ -2204,9 +2249,19 @@ struct PolledRepository {
     stale_review_clearances: Vec<RepoWatchStaleReviewClearanceCandidate>,
 }
 
-struct TargetedPolledRepository {
-    observation: RepoWatchObservation,
-    convergence: Vec<RepoWatchConvergenceAssessment>,
+#[derive(Debug, PartialEq)]
+enum TargetedPolledRepository {
+    Refreshed {
+        observation: RepoWatchObservation,
+        convergence: Vec<RepoWatchConvergenceAssessment>,
+    },
+    Superseded,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TargetedRefreshCommitOutcome {
+    Committed,
+    Superseded,
 }
 
 #[derive(Debug)]
@@ -2338,15 +2393,17 @@ impl GitHubRepositoryPoller {
 
     async fn poll_targeted_pull_requests_against_cursor(
         &self,
-        previous: &RepoWatchObservation,
+        baseline: &RepoWatchObservation,
+        candidate: &RepoWatchObservation,
         targets: &[TargetedPullRequest],
     ) -> Result<TargetedPolledRepository, RepositoryWatchAttemptError> {
         let mut state = RepoWatchRepositoryStateInput {
-            pull_requests: previous.state().pull_requests().to_vec(),
-            workflow_runs: previous.state().workflow_runs().to_vec(),
-            branch_heads: previous.state().branch_heads().to_vec(),
+            pull_requests: candidate.state().pull_requests().to_vec(),
+            workflow_runs: candidate.state().workflow_runs().to_vec(),
+            branch_heads: candidate.state().branch_heads().to_vec(),
         };
         let mut convergence = Vec::with_capacity(targets.len());
+        let mut superseded_target_count = 0_usize;
         for target in targets {
             let retained_index = state
                 .pull_requests
@@ -2362,23 +2419,56 @@ impl GitHubRepositoryPoller {
                 .as_ref()
                 .is_some_and(|expected| fetched.state.context().head_sha() != expected)
             {
+                let baseline_state = baseline
+                    .state()
+                    .pull_requests()
+                    .iter()
+                    .find(|pull_request| pull_request.context().number() == target.number)
+                    .cloned();
+                match (retained_index, baseline_state) {
+                    (Some(index), Some(baseline_state)) => {
+                        state.pull_requests[index] = baseline_state;
+                    }
+                    (Some(index), None) => {
+                        state.pull_requests.remove(index);
+                    }
+                    (None, Some(baseline_state)) => state.pull_requests.push(baseline_state),
+                    (None, None) => {}
+                }
                 tracing::debug!(
                     repository = %self.repository.as_str(),
                     pull_request = target.number.get(),
                     "targeted repository refresh was superseded before its response"
                 );
+                superseded_target_count = superseded_target_count.saturating_add(1);
                 continue;
             }
             match retained_index {
                 Some(index) => state.pull_requests[index] = fetched.state,
                 None => state.pull_requests.push(fetched.state),
             }
-            convergence.push(fetched.convergence);
+            if state
+                .branch_heads
+                .iter()
+                .any(|branch_head| branch_head.branch() == fetched.convergence.base_branch())
+            {
+                convergence.push(fetched.convergence);
+            } else {
+                tracing::debug!(
+                    repository = %self.repository.as_str(),
+                    pull_request = target.number.get(),
+                    base_branch = %fetched.convergence.base_branch().as_str(),
+                    "targeted convergence evidence awaits a cursor branch head"
+                );
+            }
+        }
+        if superseded_target_count == targets.len() {
+            return Ok(TargetedPolledRepository::Superseded);
         }
         let state = RepoWatchRepositoryState::try_new(state)
             .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-        Ok(TargetedPolledRepository {
-            observation: RepoWatchObservation::new(previous.signal_reviewers().to_vec(), state),
+        Ok(TargetedPolledRepository::Refreshed {
+            observation: RepoWatchObservation::new(candidate.signal_reviewers().to_vec(), state),
             convergence,
         })
     }
@@ -4873,12 +4963,13 @@ mod tests {
         PollCycleTiming, PullRequestSettlement, PullResponse, ReactionContent,
         RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchConvergenceAssessment,
         RepoWatchConvergenceAssessmentInput, RepoWatchCursorGeneration, RepoWatchObservation,
-        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewDecision,
-        RepoWatchReviewObservation, RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadState,
-        RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation, RepositorySlug,
-        RepositoryWatchAttemptError, RepositoryWatchChildExit,
-        RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
-        ResourceKey, ReviewState, StaleReviewClearanceProviderResult, TargetedPullRequest, Url,
+        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchRepositoryState,
+        RepoWatchRepositoryStateInput, RepoWatchReviewDecision, RepoWatchReviewObservation,
+        RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
+        RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
+        RepositoryWatchChildExit, RepositoryWatchRuntimeConstructionError,
+        RepositoryWatchRuntimeError, RepositoryWatchTask, ResourceKey, ReviewState,
+        StaleReviewClearanceProviderResult, TargetedPolledRepository, TargetedPullRequest, Url,
         UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY, WebhookDrainRetry,
         WorkflowName, WorkflowResponse, await_poll_or_interrupt, derive_repo_watch_events,
         dispatch_context_json, initial_poll_delay, inspect_webhook_drain,
@@ -7006,14 +7097,86 @@ mod tests {
 
         let refreshed = fixture
             .poller
-            .poll_targeted_pull_requests_against_cursor(&previous, &[target])
+            .poll_targeted_pull_requests_against_cursor(&previous, &previous, &[target])
             .await
             .expect("targeted refresh succeeds");
 
         server.finish().await;
-        assert_eq!(refreshed.observation, previous);
-        assert_eq!(refreshed.convergence.len(), 1);
-        assert_eq!(refreshed.convergence[0].number().get(), PULL_NUMBER);
+        let TargetedPolledRepository::Refreshed {
+            observation,
+            convergence,
+        } = refreshed
+        else {
+            panic!("matching targeted refresh must produce an observation");
+        };
+        assert_eq!(observation, previous);
+        assert_eq!(convergence.len(), 1);
+        assert_eq!(convergence[0].number().get(), PULL_NUMBER);
+    }
+
+    #[tokio::test]
+    async fn targeted_refresh_marks_a_moved_head_superseded() {
+        let previous = complete_typed_observation().await;
+        let server = ScriptedServer::start(complete_pull_request_responses()).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let target = TargetedPullRequest {
+            number: PullRequestNumber::new(
+                NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+            ),
+            expected_head: Some(
+                CommitSha::try_new(String::from("beefbeefbeefbeefbeefbeefbeefbeefbeefbeef"))
+                    .expect("fixture head SHA is canonical"),
+            ),
+        };
+
+        let refreshed = fixture
+            .poller
+            .poll_targeted_pull_requests_against_cursor(&previous, &previous, &[target])
+            .await
+            .expect("targeted refresh succeeds");
+
+        server.finish().await;
+        assert_eq!(refreshed, TargetedPolledRepository::Superseded);
+    }
+
+    #[tokio::test]
+    async fn targeted_refresh_defers_evidence_without_the_base_branch() {
+        let previous = complete_typed_observation().await;
+        let candidate_state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: previous.state().pull_requests().to_vec(),
+            workflow_runs: previous.state().workflow_runs().to_vec(),
+            branch_heads: Vec::new(),
+        })
+        .expect("candidate without branch heads remains canonical");
+        let candidate =
+            RepoWatchObservation::new(previous.signal_reviewers().to_vec(), candidate_state);
+        let server = ScriptedServer::start(complete_pull_request_responses()).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let target = TargetedPullRequest {
+            number: PullRequestNumber::new(
+                NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+            ),
+            expected_head: Some(
+                CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture head SHA is canonical"),
+            ),
+        };
+
+        let refreshed = fixture
+            .poller
+            .poll_targeted_pull_requests_against_cursor(&previous, &candidate, &[target])
+            .await
+            .expect("targeted refresh succeeds");
+
+        server.finish().await;
+        let TargetedPolledRepository::Refreshed {
+            observation,
+            convergence,
+        } = refreshed
+        else {
+            panic!("matching targeted refresh must produce an observation");
+        };
+        assert_eq!(observation, candidate);
+        assert!(convergence.is_empty());
     }
 
     #[tokio::test]
