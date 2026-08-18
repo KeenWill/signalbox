@@ -3759,6 +3759,7 @@ fn frontier_closes_latest_tool_round(
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. } => false,
+            SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. } => false,
         };
         if !valid {
             return Ok(false);
