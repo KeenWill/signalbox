@@ -563,6 +563,17 @@ pub enum AllowedNetworkHost {
     ApiAnthropicCom,
 }
 
+impl AllowedNetworkHost {
+    /// Returns whether one canonical hostname is admitted by this fixed entry.
+    pub fn admits_hostname(self, hostname: &str) -> bool {
+        match self {
+            Self::GithubCom => hostname == "github.com" || hostname.ends_with(".github.com"),
+            Self::CratesIo => hostname == "crates.io" || hostname.ends_with(".crates.io"),
+            Self::ApiAnthropicCom => hostname == "api.anthropic.com",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRepository {
