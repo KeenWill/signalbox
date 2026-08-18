@@ -492,7 +492,7 @@ impl RunnerStateRoot {
                 });
             }
         };
-        validate_operation_journal_owner(&state, &inventory)?;
+        validate_operation_journal_correlations(&state, &inventory)?;
         Ok(Self {
             directory,
             state,
@@ -694,7 +694,7 @@ impl RunnerStateRoot {
     }
 }
 
-fn validate_operation_journal_owner(
+fn validate_operation_journal_correlations(
     state: &RunnerState,
     inventory: &ReconnectInventory,
 ) -> Result<(), RunnerStateError> {
@@ -743,9 +743,14 @@ fn validate_operation_journal_owner(
 
 fn operation_journal_has_only_supported_slots(inventory: &ReconnectInventory) -> bool {
     inventory.workspace_operation.is_none()
-        && inventory.operation_failure.as_ref().is_none_or(|failure| {
-            matches!(&failure.correlation, OperationCorrelation::LeaseOffer(_))
-        })
+        && inventory
+            .operation_failure
+            .as_ref()
+            .is_none_or(|failure| match &failure.correlation {
+                OperationCorrelation::LeaseOffer(_) => true,
+                OperationCorrelation::Provision(_) => false,
+                OperationCorrelation::Release(_) => false,
+            })
         && inventory.leak_page.is_none()
 }
 

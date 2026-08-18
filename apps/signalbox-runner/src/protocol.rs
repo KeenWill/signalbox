@@ -845,15 +845,11 @@ where
                 Ok(None)
             }
             Message::OperationFailureRecorded(recorded) => {
-                let OperationCorrelation::LeaseOffer(correlation) = &recorded.correlation else {
+                let OperationCorrelation::LeaseOffer(_) = &recorded.correlation else {
                     return Err(RunnerConnectionError::Violation(
                         ProtocolViolation::FailureAcknowledgementMismatch,
                     ));
                 };
-                self.validate_connection_correlation(
-                    correlation.runner_id,
-                    correlation.registration_revision,
-                )?;
                 state
                     .acknowledge_lease_offer_failure(&recorded.correlation)
                     .map_err(|error| match error {
@@ -2061,15 +2057,18 @@ mod tests {
         );
     }
 
-    /// INV-011 / INV-024: the live exact acknowledgement clears a retained
-    /// lease-offer failure through the serving loop.
+    /// INV-011 / INV-024: an exact acknowledgement for a resent lease-offer
+    /// failure remains valid after resume advances the registration revision.
     #[tokio::test]
-    async fn s31_inv011_inv024_exact_failure_acknowledgement_clears_retained_slot() {
+    async fn s31_inv011_inv024_retained_revision_failure_acknowledgement_clears_slot() {
         let parent = TempDir::new().expect("a temporary parent is available");
         let mut state = enrolled_state(&parent);
         let advertisement = empty_advertisement();
         let failure = retained_lease_offer_failure();
         let correlation = failure.correlation.clone();
+        state
+            .record_lease_offer_failure(failure.clone())
+            .expect("the lease-offer failure is durable before reconnect");
         let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
         let mut hub_io = BufReader::new(hub_io);
 
@@ -2077,34 +2076,45 @@ mod tests {
             let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
                 .await
                 .expect("resume completes before the acknowledgement");
-            state
-                .record_lease_offer_failure(failure)
-                .expect("the lease-offer failure is durable");
             connection
                 .serve_one(&mut state)
                 .await
-                .expect("the exact failure acknowledgement is consumed")
+                .expect("the retained-revision acknowledgement is consumed")
         };
         let hub = async {
             let _resume = receive_hub_message(&mut hub_io).await;
             send_hub_message(
                 &mut hub_io,
                 Message::Resumed(Box::new(Resumed {
-                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    registration_revision: positive(NEXT_REGISTRATION_REVISION),
                     connection_epoch: positive(CONNECTION_EPOCH),
-                    directives: ReconnectDirectives::default(),
+                    directives: retained_failure_directives(&failure, DirectiveAction::Resend),
                 })),
             )
             .await;
+            let resent = receive_hub_message(&mut hub_io).await;
             send_hub_message(
                 &mut hub_io,
                 Message::OperationFailureRecorded(OperationFailureRecorded { correlation }),
             )
             .await;
+            resent
         };
-        let (outcome, ()) = tokio::join!(runner, hub);
+        let (outcome, resent) = tokio::join!(runner, hub);
 
         assert_eq!(outcome, None);
+        assert_eq!(
+            resent,
+            Message::OperationFailed(OperationFailed { failure })
+        );
+        assert_eq!(
+            state
+                .state()
+                .receipt()
+                .expect("the resumed runner remains enrolled")
+                .registration_revision(),
+            positive(NEXT_REGISTRATION_REVISION)
+        );
         assert_eq!(state.reconnect_inventory(), &ReconnectInventory::default());
     }
 
