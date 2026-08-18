@@ -49,7 +49,7 @@ use crate::{
     outbox,
 };
 
-const STORAGE_VERSION: i16 = 5;
+const STORAGE_VERSION: i16 = 6;
 pub(crate) const MODEL_SETTINGS_FROM_STORAGE_VERSION: i16 = 5;
 const USER_INITIATED: &str = "user_initiated";
 const IMPORTED_ANCESTRY: &str = "imported_conversation";
@@ -469,6 +469,9 @@ async fn insert_prepared(
     let stored_selection = encode_selection(defaults.defaults().model());
     let frontier = command.imported_frontier();
     let relationship = encode_relationship(command.relationship());
+    let runner_request =
+        crate::runner_protocol::encode_runner_placement_request(command.runner_placement())
+            .map_err(map_runner_store_error)?;
 
     sqlx::query(
         "INSERT INTO session
@@ -523,6 +526,12 @@ async fn insert_prepared(
         .execute(&mut *connection)
         .await?;
 
+    if let Some(placement) = session.runner_placement() {
+        crate::runner_protocol::insert_initial_session_runner_placement(connection, placement)
+            .await
+            .map_err(map_runner_store_error)?;
+    }
+
     sqlx::query(
         "INSERT INTO session_defaults_version
             (session_id, version, model_selection_kind,
@@ -565,10 +574,16 @@ async fn insert_prepared(
              creation_cause, ancestry_kind, initial_defaults_version,
              model_selection_kind, direct_model_selection_id, model_alias_id,
              dangerous_tool_auto_approval, system_prompt, model_settings,
+             runner_selector_kind, runner_selector_runner_id,
+             runner_selector_capability_class, runner_directory_selection_kind,
+             runner_requested_working_directory, runner_credential_profile_name,
+             runner_workspace_requirement_kind, runner_requested_repository_key,
+             runner_sandbox_profile, runner_permission_override_count,
              result_kind, created_session_id)
          VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-             $14, $15, $16, $17, $18)",
+             $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
+             $25, $26, $27, $28)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND)
@@ -597,10 +612,37 @@ async fn insert_prepared(
     .bind(model_settings_to_json(
         command.initial_configuration_defaults().model_settings(),
     ))
+    .bind(runner_request.selector_kind)
+    .bind(runner_request.selector_runner)
+    .bind(runner_request.selector_class)
+    .bind(runner_request.directory_kind)
+    .bind(runner_request.requested_directory)
+    .bind(runner_request.credential_profile)
+    .bind(runner_request.workspace_kind)
+    .bind(runner_request.requested_repository)
+    .bind(runner_request.sandbox)
+    .bind(runner_request.permission_override_count)
     .bind(APPLIED)
     .bind(session_id_to_uuid(prepared.applied_result().session()))
     .execute(&mut *connection)
     .await?;
+
+    if let Some(request) = command.runner_placement() {
+        for (tool, permission) in request.permission_overrides.iter() {
+            sqlx::query(
+                "INSERT INTO imported_session_runner_permission_override
+                    (command_id, tool_name, permission_kind)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(durable_command_id_to_uuid(command.command_id()))
+            .bind(tool.as_str())
+            .bind(crate::runner_protocol::encode_permission_override(
+                permission,
+            ))
+            .execute(&mut *connection)
+            .await?;
+        }
+    }
 
     for entry in prepared.semantic_entries() {
         let SemanticTranscriptEntryPayload::Imported { imported_entry, .. } = entry.payload()
@@ -696,6 +738,16 @@ async fn load_creation_from_connection(
             c.dangerous_tool_auto_approval AS command_tool_auto_approval,
             c.system_prompt AS command_system_prompt,
             c.model_settings AS command_model_settings,
+            c.runner_selector_kind,
+            c.runner_selector_runner_id,
+            c.runner_selector_capability_class,
+            c.runner_directory_selection_kind,
+            c.runner_requested_working_directory,
+            c.runner_credential_profile_name,
+            c.runner_workspace_requirement_kind,
+            c.runner_requested_repository_key,
+            c.runner_sandbox_profile,
+            c.runner_permission_override_count,
             c.result_kind,
             c.created_session_id AS result_session_id,
             s.session_id AS stored_session_id,
@@ -778,6 +830,16 @@ async fn load_creation_from_connection(
     require_spelling(&row, "command_cause", USER_INITIATED)?;
     require_spelling(&row, "command_ancestry", IMPORTED_ANCESTRY)?;
     require_spelling(&row, "result_kind", APPLIED)?;
+    let command_overrides = crate::runner_protocol::load_creation_permission_overrides(
+        connection,
+        crate::runner_protocol::RunnerCreationCommandKind::Imported,
+        durable_command_id_to_uuid(command_id),
+    )
+    .await
+    .map_err(map_runner_store_error)?;
+    let command_runner_placement =
+        crate::runner_protocol::decode_creation_runner_placement_request(&row, command_overrides)
+            .map_err(map_runner_store_error)?;
 
     let command_conversation =
         ImportedConversationId::from_uuid(required(&row, "command_conversation_id")?);
@@ -815,10 +877,15 @@ async fn load_creation_from_connection(
         command_frontier,
         command_relationship,
         command_defaults,
-    );
+    )
+    .with_runner_placement(command_runner_placement);
 
     let result_session = session_id_from_uuid(required(&row, "result_session_id")?);
     let stored_session = session_id_from_uuid(required(&row, "stored_session_id")?);
+    let stored_runner_placement =
+        crate::runner_protocol::load_initial_session_runner_placement(connection, stored_session)
+            .await
+            .map_err(map_runner_store_error)?;
     let provenance = decode_stored_provenance(&row, &conversation)?;
     let defaults_session = session_id_from_uuid(required(&row, "defaults_session_id")?);
     let defaults_version = decode_ordinal(&row, "stored_defaults_version")?;
@@ -838,7 +905,7 @@ async fn load_creation_from_connection(
     validate_initial_placement_effect(&row)?;
     let projection = load_seed_projection(connection, stored_session, &conversation).await?;
 
-    CreateSessionFromImportedFrontierReconstitutionInput::new(
+    CreateSessionFromImportedFrontierReconstitutionInput::new_with_runner_placement(
         command,
         result_session,
         stored_session,
@@ -850,6 +917,7 @@ async fn load_creation_from_connection(
         projection.seed_records,
         projection.seed_snapshots,
         projection.semantic_entries,
+        stored_runner_placement,
     )
     .reconstitute()
     .map(Some)
@@ -1435,7 +1503,7 @@ fn require_supported_version(
     field: &'static str,
 ) -> Result<i16, ImportedSessionRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if matches!(actual, 1..=3 | 5) {
+    if matches!(actual, 1..=3 | 5..=6) {
         Ok(actual)
     } else {
         Err(ImportedSessionCorruption::Unsupported {
@@ -1536,6 +1604,22 @@ fn map_registry_error(error: RegistryInspectionError) -> ImportedSessionReposito
         }
         RegistryInspectionError::Corruption(RegistryCorruption::ConflictingTypedRecords) => {
             ImportedSessionCorruption::Inconsistent("typed command family").into()
+        }
+    }
+}
+
+fn map_runner_store_error(
+    error: crate::runner_protocol::RunnerProtocolStoreError,
+) -> ImportedSessionRepositoryError {
+    match error {
+        crate::runner_protocol::RunnerProtocolStoreError::Database(error)
+        | crate::runner_protocol::RunnerProtocolStoreError::CommitAmbiguous(error) => {
+            ImportedSessionRepositoryError::Database(error)
+        }
+        crate::runner_protocol::RunnerProtocolStoreError::Corruption(_)
+        | crate::runner_protocol::RunnerProtocolStoreError::Domain(_)
+        | crate::runner_protocol::RunnerProtocolStoreError::EnrollmentRequest(_) => {
+            ImportedSessionCorruption::Inconsistent("initial runner placement").into()
         }
     }
 }

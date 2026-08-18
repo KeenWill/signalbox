@@ -38,11 +38,11 @@ pub(crate) const WITHDRAW_GIT_REMOTE_KIND: &str =
     durable_command_kind_to_str(CommandKind::WithdrawGitRemote);
 
 pub(crate) const fn create_session_storage_version_is_supported(version: i16) -> bool {
-    matches!(version, 1..=4 | 6..=7)
+    matches!(version, 1..=4 | 6..=8)
 }
 
 pub(crate) const fn imported_session_storage_version_is_supported(version: i16) -> bool {
-    matches!(version, 1..=3 | 5)
+    matches!(version, 1..=3 | 5..=6)
 }
 
 #[derive(Clone, Copy)]
@@ -60,14 +60,14 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 14] = [
         spelling: CREATE_SESSION_KIND,
         typed_table: "create_session_command",
         minimum_version: 1,
-        maximum_version: 7,
+        maximum_version: 8,
     },
     CommandKindDefinition {
         kind: CommandKind::CreateSessionFromImportedFrontier,
         spelling: CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND,
         typed_table: "create_session_from_imported_frontier_command",
         minimum_version: 1,
-        maximum_version: 5,
+        maximum_version: 6,
     },
     CommandKindDefinition {
         kind: CommandKind::ReplaceSessionDefaults,
@@ -343,9 +343,11 @@ mod tests {
         assert!(!create_session_storage_version_is_supported(5));
         assert!(create_session_storage_version_is_supported(6));
         assert!(create_session_storage_version_is_supported(7));
+        assert!(create_session_storage_version_is_supported(8));
         assert!(imported_session_storage_version_is_supported(3));
         assert!(!imported_session_storage_version_is_supported(4));
         assert!(imported_session_storage_version_is_supported(5));
+        assert!(imported_session_storage_version_is_supported(6));
     }
 
     #[test]

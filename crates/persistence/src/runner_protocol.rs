@@ -5384,7 +5384,7 @@ struct PlacementRecordEvidence {
 }
 
 async fn insert_placement_record(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     event_ordinal: u64,
     event_kind: &str,
     placement: &SessionRunnerPlacement,
@@ -5485,7 +5485,7 @@ async fn insert_placement_record(
             .map(|lineage| Decimal::from(lineage.revision.get())),
     );
     values.push_unseparated(")");
-    insert.build().execute(&mut **transaction).await?;
+    insert.build().execute(&mut *connection).await?;
     for tool in state.tools {
         sqlx::query(
             "INSERT INTO runner_session_placement_tool
@@ -5496,7 +5496,7 @@ async fn insert_placement_record(
         .bind(Decimal::from(event_ordinal))
         .bind(tool.as_str())
         .bind(state.runner_required_tools.contains(tool))
-        .execute(&mut **transaction)
+        .execute(&mut *connection)
         .await?;
     }
     for (tool, permission) in permission_overrides {
@@ -5509,9 +5509,43 @@ async fn insert_placement_record(
         .bind(Decimal::from(event_ordinal))
         .bind(tool.as_str())
         .bind(encode_permission_override(permission))
-        .execute(&mut **transaction)
+        .execute(&mut *connection)
         .await?;
     }
+    Ok(())
+}
+
+pub(crate) async fn insert_initial_session_runner_placement(
+    connection: &mut PgConnection,
+    placement: &SessionRunnerPlacement,
+) -> Result<(), RunnerProtocolStoreError> {
+    if placement.revision() != RunnerGeneration::one()
+        || !matches!(placement.state(), SessionRunnerPlacementState::Unpinned)
+    {
+        return Err(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::InvalidState,
+        ));
+    }
+    insert_placement_record(
+        connection,
+        1,
+        "created",
+        placement,
+        PlacementRecordEvidence {
+            registration_identity: (None, None),
+            grant_origin: None,
+            interrupted_tool_attempt: None,
+            loss_registration_revision: None,
+        },
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_current_session_placement (session_id, event_ordinal)
+         VALUES ($1, 1)",
+    )
+    .bind(placement.session().into_uuid())
+    .execute(&mut *connection)
+    .await?;
     Ok(())
 }
 
@@ -8245,11 +8279,240 @@ fn decode_tool_declaration(row: &PgRow) -> Result<RunnerToolDeclaration, RunnerP
     ))
 }
 
-const fn encode_permission_override(permission: RunnerToolPermissionOverride) -> &'static str {
+pub(crate) const fn encode_permission_override(
+    permission: RunnerToolPermissionOverride,
+) -> &'static str {
     match permission {
         RunnerToolPermissionOverride::Auto => "auto",
         RunnerToolPermissionOverride::Confirm => "confirm",
     }
+}
+
+pub(crate) struct EncodedRunnerPlacementRequest<'a> {
+    pub(crate) selector_kind: Option<&'static str>,
+    pub(crate) selector_runner: Option<Uuid>,
+    pub(crate) selector_class: Option<&'a str>,
+    pub(crate) directory_kind: Option<&'static str>,
+    pub(crate) requested_directory: Option<&'a str>,
+    pub(crate) credential_profile: Option<&'a str>,
+    pub(crate) workspace_kind: Option<&'static str>,
+    pub(crate) requested_repository: Option<&'a str>,
+    pub(crate) sandbox: Option<&'static str>,
+    pub(crate) permission_override_count: Decimal,
+}
+
+pub(crate) fn encode_runner_placement_request(
+    request: Option<&SessionRunnerPlacementRequest>,
+) -> Result<EncodedRunnerPlacementRequest<'_>, RunnerProtocolStoreError> {
+    let Some(request) = request else {
+        return Ok(EncodedRunnerPlacementRequest {
+            selector_kind: None,
+            selector_runner: None,
+            selector_class: None,
+            directory_kind: None,
+            requested_directory: None,
+            credential_profile: None,
+            workspace_kind: None,
+            requested_repository: None,
+            sandbox: None,
+            permission_override_count: Decimal::ZERO,
+        });
+    };
+    let (selector_kind, selector_runner, selector_class) = encode_selector(&request.selector);
+    let (directory_kind, requested_directory) = encode_directory(&request.working_directory);
+    let (workspace_kind, requested_repository) = encode_workspace_requirement(&request.workspace);
+    Ok(EncodedRunnerPlacementRequest {
+        selector_kind: Some(selector_kind),
+        selector_runner,
+        selector_class,
+        directory_kind: Some(directory_kind),
+        requested_directory,
+        credential_profile: request
+            .credential_profile
+            .as_ref()
+            .map(CredentialProfileName::as_str),
+        workspace_kind: Some(workspace_kind),
+        requested_repository,
+        sandbox: Some(runner_sandbox_to_str(request.sandbox)),
+        permission_override_count: count_decimal(request.permission_overrides.iter().count())?,
+    })
+}
+
+pub(crate) enum RunnerCreationCommandKind {
+    Native,
+    Imported,
+}
+
+pub(crate) async fn load_creation_permission_overrides(
+    connection: &mut PgConnection,
+    kind: RunnerCreationCommandKind,
+    command_id: Uuid,
+) -> Result<RunnerToolPermissionOverrides, RunnerProtocolStoreError> {
+    let query = match kind {
+        RunnerCreationCommandKind::Native => {
+            "SELECT tool_name, permission_kind
+               FROM create_session_runner_permission_override
+              WHERE command_id = $1 ORDER BY tool_name"
+        }
+        RunnerCreationCommandKind::Imported => {
+            "SELECT tool_name, permission_kind
+               FROM imported_session_runner_permission_override
+              WHERE command_id = $1 ORDER BY tool_name"
+        }
+    };
+    let rows = sqlx::query(query)
+        .bind(command_id)
+        .fetch_all(&mut *connection)
+        .await?;
+    let overrides = rows
+        .into_iter()
+        .map(|row| {
+            Ok((
+                tool_name(row.decode_column("tool_name")?)?,
+                decode_permission_override(row.decode_column("permission_kind")?)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, RunnerProtocolStoreError>>()?;
+    RunnerToolPermissionOverrides::try_new(overrides).map_err(RunnerProtocolStoreError::Domain)
+}
+
+pub(crate) fn decode_creation_runner_placement_request(
+    row: &PgRow,
+    overrides: RunnerToolPermissionOverrides,
+) -> Result<Option<SessionRunnerPlacementRequest>, RunnerProtocolStoreError> {
+    let selector_kind: Option<String> = row.decode_column("runner_selector_kind")?;
+    let Some(selector_kind) = selector_kind else {
+        let expected_count =
+            decode_u64(row.decode_column::<Decimal>("runner_permission_override_count")?)?;
+        if expected_count != 0
+            || overrides.iter().next().is_some()
+            || row
+                .decode_column::<Option<Uuid>>("runner_selector_runner_id")?
+                .is_some()
+            || row
+                .decode_column::<Option<String>>("runner_selector_capability_class")?
+                .is_some()
+            || row
+                .decode_column::<Option<String>>("runner_directory_selection_kind")?
+                .is_some()
+            || row
+                .decode_column::<Option<String>>("runner_requested_working_directory")?
+                .is_some()
+            || row
+                .decode_column::<Option<String>>("runner_credential_profile_name")?
+                .is_some()
+            || row
+                .decode_column::<Option<String>>("runner_workspace_requirement_kind")?
+                .is_some()
+            || row
+                .decode_column::<Option<String>>("runner_requested_repository_key")?
+                .is_some()
+            || row
+                .decode_column::<Option<String>>("runner_sandbox_profile")?
+                .is_some()
+        {
+            return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+        }
+        return Ok(None);
+    };
+    let selector = match selector_kind.as_str() {
+        "identity" => RunnerSelector::Identity(runner_id(
+            row.decode_column::<Option<Uuid>>("runner_selector_runner_id")?
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+        )),
+        "capability_class" => RunnerSelector::CapabilityClass(capability_class(
+            row.decode_column::<Option<String>>("runner_selector_capability_class")?
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+        )?),
+        _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+    };
+    let directory_kind = row
+        .decode_column::<Option<String>>("runner_directory_selection_kind")?
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+    let working_directory = match directory_kind.as_str() {
+        "runner_default" => WorkingDirectorySelection::RunnerDefault,
+        "exact" => WorkingDirectorySelection::Exact(working_directory(
+            row.decode_column::<Option<String>>("runner_requested_working_directory")?
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+        )?),
+        _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+    };
+    let credential_profile = row
+        .decode_column::<Option<String>>("runner_credential_profile_name")?
+        .map(profile_name)
+        .transpose()?;
+    let workspace_kind = row
+        .decode_column::<Option<String>>("runner_workspace_requirement_kind")?
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+    let workspace = match workspace_kind.as_str() {
+        "none" => WorkspaceRequirement::None,
+        "repository_worktree" => WorkspaceRequirement::RepositoryWorktree {
+            repository: repository_key(
+                row.decode_column::<Option<String>>("runner_requested_repository_key")?
+                    .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+            )?,
+        },
+        _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+    };
+    let sandbox = runner_sandbox_from_str(
+        &row.decode_column::<Option<String>>("runner_sandbox_profile")?
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+    )
+    .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+    let expected_count =
+        decode_u64(row.decode_column::<Decimal>("runner_permission_override_count")?)?;
+    let actual_count = u64::try_from(overrides.iter().count())
+        .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
+    if expected_count != actual_count {
+        return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+    }
+    Ok(Some(SessionRunnerPlacementRequest {
+        selector,
+        working_directory,
+        credential_profile,
+        workspace,
+        sandbox,
+        permission_overrides: overrides,
+    }))
+}
+
+pub(crate) async fn load_initial_session_runner_placement(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<Option<SessionRunnerPlacement>, RunnerProtocolStoreError> {
+    let row = sqlx::query(
+        "SELECT session_id, event_ordinal, placement_revision, event_kind, state_kind,
+                selector_kind AS runner_selector_kind,
+                selector_runner_id AS runner_selector_runner_id,
+                selector_capability_class AS runner_selector_capability_class,
+                directory_selection_kind AS runner_directory_selection_kind,
+                requested_working_directory AS runner_requested_working_directory,
+                requested_credential_profile_name AS runner_credential_profile_name,
+                workspace_requirement_kind AS runner_workspace_requirement_kind,
+                requested_repository_key AS runner_requested_repository_key,
+                requested_sandbox_profile AS runner_sandbox_profile,
+                permission_override_count AS runner_permission_override_count,
+                permission_override_count
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_ordinal = 1",
+    )
+    .bind(session.into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if decode_u64(row.decode_column("event_ordinal")?)? != 1
+        || decode_u64(row.decode_column("placement_revision")?)? != 1
+        || row.decode_column::<String>("event_kind")? != "created"
+        || row.decode_column::<String>("state_kind")? != "unpinned"
+    {
+        return Err(RunnerProtocolCorruption::InvalidEncoding.into());
+    }
+    let overrides = load_permission_overrides(connection, &row).await?;
+    let request = decode_creation_runner_placement_request(&row, overrides)?
+        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+    Ok(Some(SessionRunnerPlacement::new(session, request)))
 }
 
 fn decode_permission_override(

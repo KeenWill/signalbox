@@ -237,7 +237,7 @@ async fn inv047_template_creation_persists_copy_and_name_keyed_replay() -> Resul
         original_provenance.content_digest().as_bytes()
     );
     assert_eq!(registry_storage_version, command_storage_version);
-    assert_eq!(command_storage_version, 7);
+    assert_eq!(command_storage_version, 8);
 
     let loaded = LoadSessionService::new(SessionRepository::new(pool.clone()))
         .execute(winner)

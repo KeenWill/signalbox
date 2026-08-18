@@ -308,8 +308,8 @@ pub(crate) async fn load_current(
              ON native_creation.command_id = event.provenance_command_id
             AND native_creation.created_session_id = event.session_id
             AND native_creation.command_kind = 'create_session'
-            AND native_creation.storage_version IN (1, 2, 3, 4, 6, 7)
-            AND (native_creation.storage_version IN (6, 7)
+            AND native_creation.storage_version IN (1, 2, 3, 4, 6, 7, 8)
+            AND (native_creation.storage_version IN (6, 7, 8)
                  OR (native_creation.storage_version IN (1, 2, 3, 4)
                      AND event.placement_path IS NULL
                      AND NOT event.root_global_read_intent))
@@ -324,7 +324,7 @@ pub(crate) async fn load_current(
              ON imported_creation.command_id = event.provenance_command_id
             AND imported_creation.created_session_id = event.session_id
             AND imported_creation.command_kind = 'create_session_from_imported_frontier'
-            AND imported_creation.storage_version IN (1, 2, 3, 5)
+            AND imported_creation.storage_version IN (1, 2, 3, 5, 6)
             AND imported_creation.result_kind = 'applied'
             AND event.placement_path IS NULL
             AND NOT event.root_global_read_intent
@@ -401,8 +401,8 @@ pub(crate) async fn load_authenticated_version(
              ON native_creation.command_id = event.provenance_command_id
             AND native_creation.created_session_id = event.session_id
             AND native_creation.command_kind = 'create_session'
-            AND native_creation.storage_version IN (1, 2, 3, 4, 6, 7)
-            AND (native_creation.storage_version IN (6, 7)
+            AND native_creation.storage_version IN (1, 2, 3, 4, 6, 7, 8)
+            AND (native_creation.storage_version IN (6, 7, 8)
                  OR (native_creation.storage_version IN (1, 2, 3, 4)
                      AND event.placement_path IS NULL
                      AND NOT event.root_global_read_intent))
@@ -417,7 +417,7 @@ pub(crate) async fn load_authenticated_version(
              ON imported_creation.command_id = event.provenance_command_id
             AND imported_creation.created_session_id = event.session_id
             AND imported_creation.command_kind = 'create_session_from_imported_frontier'
-            AND imported_creation.storage_version IN (1, 2, 3, 5)
+            AND imported_creation.storage_version IN (1, 2, 3, 5, 6)
             AND imported_creation.result_kind = 'applied'
             AND event.placement_path IS NULL
             AND NOT event.root_global_read_intent

@@ -9,13 +9,17 @@
 use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use rust_decimal::Decimal;
+use signalbox_application::{ImportedConversationConverter, ImportedConversationStore};
+use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnActivationIdentities, ApprovedToolRequest,
     CancelledModelCallTurnIdentities, CanonicalCloneUrlDigest, ContextFrontierId, CreateSession,
-    CredentialProfileGrant, CredentialProfileGrantReconstitutionInput, CredentialProfileName,
-    CredentialProfilePolicy, CredentialToolApproval, DecideToolRequest, DeliveryRequest,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId, EndedToolAttempt,
-    ModelCallId, ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
+    CreateSessionFromImportedFrontier, CredentialProfileGrant,
+    CredentialProfileGrantReconstitutionInput, CredentialProfileName, CredentialProfilePolicy,
+    CredentialToolApproval, DecideToolRequest, DeliveryRequest, DescendantTerminationScope,
+    DirectModelSelection, DurableCommandId, EndedToolAttempt, ImportedConversation,
+    ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId, ModelCallId,
+    ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
     PerInputConfigurationChoices, ProvisionedWorkspace, ResolvedContextFrontierReconstitutionInput,
     RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
     RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId,
@@ -40,7 +44,9 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     MIGRATOR,
+    conversation_import::ImportedConversationRepository,
     create_session::CreateSessionRepository,
+    create_session_from_imported_frontier::ImportedSessionRepository,
     disposable_test_container_labels, local_test_connection_options, migrate,
     outbox::{
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedRunnerState, OutboxCorruption,
@@ -222,6 +228,35 @@ fn sandbox_profiles() -> [RunnerSandboxProfile; 2] {
 fn no_permission_overrides() -> RunnerToolPermissionOverrides {
     RunnerToolPermissionOverrides::try_new([])
         .expect("the empty permission override fixture is valid")
+}
+
+fn creation_permission_overrides() -> RunnerToolPermissionOverrides {
+    RunnerToolPermissionOverrides::try_new([
+        (tool("inspect"), RunnerToolPermissionOverride::Auto),
+        (
+            tool("daemon_fallback"),
+            RunnerToolPermissionOverride::Confirm,
+        ),
+    ])
+    .expect("the creation permission override fixture is valid")
+}
+
+fn session_credential_pin() -> SessionCredentialPin {
+    SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+        "fixture-model-family",
+        "fixture-credential-reference",
+    )])
+    .expect("the fixture credential pin is valid")
+}
+
+fn imported_conversation(conversation: u128, entry: u128) -> ImportedConversation {
+    ClaudeCodeJsonlConverter
+        .convert(
+            ImportedConversationId::from_uuid(uuid(conversation)),
+            b"{\"type\":\"summary\",\"value\":null}",
+            || ImportedTranscriptEntryId::from_uuid(uuid(entry)),
+        )
+        .expect("the synthetic imported conversation is valid")
 }
 
 fn permission_overrides(permission: RunnerToolPermissionOverride) -> RunnerToolPermissionOverrides {
@@ -3561,6 +3596,169 @@ async fn stored_check_violation(pool: &PgPool) -> RunnerProtocolStoreError {
         .await
         .expect_err("an enrollment inserted as already revoked violates the guard"),
     )
+}
+
+/// S32 / INV-042: native creation stores and independently reads back every
+/// runner-placement axis and its append-only permission satellite.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv042_native_creation_runner_placement_round_trips() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(uuid(0xc100));
+    let command_id = DurableCommandId::from_uuid(uuid(0xc101));
+    let expected = SessionRunnerPlacementRequest {
+        selector: RunnerSelector::Identity(RunnerId::from_uuid(uuid(0xc102))),
+        working_directory: WorkingDirectorySelection::Exact(exact_runner_directory()),
+        credential_profile: Some(profile()),
+        workspace: WorkspaceRequirement::RepositoryWorktree {
+            repository: repository_key(),
+        },
+        sandbox: RunnerSandboxProfile::Ambient,
+        permission_overrides: creation_permission_overrides(),
+    };
+    let creation = CreateSession::new(
+        command_id,
+        SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        ),
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+            DirectModelSelection::from_uuid(uuid(0xc103)),
+        )),
+    )
+    .with_runner_placement(Some(expected.clone()))
+    .prepare(session)
+    .expect("the runner-placed creation fixture is valid");
+    let repository = CreateSessionRepository::new(pool.clone(), session_credential_pin());
+
+    repository.handle(creation).await?;
+    let loaded = repository
+        .load(command_id)
+        .await?
+        .expect("the committed creation reads back");
+
+    assert_eq!(loaded.command().runner_placement(), Some(&expected));
+    assert_eq!(
+        loaded
+            .session()
+            .runner_placement()
+            .map(SessionRunnerPlacement::request),
+        Some(&expected)
+    );
+    Ok(())
+}
+
+/// S28 / S32 / INV-042: imported-frontier creation stores and independently
+/// reads back the same complete runner-placement payload.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s28_s32_inv042_imported_creation_runner_placement_round_trips()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = imported_conversation(0xc200, 0xc201);
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+    )
+    .await?;
+    let command_id = DurableCommandId::from_uuid(uuid(0xc202));
+    let expected = SessionRunnerPlacementRequest {
+        selector: RunnerSelector::CapabilityClass(class()),
+        working_directory: WorkingDirectorySelection::RunnerDefault,
+        credential_profile: None,
+        workspace: WorkspaceRequirement::None,
+        sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+        permission_overrides: creation_permission_overrides(),
+    };
+    let command = CreateSessionFromImportedFrontier::new(
+        command_id,
+        conversation
+            .frontiers()
+            .last()
+            .expect("the imported fixture has one addressable frontier"),
+        ImportedSessionRelationship::Fork,
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+            DirectModelSelection::from_uuid(uuid(0xc203)),
+        )),
+    )
+    .with_runner_placement(Some(expected.clone()));
+    let repository = ImportedSessionRepository::new(pool.clone(), session_credential_pin());
+
+    repository
+        .handle(
+            command,
+            SessionId::from_uuid(uuid(0xc204)),
+            ContextFrontierId::from_uuid(uuid(0xc205)),
+            || SemanticTranscriptEntryId::from_uuid(uuid(0xc206)),
+        )
+        .await?;
+    let loaded = repository
+        .load(command_id)
+        .await?
+        .expect("the committed imported creation reads back");
+
+    assert_eq!(loaded.command().runner_placement(), Some(&expected));
+    assert_eq!(
+        loaded
+            .session()
+            .runner_placement()
+            .map(SessionRunnerPlacement::request),
+        Some(&expected)
+    );
+    Ok(())
+}
+
+/// S32 / INV-042: a creation command cannot commit a runner-placement payload
+/// different from the created session's exact revision-one placement.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv042_creation_command_rejects_cross_wired_runner_placement()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(uuid(0xc300));
+    let command_id = DurableCommandId::from_uuid(uuid(0xc301));
+    let expected = exact_runner_request(RunnerId::from_uuid(uuid(0xc302)));
+    let creation = CreateSession::new(
+        command_id,
+        SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        ),
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+            DirectModelSelection::from_uuid(uuid(0xc303)),
+        )),
+    )
+    .with_runner_placement(Some(expected))
+    .prepare(session)
+    .expect("the runner-placed creation fixture is valid");
+    CreateSessionRepository::new(pool.clone(), session_credential_pin())
+        .handle(creation)
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "ALTER TABLE create_session_command
+         DISABLE TRIGGER create_session_command_is_append_only",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE create_session_command
+            SET runner_selector_runner_id = $2
+          WHERE command_id = $1",
+    )
+    .bind(command_id.into_uuid())
+    .bind(uuid(0xc304))
+    .execute(&mut *transaction)
+    .await?;
+
+    let error = sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *transaction)
+        .await
+        .expect_err("the command and revision-one placement must remain equal");
+    transaction.rollback().await?;
+
+    assert_check_violation(error);
+    Ok(())
 }
 
 /// INV-042 / INV-044: exact durable predecessor loss admits one

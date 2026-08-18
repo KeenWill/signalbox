@@ -31,7 +31,7 @@ use crate::mapping::{
 use crate::outbox;
 
 const COMMAND_KIND: &str = "create_session";
-const WRITTEN_STORAGE_VERSION: i16 = 7;
+const WRITTEN_STORAGE_VERSION: i16 = 8;
 const DANGEROUS_TOOL_AUTO_APPROVAL_FROM_STORAGE_VERSION: i16 = 2;
 const SYSTEM_PROMPT_FROM_STORAGE_VERSION: i16 = 3;
 const TEMPLATE_PROVENANCE_FROM_STORAGE_VERSION: i16 = 4;
@@ -398,6 +398,9 @@ async fn insert_prepared(
     let defaults = session.configuration_defaults();
     let command_selection = encode_selection(command.initial_configuration_defaults().model());
     let stored_selection = encode_selection(defaults.defaults().model());
+    let runner_request =
+        crate::runner_protocol::encode_runner_placement_request(command.runner_placement())
+            .map_err(map_runner_store_error)?;
 
     sqlx::query(
         "INSERT INTO session
@@ -464,6 +467,12 @@ async fn insert_prepared(
     .execute(&mut *connection)
     .await?;
 
+    if let Some(placement) = session.runner_placement() {
+        crate::runner_protocol::insert_initial_session_runner_placement(connection, placement)
+            .await
+            .map_err(map_runner_store_error)?;
+    }
+
     sqlx::query(
         "INSERT INTO session_defaults_version
             (session_id, version, model_selection_kind,
@@ -506,8 +515,15 @@ async fn insert_prepared(
              dangerous_tool_auto_approval, system_prompt, model_settings,
              template_name, template_content_digest,
              placement_path, root_global_read_intent,
+             runner_selector_kind, runner_selector_runner_id,
+             runner_selector_capability_class, runner_directory_selection_kind,
+             runner_requested_working_directory, runner_credential_profile_name,
+             runner_workspace_requirement_kind, runner_requested_repository_key,
+             runner_sandbox_profile, runner_permission_override_count,
              result_kind, created_session_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                 $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
+                 $24, $25, $26, $27, $28)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(COMMAND_KIND)
@@ -546,10 +562,37 @@ async fn insert_prepared(
     )
     .bind(placement_path)
     .bind(root_intent)
+    .bind(runner_request.selector_kind)
+    .bind(runner_request.selector_runner)
+    .bind(runner_request.selector_class)
+    .bind(runner_request.directory_kind)
+    .bind(runner_request.requested_directory)
+    .bind(runner_request.credential_profile)
+    .bind(runner_request.workspace_kind)
+    .bind(runner_request.requested_repository)
+    .bind(runner_request.sandbox)
+    .bind(runner_request.permission_override_count)
     .bind(APPLIED)
     .bind(session_id_to_uuid(prepared.applied_result().session()))
     .execute(&mut *connection)
     .await?;
+
+    if let Some(request) = command.runner_placement() {
+        for (tool, permission) in request.permission_overrides.iter() {
+            sqlx::query(
+                "INSERT INTO create_session_runner_permission_override
+                    (command_id, tool_name, permission_kind)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(durable_command_id_to_uuid(command.command_id()))
+            .bind(tool.as_str())
+            .bind(crate::runner_protocol::encode_permission_override(
+                permission,
+            ))
+            .execute(&mut *connection)
+            .await?;
+        }
+    }
 
     outbox::append(
         connection,
@@ -607,6 +650,16 @@ async fn load_from_connection(
             c.template_content_digest AS command_template_digest,
             c.placement_path AS command_placement_path,
             c.root_global_read_intent AS command_root_intent,
+            c.runner_selector_kind,
+            c.runner_selector_runner_id,
+            c.runner_selector_capability_class,
+            c.runner_directory_selection_kind,
+            c.runner_requested_working_directory,
+            c.runner_credential_profile_name,
+            c.runner_workspace_requirement_kind,
+            c.runner_requested_repository_key,
+            c.runner_sandbox_profile,
+            c.runner_permission_override_count,
             c.result_kind,
             c.created_session_id AS result_session_id,
             s.session_id AS stored_session_id,
@@ -659,12 +712,40 @@ async fn load_from_connection(
     .fetch_optional(&mut *connection)
     .await?;
 
-    row.map(|row| decode_complete(row, command_id)).transpose()
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let command_overrides = crate::runner_protocol::load_creation_permission_overrides(
+        connection,
+        crate::runner_protocol::RunnerCreationCommandKind::Native,
+        durable_command_id_to_uuid(command_id),
+    )
+    .await
+    .map_err(map_runner_store_error)?;
+    let command_runner_placement =
+        crate::runner_protocol::decode_creation_runner_placement_request(&row, command_overrides)
+            .map_err(map_runner_store_error)?;
+    let stored_session_uuid: Uuid = required(&row, "stored_session_id")?;
+    let stored_runner_placement = crate::runner_protocol::load_initial_session_runner_placement(
+        connection,
+        session_id_from_uuid(stored_session_uuid),
+    )
+    .await
+    .map_err(map_runner_store_error)?;
+    decode_complete(
+        row,
+        command_id,
+        command_runner_placement,
+        stored_runner_placement,
+    )
+    .map(Some)
 }
 
 fn decode_complete(
     row: PgRow,
     command_id: DurableCommandId,
+    command_runner_placement: Option<signalbox_domain::SessionRunnerPlacementRequest>,
+    stored_runner_placement: Option<signalbox_domain::SessionRunnerPlacement>,
 ) -> Result<ReconstitutedSessionCreation, CreateSessionRepositoryError> {
     require_spelling(&row, "registry_kind", COMMAND_KIND)?;
     let registry_version = require_supported_version(&row, "registry_version")?;
@@ -737,7 +818,8 @@ fn decode_complete(
             command_defaults,
             command_placement,
         ),
-    };
+    }
+    .with_runner_placement(command_runner_placement);
     require_spelling(&row, "result_kind", APPLIED)?;
     let result_session = session_id_from_uuid(required(&row, "result_session_id")?);
 
@@ -829,7 +911,7 @@ fn decode_complete(
         }
     }
 
-    CreateSessionReconstitutionInput::new_with_template_and_placement(
+    CreateSessionReconstitutionInput::new_with_runner_placement(
         command,
         result_session,
         stored_session,
@@ -839,6 +921,7 @@ fn decode_complete(
         stored_version,
         stored_defaults,
         VersionedSessionPlacement::reconstitute(stored_placement_version, stored_placement),
+        stored_runner_placement,
     )
     .reconstitute()
     .map_err(|error| CreateSessionCorruption::Domain(error.failure()).into())
@@ -1106,6 +1189,22 @@ fn map_registry_error(error: RegistryInspectionError) -> CreateSessionRepository
         }
         RegistryInspectionError::Corruption(RegistryCorruption::ConflictingTypedRecords) => {
             CreateSessionCorruption::Inconsistent("typed command family").into()
+        }
+    }
+}
+
+fn map_runner_store_error(
+    error: crate::runner_protocol::RunnerProtocolStoreError,
+) -> CreateSessionRepositoryError {
+    match error {
+        crate::runner_protocol::RunnerProtocolStoreError::Database(error)
+        | crate::runner_protocol::RunnerProtocolStoreError::CommitAmbiguous(error) => {
+            CreateSessionRepositoryError::Database(error)
+        }
+        crate::runner_protocol::RunnerProtocolStoreError::Corruption(_)
+        | crate::runner_protocol::RunnerProtocolStoreError::Domain(_)
+        | crate::runner_protocol::RunnerProtocolStoreError::EnrollmentRequest(_) => {
+            CreateSessionCorruption::Inconsistent("initial runner placement").into()
         }
     }
 }
