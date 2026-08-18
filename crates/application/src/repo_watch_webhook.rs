@@ -1,6 +1,6 @@
 //! Transport-independent GitHub webhook payload projection for repository watch.
 
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::{collections::BTreeSet, error::Error, fmt, num::NonZeroU64};
 
 use serde_json::{Map, Value};
 use signalbox_domain::{
@@ -270,6 +270,107 @@ pub enum RepoWatchTargetedRefreshV1 {
     },
 }
 
+/// Whole-pull-request hydrations one drained delivery page has already issued.
+///
+/// Every delivery on a page is durably admitted before the page is read, so the
+/// provider state each one reports is already in place when the page issues its
+/// first refresh, and one hydration observes all of them. Repeating that
+/// hydration per delivery re-reads the same state on the shared polling
+/// credential: pull-request detail, check suites, check runs, reviews, threads,
+/// and one request per comment for that comment's reactions. Pull-request
+/// comment deliveries put the repetition under an untrusted commenter's
+/// control, since signature verification, delivery deduplication, and GitHub's
+/// per-hook rate limit all admit repeated comment creation, edit, and deletion
+/// as distinct legitimate deliveries.
+///
+/// Only whole-pull-request hydration coalesces. A mergeability or check-rollup
+/// refresh names the commit it expects and an earlier hydration carries no
+/// evidence about that commit, so those reach the poller with their guards
+/// intact. The scope is one page and never a whole drain: a later page may hold
+/// deliveries admitted after this page's hydration ran, reporting state that
+/// hydration cannot have observed.
+///
+/// Asking and recording are separate because only a hydration that reached the
+/// provider makes a later one redundant. A refresh that fails before its fetch
+/// or before its commit leaves its delivery pending for a later drain, so
+/// recording the ask rather than the landing would leave the page suppressing a
+/// hydration that never happened. Success alone is not enough either, which is why [`record_issued`]
+/// takes the whole submission: the runtime merges every refresh naming one pull
+/// request into a single request carrying the strictest head guard among them,
+/// and a targeted poll whose guard no longer matches the provider head discards
+/// what it fetched and still reports success.
+///
+/// [`record_issued`]: RepoWatchTargetedRefreshCoalescerV1::record_issued
+#[derive(Debug)]
+pub struct RepoWatchTargetedRefreshCoalescerV1 {
+    hydrated: BTreeSet<PullRequestNumber>,
+}
+
+impl RepoWatchTargetedRefreshCoalescerV1 {
+    /// Opens the coalescing scope that one drained delivery page owns.
+    pub fn for_delivery_page() -> Self {
+        Self {
+            hydrated: BTreeSet::new(),
+        }
+    }
+
+    /// Retains the refreshes this page has not already issued.
+    pub fn unissued(
+        &self,
+        refreshes: &[RepoWatchTargetedRefreshV1],
+    ) -> Vec<RepoWatchTargetedRefreshV1> {
+        refreshes
+            .iter()
+            .filter(|refresh| match refresh {
+                RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request } => {
+                    !self.hydrated.contains(pull_request)
+                }
+                RepoWatchTargetedRefreshV1::Mergeability { .. }
+                | RepoWatchTargetedRefreshV1::CheckRollup { .. }
+                | RepoWatchTargetedRefreshV1::CheckRollupForCommit { .. } => true,
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Records the hydrations one submission issued with nothing to discard
+    /// them.
+    ///
+    /// A submission asking for anything head-guarded records nothing: the
+    /// merged request carries that guard, so a head the provider has already
+    /// moved past leaves the hydration fetched and thrown away rather than
+    /// applied, and the poll reports success either way. Recording less than
+    /// was issued only costs a repeated hydration; recording more would
+    /// suppress one that never landed.
+    pub fn record_issued(&mut self, refreshes: &[RepoWatchTargetedRefreshV1]) {
+        if refreshes.iter().any(Self::carries_head_guard) {
+            return;
+        }
+        self.hydrated
+            .extend(refreshes.iter().filter_map(Self::hydrated_pull_request));
+    }
+
+    fn carries_head_guard(refresh: &RepoWatchTargetedRefreshV1) -> bool {
+        match refresh {
+            RepoWatchTargetedRefreshV1::Mergeability { .. }
+            | RepoWatchTargetedRefreshV1::CheckRollup { .. }
+            | RepoWatchTargetedRefreshV1::CheckRollupForCommit { .. } => true,
+            RepoWatchTargetedRefreshV1::PullRequestHydration { .. } => false,
+        }
+    }
+
+    fn hydrated_pull_request(refresh: &RepoWatchTargetedRefreshV1) -> Option<PullRequestNumber> {
+        match refresh {
+            RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request } => {
+                Some(*pull_request)
+            }
+            RepoWatchTargetedRefreshV1::Mergeability { .. }
+            | RepoWatchTargetedRefreshV1::CheckRollup { .. }
+            | RepoWatchTargetedRefreshV1::CheckRollupForCommit { .. } => None,
+        }
+    }
+}
+
 /// Closed patch produced from one mapped delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchObservationPatchV1 {
@@ -303,6 +404,7 @@ pub enum RepoWatchObservationApplyV1 {
     Applied(RepoWatchObservation),
     DuplicateState,
     Superseded,
+    Ignored(RepoWatchWebhookIgnoredReasonV1),
     NeedsTargetedRefresh {
         observation: RepoWatchObservation,
         refreshes: Box<[RepoWatchTargetedRefreshV1]>,
@@ -350,6 +452,7 @@ enum ChangeApplyDispositionV1 {
     Applied,
     Duplicate,
     Superseded,
+    Ignored(RepoWatchWebhookIgnoredReasonV1),
     NeedsRefresh(RepoWatchTargetedRefreshV1),
 }
 
@@ -371,6 +474,9 @@ pub fn apply_repo_watch_observation_patch_v1(
             ChangeApplyDispositionV1::Duplicate => {}
             ChangeApplyDispositionV1::Superseded => {
                 return Ok(RepoWatchObservationApplyV1::Superseded);
+            }
+            ChangeApplyDispositionV1::Ignored(reason) => {
+                return Ok(RepoWatchObservationApplyV1::Ignored(reason));
             }
             ChangeApplyDispositionV1::NeedsRefresh(refresh) => {
                 if !refreshes.contains(&refresh) {
@@ -640,19 +746,31 @@ fn apply_check_run_union(
     Ok(ChangeApplyDispositionV1::Applied)
 }
 
+// Polling admits a workflow run only for a branch in the repository's current
+// branch set, so a run whose branch has since been deleted is a fact polling
+// will never produce. Admitting it from a payload would leave a webhook-only
+// observation that no reconciliation can ever match, and under a later write
+// mode a dispatch target that no longer exists. The delivery is therefore
+// ignored rather than queried: there is nothing to reconcile toward.
+//
+// The branch set read here is the one every earlier delivery has already been
+// applied to, and deliveries are drained in receipt order, so a branch this
+// stream itself created carries into every later run on it. What stays absent
+// is a branch the stream never announced — created outside the mapped set, or
+// before intake began — and for those the stream genuinely cannot project the
+// run, which is what the poll-only parity row then reports.
 fn apply_workflow_run(
     state: &mut RepoWatchRepositoryStateInput,
     run: &RepoWatchWorkflowRunObservation,
 ) -> Result<ChangeApplyDispositionV1, RepoWatchWebhookApplyError> {
-    // Polling projects workflow runs only for the branch heads it hands the
-    // provider, so a completion whose branch has already been deleted names an
-    // observation polling can never reproduce.
     if !state
         .branch_heads
         .iter()
-        .any(|head| head.branch() == run.branch())
+        .any(|branch_head| branch_head.branch() == run.branch())
     {
-        return Ok(ChangeApplyDispositionV1::Superseded);
+        return Ok(ChangeApplyDispositionV1::Ignored(
+            RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowBranch,
+        ));
     }
     let run = canonical_workflow_run(state, run);
     let retained_index = state
@@ -813,6 +931,7 @@ pub enum RepoWatchWebhookIgnoredReasonV1 {
     UnmappedAction,
     NonBranchPush,
     ForeignWorkflowRepository,
+    AbsentWorkflowBranch,
     AbsentWorkflowHeadRepository,
     AbsentWorkflowHeadBranch,
 }
@@ -866,6 +985,7 @@ pub fn map_repo_watch_webhook_delivery_v1(
 
     match delivery.event() {
         "pull_request" => map_pull_request(root, delivery.action()),
+        "issue_comment" => map_issue_comment(root, delivery.action()),
         "pull_request_review" => map_review(root, delivery.action()),
         "pull_request_review_thread" => map_thread(root, delivery.action()),
         "check_run" => map_check_run(root, delivery.action(), delivery.repository()),
@@ -879,6 +999,32 @@ pub fn map_repo_watch_webhook_delivery_v1(
             RepoWatchWebhookIgnoredReasonV1::UnmappedEvent,
         )),
     }
+}
+
+fn map_issue_comment(
+    root: &Map<String, Value>,
+    action: Option<&str>,
+) -> Result<RepoWatchWebhookMappingV1, RepoWatchWebhookMappingError> {
+    if !matches!(action, Some("created" | "edited" | "deleted")) {
+        return Ok(RepoWatchWebhookMappingV1::Ignored(
+            RepoWatchWebhookIgnoredReasonV1::UnmappedAction,
+        ));
+    }
+    let issue = object_at(root, &["issue"], "issue")?;
+    let Some(pull_request) = issue.get("pull_request") else {
+        return Ok(RepoWatchWebhookMappingV1::Ignored(
+            RepoWatchWebhookIgnoredReasonV1::UnmappedEvent,
+        ));
+    };
+    object(pull_request, "issue.pull_request")?;
+    let pull_request =
+        positive_at(issue, &["number"], "issue.number").map(PullRequestNumber::new)?;
+    Ok(RepoWatchWebhookMappingV1::Patch(
+        RepoWatchObservationPatchV1::new(
+            Vec::new(),
+            vec![RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request }],
+        ),
+    ))
 }
 
 fn verify_repository(
@@ -1258,10 +1404,10 @@ fn pull_request_numbers_for_repository(
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             };
-            let candidate = match repository_at(
+            let candidate = match github_repository_url_at(
                 pull_request,
-                &["base", "repo", "full_name"],
-                "check_run.pull_requests[].base.repo.full_name",
+                &["base", "repo", "url"],
+                "check_run.pull_requests[].base.repo.url",
             ) {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
@@ -1279,6 +1425,21 @@ fn pull_request_numbers_for_repository(
             )
         })
         .collect()
+}
+
+fn github_repository_url_at(
+    root: &Map<String, Value>,
+    path: &[&str],
+    field: &'static str,
+) -> Result<RepositorySlug, RepoWatchWebhookMappingError> {
+    const GITHUB_REPOSITORY_API_PREFIX: &str = "https://api.github.com/repos/";
+
+    let url = string_at(root, path, field)?;
+    let slug = url
+        .strip_prefix(GITHUB_REPOSITORY_API_PREFIX)
+        .ok_or(RepoWatchWebhookMappingError::InvalidField(field))?;
+    RepositorySlug::try_new(slug.to_owned())
+        .map_err(|_| RepoWatchWebhookMappingError::InvalidField(field))
 }
 
 fn object<'value>(
@@ -1406,15 +1567,6 @@ fn branch_at(
         .map_err(|_| RepoWatchWebhookMappingError::InvalidField(field))
 }
 
-fn repository_at(
-    root: &Map<String, Value>,
-    path: &[&str],
-    field: &'static str,
-) -> Result<RepositorySlug, RepoWatchWebhookMappingError> {
-    RepositorySlug::try_new(string_at(root, path, field)?.to_owned())
-        .map_err(|_| RepoWatchWebhookMappingError::InvalidField(field))
-}
-
 /// Reads text GitHub may omit or null at any step of `path`.
 ///
 /// The provider nulls whole intermediate objects, not just leaves:
@@ -1502,6 +1654,8 @@ fn check_conclusion(value: &str) -> Result<CheckConclusion, RepoWatchWebhookMapp
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use crate::RepoWatchReactionObservation;
     use signalbox_domain::{
         MergeableState, ReactionContent, ReactionSubject, RepoWatchAuthorLogin,
@@ -1517,6 +1671,7 @@ mod tests {
     const HOOK_ID: NonZeroU64 = NonZeroU64::new(7).expect("hook fixture is positive");
     const RECEIPT_SEQUENCE: NonZeroU64 = NonZeroU64::new(11).expect("receipt fixture is positive");
     const PULL_REQUEST: u64 = 17;
+    const OTHER_PULL_REQUEST: u64 = 23;
     const RETAINED_CHECK_RUN: u64 = 801;
     const RETAINED_REVIEW: u64 = 802;
     const RETAINED_WORKFLOW_RUN: u64 = 803;
@@ -1533,6 +1688,9 @@ mod tests {
     const MAPPED_WORKFLOW_RUN: u64 = 601;
     const MAPPED_WORKFLOW: u64 = 602;
     const MAPPED_WORKFLOW_ATTEMPT: u64 = 2;
+    const MAPPED_ISSUE_COMMENT: u64 = 721;
+    const ORDINARY_ISSUE: u64 = 19;
+    const ORDINARY_ISSUE_COMMENT: u64 = 722;
     const RETAINED_THREAD: &str = "PRRT_retained";
     const MAPPED_THREAD: &str = "PRRT_fixture";
     const SIGNAL_REVIEWER: &str = "signal-reviewer";
@@ -1597,6 +1755,22 @@ mod tests {
 
     fn object_id(value: u64) -> GitHubObjectId {
         GitHubObjectId::new(NonZeroU64::new(value).expect("fixture object identity is positive"))
+    }
+
+    fn pull_request_number() -> PullRequestNumber {
+        PullRequestNumber::new(
+            NonZeroU64::new(PULL_REQUEST).expect("fixture pull-request number is positive"),
+        )
+    }
+
+    fn other_pull_request_number() -> PullRequestNumber {
+        PullRequestNumber::new(
+            NonZeroU64::new(OTHER_PULL_REQUEST).expect("fixture pull-request number is positive"),
+        )
+    }
+
+    fn hydration(pull_request: PullRequestNumber) -> RepoWatchTargetedRefreshV1 {
+        RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request }
     }
 
     fn canonical_observation(head: &str) -> RepoWatchObservation {
@@ -1751,6 +1925,145 @@ mod tests {
     }
 
     #[test]
+    fn created_pr_issue_comment_requests_poll_equivalent_projection() {
+        let payload = format!(
+            r#"{{
+                "action":"created",
+                "repository":{{"full_name":"{REPOSITORY}"}},
+                "issue":{{
+                    "number":{PULL_REQUEST},
+                    "pull_request":{{"url":"https://api.github.com/repos/{REPOSITORY}/pulls/{PULL_REQUEST}"}}
+                }},
+                "comment":{{"id":{MAPPED_ISSUE_COMMENT}}}
+            }}"#
+        );
+        let patch = mapped_patch("issue_comment", Some("created"), &payload);
+
+        assert!(patch.changes().is_empty());
+        assert_eq!(
+            patch.targeted_refreshes(),
+            [RepoWatchTargetedRefreshV1::PullRequestHydration {
+                pull_request: pull_request_number()
+            }]
+        );
+    }
+
+    #[test]
+    fn ordinary_issue_comment_is_cheap_ignored_success() {
+        let payload = format!(
+            r#"{{
+                "action":"created",
+                "repository":{{"full_name":"{REPOSITORY}"}},
+                "issue":{{"number":{ORDINARY_ISSUE}}},
+                "comment":{{"id":{ORDINARY_ISSUE_COMMENT}}}
+            }}"#
+        );
+        let mapping = map_repo_watch_webhook_delivery_v1(
+            &delivery("issue_comment", Some("created")),
+            payload.as_bytes(),
+        )
+        .expect("ordinary issue comment is not an error");
+
+        assert_eq!(
+            mapping,
+            RepoWatchWebhookMappingV1::Ignored(RepoWatchWebhookIgnoredReasonV1::UnmappedEvent)
+        );
+    }
+
+    #[test]
+    fn one_delivery_page_hydrates_a_pull_request_once() {
+        let refresh = hydration(pull_request_number());
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+
+        let first = page.unissued(slice::from_ref(&refresh));
+        page.record_issued(&first);
+        let repeat = page.unissued(slice::from_ref(&refresh));
+
+        assert_eq!(first, vec![refresh]);
+        assert!(repeat.is_empty());
+    }
+
+    #[test]
+    fn one_delivery_page_hydrates_each_pull_request_it_names() {
+        let other_refresh = hydration(other_pull_request_number());
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        page.record_issued(&[hydration(pull_request_number())]);
+
+        let unissued = page.unissued(slice::from_ref(&other_refresh));
+
+        assert_eq!(unissued, vec![other_refresh]);
+    }
+
+    #[test]
+    fn coalesced_hydration_leaves_head_guarded_refreshes_alone() {
+        let pull_request = pull_request_number();
+        let expected_head =
+            CommitSha::try_new(String::from(CURRENT_HEAD)).expect("fixture SHA is valid");
+        let guarded_refreshes = [
+            RepoWatchTargetedRefreshV1::Mergeability {
+                pull_request,
+                expected_head: expected_head.clone(),
+            },
+            RepoWatchTargetedRefreshV1::CheckRollup {
+                pull_request,
+                expected_head,
+            },
+        ];
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        page.record_issued(&[hydration(pull_request)]);
+
+        let unissued = page.unissued(&guarded_refreshes);
+
+        assert_eq!(unissued, guarded_refreshes.to_vec());
+    }
+
+    #[test]
+    fn a_later_delivery_page_hydrates_again() {
+        let refresh = hydration(pull_request_number());
+        let mut drained = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        drained.record_issued(slice::from_ref(&refresh));
+        let next = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+
+        let unissued = next.unissued(slice::from_ref(&refresh));
+
+        assert_eq!(unissued, vec![refresh]);
+    }
+
+    #[test]
+    fn a_hydration_merged_under_a_head_guard_is_not_recorded() {
+        let pull_request = pull_request_number();
+        let expected_head =
+            CommitSha::try_new(String::from(CURRENT_HEAD)).expect("fixture SHA is valid");
+        let guarded_submission = [
+            hydration(pull_request),
+            RepoWatchTargetedRefreshV1::Mergeability {
+                pull_request,
+                expected_head,
+            },
+        ];
+        let later = hydration(pull_request);
+        let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        page.record_issued(&guarded_submission);
+
+        let unissued = page.unissued(slice::from_ref(&later));
+
+        assert_eq!(unissued, vec![later]);
+    }
+
+    #[test]
+    fn a_hydration_that_never_reached_the_provider_stays_unissued() {
+        let refresh = hydration(pull_request_number());
+        let page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+        // The delivery asked, its refresh failed, and nothing was recorded.
+        let asked = page.unissued(slice::from_ref(&refresh));
+
+        let reissued = page.unissued(slice::from_ref(&refresh));
+
+        assert_eq!(asked, vec![refresh.clone()]);
+        assert_eq!(reissued, vec![refresh]);
+    }
+
+    #[test]
     fn submitted_review_unions_provider_review_identity() {
         let payload = format!(
             r#"{{
@@ -1828,7 +2141,7 @@ mod tests {
                     "conclusion":"success",
                     "pull_requests":[{{
                         "number":{PULL_REQUEST},
-                        "base":{{"repo":{{"full_name":"{REPOSITORY}"}}}}
+                        "base":{{"repo":{{"url":"https://api.github.com/repos/{REPOSITORY}"}}}}
                     }}]
                 }}
             }}"#
@@ -2367,7 +2680,7 @@ mod tests {
                     "conclusion":"failure",
                     "pull_requests":[{{
                         "number":{PULL_REQUEST},
-                        "base":{{"repo":{{"full_name":"{REPOSITORY}"}}}}
+                        "base":{{"repo":{{"url":"https://api.github.com/repos/{REPOSITORY}"}}}}
                     }}]
                 }}
             }}"#
@@ -2478,7 +2791,7 @@ mod tests {
                     "conclusion":"failure",
                     "pull_requests":[{{
                         "number":{PULL_REQUEST},
-                        "base":{{"repo":{{"full_name":"{REPOSITORY}"}}}}
+                        "base":{{"repo":{{"url":"https://api.github.com/repos/{REPOSITORY}"}}}}
                     }}]
                 }}
             }}"#
@@ -2550,7 +2863,7 @@ mod tests {
                     "conclusion":"failure",
                     "pull_requests":[{{
                         "number":{PULL_REQUEST},
-                        "base":{{"repo":{{"full_name":"{REPOSITORY}"}}}}
+                        "base":{{"repo":{{"url":"https://api.github.com/repos/{REPOSITORY}"}}}}
                     }}]
                 }}
             }}"#
@@ -2563,9 +2876,9 @@ mod tests {
     }
 
     #[test]
-    fn workflow_completion_for_a_deleted_branch_is_superseded() {
+    fn a_workflow_run_on_a_deleted_branch_is_ignored_without_projection() {
         let previous = canonical_observation(CURRENT_HEAD);
-        let orphaned = RepoWatchWorkflowRunObservation::new(
+        let deleted_branch_run = RepoWatchWorkflowRunObservation::new(
             object_id(DIFFERENT_WORKFLOW_RUN),
             object_id(MAPPED_WORKFLOW),
             RepoWatchWorkflowRunAttempt::new(
@@ -2578,13 +2891,21 @@ mod tests {
             CheckConclusion::Success,
         );
         let patch = RepoWatchObservationPatchV1::new(
-            vec![RepoWatchObservationChangeV1::WorkflowRun { run: orphaned }],
+            vec![RepoWatchObservationChangeV1::WorkflowRun {
+                run: deleted_branch_run,
+            }],
             Vec::new(),
         );
+
         let outcome = apply_repo_watch_observation_patch_v1(&previous, &patch)
             .expect("a deleted branch is a disposition, not an internal error");
 
-        assert_eq!(outcome, RepoWatchObservationApplyV1::Superseded);
+        assert_eq!(
+            outcome,
+            RepoWatchObservationApplyV1::Ignored(
+                RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowBranch
+            )
+        );
     }
 
     #[test]

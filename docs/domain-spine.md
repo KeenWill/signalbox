@@ -7470,6 +7470,13 @@ pub enum RepoWatchTargetedRefreshV1 {
     CheckRollupForCommit { head: CommitSha },
 }
 
+pub struct RepoWatchTargetedRefreshCoalescerV1 { /* private */ }
+impl RepoWatchTargetedRefreshCoalescerV1 {
+    pub fn for_delivery_page() -> Self;
+    pub fn unissued(&self, refreshes: &[RepoWatchTargetedRefreshV1]) -> Vec<RepoWatchTargetedRefreshV1>;
+    pub fn record_issued(&mut self, refreshes: &[RepoWatchTargetedRefreshV1]);
+}
+
 pub struct RepoWatchObservationPatchV1 { /* private */ }
 impl RepoWatchObservationPatchV1 {
     // accessors: changes(), targeted_refreshes()
@@ -7479,6 +7486,7 @@ pub enum RepoWatchObservationApplyV1 {
     Applied(RepoWatchObservation),
     DuplicateState,
     Superseded,
+    Ignored(RepoWatchWebhookIgnoredReasonV1),
     NeedsTargetedRefresh {
         observation: RepoWatchObservation,
         refreshes: Box<[RepoWatchTargetedRefreshV1]>,
@@ -7500,6 +7508,7 @@ pub enum RepoWatchWebhookIgnoredReasonV1 {
     UnmappedAction,
     NonBranchPush,
     ForeignWorkflowRepository,
+    AbsentWorkflowBranch,
     AbsentWorkflowHeadRepository,
     AbsentWorkflowHeadBranch,
 }
@@ -8241,6 +8250,8 @@ impl<
 ## application: scheduler
 
 ```rust
+pub const fn scheduler_pass_admission_cap() -> usize;
+
 pub struct ReconciliationSweepInterval(/* private */);
 impl ReconciliationSweepInterval {
     pub const fn baseline() -> Self;
@@ -8356,6 +8367,7 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
         pass: Pass,
         max_in_flight_passes: NonZeroUsize,
     ) -> Self;
+    pub const fn paused(work_source: WorkSource, pass: Pass) -> Self;
     pub fn into_parts(self) -> (WorkSource, Pass);
 }
 impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass>
@@ -10872,15 +10884,15 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
 | application: repo_watch                            | 38 (+2 free fn) (incl. 4 traits) |
-| application: repo_watch_webhook                    | 17 (+2 free fn)                  |
+| application: repo_watch_webhook                    | 18 (+2 free fn)                  |
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
 | application: session_metadata                      | 12 (incl. 4 traits)              |
-| application: scheduler                             | 15 (incl. 5 traits)              |
+| application: scheduler                             | 15 (+1 free fn) (incl. 5 traits) |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)               |
 | application: startup_scan                          | 7 (incl. 2 traits)               |
 | application: submit_input                          | 7 (incl. 2 traits)               |
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
-| **signalbox-application total**                    | **274 (+5 free fn)**             |
+| **signalbox-application total**                    | **275 (+6 free fn)**             |
