@@ -62,6 +62,34 @@ impl AcceptedWorkspaceRelease {
     }
 }
 
+pub(crate) fn accepted_workspace_release_is_current(
+    root: &File,
+    correlation: &ReleaseCorrelation,
+) -> Result<bool, RunnerStateError> {
+    let descriptor = openat(
+        root,
+        OPERATION_JOURNAL_FILE,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| RunnerStateError::Io {
+        operation: StateOperation::Open,
+        resource: StateResource::OperationJournal,
+        source: rustix_error(error),
+    })?;
+    let (inventory, ready_workspace) =
+        read_operation_journal(File::from(descriptor), geteuid().as_raw())?;
+    Ok(ready_workspace.is_none()
+        && inventory.operation_failure.is_none()
+        && matches!(
+            inventory.workspace_operation.as_ref(),
+            Some(WorkspaceOperation::Release {
+                correlation: current,
+                phase: ReleasePhase::ReleaseAccepted,
+            }) if current == correlation
+        ))
+}
+
 /// Exact daemon-issued identities and current registration fact.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -522,7 +550,7 @@ impl RunnerStateRoot {
                 });
             }
         };
-        validate_operation_journal_owner(&state, &inventory, ready_workspace.as_ref())?;
+        validate_operation_journal_authority(&state, &inventory, ready_workspace.as_ref())?;
         Ok(Self {
             directory,
             state,
@@ -534,6 +562,12 @@ impl RunnerStateRoot {
     /// Borrows the exact current in-memory copy of fsynced state.
     pub const fn state(&self) -> &RunnerState {
         &self.state
+    }
+
+    /// Duplicates the validated, process-locked root descriptor for one dispatch.
+    #[doc(hidden)]
+    pub fn duplicate_directory(&self) -> io::Result<File> {
+        self.directory.try_clone()
     }
 
     /// Borrows the exact current in-memory copy of the fsynced operation slots.
@@ -1055,7 +1089,7 @@ impl RunnerStateRoot {
     }
 }
 
-fn validate_operation_journal_owner(
+fn validate_operation_journal_authority(
     state: &RunnerState,
     inventory: &ReconnectInventory,
     ready_workspace: Option<&WorkspaceReady>,

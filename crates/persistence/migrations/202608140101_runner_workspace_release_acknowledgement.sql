@@ -1,6 +1,7 @@
 -- Retire one completed managed-workspace release with immutable evidence.
 -- Cleanup refusal and connection-loss retirement remain separate terminal
--- proofs; every terminal transaction serializes on the pending release row.
+-- proofs; successful acknowledgement serializes on the cleanup enrollment
+-- authority shared with connection-loss admission.
 
 CREATE TABLE runner_workspace_release_acknowledgement (
     session_id uuid NOT NULL,
@@ -42,6 +43,11 @@ BEGIN
       FROM runner_workspace_release
      WHERE session_id = NEW.session_id
        AND placement_revision = NEW.placement_revision;
+
+    PERFORM enrollment_id
+      FROM runner_enrollment
+     WHERE enrollment_id = release.enrollment_id
+     FOR UPDATE;
 
     IF release.state_kind IS DISTINCT FROM 'pending'
        OR release.runner_id IS DISTINCT FROM NEW.runner_id

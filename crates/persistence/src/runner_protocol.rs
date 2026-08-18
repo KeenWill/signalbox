@@ -3742,7 +3742,24 @@ impl RunnerProtocolStore {
         acknowledgement: RunnerWorkspaceReleaseAcknowledgement,
     ) -> Result<RunnerWorkspaceReleaseAcknowledgement, RunnerProtocolStoreError> {
         let mut transaction = self.pool.begin().await?;
+        let release_enrollment: Uuid = sqlx::query_scalar(
+            "SELECT enrollment_id
+               FROM runner_workspace_release
+              WHERE session_id = $1 AND placement_revision = $2",
+        )
+        .bind(acknowledgement.session().into_uuid())
+        .bind(Decimal::from(acknowledgement.placement_revision().get()))
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(RunnerProtocolStoreError::Domain(
+            RunnerDomainError::CorrelationMismatch,
+        ))?;
         lock_runner_session_scheduler(&mut transaction, acknowledgement.session()).await?;
+        sqlx::query(RUNNER_ENROLLMENT)
+            .bind(release_enrollment)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalEnrollment)?;
         sqlx::query(RUNNER_PLACEMENT_HEAD)
             .bind(acknowledgement.session().into_uuid())
             .fetch_optional(&mut *transaction)
@@ -3763,13 +3780,6 @@ impl RunnerProtocolStore {
         ))?;
         let stored_runner = runner_id(release.decode_column("runner_id")?);
         let stored_manifest = WorkspaceManifestId::from_uuid(release.decode_column("manifest_id")?);
-        if stored_runner != acknowledgement.runner()
-            || stored_manifest != acknowledgement.manifest_id()
-        {
-            return Err(RunnerProtocolStoreError::Domain(
-                RunnerDomainError::CorrelationMismatch,
-            ));
-        }
         let recorded = sqlx::query(
             "SELECT runner_id, manifest_id
                FROM runner_workspace_release_acknowledgement
@@ -3786,8 +3796,18 @@ impl RunnerProtocolStore {
                 runner_id(recorded.decode_column("runner_id")?),
                 WorkspaceManifestId::from_uuid(recorded.decode_column("manifest_id")?),
             );
+            if stored_runner != replay.runner() || stored_manifest != replay.manifest_id() {
+                return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+            }
             transaction.rollback().await?;
             return exact_workspace_release_acknowledgement_replay(acknowledgement, replay);
+        }
+        if stored_runner != acknowledgement.runner()
+            || stored_manifest != acknowledgement.manifest_id()
+        {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::CorrelationMismatch,
+            ));
         }
         let source_was_lost: bool = sqlx::query_scalar(
             "SELECT EXISTS (
@@ -3796,7 +3816,7 @@ impl RunnerProtocolStore {
                   WHERE enrollment_id = $1 AND connection_epoch = $2
              )",
         )
-        .bind(release.decode_column::<Uuid>("enrollment_id")?)
+        .bind(release_enrollment)
         .bind(release.decode_column::<Decimal>("connection_epoch")?)
         .fetch_one(&mut *transaction)
         .await?;
@@ -7978,9 +7998,7 @@ fn exact_workspace_release_acknowledgement_replay(
     recorded: RunnerWorkspaceReleaseAcknowledgement,
 ) -> Result<RunnerWorkspaceReleaseAcknowledgement, RunnerProtocolStoreError> {
     if supplied != recorded {
-        return Err(RunnerProtocolStoreError::Domain(
-            RunnerDomainError::CorrelationMismatch,
-        ));
+        return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
     Ok(recorded)
 }

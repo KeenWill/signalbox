@@ -79,7 +79,7 @@ transactions before acknowledgement is re-verified through this PR
 best-effort `lease_offer` projection and handoff is re-verified through this PR
 (`agent/runner-lease-offer-dispatcher`). The corrected reconstitution mismatch
 contract was re-verified through PR #322 (`agent/docs-discipline`; pinned and
-pinned-loss request mismatches). Owner-private storage of the one retained lease
+pinned-loss request mismatches). Effective-user-private storage of the one retained lease
 and its monotonic fsynced phases is re-verified through this PR
 (`agent/runner-operation-journal`). Matching terminal-result retention and
 atomic acknowledgement clearing are re-verified through this PR
@@ -751,15 +751,15 @@ is terminalized as `protocol_failure` and closed.
 
 The daemon sends a heartbeat challenge every five seconds. The runner replies
 with its monotonically increasing heartbeat sequence and the exact current
-journaled lease phase when one exists; it still reports no workspace phase. The
-phase must name the active connection's runner and registration or the runner
-fails closed before sending. An acknowledgement must name the exact outstanding
-challenge, and a second challenge is not issued while the first remains
-unanswered. One missed interval durably records `suspect`; the third consecutive
-miss, fifteen seconds after the challenge, records `lost`. An exact late
-acknowledgement before the third miss appends `connected` with
-`heartbeat_recovered`. No present live path populates an operation phase because
-this runtime advertises and serves no operation provider.
+journaled lease phase when one exists. It also reports an accepted or completed
+workspace release, or its exact unrecorded cleanup failure, from the durable
+journal. A lease phase must name the active connection's runner and registration
+or the runner fails closed before sending. An acknowledgement must name the
+exact outstanding challenge, and a second challenge is not issued while the
+first remains unanswered. One missed interval durably records `suspect`; the
+third consecutive miss, fifteen seconds after the challenge, records `lost`. An
+exact late acknowledgement before the third miss appends `connected` with
+`heartbeat_recovered`.
 
 An unannounced transport close or protocol failure durably records `lost`; an
 epoch-targeted shutdown from either side durably records `shutdown`. On hub
@@ -822,8 +822,9 @@ accepts only matching paired `discard_as_recorded` or paired `fail_stale`
 directives for retained terminal evidence and atomically frees both slots. For a
 retained lease-offer failure, `resend` emits the exact stored envelope while
 retaining it, and `discard_as_recorded` or `fail_stale` frees it. Unsupported
-actions preserve the journal and fail closed. The only live failure producer is
-the registration-only empty catalog refusing an offered unknown tool. For
+actions preserve the journal and fail closed. Live failure producers are the
+registration-only empty catalog refusing an offered unknown tool and accepted
+workspace cleanup returning failure. For
 retained ready-workspace evidence, `resend` emits the complete stored frame
 while retaining it and `fail_stale` frees the exact correlation and payload
 together; every other action preserves them and fails closed.
@@ -836,10 +837,11 @@ sends no acknowledgement when durable admission fails and terminalizes the
 connection with the classified rejection. No present production path inserts a
 pending release or sends the initiating `workspace_release` frame.
 
-**Committed unimplemented functionality.** No present repository-backed
-filesystem producer creates ready evidence or begins or advances a release, and
-resumed release directives remain unsupported. This boundary supplies neither
-repository provisioning, repository cleanup, nor a workstation tool inventory.
+**Committed unimplemented functionality.** No present filesystem producer
+creates ready evidence, and resumed release directives remain unsupported. This
+boundary supplies neither workspace provisioning nor a workstation tool
+inventory; accepted cleanup is supplied by the release handoff composed by its
+caller.
 
 **Committed unimplemented functionality.** Future execution support populates
 the bounded inventory that resume already exchanges, containing at most the one
@@ -1713,7 +1715,7 @@ before both the availability probe and dispatch, recreates standard usr-merge
 aliases only when their targets are inside the configured mounts, and derives
 `PATH` only from configured mounts. The proof-only generic exec-family runner
 composes that constructor and advertises `WorkspaceRestricted`. Resource limits
-remain separate work, with first-release resource limits still owner-gated in
+remain separate work, with first-release resource limits still user-gated in
 [open questions](../open-questions.md#identity-credentials-and-resource-governance).
 
 Confinement is defined over that writable root, which need not be a repository.
@@ -1768,7 +1770,7 @@ proves a TLS tunnel to the checked host; it does not claim visibility into the
 encrypted application protocol.
 
 For every generic exec-family restricted dispatch, the runner creates one
-owner-private Unix socket below its locked state root, pins that exact socket in
+effective-user-private Unix socket below its locked state root, pins that exact socket in
 the sandbox request, and serves accepted namespace-local proxy connections
 through the runner-owned broker under the exec timeout. The host endpoint and
 its directory are removed when execution finishes, broker serving fails, or the
@@ -1964,6 +1966,11 @@ persistence transaction implements that staging port.
 authorization, receipt consumption into replacement terminalization, and a
 runner filesystem producer for the initial ready frame remain absent.
 
+**Committed unimplemented functionality.** The repository provisioning, clone,
+and cleanup contract in the following paragraphs remains absent. No present
+runner surface provides it; future implementations must remain compatible with
+these constraints.
+
 `WorkspaceRequirement::RepositoryWorktree` is satisfiable only when the selected
 validated registration advertises `WorkspaceCapability::WorktreePerSession` and
 the repository key resolves in checked runner configuration to a credential-free
@@ -2073,6 +2080,11 @@ serving heartbeats while that filesystem work runs.
 admission will advance the protected manifest to `active`. No repository cleanup
 adapter exists, and no startup scanner resumes the accepted journal.
 
+**Committed unimplemented functionality.** The guarded Git invocation contract
+in the following paragraphs remains absent. No present runner surface provides
+repository Git execution; future implementations must preserve these
+constraints.
+
 Every Git invocation, in provisioning and in every Git tool alike, runs with its
 effective configuration forced by the runner rather than validated after the
 fact. The runner neutralizes ambient configuration by pointing
@@ -2179,6 +2191,11 @@ reach is the structural answer that would retire the class instead of
 enumerating it, and it is recorded as a design question under
 [tool safety](../open-questions.md#tool-safety) rather than settled here.
 
+**Committed unimplemented functionality.** The release, deletion, and startup
+reconciliation contract in the remaining paragraphs of this section remains
+absent. No present runner filesystem adapter or startup scanner provides it;
+future implementations must preserve these constraints.
+
 A daemon release is accepted only for an exact retired placement revision —
 either superseded by replacement or terminal `RunnerAbandoned` — after no live
 lease or unacknowledged result remains. The session itself need not be terminal
@@ -2190,7 +2207,7 @@ workspace manifest. The candidate binds the session, exact retired placement
 revision, cleanup-owning runner, and protected manifest identity. It is not
 cleanup authority: the consuming durable transaction must still authenticate the
 exact retired predecessor against the current placement head, the empty lease
-and result boundary, and the live owner connection. A plain exact directory has
+and result boundary, and the live cleanup-authority connection. A plain exact directory has
 no manifest and produces no candidate.
 
 A release exists only for a workspace the runner itself created: a provisioned

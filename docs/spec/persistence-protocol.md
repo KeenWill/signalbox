@@ -662,7 +662,7 @@ Representation rules, all enforced in the schema:
   Equal replay returns the first authorization or refusal; unequal reuse returns
   a command conflict. A workspace-free or pre-pin placement rolls the claim back
   and returns `NotApplicable`, leaving the workspace-free replacement port as
-  the only command owner. That port currently claims only a pinned loss whose
+  the only command authority. That port currently claims only a pinned loss whose
   request names an exact directory and no workspace; it returns a nonterminal
   stage without appending any relocation facts, while equal provisioning replay
   recognizes that command as outside its repository-backed locus. Migration
@@ -740,11 +740,12 @@ Representation rules, all enforced in the schema:
   The relation is append-only and its initial state vocabulary is only
   `pending`. Migration `202608140101` retains one immutable completed-release
   acknowledgement under that exact correlation. Its transaction locks the
-  session scheduler, current placement head, and pending release in order,
-  rejects a completion after the cleanup-owning physical connection is durably
-  lost, returns exact replay, and makes pending-release reads exclude the
-  recorded terminal. Typed readback rejoins the complete release correlation
-  instead of trusting acknowledgement columns alone. **Committed unimplemented
+  session scheduler, release enrollment, current placement head, and pending
+  release in order, rejects a completion after the cleanup-owning physical
+  connection is durably lost, returns exact replay, and makes pending-release
+  reads exclude the recorded terminal. Typed readback rejoins the complete
+  release correlation instead of trusting acknowledgement columns alone.
+  **Committed unimplemented
   functionality.** No present production transaction inserts the pending
   release, records cleanup refusal, or retires it on connection loss; those
   transitions must consume this exact representation rather than presenting
