@@ -161,7 +161,9 @@ jobs:
           }
   rust-checks:
     runs-on: signalbox
-    timeout-minutes: 10
+    # The self-hosted pool starts with cold caches; give the workspace check
+    # headroom until they warm.
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -172,6 +174,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          shared-key: rust
+          save-if: false
       - name: Check workspace
         run: cargo check --workspace --all-targets --all-features
       - name: Run Clippy
@@ -219,7 +223,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: workspace-tests
+          shared-key: rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run tests
         env:
           SIGNALBOX_RUN_BWRAP_INTEGRATION: "1"
@@ -253,22 +258,22 @@ jobs:
   domain-instruction-counts:
     name: Domain instruction counts (report only)
     continue-on-error: true
-    runs-on: ubuntu-latest
+    runs-on: signalbox
     timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
-      - name: Install Valgrind
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes valgrind
+      # The pinned Signalbox runner image includes Valgrind, so this public-repo
+      # job needs neither root access nor an unpinned package installation.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: domain-instruction-counts
+          shared-key: rust
+          save-if: false
       - name: Install Gungraun runner
         run: cargo install --locked --version '=0.19.4' gungraun-runner
       - name: Report domain instruction counts and simulated cache behavior
@@ -331,9 +336,10 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: postgres-integration
+          shared-key: rust
+          save-if: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -461,7 +467,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive
@@ -470,11 +476,10 @@ jobs:
           name: postgres-integration-archive-${{ matrix.suite }}
           path: ${{ runner.temp }}/archive
       # Flag for flag against the `cargo test` invocation this replaces:
-      # `--run-ignored only` is `-- --ignored`, `--test-threads 4` is
-      # `--test-threads=4`, `--no-fail-fast` is unchanged, and the archive
-      # fixes the package and feature selection at build time. nextest runs
-      # each test in its own process rather than on a shared thread pool, so
-      # four concurrent tests remains the cap.
+      # `--run-ignored only` is `-- --ignored`, `--no-fail-fast` is unchanged,
+      # and the archive fixes the package and feature selection at build time.
+      # nextest runs each test in its own process rather than on a shared
+      # thread pool; eight concurrent tests is the cap.
       - name: Run the ${{ matrix.suite }} partition
         env:
           SUITE: ${{ matrix.suite }}
@@ -488,7 +493,7 @@ jobs:
           --partition "count:$PARTITION/$PARTITIONS"
           --run-ignored only
           --no-fail-fast
-          --test-threads 4
+          --test-threads 8
           -E "$FILTER"
 
   # Preserve the existing required-check name while the suites build once and

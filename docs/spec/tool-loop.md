@@ -8,6 +8,9 @@ verified against PR #433 (`agent/web-search-wiring`). The durable-command
 version cross-link was re-verified through this PR
 (`agent/model-settings-persistence`).
 
+The executor-failure containment contract is verified against this PR
+(`agent/executor-failure-turn-containment`).
+
 The session-delegation scheduling executor and daemon catalog composition are
 verified against PR #462 (`agent/delegation-runtime-daemon-v2`).
 
@@ -503,14 +506,21 @@ cannot strand an issued request or roll back its command.
 
 If the executor returns an operator failure without trustworthy evidence after
 authorization, the service retains the dispatch gate and applies the attempt's
-effect-class crash-loss transition before surfacing that failure. A failed
+effect-class crash-loss transition. A committed classification contains an
+infrastructure or identity-collision failure as the ordinary `CrashClassified`
+outcome, so the affected turn either fails or parks for reconciliation without
+failing unrelated session execution. A fail-closed corruption or caller-or-hub
+bug remains an error after that same classification closes the attempt, so the
+daemon's fatal execution supervisor still stops scheduling. A failed
 classification retains the exact attempt identity and permit for another
-classification pass, and the returned combined error preserves both the executor
-failure and the classification failure. Evidence carrying a different dispatch
-correlation follows the same classification-before-release path, surfacing the
-correlation mismatch only after closure or together with a failed
-classification. The durable attempt therefore cannot remain `InFlight` after the
-gate becomes available to an interrupt.
+classification pass. It also retains whether closure belongs to prior-process
+loss, an executor failure, or a correlation mismatch. An executor failure keeps
+its safe class and cause token, so a later successful classification emits the
+same nonfatal diagnostic or returns the same fatal class; a correlation mismatch
+likewise resurfaces only after closure. The initial combined error preserves
+both the executor failure or mismatch and the classification failure. The
+durable attempt therefore cannot remain `InFlight` after the gate becomes
+available to an interrupt.
 
 If trustworthy executor evidence returns but its commit fails, the service
 retains that exact correlated observation as an opaque linear same-incarnation
