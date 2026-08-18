@@ -16,12 +16,12 @@ use signalbox_file_media_processor_runtime::{SandboxedFileMediaProcessor, Worker
 use signalbox_file_media_runtime::{
     AttachmentKind, CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType,
     DeclaredMediaType, FileDigest, FileMediaCeilings, FileMediaFailure, FileMediaProcessCeilings,
-    FileMediaProcessor, FileMediaProviderDeclaration, FileMediaRegistry, FileReaderName,
-    FileReaderProviderName, FileReaderRevision, FileUse, InspectionRequest, NeverCancelled,
-    ProbeDeclaration, ProbeStrength, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
-    ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
-    ReaderDeclarationInput, ReaderIdentity, ReasonCode, SourceReadError, SourceReadFuture,
-    StreamingTextFallback, VerifiedBlobSource,
+    FileMediaProcessLimitOverrides, FileMediaProcessor, FileMediaProviderDeclaration,
+    FileMediaRegistry, FileReaderName, FileReaderProviderName, FileReaderRevision, FileUse,
+    InspectionRequest, NeverCancelled, ProbeDeclaration, ProbeStrength, ProcessorFailure,
+    ProcessorIsolation, ProcessorProbeOutput, ReadAccessPattern, ReadViewBounds,
+    ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity,
+    ReasonCode, SourceReadError, SourceReadFuture, StreamingTextFallback, VerifiedBlobSource,
 };
 
 struct BytesSource(Vec<u8>);
@@ -51,46 +51,46 @@ impl VerifiedBlobSource for BytesSource {
     }
 }
 
-/// INV-066: registered processors require the real accepted sandbox profile.
+/// INV-074: registered processors require the real accepted sandbox profile.
 #[tokio::test]
-async fn inv066_real_worker_has_the_accepted_isolation_profile() -> Result<(), Box<dyn Error>> {
+async fn inv074_real_worker_has_the_accepted_isolation_profile() -> Result<(), Box<dyn Error>> {
     real_worker_profile_scenario().await
 }
 
-/// INV-067: worker source reads pass only through the daemon's bounded broker.
+/// INV-075: worker source reads pass only through the daemon's bounded broker.
 #[tokio::test]
-async fn inv067_worker_can_read_only_through_the_bounded_broker() -> Result<(), Box<dyn Error>> {
+async fn inv075_worker_can_read_only_through_the_bounded_broker() -> Result<(), Box<dyn Error>> {
     bounded_broker_scenario().await
 }
 
-/// INV-068: an incomplete result from a crashed worker is never admitted.
+/// INV-076: an incomplete result from a crashed worker is never admitted.
 #[tokio::test]
-async fn inv068_worker_crash_discards_its_incomplete_result() -> Result<(), Box<dyn Error>> {
+async fn inv076_worker_crash_discards_its_incomplete_result() -> Result<(), Box<dyn Error>> {
     worker_crash_scenario().await
 }
 
-/// INV-069: the daemon wall deadline terminates work without content leakage.
+/// INV-077: the daemon wall deadline terminates work without content leakage.
 #[tokio::test]
-async fn inv069_worker_wall_timeout_is_a_content_silent_failure() -> Result<(), Box<dyn Error>> {
+async fn inv077_worker_wall_timeout_is_a_content_silent_failure() -> Result<(), Box<dyn Error>> {
     worker_timeout_scenario().await
 }
 
-/// INV-070: workers may create threads but cannot create descendant processes.
+/// INV-078: workers may create threads but cannot create descendant processes.
 #[tokio::test]
-async fn inv070_worker_process_creation_is_denied_without_blocking_threads()
+async fn inv078_worker_process_creation_is_denied_without_blocking_threads()
 -> Result<(), Box<dyn Error>> {
     worker_descendant_scenario().await
 }
 
-/// INV-071: injection-shaped worker output is sanitized before registry use.
+/// INV-079: injection-shaped worker output is sanitized before registry use.
 #[tokio::test]
-async fn inv071_hostile_worker_output_never_propagates() -> Result<(), Box<dyn Error>> {
+async fn inv079_hostile_worker_output_never_propagates() -> Result<(), Box<dyn Error>> {
     hostile_worker_output_scenario().await
 }
 
-/// INV-073: authoritative cancellation terminates in-flight worker processing.
+/// INV-080: authoritative cancellation terminates in-flight worker processing.
 #[tokio::test]
-async fn inv073_authoritative_cancellation_terminates_the_worker() -> Result<(), Box<dyn Error>> {
+async fn inv080_authoritative_cancellation_terminates_the_worker() -> Result<(), Box<dyn Error>> {
     worker_cancellation_scenario().await
 }
 
@@ -133,9 +133,14 @@ async fn worker_crash_scenario() -> Result<(), Box<dyn Error>> {
 }
 
 async fn worker_timeout_scenario() -> Result<(), Box<dyn Error>> {
-    let ceilings =
-        FileMediaProcessCeilings::try_lower(1_048_576, 512 * 1024 * 1024, 60, 1, 32, 16_384)
-            .ok_or("lowered test ceilings must be valid")?;
+    let ceilings = FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
+        memory_bytes: 512 * 1024 * 1024,
+        cpu_seconds: 60,
+        wall_seconds: 1,
+        file_descriptors: 32,
+        stderr_bytes: 16_384,
+    })
+    .ok_or("lowered test ceilings must be valid")?;
     let Some((processor, reader)) = available_processor(ceilings).await? else {
         return Ok(());
     };
