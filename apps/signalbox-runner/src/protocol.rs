@@ -614,6 +614,7 @@ impl RunnerConnectionError {
 /// Established serial runner connection and exact active receipt.
 pub struct RunnerConnection<S> {
     io: BufReader<S>,
+    receive_buffer: Vec<u8>,
     receipt: EnrollmentReceipt,
     advertisement: Advertisement,
     outcome: EnrollmentOutcome,
@@ -716,6 +717,9 @@ where
                             Message::OperationFailed(OperationFailed { failure })
                         }
                         ResumeReplay::WorkspaceReady(ready) => Message::WorkspaceReady(ready),
+                        ResumeReplay::WorkspaceReleased(released) => {
+                            Message::WorkspaceReleased(released)
+                        }
                     };
                     send_message(&mut io, message).await?;
                 }
@@ -728,6 +732,7 @@ where
         };
         Ok(Self {
             io,
+            receive_buffer: Vec::new(),
             receipt,
             advertisement: advertisement.clone(),
             outcome,
@@ -807,7 +812,7 @@ where
             }),
         )
         .await?;
-        let registered = match receive_message(&mut self.io).await? {
+        let registered = match self.receive_message().await? {
             Message::Registered(registered) => registered,
             Message::Rejected(rejected) => return Err(rejected_error(rejected)),
             other => return Err(unexpected(MessageKind::Registered, &other)),
@@ -857,7 +862,7 @@ where
                 continue;
             }
             let message = tokio::select! {
-                message = receive_message(&mut self.io) => message?,
+                message = self.receive_message() => message?,
                 () = &mut shutdown => return Ok(ServeOutcome::ShutdownReady),
             };
             if let Some(outcome) = self.serve_message(state, message).await? {
@@ -879,7 +884,7 @@ where
                 .serve_message(state, Message::WorkspaceRelease(release))
                 .await;
         }
-        let message = receive_message(&mut self.io).await?;
+        let message = self.receive_message().await?;
         self.serve_message(state, message).await
     }
 
@@ -1291,7 +1296,7 @@ where
                     .await?;
                     return Ok(());
                 }
-                message = receive_message(&mut self.io) => {
+                message = self.receive_message() => {
                     let message = message?;
                     if let Message::WorkspaceRelease(release) = message {
                         if release.correlation.runner_id != self.receipt.runner_id()
@@ -1337,47 +1342,58 @@ where
         }
         let correlation = release.correlation().clone();
         let mut deferred_shutdown = None;
+        let mut transport_error = None;
         tokio::pin!(cleanup);
         loop {
             tokio::select! {
                 result = &mut cleanup => {
-                    match result {
+                    let projection = match result {
                         Ok(()) => {
                             state.record_workspace_release_phase(
                                 correlation.clone(),
                                 signalbox_runner_wire::ReleasePhase::ReleaseCompleted,
                             )?;
-                            send_message(
-                                &mut self.io,
-                                Message::WorkspaceReleased(WorkspaceReleased {
-                                    correlation,
-                                }),
-                            )
-                            .await?;
+                            Message::WorkspaceReleased(WorkspaceReleased { correlation })
                         }
                         Err(_) => {
                             let failure = workspace_cleanup_failure(correlation)?;
                             state.record_workspace_release_failure(failure.clone())?;
-                            send_message(
-                                &mut self.io,
-                                Message::OperationFailed(OperationFailed { failure }),
-                            )
-                            .await?;
+                            Message::OperationFailed(OperationFailed { failure })
                         }
+                    };
+                    if let Some(error) = transport_error {
+                        return Err(error);
                     }
+                    send_message(&mut self.io, projection).await?;
                     self.deferred_connection_end = deferred_shutdown;
                     return Ok(());
                 }
-                message = receive_message(&mut self.io), if deferred_shutdown.is_none() => {
-                    let message = message?;
+                message = self.receive_message(),
+                    if deferred_shutdown.is_none() && transport_error.is_none() =>
+                {
+                    let message = match message {
+                        Ok(message) => message,
+                        Err(error) if error.is_reconnectable() => {
+                            transport_error = Some(error);
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
                     let received = MessageKind::of(&message);
                     match message {
                         Message::Heartbeat(challenge) => {
-                            if self
+                            let served = self
                                 .serve_message(state, Message::Heartbeat(challenge))
-                                .await?
-                                .is_some()
-                            {
+                                .await;
+                            let outcome = match served {
+                                Ok(outcome) => outcome,
+                                Err(error) if error.is_reconnectable() => {
+                                    transport_error = Some(error);
+                                    continue;
+                                }
+                                Err(error) => return Err(error),
+                            };
+                            if outcome.is_some() {
                                 return Err(RunnerConnectionError::Violation(
                                     ProtocolViolation::UnexpectedFrame {
                                         expected: MessageKind::Heartbeat,
@@ -1406,6 +1422,10 @@ where
                 }
             }
         }
+    }
+
+    async fn receive_message(&mut self) -> Result<Message, RunnerConnectionError> {
+        receive_message_buffered(&mut self.io, &mut self.receive_buffer).await
     }
 }
 
@@ -1633,6 +1653,7 @@ where
 enum ResumeReplay {
     OperationFailure(OperationFailure),
     WorkspaceReady(signalbox_runner_wire::WorkspaceReady),
+    WorkspaceReleased(signalbox_runner_wire::WorkspaceReleased),
 }
 
 fn apply_resume_directives(
@@ -1703,6 +1724,88 @@ fn apply_resume_directives(
             DirectiveAction::DiscardAsRecorded | DirectiveAction::FailStale => {
                 state
                     .acknowledge_lease_offer_failure(&failure.correlation)
+                    .map_err(|error| match error {
+                        RunnerStateError::InvalidTransition
+                        | RunnerStateError::OperationCorrelationMismatch => {
+                            RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
+                        }
+                        other => RunnerConnectionError::State(other),
+                    })?;
+                Ok(None)
+            }
+            DirectiveAction::Await => Err(RunnerConnectionError::Violation(
+                ProtocolViolation::ResumeDirectives,
+            )),
+        };
+    }
+    if let (
+        Some(WorkspaceOperation::Release {
+            correlation,
+            phase: signalbox_runner_wire::ReleasePhase::ReleaseCompleted,
+        }),
+        Some(directive),
+    ) = (
+        inventory.workspace_operation.as_ref(),
+        directives.workspace_operation.as_ref(),
+    ) && inventory.lease.is_none()
+        && inventory.result.is_none()
+        && inventory.operation_failure.is_none()
+        && inventory.leak_page.is_none()
+        && directives.lease.is_none()
+        && directives.result.is_none()
+        && directives.operation_failure.is_none()
+        && directives.leak_page.is_none()
+    {
+        return match directive.action {
+            DirectiveAction::Resend => {
+                Ok(Some(ResumeReplay::WorkspaceReleased(WorkspaceReleased {
+                    correlation: correlation.clone(),
+                })))
+            }
+            DirectiveAction::DiscardAsRecorded | DirectiveAction::FailStale => {
+                state
+                    .acknowledge_workspace_release(correlation)
+                    .map_err(|error| match error {
+                        RunnerStateError::InvalidTransition
+                        | RunnerStateError::OperationCorrelationMismatch => {
+                            RunnerConnectionError::Violation(ProtocolViolation::ResumeDirectives)
+                        }
+                        other => RunnerConnectionError::State(other),
+                    })?;
+                Ok(None)
+            }
+            DirectiveAction::Await => Err(RunnerConnectionError::Violation(
+                ProtocolViolation::ResumeDirectives,
+            )),
+        };
+    }
+    if let (
+        Some(WorkspaceOperation::Release {
+            correlation,
+            phase: signalbox_runner_wire::ReleasePhase::ReleaseAccepted,
+        }),
+        Some(failure),
+        Some(workspace_directive),
+        Some(failure_directive),
+    ) = (
+        inventory.workspace_operation.as_ref(),
+        inventory.operation_failure.as_ref(),
+        directives.workspace_operation.as_ref(),
+        directives.operation_failure.as_ref(),
+    ) && inventory.lease.is_none()
+        && inventory.result.is_none()
+        && inventory.leak_page.is_none()
+        && directives.lease.is_none()
+        && directives.result.is_none()
+        && directives.leak_page.is_none()
+        && failure.correlation == OperationCorrelation::Release(correlation.clone())
+        && workspace_directive.action == failure_directive.action
+    {
+        return match workspace_directive.action {
+            DirectiveAction::Resend => Ok(Some(ResumeReplay::OperationFailure(failure.clone()))),
+            DirectiveAction::DiscardAsRecorded | DirectiveAction::FailStale => {
+                state
+                    .acknowledge_workspace_release_failure(correlation)
                     .map_err(|error| match error {
                         RunnerStateError::InvalidTransition
                         | RunnerStateError::OperationCorrelationMismatch => {
@@ -1805,15 +1908,30 @@ async fn receive_message<S>(io: &mut BufReader<S>) -> Result<Message, RunnerConn
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut line = Vec::new();
-    let mut bounded = io.take((MAX_FRAME_BYTES + 1) as u64);
-    let bytes = bounded
-        .read_until(b'\n', &mut line)
-        .await
-        .map_err(RunnerConnectionError::Read)?;
-    if bytes == 0 {
-        return Err(RunnerConnectionError::PeerClosed);
+    let mut buffer = Vec::new();
+    receive_message_buffered(io, &mut buffer).await
+}
+
+async fn receive_message_buffered<S>(
+    io: &mut BufReader<S>,
+    buffer: &mut Vec<u8>,
+) -> Result<Message, RunnerConnectionError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let frame_complete = buffer.last() == Some(&b'\n');
+    let remaining = (MAX_FRAME_BYTES + 1).saturating_sub(buffer.len());
+    if !frame_complete && remaining > 0 {
+        let mut bounded = io.take(remaining as u64);
+        let bytes = bounded
+            .read_until(b'\n', buffer)
+            .await
+            .map_err(RunnerConnectionError::Read)?;
+        if bytes == 0 {
+            return Err(RunnerConnectionError::PeerClosed);
+        }
     }
+    let line = std::mem::take(buffer);
     decode_line(&line)
         .map(|frame| frame.message)
         .map_err(RunnerConnectionError::Decode)
@@ -4192,6 +4310,177 @@ mod tests {
                 correlation: correlation.clone(),
             })
         );
+        assert_eq!(
+            state.reconnect_inventory().workspace_operation,
+            Some(WorkspaceOperation::Release {
+                correlation,
+                phase: ReleasePhase::ReleaseCompleted,
+            })
+        );
+    }
+
+    /// INV-011 / INV-024: cleanup completion cannot discard a frame prefix
+    /// already consumed by the connection's canceled receive future.
+    #[tokio::test]
+    async fn inv011_inv024_workspace_cleanup_preserves_a_partial_heartbeat_frame() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let correlation = release_correlation();
+        let heartbeat = Message::Heartbeat(Heartbeat {
+            sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+            last_accepted_peer_sequence: NO_ACCEPTED_PEER_SEQUENCE,
+        });
+        let heartbeat_frame =
+            encode_line(&Frame::try_new(heartbeat).expect("the fixture heartbeat forms a frame"))
+                .expect("the fixture heartbeat encodes");
+        let split = heartbeat_frame.len() / 2;
+        let (heartbeat_prefix, heartbeat_suffix) = heartbeat_frame.split_at(split);
+        let (complete_cleanup, cleanup_completed) = tokio::sync::oneshot::channel();
+        let (runner_io, hub_io) = tokio::io::duplex(1);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the release");
+            let release = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the release reaches a serving boundary")
+                .expect("the release produces a cleanup handoff")
+                .into_workspace_release_ready()
+                .expect("the accepted release forms the cleanup handoff");
+            let cleanup = async {
+                cleanup_completed
+                    .await
+                    .expect("the partial frame fixture releases cleanup");
+                Ok::<(), ()>(())
+            };
+            connection
+                .release_while_serving(&mut state, release, cleanup)
+                .await
+                .expect("cleanup completes after retaining the partial frame");
+            connection
+                .serve_one(&mut state)
+                .await
+                .expect("the retained frame suffix completes decoding")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::WorkspaceRelease(WorkspaceRelease {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await;
+            hub_io
+                .get_mut()
+                .write_all(heartbeat_prefix)
+                .await
+                .expect("the heartbeat prefix reaches the runner");
+            complete_cleanup
+                .send(())
+                .expect("cleanup completes after the prefix is consumed");
+            let released = receive_hub_message(&mut hub_io).await;
+            hub_io
+                .get_mut()
+                .write_all(heartbeat_suffix)
+                .await
+                .expect("the heartbeat suffix reaches the runner");
+            let acknowledgement = receive_hub_message(&mut hub_io).await;
+            (released, acknowledgement)
+        };
+        let (outcome, (released, acknowledgement)) = tokio::join!(runner, hub);
+
+        assert_eq!(outcome, None);
+        assert_eq!(
+            released,
+            Message::WorkspaceReleased(WorkspaceReleased {
+                correlation: correlation.clone(),
+            })
+        );
+        assert_eq!(
+            acknowledgement,
+            Message::HeartbeatAck(HeartbeatAck {
+                challenge_sequence: positive(FIRST_CHALLENGE_SEQUENCE),
+                runner_sequence: positive(FIRST_RUNNER_SEQUENCE),
+                lease_phase: None,
+                workspace_phase: Some(HeartbeatWorkspacePhase::ReleaseCompleted { correlation }),
+            })
+        );
+    }
+
+    /// INV-011 / INV-024: transport loss after release acceptance waits for
+    /// cleanup and journals completion before reconnecting.
+    #[tokio::test]
+    async fn inv011_inv024_workspace_cleanup_journals_completion_after_connection_loss() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut state = enrolled_state(&parent);
+        let advertisement = empty_advertisement();
+        let correlation = release_correlation();
+        let (complete_cleanup, cleanup_completed) = tokio::sync::oneshot::channel();
+        let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
+        let mut hub_io = BufReader::new(hub_io);
+
+        let runner = async {
+            let mut connection = RunnerConnection::establish(runner_io, &mut state, &advertisement)
+                .await
+                .expect("resume completes before the release");
+            let release = connection
+                .serve_one(&mut state)
+                .await
+                .expect("the release reaches a serving boundary")
+                .expect("the release produces a cleanup handoff")
+                .into_workspace_release_ready()
+                .expect("the accepted release forms the cleanup handoff");
+            let cleanup = async {
+                cleanup_completed
+                    .await
+                    .expect("connection loss leaves cleanup live");
+                Ok::<(), ()>(())
+            };
+            connection
+                .release_while_serving(&mut state, release, cleanup)
+                .await
+                .expect_err("transport loss is returned after cleanup is durable")
+        };
+        let hub = async {
+            let _resume = receive_hub_message(&mut hub_io).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::Resumed(Box::new(Resumed {
+                    registration_revision: positive(INITIAL_REGISTRATION_REVISION),
+                    connection_epoch: positive(CONNECTION_EPOCH),
+                    directives: ReconnectDirectives::default(),
+                })),
+            )
+            .await;
+            send_hub_message(
+                &mut hub_io,
+                Message::WorkspaceRelease(WorkspaceRelease {
+                    correlation: correlation.clone(),
+                }),
+            )
+            .await;
+            drop(hub_io);
+            complete_cleanup
+                .send(())
+                .expect("cleanup remains live after the wire closes");
+        };
+        let (error, ()) = tokio::join!(runner, hub);
+
+        assert!(error.is_reconnectable());
         assert_eq!(
             state.reconnect_inventory().workspace_operation,
             Some(WorkspaceOperation::Release {

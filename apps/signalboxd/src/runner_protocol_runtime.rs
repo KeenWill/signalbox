@@ -708,6 +708,43 @@ impl PostgresRunnerRegistrationService {
                     None,
                 )
             }
+            ResumeOperation::CompletedRelease(release_correlation) => {
+                let action = if release_correlation.runner_id == request.runner_id {
+                    DirectiveAction::Resend
+                } else {
+                    DirectiveAction::FailStale
+                };
+                (
+                    release_directives(&request.inventory, action).map_err(|code| {
+                        RunnerRegistrationFailure::new(
+                            RunnerInboundFrameKind::Resume,
+                            correlation.clone(),
+                            code,
+                        )
+                    })?,
+                    None,
+                )
+            }
+            ResumeOperation::FailedRelease(failure) => {
+                let action = match &failure.correlation {
+                    signalbox_runner_wire::OperationCorrelation::Release(release)
+                        if release.runner_id == request.runner_id =>
+                    {
+                        DirectiveAction::Resend
+                    }
+                    _ => DirectiveAction::FailStale,
+                };
+                (
+                    release_directives(&request.inventory, action).map_err(|code| {
+                        RunnerRegistrationFailure::new(
+                            RunnerInboundFrameKind::Resume,
+                            correlation.clone(),
+                            code,
+                        )
+                    })?,
+                    None,
+                )
+            }
             ResumeOperation::Empty => (ReconnectDirectives::default(), None),
         };
         let previous_registration_revision = match self
@@ -1059,6 +1096,8 @@ enum ResumeOperation {
     ClaimedLease(LeaseCorrelation),
     RetainedResult(ResultFrame),
     ReadyWorkspace(signalbox_runner_wire::ProvisionCorrelation),
+    CompletedRelease(signalbox_runner_wire::ReleaseCorrelation),
+    FailedRelease(signalbox_runner_wire::OperationFailure),
 }
 
 fn classify_resume_inventory(
@@ -1068,10 +1107,7 @@ fn classify_resume_inventory(
         return Ok(ResumeOperation::Empty);
     }
     if let Some(operation) = inventory.workspace_operation.as_ref() {
-        if inventory.lease.is_some()
-            || inventory.result.is_some()
-            || inventory.operation_failure.is_some()
-            || inventory.leak_page.is_some()
+        if inventory.lease.is_some() || inventory.result.is_some() || inventory.leak_page.is_some()
         {
             return Err(RejectionCode::CorrelationMismatch);
         }
@@ -1079,12 +1115,36 @@ fn classify_resume_inventory(
             WorkspaceOperation::Provision {
                 correlation,
                 phase: ProvisionPhase::ReadyUnrecorded,
-            } => Ok(ResumeOperation::ReadyWorkspace(correlation.clone())),
+            } if inventory.operation_failure.is_none() => {
+                Ok(ResumeOperation::ReadyWorkspace(correlation.clone()))
+            }
             WorkspaceOperation::Provision {
                 phase: ProvisionPhase::Provisioning,
                 ..
+            } if inventory.operation_failure.is_none() => Err(RejectionCode::Unavailable),
+            WorkspaceOperation::Provision { .. } => Err(RejectionCode::CorrelationMismatch),
+            WorkspaceOperation::Release {
+                correlation,
+                phase: signalbox_runner_wire::ReleasePhase::ReleaseCompleted,
+            } if inventory.operation_failure.is_none() => {
+                Ok(ResumeOperation::CompletedRelease(correlation.clone()))
             }
-            | WorkspaceOperation::Release { .. } => Err(RejectionCode::Unavailable),
+            WorkspaceOperation::Release {
+                correlation,
+                phase: signalbox_runner_wire::ReleasePhase::ReleaseAccepted,
+            } => match inventory.operation_failure.as_ref() {
+                Some(failure)
+                    if failure.correlation
+                        == signalbox_runner_wire::OperationCorrelation::Release(
+                            correlation.clone(),
+                        ) =>
+                {
+                    Ok(ResumeOperation::FailedRelease(failure.clone()))
+                }
+                Some(_) => Err(RejectionCode::CorrelationMismatch),
+                None => Err(RejectionCode::Unavailable),
+            },
+            WorkspaceOperation::Release { .. } => Err(RejectionCode::CorrelationMismatch),
         };
     }
     if inventory.operation_failure.is_some() || inventory.leak_page.is_some() {
@@ -1170,6 +1230,34 @@ fn ready_workspace_directives(
             correlation: signalbox_runner_wire::OperationCorrelation::Provision(
                 correlation.clone(),
             ),
+            action,
+        }),
+        ..ReconnectDirectives::default()
+    };
+    directives
+        .validate_against(inventory)
+        .map_err(|_| RejectionCode::CorrelationMismatch)?;
+    Ok(directives)
+}
+
+fn release_directives(
+    inventory: &ReconnectInventory,
+    action: DirectiveAction,
+) -> Result<ReconnectDirectives, RejectionCode> {
+    let Some(WorkspaceOperation::Release { correlation, .. }) =
+        inventory.workspace_operation.as_ref()
+    else {
+        return Err(RejectionCode::CorrelationMismatch);
+    };
+    let operation_correlation =
+        signalbox_runner_wire::OperationCorrelation::Release(correlation.clone());
+    let directives = ReconnectDirectives {
+        workspace_operation: Some(Directive {
+            correlation: operation_correlation.clone(),
+            action,
+        }),
+        operation_failure: inventory.operation_failure.as_ref().map(|_| Directive {
+            correlation: operation_correlation,
             action,
         }),
         ..ReconnectDirectives::default()
