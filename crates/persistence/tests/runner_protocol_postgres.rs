@@ -7976,6 +7976,12 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(&pool).await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         ADD COLUMN offer_registration_revision numeric(20, 0)",
+    )
+    .execute(&pool)
+    .await?;
     let (store, _, registration, pin) = prepared_pin_fixture_with_authorization(
         &pool,
         authorized,
