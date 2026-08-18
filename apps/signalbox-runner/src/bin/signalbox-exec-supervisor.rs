@@ -1,4 +1,4 @@
-//! Separately packaged process-tree supervisor entrypoint.
+//! Proof-archive companion entrypoint for the separately packaged supervisor.
 
 #![forbid(unsafe_code)]
 
