@@ -715,15 +715,17 @@ is terminalized as `protocol_failure` and closed.
 
 The daemon sends a heartbeat challenge every five seconds. The runner replies
 with its monotonically increasing heartbeat sequence and the exact current
-journaled lease phase when one exists; it still reports no workspace phase. The
-phase must name the active connection's runner and registration or the runner
-fails closed before sending. An acknowledgement must name the exact outstanding
-challenge, and a second challenge is not issued while the first remains
-unanswered. One missed interval durably records `suspect`; the third consecutive
-miss, fifteen seconds after the challenge, records `lost`. An exact late
-acknowledgement before the third miss appends `connected` with
-`heartbeat_recovered`. No present live path populates an operation phase because
-this runtime advertises and serves no operation provider.
+journaled lease phase when one exists. When a retained workspace release exists,
+it also projects the accepted or completed release phase, or the exact
+`failure_unrecorded` release correlation after cleanup failure, from the durable
+journal; otherwise it reports no workspace phase. Each phase must name the active
+connection's runner and registration or the runner fails closed before sending.
+An acknowledgement must name the exact outstanding challenge, and a second
+challenge is not issued while the first remains unanswered. One missed interval
+durably records `suspect`; the third consecutive miss, fifteen seconds after the
+challenge, records `lost`. An exact late acknowledgement before the third miss
+appends `connected` with `heartbeat_recovered`. No present live path populates an
+operation phase because this runtime advertises and serves no operation provider.
 
 An unannounced transport close or protocol failure durably records `lost`; an
 epoch-targeted shutdown from either side durably records `shutdown`. On hub
