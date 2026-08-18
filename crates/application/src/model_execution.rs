@@ -15,8 +15,11 @@ use std::{
     time::Duration,
 };
 
-// numeric-bound: ceiling - protects against an unbounded paid provider loop
-const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 32;
+// With the runtime's ten-minute exchange deadline, 256 rounds can already hold
+// one progressing turn in provider work for 42 hours 40 minutes and repeat a
+// full-context spend 256 times. Further work is a latency and spend runaway.
+// numeric-bound: ceiling - protects against multi-day latency and repeated provider spend
+const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 256;
 
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,

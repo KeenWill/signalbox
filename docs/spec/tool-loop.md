@@ -28,9 +28,9 @@ bind is verified against this PR (`agent/per-session-workspaces`).
 The change-request-scoped thread mutation contracts and their pre-dispatch
 ownership confirmation are verified through this PR (`agent/thread-ownership`).
 
-The automatic tool-round saturation terminal contract is verified through this
-PR (`agent/tool-round-saturation`) at implementation ref
-`e3324597071041bb192c315855304805d6fa6f4e`.
+The automatic tool-round saturation and 256-round ceiling contracts are verified
+through this PR (`agent/tool-round-ceiling`) at implementation ref
+`bd80d3f63b325fb591641926061353e6d40a19c7`.
 
 The daemon blob-read declarations below are the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with its implementing
@@ -630,15 +630,15 @@ its assistant text and `TurnCompleted` marker terminalize the turn.
 At most 32 requests may appear in one completed provider tool response. A
 response with a thirty-third request closes the producing model call as
 `KnownFailed` without creating a partial batch, request record, or tool-use
-entry. At most 32 provider rounds in one turn may complete with admitted tool
+entry. At most 256 provider rounds in one turn may complete with admitted tool
 requests. The application counts distinct producing calls for the current turn,
 so every multi-request batch counts once and inherited tool history from earlier
-turns does not count. After the thirty-second batch resolves, the ordinary
-continuation transaction still projects all results and creates its fresh
-`Prepared` call; model execution closes that checkpoint as `KnownFailed` before
-provider capability preparation or send. At that enforcement site it emits a
-warning carrying the limit and observed round count, and the guarded pre-send
-closure carries `ToolRoundLimitReached`. The terminal event consequently uses
+turns does not count. After the 256th batch resolves, the ordinary continuation
+transaction still projects all results and creates its fresh `Prepared` call;
+model execution closes that checkpoint as `KnownFailed` before provider
+capability preparation or send. At that enforcement site it emits a warning
+carrying the limit and observed round count, and the guarded pre-send closure
+carries `ToolRoundLimitReached`. The terminal event consequently uses
 `tool_round_limit_reached`, distinct from `capability_known_failure` (INV-061).
 These durable-content bounds avoid wall-clock policy and ensure one
 model-controlled response or chain cannot retain the progressing slot
