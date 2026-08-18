@@ -292,6 +292,40 @@ impl PostgresRepoWatchDispatchStore {
         Ok(true)
     }
 
+    /// Fails every lifecycle-cutoff record, for a composed attempt test.
+    ///
+    /// The fault is a trigger rather than a dropped table because the candidate
+    /// query has to keep succeeding: what is being exercised is an attempt
+    /// whose earlier cutoff pass found nothing and whose later one, over work
+    /// that pass could not have seen, fails. Left in place for the container's
+    /// lifetime — every test that installs it wants the cutoff to keep failing.
+    #[cfg(feature = "test-support")]
+    pub async fn inject_lifecycle_cutoff_rejection(
+        &self,
+    ) -> Result<(), RepoWatchDispatchRepositoryError> {
+        sqlx::query(
+            "CREATE FUNCTION reject_repo_watch_lifecycle_cutoff()
+             RETURNS trigger
+             LANGUAGE plpgsql
+             AS $$
+             BEGIN
+                 RAISE EXCEPTION 'fixture rejects this lifecycle cutoff';
+             END
+             $$",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TRIGGER reject_repo_watch_lifecycle_cutoff
+             BEFORE INSERT ON repo_watch_lifecycle_cutoff
+             FOR EACH ROW
+             EXECUTE FUNCTION reject_repo_watch_lifecycle_cutoff()",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Drains durable lifecycle cutoffs before repository-specific tasks start.
     pub async fn process_pending_lifecycle_cutoffs<NextCommandId>(
         &self,

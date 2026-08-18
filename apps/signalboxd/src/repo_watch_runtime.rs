@@ -469,14 +469,18 @@ impl WebhookDrainRetry {
         self.consecutive_failures = 0;
     }
 
+    /// `trailing_failure` is the attempt's cutoff or dispatch work after the
+    /// drain, which the drain's own outcome cannot report: both run once the
+    /// drain has committed, and a delivery already terminal will not wake
+    /// another attempt for them.
     fn update_after_poll_drain(
         &mut self,
         outcome: WebhookDrainOutcome,
-        trailing_dispatch_failure: Option<RepositoryWatchAttemptError>,
+        trailing_failure: Option<RepositoryWatchAttemptError>,
         now: Instant,
     ) {
         match outcome {
-            WebhookDrainOutcome::Drained if trailing_dispatch_failure.is_some() => {
+            WebhookDrainOutcome::Drained if trailing_failure.is_some() => {
                 self.arm_follow_up(now);
             }
             WebhookDrainOutcome::Drained => self.update_after(&Ok(())),
@@ -905,10 +909,10 @@ impl RepositoryWatchTask {
                     let cycle_started = Instant::now();
                     let drain = webhook_retry.poll_drain();
                     let mut drained = None;
-                    let mut trailing_dispatch_failure = None;
+                    let mut trailing_failure = None;
                     let Some(result) = run_until_shutdown(
                         &mut shutdown,
-                        self.run_attempt(drain, &mut drained, &mut trailing_dispatch_failure),
+                        self.run_attempt(drain, &mut drained, &mut trailing_failure),
                     )
                     .await
                     else {
@@ -925,7 +929,7 @@ impl RepositoryWatchTask {
                     match drained {
                         Some(outcome) => webhook_retry.update_after_poll_drain(
                             outcome,
-                            trailing_dispatch_failure,
+                            trailing_failure,
                             Instant::now(),
                         ),
                         // The poll deferred its drain to an owed retry, or
@@ -1068,12 +1072,15 @@ impl RepositoryWatchTask {
     /// Reports the drain it performed through `drained`, so the caller can
     /// apply it to the backoff. A poll's own result cannot stand in for it:
     /// polling fails for reasons the drain never saw, and a drain can fail
-    /// after every delivery it visited reached terminal state.
+    /// after every delivery it visited reached terminal state. Reports the
+    /// cutoff and dispatch work that ran after that drain through
+    /// `trailing_failure`, which the drain's outcome likewise cannot carry:
+    /// nothing is left pending to wake a later attempt for it.
     async fn run_attempt(
         &mut self,
         drain: WebhookDrain,
         drained: &mut Option<WebhookDrainOutcome>,
-        trailing_dispatch_failure: &mut Option<RepositoryWatchAttemptError>,
+        trailing_failure: &mut Option<RepositoryWatchAttemptError>,
     ) -> Result<(), RepositoryWatchAttemptError> {
         self.poller.begin_attempt();
         let result = async {
@@ -1131,11 +1138,21 @@ impl RepositoryWatchTask {
                 }
             }
             accelerated?;
-            self.process_cutoffs().await?;
+            // Both trailing steps report through `trailing_failure` rather than
+            // escaping, because a drain that has already committed its work
+            // owns neither of them. Letting the cutoff `?` out would leave the
+            // caller reading a bare `Drained`: it would clear the deadline the
+            // committed work needs and skip the dispatch step below, so that
+            // work would wait for an unrelated admission or the next poll
+            // instead of the follow-up this failure is owed.
+            if let Err(error) = self.process_cutoffs().await {
+                *trailing_failure = Some(error);
+                return Err(error);
+            }
             match self.process_dispatches().await {
                 Ok(()) => Ok(()),
                 Err(error) => {
-                    *trailing_dispatch_failure = Some(error);
+                    *trailing_failure = Some(error);
                     Err(error)
                 }
             }
@@ -4850,6 +4867,40 @@ mod tests {
         )?)
     }
 
+    /// Closes the pull request the canonical observation holds open, so a drain
+    /// that projects it commits a lifecycle cutoff no earlier pass could see.
+    fn closed_admission(delivery: u128) -> Result<RepoWatchWebhookAdmission, Box<dyn Error>> {
+        let body = serde_json::json!({
+            "action": "closed",
+            "number": PULL_NUMBER,
+            "repository": {"full_name": WATCHED_REPOSITORY},
+            "pull_request": {
+                "title": PULL_TITLE,
+                "body": PULL_BODY,
+                "draft": false,
+                "merged": false,
+                "user": {"login": PROVIDER_PULL_AUTHOR},
+                "labels": [],
+                "base": {"ref": BASE_BRANCH},
+                "head": {
+                    "sha": HEAD_SHA,
+                    "ref": HEAD_BRANCH,
+                    "repo": {"full_name": PROVIDER_HEAD_REPOSITORY}
+                }
+            }
+        })
+        .to_string()
+        .into_bytes();
+        Ok(RepoWatchWebhookAdmission::try_new(
+            webhook_delivery_key(delivery),
+            RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?,
+            "pull_request".to_owned(),
+            Some("closed".to_owned()),
+            [WEBHOOK_BODY_DIGEST_FILL; 32],
+            body,
+        )?)
+    }
+
     struct WebhookTaskFixture {
         task: RepositoryWatchTask,
         // The poller resolves its credential from a file in this directory on
@@ -6891,6 +6942,59 @@ mod tests {
         draining.finish().await;
         assert_eq!(performed_drain, Some(WebhookDrainOutcome::Drained));
         assert!(webhook_disposition_exists(&webhook_store, admission.key()).await?);
+        Ok(())
+    }
+
+    /// Cutoff work after the drain belongs to the same follow-up classification
+    /// as the dispatch work beside it: the deliveries it follows are terminal
+    /// and will wake no later attempt, so an attempt that let this failure
+    /// escape would report a bare `Drained`, clear the deadline the committed
+    /// work needs, and leave that work to an unrelated admission or the next
+    /// poll. The cutoff the drain itself commits is what the attempt's earlier
+    /// cutoff pass could not have processed already.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_trailing_poll_cutoff_failure_arms_a_follow_up() -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let closing = closed_admission(FIRST_WEBHOOK_DELIVERY)?;
+        webhook_store.admit(&closing).await?;
+        let server = ScriptedServer::start(complete_typed_observation_responses()).await;
+        let mut fixture = webhook_task_against(&pool, server.base_url.clone()).await?;
+        fixture
+            .task
+            .dispatch_store
+            .inject_lifecycle_cutoff_rejection()
+            .await?;
+
+        let mut drained = None;
+        let mut trailing_failure = None;
+        let attempt = fixture
+            .task
+            .run_attempt(WebhookDrain::Run, &mut drained, &mut trailing_failure)
+            .await;
+
+        server.finish().await;
+        assert_eq!(attempt, Err(RepositoryWatchAttemptError::Persistence));
+        assert_eq!(
+            drained,
+            Some(WebhookDrainOutcome::Drained),
+            "every delivery the drain visited reached terminal state"
+        );
+        assert_eq!(
+            trailing_failure,
+            Some(RepositoryWatchAttemptError::Persistence),
+            "the cutoff that failed after the drain committed is reported, not swallowed"
+        );
+        assert!(webhook_disposition_exists(&webhook_store, closing.key()).await?);
+        let armed_at = Instant::now();
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after_poll_drain(
+            drained.expect("the attempt reported the drain it performed"),
+            trailing_failure,
+            armed_at,
+        );
+        assert_eq!(retry.deadline, Some(armed_at + WEBHOOK_DRAIN_RETRY_DELAY));
         Ok(())
     }
 
