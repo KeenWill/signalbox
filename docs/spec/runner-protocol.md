@@ -729,15 +729,16 @@ the runner sends the complete stored inventory. It accepts only matching paired
 evidence and atomically frees both slots. For a retained lease-offer failure,
 `resend` emits the exact stored envelope while retaining it, and
 `discard_as_recorded` or `fail_stale` frees it. Unsupported actions preserve the
-journal and fail closed. The only live producer is the registration-only empty
-catalog refusing an offered unknown tool; no successful offer admission or
-execution path populates this inventory, so the failure boundary supplies
-neither lease admission nor a workstation tool inventory.
+journal and fail closed. The registration-only empty catalog remains the only
+live producer of a pre-claim lease-offer failure; no successful live offer
+admission supplies lease authority or a workstation tool inventory. Separately,
+the live execution path for an already claimed dispatch populates the lease and
+result slots described above.
 
-**Committed unimplemented functionality.** Future execution support populates
-the bounded inventory that resume already exchanges, containing at most the one
-serial outstanding lease, its fsynced local phase, and retained terminal
-evidence. `waiting_dispatch`, `dispatch_received`, and
+That live execution path populates the bounded inventory that resume already
+exchanges, containing at most the one serial outstanding lease, its fsynced local
+phase, and retained terminal evidence. `waiting_dispatch`,
+`dispatch_received`, and
 `execution_may_have_started` retain the complete lease and dispatch correlation.
 The first two prove only that the journaled executor invocation had not started;
 the last carries ordinary effect-class ambiguity. Canonical durable state
