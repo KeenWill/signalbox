@@ -42,6 +42,7 @@ uuid = { version = "1.24.0", default-features = false, features = [
 url = "2.5.8"
 
 [dev-dependencies]
+signalbox-domain = { path = "../../crates/domain" }
 signalbox-persistence = { path = "../../crates/persistence" }
 signalbox-test-bin = { path = "../../crates/test-bin" }
 signalboxd = { path = "../signalboxd" }
