@@ -13,6 +13,9 @@ The cancelled-turn outbox projection for stopped tool responses with completed
 producing calls was re-verified against this PR
 (`agent/cancelled-outbox-completed-call`).
 
+The deployment-owned scheduler pass limit is verified against this PR
+(`agent/scheduler-pass-pause`).
+
 Tool-attempt reconciliation predecessor replay was verified against this PR
 (`agent/tool-reconciliation-origin-replay`).
 
@@ -408,22 +411,25 @@ the sweep (INV-007).
   delayed, not burst. A failed sweep is logged with its operator classification
   and retried at the next interval.
 - **Loop.** `SchedulerLoop::run_until` spawns at most 16 concurrent per-session
-  passes, deduplicates hints for a session already in flight (recording one
-  rerun), and keeps an in-progress sweep read alive across pass completions. A
-  failed or panicked pass is logged and retried by a later hint or sweep;
-  nothing is lost because the rows are the queue. A pass about to perform
-  attachment store I/O first tries the blob contract's separate
-  attachment-preparation permit without waiting. If none is immediately
-  available, the pass relinquishes its 16-pass capacity, ends, and leaves only
-  the durable `Prepared` row for a later sweep. After acquiring a permit, its
-  task remains in flight for per-session deduplication but relinquishes the
-  scheduler-pass slot during store I/O; after successful verification it
-  reacquires a slot before send authorization and its guarded transaction
-  revalidates authority. A model-originated `blob_read` uses the same slot
-  handoff after it acquires the blob contract's non-waiting direct-read permit:
-  its physical attempt remains in flight during store traversal, and it
-  reacquires a slot before committing correlated result evidence or crash-loss
-  classification. At most 16 direct reads can wait at that reacquisition point.
+  passes. Every explicit nonzero application bound, including the deployment's
+  configured bound, is capped at that shared admission cap. The loop
+  deduplicates hints for a session already in flight (recording one rerun) and
+  keeps an in-progress sweep read alive across pass completions. A failed or
+  panicked pass is logged and retried by a later hint or sweep; nothing is lost
+  because the rows are the queue. A pass about to perform attachment store I/O
+  first tries the blob contract's separate attachment-preparation permit without
+  waiting. If none is immediately available, the pass relinquishes its
+  scheduler-pass capacity, ends, and leaves only the durable `Prepared` row for
+  a later sweep. After acquiring a permit, its task remains in flight for
+  per-session deduplication but relinquishes the scheduler-pass slot during
+  store I/O; after successful verification it reacquires a slot before send
+  authorization and its guarded transaction revalidates authority. A
+  model-originated `blob_read` uses the same slot handoff after it acquires the
+  blob contract's non-waiting direct-read permit: its physical attempt remains
+  in flight during store traversal, and it reacquires a slot before committing
+  correlated result evidence or crash-loss classification. The independent
+  direct-read admission budget remains fixed, so at most 16 direct reads can
+  wait at that reacquisition point regardless of the scheduler-pass override.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. This recovers a goal disposition when the
