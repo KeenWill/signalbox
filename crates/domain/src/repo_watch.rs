@@ -433,8 +433,17 @@ pub struct RepoWatchRuleVersion(NonZeroU64);
 impl RepoWatchRuleVersion {
     pub const V1: Self = Self(NonZeroU64::MIN);
 
-    pub const fn new(value: NonZeroU64) -> Self {
-        Self(value)
+    /// The revision, or `None` beyond the durable signed 64-bit range.
+    ///
+    /// Storage records a revision as a signed 64-bit integer, so a larger
+    /// value has no durable representation. Refusing it here keeps every
+    /// constructed revision persistable, instead of admitting a rule whose
+    /// reconciliation would later report caller input as storage corruption.
+    pub const fn new(value: NonZeroU64) -> Option<Self> {
+        if value.get() > i64::MAX.unsigned_abs() {
+            return None;
+        }
+        Some(Self(value))
     }
 
     pub const fn get(self) -> u64 {
@@ -1587,6 +1596,167 @@ impl RepoWatchRuleContentDigest {
     }
 }
 
+/// One configuration field whose value belongs to a durable rule identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum RepoWatchRuleIdentityField {
+    /// The event kinds a matching fact is one of.
+    MatcherEventKinds,
+    /// The repository a matching fact belongs to.
+    MatcherRepository,
+    /// The base branch a matching pull request targets.
+    MatcherBaseBranch,
+    /// The pattern a matching pull request's head branch satisfies.
+    MatcherHeadBranchRegex,
+    /// The pattern a matching pull request's title satisfies.
+    MatcherTitleRegex,
+    /// The pattern a matching pull request's body satisfies.
+    MatcherBodyRegex,
+    /// The labels a matching pull request carries at least one of.
+    MatcherLabelsAnyOf,
+    /// The labels a matching pull request carries all of.
+    MatcherLabelsAllOf,
+    /// The labels a matching pull request carries none of.
+    MatcherLabelsNoneOf,
+    /// The draft state a matching pull request is in.
+    MatcherDraft,
+    /// The author a matching pull request has.
+    MatcherAuthor,
+    /// The mergeable states a matching fact reports one of.
+    MatcherMergeableStateAnyOf,
+    /// The check conclusions a matching fact reports one of.
+    MatcherConclusionAnyOf,
+    /// The ordered actions a match dispatches.
+    Actions,
+    /// The scope a dispatch holds its singleton over.
+    SingletonPer,
+    /// The interval a dispatch suppresses further matches for.
+    CooldownSeconds,
+}
+
+impl RepoWatchRuleIdentityField {
+    /// The head of the inventory the fingerprint order follows.
+    const fn first() -> Self {
+        Self::MatcherEventKinds
+    }
+
+    /// The inventory successor of `self`, or `None` for the tail.
+    ///
+    /// The chain is the first guard: each arm names its successor, so adding a
+    /// field makes this `match` non-exhaustive and the crate stops compiling
+    /// until the new field is slotted into it.
+    ///
+    /// Exhaustiveness alone constrains the *arms*, not reachability from the
+    /// head: a field added as `NewField => None` that no arm points at compiles
+    /// while never contributing a fingerprint chunk, which would let an
+    /// identity-relevant value change without a revision bump. The paired
+    /// `inventory_predecessor` match is the second guard, and
+    /// `every_identity_field_is_linked_into_the_inventory` checks the two are
+    /// mutual inverses, so a link written in one direction only fails rather
+    /// than silently shortening the inventory. That pairing is test-gated, so
+    /// it is named here in plain text rather than linked: a rustdoc link would
+    /// resolve only under `cfg(test)` and break the documentation build.
+    ///
+    /// The residual limit is the same one the event-kind inventory records: a
+    /// field orphaned in *both* directions cannot be detected here, because
+    /// safe Rust offers no way to enumerate an enum's variants without a
+    /// derive, and this crate deliberately takes no `strum`/`EnumIter`
+    /// dependency. Closing that last case is a dependency decision, not a code
+    /// change.
+    const fn next(self) -> Option<Self> {
+        match self {
+            Self::MatcherEventKinds => Some(Self::MatcherRepository),
+            Self::MatcherRepository => Some(Self::MatcherBaseBranch),
+            Self::MatcherBaseBranch => Some(Self::MatcherHeadBranchRegex),
+            Self::MatcherHeadBranchRegex => Some(Self::MatcherTitleRegex),
+            Self::MatcherTitleRegex => Some(Self::MatcherBodyRegex),
+            Self::MatcherBodyRegex => Some(Self::MatcherLabelsAnyOf),
+            Self::MatcherLabelsAnyOf => Some(Self::MatcherLabelsAllOf),
+            Self::MatcherLabelsAllOf => Some(Self::MatcherLabelsNoneOf),
+            Self::MatcherLabelsNoneOf => Some(Self::MatcherDraft),
+            Self::MatcherDraft => Some(Self::MatcherAuthor),
+            Self::MatcherAuthor => Some(Self::MatcherMergeableStateAnyOf),
+            Self::MatcherMergeableStateAnyOf => Some(Self::MatcherConclusionAnyOf),
+            Self::MatcherConclusionAnyOf => Some(Self::Actions),
+            Self::Actions => Some(Self::SingletonPer),
+            Self::SingletonPer => Some(Self::CooldownSeconds),
+            Self::CooldownSeconds => None,
+        }
+    }
+
+    /// The inventory predecessor of `self`, or `None` for the head.
+    ///
+    /// Paired with the successor chain so linkage is checked rather than
+    /// assumed. Exhaustive for the same reason that one is, and test-gated
+    /// because checking the pairing is its only purpose — CI always compiles
+    /// the tests, so a new field still cannot skip this match.
+    #[cfg(test)]
+    const fn inventory_predecessor(self) -> Option<Self> {
+        match self {
+            Self::MatcherEventKinds => None,
+            Self::MatcherRepository => Some(Self::MatcherEventKinds),
+            Self::MatcherBaseBranch => Some(Self::MatcherRepository),
+            Self::MatcherHeadBranchRegex => Some(Self::MatcherBaseBranch),
+            Self::MatcherTitleRegex => Some(Self::MatcherHeadBranchRegex),
+            Self::MatcherBodyRegex => Some(Self::MatcherTitleRegex),
+            Self::MatcherLabelsAnyOf => Some(Self::MatcherBodyRegex),
+            Self::MatcherLabelsAllOf => Some(Self::MatcherLabelsAnyOf),
+            Self::MatcherLabelsNoneOf => Some(Self::MatcherLabelsAllOf),
+            Self::MatcherDraft => Some(Self::MatcherLabelsNoneOf),
+            Self::MatcherAuthor => Some(Self::MatcherDraft),
+            Self::MatcherMergeableStateAnyOf => Some(Self::MatcherAuthor),
+            Self::MatcherConclusionAnyOf => Some(Self::MatcherMergeableStateAnyOf),
+            Self::Actions => Some(Self::MatcherConclusionAnyOf),
+            Self::SingletonPer => Some(Self::Actions),
+            Self::CooldownSeconds => Some(Self::SingletonPer),
+        }
+    }
+
+    /// Exact TOML path an operator changes to revise this semantic field.
+    pub const fn configuration_path(self) -> &'static str {
+        match self {
+            Self::MatcherEventKinds => "matcher.event_kinds",
+            Self::MatcherRepository => "matcher.repo",
+            Self::MatcherBaseBranch => "matcher.base_branch",
+            Self::MatcherHeadBranchRegex => "matcher.head_branch_regex",
+            Self::MatcherTitleRegex => "matcher.title_regex",
+            Self::MatcherBodyRegex => "matcher.body_regex",
+            Self::MatcherLabelsAnyOf => "matcher.labels.any_of",
+            Self::MatcherLabelsAllOf => "matcher.labels.all_of",
+            Self::MatcherLabelsNoneOf => "matcher.labels.none_of",
+            Self::MatcherDraft => "matcher.draft",
+            Self::MatcherAuthor => "matcher.author",
+            Self::MatcherMergeableStateAnyOf => "matcher.mergeable_state.any_of",
+            Self::MatcherConclusionAnyOf => "matcher.conclusion.any_of",
+            Self::Actions => "actions",
+            Self::SingletonPer => "singleton_per",
+            Self::CooldownSeconds => "cooldown_seconds",
+        }
+    }
+}
+
+/// Domain-separated digest of one identity-relevant rule field.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub struct RepoWatchRuleIdentityFieldDigest([u8; 32]);
+
+impl RepoWatchRuleIdentityFieldDigest {
+    /// The digest bytes covering this field's configured value.
+    ///
+    /// Persistence stores them as one fixed-width chunk of a rule's durable
+    /// fingerprint and compares chunks positionally, so these bytes are a
+    /// stored identity rather than an in-process hash: they reveal nothing
+    /// about the value they cover, and changing how they are derived
+    /// invalidates every fingerprint already recorded.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RepoWatchRuleIdentityFieldDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RepoWatchRuleIdentityFieldDigest([digest])")
+    }
+}
+
 impl fmt::Debug for RepoWatchRuleContentDigest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("RepoWatchRuleContentDigest([digest])")
@@ -1652,6 +1822,7 @@ impl Error for RepoWatchRuleValidationError {}
 impl RepoWatchRule {
     pub fn try_new(
         id: RepoWatchRuleId,
+        version: RepoWatchRuleVersion,
         matcher: RepoWatchMatcherV1,
         actions: Vec<RepoWatchRuleActionV1>,
         singleton_per: RepoWatchSingletonScope,
@@ -1677,7 +1848,7 @@ impl RepoWatchRule {
         }
         Ok(Self {
             id,
-            version: RepoWatchRuleVersion::V1,
+            version,
             matcher,
             actions: actions.into_boxed_slice(),
             singleton_per,
@@ -1815,6 +1986,148 @@ impl RepoWatchRule {
         update_rule_digest_frame(&mut digest, b"cooldown_nanoseconds");
         update_rule_digest_frame(&mut digest, &self.cooldown.subsec_nanos().to_be_bytes());
         RepoWatchRuleContentDigest(digest.finalize().into())
+    }
+
+    /// Derives stable, field-labeled fingerprints for configuration diagnostics.
+    /// The digest of every identity-relevant field, in storage order.
+    ///
+    /// Each entry labels one configuration field with a content-free digest of
+    /// its value, so a stored fingerprint can name the exact field an operator
+    /// changed without retaining the configured value itself. The order is the
+    /// inventory order and is durable: stored fingerprints are compared
+    /// positionally against it.
+    pub fn identity_field_digests(
+        &self,
+    ) -> Vec<(RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest)> {
+        let mut fields = Vec::new();
+        let mut field = Some(RepoWatchRuleIdentityField::first());
+        while let Some(current) = field {
+            fields.push((current, self.identity_field_digest(current)));
+            field = current.next();
+        }
+        fields
+    }
+
+    fn identity_field_digest(
+        &self,
+        field: RepoWatchRuleIdentityField,
+    ) -> RepoWatchRuleIdentityFieldDigest {
+        let mut digest = Sha256::new();
+        update_rule_digest_frame(
+            &mut digest,
+            b"signalbox/repo-watch/rule-identity-field-digest/v1",
+        );
+        update_rule_digest_frame(&mut digest, field.configuration_path().as_bytes());
+        match field {
+            RepoWatchRuleIdentityField::MatcherEventKinds => update_rule_digest_set(
+                &mut digest,
+                b"value",
+                self.matcher
+                    .event_kinds
+                    .iter()
+                    .map(|kind| repo_watch_event_kind_name(*kind)),
+            ),
+            RepoWatchRuleIdentityField::MatcherRepository => update_rule_digest_option(
+                &mut digest,
+                b"value",
+                self.matcher.repository.as_ref().map(RepositorySlug::as_str),
+            ),
+            RepoWatchRuleIdentityField::MatcherBaseBranch => update_rule_digest_option(
+                &mut digest,
+                b"value",
+                self.matcher.base_branch.as_ref().map(BranchName::as_str),
+            ),
+            RepoWatchRuleIdentityField::MatcherHeadBranchRegex => update_rule_digest_option(
+                &mut digest,
+                b"value",
+                self.matcher
+                    .head_branch
+                    .as_ref()
+                    .map(RepoWatchPattern::as_str),
+            ),
+            RepoWatchRuleIdentityField::MatcherTitleRegex => update_rule_digest_option(
+                &mut digest,
+                b"value",
+                self.matcher.title.as_ref().map(RepoWatchPattern::as_str),
+            ),
+            RepoWatchRuleIdentityField::MatcherBodyRegex => update_rule_digest_option(
+                &mut digest,
+                b"value",
+                self.matcher.body.as_ref().map(RepoWatchPattern::as_str),
+            ),
+            RepoWatchRuleIdentityField::MatcherLabelsAnyOf => update_rule_digest_set(
+                &mut digest,
+                b"value",
+                self.matcher.labels.any_of.iter().map(LabelName::as_str),
+            ),
+            RepoWatchRuleIdentityField::MatcherLabelsAllOf => update_rule_digest_set(
+                &mut digest,
+                b"value",
+                self.matcher.labels.all_of.iter().map(LabelName::as_str),
+            ),
+            RepoWatchRuleIdentityField::MatcherLabelsNoneOf => update_rule_digest_set(
+                &mut digest,
+                b"value",
+                self.matcher.labels.none_of.iter().map(LabelName::as_str),
+            ),
+            RepoWatchRuleIdentityField::MatcherDraft => {
+                update_rule_digest_frame(
+                    &mut digest,
+                    match self.matcher.draft {
+                        Some(true) => &b"true"[..],
+                        Some(false) => &b"false"[..],
+                        None => &b"none"[..],
+                    },
+                );
+            }
+            RepoWatchRuleIdentityField::MatcherAuthor => update_rule_digest_option(
+                &mut digest,
+                b"value",
+                self.matcher
+                    .author
+                    .as_ref()
+                    .map(RepoWatchAuthorLogin::as_str),
+            ),
+            RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf => update_rule_digest_set(
+                &mut digest,
+                b"value",
+                self.matcher
+                    .mergeable_state
+                    .iter()
+                    .map(|state| mergeable_state_name(*state)),
+            ),
+            RepoWatchRuleIdentityField::MatcherConclusionAnyOf => update_rule_digest_set(
+                &mut digest,
+                b"value",
+                self.matcher
+                    .conclusion
+                    .iter()
+                    .map(|conclusion| check_conclusion_name(*conclusion)),
+            ),
+            RepoWatchRuleIdentityField::Actions => {
+                update_rule_digest_frame(
+                    &mut digest,
+                    &u64::try_from(self.actions.len())
+                        .unwrap_or(u64::MAX)
+                        .to_be_bytes(),
+                );
+                for action in &self.actions {
+                    match action {
+                        RepoWatchRuleActionV1::DispatchSession { template } => {
+                            update_rule_digest_frame(&mut digest, b"dispatch_session");
+                            update_rule_digest_frame(&mut digest, template.as_str().as_bytes());
+                        }
+                    }
+                }
+            }
+            RepoWatchRuleIdentityField::SingletonPer => {
+                update_rule_digest_frame(&mut digest, self.singleton_per.as_str().as_bytes());
+            }
+            RepoWatchRuleIdentityField::CooldownSeconds => {
+                update_rule_digest_frame(&mut digest, &self.cooldown.as_secs().to_be_bytes());
+            }
+        }
+        RepoWatchRuleIdentityFieldDigest(digest.finalize().into())
     }
 
     pub fn required_context_shapes(&self) -> Vec<RepoWatchDispatchContextShape> {
@@ -2052,6 +2365,199 @@ mod tests {
             Some(RepoWatchEventKindNameV1::BaseAdvanced)
         );
     }
+
+    /// The revision bound is the durable one, checked at both edges.
+    #[test]
+    fn a_revision_beyond_the_durable_range_is_refused() {
+        let highest = NonZeroU64::new(i64::MAX.unsigned_abs()).expect("the bound is positive");
+        let beyond = NonZeroU64::new(i64::MAX.unsigned_abs() + 1).expect("one past is positive");
+
+        assert_eq!(
+            RepoWatchRuleVersion::new(highest).map(RepoWatchRuleVersion::get),
+            Some(highest.get())
+        );
+        assert_eq!(RepoWatchRuleVersion::new(beyond), None);
+        assert_eq!(
+            RepoWatchRuleVersion::new(NonZeroU64::MIN),
+            Some(RepoWatchRuleVersion::V1)
+        );
+    }
+
+    /// Every edge of the successor chain is checked against its predecessor
+    /// one assertion at a time, from a head this also pins.
+    ///
+    /// Straight-line for the same reason the event-kind inventory beside it
+    /// is: each edge stays independently attributable, so a broken link names
+    /// itself instead of surfacing as one loop iteration, and a chain edited
+    /// into a cycle fails an assertion rather than hanging the test. Naming
+    /// every field in both directions pins order, membership, and count at
+    /// once — adding a field fails here until the claim is revisited, which is
+    /// the point. Order is load-bearing because it is the order stored
+    /// fingerprints are compared in.
+    #[test]
+    fn every_identity_field_is_linked_into_the_inventory() {
+        assert_eq!(
+            RepoWatchRuleIdentityField::first(),
+            RepoWatchRuleIdentityField::MatcherEventKinds
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherEventKinds.next(),
+            Some(RepoWatchRuleIdentityField::MatcherRepository)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherRepository.next(),
+            Some(RepoWatchRuleIdentityField::MatcherBaseBranch)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherBaseBranch.next(),
+            Some(RepoWatchRuleIdentityField::MatcherHeadBranchRegex)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherHeadBranchRegex.next(),
+            Some(RepoWatchRuleIdentityField::MatcherTitleRegex)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherTitleRegex.next(),
+            Some(RepoWatchRuleIdentityField::MatcherBodyRegex)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherBodyRegex.next(),
+            Some(RepoWatchRuleIdentityField::MatcherLabelsAnyOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherLabelsAnyOf.next(),
+            Some(RepoWatchRuleIdentityField::MatcherLabelsAllOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherLabelsAllOf.next(),
+            Some(RepoWatchRuleIdentityField::MatcherLabelsNoneOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherLabelsNoneOf.next(),
+            Some(RepoWatchRuleIdentityField::MatcherDraft)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherDraft.next(),
+            Some(RepoWatchRuleIdentityField::MatcherAuthor)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherAuthor.next(),
+            Some(RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf.next(),
+            Some(RepoWatchRuleIdentityField::MatcherConclusionAnyOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherConclusionAnyOf.next(),
+            Some(RepoWatchRuleIdentityField::Actions)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::Actions.next(),
+            Some(RepoWatchRuleIdentityField::SingletonPer)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::SingletonPer.next(),
+            Some(RepoWatchRuleIdentityField::CooldownSeconds)
+        );
+
+        assert_eq!(RepoWatchRuleIdentityField::CooldownSeconds.next(), None);
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherEventKinds.inventory_predecessor(),
+            None
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherRepository.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherEventKinds)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherBaseBranch.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherRepository)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherHeadBranchRegex.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherBaseBranch)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherTitleRegex.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherHeadBranchRegex)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherBodyRegex.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherTitleRegex)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherLabelsAnyOf.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherBodyRegex)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherLabelsAllOf.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherLabelsAnyOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherLabelsNoneOf.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherLabelsAllOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherDraft.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherLabelsNoneOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherAuthor.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherDraft)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherAuthor)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::MatcherConclusionAnyOf.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherMergeableStateAnyOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::Actions.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::MatcherConclusionAnyOf)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::SingletonPer.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::Actions)
+        );
+
+        assert_eq!(
+            RepoWatchRuleIdentityField::CooldownSeconds.inventory_predecessor(),
+            Some(RepoWatchRuleIdentityField::SingletonPer)
+        );
+    }
     use std::{error::Error, num::NonZeroU64, time::Duration};
 
     use expect_test::expect;
@@ -2066,9 +2572,9 @@ mod tests {
         RepoWatchEventConstructionError, RepoWatchEventKindNameV1, RepoWatchEventKindV1,
         RepoWatchLabelMatcher, RepoWatchLabelMatcherInput, RepoWatchMatcherV1,
         RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
-        RepoWatchRuleId, RepoWatchRuleValidationError, RepoWatchSingletonScope,
-        RepoWatchTemplateContextDeclaration, RepoWatchTemplateContextDeclarationError,
-        RepoWatchTextError, RepositorySlug,
+        RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleValidationError,
+        RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
+        RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepositorySlug,
     };
 
     const CONTEXT_HEAD_SHA: &str = "1111111111111111111111111111111111111111";
@@ -2107,6 +2613,7 @@ mod tests {
     ) -> Result<RepoWatchRule, Box<dyn Error>> {
         Ok(RepoWatchRule::try_new(
             RepoWatchRuleId::try_new(String::from("digest-rule"))?,
+            RepoWatchRuleVersion::V1,
             matcher,
             actions,
             singleton_per,
@@ -2758,6 +3265,7 @@ mod tests {
     fn rule_rejects_an_empty_action_list() -> Result<(), RepoWatchTextError> {
         let result = RepoWatchRule::try_new(
             RepoWatchRuleId::try_new(String::from("no-actions"))?,
+            RepoWatchRuleVersion::V1,
             RepoWatchMatcherV1::default(),
             Vec::new(),
             RepoWatchSingletonScope::PullRequest,
@@ -2772,6 +3280,7 @@ mod tests {
     fn rule_rejects_a_subsecond_cooldown() -> Result<(), Box<dyn Error>> {
         let result = RepoWatchRule::try_new(
             RepoWatchRuleId::try_new(String::from("subsecond-cooldown"))?,
+            RepoWatchRuleVersion::V1,
             RepoWatchMatcherV1::default(),
             vec![dispatch_rule_action("handler")?],
             RepoWatchSingletonScope::PullRequest,
@@ -2838,6 +3347,7 @@ mod tests {
         let template = SessionTemplateName::try_new(String::from("branch-handler"))?;
         let result = RepoWatchRule::try_new(
             RepoWatchRuleId::try_new(String::from("invalid-branch-scope"))?,
+            RepoWatchRuleVersion::V1,
             RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
                 event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
                 ..RepoWatchMatcherV1Input::default()
@@ -2863,6 +3373,7 @@ mod tests {
         let template = SessionTemplateName::try_new(String::from("event-handler"))?;
         let result = RepoWatchRule::try_new(
             RepoWatchRuleId::try_new(String::from("invalid-everything-scope"))?,
+            RepoWatchRuleVersion::V1,
             RepoWatchMatcherV1::default(),
             vec![RepoWatchRuleActionV1::DispatchSession { template }],
             RepoWatchSingletonScope::Stack,
@@ -2886,6 +3397,7 @@ mod tests {
         let template = SessionTemplateName::try_new(String::from("conflict-handler"))?;
         let rule = RepoWatchRule::try_new(
             RepoWatchRuleId::try_new(String::from("mergeable-only"))?,
+            RepoWatchRuleVersion::V1,
             RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
                 mergeable_state: vec![MergeableState::Conflicting],
                 ..RepoWatchMatcherV1Input::default()
@@ -2907,6 +3419,7 @@ mod tests {
         let template = SessionTemplateName::try_new(String::from("author-handler"))?;
         let rule = RepoWatchRule::try_new(
             RepoWatchRuleId::try_new(String::from("author-only"))?,
+            RepoWatchRuleVersion::V1,
             RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
                 author: Some(RepoWatchAuthorLogin::try_new(String::from("maintainer"))?),
                 ..RepoWatchMatcherV1Input::default()
@@ -2929,6 +3442,7 @@ mod tests {
         let template = SessionTemplateName::try_new(String::from("failure-handler"))?;
         let rule = RepoWatchRule::try_new(
             RepoWatchRuleId::try_new(String::from("conclusion-only"))?,
+            RepoWatchRuleVersion::V1,
             RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
                 conclusion: vec![CheckConclusion::Failure],
                 ..RepoWatchMatcherV1Input::default()
@@ -2953,6 +3467,7 @@ mod tests {
         let template = SessionTemplateName::try_new(String::from("neutral-handler"))?;
         let rule = RepoWatchRule::try_new(
             RepoWatchRuleId::try_new(String::from("neutral-aggregate"))?,
+            RepoWatchRuleVersion::V1,
             RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
                 event_kinds: vec![RepoWatchEventKindNameV1::ChecksCompleted],
                 conclusion: vec![CheckConclusion::Neutral],
@@ -2972,6 +3487,7 @@ mod tests {
         let template = SessionTemplateName::try_new(String::from("branch-handler"))?;
         let rule = RepoWatchRule::try_new(
             RepoWatchRuleId::try_new(String::from("branch-failure"))?,
+            RepoWatchRuleVersion::V1,
             RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
                 event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
                 conclusion: vec![CheckConclusion::Failure],
@@ -3111,6 +3627,7 @@ mod tests {
         let second_template = SessionTemplateName::try_new(String::from("notify-user"))?;
         let rule = RepoWatchRule::try_new(
             RepoWatchRuleId::try_new(String::from("conflict"))?,
+            RepoWatchRuleVersion::V1,
             RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
                 event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
                 mergeable_state: vec![MergeableState::Conflicting],
