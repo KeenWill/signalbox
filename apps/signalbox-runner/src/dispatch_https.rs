@@ -19,6 +19,7 @@ use crate::HttpsBroker;
 
 const DIRECTORY_MODE: u32 = 0o700;
 const PERMISSION_MASK: u32 = 0o7777;
+const SOCKET_MODE: u32 = 0o600;
 const SOCKET_FILE: &str = "h";
 
 /// Sanitized failure while preparing or serving one dispatch-scoped endpoint.
@@ -98,6 +99,18 @@ impl DispatchHttpsEndpoint {
             if name != format!("d-{lease}") {
                 continue;
             }
+            let pinned_directory = File::from(
+                openat(
+                    &root,
+                    name.as_str(),
+                    OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|error| DispatchHttpsError::Directory(rustix_error(error)))?,
+            );
+            let pinned_path = format!("/proc/self/fd/{}", pinned_directory.as_raw_fd());
+            fs::set_permissions(&pinned_path, fs::Permissions::from_mode(DIRECTORY_MODE))
+                .map_err(DispatchHttpsError::Directory)?;
             let directory = File::from(
                 openat(
                     &root,
@@ -170,6 +183,8 @@ impl DispatchHttpsEndpoint {
             directory_name,
             socket,
         };
+        fs::set_permissions(&endpoint.socket, fs::Permissions::from_mode(SOCKET_MODE))
+            .map_err(DispatchHttpsError::Bind)?;
         let directory_metadata = endpoint
             .directory
             .metadata()
@@ -179,6 +194,8 @@ impl DispatchHttpsEndpoint {
         if !directory_metadata.is_dir()
             || directory_metadata.permissions().mode() & PERMISSION_MASK != DIRECTORY_MODE
             || !socket_metadata.file_type().is_socket()
+            || socket_metadata.uid() != rustix::process::geteuid().as_raw()
+            || socket_metadata.permissions().mode() & PERMISSION_MASK != SOCKET_MODE
         {
             return Err(DispatchHttpsError::InvalidSocket);
         }
@@ -247,7 +264,9 @@ mod tests {
     };
     use uuid::Uuid;
 
-    use super::{DIRECTORY_MODE, DispatchHttpsEndpoint, DispatchHttpsError, HttpsBroker};
+    use super::{
+        DIRECTORY_MODE, DispatchHttpsEndpoint, DispatchHttpsError, HttpsBroker, SOCKET_MODE,
+    };
 
     const LEASE: u128 = 0x018f_6f10_0000_7000_8000_0000_0000_00d1;
 
@@ -298,8 +317,14 @@ mod tests {
             .permissions()
             .mode()
             & 0o7777;
+        let socket_mode = fs::symlink_metadata(&socket)
+            .expect("the dispatch socket is inspectable")
+            .permissions()
+            .mode()
+            & 0o7777;
 
         assert_eq!(mode, DIRECTORY_MODE);
+        assert_eq!(socket_mode, SOCKET_MODE);
         assert!(socket.exists());
         drop(endpoint);
         assert!(!socket.exists());
@@ -366,6 +391,23 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn startup_reclaims_a_mode_zero_endpoint_directory() {
+        let root = private_root();
+        let directory = root.path().join(format!(
+            "d-{}",
+            CanonicalUuid::from_uuid(Uuid::from_u128(LEASE))
+        ));
+        fs::create_dir(&directory).expect("the interrupted endpoint directory is created");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0))
+            .expect("the interrupted endpoint directory is made inaccessible");
+
+        DispatchHttpsEndpoint::reclaim_stale(root_descriptor(&root))
+            .expect("the locked-root startup sweep reclaims the mode-zero endpoint");
+
+        assert!(!directory.exists());
     }
 
     #[tokio::test]
