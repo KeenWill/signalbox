@@ -26,10 +26,10 @@ use signalbox_domain::{
     AbandonedRunnerPlacement, CanonicalCloneUrlDigest, CredentialDispatchAuthorization,
     CredentialProfileGrant, CredentialProfileGrantReconstitutionInput, CredentialProfileGrantState,
     CredentialProfileName, CredentialProfilePolicy, CredentialToolApproval, DurableCommandId,
-    EndedToolAttempt, LostPinnedRunnerPlacement, PinnedRunnerPlacement, ProvisionedWorkspace,
-    ReplaceLostRunner, ReplaceLostRunnerBeforePinRejection, ReplaceLostRunnerBeforePinResult,
-    ReplacedLostRunnerBeforePin, RunnerAdvertisement, RunnerAuthenticationId,
-    RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
+    EndedToolAttempt, LostPinnedRunnerPlacement, NormalizedToolArguments, PinnedRunnerPlacement,
+    ProvisionedWorkspace, ReplaceLostRunner, ReplaceLostRunnerBeforePinRejection,
+    ReplaceLostRunnerBeforePinResult, ReplacedLostRunnerBeforePin, RunnerAdvertisement,
+    RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog, RunnerClaimedAttemptReplacement,
     RunnerCredentialGrantLineage, RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId,
     RunnerEnrollmentReconstitutionInput, RunnerEnrollmentRequestId, RunnerEnrollmentState,
     RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCompletion, RunnerLeaseCorrelation,
@@ -43,14 +43,14 @@ use signalbox_domain::{
     RunnerToolPermissionOverride, RunnerToolPermissionOverrides, RunnerWorkingDirectory, SessionId,
     SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
     SessionRunnerPlacementRequest, SessionRunnerPlacementState,
-    StoredRunnerRegistrationLossEvidence, ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptEnd, ToolAttemptId,
-    ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind, ToolName,
-    ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
-    ValidatedRunnerRegistrationReconstitutionInput, WorkingDirectorySelection, WorkspaceBranchName,
-    WorkspaceCapability, WorkspaceManifestId, WorkspaceProvisioningAuthorizationId,
-    WorkspaceRecovery, WorkspaceRelativePath, WorkspaceRepositoryKey, WorkspaceRequirement,
-    WorkspaceRevision,
+    StoredRunnerRegistrationLossEvidence, ToolAdmissibleLoci, ToolArgumentsKind,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptEnd, ToolAttemptId, ToolDispatchGeneration, ToolEffectClass, ToolExecutionErrorKind,
+    ToolName, ToolPermissionDefault, ToolRequestId, TurnAttemptId, TurnId,
+    ValidatedRunnerRegistration, ValidatedRunnerRegistrationReconstitutionInput,
+    WorkingDirectorySelection, WorkspaceBranchName, WorkspaceCapability, WorkspaceManifestId,
+    WorkspaceProvisioningAuthorizationId, WorkspaceRecovery, WorkspaceRelativePath,
+    WorkspaceRepositoryKey, WorkspaceRequirement, WorkspaceRevision,
 };
 use sqlx::{
     PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction, postgres::PgRow, types::Uuid,
@@ -5273,6 +5273,8 @@ impl RunnerProtocolStore {
         let row = sqlx::query(
             "SELECT lease_generation.*, event.state_kind,
                     request.tool_name AS canonical_attempt_tool,
+                    request.arguments_kind AS canonical_arguments_kind,
+                    request.arguments_text AS canonical_arguments_text,
                     attempt.turn_id AS canonical_attempt_turn,
                     attempt.issuing_turn_attempt_id
                         AS canonical_issuing_attempt,
@@ -10365,10 +10367,18 @@ async fn insert_lease_generation(
 ) -> Result<(), RunnerProtocolStoreError> {
     let correlation = lease.correlation();
     let canonical_dispatch = sqlx::query(
-        "SELECT session_id, turn_id, issuing_turn_attempt_id,
-                request_id, dispatch_generation
-           FROM tool_attempt
-          WHERE attempt_id = $1",
+        "SELECT attempt.session_id, attempt.turn_id,
+                attempt.issuing_turn_attempt_id, attempt.request_id,
+                attempt.dispatch_generation,
+                request.tool_name AS canonical_attempt_tool,
+                request.arguments_kind AS canonical_arguments_kind,
+                request.arguments_text AS canonical_arguments_text
+           FROM tool_attempt AS attempt
+           JOIN tool_request AS request
+             ON request.request_id = attempt.request_id
+            AND request.session_id = attempt.session_id
+            AND request.turn_id = attempt.turn_id
+          WHERE attempt.attempt_id = $1",
     )
     .bind(correlation.dispatch.attempt().into_uuid())
     .fetch_optional(&mut **transaction)
@@ -10384,6 +10394,9 @@ async fn insert_lease_generation(
             != correlation.dispatch.request().into_uuid()
         || canonical_dispatch.decode_column::<Decimal>("dispatch_generation")?
             != Decimal::from(correlation.dispatch.generation().as_u64())
+        || canonical_dispatch.decode_column::<String>("canonical_attempt_tool")?
+            != lease.tool().as_str()
+        || decode_lease_arguments(&canonical_dispatch)? != *lease.arguments()
     {
         return Err(RunnerProtocolCorruption::CrossWiredReference.into());
     }
@@ -10524,6 +10537,7 @@ fn decode_lease(
     let canonical_tool = row
         .decode_column::<Option<String>>("canonical_attempt_tool")?
         .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?;
+    let arguments = decode_lease_arguments(row)?;
     let dispatch = ToolAttemptDispatchCorrelation::reconstitute(
         ToolAttemptDispatchCorrelationReconstitutionInput {
             session,
@@ -10631,6 +10645,7 @@ fn decode_lease(
             working_directory: canonical_working_directory.clone(),
             sandbox: canonical_sandbox,
             tool: tool.clone(),
+            arguments: arguments.clone(),
             effect: decode_effect(row.decode_column("effect_class")?)?,
             credential_authorization: authorization.clone(),
             generation,
@@ -10650,6 +10665,7 @@ fn decode_lease(
             },
             recorded_session: session,
             recorded_effect: decode_effect(row.decode_column("effect_class")?)?,
+            recorded_arguments: arguments,
             recorded_credential_authorization: authorization.clone(),
             recorded_state: decode_lease_state(row.decode_column("state_kind")?)?,
             retry_preparation: RunnerLeaseRetryPreparation::Available,
@@ -10657,6 +10673,24 @@ fn decode_lease(
         registration,
     )
     .map_err(RunnerProtocolStoreError::Domain)
+}
+
+fn decode_lease_arguments(
+    row: &PgRow,
+) -> Result<NormalizedToolArguments, RunnerProtocolStoreError> {
+    let kind = row
+        .decode_column::<Option<String>>("canonical_arguments_kind")?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?;
+    let kind = match kind.as_str() {
+        "json" => ToolArgumentsKind::Json,
+        "undecodable" => ToolArgumentsKind::Undecodable,
+        _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+    };
+    let text = row
+        .decode_column::<Option<String>>("canonical_arguments_text")?
+        .ok_or(RunnerProtocolCorruption::MissingCanonicalAttempt)?;
+    NormalizedToolArguments::try_from_stored(kind, text)
+        .map_err(|_| RunnerProtocolCorruption::InvalidEncoding.into())
 }
 
 fn validate_placement_snapshot(
@@ -10895,6 +10929,7 @@ fn require_stored_lease_identity(
         || row.decode_column::<Uuid>("session_id")? != lease.session().into_uuid()
         || row.decode_column::<Uuid>("runner_id")? != correlation.runner.into_uuid()
         || row.decode_column::<String>("tool_name")? != correlation.tool.as_str()
+        || decode_lease_arguments(row)? != *lease.arguments()
         || decode_effect(row.decode_column("effect_class")?)? != lease.effect()
         || stored_authorization.as_ref() != lease.credential_authorization()
     {

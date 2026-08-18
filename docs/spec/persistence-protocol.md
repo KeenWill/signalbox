@@ -36,7 +36,9 @@ attempt-and-offer atomicity is verified against this PR
 (`agent/runner-pinned-dispatch-transaction`). Durable lease-claim admission is
 verified against this PR (`agent/runner-lease-claim-transaction`). Atomic
 claimed-lease and physical-attempt result admission is verified against this PR
-(`agent/runner-lease-result-transaction`).
+(`agent/runner-lease-result-transaction`). Canonical normalized arguments joined
+through every lease's exact tool request are verified against this PR
+(`agent/runner-lease-argument-binding`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -609,15 +611,17 @@ Representation rules, all enforced in the schema:
   Equal replay returns the first authorization or refusal; unequal reuse returns
   a command conflict. A workspace-free or pre-pin placement rolls the claim back
   and returns `NotApplicable`, leaving its terminal replacement transaction as
-  the only command owner. No transaction remains open across runner I/O.
+  the only command authority. No transaction remains open across runner I/O.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their
   historical revision during backfill. New offers must name the exact current
   registration under its guarded head, while their placement foreign key still
   names the immutable pin. Lease readback reconstructs placement revision,
-  concrete execution directory, and sandbox from that exact placement record and
-  rejects any caller-supplied disagreement before insert.
+  concrete execution directory, and sandbox from that exact placement record,
+  and reconstructs immutable normalized arguments through the exact physical
+  attempt and tool request. Both first insert and readback reject a
+  caller-supplied disagreement.
 - The runner-orchestration foundation adds one append-only
   `runner_operation_failure` record for every durably admitted
   `operation_failed` frame. It stores the exact runner, one closed

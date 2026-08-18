@@ -20,7 +20,9 @@ atomicity is re-verified through this PR
 (`agent/runner-pinned-dispatch-transaction`). Durable lease-claim admission is
 re-verified through this PR (`agent/runner-lease-claim-transaction`). The atomic
 claimed-lease and physical-attempt result boundary is re-verified through this
-PR (`agent/runner-lease-result-transaction`). The corrected reconstitution
+PR (`agent/runner-lease-result-transaction`). Immutable normalized dispatch
+arguments on every lease and its durable readback are re-verified through this
+PR (`agent/runner-lease-argument-binding`). The corrected reconstitution
 mismatch contract was re-verified through PR #322 (`agent/docs-discipline`;
 pinned and pinned-loss request mismatches). The placement loss-source, pre-pin
 replacement and abandonment state shapes, and append-only reconstitution-history
@@ -749,7 +751,7 @@ selected runner authority, and placement in the runner lock order, authenticates
 either a distinct live successor or the registration-loss-only same-runner
 exception, and returns the original durable stage on equal replay. A
 workspace-free placement returns `NotApplicable` without claiming the command,
-so its later terminal transaction remains the sole owner. The runner provisions
+so its later terminal transaction remains the sole authority. The runner provisions
 and spools `workspace_ready` under that limited authority. Only a later
 transaction can activate the pending enrollment: it rechecks the lost
 predecessor and connected candidate, consumes the exact workspace receipt,
@@ -990,42 +992,45 @@ fail-closed adapter behavior is not a fourth domain effect class.
 A `RunnerLease` binds one lease identity, exact tool name, complete authorized
 physical-attempt dispatch correlation, session, runner, authorizing registration
 revision, pinned placement revision, concrete execution working directory,
-sandbox profile, effect class, and positive lease-lineage generation. Claim,
-completion, no-execution proof, retry lineage, and durable reconstitution repeat
-that complete correlation; none may infer an execution-locus member from the
-tool name, repository presence, or current placement. Lease creation is not a
-free constructor: it consumes one `RunnerToolAttemptAuthorization`, which binds
-the approved request and its exact tool name to the tool loop's
-`AuthorizedToolAttempt`. Only `ToolBatch::authorize_runner_attempt` and
-`ToolBatch::resume_runner_attempt` publicly produce that pairing: each selects
-the batch's canonical immutable request and approval together with its
-physical-attempt authority. `RunnerToolAttemptAuthorization` has no public
-raw-parts constructor. The underlying attempt exists only after the automatic or
-user decision authorizes that exact attempt, and neither authority nor the
-resulting lease is cloneable. Every checked `ToolBatch` carries a durable
-per-attempt inventory of runner authority already issued. Its in-memory clones
-share the exact atomic guard for each physical attempt. The persistence loader
-derives the active batch's consumed inventory from exact current physical
-attempts already bound by durable runner lease generations, and complete
-reconstitution restores every consumed guard from that inventory. A stored
-retryable claimed loss leaves its source attempt in flight, so a reloaded batch
-still carries the exact live source the checked claimed replacement transition
-requires; the predecessor leaves the current-attempt view, and enters the
-batch's restored retired-identity inventory, only once the atomic replacement
-commit retires it to terminal history. A reloaded batch therefore keeps
-rejecting retired attempt-identity reuse in the domain rather than at the
-retained row's key. Atomic runner authorization marks that exact attempt issued
-in the batch; a later clone or reconstitution from the updated facts cannot mint
-a second runner lease capability. Current active enrollment, pinned placement,
-its exact validated registration, and any selected active credential grant
-jointly authorize every offer after the first. The initial offer instead creates
-that pinned placement, any selected grant, and generation-one lease in one
-checked transition from `Unpinned`; it does not require those products to exist
-beforehand. The request, attempt, session, and two-way crash class must match
-the selected tool, placement, and declaration-derived effect class (`Pure` to
-`EffectFree`; `Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked
-enrollment, lost placement, or a mismatched runner, request, tool, attempt,
-effect, profile, or grant cannot create a lease.
+sandbox profile, immutable normalized arguments, effect class, and positive
+lease-lineage generation. Claim, completion, no-execution proof, retry lineage,
+and durable reconstitution repeat that complete correlation; none may infer an
+execution-locus member from the tool name, repository presence, or current
+placement. The arguments are the exact normalized payload of the approved
+request bound to the physical attempt; retry refuses a payload change within the
+same logical request. Lease creation is not a free constructor: it consumes one
+`RunnerToolAttemptAuthorization`, which binds the approved request and its exact
+tool name to the tool loop's `AuthorizedToolAttempt`. Only
+`ToolBatch::authorize_runner_attempt` and `ToolBatch::resume_runner_attempt`
+publicly produce that pairing: each selects the batch's canonical immutable
+request and approval together with its physical-attempt authority.
+`RunnerToolAttemptAuthorization` has no public raw-parts constructor. The
+underlying attempt exists only after the automatic or user decision authorizes
+that exact attempt, and neither authority nor the resulting lease is cloneable.
+Every checked `ToolBatch` carries a durable per-attempt inventory of runner
+authority already issued. Its in-memory clones share the exact atomic guard for
+each physical attempt. The persistence loader derives the active batch's
+consumed inventory from exact current physical attempts already bound by durable
+runner lease generations, and complete reconstitution restores every consumed
+guard from that inventory. A stored retryable claimed loss leaves its source
+attempt in flight, so a reloaded batch still carries the exact live source the
+checked claimed replacement transition requires; the predecessor leaves the
+current-attempt view, and enters the batch's restored retired-identity
+inventory, only once the atomic replacement commit retires it to terminal
+history. A reloaded batch therefore keeps rejecting retired attempt-identity
+reuse in the domain rather than at the retained row's key. Atomic runner
+authorization marks that exact attempt issued in the batch; a later clone or
+reconstitution from the updated facts cannot mint a second runner lease
+capability. Current active enrollment, pinned placement, its exact validated
+registration, and any selected active credential grant jointly authorize every
+offer after the first. The initial offer instead creates that pinned placement,
+any selected grant, and generation-one lease in one checked transition from
+`Unpinned`; it does not require those products to exist beforehand. The request,
+attempt, session, and two-way crash class must match the selected tool,
+placement, and declaration-derived effect class (`Pure` to `EffectFree`;
+`Idempotent` or `SideEffecting` to `ExternalEffect`). Revoked enrollment, lost
+placement, or a mismatched runner, request, tool, attempt, effect, profile, or
+grant cannot create a lease.
 
 When a credential profile is selected, the lease also retains the exact
 immutable `CredentialDispatchAuthorization`: session, runner, profile, grant
