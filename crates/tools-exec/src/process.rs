@@ -1864,6 +1864,7 @@ fn bwrap_request(
                 ]);
             }
             append_usr_merge_aliases(&mut bwrap_arguments, paths);
+            #[cfg(target_os = "linux")]
             if let Some(https_broker) = https_broker {
                 bwrap_arguments.extend([
                     OsString::from("--preserve-fds"),
@@ -1912,6 +1913,7 @@ fn bwrap_request(
         context.launcher.as_os_str().to_owned(),
         OsString::from(SANDBOX_DISPATCH_PROGRAM),
     ]);
+    #[cfg(target_os = "linux")]
     let https_broker_descriptor = match profile.mounts {
         SandboxMountProfile::RunnerRestricted {
             https_broker: Some(https_broker),
@@ -1922,6 +1924,8 @@ fn bwrap_request(
             https_broker: None, ..
         } => None,
     };
+    #[cfg(not(target_os = "linux"))]
+    let https_broker_descriptor: Option<i32> = None;
     bwrap_arguments.extend([
         OsString::from("--chdir"),
         OsString::from(sandbox_directory),
