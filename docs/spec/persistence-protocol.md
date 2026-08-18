@@ -602,7 +602,7 @@ Representation rules, all enforced in the schema:
   Equal replay returns the first authorization or refusal; unequal reuse returns
   a command conflict. A workspace-free or pre-pin placement rolls the claim back
   and returns `NotApplicable`, leaving its terminal replacement transaction as
-  the only command owner. No transaction remains open across runner I/O.
+  the only command claimant. No transaction remains open across runner I/O.
 - The runner-orchestration foundation adds one append-only
   `runner_operation_failure` record for every durably admitted
   `operation_failed` frame. It stores the exact runner, one closed
