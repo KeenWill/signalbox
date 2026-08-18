@@ -9,7 +9,8 @@ use std::{
 
 use futures_util::StreamExt;
 use reqwest::{Client, Url, redirect::Policy};
-use signalbox_network_policy::is_public_destination_address;
+#[doc(hidden)]
+pub use signalbox_network_policy::is_public_destination_address;
 
 const MAX_RESOLVED_ADDRESSES: usize = 32;
 

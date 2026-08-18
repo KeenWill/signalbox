@@ -83,16 +83,17 @@ use crate::mapping::{
     AbandonLostRunnerRejectionStorageKind, AbandonLostRunnerResultStorageKind,
     ReplaceLostRunnerRejectionStorageKind, ReplaceLostRunnerResultStorageKind,
     RunnerLossPropagationStateStorageKind, ToolAttemptDispositionStorageKind,
-    abandon_lost_runner_rejection_from_str, abandon_lost_runner_rejection_to_str,
-    abandon_lost_runner_result_from_str, abandon_lost_runner_result_to_str,
-    replace_lost_runner_rejection_from_str, replace_lost_runner_rejection_to_str,
-    replace_lost_runner_result_from_str, replace_lost_runner_result_to_str,
-    runner_connection_state_from_str, runner_connection_state_to_str,
-    runner_enrollment_state_from_str, runner_enrollment_state_to_str,
-    runner_loss_propagation_state_from_str, runner_loss_propagation_state_to_str,
-    runner_placement_loss_source_from_str, runner_placement_loss_source_to_str,
-    runner_sandbox_from_str, runner_sandbox_to_str, tool_attempt_disposition_to_str,
-    tool_permission_default_from_str, tool_permission_default_to_str,
+    WorkspaceRecoveryStorageKind, abandon_lost_runner_rejection_from_str,
+    abandon_lost_runner_rejection_to_str, abandon_lost_runner_result_from_str,
+    abandon_lost_runner_result_to_str, replace_lost_runner_rejection_from_str,
+    replace_lost_runner_rejection_to_str, replace_lost_runner_result_from_str,
+    replace_lost_runner_result_to_str, runner_connection_state_from_str,
+    runner_connection_state_to_str, runner_enrollment_state_from_str,
+    runner_enrollment_state_to_str, runner_loss_propagation_state_from_str,
+    runner_loss_propagation_state_to_str, runner_placement_loss_source_from_str,
+    runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
+    tool_attempt_disposition_to_str, tool_permission_default_from_str,
+    tool_permission_default_to_str, workspace_recovery_from_str, workspace_recovery_to_str,
 };
 
 use crate::command_registry::{
@@ -3240,21 +3241,29 @@ impl RunnerProtocolStore {
         let recovery_kind: String = row.decode_column("recovery_kind")?;
         let branch_name: Option<String> = row.decode_column("branch_name")?;
         let revision = row.decode_column::<Option<String>>("revision")?;
-        let recovery = match (recovery_kind.as_str(), branch_name, revision) {
-            ("commit", None, Some(revision)) => WorkspaceRecovery::Commit {
-                revision: WorkspaceRevision::try_new(revision)
-                    .map_err(RunnerProtocolStoreError::Domain)?,
-            },
-            ("branch", Some(name), Some(revision)) => WorkspaceRecovery::Branch {
-                name: WorkspaceBranchName::try_new(name)
-                    .map_err(RunnerProtocolStoreError::Domain)?,
-                revision: WorkspaceRevision::try_new(revision)
-                    .map_err(RunnerProtocolStoreError::Domain)?,
-            },
-            ("unborn_branch", Some(name), None) => WorkspaceRecovery::UnbornBranch {
-                name: WorkspaceBranchName::try_new(name)
-                    .map_err(RunnerProtocolStoreError::Domain)?,
-            },
+        let recovery_kind = workspace_recovery_from_str(&recovery_kind)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let recovery = match (recovery_kind, branch_name, revision) {
+            (WorkspaceRecoveryStorageKind::Commit, None, Some(revision)) => {
+                WorkspaceRecovery::Commit {
+                    revision: WorkspaceRevision::try_new(revision)
+                        .map_err(RunnerProtocolStoreError::Domain)?,
+                }
+            }
+            (WorkspaceRecoveryStorageKind::Branch, Some(name), Some(revision)) => {
+                WorkspaceRecovery::Branch {
+                    name: WorkspaceBranchName::try_new(name)
+                        .map_err(RunnerProtocolStoreError::Domain)?,
+                    revision: WorkspaceRevision::try_new(revision)
+                        .map_err(RunnerProtocolStoreError::Domain)?,
+                }
+            }
+            (WorkspaceRecoveryStorageKind::UnbornBranch, Some(name), None) => {
+                WorkspaceRecovery::UnbornBranch {
+                    name: WorkspaceBranchName::try_new(name)
+                        .map_err(RunnerProtocolStoreError::Domain)?,
+                }
+            }
             _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
         };
         let staged_session = session_id(row.decode_column("staged_session_id")?);
@@ -3521,13 +3530,21 @@ impl RunnerProtocolStore {
                 RunnerDomainError::InvalidState,
             ))?;
         let (recovery_kind, branch_name, revision) = match recovery {
-            WorkspaceRecovery::Commit { revision } => ("commit", None, Some(revision.as_str())),
-            WorkspaceRecovery::Branch { name, revision } => {
-                ("branch", Some(name.as_str()), Some(revision.as_str()))
-            }
-            WorkspaceRecovery::UnbornBranch { name } => {
-                ("unborn_branch", Some(name.as_str()), None)
-            }
+            WorkspaceRecovery::Commit { revision } => (
+                workspace_recovery_to_str(recovery),
+                None,
+                Some(revision.as_str()),
+            ),
+            WorkspaceRecovery::Branch { name, revision } => (
+                workspace_recovery_to_str(recovery),
+                Some(name.as_str()),
+                Some(revision.as_str()),
+            ),
+            WorkspaceRecovery::UnbornBranch { name } => (
+                workspace_recovery_to_str(recovery),
+                Some(name.as_str()),
+                None,
+            ),
         };
         sqlx::query(
             "INSERT INTO runner_replacement_workspace_receipt
@@ -7806,11 +7823,21 @@ async fn insert_workspace_ready_receipt(
     receipt: &RunnerWorkspaceReadyReceipt,
 ) -> Result<(), RunnerProtocolStoreError> {
     let (recovery_kind, branch_name, revision) = match receipt.recovery() {
-        WorkspaceRecovery::Commit { revision } => ("commit", None, Some(revision.as_str())),
-        WorkspaceRecovery::Branch { name, revision } => {
-            ("branch", Some(name.as_str()), Some(revision.as_str()))
-        }
-        WorkspaceRecovery::UnbornBranch { name } => ("unborn_branch", Some(name.as_str()), None),
+        recovery @ WorkspaceRecovery::Commit { revision } => (
+            workspace_recovery_to_str(recovery),
+            None,
+            Some(revision.as_str()),
+        ),
+        recovery @ WorkspaceRecovery::Branch { name, revision } => (
+            workspace_recovery_to_str(recovery),
+            Some(name.as_str()),
+            Some(revision.as_str()),
+        ),
+        recovery @ WorkspaceRecovery::UnbornBranch { name } => (
+            workspace_recovery_to_str(recovery),
+            Some(name.as_str()),
+            None,
+        ),
     };
     sqlx::query(
         "INSERT INTO runner_replacement_workspace_receipt
@@ -12738,20 +12765,34 @@ fn decode_provisioned_workspace(
     if !any_present {
         return Ok(None);
     }
-    let recovery = match (recovery_kind.as_deref(), branch_name, revision) {
+    let recovery_kind = recovery_kind
+        .as_deref()
+        .map(|value| {
+            workspace_recovery_from_str(value).ok_or(RunnerProtocolCorruption::CrossWiredReference)
+        })
+        .transpose()?;
+    let recovery = match (recovery_kind, branch_name, revision) {
         (None, None, None) => None,
-        (Some("commit"), None, Some(revision)) => Some(WorkspaceRecovery::Commit {
-            revision: WorkspaceRevision::try_new(revision)
-                .map_err(RunnerProtocolStoreError::Domain)?,
-        }),
-        (Some("branch"), Some(name), Some(revision)) => Some(WorkspaceRecovery::Branch {
-            name: WorkspaceBranchName::try_new(name).map_err(RunnerProtocolStoreError::Domain)?,
-            revision: WorkspaceRevision::try_new(revision)
-                .map_err(RunnerProtocolStoreError::Domain)?,
-        }),
-        (Some("unborn_branch"), Some(name), None) => Some(WorkspaceRecovery::UnbornBranch {
-            name: WorkspaceBranchName::try_new(name).map_err(RunnerProtocolStoreError::Domain)?,
-        }),
+        (Some(WorkspaceRecoveryStorageKind::Commit), None, Some(revision)) => {
+            Some(WorkspaceRecovery::Commit {
+                revision: WorkspaceRevision::try_new(revision)
+                    .map_err(RunnerProtocolStoreError::Domain)?,
+            })
+        }
+        (Some(WorkspaceRecoveryStorageKind::Branch), Some(name), Some(revision)) => {
+            Some(WorkspaceRecovery::Branch {
+                name: WorkspaceBranchName::try_new(name)
+                    .map_err(RunnerProtocolStoreError::Domain)?,
+                revision: WorkspaceRevision::try_new(revision)
+                    .map_err(RunnerProtocolStoreError::Domain)?,
+            })
+        }
+        (Some(WorkspaceRecoveryStorageKind::UnbornBranch), Some(name), None) => {
+            Some(WorkspaceRecovery::UnbornBranch {
+                name: WorkspaceBranchName::try_new(name)
+                    .map_err(RunnerProtocolStoreError::Domain)?,
+            })
+        }
         _ => return Err(RunnerProtocolCorruption::CrossWiredReference.into()),
     };
     Ok(Some(ProvisionedWorkspace {
@@ -13936,13 +13977,21 @@ fn encode_workspace_recovery(
     recovery: &WorkspaceRecovery,
 ) -> (Option<&'static str>, Option<&str>, Option<&str>) {
     match recovery {
-        WorkspaceRecovery::Commit { revision } => (Some("commit"), None, Some(revision.as_str())),
-        WorkspaceRecovery::Branch { name, revision } => {
-            (Some("branch"), Some(name.as_str()), Some(revision.as_str()))
-        }
-        WorkspaceRecovery::UnbornBranch { name } => {
-            (Some("unborn_branch"), Some(name.as_str()), None)
-        }
+        WorkspaceRecovery::Commit { revision } => (
+            Some(workspace_recovery_to_str(recovery)),
+            None,
+            Some(revision.as_str()),
+        ),
+        WorkspaceRecovery::Branch { name, revision } => (
+            Some(workspace_recovery_to_str(recovery)),
+            Some(name.as_str()),
+            Some(revision.as_str()),
+        ),
+        WorkspaceRecovery::UnbornBranch { name } => (
+            Some(workspace_recovery_to_str(recovery)),
+            Some(name.as_str()),
+            None,
+        ),
     }
 }
 
