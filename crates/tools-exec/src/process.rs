@@ -10,7 +10,7 @@
 #[cfg(target_os = "linux")]
 use std::os::{
     fd::{AsFd, AsRawFd, OwnedFd},
-    unix::{ffi::OsStrExt, fs::MetadataExt, net::UnixStream},
+    unix::{ffi::OsStrExt, fs::MetadataExt},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -656,12 +656,16 @@ struct SandboxEnvironmentDelivery {
 impl SandboxEnvironmentDelivery {
     #[cfg(target_os = "linux")]
     fn try_new(environment: SandboxEnvironmentVariable) -> Result<Self, ()> {
-        let (reader, mut writer) = UnixStream::pair().map_err(|_| ())?;
-        std::io::Write::write_all(&mut writer, environment.value.as_bytes()).map_err(|_| ())?;
-        writer.shutdown(std::net::Shutdown::Write).map_err(|_| ())?;
-        drop(writer);
+        let descriptor = rustix::fs::memfd_create(
+            c"signalbox-restricted-environment",
+            rustix::fs::MemfdFlags::CLOEXEC,
+        )
+        .map_err(|_| ())?;
+        let mut file = std::fs::File::from(descriptor);
+        std::io::Write::write_all(&mut file, environment.value.as_bytes()).map_err(|_| ())?;
+        std::io::Seek::rewind(&mut file).map_err(|_| ())?;
         let descriptor =
-            inherited_descriptor_above_standard_streams(OwnedFd::from(reader)).map_err(|_| ())?;
+            inherited_descriptor_above_standard_streams(OwnedFd::from(file)).map_err(|_| ())?;
         Ok(Self {
             name: environment.name,
             descriptor,
@@ -2042,6 +2046,7 @@ fn bwrap_request(
             https_broker,
         } => {
             bwrap_arguments.extend([OsString::from("--tmpfs"), OsString::from("/run")]);
+            #[cfg(target_os = "linux")]
             if let Some(environment) = invocation.environment {
                 bwrap_arguments.extend([
                     OsString::from("--dir"),
@@ -5296,6 +5301,27 @@ mod tests {
         );
 
         assert!(result.is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sandbox_environment_delivery_holds_the_exact_value_byte_bound() -> Result<(), Box<dyn Error>>
+    {
+        let expected = "s".repeat(MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES);
+        let environment = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            expected.clone(),
+        )?;
+
+        let delivery = SandboxEnvironmentDelivery::try_new(environment)
+            .map_err(|()| std::io::Error::other("create sandbox environment delivery"))?;
+        let mut file =
+            std::fs::File::open(format!("/proc/self/fd/{}", delivery.descriptor.as_raw_fd()))?;
+        let mut delivered = String::new();
+        std::io::Read::read_to_string(&mut file, &mut delivered)?;
+
+        assert_eq!(delivered, expected);
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
