@@ -527,6 +527,12 @@ fn apply_review_union(
         if retained == review {
             return Ok(ChangeApplyDispositionV1::Duplicate);
         }
+        if retained.state().is_none() {
+            // A dismissed review is retained with no state; a submission
+            // observed after the dismissal is history the dismissal already
+            // superseded, not a conflicting identity.
+            return Ok(ChangeApplyDispositionV1::Superseded);
+        }
         return Err(RepoWatchWebhookApplyError::ConflictingImmutableFact(
             "review identity",
         ));
@@ -2661,5 +2667,61 @@ mod tests {
             error,
             RepoWatchWebhookApplyError::ConflictingImmutableFact("review identity")
         );
+    }
+
+    #[test]
+    fn a_submission_observed_after_dismissal_is_superseded() {
+        let previous = canonical_observation(CURRENT_HEAD);
+        let mut pull_requests = previous.state().pull_requests().to_vec();
+        let reviewer = RepoWatchAuthorLogin::try_new(String::from(SIGNAL_REVIEWER))
+            .expect("fixture reviewer is valid");
+        let dismissed = RepoWatchReviewObservation::new(
+            object_id(RETAINED_REVIEW),
+            reviewer.clone(),
+            None,
+            CommitSha::try_new(String::from(CURRENT_HEAD)).expect("fixture SHA is valid"),
+        );
+        let retained = &pull_requests[0];
+        let rebuilt = rebuild_pull_request(
+            retained,
+            retained.context().clone(),
+            retained.lifecycle(),
+            retained.completed_check_runs().to_vec(),
+            vec![dismissed],
+            retained.threads().to_vec(),
+        )
+        .expect("fixture rebuild is valid");
+        pull_requests[0] = rebuilt;
+        let previous = RepoWatchObservation::new(
+            previous.signal_reviewers().to_vec(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+                pull_requests,
+                workflow_runs: previous.state().workflow_runs().to_vec(),
+                branch_heads: previous.state().branch_heads().to_vec(),
+            })
+            .expect("fixture state is valid"),
+        );
+        let late_submission = RepoWatchReviewObservation::new(
+            object_id(RETAINED_REVIEW),
+            reviewer,
+            Some(ReviewState::Approved),
+            CommitSha::try_new(String::from(CURRENT_HEAD)).expect("fixture SHA is valid"),
+        );
+        let patch = RepoWatchObservationPatchV1::new(
+            vec![RepoWatchObservationChangeV1::ReviewUnion {
+                pull_request: PullRequestNumber::new(
+                    NonZeroU64::new(PULL_REQUEST).expect("fixture PR is positive"),
+                ),
+                expected_head: CommitSha::try_new(String::from(CURRENT_HEAD))
+                    .expect("fixture SHA is valid"),
+                review: late_submission,
+            }],
+            Vec::new(),
+        );
+
+        let applied = apply_repo_watch_observation_patch_v1(&previous, &patch)
+            .expect("a dismissal supersedes its late submission");
+
+        assert_eq!(applied, RepoWatchObservationApplyV1::Superseded);
     }
 }

@@ -183,6 +183,7 @@ impl RepositoryWatchRuntime {
     ) -> Result<Self, RepositoryWatchRuntimeConstructionError> {
         let mut tasks = Vec::with_capacity(configuration.repositories().len());
         let mut webhook_workers = HashMap::new();
+        let payload_purge = WebhookPayloadPurgeSchedule::starting_now();
         for repository in configuration.repositories() {
             let mut webhook_nudge = None;
             let webhook_work = repository.webhook().map(|_| {
@@ -205,6 +206,7 @@ impl RepositoryWatchRuntime {
                     eligibility_nudge: eligibility_nudge.clone(),
                     webhook_work,
                     webhook_nudge,
+                    payload_purge: payload_purge.clone(),
                 },
             )?);
         }
@@ -329,8 +331,26 @@ struct RepositoryWatchTask {
     webhook_nudge: Option<mpsc::Sender<()>>,
     webhook_shadow: Option<WebhookShadowBaseline>,
     webhook_shadow_superseded: bool,
-    next_payload_purge: Instant,
+    payload_purge: WebhookPayloadPurgeSchedule,
     rules_activated: bool,
+}
+
+/// One process-wide schedule for the expired-payload purge.
+///
+/// Every repository task shares it, so a multi-repository daemon purges at
+/// most once per interval rather than once per repository, and the lock is
+/// held across the deletion so concurrent tasks cannot run it redundantly.
+#[derive(Clone)]
+struct WebhookPayloadPurgeSchedule {
+    next: Arc<tokio::sync::Mutex<Instant>>,
+}
+
+impl WebhookPayloadPurgeSchedule {
+    fn starting_now() -> Self {
+        Self {
+            next: Arc::new(tokio::sync::Mutex::new(Instant::now())),
+        }
+    }
 }
 
 struct RepositoryWatchTaskContext {
@@ -343,6 +363,7 @@ struct RepositoryWatchTaskContext {
     eligibility_nudge: InProcessEligibilityNudge,
     webhook_work: Option<mpsc::Receiver<()>>,
     webhook_nudge: Option<mpsc::Sender<()>>,
+    payload_purge: WebhookPayloadPurgeSchedule,
 }
 
 impl RepositoryWatchTask {
@@ -360,6 +381,7 @@ impl RepositoryWatchTask {
             eligibility_nudge,
             webhook_work,
             webhook_nudge,
+            payload_purge,
         } = context;
         let credential_reference = configuration.credential_reference();
         let credentials = FileCredentialAccess::new_bounded(
@@ -388,7 +410,7 @@ impl RepositoryWatchTask {
             webhook_nudge,
             webhook_shadow: None,
             webhook_shadow_superseded: false,
-            next_payload_purge: Instant::now(),
+            payload_purge,
             rules_activated: false,
         })
     }
@@ -527,12 +549,13 @@ impl RepositoryWatchTask {
     /// already-terminal deliveries, so it is retried on the next successful
     /// poll rather than propagated.
     async fn maybe_purge_expired_payloads(&mut self) {
-        if Instant::now() < self.next_payload_purge {
+        let mut next = self.payload_purge.next.lock().await;
+        if Instant::now() < *next {
             return;
         }
         match self.webhook_store.purge_expired_payloads().await {
             Ok(purged) => {
-                self.next_payload_purge = Instant::now() + WEBHOOK_PAYLOAD_PURGE_INTERVAL;
+                *next = Instant::now() + WEBHOOK_PAYLOAD_PURGE_INTERVAL;
                 if purged > 0 {
                     tracing::info!(
                         repository = %self.repository.as_str(),
