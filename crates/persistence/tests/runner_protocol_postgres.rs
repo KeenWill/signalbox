@@ -145,6 +145,7 @@ const NONCURRENT_REPLACEMENT_COMMAND: u128 = 0x9376;
 const DISCONNECTED_REPLACEMENT_COMMAND: u128 = 0x9377;
 const UNADVERTISED_REPLACEMENT_COMMAND: u128 = 0x9378;
 const PENDING_REPLACEMENT_COMMAND: u128 = 0x9379;
+const PENDING_PINNED_REPLACEMENT_COMMAND: u128 = 0x9389;
 const PENDING_MISMATCH_REPLACEMENT_COMMAND: u128 = 0x937a;
 const PENDING_DISCONNECTED_REPLACEMENT_COMMAND: u128 = 0x937b;
 const FOREIGN_PREDECESSOR_REPLACEMENT_COMMAND: u128 = 0x937c;
@@ -226,6 +227,20 @@ struct PendingPrePinReplacementFixture {
     candidate_request: RunnerEnrollmentRequestId,
     candidate_registration: RunnerGeneration,
     successor_placement_revision: RunnerGeneration,
+}
+
+struct PendingPinnedWorkspaceFreeReplacementFixture {
+    store: RunnerProtocolStore,
+    pin: SessionRunnerPin,
+    predecessor_enrollment: RunnerEnrollmentId,
+    predecessor_runner: RunnerId,
+    candidate_enrollment: RunnerEnrollmentId,
+    candidate_runner: RunnerId,
+    candidate_request: RunnerEnrollmentRequestId,
+    candidate_registration: RunnerRegistrationRevision,
+    successor_placement_revision: RunnerGeneration,
+    working_directory: RunnerWorkingDirectory,
+    sandbox: RunnerSandboxProfile,
 }
 
 struct WorkspaceProvisioningAuthorizationFixture {
@@ -355,6 +370,87 @@ async fn pending_pre_pin_replacement_fixture_with(
         candidate_registration,
         successor_placement_revision: RunnerGeneration::try_from_u64(2)
             .expect("the fixture successor placement revision is positive"),
+    })
+}
+
+async fn pending_pinned_workspace_free_replacement_fixture(
+    pool: PgPool,
+) -> Result<PendingPinnedWorkspaceFreeReplacementFixture, Box<dyn Error>> {
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let active = store
+        .enroll_pristine(pristine_enrollment_request(
+            ENROLLMENT_REQUEST,
+            ENROLLMENT,
+            RUNNER,
+            AUTHENTICATION,
+        ))
+        .await?;
+    let active_enrollment = active.receipt().enrollment();
+    let active_registration = store
+        .load_registration(
+            active_enrollment,
+            active.receipt().registration().revision(),
+        )
+        .await?
+        .expect("the pending pinned predecessor registration reads back");
+    let active_connection = store
+        .open_connection(active_enrollment.enrollment())
+        .await?;
+    let directory = exact_runner_directory();
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::Exact(directory.clone()),
+            credential_profile: None,
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            permission_overrides: no_permission_overrides(),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            active_enrollment,
+            active_registration.registration(),
+            directory.clone(),
+            None,
+            authorized(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the pending pinned predecessor placement pins");
+    store.store_pin(&pin, &active_registration).await?;
+    store
+        .transition_connection(
+            active_enrollment.enrollment(),
+            active_connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    append_runner_lost_projection(&pool, pin.placement.session()).await?;
+    let pending = store
+        .enroll_pristine(pristine_enrollment_request(
+            PENDING_ENROLLMENT_REQUEST,
+            REPLACEMENT_ENROLLMENT,
+            REPLACEMENT_RUNNER,
+            REPLACEMENT_AUTHENTICATION,
+        ))
+        .await?;
+    Ok(PendingPinnedWorkspaceFreeReplacementFixture {
+        store,
+        pin,
+        predecessor_enrollment: active_enrollment.enrollment(),
+        predecessor_runner: active_enrollment.runner(),
+        candidate_enrollment: pending.receipt().enrollment().enrollment(),
+        candidate_runner: pending.receipt().enrollment().runner(),
+        candidate_request: pending.receipt().request(),
+        candidate_registration: pending.receipt().registration().revision(),
+        successor_placement_revision: RunnerGeneration::try_from_u64(2)
+            .expect("the pending pinned successor revision is positive"),
+        working_directory: directory,
+        sandbox: RunnerSandboxProfile::WorkspaceRestricted,
     })
 }
 
@@ -2873,13 +2969,13 @@ async fn insert_lease_generation_direct(
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name,
+             offer_registration_revision, credential_profile_name,
              credential_grant_lineage_origin_ordinal,
              credential_grant_revision, credential_approval_kind,
              predecessor_generation)
          SELECT $1, $2, $3, record.session_id, $4,
                 $5, registered.effect_class, record.event_ordinal,
-                record.registration_enrollment_id, record.registration_revision,
+                record.registration_enrollment_id, record.registration_revision, $7,
                 record.pinned_credential_profile_name,
                 record.credential_grant_lineage_origin_ordinal,
                 record.credential_grant_revision, approval.approval_kind, NULL
@@ -2906,6 +3002,7 @@ async fn insert_lease_generation_direct(
     .bind(correlation.runner.into_uuid())
     .bind(correlation.tool.as_str())
     .bind(correlation.dispatch.session().into_uuid())
+    .bind(Decimal::from(correlation.registration_revision.get()))
     .execute(pool)
     .await?;
     Ok(())
@@ -7297,6 +7394,12 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
     MIGRATOR
         .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
         .await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         ADD COLUMN offer_registration_revision numeric(20, 0)",
+    )
+    .execute(&pool)
+    .await?;
     let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
@@ -8701,6 +8804,12 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(&pool).await?;
+    sqlx::query(
+        "ALTER TABLE runner_lease_generation
+         ADD COLUMN offer_registration_revision numeric(20, 0)",
+    )
+    .execute(&pool)
+    .await?;
     let (store, _, registration, pin) = prepared_pin_fixture_with_authorization(
         &pool,
         authorized,
@@ -20058,7 +20167,7 @@ async fn s31_inv043_later_lease_event_rejects_cross_wired_dispatch_fence()
         .expect("the exact lease fence claims");
     let cross_wired = lease_with_cross_wired_dispatch(&claimed, registration.registration());
     let rejected = store
-        .store_lease(&cross_wired)
+        .store_claimed_lease_projection_for_test(&cross_wired)
         .await
         .expect_err("a later event must match every canonical dispatch-fence field");
 
@@ -23475,6 +23584,107 @@ async fn s32_inv012_inv044_workspace_free_same_runner_reenrollment_completes()
     Ok(())
 }
 
+/// S32 / INV-001 / INV-002 / INV-012 / INV-044: an exact connected pending
+/// target atomically activates its candidate, revokes its lost predecessor,
+/// and installs the workspace-free pinned successor before replaying its receipt.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv001_inv002_inv012_inv044_pending_workspace_free_replacement_completes_and_replays()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let mut fixture = pending_pinned_workspace_free_replacement_fixture(pool.clone()).await?;
+    let candidate_connection = fixture
+        .store
+        .open_connection(fixture.candidate_enrollment)
+        .await?;
+    let session = fixture.pin.placement.session();
+    let command = ReplaceLostRunner::new(
+        DurableCommandId::from_uuid(uuid(PENDING_PINNED_REPLACEMENT_COMMAND)),
+        session,
+        fixture.pin.placement.revision(),
+        RunnerReplacementTarget::PendingEnrollment(fixture.candidate_request),
+    );
+    let identities = PinnedRunnerReplacementIdentities::new(
+        SemanticTranscriptEntryId::from_uuid(uuid(PINNED_REPLACEMENT_SEMANTIC_ENTRY)),
+        ContextFrontierId::from_uuid(uuid(PINNED_REPLACEMENT_FRONTIER)),
+    );
+    let expected = PinnedRunnerReplacementOutcome::Recorded(
+        PinnedRunnerReplacementResult::Applied(ReplacedPinnedRunner::new(
+            session,
+            fixture.predecessor_runner,
+            fixture.candidate_runner,
+            fixture.successor_placement_revision,
+            fixture.working_directory.clone(),
+            fixture.sandbox,
+        )),
+    );
+
+    let applied = fixture.store.complete(command, identities).await?;
+    let replayed = fixture.store.complete(command, identities).await?;
+    let loaded = fixture
+        .store
+        .load_placement(session)
+        .await?
+        .expect("the pending pinned successor placement reads back");
+    let predecessor = fixture
+        .store
+        .load_enrollment(fixture.predecessor_enrollment)
+        .await?
+        .expect("the pending pinned predecessor reads back revoked");
+    let candidate = fixture
+        .store
+        .load_enrollment(fixture.candidate_enrollment)
+        .await?
+        .expect("the pending pinned candidate reads back active");
+    let result_authority: (Uuid, Decimal, Decimal, Decimal) = sqlx::query_as(
+        "SELECT target_enrollment_id, target_registration_revision,
+                target_connection_epoch, target_connection_event_ordinal
+           FROM replace_lost_runner_result
+          WHERE command_id = $1",
+    )
+    .bind(command.command().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(applied, expected);
+    assert_eq!(replayed, expected);
+    assert_eq!(
+        loaded.placement().revision(),
+        fixture.successor_placement_revision
+    );
+    assert_eq!(
+        loaded
+            .registration()
+            .expect("the pending pinned registration reads back")
+            .registration()
+            .runner(),
+        fixture.candidate_runner
+    );
+    assert_eq!(
+        predecessor.state(),
+        signalbox_domain::RunnerEnrollmentState::Revoked
+    );
+    assert_eq!(
+        candidate.state(),
+        signalbox_domain::RunnerEnrollmentState::Active
+    );
+    assert_eq!(result_authority.0, fixture.candidate_enrollment.into_uuid());
+    assert_eq!(
+        result_authority.1,
+        Decimal::from(fixture.candidate_registration.get())
+    );
+    assert_eq!(
+        result_authority.2,
+        Decimal::from(candidate_connection.epoch().get())
+    );
+    assert_eq!(
+        result_authority.3,
+        Decimal::from(candidate_connection.event_ordinal())
+    );
+    drop(pool);
+    Ok(())
+}
+
 /// S32 / INV-044: a connection-loss label cannot authorize the explicit
 /// same-runner workspace-free recovery target.
 #[tokio::test]
@@ -25052,14 +25262,14 @@ async fn s31_inv043_first_generation_requires_null_predecessor() -> Result<(), B
             (lease_id, generation, attempt_id, session_id, runner_id,
              tool_name, effect_class, placement_event_ordinal,
              registration_enrollment_id, registration_revision,
-             credential_profile_name,
+             offer_registration_revision, credential_profile_name,
              credential_grant_lineage_origin_ordinal,
              credential_grant_revision, credential_approval_kind,
              predecessor_generation)
          SELECT $2, 1, attempt_id, session_id, runner_id,
                 tool_name, effect_class, placement_event_ordinal,
                 registration_enrollment_id, registration_revision,
-                credential_profile_name,
+                offer_registration_revision, credential_profile_name,
                 credential_grant_lineage_origin_ordinal,
                 credential_grant_revision, credential_approval_kind, 0
            FROM runner_lease_generation

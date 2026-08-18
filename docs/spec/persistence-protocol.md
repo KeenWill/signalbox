@@ -44,7 +44,10 @@ for a staged exact-directory pinned replacement is verified against this PR
 (`agent/runner-pinned-replacement-observation-finalizer`).
 Registration-loss-only same-runner completion for that workspace-free stage is
 verified against this PR (`agent/runner-same-runner-replacement-finalization`).
-Existing-pin attempt-and-offer atomicity is verified against this PR
+Pending-enrollment activation inside that workspace-free terminal transaction is
+verified against this PR
+(`agent/runner-pending-workspace-free-replacement-finalization`). Existing-pin
+attempt-and-offer atomicity is verified against this PR
 (`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch adapter's
 exact runner/registration lookup and returned enrollment routing identity are
 verified against this PR (`agent/runner-offer-locus-binding`). The
@@ -647,7 +650,7 @@ Representation rules, all enforced in the schema:
   Equal replay returns the first authorization or refusal; unequal reuse returns
   a command conflict. A workspace-free or pre-pin placement rolls the claim back
   and returns `NotApplicable`, leaving the workspace-free replacement port as
-  the only command owner. That port currently claims only a pinned loss whose
+  the sole command authority. That port currently claims only a pinned loss whose
   request names an exact directory and no workspace; it returns a nonterminal
   stage without appending any relocation facts, while equal provisioning replay
   recognizes that command as outside its repository-backed locus. Migration
@@ -698,9 +701,21 @@ Representation rules, all enforced in the schema:
   runner, and authentication lineage, and the current registration still owns
   the live connection and advertises the complete placement. An ordinary direct
   target still requires a distinct runner, and connection loss still records the
-  closed same-runner refusal. **Committed unimplemented functionality.**
-  Pending-enrollment workspace-free targets remain staged for later checked
-  completion.
+  closed same-runner refusal. Migration `202608110026` admits an exact pending
+  enrollment for the same workspace-free terminal shape. The command's pending
+  request must still identify its provisioning-only candidate and immutable lost
+  predecessor relation, the candidate must be connected and advertised, the
+  predecessor loss must be newer than the placement's retained loss baseline,
+  and the lost placement must name that predecessor enrollment. The terminal
+  transaction activates the candidate and revokes the predecessor before
+  installing the successor placement, boundary, outbox event, and result in the
+  same commit. The deferred activation completeness check accepts that one exact
+  result as activation authority, and typed readback independently rejoins the
+  pending relation, both enrollment audits, the predecessor loss, current
+  registration, connection, placement, and boundary before returning the
+  receipt. **Committed unimplemented functionality.** Repository-backed pending
+  replacement remains staged until the workspace-receipt terminal transaction
+  exists.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their

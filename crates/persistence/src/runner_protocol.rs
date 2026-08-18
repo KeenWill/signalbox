@@ -3136,12 +3136,6 @@ impl RunnerProtocolStore {
         if !matches!(staged, PinnedRunnerReplacementOutcome::Staged { .. }) {
             return Ok(staged);
         }
-        if matches!(
-            command.replacement(),
-            RunnerReplacementTarget::PendingEnrollment(_)
-        ) {
-            return Ok(staged);
-        }
         let mut transaction = self.pool.begin().await?;
         let scheduler = sqlx::query(REPLACE_LOST_RUNNER_SCHEDULER)
             .bind(command.session().into_uuid())
@@ -3279,18 +3273,23 @@ impl RunnerProtocolStore {
         {
             return Ok(outcome);
         }
-        let (selected_runner, checked_same_runner) = match command.replacement() {
-            RunnerReplacementTarget::Runner(runner) => (runner, false),
-            RunnerReplacementTarget::SameRunnerReenrollment(runner) => (runner, true),
-            RunnerReplacementTarget::PendingEnrollment(_) => {
-                return Ok(PinnedRunnerReplacementOutcome::Staged {
-                    command: command.command(),
-                });
-            }
+        let (target_authority, checked_same_runner) = match command.replacement() {
+            RunnerReplacementTarget::Runner(runner) => (
+                self.lock_direct_replacement_target(transaction, runner)
+                    .await?,
+                false,
+            ),
+            RunnerReplacementTarget::SameRunnerReenrollment(runner) => (
+                self.lock_direct_replacement_target(transaction, runner)
+                    .await?,
+                true,
+            ),
+            RunnerReplacementTarget::PendingEnrollment(request) => (
+                self.lock_pending_replacement_target(transaction, request)
+                    .await?,
+                false,
+            ),
         };
-        let target_authority = self
-            .lock_direct_replacement_target(transaction, selected_runner)
-            .await?;
         let prior = sqlx::query(RUNNER_PLACEMENT_HEAD)
             .bind(command.session().into_uuid())
             .fetch_optional(&mut **transaction)
@@ -3354,7 +3353,47 @@ impl RunnerProtocolStore {
         let prior_runner = lost.pinned().runner;
         evidence.prior_runner = Some(prior_runner);
         evidence.new_runner = target_authority.runner();
-        let selected_is_prior = selected_runner == prior_runner;
+        if matches!(
+            command.replacement(),
+            RunnerReplacementTarget::PendingEnrollment(_)
+        ) && lost.source() != RunnerPlacementLossSource::Connection
+        {
+            let rejection = RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+                session: command.session(),
+                target: command.replacement(),
+                reason: RunnerReplacementTargetUnavailableReason::PendingRequestMismatch,
+            };
+            insert_replacement_provisioning_rejection(
+                transaction.as_mut(),
+                command,
+                rejection,
+                evidence,
+            )
+            .await?;
+            return Ok(PinnedRunnerReplacementOutcome::Recorded(
+                PinnedRunnerReplacementResult::Rejected(rejection),
+            ));
+        }
+        if target_authority.predecessor_runner().is_some()
+            && target_authority.predecessor_runner() != Some(prior_runner)
+        {
+            let rejection = RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+                session: command.session(),
+                target: command.replacement(),
+                reason: RunnerReplacementTargetUnavailableReason::PendingRequestMismatch,
+            };
+            insert_replacement_provisioning_rejection(
+                transaction.as_mut(),
+                command,
+                rejection,
+                evidence,
+            )
+            .await?;
+            return Ok(PinnedRunnerReplacementOutcome::Recorded(
+                PinnedRunnerReplacementResult::Rejected(rejection),
+            ));
+        }
+        let selected_is_prior = target_authority.runner() == Some(prior_runner);
         if (!checked_same_runner && selected_is_prior)
             || (checked_same_runner
                 && (!selected_is_prior || lost.source() != RunnerPlacementLossSource::Registration))
@@ -3465,8 +3504,37 @@ impl RunnerProtocolStore {
                 None,
                 None,
             )
+        };
+        let replacement = match replacement {
+            Ok(replacement) => replacement,
+            Err(error)
+                if target.pending_activation.is_some()
+                    && replacement_target_is_unavailable(&error) =>
+            {
+                let rejection =
+                    RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+                        session: command.session(),
+                        target: command.replacement(),
+                        reason: RunnerReplacementTargetUnavailableReason::NotAdvertised,
+                    };
+                insert_replacement_provisioning_rejection(
+                    transaction.as_mut(),
+                    command,
+                    rejection,
+                    evidence,
+                )
+                .await?;
+                return Ok(PinnedRunnerReplacementOutcome::Recorded(
+                    PinnedRunnerReplacementResult::Rejected(rejection),
+                ));
+            }
+            Err(error) => return Err(RunnerProtocolStoreError::Domain(error)),
+        };
+        if let Some(activation) = target.pending_activation.as_ref() {
+            terminalize_connection_for_revocation(transaction, activation.predecessor.enrollment)
+                .await?;
+            activate_pending_replacement_target(transaction.as_mut(), activation).await?;
         }
-        .map_err(RunnerProtocolStoreError::Domain)?;
         let next_event_ordinal = current_event_ordinal
             .checked_add(1)
             .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
@@ -7750,7 +7818,19 @@ async fn load_pinned_replacement_record(
                 target_registration.runner_id AS target_registration_runner_id,
                 target_registration.authentication_reference_id
                     AS target_registration_authentication_id,
+                target_enrollment.runner_id AS target_enrollment_runner_id,
+                target_enrollment.state_kind AS target_enrollment_state_kind,
                 target_connection.state_kind AS target_connection_state_kind,
+                pending.request_id AS pending_request_id,
+                pending.enrollment_id AS pending_enrollment_id,
+                pending.predecessor_enrollment_id,
+                pending.predecessor_loss_epoch,
+                pending_predecessor.runner_id AS pending_predecessor_runner_id,
+                pending_predecessor.state_kind AS pending_predecessor_state_kind,
+                pending_loss.enrollment_id AS pending_loss_enrollment_id,
+                pending_loss.loss_epoch AS pending_loss_epoch,
+                pending_candidate_audit.state_kind AS pending_candidate_state_kind,
+                active_candidate_audit.state_kind AS active_candidate_state_kind,
                 stage.lost_placement_event_ordinal,
                 stage.lost_placement_revision,
                 stage.requested_working_directory AS stage_working_directory,
@@ -7761,6 +7841,8 @@ async fn load_pinned_replacement_record(
                 lost.lost_runner_id AS lost_runner_id,
                 lost.loss_source_kind AS lost_loss_source_kind,
                 lost.loss_registration_revision,
+                lost.loss_fence_enrollment_id,
+                lost.observed_runner_loss_epoch,
                 loss_registration.enrollment_id AS loss_registration_enrollment_id,
                 loss_registration.runner_id AS loss_registration_runner_id,
                 loss_registration.authentication_reference_id
@@ -7802,6 +7884,8 @@ async fn load_pinned_replacement_record(
              ON target_registration.enrollment_id = result.target_enrollment_id
             AND target_registration.registration_revision =
                 result.target_registration_revision
+           LEFT JOIN runner_enrollment AS target_enrollment
+             ON target_enrollment.enrollment_id = result.target_enrollment_id
            LEFT JOIN runner_registration AS loss_registration
              ON loss_registration.enrollment_id =
                     lost.registration_enrollment_id
@@ -7812,6 +7896,19 @@ async fn load_pinned_replacement_record(
             AND target_connection.connection_epoch = result.target_connection_epoch
             AND target_connection.event_ordinal =
                 result.target_connection_event_ordinal
+           LEFT JOIN runner_pending_enrollment AS pending
+             ON pending.request_id = command.target_pending_request_id
+           LEFT JOIN runner_enrollment AS pending_predecessor
+             ON pending_predecessor.enrollment_id = pending.predecessor_enrollment_id
+           LEFT JOIN runner_connection_loss_epoch AS pending_loss
+             ON pending_loss.enrollment_id = pending.predecessor_enrollment_id
+            AND pending_loss.loss_epoch = pending.predecessor_loss_epoch
+           LEFT JOIN runner_enrollment_audit AS pending_candidate_audit
+             ON pending_candidate_audit.enrollment_id = pending.enrollment_id
+            AND pending_candidate_audit.revision = 1
+           LEFT JOIN runner_enrollment_audit AS active_candidate_audit
+             ON active_candidate_audit.enrollment_id = pending.enrollment_id
+            AND active_candidate_audit.revision = 2
           WHERE command.command_id = $1",
     )
     .bind(command_id.into_uuid())
@@ -7871,7 +7968,25 @@ async fn load_pinned_replacement_record(
     let target_registration_runner = runner_id(row.decode_column("target_registration_runner_id")?);
     let target_registration_authentication: Uuid =
         row.decode_column("target_registration_authentication_id")?;
+    let target_enrollment_runner = runner_id(row.decode_column("target_enrollment_runner_id")?);
+    let target_enrollment_state: String = row.decode_column("target_enrollment_state_kind")?;
     let target_connection_state: String = row.decode_column("target_connection_state_kind")?;
+    let pending_request: Option<Uuid> = row.decode_column("pending_request_id")?;
+    let pending_enrollment: Option<Uuid> = row.decode_column("pending_enrollment_id")?;
+    let pending_predecessor_enrollment: Option<Uuid> =
+        row.decode_column("predecessor_enrollment_id")?;
+    let pending_predecessor_loss_epoch: Option<Decimal> =
+        row.decode_column("predecessor_loss_epoch")?;
+    let pending_predecessor_runner: Option<Uuid> =
+        row.decode_column("pending_predecessor_runner_id")?;
+    let pending_predecessor_state: Option<String> =
+        row.decode_column("pending_predecessor_state_kind")?;
+    let pending_loss_enrollment: Option<Uuid> = row.decode_column("pending_loss_enrollment_id")?;
+    let pending_loss_epoch: Option<Decimal> = row.decode_column("pending_loss_epoch")?;
+    let pending_candidate_state: Option<String> =
+        row.decode_column("pending_candidate_state_kind")?;
+    let active_candidate_state: Option<String> =
+        row.decode_column("active_candidate_state_kind")?;
     let lost_event_ordinal = decode_u64(row.decode_column("lost_placement_event_ordinal")?)?;
     let lost_revision = decode_runner_generation(row.decode_column("lost_placement_revision")?)?;
     let stage_working_directory: String = row.decode_column("stage_working_directory")?;
@@ -7881,6 +7996,9 @@ async fn load_pinned_replacement_record(
     let lost_loss_source: String = row.decode_column("lost_loss_source_kind")?;
     let loss_registration_revision: Option<Decimal> =
         row.decode_column("loss_registration_revision")?;
+    let lost_loss_fence_enrollment: Option<Uuid> = row.decode_column("loss_fence_enrollment_id")?;
+    let lost_observed_loss_epoch: Option<Decimal> =
+        row.decode_column("observed_runner_loss_epoch")?;
     let loss_registration_enrollment: Option<Uuid> =
         row.decode_column("loss_registration_enrollment_id")?;
     let loss_registration_runner: Option<Uuid> =
@@ -7914,11 +8032,35 @@ async fn load_pinned_replacement_record(
                 && loss_registration_runner == Some(new_runner.into_uuid())
                 && loss_registration_authentication == Some(target_registration_authentication)
         }
-        RunnerReplacementTarget::PendingEnrollment(_) => false,
+        RunnerReplacementTarget::PendingEnrollment(request) => {
+            pending_request == Some(request.into_uuid())
+                && pending_enrollment == Some(target_enrollment)
+                && pending_predecessor_enrollment == lost_loss_fence_enrollment
+                && lost_observed_loss_epoch
+                    .is_none_or(|observed| Some(observed) < pending_predecessor_loss_epoch)
+                && pending_predecessor_runner == Some(prior_runner.into_uuid())
+                && pending_predecessor_state.as_deref() == Some("revoked")
+                && pending_loss_enrollment == pending_predecessor_enrollment
+                && pending_loss_epoch == pending_predecessor_loss_epoch
+                && pending_candidate_state.as_deref() == Some("pending")
+                && active_candidate_state.as_deref() == Some("active")
+                && lost_loss_source == "connection"
+                && prior_runner != new_runner
+        }
+    };
+    let target_enrollment_state_matches = match command.replacement() {
+        RunnerReplacementTarget::PendingEnrollment(_) => {
+            active_candidate_state.as_deref() == Some("active")
+        }
+        RunnerReplacementTarget::Runner(_) | RunnerReplacementTarget::SameRunnerReenrollment(_) => {
+            target_enrollment_state == "active"
+        }
     };
     if !target_matches
         || target_registration_enrollment != target_enrollment
         || target_registration_runner != new_runner
+        || target_enrollment_runner != new_runner
+        || !target_enrollment_state_matches
         || runner_connection_state_from_str(&target_connection_state)
             != Some(RunnerConnectionState::Connected)
         || lost_event_kind != "runner_lost"
