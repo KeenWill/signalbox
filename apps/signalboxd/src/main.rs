@@ -278,7 +278,13 @@ impl HubConfiguration {
     fn repository_watch_credential_conflicts(&self, configuration: &HubModelConfiguration) -> bool {
         configuration.repository_watch().is_some_and(|watch| {
             watch.repositories().iter().any(|repository| {
+                // A webhook secret is a repository-watch credential like the
+                // polling token, so the same credential boundary applies: neither
+                // may equal or alias the session GitHub credential.
                 credential_files_conflict(&self.github_token_file, repository.credential_file())
+                    || repository.webhook().is_some_and(|webhook| {
+                        credential_files_conflict(&self.github_token_file, webhook.secret_file())
+                    })
             })
         })
     }
