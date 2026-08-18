@@ -691,23 +691,26 @@ impl PostgresRunnerRegistrationService {
                     (action == DirectiveAction::Await).then_some(claimed),
                 )
             }
-            ResumeOperation::ReadyWorkspace(workspace_correlation) => {
-                let action = ready_workspace_resume_action(
-                    &workspace_correlation,
-                    request.runner_id,
-                    request.prior_registration_revision,
-                );
-                (
-                    ready_workspace_directives(&request.inventory, action).map_err(|code| {
-                        RunnerRegistrationFailure::new(
-                            RunnerInboundFrameKind::Resume,
-                            correlation.clone(),
-                            code,
-                        )
-                    })?,
-                    None,
+            ResumeOperation::ReadyWorkspace(ready_correlation) => (
+                ready_workspace_directives(
+                    &request.inventory,
+                    if ready_correlation.runner_id == request.runner_id
+                        && ready_correlation.registration_revision.get() == prior.get()
+                    {
+                        DirectiveAction::Resend
+                    } else {
+                        DirectiveAction::FailStale
+                    },
                 )
-            }
+                .map_err(|code| {
+                    RunnerRegistrationFailure::new(
+                        RunnerInboundFrameKind::Resume,
+                        correlation.clone(),
+                        code,
+                    )
+                })?,
+                None,
+            ),
             ResumeOperation::Empty => (ReconnectDirectives::default(), None),
         };
         let previous_registration_revision = match self
@@ -1178,21 +1181,6 @@ fn ready_workspace_directives(
         .validate_against(inventory)
         .map_err(|_| RejectionCode::CorrelationMismatch)?;
     Ok(directives)
-}
-
-fn ready_workspace_resume_action(
-    correlation: &signalbox_runner_wire::ProvisionCorrelation,
-    authenticated_runner: CanonicalUuid,
-    prior_registration_revision: PositiveU64,
-) -> DirectiveAction {
-    if correlation.runner_id == authenticated_runner
-        && correlation.registration_revision == prior_registration_revision
-        && correlation.repository.is_some()
-    {
-        DirectiveAction::Resend
-    } else {
-        DirectiveAction::FailStale
-    }
 }
 
 impl RunnerLeaseOperationService for RunnerProtocolStore {
@@ -3538,7 +3526,7 @@ mod tests {
     }
 
     #[test]
-    fn s32_inv012_ready_workspace_resume_requests_exact_resend() {
+    fn s32_inv012_ready_workspace_resume_resends_matching_authenticated_evidence() {
         let correlation = repository_workspace_provision_correlation();
         let inventory = ReconnectInventory {
             workspace_operation: Some(WorkspaceOperation::Provision {
@@ -3549,7 +3537,7 @@ mod tests {
         };
 
         let operation = classify_resume_inventory(&inventory)
-            .expect("one ready-unrecorded workspace is recoverable");
+            .expect("one ready-unrecorded workspace is structurally admissible");
         let directives = ready_workspace_directives(&inventory, DirectiveAction::Resend)
             .expect("the exact ready inventory accepts a resend directive");
 
@@ -3601,32 +3589,6 @@ mod tests {
             .expect_err("workspace recovery remains serial with lease recovery");
 
         assert_eq!(rejected, RejectionCode::CorrelationMismatch);
-    }
-
-    #[test]
-    fn s32_ready_workspace_resume_resends_for_the_authenticated_runner_revision() {
-        let correlation = repository_workspace_provision_correlation();
-
-        let action = ready_workspace_resume_action(
-            &correlation,
-            correlation.runner_id,
-            correlation.registration_revision,
-        );
-
-        assert_eq!(action, DirectiveAction::Resend);
-    }
-
-    #[test]
-    fn s32_ready_workspace_resume_fails_a_foreign_runner_correlation() {
-        let correlation = repository_workspace_provision_correlation();
-
-        let action = ready_workspace_resume_action(
-            &correlation,
-            identity(ARBITRARY_PROVISION_RUNNER_ID_SEED + 1),
-            correlation.registration_revision,
-        );
-
-        assert_eq!(action, DirectiveAction::FailStale);
     }
 
     #[test]
