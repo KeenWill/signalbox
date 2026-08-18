@@ -11,16 +11,16 @@ use signalbox_persistence::runner_protocol::{
     AppliedRunnerConnectionTransition, IssuedRunnerEnrollmentIdentities,
     PristineRunnerEnrollmentRequest, RunnerConnectionCause, RunnerConnectionEpoch,
     RunnerConnectionState, RunnerConnectionTransition, RunnerConnectionTransitionEffect,
-    RunnerConnectionTransitionOutcome, RunnerEnrollmentDisposition, RunnerEnrollmentRequestFailure,
-    RunnerEnrollmentRequestId, RunnerProtocolStore, RunnerProtocolStoreError,
-    RunnerRegistrationRevision,
+    RunnerConnectionTransitionOutcome, RunnerEnrollmentAuthority, RunnerEnrollmentDisposition,
+    RunnerEnrollmentRequestFailure, RunnerEnrollmentRequestId, RunnerProtocolStore,
+    RunnerProtocolStoreError, RunnerRegistrationRevision,
 };
 use signalbox_runner_wire::{
     Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Enroll, Enrolled, Frame,
     FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase, MAX_FRAME_BYTES, Message,
-    PositiveU64, ReconnectDirectives, Registered, Rejected, RejectionCode, Resume, Resumed,
-    Shutdown, ShutdownReason, WorkspaceFailureCorrelation, advertisement_digest, decode_line,
-    encode_line,
+    PositiveU64, ReconnectDirectives, Registered, Rejected, RejectionCode, ReplacementPending,
+    Resume, Resumed, Shutdown, ShutdownReason, WorkspaceFailureCorrelation, advertisement_digest,
+    decode_line, encode_line,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -45,10 +45,76 @@ const REGISTRATION_ONLY_CREDENTIAL_PROFILE: &str = "github-runner";
 pub type RunnerRegistrationFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, RunnerRegistrationFailure>> + Send + 'a>>;
 
+/// One closed successful response to a pristine runner enrollment request.
+#[derive(Clone, Debug)]
+pub enum RunnerEnrollmentAccepted {
+    /// The first deployment enrollment received active authority.
+    Active(Enrolled),
+    /// A successor admitted after durable predecessor loss remains provisioning-only.
+    ReplacementPending(ReplacementPending),
+}
+
+impl RunnerEnrollmentAccepted {
+    /// Returns the stable request identity from either accepted authority.
+    pub const fn request_id(&self) -> CanonicalUuid {
+        match self {
+            Self::Active(response) => response.request_id,
+            Self::ReplacementPending(response) => response.request_id,
+        }
+    }
+
+    /// Returns the issued enrollment identity from either accepted authority.
+    pub const fn enrollment_id(&self) -> CanonicalUuid {
+        match self {
+            Self::Active(response) => response.enrollment_id,
+            Self::ReplacementPending(response) => response.enrollment_id,
+        }
+    }
+
+    /// Returns the issued runner identity from either accepted authority.
+    pub const fn runner_id(&self) -> CanonicalUuid {
+        match self {
+            Self::Active(response) => response.runner_id,
+            Self::ReplacementPending(response) => response.runner_id,
+        }
+    }
+
+    /// Returns the issued authentication-reference identity.
+    pub const fn authentication_id(&self) -> CanonicalUuid {
+        match self {
+            Self::Active(response) => response.authentication_id,
+            Self::ReplacementPending(response) => response.authentication_id,
+        }
+    }
+
+    /// Returns the immutable initial registration revision.
+    pub const fn registration_revision(&self) -> PositiveU64 {
+        match self {
+            Self::Active(response) => response.registration_revision,
+            Self::ReplacementPending(response) => response.registration_revision,
+        }
+    }
+
+    /// Returns the opened physical connection epoch.
+    pub const fn connection_epoch(&self) -> PositiveU64 {
+        match self {
+            Self::Active(response) => response.connection_epoch,
+            Self::ReplacementPending(response) => response.connection_epoch,
+        }
+    }
+
+    fn into_message(self) -> Message {
+        match self {
+            Self::Active(response) => Message::Enrolled(response),
+            Self::ReplacementPending(response) => Message::ReplacementPending(response),
+        }
+    }
+}
+
 /// Durable-before-ack boundary consumed by the runner socket runtime.
 pub trait RunnerRegistrationService: Clone + Send + Sync + 'static {
     /// Atomically creates or exactly replays pristine enrollment authority.
-    fn enroll(&self, request: Enroll) -> RunnerRegistrationFuture<'_, Enrolled>;
+    fn enroll(&self, request: Enroll) -> RunnerRegistrationFuture<'_, RunnerEnrollmentAccepted>;
 
     /// Validates one reconnect and returns canonical current registration facts.
     fn resume(&self, request: Resume) -> RunnerRegistrationFuture<'_, Resumed>;
@@ -206,7 +272,10 @@ impl PostgresRunnerRegistrationService {
         Ok(())
     }
 
-    async fn enroll_durably(&self, request: Enroll) -> Result<Enrolled, RunnerRegistrationFailure> {
+    async fn enroll_durably(
+        &self,
+        request: Enroll,
+    ) -> Result<RunnerEnrollmentAccepted, RunnerRegistrationFailure> {
         let _admission = self.registration_admission.lock().await;
         let correlation = AvailableCorrelation::Enrollment(request.request_id);
         if request.digest_version != DIGEST_VERSION {
@@ -279,14 +348,33 @@ impl PostgresRunnerRegistrationService {
             connection_cause = ?connection.cause(),
             "runner connection established"
         );
-        Ok(Enrolled {
-            request_id: CanonicalUuid::from_uuid(receipt.request().into_uuid()),
-            enrollment_id: CanonicalUuid::from_uuid(identities.enrollment().into_uuid()),
-            runner_id: CanonicalUuid::from_uuid(identities.runner().into_uuid()),
-            authentication_id: CanonicalUuid::from_uuid(identities.authentication().into_uuid()),
-            registration_revision: positive_revision(receipt.registration().revision())?,
-            connection_epoch: positive_epoch(connection.epoch())?,
-            advertisement_digest: digest,
+        let request_id = CanonicalUuid::from_uuid(receipt.request().into_uuid());
+        let enrollment_id = CanonicalUuid::from_uuid(identities.enrollment().into_uuid());
+        let runner_id = CanonicalUuid::from_uuid(identities.runner().into_uuid());
+        let authentication_id = CanonicalUuid::from_uuid(identities.authentication().into_uuid());
+        let registration_revision = positive_revision(receipt.registration().revision())?;
+        let connection_epoch = positive_epoch(connection.epoch())?;
+        Ok(match receipt.authority() {
+            RunnerEnrollmentAuthority::Active => RunnerEnrollmentAccepted::Active(Enrolled {
+                request_id,
+                enrollment_id,
+                runner_id,
+                authentication_id,
+                registration_revision,
+                connection_epoch,
+                advertisement_digest: digest,
+            }),
+            RunnerEnrollmentAuthority::ReplacementPending => {
+                RunnerEnrollmentAccepted::ReplacementPending(ReplacementPending {
+                    request_id,
+                    enrollment_id,
+                    runner_id,
+                    authentication_id,
+                    registration_revision,
+                    connection_epoch,
+                    advertisement_digest: digest,
+                })
+            }
         })
     }
 
@@ -624,7 +712,7 @@ fn registration_only_catalog() -> Result<RunnerCatalog, RunnerDomainError> {
 }
 
 impl RunnerRegistrationService for PostgresRunnerRegistrationService {
-    fn enroll(&self, request: Enroll) -> RunnerRegistrationFuture<'_, Enrolled> {
+    fn enroll(&self, request: Enroll) -> RunnerRegistrationFuture<'_, RunnerEnrollmentAccepted> {
         Box::pin(self.enroll_durably(request))
     }
 
@@ -681,6 +769,7 @@ fn store_failure(
     let (code, cause) = match &error {
         RunnerProtocolStoreError::EnrollmentRequest(
             RunnerEnrollmentRequestFailure::ActiveEnrollmentExists { .. }
+            | RunnerEnrollmentRequestFailure::PendingEnrollmentExists { .. }
             | RunnerEnrollmentRequestFailure::ReplayAdvertisementMismatch { .. }
             | RunnerEnrollmentRequestFailure::ReplayPolicyMismatch { .. },
         ) => (
@@ -1275,10 +1364,10 @@ where
         Message::Enroll(request) => match service.enroll(request).await {
             Ok(response) => {
                 let context = ConnectionContext {
-                    enrollment: response.enrollment_id,
-                    epoch: response.connection_epoch,
+                    enrollment: response.enrollment_id(),
+                    epoch: response.connection_epoch(),
                 };
-                if let Err(error) = write_message(&mut writer, Message::Enrolled(response)).await {
+                if let Err(error) = write_message(&mut writer, response.into_message()).await {
                     transition_is_current(
                         &service,
                         context,
@@ -2110,8 +2199,13 @@ mod tests {
     }
 
     impl RunnerRegistrationService for EnrollmentService {
-        fn enroll(&self, _request: Enroll) -> RunnerRegistrationFuture<'_, Enrolled> {
-            Box::pin(std::future::ready(Ok(self.response.clone())))
+        fn enroll(
+            &self,
+            _request: Enroll,
+        ) -> RunnerRegistrationFuture<'_, RunnerEnrollmentAccepted> {
+            Box::pin(std::future::ready(Ok(RunnerEnrollmentAccepted::Active(
+                self.response.clone(),
+            ))))
         }
 
         fn resume(&self, request: Resume) -> RunnerRegistrationFuture<'_, Resumed> {
@@ -2901,6 +2995,58 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
+    async fn lost_active_runner_admits_one_pending_successor_over_the_wire() {
+        let (_container, _database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store, []);
+        let advertisement = empty_advertisement();
+        let active = service
+            .enroll(Enroll {
+                request_id: identity(1),
+                digest_version: DIGEST_VERSION,
+                advertisement: advertisement.clone(),
+            })
+            .await
+            .expect("the initial runner receives active authority");
+        service
+            .transition_connection(
+                active.enrollment_id(),
+                active.connection_epoch(),
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await
+            .expect("the predecessor connection loss commits");
+        let pending_request = identity(2);
+        let pending = service
+            .enroll(Enroll {
+                request_id: pending_request,
+                digest_version: DIGEST_VERSION,
+                advertisement: advertisement.clone(),
+            })
+            .await
+            .expect("the lost predecessor admits one pending successor");
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection(server, service, shutdown);
+        let replay = enroll_over(client, pending_request, advertisement.clone());
+        let (served, observed) = tokio::join!(server, replay);
+        let expected = Message::ReplacementPending(ReplacementPending {
+            request_id: pending_request,
+            enrollment_id: pending.enrollment_id(),
+            runner_id: pending.runner_id(),
+            authentication_id: pending.authentication_id(),
+            registration_revision: pending.registration_revision(),
+            connection_epoch: PositiveU64::try_new(2)
+                .expect("the replay connection epoch is positive"),
+            advertisement_digest: advertisement_digest(&advertisement)
+                .expect("the advertisement has a digest"),
+        });
+
+        served.expect("the replayed pending connection completes");
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
     async fn restart_resumes_the_same_registration_through_a_fresh_pool() {
         let (_container, database_url, store) = postgres_store().await;
         let request_id = identity(1);
@@ -2979,15 +3125,15 @@ mod tests {
 
         service
             .transition_connection(
-                enrolled.enrollment_id,
-                enrolled.connection_epoch,
+                enrolled.enrollment_id(),
+                enrolled.connection_epoch(),
                 RunnerConnectionTransition::RunnerShutdown,
             )
             .await
             .expect("the epoch-targeted shutdown commits");
         let observed = store
             .load_connection(RunnerEnrollmentId::from_uuid(
-                enrolled.enrollment_id.into_uuid(),
+                enrolled.enrollment_id().into_uuid(),
             ))
             .await
             .expect("the shutdown state loads")
@@ -3140,15 +3286,15 @@ mod tests {
 
         service
             .transition_connection(
-                enrolled.enrollment_id,
-                enrolled.connection_epoch,
+                enrolled.enrollment_id(),
+                enrolled.connection_epoch(),
                 RunnerConnectionTransition::TransportClosed,
             )
             .await
             .expect("the dead transport commits loss");
         let observed = store
             .load_connection(RunnerEnrollmentId::from_uuid(
-                enrolled.enrollment_id.into_uuid(),
+                enrolled.enrollment_id().into_uuid(),
             ))
             .await
             .expect("the loss state loads")
@@ -3171,8 +3317,8 @@ mod tests {
             })
             .await
             .expect("the real registration service enrolls the runner");
-        let enrollment = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid());
-        let epoch = RunnerConnectionEpoch::try_from_u64(enrolled.connection_epoch.get())
+        let enrollment = RunnerEnrollmentId::from_uuid(enrolled.enrollment_id().into_uuid());
+        let epoch = RunnerConnectionEpoch::try_from_u64(enrolled.connection_epoch().get())
             .expect("the enrolled connection epoch is positive");
 
         let first = store
@@ -3274,7 +3420,7 @@ mod tests {
             .expect("the prior-process connection produces one applied loss");
         let observed = store
             .load_connection(RunnerEnrollmentId::from_uuid(
-                enrolled.enrollment_id.into_uuid(),
+                enrolled.enrollment_id().into_uuid(),
             ))
             .await
             .expect("the startup loss state loads")
@@ -3283,7 +3429,7 @@ mod tests {
         assert_eq!(transitions.len(), 1);
         assert_eq!(
             applied.enrollment().into_uuid(),
-            enrolled.enrollment_id.into_uuid()
+            enrolled.enrollment_id().into_uuid()
         );
         assert_eq!(applied.snapshot(), observed);
         assert_eq!(observed.state(), RunnerConnectionState::Lost);
@@ -3305,13 +3451,13 @@ mod tests {
             .expect("the runner enrolls before session placement");
         let pool = fresh_pool(&database_url).await;
         let session = SessionId::from_uuid(uuid::Uuid::from_u128(ARBITRARY_RUNNER_SESSION_ID_SEED));
-        let runner = RunnerId::from_uuid(enrolled.runner_id.into_uuid());
+        let runner = RunnerId::from_uuid(enrolled.runner_id().into_uuid());
         create_runner_placed_session(&pool, &store, session, runner).await;
 
         service
             .transition_connection(
-                enrolled.enrollment_id,
-                enrolled.connection_epoch,
+                enrolled.enrollment_id(),
+                enrolled.connection_epoch(),
                 RunnerConnectionTransition::TransportClosed,
             )
             .await
@@ -3350,12 +3496,12 @@ mod tests {
             .expect("the runner enrolls before session placement");
         let pool = fresh_pool(&database_url).await;
         let session = SessionId::from_uuid(uuid::Uuid::from_u128(ARBITRARY_RUNNER_SESSION_ID_SEED));
-        let runner = RunnerId::from_uuid(enrolled.runner_id.into_uuid());
+        let runner = RunnerId::from_uuid(enrolled.runner_id().into_uuid());
         create_runner_placed_session(&pool, &store, session, runner).await;
         store
             .transition_connection_with_effect(
-                RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid()),
-                RunnerConnectionEpoch::try_from_u64(enrolled.connection_epoch.get())
+                RunnerEnrollmentId::from_uuid(enrolled.enrollment_id().into_uuid()),
+                RunnerConnectionEpoch::try_from_u64(enrolled.connection_epoch().get())
                     .expect("the connection epoch is positive"),
                 RunnerConnectionTransition::TransportClosed,
             )
@@ -3364,8 +3510,8 @@ mod tests {
 
         let replayed = service
             .transition_connection(
-                enrolled.enrollment_id,
-                enrolled.connection_epoch,
+                enrolled.enrollment_id(),
+                enrolled.connection_epoch(),
                 RunnerConnectionTransition::TransportClosed,
             )
             .await
@@ -3385,7 +3531,7 @@ mod tests {
             RunnerConnectionTransitionOutcome::Current(
                 store
                     .load_connection(RunnerEnrollmentId::from_uuid(
-                        enrolled.enrollment_id.into_uuid(),
+                        enrolled.enrollment_id().into_uuid(),
                     ))
                     .await
                     .expect("the connection state loads")
@@ -3416,12 +3562,12 @@ mod tests {
             .expect("the prior daemon enrolls the runner");
         let pool = fresh_pool(&database_url).await;
         let session = SessionId::from_uuid(uuid::Uuid::from_u128(ARBITRARY_RUNNER_SESSION_ID_SEED));
-        let runner = RunnerId::from_uuid(enrolled.runner_id.into_uuid());
+        let runner = RunnerId::from_uuid(enrolled.runner_id().into_uuid());
         create_runner_placed_session(&pool, &store, session, runner).await;
         store
             .transition_connection_with_effect(
-                RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid()),
-                RunnerConnectionEpoch::try_from_u64(enrolled.connection_epoch.get())
+                RunnerEnrollmentId::from_uuid(enrolled.enrollment_id().into_uuid()),
+                RunnerConnectionEpoch::try_from_u64(enrolled.connection_epoch().get())
                     .expect("the connection epoch is positive"),
                 RunnerConnectionTransition::TransportClosed,
             )
@@ -3473,13 +3619,13 @@ mod tests {
             .expect("the real registration service enrolls the runner");
         let resumed = service
             .resume(Resume {
-                request_id: enrolled.request_id,
+                request_id: enrolled.request_id(),
                 digest_version: DIGEST_VERSION,
-                enrollment_id: enrolled.enrollment_id,
-                runner_id: enrolled.runner_id,
-                authentication_id: enrolled.authentication_id,
+                enrollment_id: enrolled.enrollment_id(),
+                runner_id: enrolled.runner_id(),
+                authentication_id: enrolled.authentication_id(),
                 advertisement,
-                prior_registration_revision: enrolled.registration_revision,
+                prior_registration_revision: enrolled.registration_revision(),
                 inventory: Default::default(),
             })
             .await
@@ -3487,21 +3633,21 @@ mod tests {
 
         let refused = service
             .transition_connection(
-                enrolled.enrollment_id,
-                enrolled.connection_epoch,
+                enrolled.enrollment_id(),
+                enrolled.connection_epoch(),
                 RunnerConnectionTransition::RunnerShutdown,
             )
             .await
             .expect("stale epoch detection is a typed outcome");
         let observed = store
             .load_connection(RunnerEnrollmentId::from_uuid(
-                enrolled.enrollment_id.into_uuid(),
+                enrolled.enrollment_id().into_uuid(),
             ))
             .await
             .expect("the current connection state loads")
             .expect("the connection lifecycle exists");
         let expected_stale = RunnerConnectionTransitionOutcome::Stale {
-            observed: RunnerConnectionEpoch::try_from_u64(enrolled.connection_epoch.get())
+            observed: RunnerConnectionEpoch::try_from_u64(enrolled.connection_epoch().get())
                 .expect("the enrolled epoch is positive"),
             current: RunnerConnectionEpoch::try_from_u64(resumed.connection_epoch.get())
                 .expect("the resumed epoch is positive"),
@@ -3528,13 +3674,13 @@ mod tests {
             .expect("the real registration service enrolls the runner");
         let resumed = service
             .resume(Resume {
-                request_id: enrolled.request_id,
+                request_id: enrolled.request_id(),
                 digest_version: DIGEST_VERSION,
-                enrollment_id: enrolled.enrollment_id,
-                runner_id: enrolled.runner_id,
-                authentication_id: enrolled.authentication_id,
+                enrollment_id: enrolled.enrollment_id(),
+                runner_id: enrolled.runner_id(),
+                authentication_id: enrolled.authentication_id(),
                 advertisement: advertisement.clone(),
-                prior_registration_revision: enrolled.registration_revision,
+                prior_registration_revision: enrolled.registration_revision(),
                 inventory: Default::default(),
             })
             .await
@@ -3542,21 +3688,21 @@ mod tests {
 
         let refused = service
             .advertise(
-                enrolled.enrollment_id,
+                enrolled.enrollment_id(),
                 Advertise {
-                    enrollment_id: enrolled.enrollment_id,
-                    runner_id: enrolled.runner_id,
-                    authentication_id: enrolled.authentication_id,
+                    enrollment_id: enrolled.enrollment_id(),
+                    runner_id: enrolled.runner_id(),
+                    authentication_id: enrolled.authentication_id(),
                     registration_revision: resumed.registration_revision,
                     advertisement,
                 },
-                enrolled.connection_epoch,
+                enrolled.connection_epoch(),
             )
             .await
             .expect_err("the superseded epoch cannot advertise");
         let enrollment = store
             .load_enrollment(RunnerEnrollmentId::from_uuid(
-                enrolled.enrollment_id.into_uuid(),
+                enrolled.enrollment_id().into_uuid(),
             ))
             .await
             .expect("the enrollment loads")
@@ -3594,15 +3740,15 @@ mod tests {
 
         let registered = service
             .advertise(
-                enrolled.enrollment_id,
+                enrolled.enrollment_id(),
                 Advertise {
-                    enrollment_id: enrolled.enrollment_id,
-                    runner_id: enrolled.runner_id,
-                    authentication_id: enrolled.authentication_id,
-                    registration_revision: enrolled.registration_revision,
+                    enrollment_id: enrolled.enrollment_id(),
+                    runner_id: enrolled.runner_id(),
+                    authentication_id: enrolled.authentication_id(),
+                    registration_revision: enrolled.registration_revision(),
                     advertisement: empty_advertisement(),
                 },
-                enrolled.connection_epoch,
+                enrolled.connection_epoch(),
             )
             .await
             .expect("the changed advertisement is acknowledged after reconciliation");
@@ -3611,7 +3757,7 @@ mod tests {
                FROM runner_registration_reconciliation
               WHERE enrollment_id = $1 AND registration_revision = $2",
         )
-        .bind(enrolled.enrollment_id.into_uuid())
+        .bind(enrolled.enrollment_id().into_uuid())
         .bind(Decimal::from(registered.registration_revision.get()))
         .fetch_one(&pool)
         .await
@@ -3643,21 +3789,21 @@ mod tests {
 
         let refused = service
             .advertise(
-                enrolled.enrollment_id,
+                enrolled.enrollment_id(),
                 Advertise {
                     enrollment_id: identity(99),
-                    runner_id: enrolled.runner_id,
-                    authentication_id: enrolled.authentication_id,
-                    registration_revision: enrolled.registration_revision,
+                    runner_id: enrolled.runner_id(),
+                    authentication_id: enrolled.authentication_id(),
+                    registration_revision: enrolled.registration_revision(),
                     advertisement,
                 },
-                enrolled.connection_epoch,
+                enrolled.connection_epoch(),
             )
             .await
             .expect_err("the connection cannot advertise for another enrollment");
         let enrollment = store
             .load_enrollment(RunnerEnrollmentId::from_uuid(
-                enrolled.enrollment_id.into_uuid(),
+                enrolled.enrollment_id().into_uuid(),
             ))
             .await
             .expect("the enrollment loads")
@@ -3671,7 +3817,7 @@ mod tests {
         assert_eq!(refused.code, RejectionCode::CorrelationMismatch);
         assert_eq!(
             registration.revision().get(),
-            enrolled.registration_revision.get()
+            enrolled.registration_revision().get()
         );
     }
 

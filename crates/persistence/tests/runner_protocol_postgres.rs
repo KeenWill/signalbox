@@ -52,8 +52,10 @@ use signalbox_persistence::{
         ProcessReadRepository, ProcessRunnerConnectionHealth, ProcessRunnerProjectionState,
     },
     runner_protocol::{
-        RunnerConnectionCause, RunnerConnectionEpoch, RunnerConnectionLossSessionDisposition,
-        RunnerConnectionState, RunnerConnectionTransition, RunnerProtocolCorruption,
+        IssuedRunnerEnrollmentIdentities, PristineRunnerEnrollmentRequest, RunnerConnectionCause,
+        RunnerConnectionEpoch, RunnerConnectionLossSessionDisposition, RunnerConnectionState,
+        RunnerConnectionTransition, RunnerEnrollmentAuthority, RunnerEnrollmentDisposition,
+        RunnerEnrollmentRequestFailure, RunnerEnrollmentRequestId, RunnerProtocolCorruption,
         RunnerProtocolStore, RunnerProtocolStoreError, RunnerRegistrationReconciliationDisposition,
         StoredValidatedRunnerRegistration,
     },
@@ -84,6 +86,9 @@ const REPLACEMENT_AUTHENTICATION: u128 = 0x9301;
 const LATER_ENROLLMENT: u128 = 0x9102;
 const LATER_RUNNER: u128 = 0x9202;
 const LATER_AUTHENTICATION: u128 = 0x9302;
+const ENROLLMENT_REQUEST: u128 = 0x9350;
+const PENDING_ENROLLMENT_REQUEST: u128 = 0x9351;
+const SECOND_PENDING_ENROLLMENT_REQUEST: u128 = 0x9352;
 const SESSION: u128 = 0x9400;
 const FOREIGN_SESSION: u128 = 0x9401;
 const SECOND_SESSION: u128 = 0x9402;
@@ -101,6 +106,7 @@ const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608110003;
 const PRE_PLACEMENT_LOSS_FENCE_MIGRATION: i64 = 202608110004;
 const PRE_RUNNER_LOSS_CURSOR_MIGRATION: i64 = 202608110005;
 const PRE_REGISTRATION_RECONCILIATION_MIGRATION: i64 = 202608110006;
+const PRE_PENDING_SUCCESSOR_MIGRATION: i64 = 202608110007;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
@@ -790,6 +796,24 @@ fn advertisement() -> RunnerAdvertisement {
         [WorkspaceCapability::WorktreePerSession],
         sandbox_profiles(),
         [repository_entry()],
+    )
+}
+
+fn pristine_enrollment_request(
+    request: u128,
+    enrollment: u128,
+    runner: u128,
+    authentication: u128,
+) -> PristineRunnerEnrollmentRequest {
+    PristineRunnerEnrollmentRequest::new(
+        RunnerEnrollmentRequestId::from_uuid(uuid(request)),
+        IssuedRunnerEnrollmentIdentities::new(
+            RunnerEnrollmentId::from_uuid(uuid(enrollment)),
+            RunnerId::from_uuid(uuid(runner)),
+            RunnerAuthenticationId::from_uuid(uuid(authentication)),
+        ),
+        [class()],
+        advertisement(),
     )
 }
 
@@ -3537,6 +3561,234 @@ async fn stored_check_violation(pool: &PgPool) -> RunnerProtocolStoreError {
         .await
         .expect_err("an enrollment inserted as already revoked violates the guard"),
     )
+}
+
+/// INV-042 / INV-044: exact durable predecessor loss admits one
+/// provisioning-only successor and equal replay reads back its original facts.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_inv044_pending_successor_enrollment_round_trips_and_replays()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let active = store
+        .enroll_pristine(pristine_enrollment_request(
+            ENROLLMENT_REQUEST,
+            ENROLLMENT,
+            RUNNER,
+            AUTHENTICATION,
+        ))
+        .await?;
+    let active_connection = store
+        .open_connection(active.receipt().enrollment().enrollment())
+        .await?;
+    store
+        .transition_connection(
+            active.receipt().enrollment().enrollment(),
+            active_connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let predecessor_loss = store
+        .load_current_connection_loss(active.receipt().enrollment().enrollment())
+        .await?
+        .expect("the terminal predecessor owns an exact loss epoch");
+    let created = store
+        .enroll_pristine(pristine_enrollment_request(
+            PENDING_ENROLLMENT_REQUEST,
+            REPLACEMENT_ENROLLMENT,
+            REPLACEMENT_RUNNER,
+            REPLACEMENT_AUTHENTICATION,
+        ))
+        .await?;
+    let loaded = store
+        .load_pending_enrollment(RunnerEnrollmentRequestId::from_uuid(uuid(
+            PENDING_ENROLLMENT_REQUEST,
+        )))
+        .await?
+        .expect("the pending successor reads back through its exact relation");
+    let replayed = store
+        .enroll_pristine(pristine_enrollment_request(
+            PENDING_ENROLLMENT_REQUEST,
+            LATER_ENROLLMENT,
+            LATER_RUNNER,
+            LATER_AUTHENTICATION,
+        ))
+        .await?;
+    let pending_connection = store
+        .open_connection(created.receipt().enrollment().enrollment())
+        .await?;
+    let resumed = store
+        .resume_registration(
+            created.receipt().request(),
+            created.receipt().identities(),
+            created.receipt().registration().revision(),
+            advertisement(),
+        )
+        .await?;
+    let changed_resume = store
+        .resume_registration(
+            created.receipt().request(),
+            created.receipt().identities(),
+            created.receipt().registration().revision(),
+            narrowed_advertisement(),
+        )
+        .await
+        .expect_err("pending authority rejects registration mutation");
+    let expected_changed_resume = RunnerProtocolStoreError::Domain(RunnerDomainError::InvalidState);
+
+    assert_eq!(active.disposition(), RunnerEnrollmentDisposition::Created);
+    assert_eq!(
+        active.receipt().authority(),
+        RunnerEnrollmentAuthority::Active
+    );
+    assert_eq!(created.disposition(), RunnerEnrollmentDisposition::Created);
+    assert_eq!(
+        created.receipt().authority(),
+        RunnerEnrollmentAuthority::ReplacementPending
+    );
+    assert_eq!(
+        created.receipt().enrollment().state(),
+        signalbox_domain::RunnerEnrollmentState::Pending
+    );
+    assert_eq!(
+        loaded.predecessor(),
+        active.receipt().enrollment().enrollment()
+    );
+    assert_eq!(
+        loaded.predecessor_loss_epoch(),
+        predecessor_loss.loss_epoch()
+    );
+    assert_eq!(
+        loaded.receipt().identities(),
+        created.receipt().identities()
+    );
+    assert_eq!(
+        replayed.disposition(),
+        RunnerEnrollmentDisposition::Replayed
+    );
+    assert_eq!(
+        replayed.receipt().identities(),
+        created.receipt().identities()
+    );
+    assert_eq!(
+        replayed.receipt().authority(),
+        RunnerEnrollmentAuthority::ReplacementPending
+    );
+    assert_eq!(pending_connection.epoch(), active_connection.epoch());
+    assert_eq!(resumed.identities(), created.receipt().identities());
+    assert_eq!(
+        resumed.registration().revision(),
+        created.receipt().registration().revision()
+    );
+    assert_eq!(
+        changed_resume.to_string(),
+        expected_changed_resume.to_string()
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042: the temporary version-one admission policy permits at most one
+/// provisioning-only successor while preserving predecessor-scoped storage.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_second_pending_successor_request_is_rejected() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let active = store
+        .enroll_pristine(pristine_enrollment_request(
+            ENROLLMENT_REQUEST,
+            ENROLLMENT,
+            RUNNER,
+            AUTHENTICATION,
+        ))
+        .await?;
+    let connection = store
+        .open_connection(active.receipt().enrollment().enrollment())
+        .await?;
+    store
+        .transition_connection(
+            active.receipt().enrollment().enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let pending = store
+        .enroll_pristine(pristine_enrollment_request(
+            PENDING_ENROLLMENT_REQUEST,
+            REPLACEMENT_ENROLLMENT,
+            REPLACEMENT_RUNNER,
+            REPLACEMENT_AUTHENTICATION,
+        ))
+        .await?;
+    let rejected = store
+        .enroll_pristine(pristine_enrollment_request(
+            SECOND_PENDING_ENROLLMENT_REQUEST,
+            LATER_ENROLLMENT,
+            LATER_RUNNER,
+            LATER_AUTHENTICATION,
+        ))
+        .await
+        .expect_err("the occupied pending slot rejects a different request");
+    let expected = RunnerEnrollmentRequestFailure::PendingEnrollmentExists {
+        request: RunnerEnrollmentRequestId::from_uuid(uuid(SECOND_PENDING_ENROLLMENT_REQUEST)),
+        pending_enrollment: pending.receipt().enrollment().enrollment(),
+    };
+
+    assert_eq!(rejected.to_string(), expected.to_string());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042: upgrading an active enrollment preserves its pristine request as
+/// active authority rather than inventing a pending predecessor relation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s30_inv042_pending_successor_migration_preserves_active_request_receipt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_PENDING_SUCCESSOR_MIGRATION, &pool)
+        .await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    sqlx::query(
+        "INSERT INTO runner_enrollment_request_receipt
+            (request_id, enrollment_id, runner_id,
+             authentication_reference_id, registration_revision)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(uuid(ENROLLMENT_REQUEST))
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .bind(expected_enrollment.runner().into_uuid())
+    .bind(expected_enrollment.authentication().into_uuid())
+    .bind(Decimal::from(registration.revision().get()))
+    .execute(&pool)
+    .await?;
+    migrate(&pool).await?;
+    let receipt = store
+        .resume_registration(
+            RunnerEnrollmentRequestId::from_uuid(uuid(ENROLLMENT_REQUEST)),
+            IssuedRunnerEnrollmentIdentities::new(
+                expected_enrollment.enrollment(),
+                expected_enrollment.runner(),
+                expected_enrollment.authentication(),
+            ),
+            registration.revision(),
+            advertisement(),
+        )
+        .await?;
+
+    assert_eq!(receipt.authority(), RunnerEnrollmentAuthority::Active);
+    assert_eq!(receipt.enrollment(), &expected_enrollment);
+    assert_eq!(receipt.registration(), &registration);
+    drop(pool);
+    Ok(())
 }
 
 #[tokio::test]

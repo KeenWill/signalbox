@@ -31,7 +31,9 @@ and startup resumption were verified against this PR
 (`agent/runner-loss-daemon-propagation`). Registration-triggered placement
 reconciliation, including exact durable cause authentication and restartable
 daemon paging, was verified against this PR
-(`agent/runner-registration-reconciliation`).
+(`agent/runner-registration-reconciliation`). Pending-successor admission after
+exact durable predecessor loss was verified against this PR
+(`agent/runner-pending-successor-promotion`).
 
 The registration-only executable slice is verified through PR #376
 (`agent/runner-daemon`). It adds the dedicated local listener, durable
@@ -594,18 +596,20 @@ advertisement; another pristine request conflicts rather than replacing active
 authority. The runner atomically journals the returned receipt before treating
 enrollment as complete.
 
-**Committed unimplemented functionality.** No present enrollment path creates a
-pending successor. After durable predecessor loss, a successor request may in
-future issue the same identity shapes plus one checked `PendingRunnerEnrollment`
-and pending registration revision. That authority may admit heartbeat, startup
-leak reconciliation, and one user-command-bound workspace operation, but never
+After durable predecessor loss, the enrollment path may issue the same identity
+shapes plus one checked `PendingRunnerEnrollment` and pending registration
+revision. The relation retains the exact active predecessor and durable loss
+epoch that admitted it. Pending authority admits a physical connection, exact
+receipt resume, heartbeat, and startup connection reconciliation, but never
 registration mutation, grant creation, lease offer, claim, or dispatch. At most
-one pending request may exist, and equal replay must return its exact original
-receipt.
+one pending request may exist in the temporary version-one deployment, and equal
+replay returns its original identities, registration, advertisement, and
+authority while opening a fresh connection epoch.
 
-The following same-runner recovery, pending promotion, and replacement-command
-paragraphs are also committed unimplemented functionality; no present daemon or
-runner command surface provides them.
+**Committed unimplemented functionality.** No present pending enrollment can
+perform the one future user-command-bound workspace operation. The following
+same-runner recovery, pending promotion, and replacement-command paragraphs are
+also unimplemented; no present daemon or runner command surface provides them.
 
 Loss triggered by re-registration has its own recovery. When a live runner stops
 advertising a capability that a pinned placement requires, the

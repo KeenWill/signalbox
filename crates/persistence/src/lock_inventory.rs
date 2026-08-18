@@ -318,9 +318,21 @@ pub(crate) const HUB_FENCE_GENERATION: &str = "SELECT generation
           FOR UPDATE";
 
 pub(crate) const RUNNER_ENROLLMENT: &str = "SELECT enrollment_id
-               FROM runner_enrollment
-              WHERE enrollment_id = $1
-              FOR UPDATE";
+           FROM runner_enrollment
+          WHERE enrollment_id = $1
+          FOR UPDATE";
+
+pub(crate) const RUNNER_PRISTINE_ACTIVE_ENROLLMENTS: &str = "SELECT enrollment_id
+           FROM runner_enrollment
+          WHERE state_kind = 'active'
+          ORDER BY enrollment_id
+          FOR UPDATE";
+
+pub(crate) const RUNNER_PRISTINE_PENDING_ENROLLMENTS: &str = "SELECT enrollment_id
+           FROM runner_enrollment
+          WHERE state_kind = 'pending'
+          ORDER BY enrollment_id
+          FOR SHARE";
 
 pub(crate) const RUNNER_GRANT: &str = "SELECT credential_profile_name
                FROM runner_credential_grant

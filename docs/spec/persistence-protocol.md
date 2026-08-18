@@ -11,7 +11,9 @@ propagation transaction and cursor completion were verified against this PR
 startup resumption of every pending cursor were verified against this PR
 (`agent/runner-loss-daemon-propagation`). The registration-reconciliation
 cursor, exact registration-loss cause, and per-session transaction were verified
-against this PR (`agent/runner-registration-reconciliation`).
+against this PR (`agent/runner-registration-reconciliation`). Pending-successor
+enrollment admission and exact receipt replay were verified against this PR
+(`agent/runner-pending-successor-promotion`).
 
 The runner-state transition outbox representation, relational source checks, and
 dispatch projection were verified against this PR
@@ -141,7 +143,7 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — seventy-eight files, `202607180001` through
+`crates/persistence/migrations/` — eighty files, `202607180001` through
 `202608140100` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
@@ -392,6 +394,18 @@ Representation rules, all enforced in the schema:
   candidate. The daemon drains the cursor before acknowledging a changed
   registration and drains any crash-retained cursor before startup classifies
   old physical connections lost.
+- Migration `202608110008` distinguishes active and replacement-pending
+  enrollment receipts and stores each pending candidate's exact active
+  predecessor and durable connection-loss epoch. The version-one adapter
+  serializes pristine admission, returns an equal request's original receipt
+  before inspecting the occupied slot, admits one pending candidate only while
+  the current active predecessor is durably lost, and rejects another request
+  while that slot remains occupied. Deferred checks require the pending state,
+  receipt authority, predecessor enrollment, and loss source to agree. Pending
+  authority may create only registration revision one and may open or resume a
+  physical connection; later advertisement mutation remains refused. Existing
+  request receipts migrate as active authority. Promotion is not part of this
+  migration and remains a separate command-authorized transaction.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. This includes raw-record blobs and occurrences,
@@ -671,8 +685,8 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Twenty-three explicit lock
-statements live in the schema instead:
+`crates/persistence/src/lock_inventory.rs`. Twenty-five explicit lock statements
+live in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
@@ -718,6 +732,10 @@ statements live in the schema instead:
   `FOR UPDATE` on the session scheduler, then `FOR SHARE` on the selected
   enrollment, connection authority head, and optional current loss head before
   deriving the immutable baseline and before the placement row becomes visible.
+- the pending-successor registration and connection guards in migration
+  `202608110008` take `FOR SHARE` or `FOR UPDATE`, respectively, on the
+  candidate enrollment before admitting its first registration or a physical
+  connection.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here

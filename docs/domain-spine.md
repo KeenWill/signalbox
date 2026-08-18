@@ -8670,12 +8670,19 @@ impl RunnerAdvertisement {
 }
 
 pub enum RunnerEnrollmentState {
+    Pending,
     Active,
     Revoked,
 }
 pub struct RunnerEnrollment { /* private */ }
 impl RunnerEnrollment {
     pub fn new(
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        authentication: RunnerAuthenticationId,
+        allowed_classes: impl IntoIterator<Item = RunnerCapabilityClass>,
+    ) -> Self;
+    pub fn new_pending(
         enrollment: RunnerEnrollmentId,
         runner: RunnerId,
         authentication: RunnerAuthenticationId,

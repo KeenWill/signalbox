@@ -764,9 +764,11 @@ impl RunnerAdvertisement {
     }
 }
 
-/// Active or terminally revoked logical enrollment.
+/// Provisioning-only pending, active, or terminally revoked enrollment.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RunnerEnrollmentState {
+    /// The enrollment may connect but cannot mutate availability or execute work.
+    Pending,
     /// The enrollment may register runner availability.
     Active,
     /// The enrollment is terminally unable to register.
@@ -808,12 +810,44 @@ impl RunnerEnrollment {
         authentication: RunnerAuthenticationId,
         allowed_classes: impl IntoIterator<Item = RunnerCapabilityClass>,
     ) -> Self {
+        Self::with_state(
+            enrollment,
+            runner,
+            authentication,
+            allowed_classes,
+            RunnerEnrollmentState::Active,
+        )
+    }
+
+    /// Creates a provisioning-only pending enrollment with no registration revision.
+    pub fn new_pending(
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        authentication: RunnerAuthenticationId,
+        allowed_classes: impl IntoIterator<Item = RunnerCapabilityClass>,
+    ) -> Self {
+        Self::with_state(
+            enrollment,
+            runner,
+            authentication,
+            allowed_classes,
+            RunnerEnrollmentState::Pending,
+        )
+    }
+
+    fn with_state(
+        enrollment: RunnerEnrollmentId,
+        runner: RunnerId,
+        authentication: RunnerAuthenticationId,
+        allowed_classes: impl IntoIterator<Item = RunnerCapabilityClass>,
+        state: RunnerEnrollmentState,
+    ) -> Self {
         Self {
             enrollment,
             runner,
             authentication,
             allowed_classes: allowed_classes.into_iter().collect(),
-            state: RunnerEnrollmentState::Active,
+            state,
             registration_revision: Arc::new(AtomicU64::new(0)),
             registration_active: Arc::new(AtomicBool::new(true)),
             registration_preparation: Arc::new(AtomicBool::new(false)),
@@ -882,8 +916,14 @@ impl RunnerEnrollment {
         advertisement: RunnerAdvertisement,
         catalog: &RunnerCatalog,
     ) -> Result<PreparedRunnerRegistration, RunnerDomainError> {
-        if self.state != RunnerEnrollmentState::Active {
-            return Err(RunnerDomainError::EnrollmentRevoked);
+        match self.state {
+            RunnerEnrollmentState::Active => {}
+            RunnerEnrollmentState::Pending
+                if self.registration_revision.load(Ordering::Acquire) == 0 => {}
+            RunnerEnrollmentState::Pending => return Err(RunnerDomainError::InvalidState),
+            RunnerEnrollmentState::Revoked => {
+                return Err(RunnerDomainError::EnrollmentRevoked);
+            }
         }
         if advertisement.repositories.len() > RunnerAdvertisement::MAX_REPOSITORIES {
             return Err(RunnerDomainError::TooManyAdvertisedRepositories);
@@ -999,8 +1039,12 @@ impl RunnerEnrollment {
         &self,
         registration: &ValidatedRunnerRegistration,
     ) -> Result<(), RunnerDomainError> {
-        if self.state != RunnerEnrollmentState::Active {
-            return Err(RunnerDomainError::EnrollmentRevoked);
+        match self.state {
+            RunnerEnrollmentState::Active => {}
+            RunnerEnrollmentState::Pending => return Err(RunnerDomainError::InvalidState),
+            RunnerEnrollmentState::Revoked => {
+                return Err(RunnerDomainError::EnrollmentRevoked);
+            }
         }
         if self.enrollment != registration.enrollment
             || self.runner != registration.runner
@@ -1038,7 +1082,7 @@ impl RunnerEnrollment {
             state: input.state,
             registration_revision: Arc::new(AtomicU64::new(registration_revision)),
             registration_active: Arc::new(AtomicBool::new(
-                input.state == RunnerEnrollmentState::Active,
+                input.state != RunnerEnrollmentState::Revoked,
             )),
             registration_preparation: Arc::new(AtomicBool::new(false)),
         })
@@ -4764,6 +4808,59 @@ mod tests {
         assert_eq!(
             enrollment.register(RunnerAdvertisement::new([], [], [], [], [], []), &catalog()),
             Err(RunnerDomainError::EnrollmentRevoked)
+        );
+    }
+
+    #[test]
+    fn s30_inv042_pending_enrollment_issues_only_its_initial_registration() {
+        let pending = RunnerEnrollment::new_pending(
+            runner_enrollment_id(ENROLLMENT),
+            runner_id(RUNNER),
+            runner_authentication_id(AUTHENTICATION),
+            [class()],
+        );
+        let initial = pending
+            .register(advertisement(), &catalog())
+            .expect("pending authority admits its immutable initial registration");
+
+        assert_eq!(initial.revision(), RunnerGeneration::one());
+        assert_eq!(pending.state(), RunnerEnrollmentState::Pending);
+        assert_eq!(
+            pending.register(advertisement(), &catalog()),
+            Err(RunnerDomainError::InvalidState)
+        );
+    }
+
+    #[test]
+    fn s31_inv042_pending_enrollment_cannot_authorize_a_lease() {
+        let pending = RunnerEnrollment::new_pending(
+            runner_enrollment_id(ENROLLMENT),
+            runner_id(RUNNER),
+            runner_authentication_id(AUTHENTICATION),
+            [class()],
+        );
+        let registration = pending
+            .register(advertisement(), &catalog())
+            .expect("pending authority admits its immutable initial registration");
+
+        assert_eq!(
+            SessionRunnerPlacement::new(
+                session_id(SESSION),
+                exact_placement_request(runner_id(RUNNER)),
+            )
+            .pin_and_offer_lease(
+                &pending,
+                &registration,
+                directory("/workspace/session"),
+                None,
+                authorized(
+                    "inspect",
+                    tool_attempt_id(ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            ),
+            Err(RunnerDomainError::InvalidState)
         );
     }
 
