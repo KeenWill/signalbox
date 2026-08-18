@@ -41,8 +41,10 @@ workspace-free pinned-replacement completion is verified against this PR
 boundary identity pair retained by that stage is verified against this PR
 (`agent/runner-replacement-boundary-identity`). Model-observation finalization
 for a staged exact-directory pinned replacement is verified against this PR
-(`agent/runner-pinned-replacement-observation-finalizer`). Existing-pin
-attempt-and-offer atomicity is verified against this PR
+(`agent/runner-pinned-replacement-observation-finalizer`).
+Registration-loss-only same-runner completion for that workspace-free stage is
+verified against this PR (`agent/runner-same-runner-replacement-finalization`).
+Existing-pin attempt-and-offer atomicity is verified against this PR
 (`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch adapter's
 exact runner/registration lookup and returned enrollment routing identity are
 verified against this PR (`agent/runner-offer-locus-binding`). The
@@ -691,9 +693,16 @@ Representation rules, all enforced in the schema:
   therefore remains the prefix, while ambiguous output uses the issued call
   frontier whose exact count is reread in the transaction. No transaction
   remains open across runner I/O. An earlier nonempty frontier without such an
-  in-flight model observation retains the stage. **Committed unimplemented
-  functionality.** Pending-enrollment and same-runner workspace-free targets
-  remain staged for later checked completion.
+  in-flight model observation retains the stage. Migration `202608110025` admits
+  the same terminal shape when the command explicitly names the lost runner's
+  reenrollment, the loss source is registration reconciliation, the historical
+  loss registration and current registration retain the exact enrollment,
+  runner, and authentication lineage, and the current registration still owns
+  the live connection and advertises the complete placement. An ordinary direct
+  target still requires a distinct runner, and connection loss still records the
+  closed same-runner refusal. **Committed unimplemented functionality.**
+  Pending-enrollment workspace-free targets remain staged for later checked
+  completion.
 - Migration `202608110018` separates the registration revision retained by an
   immutable pinned placement from the then-current registration revision that
   authorizes each lease offer. Existing lease generations preserve their

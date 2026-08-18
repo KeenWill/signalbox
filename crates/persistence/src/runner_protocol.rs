@@ -3136,9 +3136,12 @@ impl RunnerProtocolStore {
         if !matches!(staged, PinnedRunnerReplacementOutcome::Staged { .. }) {
             return Ok(staged);
         }
-        let RunnerReplacementTarget::Runner(_) = command.replacement() else {
+        if matches!(
+            command.replacement(),
+            RunnerReplacementTarget::PendingEnrollment(_)
+        ) {
             return Ok(staged);
-        };
+        }
         let mut transaction = self.pool.begin().await?;
         let scheduler = sqlx::query(REPLACE_LOST_RUNNER_SCHEDULER)
             .bind(command.session().into_uuid())
@@ -3285,8 +3288,14 @@ impl RunnerProtocolStore {
         {
             return Ok(outcome);
         }
-        let RunnerReplacementTarget::Runner(selected_runner) = command.replacement() else {
-            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        let (selected_runner, checked_same_runner) = match command.replacement() {
+            RunnerReplacementTarget::Runner(runner) => (runner, false),
+            RunnerReplacementTarget::SameRunnerReenrollment(runner) => (runner, true),
+            RunnerReplacementTarget::PendingEnrollment(_) => {
+                return Ok(PinnedRunnerReplacementOutcome::Staged {
+                    command: command.command(),
+                });
+            }
         };
         let target_authority = self
             .lock_direct_replacement_target(transaction, selected_runner)
@@ -3354,7 +3363,27 @@ impl RunnerProtocolStore {
         let prior_runner = lost.pinned().runner;
         evidence.prior_runner = Some(prior_runner);
         evidence.new_runner = target_authority.runner();
-        if selected_runner == prior_runner {
+        let selected_is_prior = selected_runner == prior_runner;
+        if checked_same_runner && !selected_is_prior {
+            let rejection = RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+                session: command.session(),
+                target: command.replacement(),
+                reason: RunnerReplacementTargetUnavailableReason::PendingRequestMismatch,
+            };
+            insert_replacement_provisioning_rejection(
+                transaction.as_mut(),
+                command,
+                rejection,
+                evidence,
+            )
+            .await?;
+            return Ok(PinnedRunnerReplacementOutcome::Recorded(
+                PinnedRunnerReplacementResult::Rejected(rejection),
+            ));
+        }
+        if (!checked_same_runner && selected_is_prior)
+            || (checked_same_runner && lost.source() != RunnerPlacementLossSource::Registration)
+        {
             let rejection = RunnerReplacementProvisioningRejection::ReplacementSameRunner {
                 session: command.session(),
                 runner: prior_runner,
@@ -3427,15 +3456,63 @@ impl RunnerProtocolStore {
             });
         }
         let replacement_request = placement.request().clone();
-        let replacement = placement
-            .replace_lost_runner(
+        let replacement = if checked_same_runner {
+            let loss_revision =
+                lost.loss_registration_revision()
+                    .ok_or(RunnerProtocolStoreError::Domain(
+                        RunnerDomainError::InvalidState,
+                    ))?;
+            let loss_registration = load_registration_in(
+                transaction.as_mut(),
+                target.enrollment,
+                RunnerRegistrationRevision::try_from_u64(loss_revision.get())
+                    .ok_or(RunnerProtocolCorruption::InvalidEncoding)?,
+                None,
+                &self.catalog,
+            )
+            .await?
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+            placement.replace_lost_runner_after_same_runner_registration_recovery(
+                replacement_request,
+                signalbox_domain::SameRunnerRegistrationRecovery {
+                    loss_registration: loss_registration.registration().clone(),
+                    current_registration: target.registration.registration().clone(),
+                },
+                working_directory.clone(),
+                None,
+                None,
+            )
+        } else {
+            placement.replace_lost_runner(
                 replacement_request,
                 target.registration.registration(),
                 working_directory.clone(),
                 None,
                 None,
             )
-            .map_err(RunnerProtocolStoreError::Domain)?;
+        };
+        let replacement = match replacement {
+            Ok(replacement) => replacement,
+            Err(error) if replacement_target_is_unavailable(&error) => {
+                let rejection =
+                    RunnerReplacementProvisioningRejection::ReplacementTargetUnavailable {
+                        session: command.session(),
+                        target: command.replacement(),
+                        reason: RunnerReplacementTargetUnavailableReason::NotAdvertised,
+                    };
+                insert_replacement_provisioning_rejection(
+                    transaction.as_mut(),
+                    command,
+                    rejection,
+                    evidence,
+                )
+                .await?;
+                return Ok(PinnedRunnerReplacementOutcome::Recorded(
+                    PinnedRunnerReplacementResult::Rejected(rejection),
+                ));
+            }
+            Err(error) => return Err(RunnerProtocolStoreError::Domain(error)),
+        };
         let next_event_ordinal = current_event_ordinal
             .checked_add(1)
             .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
@@ -7715,7 +7792,10 @@ async fn load_pinned_replacement_record(
                 result.target_registration_revision,
                 result.target_connection_epoch,
                 result.target_connection_event_ordinal,
+                target_registration.enrollment_id AS target_registration_enrollment_id,
                 target_registration.runner_id AS target_registration_runner_id,
+                target_registration.authentication_reference_id
+                    AS target_registration_authentication_id,
                 target_connection.state_kind AS target_connection_state_kind,
                 stage.lost_placement_event_ordinal,
                 stage.lost_placement_revision,
@@ -7725,6 +7805,12 @@ async fn load_pinned_replacement_record(
                 lost.event_kind AS lost_event_kind,
                 lost.state_kind AS lost_state_kind,
                 lost.lost_runner_id AS lost_runner_id,
+                lost.loss_source_kind AS lost_loss_source_kind,
+                lost.loss_registration_revision,
+                loss_registration.enrollment_id AS loss_registration_enrollment_id,
+                loss_registration.runner_id AS loss_registration_runner_id,
+                loss_registration.authentication_reference_id
+                    AS loss_registration_authentication_id,
                 placement.event_kind AS placement_event_kind,
                 placement.state_kind AS stored_placement_state_kind,
                 placement.pinned_runner_id AS placement_runner_id,
@@ -7762,6 +7848,11 @@ async fn load_pinned_replacement_record(
              ON target_registration.enrollment_id = result.target_enrollment_id
             AND target_registration.registration_revision =
                 result.target_registration_revision
+           LEFT JOIN runner_registration AS loss_registration
+             ON loss_registration.enrollment_id =
+                    lost.registration_enrollment_id
+            AND loss_registration.registration_revision =
+                    lost.loss_registration_revision
            LEFT JOIN runner_connection_event AS target_connection
              ON target_connection.enrollment_id = result.target_enrollment_id
             AND target_connection.connection_epoch = result.target_connection_epoch
@@ -7813,14 +7904,19 @@ async fn load_pinned_replacement_record(
     let sandbox: String = row.decode_column("sandbox_profile")?;
     let sandbox =
         runner_sandbox_from_str(&sandbox).ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
-    let _: Uuid = row.decode_column("target_enrollment_id")?;
-    let _ = decode_registration_revision(row.decode_column("target_registration_revision")?)?;
+    let target_enrollment: Uuid = row.decode_column("target_enrollment_id")?;
+    let target_registration_revision =
+        decode_registration_revision(row.decode_column("target_registration_revision")?)?;
     let _ = RunnerConnectionEpoch::try_from_u64(decode_u64(
         row.decode_column("target_connection_epoch")?,
     )?)
     .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
     let _ = decode_u64(row.decode_column("target_connection_event_ordinal")?)?;
+    let target_registration_enrollment: Uuid =
+        row.decode_column("target_registration_enrollment_id")?;
     let target_registration_runner = runner_id(row.decode_column("target_registration_runner_id")?);
+    let target_registration_authentication: Uuid =
+        row.decode_column("target_registration_authentication_id")?;
     let target_connection_state: String = row.decode_column("target_connection_state_kind")?;
     let lost_event_ordinal = decode_u64(row.decode_column("lost_placement_event_ordinal")?)?;
     let lost_revision = decode_runner_generation(row.decode_column("lost_placement_revision")?)?;
@@ -7828,6 +7924,15 @@ async fn load_pinned_replacement_record(
     let lost_event_kind: String = row.decode_column("lost_event_kind")?;
     let lost_state_kind: String = row.decode_column("lost_state_kind")?;
     let lost_runner = runner_id(row.decode_column("lost_runner_id")?);
+    let lost_loss_source: String = row.decode_column("lost_loss_source_kind")?;
+    let loss_registration_revision: Option<Decimal> =
+        row.decode_column("loss_registration_revision")?;
+    let loss_registration_enrollment: Option<Uuid> =
+        row.decode_column("loss_registration_enrollment_id")?;
+    let loss_registration_runner: Option<Uuid> =
+        row.decode_column("loss_registration_runner_id")?;
+    let loss_registration_authentication: Option<Uuid> =
+        row.decode_column("loss_registration_authentication_id")?;
     let placement_event_kind: String = row.decode_column("placement_event_kind")?;
     let stored_placement_state_kind: String = row.decode_column("stored_placement_state_kind")?;
     let placement_runner = runner_id(row.decode_column("placement_runner_id")?);
@@ -7839,7 +7944,27 @@ async fn load_pinned_replacement_record(
     let stage_boundary_frontier: Uuid = row.decode_column("stage_boundary_frontier_id")?;
     let boundary_entry: Uuid = row.decode_column("boundary_entry_id")?;
     let boundary_frontier: Uuid = row.decode_column("boundary_frontier_id")?;
-    if target_registration_runner != new_runner
+    let target_matches = match command.replacement() {
+        RunnerReplacementTarget::Runner(runner) => {
+            runner == new_runner && prior_runner != new_runner
+        }
+        RunnerReplacementTarget::SameRunnerReenrollment(runner) => {
+            runner == new_runner
+                && prior_runner == new_runner
+                && lost_loss_source == "registration"
+                && loss_registration_revision
+                    .map(decode_registration_revision)
+                    .transpose()?
+                    .is_some_and(|revision| revision <= target_registration_revision)
+                && loss_registration_enrollment == Some(target_enrollment)
+                && loss_registration_runner == Some(new_runner.into_uuid())
+                && loss_registration_authentication == Some(target_registration_authentication)
+        }
+        RunnerReplacementTarget::PendingEnrollment(_) => false,
+    };
+    if !target_matches
+        || target_registration_enrollment != target_enrollment
+        || target_registration_runner != new_runner
         || runner_connection_state_from_str(&target_connection_state)
             != Some(RunnerConnectionState::Connected)
         || lost_event_kind != "runner_lost"
