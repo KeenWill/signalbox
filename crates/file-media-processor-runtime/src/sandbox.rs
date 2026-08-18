@@ -12,7 +12,7 @@ use std::{
 
 use rustix::{
     fd::AsFd as _,
-    process::{Resource, Rlimit},
+    process::{Resource, Rlimit, geteuid},
 };
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProcessCeilings, FileMediaProcessor, FileMediaProcessorFuture,
@@ -40,6 +40,7 @@ const WORKER_SANDBOX_PATH: &str = "/signalbox-file-media-worker";
 const BWRAP_PROBE_ARGUMENT: &str = "--signalbox-file-media-isolation-probe";
 const CANCELLATION_POLL: Duration = Duration::from_millis(5);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+const WRITABLE_TMPFS_BUDGET_DIVISOR: u64 = 2;
 
 /// One checked mapping from a provider declaration to its worker executable.
 #[derive(Clone, Debug)]
@@ -87,6 +88,9 @@ impl SandboxedFileMediaProcessor {
     ) -> Result<Self, SandboxedFileMediaProcessorConstructionError> {
         if !cfg!(target_os = "linux") || bindings.is_empty() {
             return Err(SandboxedFileMediaProcessorConstructionError::Unsupported);
+        }
+        if !task_ceiling_is_enforceable(geteuid().as_raw()) {
+            return Err(SandboxedFileMediaProcessorConstructionError::TaskCeiling);
         }
         if !FileMediaProcessCeilings::version_one().admits(ceilings) {
             return Err(SandboxedFileMediaProcessorConstructionError::Ceilings);
@@ -627,7 +631,8 @@ async fn finish_diagnostics(
 }
 
 fn apply_process_limits(ceilings: FileMediaProcessCeilings) -> Result<(), rustix::io::Errno> {
-    set_limit(Resource::As, ceilings.memory_bytes())?;
+    let memory = worker_memory_budget(ceilings.memory_bytes());
+    set_limit(Resource::As, memory.address_space_bytes)?;
     set_limit(Resource::Cpu, ceilings.cpu_seconds())?;
     set_limit(Resource::Core, 0)?;
     set_limit(Resource::Nproc, MAX_WORKER_TASKS)?;
@@ -651,8 +656,7 @@ fn sandbox_arguments(
     memory_bytes: u64,
     probe: bool,
 ) -> Vec<std::ffi::OsString> {
-    let first_tmpfs_bytes = memory_bytes / 2;
-    let second_tmpfs_bytes = memory_bytes - first_tmpfs_bytes;
+    let memory = worker_memory_budget(memory_bytes);
     let mut arguments = [
         "--die-with-parent",
         "--new-session",
@@ -685,11 +689,11 @@ fn sandbox_arguments(
     .collect::<Vec<_>>();
     arguments.extend([
         std::ffi::OsString::from("--size"),
-        std::ffi::OsString::from(first_tmpfs_bytes.to_string()),
+        std::ffi::OsString::from(memory.first_tmpfs_bytes.to_string()),
         std::ffi::OsString::from("--tmpfs"),
         std::ffi::OsString::from("/tmp"),
         std::ffi::OsString::from("--size"),
-        std::ffi::OsString::from(second_tmpfs_bytes.to_string()),
+        std::ffi::OsString::from(memory.second_tmpfs_bytes.to_string()),
         std::ffi::OsString::from("--tmpfs"),
         std::ffi::OsString::from("/run"),
         std::ffi::OsString::from("--ro-bind"),
@@ -714,6 +718,28 @@ fn sandbox_arguments(
         arguments.push(std::ffi::OsString::from(BWRAP_PROBE_ARGUMENT));
     }
     arguments
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WorkerMemoryBudget {
+    address_space_bytes: u64,
+    first_tmpfs_bytes: u64,
+    second_tmpfs_bytes: u64,
+}
+
+const fn worker_memory_budget(memory_bytes: u64) -> WorkerMemoryBudget {
+    let tmpfs_bytes = memory_bytes / WRITABLE_TMPFS_BUDGET_DIVISOR;
+    let first_tmpfs_bytes = tmpfs_bytes / 2;
+    let second_tmpfs_bytes = tmpfs_bytes - first_tmpfs_bytes;
+    WorkerMemoryBudget {
+        address_space_bytes: memory_bytes - tmpfs_bytes,
+        first_tmpfs_bytes,
+        second_tmpfs_bytes,
+    }
+}
+
+const fn task_ceiling_is_enforceable(effective_uid: u32) -> bool {
+    effective_uid != 0
 }
 
 fn process_creation_filter() -> Result<fs::File, std::io::Error> {
@@ -888,6 +914,8 @@ pub enum SandboxedFileMediaProcessorConstructionError {
     Worker,
     /// A process ceiling was zero or exceeded its compiled maximum.
     Ceilings,
+    /// The current identity is exempt from the configured task ceiling.
+    TaskCeiling,
     /// Two worker bindings claimed the same provider.
     DuplicateProvider,
     /// Two worker bindings claimed the same reader identity.
@@ -901,6 +929,7 @@ impl fmt::Display for SandboxedFileMediaProcessorConstructionError {
             Self::Bubblewrap => "file-media bubblewrap executable is invalid",
             Self::Worker => "file-media worker executable is invalid",
             Self::Ceilings => "file-media process ceilings are invalid",
+            Self::TaskCeiling => "file-media task ceiling is unenforceable for this identity",
             Self::DuplicateProvider => "file-media worker provider is duplicated",
             Self::DuplicateReader => "file-media worker reader is duplicated",
         })
@@ -915,7 +944,10 @@ mod tests {
 
     use signalbox_file_media_runtime::{CancellationSignal, ProcessorFailure};
 
-    use super::{CompletedOutput, admit_completed, sandbox_arguments, seccomp_instructions};
+    use super::{
+        CompletedOutput, admit_completed, sandbox_arguments, seccomp_instructions,
+        task_ceiling_is_enforceable, worker_memory_budget,
+    };
 
     struct Cancelled;
 
@@ -960,7 +992,7 @@ mod tests {
             window
                 == [
                     OsStr::new("--size"),
-                    OsStr::new("268435456"),
+                    OsStr::new("134217728"),
                     OsStr::new("--tmpfs"),
                     OsStr::new("/tmp"),
                 ]
@@ -969,7 +1001,7 @@ mod tests {
             window
                 == [
                     OsStr::new("--size"),
-                    OsStr::new("268435456"),
+                    OsStr::new("134217728"),
                     OsStr::new("--tmpfs"),
                     OsStr::new("/run"),
                 ]
@@ -985,6 +1017,24 @@ mod tests {
             &Cancelled,
         );
         assert!(matches!(outcome, Err(ProcessorFailure::Cancelled)));
+    }
+
+    #[test]
+    fn memory_budget_combines_address_space_and_writable_tmpfs() {
+        let budget = worker_memory_budget(512 * 1024 * 1024);
+        assert_eq!(budget.address_space_bytes, 256 * 1024 * 1024);
+        assert_eq!(budget.first_tmpfs_bytes, 128 * 1024 * 1024);
+        assert_eq!(budget.second_tmpfs_bytes, 128 * 1024 * 1024);
+        assert_eq!(
+            budget.address_space_bytes + budget.first_tmpfs_bytes + budget.second_tmpfs_bytes,
+            512 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn root_identity_cannot_claim_an_enforced_task_ceiling() {
+        assert!(!task_ceiling_is_enforceable(0));
+        assert!(task_ceiling_is_enforceable(1_000));
     }
 
     #[test]

@@ -57,6 +57,7 @@ use signalbox_model_runtime::{
 ///
 /// The provider controls the reported spelling, so the diagnostic projection
 /// is bounded before it can reach a log line.
+// numeric-bound: tunable - controls retained provider identity detail
 const DIAGNOSTIC_MODEL_IDENTITY_LIMIT: usize = 128;
 
 const MODEL_IDENTITY_CHANGE_MESSAGE: &str = "Signalbox session event: your model identity is now";
@@ -1333,6 +1334,14 @@ where
             ));
         }
         let usage = provider_reported_token_usage(&report.evidence);
+        let retry_after = match &report.evidence {
+            TerminalEvidence::ProviderError(error) => error.exchange.retry_after,
+            _ => None,
+        };
+        let non_acceptance_proven = match &report.evidence {
+            TerminalEvidence::ProviderError(error) => error.non_acceptance_proven,
+            _ => false,
+        };
         let classified = classify_terminal(
             report.evidence,
             &observations.observations,
@@ -1345,7 +1354,12 @@ where
         let correlation = authorized.observation_correlation();
         Ok(match classified.cause {
             ModelCallCauseCode::ProviderError(kind) => correlation
-                .bind_provider_failure_observation_with_usage(provider_failure_cause(kind), usage),
+                .bind_provider_failure_observation_with_retry_after(
+                    provider_failure_cause(kind),
+                    usage,
+                    retry_after,
+                    non_acceptance_proven,
+                ),
             _ => correlation.bind_terminal_observation_with_usage(classified.observation, usage),
         })
     }
@@ -2729,6 +2743,7 @@ mod tests {
                     exchange: exchange.clone(),
                     reported_model: None,
                     kind: ProviderErrorKind::RateLimited,
+                    non_acceptance_proven: false,
                     native: NativeErrorFacts::default(),
                     usage: TokenUsage::unreported(),
                 }),
@@ -3259,6 +3274,7 @@ mod tests {
                     exchange: ExchangeFacts::default(),
                     reported_model: None,
                     kind: ProviderErrorKind::CredentialRejected,
+                    non_acceptance_proven: false,
                     native: NativeErrorFacts::default(),
                     usage: TokenUsage::unreported(),
                 }),
