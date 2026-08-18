@@ -695,12 +695,15 @@ acknowledges the final page; an interrupted newer report never erases the prior
 complete one. Reconnect inventory names the exact retained page and resumes at
 its durable acknowledgement boundary.
 
-Every operation message after `enrolled` or `replacement_pending` carries the
-exact active or pending connection registration revision. Lease messages
-additionally carry lease id, lease-lineage generation, runner, tool name,
-session, turn, tool request, physical tool attempt, issuing turn attempt, and
-tool dispatch generation. An acknowledgement for another revision or correlation
-is stale evidence and cannot advance either side (INV-042, INV-021, INV-043).
+Every lease or provisioning operation message after `enrolled` or
+`replacement_pending` carries the exact active or pending connection registration
+revision. Lease messages additionally carry lease id, lease-lineage generation,
+runner, tool name, session, turn, tool request, physical tool attempt, issuing
+turn attempt, and tool dispatch generation. Release messages carry their durable
+session, placement revision, runner, and manifest correlation instead; the runner
+identity fences their heartbeat projection to the established connection. An
+acknowledgement for another required revision or correlation is stale evidence
+and cannot advance either side (INV-042, INV-021, INV-043).
 
 The hub durably assigns a new positive connection epoch before each `enrolled`
 or `resumed` acknowledgement. Every post-handshake lifecycle transition names
@@ -718,8 +721,10 @@ with its monotonically increasing heartbeat sequence and the exact current
 journaled lease phase when one exists. When a retained workspace release exists,
 it also projects the accepted or completed release phase, or the exact
 `failure_unrecorded` release correlation after cleanup failure, from the durable
-journal; otherwise it reports no workspace phase. Each phase must name the active
-connection's runner and registration or the runner fails closed before sending.
+journal; otherwise it reports no workspace phase. Lease and provisioning phases
+must name the active connection's runner and registration; release phases must
+name its runner because their durable correlation carries no registration
+revision. Either side fails closed on a mismatched required fence.
 An acknowledgement must name the exact outstanding challenge, and a second
 challenge is not issued while the first remains unanswered. One missed interval
 durably records `suspect`; the third consecutive miss, fifteen seconds after the
