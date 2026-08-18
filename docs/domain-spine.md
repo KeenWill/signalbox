@@ -2514,10 +2514,16 @@ pub struct SubmitInputTerminalSourceConstructionInput {
 pub struct SubmitInputInterruptedModelCallReconciliationConstructionInput {
     /* public named canonical origin, turn, ambiguous call, and interrupt facts */
 }
+pub struct SubmitInputInterruptedToolReconciliationConstructionInput {
+    /* public named canonical origin, turn, ambiguous attempt, and interrupt facts */
+}
 impl SubmitInputTerminalSourceReconstitutionInput {
     pub fn new(input: SubmitInputTerminalSourceConstructionInput) -> Self;
     pub fn interrupted_model_call_reconciliation(
         input: SubmitInputInterruptedModelCallReconciliationConstructionInput,
+    ) -> Self;
+    pub fn interrupted_tool_reconciliation(
+        input: SubmitInputInterruptedToolReconciliationConstructionInput,
     ) -> Self;
 }
 
@@ -6891,6 +6897,10 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     ChildWaitReconciliation(TransactionError),
     ChildWaitMismatch,
     CrashClassification(TransactionError),
+    RecoveredFatalExecutorFailure {
+        failure_class: OperatorFailureClass,
+        cause_code: &'static str,
+    },
     Continuation(TransactionError),
     CatalogDrift,
 }
@@ -10624,7 +10634,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: accepted_input                             | 5                     |
 | domain: delivery_request                           | 2                     |
 | domain: user_content                               | 4                     |
-| domain: submit_input                               | 33                    |
+| domain: submit_input                               | 34                    |
 | domain: queue_order                                | 5 (+1 free fn)        |
 | domain: repo_watch                                 | 49                    |
 | domain: turn_lifecycle                             | 10                    |
@@ -10648,7 +10658,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                    |
 | domain: runner                                     | 70                    |
 | domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **802 (+12 free fn)** |
+| **signalbox-domain total**                         | **803 (+12 free fn)** |
 | application: approval_judge                        | 1 (incl. 1 trait)     |
 | application: conversation_import                   | 12 (incl. 4 traits)   |
 | application: create_session                        | 8 (incl. 2 traits)    |
