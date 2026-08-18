@@ -662,6 +662,7 @@ pub(crate) enum ToolApprovalDecisionSourceStorageKind {
     PolicyAuto,
     SessionBlanket,
     Delegate,
+    UserOverride,
 }
 
 pub(crate) const fn tool_approval_decision_source_to_str(
@@ -672,6 +673,7 @@ pub(crate) const fn tool_approval_decision_source_to_str(
         ToolApprovalDecisionSourceStorageKind::PolicyAuto => "policy_auto",
         ToolApprovalDecisionSourceStorageKind::SessionBlanket => "session_blanket",
         ToolApprovalDecisionSourceStorageKind::Delegate => "delegate",
+        ToolApprovalDecisionSourceStorageKind::UserOverride => "user_override",
     }
 }
 
@@ -683,6 +685,7 @@ pub(crate) fn tool_approval_decision_source_from_str(
         "policy_auto" => Some(ToolApprovalDecisionSourceStorageKind::PolicyAuto),
         "session_blanket" => Some(ToolApprovalDecisionSourceStorageKind::SessionBlanket),
         "delegate" => Some(ToolApprovalDecisionSourceStorageKind::Delegate),
+        "user_override" => Some(ToolApprovalDecisionSourceStorageKind::UserOverride),
         _ => None,
     }
 }
@@ -702,6 +705,8 @@ pub(crate) enum DurableCommandKind {
     SubmitInput,
     /// Tool-request decision.
     DecideToolRequest,
+    /// Delegate-denial override.
+    OverrideDeniedToolRequest,
     /// Review-workflow command.
     ReviewWorkflow,
     /// Review-orchestration command.
@@ -731,6 +736,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::ReplaceSessionMetadata => "replace_session_metadata",
         DurableCommandKind::SubmitInput => "submit_input",
         DurableCommandKind::DecideToolRequest => "decide_tool_request",
+        DurableCommandKind::OverrideDeniedToolRequest => "override_denied_tool_request",
         DurableCommandKind::ReviewWorkflow => "review_workflow",
         DurableCommandKind::ReviewOrchestration => "review_orchestration",
         DurableCommandKind::CompactSession => "compact_session",
@@ -753,6 +759,7 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "replace_session_metadata" => Some(DurableCommandKind::ReplaceSessionMetadata),
         "submit_input" => Some(DurableCommandKind::SubmitInput),
         "decide_tool_request" => Some(DurableCommandKind::DecideToolRequest),
+        "override_denied_tool_request" => Some(DurableCommandKind::OverrideDeniedToolRequest),
         "review_workflow" => Some(DurableCommandKind::ReviewWorkflow),
         "review_orchestration" => Some(DurableCommandKind::ReviewOrchestration),
         "compact_session" => Some(DurableCommandKind::CompactSession),

@@ -1924,6 +1924,29 @@ async fn replace_approval_with_user_command(
     transaction.commit().await
 }
 
+async fn insert_user_override_approval(
+    pool: &PgPool,
+    facts: PhysicalAttemptFacts,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("ALTER TABLE tool_approval_decision DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source,
+             override_denied_request_id)
+         VALUES ($1, 'approve', 'user_override', $2)",
+    )
+    .bind(uuid(facts.request))
+    .bind(uuid(facts.request + (RELATED_IDENTITY_OFFSET * 5)))
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_approval_decision ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 async fn insert_external_physical_attempt(
     pool: &PgPool,
     facts: PhysicalAttemptFacts,
@@ -7302,6 +7325,64 @@ async fn s31_inv035_inv045_session_policy_lease_requires_confirmed_provenance()
 
     assert_store_check_violation(unconfirmed);
     assert_store_check_violation(blanket);
+    assert_eq!(admitted, Decimal::from(1u64));
+    drop(pool);
+    Ok(())
+}
+
+/// S31 / INV-035 / INV-045: a one-shot user override is the user confirming
+/// one exact command in advance, so its provenance admits a session-policy
+/// lease exactly as an applied user command does.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv035_inv045_session_policy_lease_admits_user_override_provenance()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(replacement_profile()),
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: permission_overrides(RunnerToolPermissionOverride::Confirm),
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the fixture working directory is valid"),
+            None,
+            confirmed_authorized_with_effect(INITIAL_PHYSICAL_ATTEMPT, ToolEffectClass::EffectFree),
+            offer_request(),
+        )
+        .expect("the session-policy profile pins the placement");
+    insert_user_override_approval(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    store.store_pin(&pin, &registration).await?;
+    let admitted: Decimal = sqlx::query_scalar(
+        "SELECT generation
+           FROM runner_lease_generation
+          WHERE lease_id = $1",
+    )
+    .bind(uuid(LEASE))
+    .fetch_one(&pool)
+    .await?;
+
     assert_eq!(admitted, Decimal::from(1u64));
     drop(pool);
     Ok(())
