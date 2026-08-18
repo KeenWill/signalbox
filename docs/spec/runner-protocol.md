@@ -65,7 +65,9 @@ readback of an exact claimed lease under authenticated resume facts is
 re-verified through this PR (`agent/runner-claimed-resume-readback`). The
 daemon's checked lease-only resume directives and canonical claim/dispatch
 replay are re-verified through this PR
-(`agent/runner-claimed-resume-transaction`). The placement loss-source, pre-pin
+(`agent/runner-claimed-resume-transaction`). The reusable runner-restricted
+bubblewrap request profile is re-verified through this PR
+(`agent/runner-strict-sandbox-profile`). The placement loss-source, pre-pin
 replacement and abandonment state shapes, and append-only reconstitution-history
 contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
 It owns logical runner enrollment, daemon-authoritative catalog validation,
@@ -1544,6 +1546,17 @@ namespaces; drops capabilities; clears inherited environment; mounts fresh
 `/proc`, `/dev`, `/tmp`, and runtime directories; binds only the session's exact
 writable root read-write; and binds configured toolchain and cache allowlist
 paths read-only.
+
+The reusable process core implements that filesystem and namespace request
+shape: it pins every configured read-only identity, rechecks those identities
+before both the availability probe and dispatch, recreates standard usr-merge
+aliases only when their targets are inside the configured mounts, and derives
+`PATH` only from configured mounts. `signalbox-runner` does not yet invoke this
+constructor or advertise `WorkspaceRestricted`; the execution child slice must
+compose it before any runner tool is executable. The HTTPS broker and resource
+limits remain separate work, with first-release resource limits still
+owner-gated in
+[open questions](../open-questions.md#identity-credentials-and-resource-governance).
 
 Confinement is defined over that writable root, which need not be a repository.
 The root is the provisioned repository when the placement requires a worktree,

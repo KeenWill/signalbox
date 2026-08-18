@@ -16,13 +16,14 @@ use std::{
     fmt,
     future::Future,
     path::{Component, Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 #[cfg(target_os = "linux")]
 use std::{
     process::Stdio,
     sync::{
-        Arc, Mutex, PoisonError,
+        Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     thread::JoinHandle,
@@ -152,6 +153,13 @@ pub enum ExecToolConstructionError {
         /// Underlying filesystem failure, when one occurred.
         source: Option<std::io::Error>,
     },
+    /// A configured runner read-only path was absent, mutable by identity, or invalid.
+    ReadOnlyPath {
+        /// Supplied path associated with the failure.
+        path: PathBuf,
+        /// Underlying filesystem failure, when one occurred.
+        source: Option<std::io::Error>,
+    },
     /// The injected supervisor program was not an absolute canonical file.
     SupervisorProgram {
         /// Supplied program associated with the failure.
@@ -182,6 +190,13 @@ impl fmt::Display for ExecToolConstructionError {
                     path.display()
                 )
             }
+            Self::ReadOnlyPath { path, .. } => {
+                write!(
+                    formatter,
+                    "exec read-only path `{}` is invalid",
+                    path.display()
+                )
+            }
             Self::SupervisorProgram { path, .. } => {
                 write!(
                     formatter,
@@ -207,6 +222,10 @@ impl Error for ExecToolConstructionError {
                 source: Some(source),
                 ..
             }
+            | Self::ReadOnlyPath {
+                source: Some(source),
+                ..
+            }
             | Self::SupervisorProgram {
                 source: Some(source),
                 ..
@@ -220,6 +239,7 @@ impl Error for ExecToolConstructionError {
             | Self::ErrorDetail
             | Self::Duplicate
             | Self::WorkspaceRoot { source: None, .. }
+            | Self::ReadOnlyPath { source: None, .. }
             | Self::SupervisorProgram { source: None, .. }
             | Self::BubblewrapProgram { source: None, .. } => None,
         }
@@ -832,6 +852,7 @@ pub struct SandboxedCommandRunner<Runner> {
     runner: Runner,
     workspace_root: PathBuf,
     bubblewrap_program: PathBuf,
+    mount_profile: Arc<SandboxMountProfile>,
     #[cfg(not(target_os = "linux"))]
     sandbox_launcher: PathBuf,
     #[cfg(target_os = "linux")]
@@ -840,11 +861,60 @@ pub struct SandboxedCommandRunner<Runner> {
     workspace_identity: WorkspaceIdentity,
 }
 
+#[derive(Clone, Debug)]
+enum SandboxMountProfile {
+    DaemonLocal,
+    RunnerRestricted(Vec<ReadOnlyPathIdentity>),
+}
+
+impl SandboxMountProfile {
+    fn identities_are_current(&self) -> bool {
+        match self {
+            Self::DaemonLocal => true,
+            Self::RunnerRestricted(paths) => paths.iter().all(ReadOnlyPathIdentity::matches),
+        }
+    }
+
+    fn executable_path(&self, workspace_root: &Path) -> OsString {
+        match self {
+            Self::DaemonLocal => sandbox_path(workspace_root),
+            Self::RunnerRestricted(paths) => configured_sandbox_path(workspace_root, paths),
+        }
+    }
+}
+
 impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
     /// Admits one canonical injected workspace root.
     pub fn try_new(
         runner: Runner,
         workspace_root: impl AsRef<Path>,
+    ) -> Result<Self, ExecToolConstructionError> {
+        Self::try_new_with_mount_profile(runner, workspace_root, SandboxMountProfile::DaemonLocal)
+    }
+
+    /// Admits one runner workspace and its exact configured read-only path set.
+    ///
+    /// This profile adds the cgroup namespace, drops every capability, creates
+    /// fresh runtime directories, and exposes no read-only host path beyond the
+    /// supplied identities. Network remains fully unshared; a later broker can
+    /// add explicitly authorized egress without widening this filesystem set.
+    pub fn try_new_runner_restricted(
+        runner: Runner,
+        workspace_root: impl AsRef<Path>,
+        read_only_paths: &[PathBuf],
+    ) -> Result<Self, ExecToolConstructionError> {
+        let read_only_paths = capture_read_only_paths(read_only_paths)?;
+        Self::try_new_with_mount_profile(
+            runner,
+            workspace_root,
+            SandboxMountProfile::RunnerRestricted(read_only_paths),
+        )
+    }
+
+    fn try_new_with_mount_profile(
+        runner: Runner,
+        workspace_root: impl AsRef<Path>,
+        mount_profile: SandboxMountProfile,
     ) -> Result<Self, ExecToolConstructionError> {
         #[cfg(target_os = "linux")]
         let workspace_identity = WorkspaceIdentity::capture(workspace_root.as_ref())?;
@@ -872,6 +942,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
             workspace_identity,
             workspace_root,
             bubblewrap_program,
+            mount_profile: Arc::new(mount_profile),
         })
     }
 
@@ -912,6 +983,16 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         capture_bytes: usize,
     ) -> ExecResult {
         let deadline = tokio::time::Instant::now() + requested_timeout;
+        if !self.mount_profile.identities_are_current() {
+            return ExecResult {
+                confinement: ExecutionConfinement::SandboxSetupFailed,
+                outcome: ProcessOutcome::SpawnFailed {
+                    reason: ProcessSpawnFailure::SandboxSetup,
+                },
+                stdout: OutputCapture::empty(),
+                stderr: OutputCapture::empty(),
+            };
+        }
         #[cfg(target_os = "linux")]
         if !self.workspace_identity.matches(&self.workspace_root) {
             return ExecResult {
@@ -923,7 +1004,9 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 stderr: OutputCapture::empty(),
             };
         }
-        let probe_program = sandbox_shell(&self.workspace_root)
+        let sandbox_path = self.mount_profile.executable_path(&self.workspace_root);
+        let probe_program = executable_sandbox_shell(&sandbox_path)
+            .unwrap_or_else(|| PathBuf::from("/bin/sh"))
             .to_string_lossy()
             .into_owned();
         let probe_timeout = deadline
@@ -939,7 +1022,6 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         }
         let probe = bwrap_request(
             SandboxLaunchContext {
-                workspace_root: &self.workspace_root,
                 #[cfg(target_os = "linux")]
                 bind_source: &self.workspace_identity.bind_source,
                 #[cfg(target_os = "linux")]
@@ -958,15 +1040,31 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 working_directory_bind_descriptor: None,
             },
             &self.bubblewrap_program,
-            &probe_program,
-            &[String::from("-c"), String::from("exit 0")],
-            ".",
-            probe_timeout,
-            8 * 1024,
+            SandboxInvocation {
+                program: &probe_program,
+                arguments: &[String::from("-c"), String::from("exit 0")],
+                working_directory: ".",
+                timeout: probe_timeout,
+                capture_bytes: 8 * 1024,
+            },
+            SandboxRequestProfile {
+                mounts: &self.mount_profile,
+                executable_path: &sandbox_path,
+            },
         );
         let availability = self.runner.bwrap_availability(probe).await;
         match availability {
             BwrapAvailability::Available => {
+                if !self.mount_profile.identities_are_current() {
+                    return ExecResult {
+                        confinement: ExecutionConfinement::SandboxSetupFailed,
+                        outcome: ProcessOutcome::SpawnFailed {
+                            reason: ProcessSpawnFailure::SandboxSetup,
+                        },
+                        stdout: OutputCapture::empty(),
+                        stderr: OutputCapture::empty(),
+                    };
+                }
                 #[cfg(target_os = "linux")]
                 if !self.workspace_identity.matches(&self.workspace_root) {
                     return ExecResult {
@@ -1009,7 +1107,6 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 }
                 let request = bwrap_request(
                     SandboxLaunchContext {
-                        workspace_root: &self.workspace_root,
                         #[cfg(target_os = "linux")]
                         bind_source: &self.workspace_identity.bind_source,
                         #[cfg(target_os = "linux")]
@@ -1030,11 +1127,17 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                         working_directory_bind_source: None,
                     },
                     &self.bubblewrap_program,
-                    &arguments.program,
-                    &arguments.arguments,
-                    &arguments.working_directory,
-                    remaining,
-                    capture_bytes,
+                    SandboxInvocation {
+                        program: &arguments.program,
+                        arguments: &arguments.arguments,
+                        working_directory: &arguments.working_directory,
+                        timeout: remaining,
+                        capture_bytes,
+                    },
+                    SandboxRequestProfile {
+                        mounts: &self.mount_profile,
+                        executable_path: &sandbox_path,
+                    },
                 );
                 sandbox_process_result(self.runner.run(request).await, capture_bytes)
             }
@@ -1054,6 +1157,118 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
             },
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct ReadOnlyPathIdentity {
+    destination: PathBuf,
+    bind_source: PathBuf,
+    #[cfg(target_os = "linux")]
+    device: u64,
+    #[cfg(target_os = "linux")]
+    inode: u64,
+    #[cfg(target_os = "linux")]
+    _descriptor: Arc<rustix::fd::OwnedFd>,
+}
+
+impl ReadOnlyPathIdentity {
+    fn capture(path: &Path) -> Result<Self, ExecToolConstructionError> {
+        if !path.is_absolute()
+            || path
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(ExecToolConstructionError::ReadOnlyPath {
+                path: path.to_owned(),
+                source: None,
+            });
+        }
+        let destination =
+            path.canonicalize()
+                .map_err(|source| ExecToolConstructionError::ReadOnlyPath {
+                    path: path.to_owned(),
+                    source: Some(source),
+                })?;
+        if destination != path {
+            return Err(ExecToolConstructionError::ReadOnlyPath {
+                path: path.to_owned(),
+                source: None,
+            });
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let descriptor = rustix::fs::open(
+                &destination,
+                rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW,
+                rustix::fs::Mode::empty(),
+            )
+            .map_err(|source| ExecToolConstructionError::ReadOnlyPath {
+                path: path.to_owned(),
+                source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+            })?;
+            let descriptor =
+                inherited_descriptor_above_standard_streams(descriptor).map_err(|source| {
+                    ExecToolConstructionError::ReadOnlyPath {
+                        path: path.to_owned(),
+                        source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+                    }
+                })?;
+            let metadata = rustix::fs::fstat(&descriptor).map_err(|source| {
+                ExecToolConstructionError::ReadOnlyPath {
+                    path: path.to_owned(),
+                    source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+                }
+            })?;
+            let bind_source = descriptor_path(rustix::fd::AsRawFd::as_raw_fd(&descriptor));
+            Ok(Self {
+                destination,
+                bind_source,
+                device: metadata.st_dev,
+                inode: metadata.st_ino,
+                _descriptor: Arc::new(descriptor),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(Self {
+                bind_source: destination.clone(),
+                destination,
+            })
+        }
+    }
+
+    fn matches(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.destination.symlink_metadata().is_ok_and(|metadata| {
+                !metadata.file_type().is_symlink()
+                    && metadata.dev() == self.device
+                    && metadata.ino() == self.inode
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.destination
+                .canonicalize()
+                .is_ok_and(|path| path == self.destination)
+        }
+    }
+}
+
+fn capture_read_only_paths(
+    paths: &[PathBuf],
+) -> Result<Vec<ReadOnlyPathIdentity>, ExecToolConstructionError> {
+    let invalid_path = paths.first().cloned().unwrap_or_default();
+    if paths.is_empty() || paths.iter().collect::<BTreeSet<_>>().len() != paths.len() {
+        return Err(ExecToolConstructionError::ReadOnlyPath {
+            path: invalid_path,
+            source: None,
+        });
+    }
+    paths
+        .iter()
+        .map(|path| ReadOnlyPathIdentity::capture(path))
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -1350,7 +1565,6 @@ fn direct_request(
 
 #[derive(Clone, Copy)]
 struct SandboxLaunchContext<'a> {
-    workspace_root: &'a Path,
     bind_source: &'a Path,
     #[cfg(target_os = "linux")]
     bind_descriptor: i32,
@@ -1364,20 +1578,31 @@ struct SandboxLaunchContext<'a> {
     working_directory_bind_descriptor: Option<i32>,
 }
 
+#[derive(Clone, Copy)]
+struct SandboxInvocation<'a> {
+    program: &'a str,
+    arguments: &'a [String],
+    working_directory: &'a str,
+    timeout: Duration,
+    capture_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SandboxRequestProfile<'a> {
+    mounts: &'a SandboxMountProfile,
+    executable_path: &'a std::ffi::OsStr,
+}
+
 fn bwrap_request(
     context: SandboxLaunchContext<'_>,
     bubblewrap_program: &Path,
-    program: &str,
-    arguments: &[String],
-    working_directory: &str,
-    timeout: Duration,
-    capture_bytes: usize,
+    invocation: SandboxInvocation<'_>,
+    profile: SandboxRequestProfile<'_>,
 ) -> ProcessRequest {
-    let sandbox_path = sandbox_path(context.workspace_root);
-    let sandbox_directory = if working_directory == "." {
+    let sandbox_directory = if invocation.working_directory == "." {
         String::from(SANDBOX_WORKSPACE)
     } else {
-        format!("{SANDBOX_WORKSPACE}/{working_directory}")
+        format!("{SANDBOX_WORKSPACE}/{}", invocation.working_directory)
     };
     // The leading flags are this profile's whole namespace isolation. A deletion
     // or reordering here fails
@@ -1390,65 +1615,74 @@ fn bwrap_request(
         "--unshare-pid",
         "--unshare-ipc",
         "--unshare-uts",
-        "--unshare-net",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-        "--ro-bind-try",
-        "/usr",
-        "/usr",
-        "--ro-bind-try",
-        "/bin",
-        "/bin",
-        "--ro-bind-try",
-        "/lib",
-        "/lib",
-        "--ro-bind-try",
-        "/lib64",
-        "/lib64",
-        "--ro-bind-try",
-        "/nix/store",
-        "/nix/store",
-        "--dir",
-        "/etc",
-        "--ro-bind-try",
-        "/etc/alternatives",
-        "/etc/alternatives",
-        // `/etc/hosts` and `/etc/nsswitch.conf` are kept: the unshared network
-        // namespace still carries a loopback interface, and glibc reads
-        // `nsswitch.conf` for `passwd`/`group` lookups that no resolver serves.
-        //
-        // `/etc/ssl` is kept on purpose, and is not dead weight to clean up.
-        // Building a TLS client reads the trust store even when nothing will be
-        // connected to: reqwest depends on `rustls-platform-verifier`, which
-        // loads the native store on Linux, so workspace tests that construct an
-        // HTTPS client would meet an empty root store without it. Binding it
-        // adds no transport and no IP route, so it grants no reach the profile
-        // did not already have — it only lets a client finish constructing.
-        // What this profile does and does not fence, including the non-IP
-        // transports that survive `--unshare-net`, is owned by
-        // `docs/spec/configuration-and-credentials.md`.
-        //
-        // `/etc/resolv.conf` is deliberately absent. Resolving a name needs the
-        // network that `--unshare-net` removes, so it is genuinely inert, and
-        // binding it would leave the profile reading as though egress were
-        // still expected to work.
-        "--ro-bind-try",
-        "/etc/hosts",
-        "/etc/hosts",
-        "--ro-bind-try",
-        "/etc/nsswitch.conf",
-        "/etc/nsswitch.conf",
-        "--ro-bind-try",
-        "/etc/ssl",
-        "/etc/ssl",
     ]
     .into_iter()
     .map(OsString::from)
     .collect::<Vec<_>>();
+    if matches!(profile.mounts, SandboxMountProfile::RunnerRestricted(_)) {
+        bwrap_arguments.push(OsString::from("--unshare-cgroup"));
+    }
+    bwrap_arguments.push(OsString::from("--unshare-net"));
+    if matches!(profile.mounts, SandboxMountProfile::RunnerRestricted(_)) {
+        bwrap_arguments.extend([OsString::from("--cap-drop"), OsString::from("ALL")]);
+    }
+    bwrap_arguments.extend([
+        OsString::from("--proc"),
+        OsString::from("/proc"),
+        OsString::from("--dev"),
+        OsString::from("/dev"),
+        OsString::from("--tmpfs"),
+        OsString::from("/tmp"),
+    ]);
+    match profile.mounts {
+        SandboxMountProfile::DaemonLocal => bwrap_arguments.extend(
+            [
+                "--ro-bind-try",
+                "/usr",
+                "/usr",
+                "--ro-bind-try",
+                "/bin",
+                "/bin",
+                "--ro-bind-try",
+                "/lib",
+                "/lib",
+                "--ro-bind-try",
+                "/lib64",
+                "/lib64",
+                "--ro-bind-try",
+                "/nix/store",
+                "/nix/store",
+                "--dir",
+                "/etc",
+                "--ro-bind-try",
+                "/etc/alternatives",
+                "/etc/alternatives",
+                "--ro-bind-try",
+                "/etc/hosts",
+                "/etc/hosts",
+                "--ro-bind-try",
+                "/etc/nsswitch.conf",
+                "/etc/nsswitch.conf",
+                "--ro-bind-try",
+                "/etc/ssl",
+                "/etc/ssl",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        ),
+        SandboxMountProfile::RunnerRestricted(paths) => {
+            bwrap_arguments.extend([OsString::from("--tmpfs"), OsString::from("/run")]);
+            append_read_only_parent_directories(&mut bwrap_arguments, paths);
+            for path in paths {
+                bwrap_arguments.extend([
+                    OsString::from("--ro-bind"),
+                    path.bind_source.as_os_str().to_owned(),
+                    path.destination.as_os_str().to_owned(),
+                ]);
+            }
+            append_usr_merge_aliases(&mut bwrap_arguments, paths);
+        }
+    }
     #[cfg(target_os = "linux")]
     bwrap_arguments.extend([
         OsString::from("--bind"),
@@ -1498,22 +1732,66 @@ fn bwrap_request(
         OsString::from("--"),
         OsString::from(SANDBOX_DISPATCH_PROGRAM),
         OsString::from("--dispatch"),
-        OsString::from(program),
+        OsString::from(invocation.program),
     ]);
-    bwrap_arguments.extend(arguments.iter().map(OsString::from));
+    bwrap_arguments.extend(invocation.arguments.iter().map(OsString::from));
     ProcessRequest {
         program: bubblewrap_program.as_os_str().to_owned(),
         arguments: bwrap_arguments,
         working_directory: context.bind_source.to_owned(),
-        timeout,
-        capture_bytes: capture_bytes.saturating_add(SANDBOX_DISPATCH_MARKER.len()),
+        timeout: invocation.timeout,
+        capture_bytes: invocation
+            .capture_bytes
+            .saturating_add(SANDBOX_DISPATCH_MARKER.len()),
         environment: BTreeMap::from([
             (OsString::from("LANG"), OsString::from("C.UTF-8")),
             (OsString::from("LC_ALL"), OsString::from("C.UTF-8")),
-            (OsString::from("PATH"), sandbox_path),
+            (OsString::from("PATH"), profile.executable_path.to_owned()),
         ]),
         environment_inheritance: ProcessEnvironment::Clear,
         status_protocol: ProcessStatusProtocol::SandboxDispatch,
+    }
+}
+
+fn append_read_only_parent_directories(
+    arguments: &mut Vec<OsString>,
+    read_only_paths: &[ReadOnlyPathIdentity],
+) {
+    let directories = read_only_paths
+        .iter()
+        .filter_map(|path| path.destination.parent())
+        .flat_map(Path::ancestors)
+        .filter(|path| *path != Path::new("/"))
+        .collect::<BTreeSet<_>>();
+    for directory in directories {
+        arguments.extend([OsString::from("--dir"), directory.as_os_str().to_owned()]);
+    }
+}
+
+fn append_usr_merge_aliases(
+    arguments: &mut Vec<OsString>,
+    read_only_paths: &[ReadOnlyPathIdentity],
+) {
+    for (destination, target, absolute_target) in [
+        ("/bin", "usr/bin", "/usr/bin"),
+        ("/sbin", "usr/sbin", "/usr/sbin"),
+        ("/lib", "usr/lib", "/usr/lib"),
+        ("/lib64", "usr/lib64", "/usr/lib64"),
+    ] {
+        let destination_is_mounted = read_only_paths
+            .iter()
+            .any(|path| path.destination == Path::new(destination));
+        let target_is_visible = Path::new(absolute_target).exists()
+            && read_only_paths
+                .iter()
+                .any(|path| Path::new(absolute_target).starts_with(&path.destination));
+        if !destination_is_mounted && target_is_visible {
+            arguments.extend([
+                OsString::from("--symlink"),
+                OsString::from(target),
+                OsString::from(destination),
+            ]);
+        }
     }
 }
 
@@ -1543,6 +1821,39 @@ fn sandbox_path(workspace_root: &Path) -> OsString {
     std::env::join_paths(components).unwrap_or_default()
 }
 
+fn configured_sandbox_path(
+    workspace_root: &Path,
+    read_only_paths: &[ReadOnlyPathIdentity],
+) -> OsString {
+    let inherited = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut seen = BTreeSet::new();
+    let mut components = Vec::new();
+    for path in inherited
+        .into_iter()
+        .chain(std::env::split_paths(&OsString::from(
+            SANDBOX_FALLBACK_PATH,
+        )))
+    {
+        let Some(canonical) = path.canonicalize().ok() else {
+            continue;
+        };
+        let configured = read_only_paths
+            .iter()
+            .any(|read_only| canonical.starts_with(&read_only.destination));
+        if configured
+            && canonical.is_dir()
+            && !canonical.starts_with(workspace_root)
+            && seen.insert(canonical.clone())
+        {
+            components.push(canonical);
+        }
+    }
+    std::env::join_paths(components).unwrap_or_default()
+}
+
+#[cfg(test)]
 fn sandbox_shell(workspace_root: &Path) -> PathBuf {
     executable_sandbox_shell(&sandbox_path(workspace_root))
         .unwrap_or_else(|| PathBuf::from("/bin/sh"))
@@ -4168,12 +4479,119 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn runner_restricted_request_uses_only_pinned_configured_read_only_paths()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let configured_path = read_only.path().to_owned();
+        let mut command_runner = SandboxedCommandRunner::try_new_runner_restricted(
+            runner,
+            workspace.path(),
+            std::slice::from_ref(&configured_path),
+        )?;
+        let arguments = ExecArguments {
+            program: String::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let expected_isolation_prefix = [
+            OsString::from("--die-with-parent"),
+            OsString::from("--new-session"),
+            OsString::from("--unshare-user"),
+            OsString::from("--unshare-pid"),
+            OsString::from("--unshare-ipc"),
+            OsString::from("--unshare-uts"),
+            OsString::from("--unshare-cgroup"),
+            OsString::from("--unshare-net"),
+            OsString::from("--cap-drop"),
+            OsString::from("ALL"),
+        ];
+        let expected_runtime = [OsString::from("--tmpfs"), OsString::from("/run")];
+
+        let result = command_runner.try_run(arguments).await?;
+        let requests = observation.recorded_requests();
+        let request = requests
+            .first()
+            .ok_or_else(|| std::io::Error::other("one requested process"))?;
+        let read_only_bind = request
+            .arguments
+            .windows(3)
+            .find(|arguments| arguments[0] == "--ro-bind" && arguments[2] == configured_path)
+            .ok_or_else(|| std::io::Error::other("configured read-only bind"))?;
+
+        assert!(request.arguments.starts_with(&expected_isolation_prefix));
+        assert!(
+            request
+                .arguments
+                .windows(expected_runtime.len())
+                .any(|arguments| arguments == expected_runtime)
+        );
+        assert!(
+            read_only_bind[1]
+                .to_string_lossy()
+                .starts_with("/proc/self/fd/")
+        );
+        assert!(!request.arguments.contains(&OsString::from("/etc/hosts")));
+        assert_eq!(
+            request.environment.get(&OsString::from("PATH")),
+            Some(&OsString::new())
+        );
+        assert_eq!(result.stdout.text, SANDBOXED_STDOUT);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn runner_restricted_request_rechecks_read_only_path_identity_before_probe()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let configured_path = read_only.path().to_owned();
+        let mut command_runner = SandboxedCommandRunner::try_new_runner_restricted(
+            runner,
+            workspace.path(),
+            std::slice::from_ref(&configured_path),
+        )?;
+        read_only.replace()?;
+        let arguments = ExecArguments {
+            program: String::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.try_run(arguments).await?;
+
+        assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::SandboxSetup,
+            }
+        );
+        assert_eq!(observation.recorded_probes(), Vec::new());
+        assert_eq!(observation.recorded_requests(), Vec::new());
+        Ok(())
+    }
+
     /// Builds the launch context the two isolation tests below share. The
     /// descriptor and launcher fields differ by host, so the conditional
     /// compilation lives here and both test bodies stay straight-line.
     fn isolation_fixture_context(workspace_root: &Path) -> SandboxLaunchContext<'_> {
         SandboxLaunchContext {
-            workspace_root,
             bind_source: workspace_root,
             #[cfg(target_os = "linux")]
             bind_descriptor: TEST_SANDBOX_BIND_DESCRIPTOR,
@@ -4202,6 +4620,8 @@ mod tests {
     #[test]
     fn sandboxed_request_opens_with_the_user_pid_ipc_uts_and_network_unshare_prefix() {
         let workspace_root = Path::new(TEST_SANDBOX_WORKSPACE_ROOT);
+        let mount_profile = SandboxMountProfile::DaemonLocal;
+        let executable_path = sandbox_path(workspace_root);
         let expected_isolation_prefix = [
             OsString::from("--die-with-parent"),
             OsString::from("--new-session"),
@@ -4215,14 +4635,70 @@ mod tests {
         let request = bwrap_request(
             isolation_fixture_context(workspace_root),
             Path::new(BWRAP_PROGRAM),
-            "cargo",
-            &[String::from("check")],
-            ".",
-            ISOLATION_FIXTURE_TIMEOUT,
-            EXEC_CAPTURE_BYTES,
+            SandboxInvocation {
+                program: "cargo",
+                arguments: &[String::from("check")],
+                working_directory: ".",
+                timeout: ISOLATION_FIXTURE_TIMEOUT,
+                capture_bytes: EXEC_CAPTURE_BYTES,
+            },
+            SandboxRequestProfile {
+                mounts: &mount_profile,
+                executable_path: &executable_path,
+            },
         );
 
         assert!(request.arguments.starts_with(&expected_isolation_prefix));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runner_restricted_usr_mount_recreates_standard_usr_merge_aliases()
+    -> Result<(), Box<dyn Error>> {
+        let workspace_root = Path::new(TEST_SANDBOX_WORKSPACE_ROOT);
+        let read_only_paths = vec![ReadOnlyPathIdentity::capture(Path::new("/usr"))?];
+        let executable_path = configured_sandbox_path(workspace_root, &read_only_paths);
+        let mount_profile = SandboxMountProfile::RunnerRestricted(read_only_paths);
+        let expected_bin_alias = [
+            OsString::from("--symlink"),
+            OsString::from("usr/bin"),
+            OsString::from("/bin"),
+        ];
+        let expected_lib64_alias = [
+            OsString::from("--symlink"),
+            OsString::from("usr/lib64"),
+            OsString::from("/lib64"),
+        ];
+
+        let request = bwrap_request(
+            isolation_fixture_context(workspace_root),
+            Path::new(BWRAP_PROGRAM),
+            SandboxInvocation {
+                program: "test",
+                arguments: &[],
+                working_directory: ".",
+                timeout: ISOLATION_FIXTURE_TIMEOUT,
+                capture_bytes: EXEC_CAPTURE_BYTES,
+            },
+            SandboxRequestProfile {
+                mounts: &mount_profile,
+                executable_path: &executable_path,
+            },
+        );
+
+        assert!(
+            request
+                .arguments
+                .windows(expected_bin_alias.len())
+                .any(|arguments| arguments == expected_bin_alias)
+        );
+        assert!(
+            request
+                .arguments
+                .windows(expected_lib64_alias.len())
+                .any(|arguments| arguments == expected_lib64_alias)
+        );
+        Ok(())
     }
 
     /// `/etc/resolv.conf` served outbound DNS, which needs the network that
@@ -4234,15 +4710,23 @@ mod tests {
     #[test]
     fn sandboxed_request_omits_the_etc_resolv_conf_bind() {
         let workspace_root = Path::new(TEST_SANDBOX_WORKSPACE_ROOT);
+        let mount_profile = SandboxMountProfile::DaemonLocal;
+        let executable_path = sandbox_path(workspace_root);
 
         let request = bwrap_request(
             isolation_fixture_context(workspace_root),
             Path::new(BWRAP_PROGRAM),
-            "cargo",
-            &[String::from("check")],
-            ".",
-            ISOLATION_FIXTURE_TIMEOUT,
-            EXEC_CAPTURE_BYTES,
+            SandboxInvocation {
+                program: "cargo",
+                arguments: &[String::from("check")],
+                working_directory: ".",
+                timeout: ISOLATION_FIXTURE_TIMEOUT,
+                capture_bytes: EXEC_CAPTURE_BYTES,
+            },
+            SandboxRequestProfile {
+                mounts: &mount_profile,
+                executable_path: &executable_path,
+            },
         );
 
         assert!(
