@@ -298,6 +298,7 @@ pub struct PostgresModelCallRepository {
     credential_reference: ModelCallCredentialReference,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
     cache_inclusive_input_targets: HashSet<ResolvedProviderTarget>,
+    runner_observation_finalizer: Option<crate::runner_protocol::RunnerProtocolStore>,
 }
 
 impl PostgresModelCallRepository {
@@ -314,7 +315,17 @@ impl PostgresModelCallRepository {
             credential_reference,
             credential_families: None,
             cache_inclusive_input_targets: HashSet::new(),
+            runner_observation_finalizer: None,
         }
+    }
+
+    /// Finalizes staged runner relocation boundaries inside model observations.
+    pub fn with_runner_observation_finalizer(
+        mut self,
+        store: crate::runner_protocol::RunnerProtocolStore,
+    ) -> Self {
+        self.runner_observation_finalizer = Some(store);
+        self
     }
 
     /// Selects credentials from each session's latest append-only snapshot.
@@ -844,6 +855,20 @@ impl PostgresModelCallRepository {
                 provider_failure_cause,
             )
             .await?;
+            if let Some(finalizer) = &self.runner_observation_finalizer
+                && !matches!(outcome, ModelCallTerminalOutcome::ToolRound(_))
+            {
+                let boundary = model_observation_boundary(&outcome)?;
+                finalizer
+                    .finalize_workspace_free_replacements_after_model_observation(
+                        &mut transaction,
+                        boundary.session,
+                        boundary.frontier,
+                        boundary.member_count,
+                    )
+                    .await
+                    .map_err(map_runner_observation_finalizer_error)?;
+            }
             Ok(Some(outcome))
         }
         .await;
@@ -4879,6 +4904,22 @@ fn map_tool_evidence_error(
     }
 }
 
+fn map_runner_observation_finalizer_error(
+    error: crate::runner_protocol::RunnerProtocolStoreError,
+) -> ModelCallRepositoryError {
+    match error {
+        crate::runner_protocol::RunnerProtocolStoreError::Database(source) => source.into(),
+        crate::runner_protocol::RunnerProtocolStoreError::CommitAmbiguous(source) => {
+            ModelCallRepositoryError::from_database(source, true)
+        }
+        crate::runner_protocol::RunnerProtocolStoreError::Corruption(_)
+        | crate::runner_protocol::RunnerProtocolStoreError::Domain(_)
+        | crate::runner_protocol::RunnerProtocolStoreError::EnrollmentRequest(_) => {
+            ModelCallCorruption::Inconsistent("runner replacement observation finalization").into()
+        }
+    }
+}
+
 async fn load_call_credential_reference(
     connection: &mut PgConnection,
     session: SessionId,
@@ -5118,6 +5159,44 @@ async fn persist_terminal_outcome_with_usage(
             persist_ambiguous(connection, ambiguous, usage).await
         }
     }
+}
+
+struct ModelObservationBoundary {
+    session: SessionId,
+    frontier: signalbox_domain::ContextFrontierId,
+    member_count: Option<u64>,
+}
+
+fn model_observation_boundary(
+    outcome: &ModelCallTerminalOutcome,
+) -> Result<ModelObservationBoundary, ModelCallRepositoryError> {
+    let (session, snapshot) = match outcome {
+        ModelCallTerminalOutcome::Completed(value) => (value.session(), value.terminal_snapshot()),
+        ModelCallTerminalOutcome::ToolRound(value) => (value.session(), value.yielded_snapshot()),
+        ModelCallTerminalOutcome::CancelledWithToolResponse(value) => {
+            (value.session(), value.terminal_snapshot())
+        }
+        ModelCallTerminalOutcome::Failed(value) => (value.session(), value.terminal_snapshot()),
+        ModelCallTerminalOutcome::Cancelled(value) => (value.session(), value.terminal_snapshot()),
+        ModelCallTerminalOutcome::Refused(value) => (value.session(), value.terminal_snapshot()),
+        ModelCallTerminalOutcome::ReconciliationRequired(value) => {
+            (value.session(), value.terminal_snapshot())
+        }
+        ModelCallTerminalOutcome::AwaitingRecovery(value) => {
+            return Ok(ModelObservationBoundary {
+                session: value.session(),
+                frontier: value.call().frontier().snapshot(),
+                member_count: None,
+            });
+        }
+    };
+    Ok(ModelObservationBoundary {
+        session,
+        frontier: snapshot.frontier().snapshot(),
+        member_count: Some(u64::try_from(snapshot.entry_count()).map_err(|_| {
+            ModelCallCorruption::Inconsistent("model observation frontier member count")
+        })?),
+    })
 }
 
 async fn persist_failed_with_delegated_child_result(
