@@ -26,7 +26,10 @@ against this PR (`agent/daemon-ops-overnight`). Runtime-relevance release,
 held-slot diagnostics, and terminal-target cutoff are also verified against this
 PR. The provider members the poller adopts as check-suite and check-run
 completion generations are verified against PR #541
-(`fix/check-run-updated-at`).
+(`fix/check-run-updated-at`). Eager merge-forward dispatch is verified against
+PR #886 (`agent/eager-merge-forward`). Requeue after non-converged dispatch
+termination is verified against this PR
+(`agent/dispatch-requeue-on-invalidation`).
 
 ## Configuration and credential boundary
 
@@ -500,16 +503,40 @@ evaluations remain append-only audit facts. The batch releases the singleton at
 the transition that makes every dispatched turn terminal or runtime-irrelevant,
 leaves no live runtime-relevant turn for its session, and leaves no pursuing
 goal. A goal-ending recheck is deferred to its transaction boundary so an active
-turn's stop cascade is visible. The obligation becomes eligible only after that
-release and the same cooldown that would suppress a fresh successor; cooldown
-suppression without an existing obligation does not create one. Eligibility
-settles the obligation and creates its one current-state batch atomically. Equal
-recovery cannot create a second session for the same admitted action or
-obligation. A session whose current goal is pursuing remains nonterminal for
-singleton ownership across the gap between a completed goal turn and its durably
-queued continuation. Goal blocking, achievement, or user stop rechecks release
-after pursuit ends. The append-only dispatch records identify the sessions
-responsible for the PR; no mutable assignment flag replaces them.
+turn's stop cascade is visible. A blocked or user-stopped dispatch session, and
+an achieved session whose delivered state is no longer the pull request's latest
+durable head, opens the same latest-state obligation before release; sibling
+terminations and matching events collapse into that one obligation without
+regressing its latest event. A batch delivers its originating event when
+admission dispatched that event, and the target's collapsed current state when
+admission settled an obligation by replaying a still-matching earlier event.
+Achievement is terminal exactly when that delivered state is known and is still
+the pull request's latest durable head, so the successor that carried the newest
+head seals instead of owing another batch after every cooldown. A batch admitted
+before the delivered state was recorded has none, and achievement cannot seal
+it: reading its originating event as the delivered state would seal without
+delivery whenever a head returns to an earlier value. A branch target records no
+durable revision, only a workflow conclusion, so achievement is its own seal
+there. A batch owes at most one requeue, at its own release, and the terminal
+event deciding it is the one ending the generation the dispatch commissioned; a
+later goal generation its session accepts terminates without reopening one,
+including while a sibling action still holds the batch. Termination takes the
+singleton advisory key that admission takes, and locks the rule activation row
+that recording a deactivation shares, so a match racing a termination joins its
+obligation and a racing deactivation cannot miss it. Termination does not take
+the repository key: it runs inside the transaction ending the goal, which holds
+that session row, and lifecycle-cutoff processing takes the repository key
+before waiting on the same row, so the reverse order would deadlock a goal pass
+against a cutoff attempt. The obligation becomes eligible only after release and
+the same cooldown that would suppress a fresh successor; cooldown suppression
+without an existing obligation does not create one. Eligibility settles the
+obligation and creates its one current-state batch atomically. Equal recovery
+cannot create a second session for the same admitted action or obligation. A
+session whose current goal is pursuing remains nonterminal for singleton
+ownership across the gap between a completed goal turn and its durably queued
+continuation. Goal blocking, achievement, or user stop rechecks release after
+pursuit ends. The append-only dispatch records identify the sessions responsible
+for the PR; no mutable assignment flag replaces them.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies
@@ -522,11 +549,13 @@ obligation for that pull request immediately, without waiting for singleton or
 cooldown readiness; the admission recheck is the race-closing backstop. Either
 path settles stale nonterminal work as `target_closed` without creating a
 session. A rule that matches the `PullRequestClosed` or `PullRequestMerged`
-event itself remains dispatch-eligible; the terminal event is the cutoff fact,
-not work made stale by that fact. Corruption in one commissioned goal rolls back
-that goal's stop to a savepoint but does not roll back the cutoff: the terminal
-event remains durably dispositioned, healthy commissioned goals are stopped, and
-later cutoffs remain eligible for processing.
+event itself remains dispatch-eligible, and a non-converged termination of that
+dispatch still owes its requeue while its own cutoff remains the latest one; the
+terminal event is the cutoff fact, not work made stale by that fact. Corruption
+in one commissioned goal rolls back that goal's stop to a savepoint but does not
+roll back the cutoff: the terminal event remains durably dispositioned, healthy
+commissioned goals are stopped, and later cutoffs remain eligible for
+processing.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
@@ -584,14 +613,18 @@ singleton. After this transaction, the mapped rule is a subscription;
 subscription identity, delivery, continuation cursor inheritance, and
 cancellation follow the [program substrate](program-substrate.md).
 
-## First live rule
+## Live merge-forward rule
 
-**Foundation contract.** The first deployed rule is `merge-forward-on-conflict`.
-It matches `MergeableStateChanged` with
-`mergeable_state.any_of = ["conflicting"]`, uses pull-request singleton scope,
-and dispatches the merge-forward session template configured with the approved
-cheap model and pull-request context. The rule does not match transitions back
-to `mergeable` or `unknown`.
+**Foundation contract.** The live merge-forward rule is
+`merge-forward-on-base-advance`. It matches `BaseAdvanced` for pull requests
+whose head branch matches `^agent/.+$`, uses pull-request singleton scope, and
+dispatches the merge-forward session template configured with the approved cheap
+model and pull-request context. Because each `BaseAdvanced` fact targets an open
+pull request based on the branch that advanced, the rule dispatches for each
+immediate dependent when a stacked parent branch advances and for each matching
+main-based pull request when `main` advances. It does not wait for a workflow
+conclusion or a `MergeableStateChanged` conflict fact, and a parent's own
+`HeadChanged` fact does not dispatch the parent.
 
 ## Designed-for version-two poll-cache persistence
 

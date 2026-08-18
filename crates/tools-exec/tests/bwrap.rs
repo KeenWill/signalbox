@@ -11,8 +11,11 @@
 use signalbox_test_bin::test_bin_path;
 use signalbox_tools_exec::{
     BwrapAvailability, CaptureCompleteness, ExecArguments, ExecutionConfinement, OutputEncoding,
-    ProcessOutcome, ProcessSpawnFailure, SandboxedCommandRunner, TokioProcessRunner,
+    ProcessOutcome, ProcessSpawnFailure, SandboxProcessNamespace, SandboxedCommandRunner,
+    TokioProcessRunner,
 };
+
+const BWRAP_PROCESS_NAMESPACE_ENVIRONMENT: &str = "SIGNALBOX_BWRAP_PROCESS_NAMESPACE";
 
 #[tokio::test]
 async fn real_bwrap_profile_confines_or_proves_typed_host_refusal()
@@ -39,7 +42,12 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
         .ok_or("tools-exec manifest is not nested under the workspace root")?
         .canonicalize()?;
     let process_runner = TokioProcessRunner::try_new(test_bin_path!("signalbox-exec-supervisor"))?;
-    let mut runner = SandboxedCommandRunner::try_new(process_runner, root)?;
+    let process_namespace = bwrap_process_namespace_from_environment()?;
+    let mut runner = SandboxedCommandRunner::try_new_with_process_namespace(
+        process_runner,
+        root,
+        process_namespace,
+    )?;
     let arguments = ExecArguments {
         program: String::from("test"),
         arguments: vec![String::from("!"), String::from("-e"), String::from("/home")],
@@ -120,6 +128,21 @@ async fn run_real_bwrap_profile_when_required() -> Result<(), Box<dyn std::error
     let missing_result = runner.try_run(missing_arguments).await?;
 
     assert_real_bwrap_spawn_failure(missing_result)
+}
+
+fn bwrap_process_namespace_from_environment()
+-> Result<SandboxProcessNamespace, Box<dyn std::error::Error>> {
+    match std::env::var(BWRAP_PROCESS_NAMESPACE_ENVIRONMENT) {
+        Err(std::env::VarError::NotPresent) => Ok(SandboxProcessNamespace::Private),
+        Ok(value) if value == "container" => Ok(SandboxProcessNamespace::Container),
+        Ok(value) => Err(format!(
+            "{BWRAP_PROCESS_NAMESPACE_ENVIRONMENT} must be exactly `container`, got `{value}`"
+        )
+        .into()),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(format!("{BWRAP_PROCESS_NAMESPACE_ENVIRONMENT} must be valid Unicode").into())
+        }
+    }
 }
 
 fn real_bwrap_gate(

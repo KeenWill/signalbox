@@ -119,29 +119,6 @@ impl ValidatedFile {
         }
     }
 
-    /// Reconstitutes registry evidence after a checked local worker boundary.
-    ///
-    /// Every component remains untrusted until the daemon-side registry
-    /// sanitizes the worker's final response; this constructor only restores
-    /// the request evidence that the registry originally supplied.
-    pub fn from_worker_request(
-        source: FileUse,
-        detected_media_type: CanonicalMediaType,
-        reader: ReaderIdentity,
-        validation: ValidationEvidence,
-        metadata: BoundedMetadata,
-        views: Vec<ReadViewDeclaration>,
-    ) -> Self {
-        Self::new(
-            source,
-            detected_media_type,
-            reader,
-            validation,
-            metadata,
-            views,
-        )
-    }
-
     /// Borrows the exact semantic use.
     pub const fn source(&self) -> &FileUse {
         &self.source
@@ -423,9 +400,41 @@ impl fmt::Display for ProcessorFailure {
 
 impl Error for ProcessorFailure {}
 
+/// Authenticated failure returned by the daemon-side processor broker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessorBoundaryFailure {
+    /// Process execution failed without a verified-source classification.
+    Processor(ProcessorFailure),
+    /// The verified source failed while serving processor reads.
+    Source(SourceReadError),
+}
+
+impl fmt::Display for ProcessorBoundaryFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Processor(failure) => failure.fmt(formatter),
+            Self::Source(failure) => failure.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ProcessorBoundaryFailure {}
+
+impl From<ProcessorFailure> for ProcessorBoundaryFailure {
+    fn from(value: ProcessorFailure) -> Self {
+        Self::Processor(value)
+    }
+}
+
+impl From<SourceReadError> for ProcessorBoundaryFailure {
+    fn from(value: SourceReadError) -> Self {
+        Self::Source(value)
+    }
+}
+
 /// Boxed future returned by a daemon-side isolated processor client.
 pub type FileMediaProcessorFuture<'a, Output> =
-    Pin<Box<dyn Future<Output = Result<Output, ProcessorFailure>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<Output, ProcessorBoundaryFailure>> + Send + 'a>>;
 
 /// Daemon-side process boundary used by detection and reads.
 pub trait FileMediaProcessor: Send + Sync {
@@ -550,6 +559,15 @@ impl From<ProcessorFailure> for FileMediaFailure {
             ProcessorFailure::Failed | ProcessorFailure::Protocol => Self::ProcessorFailed,
             ProcessorFailure::TimedOut => Self::ProcessorTimedOut,
             ProcessorFailure::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<ProcessorBoundaryFailure> for FileMediaFailure {
+    fn from(value: ProcessorBoundaryFailure) -> Self {
+        match value {
+            ProcessorBoundaryFailure::Processor(failure) => failure.into(),
+            ProcessorBoundaryFailure::Source(failure) => failure.into(),
         }
     }
 }

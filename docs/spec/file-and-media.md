@@ -53,10 +53,11 @@ The daemon-side registry stores checked declarations and calls only
 Registry construction sorts unsigned-ASCII provider/reader identities and
 rejects duplicate providers or readers, duplicate exact media-type claims,
 duplicate per-reader types, views, or reason codes, absent or excessive probe
-and output bounds, contradictory image bounds, ambiguous streaming-text
+and output bounds, read source work or range fan-out above their compiled
+lowerable ceilings, contradictory image bounds, ambiguous streaming-text
 fallback, unavailable isolation when any provider is present, and any effective
 ceiling above the compiled version-one value. An empty registry is valid.
-Configuration can therefore disable providers or lower bounds but cannot add an
+Configuration can therefore disable providers or lower bounds but cannot add a
 media-type mapping, alias, executable, or precedence rule.
 
 An adapter author supplies one provider declaration with exact owned canonical
@@ -97,9 +98,10 @@ content is terminal `EncryptedOrLocked`; version one has no password channel.
 
 The stable `file_inspect` contract accepts exactly a canonical `digest` and an
 optional bounded visible-part selector. `file_read` adds an exact provider-owned
-`view` and object `options`; it accepts no model-supplied type or reader. Both
-are effect-free tool declarations. The generic executor projects only compact
-JSON or bounded typed failure evidence.
+`view` and object `options`; the serialized options object is limited to 65,536
+bytes before adapter validation, and the request accepts no model-supplied type
+or reader. Both are effect-free tool declarations. The generic executor projects
+only compact JSON or bounded typed failure evidence.
 
 `signalbox-file-media-provider-runtime` supplies their registry-backed service.
 Its injected `FileUseResolver` is the sole authorization boundary: it must reuse
@@ -141,8 +143,8 @@ The raw processor enums deliberately carry strings and JSON text rather than
 checked registry values. Oversized, malformed, injection-shaped, cross-reader,
 unregistered-reason, wrong-output-kind, contradictory continuation, and
 excessively nested responses collapse to sanitized processor failure without
-partial success (INV-065). Detection uses generated synthetic bytes and
-byte-derived evidence independent of caller declaration (INV-064).
+partial success (INV-068). Detection uses generated synthetic bytes and
+byte-derived evidence independent of caller declaration (INV-067).
 
 `signalbox-file-media-processor-runtime` implements `FileMediaProcessor` with
 one fresh local process for every probe, validation, or read. A provider maps to
@@ -163,14 +165,15 @@ network namespace. An architecture-checked seccomp filter returns `ENOSYS` for
 creation. Decoder threads remain available while worker descendants stay zero.
 
 Before releasing a dedicated startup gate, the daemon applies hard
-address-space, CPU, and descriptor limits to the sandbox process and all
-inherited worker threads. Address space is the conservative enforceable reading
-of the accepted memory ceiling on an unprivileged Linux host: it can reject an
-allocation before resident use reaches the same value and cannot admit more
-resident memory. The daemon independently owns the wall deadline and kills the
-isolated process group on timeout or authoritative cancellation. Bounded stderr
-is drained and discarded; it is never parser evidence, telemetry content, or
-model-visible output.
+address-space, CPU, task, core-dump, and descriptor limits to the sandbox process
+and all inherited worker threads. The configured memory ceiling is one combined
+budget: half is reserved for address space and half is split between the two
+writable tmpfs mounts, so their maxima cannot add to more than the configured
+value. Construction fails for effective UID 0 because Linux exempts that
+identity from `RLIMIT_NPROC`, making the task ceiling unenforceable. The daemon
+independently owns the wall deadline and kills the isolated process group on
+timeout or authoritative cancellation. Bounded stderr is drained and discarded;
+it is never parser evidence, telemetry content, or model-visible output.
 
 The worker receives one digest and positive length, then requests exact byte
 ranges over length-delimited standard I/O. The daemon checks every request for
@@ -187,8 +190,8 @@ worker exit, and complete bounded stderr drain. EOF before a final frame, crash,
 signal, timeout, cancellation, malformed or oversized framing, extra output,
 source failure, or limit excess discards the whole result. Thus the isolation
 slice can leave neither a partial durable result nor parser output that bypasses
-the registry sanitizer (INV-066 through INV-071). Authoritative cancellation
-terminates the in-flight worker and admits no result (INV-073).
+the registry sanitizer (INV-074 through INV-079). Authoritative cancellation
+terminates the in-flight worker and admits no result (INV-080).
 
 The version-one compiled ceilings are:
 
@@ -196,7 +199,8 @@ The version-one compiled ceilings are:
 | ------------------------------------- | ---------------------- |
 | Probe prefix and suffix               | 65,536 bytes each      |
 | Probe ranges / cumulative bytes       | 16 / 262,144           |
-| Processor frame / text-or-JSON body   | 1,048,576 / 786,432    |
+| Processor frame / text-or-JSON body   | 1,048,576 / 170,000    |
+| Serialized read options               | 65,536 bytes           |
 | Structured depth / nodes              | 64 / 100,000           |
 | Observed container entries            | 10,000                 |
 | Image axis / decoded pixels           | 8,192 / 16,777,216     |
@@ -205,13 +209,16 @@ The version-one compiled ceilings are:
 | Audio duration / presented bytes      | 60 s / 8,388,608       |
 | Presented general-file bytes          | 8,388,608              |
 | References / aggregate media per call | 16 / 33,554,432 bytes  |
-| Worker address space / CPU / wall     | 512 MiB / 60 s / 120 s |
+| Worker memory budget / CPU / wall     | 512 MiB / 60 s / 120 s |
 | Worker descriptors / retained stderr  | 32 / 16,384 bytes      |
 | Worker descendants                    | 0                      |
 
-`FileMediaCeilings` and `FileMediaProcessCeilings` admit only positive effective
-values at or below these compiled maxima; descendants are fixed at zero
-(INV-072). A stored source may be larger. A streaming view must request it in
+`FileMediaCeilings` admits only positive effective values at or below its
+compiled maxima. `FileMediaProcessCeilings` keeps the protocol frame fixed at
+1,048,576 bytes while admitting only positive resource values at or below their
+compiled maxima; descendants are fixed at zero (INV-072). The text-or-JSON body
+ceiling reserves enough frame space for worst-case JSON escaping and envelope
+fields. A stored source may be larger. A streaming view must request it in
 bounded frames under its finite declared source-work envelope; a whole-decode
 view may reject it without changing the blob.
 

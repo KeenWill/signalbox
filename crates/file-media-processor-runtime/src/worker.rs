@@ -9,12 +9,15 @@ use tokio::sync::Mutex;
 
 use crate::{
     broker::{read_frame, write_frame},
-    protocol::{DaemonFrame, Invocation, WorkerFrame, decode_bytes},
+    protocol::{
+        DaemonFrame, Invocation, WorkerFrame, declaration_fingerprint_ordered, decode_bytes,
+    },
 };
 
 /// Immutable worker-side inventory of compiled format providers.
 pub struct WorkerCatalog {
     providers: Vec<Box<dyn FileMediaProvider>>,
+    provider_order: Vec<usize>,
     readers: BTreeMap<ReaderIdentity, usize>,
 }
 
@@ -50,7 +53,13 @@ impl WorkerCatalog {
                 }
             }
         }
-        Ok(Self { providers, readers })
+        let mut provider_order = (0..providers.len()).collect::<Vec<_>>();
+        provider_order.sort_by(|left, right| provider_names[*left].cmp(&provider_names[*right]));
+        Ok(Self {
+            providers,
+            provider_order,
+            readers,
+        })
     }
 
     /// Returns declarations in worker construction order for daemon registration.
@@ -59,6 +68,15 @@ impl WorkerCatalog {
             .iter()
             .map(|provider| provider.declaration())
             .collect()
+    }
+
+    fn declaration_fingerprint(&self) -> [u8; 32] {
+        declaration_fingerprint_ordered(
+            self.provider_order.len(),
+            self.provider_order
+                .iter()
+                .map(|index| self.providers[*index].declaration()),
+        )
     }
 
     fn provider(
@@ -128,7 +146,16 @@ pub async fn serve_one(catalog: &WorkerCatalog) -> Result<(), WorkerServiceError
             "--signalbox-file-media-isolation-probe",
         )]
     {
-        return Ok(());
+        let fingerprint = catalog.declaration_fingerprint();
+        let mut output = tokio::io::stdout();
+        output
+            .write_all(fingerprint.as_slice())
+            .await
+            .map_err(|_| WorkerServiceError::Protocol)?;
+        return output
+            .shutdown()
+            .await
+            .map_err(|_| WorkerServiceError::Protocol);
     }
     if !arguments.is_empty() {
         return Err(WorkerServiceError::Protocol);
@@ -196,10 +223,7 @@ async fn dispatch(
             let request: signalbox_file_media_runtime::FileMediaProviderReadRequest = request
                 .try_into()
                 .map_err(|_| WorkerServiceError::Protocol)?;
-            require_source_identity(source, request.file.source())?;
-            if request.file.reader() != &reader {
-                return Err(WorkerServiceError::Protocol);
-            }
+            require_source_identity(source, &request.source)?;
             let provider = catalog.provider(&reader)?;
             let output = provider
                 .read(&reader, request, source, &NeverCancelled)

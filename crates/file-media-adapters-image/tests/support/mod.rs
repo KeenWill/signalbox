@@ -91,7 +91,8 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
-        self.provider.probe(reader, source, cancellation)
+        let future = self.provider.probe(reader, source, cancellation);
+        Box::pin(async move { future.await.map_err(Into::into) })
     }
 
     fn validate<'a>(
@@ -101,7 +102,8 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
-        self.provider.inspect(reader, request, source, cancellation)
+        let future = self.provider.inspect(reader, request, source, cancellation);
+        Box::pin(async move { future.await.map_err(Into::into) })
     }
 
     fn read<'a>(
@@ -112,7 +114,10 @@ impl FileMediaProcessor for DirectProcessor {
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
         match &self.read_behavior {
-            ReadBehavior::Provider => self.provider.read(reader, request, source, cancellation),
+            ReadBehavior::Provider => {
+                let future = self.provider.read(reader, request, source, cancellation);
+                Box::pin(async move { future.await.map_err(Into::into) })
+            }
             ReadBehavior::InjectedStructured(body_json) => {
                 let body_json = body_json.clone();
                 Box::pin(async move {

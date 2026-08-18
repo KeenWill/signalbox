@@ -4,16 +4,23 @@ use crate::{
     BoundedMetadata, CanonicalMediaType, FileInspection, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProviderDeclaration, FileMediaProviderReadRequest,
     FileMediaProviderValidationRequest, FileReadRequest, FileReadResult, InspectionRequest,
-    ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadAccessPattern, ReadContinuation, ReadViewBounds, ReaderDeclaration, ReaderIdentity,
-    ReasonCode, StreamingTextFallback, ValidatedFile, ValidationEvidence, VerifiedBlobSource,
+    MAX_READ_OPTIONS_BYTES, ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadAccessPattern, ReadContinuation, ReadViewBounds,
+    ReaderDeclaration, ReaderIdentity, ReasonCode, StreamingTextFallback, ValidatedFile,
+    ValidationEvidence, VerifiedBlobSource,
 };
 
+// numeric-bound: ceiling - bounds process-lifetime provider inventory memory
 const MAX_REGISTRY_PROVIDERS: usize = 256;
+// numeric-bound: ceiling - bounds per-provider reader inventory memory and startup work
 const MAX_READERS_PER_PROVIDER: usize = 256;
+// numeric-bound: ceiling - bounds per-reader media-claim memory and conflict checks
 const MAX_MEDIA_TYPES_PER_READER: usize = 256;
+// numeric-bound: ceiling - bounds per-reader model-visible view inventory memory
 const MAX_VIEWS_PER_READER: usize = 256;
+// numeric-bound: ceiling - bounds per-reader sanitized reason inventory memory
 const MAX_REASON_CODES_PER_READER: usize = 256;
+// numeric-bound: ceiling - bounds retained untrusted continuation state
 const MAX_CURSOR_BYTES: usize = 1_024;
 
 /// Immutable process-lifetime registry snapshot.
@@ -52,6 +59,9 @@ impl FileMediaRegistry {
             return Err(FileMediaRegistryConstructionError::IsolationUnavailable);
         }
         providers.sort_by(|left, right| left.provider().cmp(right.provider()));
+        for provider in &mut providers {
+            provider.sort_readers();
+        }
         if providers
             .windows(2)
             .any(|pair| pair[0].provider() == pair[1].provider())
@@ -163,7 +173,14 @@ impl FileMediaRegistry {
         if !malformed.is_empty() {
             malformed.sort();
             malformed.dedup();
-            let distinct = distinct_media_types(malformed.iter().map(|(kind, _)| kind.clone()));
+            let distinct = distinct_media_types(
+                malformed.iter().map(|(kind, _)| kind.clone()).chain(
+                    candidates
+                        .iter()
+                        .filter(|candidate| candidate.strength == ProbeStrength::Strong)
+                        .map(|candidate| candidate.media_type.clone()),
+                ),
+            );
             if distinct.len() > 1 {
                 return Ok(FileInspection::Ambiguous {
                     source: request.source,
@@ -377,7 +394,9 @@ impl FileMediaRegistry {
         source: &dyn VerifiedBlobSource,
         cancellation: &dyn crate::CancellationSignal,
     ) -> Result<FileReadResult, FileMediaFailure> {
-        if !request.options.is_object() {
+        let options_are_bounded = serde_json::to_vec(&request.options)
+            .is_ok_and(|encoded| encoded.len() <= MAX_READ_OPTIONS_BYTES);
+        if !request.options.is_object() || !options_are_bounded {
             return Err(FileMediaFailure::InvalidViewArguments);
         }
         let inspection = self
@@ -419,7 +438,10 @@ impl FileMediaRegistry {
             .read(
                 validated.reader(),
                 FileMediaProviderReadRequest {
-                    file: validated.clone(),
+                    source: validated.source().clone(),
+                    detected_media_type: validated.detected_media_type().clone(),
+                    validation: validated.validation(),
+                    metadata: validated.metadata().clone(),
                     view: request.view,
                     options: request.options,
                 },
@@ -587,14 +609,15 @@ fn sanitize_read(
                 return Err(FileMediaFailure::ProcessorFailed);
             }
             let continuation = sanitize_continuation(truncated, cursor)?;
-            let body: serde_json::Value =
-                serde_json::from_str(&body_json).map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            let body = crate::value::parse_json_without_duplicate_members(&body_json)
+                .map_err(|_| FileMediaFailure::ProcessorFailed)?;
             let mut observed = ObservedJson::default();
             observe_json(&body, 1, &mut observed)?;
             if observed.depth > depth
                 || observed.depth > ceilings.structured_depth
                 || observed.nodes > nodes
                 || observed.nodes > ceilings.structured_nodes
+                || observed.max_container_entries > ceilings.observed_container_entries
                 || observed.string_bytes > string_bytes
             {
                 return Err(FileMediaFailure::ProcessorFailed);
@@ -602,9 +625,9 @@ fn sanitize_read(
             Ok(FileReadResult::Structured { body, continuation })
         }
         ProcessorReadOutput::InvalidViewArguments => Err(FileMediaFailure::InvalidViewArguments),
-        ProcessorReadOutput::UnsupportedView => Err(FileMediaFailure::UnsupportedView),
+        ProcessorReadOutput::UnsupportedView => Err(FileMediaFailure::ProcessorFailed),
         ProcessorReadOutput::SourceTooLarge { maximum_bytes } => {
-            if maximum_bytes == 0 || maximum_bytes > view.bounds().source_bytes() {
+            if maximum_bytes != view.bounds().source_bytes() {
                 return Err(FileMediaFailure::ProcessorFailed);
             }
             Err(FileMediaFailure::SourceTooLarge { maximum_bytes })
@@ -623,6 +646,7 @@ struct ObservedJson {
     depth: u32,
     nodes: u64,
     string_bytes: usize,
+    max_container_entries: u64,
 }
 
 fn observe_json(
@@ -643,6 +667,9 @@ fn observe_json(
                 .ok_or(FileMediaFailure::ProcessorFailed)?;
         }
         serde_json::Value::Array(values) => {
+            let entries =
+                u64::try_from(values.len()).map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            observed.max_container_entries = observed.max_container_entries.max(entries);
             let next = depth
                 .checked_add(1)
                 .ok_or(FileMediaFailure::ProcessorFailed)?;
@@ -651,6 +678,9 @@ fn observe_json(
             }
         }
         serde_json::Value::Object(values) => {
+            let entries =
+                u64::try_from(values.len()).map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            observed.max_container_entries = observed.max_container_entries.max(entries);
             let next = depth
                 .checked_add(1)
                 .ok_or(FileMediaFailure::ProcessorFailed)?;
@@ -729,6 +759,7 @@ fn validate_reader(
     if probe.prefix_bytes() > ceilings.probe_prefix_bytes
         || probe.suffix_bytes() > ceilings.probe_suffix_bytes
         || probe.range_count() > ceilings.probe_ranges
+        || (probe.prefix_bytes() == 0 && probe.suffix_bytes() == 0 && probe.range_count() == 0)
         || probe.cumulative_bytes() == 0
         || probe.cumulative_bytes() > ceilings.probe_cumulative_bytes
         || probe
@@ -770,8 +801,10 @@ fn validate_view(
 ) -> Result<(), FileMediaRegistryConstructionError> {
     if matches!(
         access,
-        ReadAccessPattern::RandomAccess { maximum_ranges: 0 }
+        ReadAccessPattern::RandomAccess { maximum_ranges }
+            if maximum_ranges == 0 || maximum_ranges > ceilings.read_ranges
     ) || bounds.source_bytes() == 0
+        || bounds.source_bytes() > ceilings.read_source_bytes
     {
         return Err(FileMediaRegistryConstructionError::ViewBounds);
     }
