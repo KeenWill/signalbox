@@ -879,8 +879,9 @@ repository task evaluates committed webhook events through the same dispatch
 path as poll events. A targeted read that proves every guarded head has already
 moved records the delivery superseded rather than committing its stale patch. A
 targeted pull-request observation whose named base branch is absent from the
-cursor commits without convergence evidence; the next complete sweep supplies
-the branch head before recording that evidence. An exact replay may attach the
+cursor records its exact-head assessment, superseding older evidence, but no
+cutoff or convergence-based dispatch decision becomes eligible until a later
+cursor contains that assessed branch revision. An exact replay may attach the
 terminal disposition to state won by a concurrent equivalent commit, but cannot
 duplicate its events.
 

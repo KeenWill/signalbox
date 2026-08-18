@@ -2447,20 +2447,19 @@ impl GitHubRepositoryPoller {
                 Some(index) => state.pull_requests[index] = fetched.state,
                 None => state.pull_requests.push(fetched.state),
             }
-            if state
+            let base_branch_is_present = state
                 .branch_heads
                 .iter()
-                .any(|branch_head| branch_head.branch() == fetched.convergence.base_branch())
-            {
-                convergence.push(fetched.convergence);
-            } else {
+                .any(|branch_head| branch_head.branch() == fetched.convergence.base_branch());
+            if !base_branch_is_present {
                 tracing::debug!(
                     repository = %self.repository.as_str(),
                     pull_request = target.number.get(),
                     base_branch = %fetched.convergence.base_branch().as_str(),
-                    "targeted convergence evidence awaits a cursor branch head"
+                    "targeted convergence evidence is ineligible until the cursor learns its base branch"
                 );
             }
+            convergence.push(fetched.convergence);
         }
         if superseded_target_count == targets.len() {
             return Ok(TargetedPolledRepository::Superseded);
@@ -7140,7 +7139,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn targeted_refresh_defers_evidence_without_the_base_branch() {
+    async fn targeted_refresh_records_evidence_without_the_base_branch() {
         let previous = complete_typed_observation().await;
         let candidate_state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
             pull_requests: previous.state().pull_requests().to_vec(),
@@ -7176,7 +7175,8 @@ mod tests {
             panic!("matching targeted refresh must produce an observation");
         };
         assert_eq!(observation, candidate);
-        assert!(convergence.is_empty());
+        assert_eq!(convergence.len(), 1);
+        assert_eq!(convergence[0].number().get(), PULL_NUMBER);
     }
 
     #[tokio::test]

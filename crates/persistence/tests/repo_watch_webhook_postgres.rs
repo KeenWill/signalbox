@@ -26,7 +26,7 @@ use signalbox_domain::{
 use signalbox_persistence::{
     disposable_test_container_labels, local_test_connection_options, migrate,
     repo_watch::{
-        PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
+        PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest, RepoWatchCursor,
         RepoWatchCursorCandidate, RepoWatchStoreError,
     },
     repo_watch_webhook::{
@@ -178,6 +178,17 @@ fn pending_page_size() -> RepoWatchWebhookPendingPageSize {
         NonZeroU16::new(10).expect("fixture page size is positive"),
     )
     .expect("fixture page size is bounded")
+}
+
+fn committed_cursor(outcome: RepoWatchCommitOutcome) -> RepoWatchCursor {
+    match outcome {
+        RepoWatchCommitOutcome::Committed(cursor) => cursor,
+        RepoWatchCommitOutcome::Unchanged(_)
+        | RepoWatchCommitOutcome::Replayed(_)
+        | RepoWatchCommitOutcome::Conflict { .. } => {
+            panic!("fixture commit must advance the cursor")
+        }
+    }
 }
 
 fn projected_request(
@@ -706,6 +717,72 @@ async fn primary_targeted_commit_atomically_records_partial_convergence_evidence
         vec![(HEAD_SHA.to_owned(), Decimal::from(41_u64))]
     );
     assert_eq!(seal_count, 1);
+    assert_eq!(disposition_generation, committed.generation().get() as i64);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn primary_targeted_commit_records_evidence_before_its_base_branch()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let key = delivery_key(0x306);
+    admit_fixture(&webhook_store, key).await?;
+    let baseline = RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::default(),
+    ));
+    let cursor = committed_cursor(
+        event_store
+            .commit(
+                &repository()?,
+                RepoWatchCommitRequest::new(None, baseline, Vec::new()),
+            )
+            .await?,
+    );
+    let observation = RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: vec![pull_request(41, HEAD_SHA, "agent/targeted")?],
+            workflow_runs: Vec::new(),
+            branch_heads: Vec::new(),
+        })?,
+    );
+
+    let committed = committed_cursor(
+        event_store
+            .commit_webhook_with_convergence(
+                &repository()?,
+                RepoWatchCommitRequest::from_webhook(
+                    cursor.generation(),
+                    RepoWatchCursorCandidate::new(observation),
+                    Vec::new(),
+                ),
+                key,
+                Vec::new(),
+                &[merge_ready_assessment(41, HEAD_SHA)?],
+            )
+            .await?,
+    );
+    let assessments = sqlx::query_as::<_, (String, String)>(
+        "SELECT head_sha, base_branch
+           FROM repo_watch_pull_request_convergence_assessment",
+    )
+    .fetch_all(&pool)
+    .await?;
+    let disposition_generation: i64 = sqlx::query_scalar(
+        "SELECT resulting_cursor_generation
+           FROM repo_watch_webhook_disposition
+          WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(key.hook_id().get()))
+    .bind(key.delivery_id())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(assessments, vec![(HEAD_SHA.to_owned(), "main".to_owned())]);
     assert_eq!(disposition_generation, committed.generation().get() as i64);
     Ok(())
 }
