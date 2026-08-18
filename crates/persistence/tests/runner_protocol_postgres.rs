@@ -16,8 +16,10 @@ use signalbox_application::{
     PinnedRunnerDispatchRequest, PinnedRunnerReplacementIdentities, PinnedRunnerReplacementOutcome,
     PinnedRunnerReplacementTransaction, PromotePendingRunnerOutcome,
     ReplaceLostRunnerBeforePinOutcome, RunnerLeaseClaimRequest, RunnerLeaseResultRequest,
-    RunnerReadyManifestDigest, RunnerReplacementProvisioningOutcome, RunnerWorkspaceReadyReceipt,
-    RunnerWorkspaceReleaseAcknowledgement, ToolDefinition, ToolInputSchema,
+    RunnerOperationFailureDetail, RunnerOperationFailureDetailInput, RunnerReadyManifestDigest,
+    RunnerReplacementProvisioningOutcome, RunnerWorkspaceCleanupFailure,
+    RunnerWorkspaceReadyReceipt, RunnerWorkspaceReleaseAcknowledgement, ToolDefinition,
+    ToolInputSchema,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
@@ -177,6 +179,9 @@ const RELATED_IDENTITY_OFFSET: u128 = 0x100;
 const LOCK_WAIT_PROBE: Duration = Duration::from_millis(100);
 const LOCK_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
 const SERIALIZATION_TEST_TIMEOUT: Duration = Duration::from_secs(90);
+const CLEANUP_FAILURE_CODE: &str = "cleanup.io";
+const CLEANUP_FAILURE_MESSAGE: &str = "workspace removal failed";
+const CLEANUP_FAILURE_PAYLOAD: &str = r#"{"attempt":1}"#;
 const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
 const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608110003;
@@ -280,6 +285,36 @@ struct WorkspaceReleaseProjectionFixture {
     enrollment: RunnerEnrollmentId,
     connection_epoch: RunnerConnectionEpoch,
     connection_event_ordinal: u64,
+}
+
+impl WorkspaceReleaseProjectionFixture {
+    fn cleanup_failure(&self) -> RunnerWorkspaceCleanupFailure {
+        RunnerWorkspaceCleanupFailure::new(
+            self.candidate.session(),
+            self.candidate.placement_revision(),
+            self.candidate.runner(),
+            self.candidate.manifest_id(),
+            RunnerOperationFailureDetail::try_new(RunnerOperationFailureDetailInput {
+                code: String::from(CLEANUP_FAILURE_CODE),
+                message: String::from(CLEANUP_FAILURE_MESSAGE),
+                payload_json: String::from(CLEANUP_FAILURE_PAYLOAD),
+            })
+            .expect("the fixture cleanup-failure detail is valid"),
+        )
+    }
+
+    async fn store_release(&self) -> Result<(), RunnerProtocolStoreError> {
+        self.store
+            .store_workspace_release_projection_for_test(
+                &self.candidate,
+                self.retired_placement_event_ordinal,
+                self.successor_placement_event_ordinal,
+                self.enrollment,
+                self.connection_epoch,
+                self.connection_event_ordinal,
+            )
+            .await
+    }
 }
 
 async fn pending_promotion_fixture(
@@ -24254,6 +24289,262 @@ async fn s32_inv044_workspace_release_loss_retirement_rejects_completed_release(
     .expect_err("a completed release cannot also retire for connection loss");
 
     assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: one cleanup refusal durably retains the exact runner detail,
+/// exactly replays, and removes the release from pending delivery.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_cleanup_failure_round_trips_and_replays() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture.store_release().await?;
+    let failure = fixture.cleanup_failure();
+
+    let recorded = fixture
+        .store
+        .record_workspace_cleanup_failure(failure.clone())
+        .await?;
+    let replayed = fixture
+        .store
+        .record_workspace_cleanup_failure(failure.clone())
+        .await?;
+    let loaded = fixture
+        .store
+        .load_workspace_cleanup_failure(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await?
+        .expect("the cleanup failure reads back");
+    let pending = fixture
+        .store
+        .load_workspace_release(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await?;
+
+    assert_eq!(recorded, failure);
+    assert_eq!(replayed, failure);
+    assert_eq!(loaded, failure);
+    assert_eq!(pending, None);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: one release correlation cannot be replayed with different
+/// runner-authored failure detail.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_cleanup_failure_rejects_unequal_replay() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture.store_release().await?;
+    fixture
+        .store
+        .record_workspace_cleanup_failure(fixture.cleanup_failure())
+        .await?;
+    let unequal = RunnerWorkspaceCleanupFailure::new(
+        fixture.candidate.session(),
+        fixture.candidate.placement_revision(),
+        fixture.candidate.runner(),
+        fixture.candidate.manifest_id(),
+        RunnerOperationFailureDetail::try_new(RunnerOperationFailureDetailInput {
+            code: String::from(CLEANUP_FAILURE_CODE),
+            message: String::from("another cleanup failure"),
+            payload_json: String::from(CLEANUP_FAILURE_PAYLOAD),
+        })?,
+    );
+
+    let rejected = fixture
+        .store
+        .record_workspace_cleanup_failure(unequal)
+        .await
+        .expect_err("unequal detail cannot reuse the release correlation");
+
+    assert_store_domain_error(rejected, RunnerDomainError::CorrelationMismatch);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: successful cleanup wins the release's single terminal slot
+/// over a later cleanup refusal.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_cleanup_failure_rejects_completed_release()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture.store_release().await?;
+    fixture
+        .store
+        .record_workspace_release_acknowledgement(RunnerWorkspaceReleaseAcknowledgement::new(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+            fixture.candidate.runner(),
+            fixture.candidate.manifest_id(),
+        ))
+        .await?;
+
+    let rejected = fixture
+        .store
+        .record_workspace_cleanup_failure(fixture.cleanup_failure())
+        .await
+        .expect_err("completed cleanup excludes a later cleanup refusal");
+
+    assert_store_domain_error(rejected, RunnerDomainError::InvalidState);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: a retained cleanup refusal remains the release's terminal
+/// proof when its physical connection is lost later.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_cleanup_failure_excludes_later_loss_retirement()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture.store_release().await?;
+    let failure = fixture.cleanup_failure();
+    fixture
+        .store
+        .record_workspace_cleanup_failure(failure.clone())
+        .await?;
+    fixture
+        .store
+        .transition_connection(
+            fixture.enrollment,
+            fixture.connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = fixture
+        .store
+        .load_current_connection_loss(fixture.enrollment)
+        .await?
+        .expect("the later connection loss reads back");
+
+    fixture
+        .store
+        .propagate_connection_loss_session(loss, fixture.candidate.session())
+        .await?;
+    let retained = fixture
+        .store
+        .load_workspace_cleanup_failure(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await?
+        .expect("the cleanup refusal remains durable");
+    let retirement = fixture
+        .store
+        .load_workspace_release_loss_retirement(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await?;
+
+    assert_eq!(retained, failure);
+    assert_eq!(retirement, None);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: the cleanup refusal's relational payload guard rejects a
+/// runner detail whose number is outside the wire's unsigned vocabulary.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_cleanup_failure_guard_rejects_signed_detail_number()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture.store_release().await?;
+
+    let rejected = sqlx::query(
+        "INSERT INTO runner_operation_failure
+            (operation_kind, runner_id, release_session_id,
+             release_placement_revision, release_manifest_id,
+             category_kind, detail_code, detail_message,
+             detail_payload_json)
+         VALUES ('workspace_release', $1, $2, $3, $4,
+                 'workspace_cleanup_failed', $5, $6, $7)",
+    )
+    .bind(fixture.candidate.runner().into_uuid())
+    .bind(fixture.candidate.session().into_uuid())
+    .bind(Decimal::from(fixture.candidate.placement_revision().get()))
+    .bind(fixture.candidate.manifest_id().into_uuid())
+    .bind(CLEANUP_FAILURE_CODE)
+    .bind(CLEANUP_FAILURE_MESSAGE)
+    .bind(r#"{"attempt":-1}"#)
+    .execute(&pool)
+    .await
+    .expect_err("signed failure-detail numbers are refused");
+
+    assert_check_violation(rejected);
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-044: typed cleanup-failure readback refuses stored JSON text that
+/// is semantically valid but no longer in the canonical runner representation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_workspace_cleanup_failure_readback_rejects_noncanonical_json()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let fixture = workspace_release_projection_fixture(&pool).await?;
+    fixture.store_release().await?;
+    fixture
+        .store
+        .record_workspace_cleanup_failure(fixture.cleanup_failure())
+        .await?;
+    let mut corruption = pool.begin().await?;
+    sqlx::raw_sql("ALTER TABLE runner_operation_failure DISABLE TRIGGER ALL")
+        .execute(&mut *corruption)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_operation_failure
+            SET detail_payload_json = $3
+          WHERE release_session_id = $1
+            AND release_placement_revision = $2",
+    )
+    .bind(fixture.candidate.session().into_uuid())
+    .bind(Decimal::from(fixture.candidate.placement_revision().get()))
+    .bind("{ \"attempt\": 1 }")
+    .execute(&mut *corruption)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE runner_operation_failure ENABLE TRIGGER ALL")
+        .execute(&mut *corruption)
+        .await?;
+    corruption.commit().await?;
+
+    let suppressed = fixture
+        .store
+        .load_workspace_release(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await
+        .expect_err("pending-release loading rejects noncanonical failure detail");
+
+    assert_store_corruption(suppressed, RunnerProtocolCorruption::InvalidEncoding);
+
+    let rejected = fixture
+        .store
+        .load_workspace_cleanup_failure(
+            fixture.candidate.session(),
+            fixture.candidate.placement_revision(),
+        )
+        .await
+        .expect_err("typed readback rejects noncanonical JSON text");
+
+    assert_store_corruption(rejected, RunnerProtocolCorruption::InvalidEncoding);
     drop(pool);
     Ok(())
 }

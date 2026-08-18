@@ -55,12 +55,15 @@ are verified against this PR (`agent/runner-workspace-release-acknowledgement`).
 The immutable unowned-release proof installed by exact connection-loss
 propagation, together with pending-delivery exclusion and typed readback, is
 verified against this PR (`agent/runner-workspace-release-loss-retirement`). The
-immutable repository replacement workspace-receipt representation and typed
-replay are verified against this PR
-(`agent/runner-replacement-workspace-receipt-persistence`). Workspace-ready
-admission under the exact current staging authority and equal receipt replay are
-verified against this PR (`agent/runner-workspace-ready-admission`). Live
-post-commit daemon acknowledgement projection is verified against this PR
+immutable workspace-cleanup refusal, bounded runner detail, exact replay, and
+pending-delivery exclusion are verified against this PR
+(`agent/runner-workspace-cleanup-failure-admission`). The immutable repository
+replacement workspace-receipt representation and typed replay are verified
+against this PR (`agent/runner-replacement-workspace-receipt-persistence`).
+Workspace-ready admission under the exact current staging authority and equal
+receipt replay are verified against this PR
+(`agent/runner-workspace-ready-admission`). Live post-commit daemon
+acknowledgement projection is verified against this PR
 (`agent/daemon-runner-workspace-ready-routing`). Existing-pin attempt-and-offer
 atomicity is verified against this PR
 (`agent/runner-pinned-dispatch-transaction`). The pinned-dispatch adapter's
@@ -751,11 +754,10 @@ Representation rules, all enforced in the schema:
   retains one immutable unowned-release proof under the same exact correlation
   when connection-loss propagation retires a pending release. Release admission
   and cursor advancement serialize on the matching loss cursor, while completion
-  and loss retirement serialize on the release row and are mutually exclusive.
-  **Committed unimplemented functionality.** No present production transaction
-  inserts the pending release or records cleanup refusal; those transitions must
-  consume this exact representation rather than presenting
-  `RunnerWorkspaceReleaseCandidate` as cleanup authority.
+  loss retirement, and cleanup refusal serialize on the release row and are
+  mutually exclusive. No present production transaction inserts the pending
+  release; that transition must consume this exact representation rather than
+  presenting `RunnerWorkspaceReleaseCandidate` as cleanup authority.
 - Migration `202608110028` retains one immutable repository-replacement
   workspace receipt under its single-use provisioning authorization. The row
   preserves the successor revision, runner, stable manifest identity,
@@ -802,38 +804,33 @@ Representation rules, all enforced in the schema:
   caller-supplied disagreement.
 - The runner-orchestration foundation adds one append-only
   `runner_operation_failure` record for every durably admitted
-  `operation_failed` frame. It stores the exact runner, one closed
-  `operation_kind` (`workspace_provision`, `workspace_release`, or
-  `lease_offer`), the runner protocol's closed category, and the complete
+  `operation_failed` frame. The implemented workspace-release arm stores the
+  exact runner, retired session, positive placement revision, workspace
+  manifest, the closed `workspace_cleanup_failed` category, and complete
   runner-authored detail as separate code, message, and exact JSON-object
-  payload fields. The discriminator makes exactly one correlation arm total: the
-  workspace-provisioning authorization identity; the retired session, positive
-  placement revision, and workspace-manifest identity of a release; or the
-  offered lease identity and positive generation. Composite foreign keys bind
-  that arm to its typed authorization, release, or offered-lease record and to
-  the same runner; a unique constraint permits only one retained failure for an
-  exact operation correlation. Each arm admits exactly the category/correlation
-  pairs owned by
+  payload fields. A composite foreign key binds the correlation to its typed
+  release and runner, while one correlation admits only one retained failure.
+  Code, message, payload, aggregate detail size, JSON member-name grammar,
+  container cardinality, and depth carry the exact checks owned by
   [runner protocol](runner-protocol.md#local-transport-and-connection-protocol);
-  every other pair is rejected. Code, message, payload, aggregate detail size,
-  JSON member-name grammar, container cardinality, and depth carry the exact
-  checks owned by
-  [runner protocol](runner-protocol.md#local-transport-and-connection-protocol);
-  none is stored in a generic payload column or normalized on admission. The
-  record and its JSON text reject update, delete, and truncate. Admission
-  inserts that evidence in the same transaction that resolves the correlated
-  operation as refused. Provisioning can then produce no `workspace_ready`
-  receipt; a release can produce neither `workspace_released` nor a second
-  refusal and is retired as refused; and an offered lease can produce no
-  `lease_claim` and terminalizes with exact no-execution evidence. Deferred
-  checks require exactly one of the operation's success and refusal proofs and
-  preserve the failure after the mutable operation head retires. Equal
-  retransmission rereads the equal record and returns
-  `operation_failure_recorded`; unequal reuse is a correlation error. Why:
-  acknowledging volatile detail would let a restart forget evidence operator
-  inspection must reproduce, while delaying the operation transition until after
-  acknowledgement would leave the runner resending a failure the daemon had
-  already acted on.
+  none is stored in a generic payload column. Typed readback rejects a stored
+  payload that is no longer in the canonical runner representation. The record
+  and its JSON text reject update, delete, and truncate. Admission locks runner
+  authority in the total order, inserts the evidence, and retires the release as
+  refused in one transaction, so that release can produce neither
+  `workspace_released` nor a second refusal. Equal retransmission rereads the
+  equal record; unequal reuse is a correlation error. Why: acknowledging
+  volatile detail would let a restart forget evidence operator inspection must
+  reproduce, while delaying release retirement until after acknowledgement would
+  leave the runner resending a failure the daemon had already acted on.
+  **Committed unimplemented functionality.** No present operation-failure
+  transaction admits the `workspace_provision` or `lease_offer` arm. The
+  relation will widen compatibly to make exactly one correlation arm total: the
+  workspace-provisioning authorization identity; the implemented release arm; or
+  the offered lease identity and positive generation. Those future arms retain
+  the same checked detail, admit only the category/correlation pairs owned by
+  runner protocol, and atomically install the correlated refusal or no-execution
+  transition before acknowledgement.
 - Both creation command families store the caller's optional placement.
   `create_session_command` and `create_session_from_imported_frontier_command`
   carry the complete request — selector kind with its runner identity or class
@@ -1386,12 +1383,11 @@ Locks per transaction, in acquisition order:
   removes that correlation from pending delivery. Exact connection-loss
   propagation now atomically installs an immutable unowned-release proof before
   advancing that session's cursor and removes the same correlation from pending
-  delivery. **Committed unimplemented functionality.** One other transition will
-  retire the durable release record and no other may do so: durable admission of
-  the runner's `workspace_cleanup_failed` operation failure naming that same
-  release will resolve it as refused when the runner cannot complete the
-  deletion. Until one of the three terminal commits, an unacknowledged release
-  is redelivered after restart exactly as an unacknowledged result is.
+  delivery. Durable admission of the runner's `workspace_cleanup_failed`
+  operation failure names that same release, retains the bounded exact failure
+  detail, and resolves the release as refused. These three terminal proofs are
+  mutually exclusive. Until one commits, an unacknowledged release is
+  redelivered after restart exactly as an unacknowledged result is.
 
 - **Runner operation failure**: durable admission takes `session_scheduler` for
   the correlated session, then the applicable enrollment, connection/loss,

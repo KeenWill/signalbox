@@ -6150,6 +6150,70 @@ impl<Transaction: RunnerWorkspaceReleaseTransaction>
 }
 ```
 
+## application: runner_operation_failure
+
+```rust
+pub enum RunnerOperationFailureDetailFailure {
+    InvalidCode,
+    InvalidMessage,
+    InvalidPayload,
+    DetailTooLarge,
+}
+
+pub struct RunnerOperationFailureDetailError { /* private */ }
+impl RunnerOperationFailureDetailError {
+    pub const fn failure(self) -> RunnerOperationFailureDetailFailure;
+}
+
+pub struct RunnerOperationFailureDetail { /* private */ }
+pub struct RunnerOperationFailureDetailInput {
+    pub code: String,
+    pub message: String,
+    pub payload_json: String,
+}
+impl RunnerOperationFailureDetail {
+    pub fn try_new(
+        input: RunnerOperationFailureDetailInput,
+    ) -> Result<Self, RunnerOperationFailureDetailError>;
+    pub fn code(&self) -> &str;
+    pub fn message(&self) -> &str;
+    pub fn payload_json(&self) -> &str;
+}
+
+pub struct RunnerWorkspaceCleanupFailure { /* private */ }
+impl RunnerWorkspaceCleanupFailure {
+    pub const fn new(
+        session: SessionId,
+        placement_revision: RunnerGeneration,
+        runner: RunnerId,
+        manifest: WorkspaceManifestId,
+        detail: RunnerOperationFailureDetail,
+    ) -> Self;
+    // accessors: session(), placement_revision(), runner(), manifest_id(), detail()
+}
+
+pub trait RunnerWorkspaceCleanupFailureTransaction {
+    type Error;
+    fn record_cleanup_failure(
+        &mut self,
+        failure: RunnerWorkspaceCleanupFailure,
+    ) -> impl Future<Output = Result<RunnerWorkspaceCleanupFailure, Self::Error>> + Send;
+}
+
+pub struct RunnerWorkspaceCleanupFailureService<Transaction> { /* private */ }
+impl<Transaction> RunnerWorkspaceCleanupFailureService<Transaction> {
+    pub const fn new(transaction: Transaction) -> Self;
+}
+impl<Transaction: RunnerWorkspaceCleanupFailureTransaction>
+    RunnerWorkspaceCleanupFailureService<Transaction>
+{
+    pub async fn execute(
+        &mut self,
+        failure: RunnerWorkspaceCleanupFailure,
+    ) -> Result<RunnerWorkspaceCleanupFailure, Transaction::Error>;
+}
+```
+
 ## application: runner_workspace_ready
 
 ```rust
@@ -11328,6 +11392,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: replace_lost_runner_before_pin        | 4 (incl. 1 trait)     |
 | application: pinned_runner_replacement             | 7 (incl. 2 traits)    |
 | application: runner_replacement_provisioning       | 7 (incl. 2 traits)    |
+| application: runner_operation_failure              | 7 (incl. 1 trait)     |
 | application: runner_workspace_release              | 3 (incl. 1 trait)     |
 | application: runner_workspace_ready                | 5 (incl. 1 trait)     |
 | application: runner_lease_claim                    | 3 (incl. 1 trait)     |
@@ -11352,4 +11417,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                     |
 | application: tool_execution_test_support           | 7 (+1 free fn)        |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **313 (+1 free fn)**  |
+| **signalbox-application total**                    | **320 (+1 free fn)**  |

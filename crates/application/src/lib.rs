@@ -22,6 +22,7 @@ mod review_orchestration;
 mod review_workflow;
 mod runner_lease_claim;
 mod runner_lease_result;
+mod runner_operation_failure;
 mod runner_replacement_provisioning;
 mod runner_workspace_ready;
 mod runner_workspace_release;
@@ -145,6 +146,12 @@ pub use runner_lease_claim::{
 };
 pub use runner_lease_result::{
     RunnerLeaseResultRequest, RunnerLeaseResultService, RunnerLeaseResultTransaction,
+};
+pub use runner_operation_failure::{
+    RunnerOperationFailureDetail, RunnerOperationFailureDetailError,
+    RunnerOperationFailureDetailFailure, RunnerOperationFailureDetailInput,
+    RunnerWorkspaceCleanupFailure, RunnerWorkspaceCleanupFailureService,
+    RunnerWorkspaceCleanupFailureTransaction,
 };
 pub use runner_replacement_provisioning::{
     RunnerReplacementProvisioningIdGenerator, RunnerReplacementProvisioningOutcome,
