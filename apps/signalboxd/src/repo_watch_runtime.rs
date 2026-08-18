@@ -1160,8 +1160,22 @@ impl RepositoryWatchTask {
                 self.activate_rules().await?;
                 self.rules_activated = true;
             }
-            self.process_cutoffs().await?;
-            self.process_dispatches().await?;
+            // A leading reconciliation failure is recorded and not
+            // propagated: the pre-poll drain owes none of that work, and the
+            // same steps run again after the poll, where a repeated failure
+            // reports through `trailing_failure`.
+            if let Err(error) = async {
+                self.process_cutoffs().await?;
+                self.process_dispatches().await
+            }
+            .await
+            {
+                tracing::warn!(
+                    repository = %self.repository.as_str(),
+                    cause_code = error.cause_code(),
+                    "repository-watch leading reconciliation failed; the poll and its drains continue"
+                );
+            }
             // Deliveries already admitted are projected before this poll runs.
             // A poll that observes the same transition would otherwise advance
             // the cursor past them, and every one of them would then apply to
@@ -1190,23 +1204,35 @@ impl RepositoryWatchTask {
                 }
                 WebhookDrain::Deferred => Ok(()),
             };
-            if let Err(error) = &accelerated {
-                tracing::warn!(
+            match drained.as_ref() {
+                Some(WebhookDrainOutcome::ProjectionFailed(error)) => tracing::warn!(
                     repository = %self.repository.as_str(),
                     cause_code = error.cause_code(),
                     "repository-watch webhook pre-poll drain failed; polling continues"
-                );
+                ),
+                Some(WebhookDrainOutcome::DispatchFailedAfterTerminal(error)) => tracing::warn!(
+                    repository = %self.repository.as_str(),
+                    cause_code = error.cause_code(),
+                    "repository-watch webhook pre-poll dispatch work failed after terminal records; polling continues"
+                ),
+                _ => {}
             }
             self.poll_and_commit().await?;
             // Keyed on the poll succeeding rather than the whole attempt, so a
             // deferred drain failure cannot starve retention while one
             // delivery persistently fails.
             self.maybe_purge_expired_payloads().await;
-            // Only once the pre-poll drain succeeded. Repeating a drain that
-            // has just failed would spend the same provider and database work
-            // twice inside one attempt, ahead of the backoff that exists to
-            // space exactly that work out.
-            if drain == WebhookDrain::Run && accelerated.is_ok() {
+            // Only once the pre-poll drain's projections succeeded: repeating
+            // a projection-failed drain would spend the same provider and
+            // database work twice inside one attempt, ahead of the backoff
+            // that exists to space exactly that work out. A terminal dispatch
+            // failure does not gate it — projection succeeded, and the
+            // post-poll step still owes newly admitted deliveries their drain.
+            let pre_drain_projection_failed = matches!(
+                drained.as_ref(),
+                Some(WebhookDrainOutcome::ProjectionFailed(_))
+            );
+            if drain == WebhookDrain::Run && !pre_drain_projection_failed {
                 let outcome = self.process_webhook_deliveries().await;
                 *drained = Some(outcome);
                 if let Some(error) = outcome.failure() {
@@ -1251,12 +1277,18 @@ impl RepositoryWatchTask {
                 }
                 self.rules_activated = true;
             }
-            if let Err(error) = self.process_cutoffs().await {
-                return WebhookAttemptOutcome::FailedBeforeDrain(error);
-            }
-            if let Err(error) = self.process_dispatches().await {
-                return WebhookAttemptOutcome::FailedBeforeDrain(error);
-            }
+            // Leading reconciliation failures no longer gate the drain:
+            // pending deliveries owe none of that work, and gating here left
+            // every newly admitted delivery waiting on unrelated dispatch
+            // trouble. The failure is preserved and reported once the drain
+            // has run.
+            let leading_failure = if let Err(error) = self.process_cutoffs().await {
+                Some(error)
+            } else if let Err(error) = self.process_dispatches().await {
+                Some(error)
+            } else {
+                None
+            };
             match self.process_webhook_deliveries().await {
                 WebhookDrainOutcome::Drained => {}
                 WebhookDrainOutcome::ProjectionFailed(error) => {
@@ -1267,6 +1299,12 @@ impl RepositoryWatchTask {
                 WebhookDrainOutcome::DispatchFailedAfterTerminal(error) => {
                     return WebhookAttemptOutcome::DrainedThenFailed(error);
                 }
+            }
+            if let Some(error) = leading_failure {
+                // The drain committed its work; the leading failure is the
+                // surrounding dispatch work's, so it follows up rather than
+                // advancing the drain backoff.
+                return WebhookAttemptOutcome::DrainedThenFailed(error);
             }
             if let Err(error) = self.process_cutoffs().await {
                 return WebhookAttemptOutcome::DrainedThenFailed(error);
@@ -1312,9 +1350,14 @@ impl RepositoryWatchTask {
                     // The same error-level record a per-delivery failure earns:
                     // a page this drain could not read is a drain failure, and
                     // the poll caller's own record is a warning about polling.
+                    // The record names the chronological first cause when a
+                    // delivery already failed on an earlier page; the outcome
+                    // keeps the page-load error for classification.
                     tracing::error!(
                         repository = %self.repository.as_str(),
-                        cause_code = RepositoryWatchAttemptError::Persistence.cause_code(),
+                        cause_code = chronological_first
+                            .unwrap_or(RepositoryWatchAttemptError::Persistence)
+                            .cause_code(),
                         cause = %error,
                         "repository-watch webhook drain could not load its pending page"
                     );

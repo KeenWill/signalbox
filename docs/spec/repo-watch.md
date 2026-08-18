@@ -946,33 +946,33 @@ slowly. A poll whose pre-poll drain failed does not repeat it: the step after
 the poll is skipped, so work already known to be failing waits for that delay
 rather than repeating inside one attempt. A pre-poll drain that succeeded is
 still followed by the post-poll one, which is what catches deliveries admitted
-while the poll was running. A failed full poll schedules that retry only when
-none is already owed, an admission wake is suppressed while one is, and a full
-poll omits both of its drain steps while one is, so neither a rapidly failing
-poll nor an authenticated replay stream can defer or bypass the backoff; a
-suppressed wake coalesces and is observed by the attempt that follows the retry.
-A poll taken during a backoff window therefore commits a cursor that a delivery
-still pending does not reflect. The shadow baseline that delivery seeded is
-marked superseded but retained, because replacement waits for an empty pending
-page, so its retry projects against that baseline rather than reseeding from the
-advanced cursor — the accepted cost is that divergence, taken against an
-unbounded repetition of work already failing. An overdue retry is taken ahead of
-an overdue poll, and a full poll that outlasts its own interval schedules the
-next one a whole interval from completion; without both, a poll deadline that is
-always already elapsed would win every scheduling decision and starve durable
-webhook work for as long as polling kept failing. An independent per-repository
-observer checks durable pending work every thirty seconds, reading delivery
-identity and receipt time only and never the admitted body. That cadence is
-anchored, so a slow inspection does not push the next one out by its own
-duration, and the inspection is bounded at ten seconds so a connection pool
-exhausted by wedged repositories produces a closed timeout cause rather than
-silence; once the oldest delivery has remained undispositioned for one minute it
-emits an error-level stall signal with the repository, delivery identity,
-receipt sequence, pending age, and closed stall cause. Because the observer is
-not the serialized drain task, a task wedged in polling, projection,
-disposition, or dispatch cannot silence that signal, and the observer's own
-inspection is cancelled by shutdown so an unresponsive database cannot hold
-daemon termination.
+while the poll was running. A full poll that fails before its drains have run
+schedules that retry only when none is already owed, an admission wake is
+suppressed while one is, and a full poll omits both of its drain steps while one
+is, so neither a rapidly failing poll nor an authenticated replay stream can
+defer or bypass the backoff; a suppressed wake coalesces and is observed by the
+attempt that follows the retry. A poll taken during a backoff window therefore
+commits a cursor that a delivery still pending does not reflect. The shadow
+baseline that delivery seeded is marked superseded but retained, because
+replacement waits for an empty pending page, so its retry projects against that
+baseline rather than reseeding from the advanced cursor — the accepted cost is
+that divergence, taken against an unbounded repetition of work already failing.
+An overdue retry is taken ahead of an overdue poll, and a full poll that
+outlasts its own interval schedules the next one a whole interval from
+completion; without both, a poll deadline that is always already elapsed would
+win every scheduling decision and starve durable webhook work for as long as
+polling kept failing. An independent per-repository observer checks durable
+pending work every thirty seconds, reading delivery identity and receipt time
+only and never the admitted body. That cadence is anchored, so a slow inspection
+does not push the next one out by its own duration, and the inspection is
+bounded at ten seconds so a connection pool exhausted by wedged repositories
+produces a closed timeout cause rather than silence; once the oldest delivery
+has remained undispositioned for one minute it emits an error-level stall signal
+with the repository, delivery identity, receipt sequence, pending age, and
+closed stall cause. Because the observer is not the serialized drain task, a
+task wedged in polling, projection, disposition, or dispatch cannot silence that
+signal, and the observer's own inspection is cancelled by shutdown so an
+unresponsive database cannot hold daemon termination.
 
 **Implemented behavior.** Shadow mode never inserts a webhook-produced row into
 `repo_watch_event` and never mutates the cursor from a payload-derived patch.
