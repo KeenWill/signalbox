@@ -2088,7 +2088,7 @@ where
         }
     };
 
-    let (context, mut attachment) = context;
+    let (mut context, mut attachment) = context;
 
     let outcome = async {
         let mut heartbeat = interval(HEARTBEAT_INTERVAL);
@@ -2160,6 +2160,7 @@ where
                             .await
                         {
                             Ok(response) => {
+                                context.registration_revision = response.registration_revision;
                                 write_message(&mut writer, Message::Registered(response)).await?;
                             }
                             Err(failure) => {
@@ -5592,6 +5593,96 @@ mod tests {
         assert_eq!(registered.registration_revision.get(), 2);
         assert_eq!(state, "completed");
         assert_eq!(pending, []);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn workspace_ready_uses_the_registration_revision_returned_by_advertise() {
+        let (_container, database_url, _empty_store) = postgres_store().await;
+        let store = RunnerProtocolStore::new(fresh_pool(&database_url).await, configured_catalog());
+        let service = PostgresRunnerRegistrationService::new(store, []);
+        let workspace_ready = RecordingWorkspaceReadyOperationService::default();
+        let (server, client) = UnixStream::pair().expect("a local runner stream pair exists");
+        let (_shutdown_sender, shutdown) = watch::channel(false);
+        let server = serve_connection_with_operations_and_broker(
+            server,
+            service,
+            UnavailableRunnerLeaseOperationService,
+            workspace_ready,
+            RunnerConnectionBroker::new(),
+            shutdown,
+        );
+        let client = async {
+            let (reader, mut writer) = client.into_split();
+            let mut reader = BufReader::new(reader);
+            write_message(
+                &mut writer,
+                Message::Enroll(Enroll {
+                    request_id: identity(1),
+                    digest_version: DIGEST_VERSION,
+                    advertisement: configured_advertisement(),
+                }),
+            )
+            .await
+            .expect("the configured runner enrolls");
+            let Message::Enrolled(enrolled) = read_frame(&mut reader)
+                .await
+                .expect("the enrollment response is received")
+                .message
+            else {
+                panic!("the runner receives its enrollment receipt");
+            };
+            write_message(
+                &mut writer,
+                Message::Advertise(Advertise {
+                    enrollment_id: enrolled.enrollment_id,
+                    runner_id: enrolled.runner_id,
+                    authentication_id: enrolled.authentication_id,
+                    registration_revision: enrolled.registration_revision,
+                    advertisement: empty_advertisement(),
+                }),
+            )
+            .await
+            .expect("the changed advertisement is sent");
+            let Message::Registered(registered) = read_frame(&mut reader)
+                .await
+                .expect("the changed advertisement is acknowledged")
+                .message
+            else {
+                panic!("the runner receives its updated registration receipt");
+            };
+            let mut ready = repository_workspace_ready();
+            ready.correlation.runner_id = enrolled.runner_id;
+            ready.correlation.registration_revision = registered.registration_revision;
+            ready.ready.manifest.runner = enrolled.runner_id;
+            ready.ready.manifest_digest =
+                signalbox_runner_wire::workspace_manifest_digest(&ready.ready.manifest)
+                    .expect("the updated fixture manifest has a canonical digest");
+            write_message(&mut writer, Message::WorkspaceReady(ready.clone()))
+                .await
+                .expect("workspace-ready is sent under the updated registration");
+            let acknowledgement = read_frame(&mut reader)
+                .await
+                .expect("workspace-ready is acknowledged")
+                .message;
+            (enrolled, registered, ready, acknowledgement)
+        };
+
+        let (served, (enrolled, registered, ready, acknowledgement)) = tokio::join!(server, client);
+
+        served.expect("the established connection closes cleanly");
+        assert_ne!(
+            registered.registration_revision,
+            enrolled.registration_revision
+        );
+        assert_eq!(
+            acknowledgement,
+            Message::WorkspaceRecorded(WorkspaceRecorded {
+                correlation: ready.correlation,
+                manifest_id: ready.ready.manifest.manifest_id,
+                manifest_digest: ready.ready.manifest_digest,
+            })
+        );
     }
 
     #[tokio::test]
