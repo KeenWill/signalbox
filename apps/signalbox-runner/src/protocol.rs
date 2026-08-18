@@ -558,6 +558,7 @@ pub struct RunnerConnection<S> {
     connection_epoch: PositiveU64,
     heartbeat: Option<HeartbeatExchange>,
     claimed_capability: Option<LeaseCorrelation>,
+    handed_off_capability: Option<LeaseCorrelation>,
 }
 
 #[derive(Clone)]
@@ -668,6 +669,7 @@ where
             connection_epoch,
             heartbeat: None,
             claimed_capability: None,
+            handed_off_capability: None,
         })
     }
 
@@ -895,6 +897,10 @@ where
                         .claimed_capability
                         .as_ref()
                         .is_some_and(|current| current != &correlation)
+                    || self
+                        .handed_off_capability
+                        .as_ref()
+                        .is_some_and(|handed_off| handed_off == &correlation)
                 {
                     return Err(RunnerConnectionError::Violation(
                         ProtocolViolation::LeaseAcknowledgementMismatch,
@@ -925,6 +931,7 @@ where
                         other => RunnerConnectionError::State(other),
                     })?;
                 self.claimed_capability = None;
+                self.handed_off_capability = Some(correlation.clone());
                 Ok(Some(ServeOutcome::DispatchReady(Box::new(
                     RunnerDispatchReady {
                         correlation,
@@ -2297,7 +2304,8 @@ mod tests {
     }
 
     /// INV-011 / INV-024 / INV-043: consuming the claimed capability for one
-    /// dispatch handoff prevents an equal replay from minting a second handoff.
+    /// dispatch handoff prevents an equal claim replay from re-arming a second
+    /// handoff on the same connection.
     #[tokio::test]
     async fn s31_inv011_inv024_inv043_equal_dispatch_replay_has_one_handoff() {
         let parent = TempDir::new().expect("a temporary parent is available");
@@ -2311,7 +2319,6 @@ mod tests {
             })
             .expect("the waiting-dispatch phase is durable");
         let dispatch = retained_dispatch();
-        let repeated = dispatch.clone();
         let (runner_io, hub_io) = tokio::io::duplex(TEST_WIRE_BYTES);
         let mut hub_io = BufReader::new(hub_io);
 
@@ -2327,11 +2334,11 @@ mod tests {
                 .serve_one(&mut state)
                 .await
                 .expect("the first canonical dispatch is accepted");
-            let repeated = connection
+            let repeated_claim = connection
                 .serve_one(&mut state)
                 .await
-                .expect_err("an equal dispatch cannot mint another handoff");
-            (claimed, ready, repeated)
+                .expect_err("an equal claim cannot re-arm the handed-off capability");
+            (claimed, ready, repeated_claim)
         };
         let hub = async {
             let _resume = receive_hub_message(&mut hub_io).await;
@@ -2350,15 +2357,19 @@ mod tests {
             )
             .await;
             send_hub_message(&mut hub_io, Message::Dispatch(dispatch)).await;
-            send_hub_message(&mut hub_io, Message::Dispatch(repeated)).await;
+            send_hub_message(
+                &mut hub_io,
+                Message::LeaseClaimed(LeaseClaimed { correlation }),
+            )
+            .await;
         };
-        let ((claimed, ready, repeated), ()) = tokio::join!(runner, hub);
+        let ((claimed, ready, repeated_claim), ()) = tokio::join!(runner, hub);
 
         assert_eq!(claimed, None);
         assert!(matches!(ready, Some(ServeOutcome::DispatchReady(_))));
         assert!(matches!(
-            repeated,
-            RunnerConnectionError::Violation(ProtocolViolation::DispatchMismatch)
+            repeated_claim,
+            RunnerConnectionError::Violation(ProtocolViolation::LeaseAcknowledgementMismatch)
         ));
     }
 
