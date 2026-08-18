@@ -37,6 +37,12 @@ impl FileMediaProvider for SyntheticProvider {
                 Some(b'C') => std::process::exit(7),
                 Some(b'T') => std::thread::sleep(Duration::from_secs(5)),
                 Some(b'X') => {
+                    let thread_output = std::thread::spawn(|| 1_u8)
+                        .join()
+                        .map_err(|_| signalbox_file_media_runtime::ProcessorFailure::Failed)?;
+                    if thread_output != 1 {
+                        return Err(signalbox_file_media_runtime::ProcessorFailure::Failed);
+                    }
                     let spawned = std::process::Command::new("/signalbox-file-media-worker")
                         .arg("--signalbox-file-media-isolation-probe")
                         .status();

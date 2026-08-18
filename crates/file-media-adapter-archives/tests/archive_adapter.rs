@@ -161,6 +161,15 @@ async fn latin1_gzip_filename_is_decoded_before_validation() -> Result<(), Box<d
 }
 
 #[tokio::test]
+async fn hostile_later_gzip_member_filename_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::gzip_with_hostile_later_member()?).await?,
+        "hostile_entry_name",
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn generated_zstd_validates_and_enumerates() -> Result<(), Box<dyn Error>> {
     assert_valid_inventory(valid_inventory(ArchiveFixture::zstd()?).await?);
     Ok(())

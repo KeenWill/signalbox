@@ -1,7 +1,8 @@
-use std::{num::NonZeroU64, str::FromStr};
+use std::{borrow::Borrow, num::NonZeroU64, str::FromStr};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use signalbox_file_media_runtime::{
     AttachmentKind, BoundedMetadata, CanonicalMediaType, DeclaredMediaType, DisplayFilename,
     FileDigest, FileMediaProviderDeclaration, FileMediaProviderReadRequest,
@@ -12,14 +13,33 @@ use signalbox_file_media_runtime::{
     ValidationEvidence,
 };
 
-pub(crate) fn declaration_fingerprint(declarations: &[FileMediaProviderDeclaration]) -> Vec<u8> {
+pub(crate) fn declaration_fingerprint(declarations: &[FileMediaProviderDeclaration]) -> [u8; 32] {
     let mut declarations = declarations.iter().collect::<Vec<_>>();
     declarations.sort_by(|left, right| left.provider().cmp(right.provider()));
-    let mut fingerprint = Vec::new();
+    declaration_fingerprint_ordered(declarations.len(), declarations)
+}
+
+pub(crate) fn declaration_fingerprint_ordered<I, D>(
+    declaration_count: usize,
+    declarations: I,
+) -> [u8; 32]
+where
+    I: IntoIterator<Item = D>,
+    D: Borrow<FileMediaProviderDeclaration>,
+{
+    let mut fingerprint = Sha256::new();
     fingerprint_field(&mut fingerprint, b"signalbox-file-media-catalog-v1");
-    fingerprint_len(&mut fingerprint, declarations.len());
+    fingerprint_len(&mut fingerprint, declaration_count);
     for declaration in declarations {
+        let declaration = declaration.borrow();
         fingerprint_field(&mut fingerprint, declaration.provider().as_str().as_bytes());
+        match declaration.observed_container_entries() {
+            None => fingerprint_field(&mut fingerprint, b"no_container_entries"),
+            Some(entries) => {
+                fingerprint_field(&mut fingerprint, b"container_entries");
+                fingerprint_u64(&mut fingerprint, entries);
+            }
+        }
         fingerprint_len(&mut fingerprint, declaration.readers().len());
         for reader in declaration.readers() {
             fingerprint_field(
@@ -85,10 +105,10 @@ pub(crate) fn declaration_fingerprint(declarations: &[FileMediaProviderDeclarati
             );
         }
     }
-    fingerprint
+    fingerprint.finalize().into()
 }
 
-fn fingerprint_view_bounds(fingerprint: &mut Vec<u8>, bounds: ReadViewBounds) {
+fn fingerprint_view_bounds(fingerprint: &mut Sha256, bounds: ReadViewBounds) {
     fingerprint_u64(fingerprint, bounds.source_bytes());
     match bounds {
         ReadViewBounds::Text { output_bytes, .. } => {
@@ -136,21 +156,21 @@ fn fingerprint_view_bounds(fingerprint: &mut Vec<u8>, bounds: ReadViewBounds) {
     }
 }
 
-fn fingerprint_field(fingerprint: &mut Vec<u8>, value: &[u8]) {
+fn fingerprint_field(fingerprint: &mut Sha256, value: &[u8]) {
     fingerprint_len(fingerprint, value.len());
-    fingerprint.extend_from_slice(value);
+    fingerprint.update(value);
 }
 
-fn fingerprint_len(fingerprint: &mut Vec<u8>, value: usize) {
+fn fingerprint_len(fingerprint: &mut Sha256, value: usize) {
     fingerprint_usize(fingerprint, value);
 }
 
-fn fingerprint_usize(fingerprint: &mut Vec<u8>, value: usize) {
+fn fingerprint_usize(fingerprint: &mut Sha256, value: usize) {
     fingerprint_u64(fingerprint, u64::try_from(value).unwrap_or(u64::MAX));
 }
 
-fn fingerprint_u64(fingerprint: &mut Vec<u8>, value: u64) {
-    fingerprint.extend_from_slice(&value.to_be_bytes());
+fn fingerprint_u64(fingerprint: &mut Sha256, value: u64) {
+    fingerprint.update(value.to_be_bytes());
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

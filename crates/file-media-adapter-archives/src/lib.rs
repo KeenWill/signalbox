@@ -8,7 +8,7 @@ use std::{
     str::FromStr,
 };
 
-use flate2::read::MultiGzDecoder;
+use flate2::bufread::GzDecoder;
 use signalbox_file_media_runtime::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider,
     FileMediaProviderDeclaration, FileMediaProviderFuture, FileMediaProviderReadRequest,
@@ -71,19 +71,19 @@ impl FileMediaProvider for ArchiveProvider {
             let kind = require_reader(reader)?;
             require_active(cancellation)?;
             let length = source.byte_length().get().min(PROBE_BYTES);
-            let bytes = read_range(source, 0, length).await?;
+            let prefix = ProbePrefix(read_range(source, 0, length).await?);
             require_active(cancellation)?;
-            if kind.matches_probe(&bytes) {
+            if kind.matches_probe(prefix.as_bytes()) {
                 let strength = if source.byte_length().get() <= SOURCE_BYTES
                     && (kind == ArchiveKind::Zip
-                        || zip_header(&bytes)
+                        || zip_header(prefix.as_bytes())
                             && matches!(kind, ArchiveKind::Gzip | ArchiveKind::Zstd))
                 {
-                    let complete = read_all(source).await?;
+                    let complete = read_complete_after_prefix(source, prefix).await?;
                     require_active(cancellation)?;
-                    kind.probe_strength_with_complete_bytes(&bytes, &complete)
+                    kind.probe_strength_with_complete_bytes(&complete)
                 } else {
-                    kind.probe_strength(&bytes)
+                    kind.probe_strength(prefix.as_bytes())
                 };
                 Ok(ProcessorProbeOutput::Candidate {
                     media_type: String::from(kind.media_type()),
@@ -274,12 +274,14 @@ impl ArchiveKind {
         }
     }
 
-    fn probe_strength_with_complete_bytes(self, prefix: &[u8], complete: &[u8]) -> ProbeStrength {
-        let structurally_valid_zip = ZipArchive::new(Cursor::new(complete)).is_ok();
+    fn probe_strength_with_complete_bytes(self, source: &CompleteSource) -> ProbeStrength {
+        let structurally_valid_zip = ZipArchive::new(Cursor::new(source.as_bytes())).is_ok();
         match self {
             Self::Zip if structurally_valid_zip => ProbeStrength::Strong,
             Self::Gzip | Self::Zstd if structurally_valid_zip => ProbeStrength::StructuralCandidate,
-            Self::Zip | Self::Gzip | Self::Zstd | Self::Tar => self.probe_strength(prefix),
+            Self::Zip | Self::Gzip | Self::Zstd | Self::Tar => {
+                self.probe_strength(source.probe_prefix())
+            }
         }
     }
 
@@ -464,18 +466,37 @@ fn enumerate_tar(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
 }
 
 fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
-    let name = match gzip_name(bytes)? {
-        Some(name) => checked_name_text(&latin1_name(name))?,
-        None => String::from("content"),
-    };
-    if recursive_name(&name) {
-        return Err(ArchiveIssue::Recursive);
+    let mut remaining = bytes;
+    let mut first_name = None;
+    let mut expanded = 0_u64;
+    while !remaining.is_empty() {
+        let name = match gzip_name(remaining)? {
+            Some(name) => checked_name_text(&latin1_name(name))?,
+            None => String::from("content"),
+        };
+        if recursive_name(&name) {
+            return Err(ArchiveIssue::Recursive);
+        }
+        if first_name.is_none() {
+            first_name = Some(name);
+        }
+        let mut decoder = GzDecoder::new(Cursor::new(remaining));
+        let maximum = MAX_EXPANDED_BYTES
+            .checked_sub(expanded)
+            .ok_or(ArchiveIssue::Expansion)?;
+        let (member_expanded, recursive) = count_reader(&mut decoder, maximum)?;
+        if recursive {
+            return Err(ArchiveIssue::Recursive);
+        }
+        expanded = bounded_total(expanded, member_expanded)?;
+        let consumed = usize::try_from(decoder.into_inner().position())
+            .map_err(|_| ArchiveIssue::Malformed)?;
+        if consumed == 0 {
+            return Err(ArchiveIssue::Malformed);
+        }
+        remaining = remaining.get(consumed..).ok_or(ArchiveIssue::Malformed)?;
     }
-    let mut decoder = MultiGzDecoder::new(bytes);
-    let (expanded, recursive) = count_reader(&mut decoder, MAX_EXPANDED_BYTES)?;
-    if recursive {
-        return Err(ArchiveIssue::Recursive);
-    }
+    let name = first_name.ok_or(ArchiveIssue::Malformed)?;
     Ok(single_stream_summary(name, expanded))
 }
 
@@ -807,6 +828,48 @@ fn entries_output(
 
 async fn read_all(source: &dyn VerifiedBlobSource) -> Result<Vec<u8>, ProcessorFailure> {
     read_range(source, 0, source.byte_length().get()).await
+}
+
+struct ProbePrefix(Vec<u8>);
+
+impl ProbePrefix {
+    fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+struct CompleteSource(Vec<u8>);
+
+impl CompleteSource {
+    fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    fn probe_prefix(&self) -> &[u8] {
+        &self.0[..self.0.len().min(PREFIX_BYTES)]
+    }
+}
+
+async fn read_complete_after_prefix(
+    source: &dyn VerifiedBlobSource,
+    prefix: ProbePrefix,
+) -> Result<CompleteSource, ProcessorFailure> {
+    let total =
+        usize::try_from(source.byte_length().get()).map_err(|_| ProcessorFailure::Failed)?;
+    let mut bytes = prefix.0;
+    if bytes.len() < total {
+        let offset = u64::try_from(bytes.len()).map_err(|_| ProcessorFailure::Failed)?;
+        let remaining = source
+            .byte_length()
+            .get()
+            .checked_sub(offset)
+            .ok_or(ProcessorFailure::Failed)?;
+        bytes.extend_from_slice(&read_range(source, offset, remaining).await?);
+    }
+    if bytes.len() != total {
+        return Err(ProcessorFailure::Failed);
+    }
+    Ok(CompleteSource(bytes))
 }
 
 async fn read_range(

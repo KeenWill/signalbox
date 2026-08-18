@@ -157,6 +157,17 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn gzip_with_hostile_later_member() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = gzip_bytes("payload.txt", PAYLOAD)?;
+        bytes.extend_from_slice(&gzip_bytes("../../host", PAYLOAD)?);
+        Ok(Self {
+            bytes,
+            media_type: "application/gzip",
+            expected_format: "gzip",
+            expected_name: "payload.txt",
+        })
+    }
+
     pub fn zstd() -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             bytes: zstd::stream::encode_all(PAYLOAD, 1)?,
