@@ -477,6 +477,114 @@ async fn pending_delivery_survives_store_restart() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
+/// The drain monitor reads the oldest pending delivery on a fixed cadence for
+/// every webhook repository, so it must not transfer the admitted bodies that a
+/// pending page carries. Taking the payload table out of reach proves the
+/// dependency rather than asserting it: the monitor query still answers where
+/// the page query, which joins that table, can no longer run at all.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn oldest_pending_receipt_is_read_without_its_payload() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let oldest = delivery_key(0x401);
+    let newer = delivery_key(0x402);
+    admit_fixture(&store, oldest).await?;
+    admit_fixture(&store, newer).await?;
+    store
+        .admit(&admission(
+            delivery_key(0x403),
+            other_repository()?,
+            OTHER_EVENT_NAME,
+            Some(OTHER_ACTION_NAME),
+            OTHER_DIGEST,
+            OTHER_BODY,
+        )?)
+        .await?;
+
+    let pending = store
+        .load_oldest_pending_receipt(&repository()?)
+        .await?
+        .expect("an admitted delivery is pending");
+
+    assert_eq!(pending.key(), oldest);
+    let page = store
+        .load_pending(&repository()?, pending_page_size(), None)
+        .await?;
+    assert_eq!(pending.receipt(), page[0].receipt());
+
+    sqlx::query(
+        "ALTER TABLE repo_watch_webhook_payload RENAME TO repo_watch_webhook_payload_hidden",
+    )
+    .execute(&pool)
+    .await?;
+
+    let without_payload = store
+        .load_oldest_pending_receipt(&repository()?)
+        .await?
+        .expect("the monitor query does not depend on the payload");
+    assert_eq!(without_payload.key(), oldest);
+    assert_eq!(without_payload.receipt(), pending.receipt());
+    assert!(
+        store
+            .load_pending(&repository()?, pending_page_size(), None)
+            .await
+            .is_err(),
+        "the drain page joins the payload the monitor deliberately never reads"
+    );
+
+    sqlx::query(
+        "ALTER TABLE repo_watch_webhook_payload_hidden RENAME TO repo_watch_webhook_payload",
+    )
+    .execute(&pool)
+    .await?;
+
+    Ok(())
+}
+
+/// The monitor reads the oldest pending delivery, so a delivery reaching
+/// terminal state has to hand that position to the next one and the last one
+/// has to leave nothing pending at all.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_oldest_pending_receipt_advances_as_deliveries_reach_terminal_state()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool);
+    let oldest = delivery_key(0x411);
+    let newer = delivery_key(0x412);
+    admit_fixture(&store, oldest).await?;
+    admit_fixture(&store, newer).await?;
+    assert_eq!(
+        store
+            .load_oldest_pending_receipt(&repository()?)
+            .await?
+            .map(|pending| pending.key()),
+        Some(oldest)
+    );
+
+    store
+        .record_terminal(oldest, &projected_request(Vec::new())?)
+        .await?;
+    assert_eq!(
+        store
+            .load_oldest_pending_receipt(&repository()?)
+            .await?
+            .map(|pending| pending.key()),
+        Some(newer)
+    );
+
+    store
+        .record_terminal(newer, &projected_request(Vec::new())?)
+        .await?;
+
+    assert_eq!(
+        store.load_oldest_pending_receipt(&repository()?).await?,
+        None
+    );
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn terminal_projection_and_disposition_are_atomic() -> Result<(), Box<dyn Error>> {
