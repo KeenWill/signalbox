@@ -57,6 +57,13 @@ concurrency:
 
 permissions: {}
 
+# Matches the Rust workflow, whose workspace-tests job writes the shared
+# cache: both the cache key and cargo's own artifact fingerprints
+# incorporate RUSTFLAGS, so restore-only jobs must build identically
+# to reuse it.
+env:
+  RUSTFLAGS: "-D warnings"
+
 jobs:
   gate:
     name: Codex smoke eligibility
@@ -172,7 +179,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: codex-smoke
+          shared-key: rust
+          save-if: false
       # Compile the smoke test binary BEFORE the credential store exists, so no
       # repository build script or procedural macro executes while the API key
       # is readable under CODEX_HOME. The later test run is fresh and does not

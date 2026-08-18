@@ -33,6 +33,13 @@ permissions:
   contents: read
   pull-requests: read
 
+# Matches the Rust workflow, whose workspace-tests job writes the shared
+# cache: both the cache key and cargo's own artifact fingerprints
+# incorporate RUSTFLAGS, so restore-only jobs must build identically
+# to reuse it.
+env:
+  RUSTFLAGS: "-D warnings"
+
 jobs:
   # Report-only home for live tool smokes: fixture drift stays visible but never
   # merge-gates. The whole-daemon exercise extends the existing CI pattern.
@@ -51,7 +58,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: tool-live-smokes
+          shared-key: rust
+          save-if: false
       - name: Run GitHub read smokes
         continue-on-error: true
         env:
@@ -127,7 +135,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: web-smoke
+          shared-key: rust
+          save-if: false
       # Compile before the credential exists in any step environment, and
       # capture the resulting binary path: the credentialed step below
       # executes that binary directly rather than invoking Cargo a second

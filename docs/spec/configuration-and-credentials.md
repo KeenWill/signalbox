@@ -17,7 +17,8 @@ verified against this PR (`agent/per-session-workspaces`).
 
 The execution family's permission defaults and the confinement its bubblewrap
 profile does and does not provide are verified against this PR
-(`agent/exec-sandbox-net-fence`).
+(`agent/exec-sandbox-net-fence`). Its explicit container-process-namespace
+variant is verified against this PR (`agent/kubernetes-bwrap-proc`).
 
 The daemon web-tool composition, Brave credential channel, and shipped human
 postures are verified against PR #433 (`agent/web-search-wiring`).
@@ -1076,18 +1077,22 @@ and then lists separately what the profile does not provide. The recitation
 draws no consequence, because every consequence stated here so far has proved
 narrower than it sounded.
 
-The launch is this. Bubblewrap receives `--die-with-parent`, `--new-session`,
-`--unshare-user`, `--unshare-pid`, `--unshare-ipc`, `--unshare-uts`, and
-`--unshare-net`. It mounts a fresh `/proc`, a fresh `/dev`, and a `tmpfs` at
-`/tmp`; creates `/etc`; and read-only binds `/usr`, `/bin`, `/lib`, `/lib64`,
-`/nix/store`, `/etc/alternatives`, `/etc/hosts`, `/etc/nsswitch.conf`, and
-`/etc/ssl`, each where it is present. It does not bind `/etc/resolv.conf`. It
-binds the calling session's bound workspace root read-write at `/workspace`,
-read-only binds the pinned execution supervisor — a host path that need not lie
-under that root — at `/signalbox-exec-dispatch`, and changes directory to
-`/workspace` or to the requested directory beneath it. The child environment is
-cleared and then set to `LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. Every
-command is dispatched through the supervisor.
+The default launch is this. Bubblewrap receives `--die-with-parent`,
+`--new-session`, `--unshare-user`, `--unshare-pid`, `--unshare-ipc`,
+`--unshare-uts`, and `--unshare-net`, and mounts a fresh `/proc`. An explicit
+container-process-namespace variant omits `--unshare-pid` and instead read-only
+binds the existing `/proc`; it is admissible only when an outer container
+runtime already isolates that PID namespace and procfs from the host. Both
+variants mount a fresh `/dev` and a `tmpfs` at `/tmp`; create `/etc`; and
+read-only bind `/usr`, `/bin`, `/lib`, `/lib64`, `/nix/store`,
+`/etc/alternatives`, `/etc/hosts`, `/etc/nsswitch.conf`, and `/etc/ssl`, each
+where it is present. It does not bind `/etc/resolv.conf`. It binds the calling
+session's bound workspace root read-write at `/workspace`, read-only binds the
+pinned execution supervisor — a host path that need not lie under that root — at
+`/signalbox-exec-dispatch`, and changes directory to `/workspace` or to the
+requested directory beneath it. The child environment is cleared and then set to
+`LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. Every command is dispatched
+through the supervisor.
 
 The profile does not provide the following, and no other daemon-local control
 supplies them:
@@ -1102,10 +1107,11 @@ supplies them:
   admitted on presence alone and are never checked against that root, so one
   configured inside it is bound along with the workspace, as is any secret the
   repository itself carries.
-- The fresh `/proc` and `/dev` are not a private surface. They carry kernel- and
-  host-derived data — `/proc/cpuinfo`, `/proc/meminfo`, and the boot identifier
-  among it — that no bind governs, so the readable surface is wider than the
-  bound paths alone.
+- The fresh `/proc` in the default variant, the container-isolated `/proc` in
+  the explicit variant, and `/dev` are not a private surface. They carry kernel-
+  and host-derived data — `/proc/cpuinfo`, `/proc/meminfo`, and the boot
+  identifier among it — that no workspace bind governs, so the readable surface
+  is wider than the bound paths alone.
 - `HOME` is the workspace root, so home-relative configuration discovery —
   `~/.cargo`, `~/.config`, and anything else a program resolves that way — lands
   inside the writable workspace rather than at a host location.
