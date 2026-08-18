@@ -24,7 +24,8 @@ use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
-        RepoWatchCursorCandidate, RepoWatchCursorGeneration,
+        RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchObservationBoundary,
+        RepoWatchThreadObservationBoundary,
     },
     repo_watch_dispatch::PostgresRepoWatchDispatchStore,
     tool_loop::PostgresToolLoopRepository,
@@ -458,6 +459,7 @@ async fn commit_initial_observation(
     repository: &RepositorySlug,
     observation: &RepoWatchObservation,
 ) -> Result<RepoWatchCursorGeneration, Box<dyn Error>> {
+    let boundary = event_store.capture_observation_boundary().await?;
     let events = derive_repo_watch_events(
         repository,
         None,
@@ -472,10 +474,20 @@ async fn commit_initial_observation(
                     None,
                     RepoWatchCursorCandidate::new(observation.clone()),
                     events,
-                ),
+                )
+                .with_thread_observation_boundaries(thread_observation_boundaries(boundary)?),
             )
             .await?,
     ))
+}
+
+fn thread_observation_boundaries(
+    boundary: RepoWatchObservationBoundary,
+) -> Result<Vec<RepoWatchThreadObservationBoundary>, Box<dyn Error>> {
+    Ok(vec![RepoWatchThreadObservationBoundary::new(
+        ReviewThreadId::try_new(String::from(THREAD))?,
+        boundary,
+    )])
 }
 
 fn unchanged_generation(outcome: RepoWatchCommitOutcome) -> RepoWatchCursorGeneration {
@@ -852,7 +864,7 @@ async fn reopened_thread_does_not_reuse_stale_resolve_receipt() -> Result<(), Bo
         .reconcile_rules(&repository, std::slice::from_ref(&rule))
         .await?;
     complete_thread_resolve(&pool, 0x90_100).await?;
-    let post_mutation_poll = event_store.begin_observation().await?;
+    let post_mutation_poll = event_store.capture_observation_boundary().await?;
     let unchanged = event_store
         .commit(
             &repository,
@@ -861,7 +873,7 @@ async fn reopened_thread_does_not_reuse_stale_resolve_receipt() -> Result<(), Bo
                 RepoWatchCursorCandidate::new(reopened.clone()),
                 Vec::new(),
             )
-            .snapshot_observed_before(post_mutation_poll),
+            .with_thread_observation_boundaries(thread_observation_boundaries(post_mutation_poll)?),
         )
         .await?;
     assert_eq!(unchanged_generation(unchanged), first_generation);
@@ -915,20 +927,9 @@ async fn pre_mutation_unchanged_poll_does_not_consume_resolve_receipt() -> Resul
         .reconcile_rules(&repository, std::slice::from_ref(&rule))
         .await?;
     let open = thread_observation(RepoWatchThreadState::Open)?;
-    let first_generation = committed_generation(
-        event_store
-            .commit(
-                &repository,
-                RepoWatchCommitRequest::new(
-                    None,
-                    RepoWatchCursorCandidate::new(open.clone()),
-                    Vec::new(),
-                ),
-            )
-            .await?,
-    );
+    let first_generation = commit_initial_observation(&event_store, &repository, &open).await?;
 
-    let pre_mutation_poll = event_store.begin_observation().await?;
+    let pre_mutation_poll = event_store.capture_observation_boundary().await?;
     complete_thread_resolve(&pool, 0x90_150).await?;
     let unchanged = event_store
         .commit(
@@ -938,12 +939,12 @@ async fn pre_mutation_unchanged_poll_does_not_consume_resolve_receipt() -> Resul
                 RepoWatchCursorCandidate::new(open.clone()),
                 Vec::new(),
             )
-            .snapshot_observed_before(pre_mutation_poll),
+            .with_thread_observation_boundaries(thread_observation_boundaries(pre_mutation_poll)?),
         )
         .await?;
     assert_eq!(unchanged_generation(unchanged), first_generation);
 
-    let post_mutation_poll = event_store.begin_observation().await?;
+    let post_mutation_poll = event_store.capture_observation_boundary().await?;
     let resolved = thread_observation(RepoWatchThreadState::Resolved)?;
     let events = derive_repo_watch_events(
         &repository,
@@ -959,7 +960,7 @@ async fn pre_mutation_unchanged_poll_does_not_consume_resolve_receipt() -> Resul
                 RepoWatchCursorCandidate::new(resolved.clone()),
                 events,
             )
-            .snapshot_observed_before(post_mutation_poll),
+            .with_thread_observation_boundaries(thread_observation_boundaries(post_mutation_poll)?),
         )
         .await?;
     let event = dispatch_store
@@ -995,23 +996,12 @@ async fn resolve_completed_during_poll_is_linked_to_observed_snapshot() -> Resul
         .reconcile_rules(&repository, std::slice::from_ref(&rule))
         .await?;
     let open = thread_observation(RepoWatchThreadState::Open)?;
-    let first_generation = committed_generation(
-        event_store
-            .commit(
-                &repository,
-                RepoWatchCommitRequest::new(
-                    None,
-                    RepoWatchCursorCandidate::new(open.clone()),
-                    Vec::new(),
-                ),
-            )
-            .await?,
-    );
+    let first_generation = commit_initial_observation(&event_store, &repository, &open).await?;
 
-    let _poll_started_at = event_store.begin_observation().await?;
+    let _poll_started_at = event_store.capture_observation_boundary().await?;
     complete_thread_resolve(&pool, 0x90_170).await?;
     let resolved = thread_observation(RepoWatchThreadState::Resolved)?;
-    let snapshot_observed_at = event_store.begin_observation().await?;
+    let snapshot_observed_at = event_store.capture_observation_boundary().await?;
     let events = derive_repo_watch_events(
         &repository,
         Some(&open),
@@ -1026,7 +1016,9 @@ async fn resolve_completed_during_poll_is_linked_to_observed_snapshot() -> Resul
                 RepoWatchCursorCandidate::new(resolved.clone()),
                 events,
             )
-            .snapshot_observed_before(snapshot_observed_at),
+            .with_thread_observation_boundaries(thread_observation_boundaries(
+                snapshot_observed_at,
+            )?),
         )
         .await?;
     let event = dispatch_store
@@ -1062,20 +1054,9 @@ async fn pre_mutation_user_resolution_does_not_consume_later_resolve_receipt()
         .reconcile_rules(&repository, std::slice::from_ref(&rule))
         .await?;
     let open = thread_observation(RepoWatchThreadState::Open)?;
-    let first_generation = committed_generation(
-        event_store
-            .commit(
-                &repository,
-                RepoWatchCommitRequest::new(
-                    None,
-                    RepoWatchCursorCandidate::new(open.clone()),
-                    Vec::new(),
-                ),
-            )
-            .await?,
-    );
+    let first_generation = commit_initial_observation(&event_store, &repository, &open).await?;
 
-    let user_poll = event_store.begin_observation().await?;
+    let user_poll = event_store.capture_observation_boundary().await?;
     let resolved = thread_observation(RepoWatchThreadState::Resolved)?;
     complete_thread_resolve(&pool, 0x90_180).await?;
     let events = derive_repo_watch_events(
@@ -1092,7 +1073,7 @@ async fn pre_mutation_user_resolution_does_not_consume_later_resolve_receipt()
                 RepoWatchCursorCandidate::new(resolved.clone()),
                 events,
             )
-            .snapshot_observed_before(user_poll),
+            .with_thread_observation_boundaries(thread_observation_boundaries(user_poll)?),
         )
         .await?;
     let event = dispatch_store
@@ -1129,18 +1110,7 @@ async fn user_resolution_snapshot_before_late_resolve_receipt_dispatches()
         .reconcile_rules(&repository, std::slice::from_ref(&rule))
         .await?;
     let open = thread_observation(RepoWatchThreadState::Open)?;
-    let first_generation = committed_generation(
-        event_store
-            .commit(
-                &repository,
-                RepoWatchCommitRequest::new(
-                    None,
-                    RepoWatchCursorCandidate::new(open.clone()),
-                    Vec::new(),
-                ),
-            )
-            .await?,
-    );
+    let first_generation = commit_initial_observation(&event_store, &repository, &open).await?;
 
     let arguments = format!(r#"{{"thread_id":"{THREAD}"}}"#);
     let (fixture, _, _, request) = checkpoint_confirmed_tool_round(
@@ -1175,7 +1145,7 @@ async fn user_resolution_snapshot_before_late_resolve_receipt_dispatches()
         .await?;
 
     let resolved = thread_observation(RepoWatchThreadState::Resolved)?;
-    let snapshot_observed_at = event_store.begin_observation().await?;
+    let snapshot_observed_at = event_store.capture_observation_boundary().await?;
     let events = derive_repo_watch_events(
         &repository,
         Some(&open),
@@ -1190,7 +1160,9 @@ async fn user_resolution_snapshot_before_late_resolve_receipt_dispatches()
                 RepoWatchCursorCandidate::new(resolved.clone()),
                 events,
             )
-            .snapshot_observed_before(snapshot_observed_at),
+            .with_thread_observation_boundaries(thread_observation_boundaries(
+                snapshot_observed_at,
+            )?),
         )
         .await?;
 
