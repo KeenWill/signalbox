@@ -455,10 +455,10 @@ duplicate, or mismatched command/call correlation fails closed.
 
 ## Staged execution
 
-`ModelCallExecutionService::execute` runs one linear invocation over five
-composed roles (prepare, capability, authorize-send, provider,
-commit-observation) plus an id generator and a dispatch gate. No database
-transaction is ever open across credential I/O or provider work.
+`ModelCallExecutionService::execute` runs one linear invocation over six
+composed roles (prepare, executable-tool snapshot, capability, authorize-send,
+provider, commit-observation) plus an id generator and a dispatch gate. No
+database transaction is ever open across credential I/O or provider work.
 
 The two off-transaction provider roles share one call-scoped
 `CancellationSignal`. It resolves when an authoritative reload finds the exact
@@ -494,7 +494,11 @@ command. This proposal is accepted with the implementing stack's merge.
    transaction. Why: committing durable call identity before any external step
    means a crash can never produce a provider effect with nothing durable to
    classify.
-2. **Capability preparation (no transaction).** The provider adapter resolves
+2. **Executable-tool snapshot derivation (no transaction).** The injected
+   snapshot source derives the session's ordered executable-tool snapshot before
+   provider capability preparation. A classified source failure stops the
+   invocation before provider work.
+3. **Capability preparation (no transaction).** The provider adapter resolves
    its credential internally from the call's durably pinned reference (reloading
    a `Prepared` call without one fails closed) and builds an opaque, one-shot,
    call-bound send capability; application and domain code only move the value
@@ -506,7 +510,7 @@ command. This proposal is accepted with the implementing stack's merge.
    commits the accepted `Prepared -> KnownFailed` closure with attempt and turn
    failure in a separate guarded transaction; an adapter defect is an operator
    failure and commits no provider-failure closure.
-3. **Authorize-send transaction.** After acquiring the process-shared
+4. **Authorize-send transaction.** After acquiring the process-shared
    per-attempt dispatch gate, a distinct transaction reloads authority and
    commits `Prepared -> InFlight`. A `Prepared` owning attempt moves
    `Prepared -> Running`, whether it is the turn's initial attempt or a
@@ -522,13 +526,13 @@ command. This proposal is accepted with the implementing stack's merge.
    the gate across the authorize commit and send start serializes
    execution-service passes for that attempt across the acceptance-capable
    boundary; it does not serialize interrupt application.
-4. **Provider interaction (no transaction).** The provider port is invoked at
+5. **Provider interaction (no transaction).** The provider port is invoked at
    most once per invocation, and exactly once only after the `InFlight` commit
    is known. It consumes the capability exactly once and returns one
    provider-neutral terminal observation bound to the sealed issued correlation
    (session, turn, attempt, call, target, frontier). Its runtime
    `CancellationSignal` is the shared durable signal defined above.
-5. **Commit-observation transaction.** A fresh transaction reloads and
+6. **Commit-observation transaction.** A fresh transaction reloads and
    revalidates complete authority — it never trusts the pre-send projection —
    checks the observation's correlation against fresh state, and atomically
    commits the call disposition, attempt and turn transitions, semantic entries,
@@ -545,9 +549,9 @@ command. This proposal is accepted with the implementing stack's merge.
    and a later release could readmit the profile whose failure parked the turn.
 
 Failure keeps its stage: `ModelCallExecutionError` names which of prepare,
-render, capability, capability-failure commit, capability-failure reread,
-authorization, authorization reread, authorization reconciliation, provider, or
-observation commit failed.
+render, executable-tool snapshot, capability, capability-failure commit,
+capability-failure reread, authorization, authorization reread, authorization
+reconciliation, provider, or observation commit failed.
 
 ### Identity minting and commit ambiguity
 
