@@ -7,39 +7,54 @@
 use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use signalbox_application::{
+    ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
+    ApprovalJudgePullRequestAuthority, AuthorizeModelCallOutcome, ModelCallCredentialReference,
     RepoWatchBranchHead, RepoWatchDispatchService, RepoWatchDispatchTransaction,
     RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
     RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
     RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
-    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
+    RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome, StartEligibleTurnService,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
-    AcceptedInputId, BranchName, CheckConclusion, CommitSha, DangerousToolAutoApproval,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId, GitHubObjectId,
-    GoalCommandResult, GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance,
-    GoalState, GoalStatement, GoalUserAction, GoalUserCommand, MergeableState,
-    ModelSelectionRequest, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
-    PullRequestNumber, PullRequestTitle, RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent,
-    RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
-    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule,
-    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleVersion,
-    RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt, RepositorySlug,
+    AcceptedInputId, ActiveTurnPhase, AssistantResponsePart, BranchName, CheckConclusion,
+    CommitSha, ContextFrontierId, DangerousToolAutoApproval, DelegateApprovalRecommendation,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    FailedModelCallTurnIdentities, GitHubObjectId, GoalCommandResult, GoalModelProvenance,
+    GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction,
+    GoalUserCommand, InitialToolApproval, MergeableState, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionRequest,
+    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments, ProviderModelIdentity,
+    ProviderReportedTokenUsage, PullRequestBody, PullRequestEventContext,
+    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchActionV1,
+    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
+    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+    RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId,
+    RepoWatchRuleIdentityField, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepoWatchWorkflowRunAttempt, RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
-    SessionTemplateName, SessionTemplateProvenance, ToolRequestId, TurnId, UserContent,
-    WorkflowName,
+    SessionTemplateName, SessionTemplateProvenance, ToolCallProposal, ToolDecisionRationale,
+    ToolName, ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TurnAttemptId, TurnId, UserContent, WorkflowName,
 };
 use signalbox_persistence::{
-    SessionCredentialPin, SessionModelCredential, disposable_test_container_labels,
+    SessionCredentialPin, SessionModelCredential,
+    approval_judge::{
+        CompleteApprovalJudgeOutcome, PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
+    },
+    disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
+    model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
         RepoWatchCursorCandidate, RepoWatchCursorGeneration,
     },
     repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
     repo_watch_dispatch_obligation::RepoWatchDispatchObligation,
+    start_eligible_turn::StartEligibleTurnRepository,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -608,6 +623,38 @@ fn credential_pin() -> SessionCredentialPin {
     .expect("fixture credential pin is valid")
 }
 
+fn model_credential_reference() -> ModelCallCredentialReference {
+    ModelCallCredentialReference::new("fixture-credential")
+}
+
+fn model_targets() -> ModelTargetCatalog {
+    ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(901)),
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(902))),
+    )])
+    .expect("one fixture target forms a catalog")
+}
+
+#[track_caller]
+fn ready_approval_judge(outcome: PrepareApprovalJudgeOutcome) -> PreparedApprovalJudge {
+    let PrepareApprovalJudgeOutcome::Ready(prepared) = outcome else {
+        panic!("the delegated fixture prepares a fresh judge call")
+    };
+    *prepared
+}
+
+#[track_caller]
+fn prepared_pull_request_authority(
+    prepared: &PreparedApprovalJudge,
+) -> &ApprovalJudgePullRequestAuthority {
+    let Some(ApprovalJudgeDispatchAuthority::PullRequest(authority)) =
+        prepared.session_context().dispatch()
+    else {
+        panic!("the dispatched pull-request session carries its immutable fence")
+    };
+    authority
+}
+
 fn dispatch_context() -> UserContent {
     UserContent::try_text(DISPATCH_CONTEXT.to_owned()).expect("fixture dispatch context is valid")
 }
@@ -1135,6 +1182,133 @@ async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Bo
     })
 }
 
+async fn checkpoint_dispatched_delegated_approval(
+    fixture: &DispatchFixture,
+    seed: u128,
+) -> Result<
+    (
+        PostgresModelCallRepository,
+        PreparedApprovalJudge,
+        TurnId,
+        ToolRequestId,
+    ),
+    Box<dyn Error>,
+> {
+    let session = fixture.session(0);
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(fixture.pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) = activation.execute(session).await? else {
+        panic!("the dispatched work turn activates")
+    };
+    let turn = activated.turn();
+    drop(activated);
+
+    let repository = PostgresModelCallRepository::new(
+        fixture.pool.clone(),
+        model_targets(),
+        model_credential_reference(),
+    );
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed));
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed) = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 1)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 2)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 3)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 4)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 5)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the dispatched turn checkpoints its initial model call")
+    };
+    assert_eq!(checkpointed, call);
+    let PrepareInitialModelCallOutcome::Ready { .. } = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 20)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 23)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 24)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 25)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the checkpointed initial model call reloads ready")
+    };
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        repository.authorize_send(session, call).await?
+    else {
+        panic!("the initial model call authorizes")
+    };
+    let request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 6));
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::new(
+                ToolName::try_new(String::from("exec")).expect("the fixture tool name is admitted"),
+                NormalizedToolArguments::try_from_provider_text(String::from(
+                    r#"{"cmd":"git fetch origin main"}"#,
+                ))
+                .expect("the fixture arguments are admitted"),
+            ),
+        )])
+        .expect("one proposal forms a tool-using response");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    let ModelCallTerminalOutcome::ToolRound(round) = repository
+        .apply_terminal_observation(
+            session,
+            observation,
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 7)),
+                    request,
+                    InitialToolApproval::Delegated,
+                )],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 8)),
+                None,
+            )),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?
+    else {
+        panic!("the model call reaches a delegated tool round")
+    };
+    assert_eq!(
+        round.next_phase(),
+        &ActiveTurnPhase::AwaitingApproval { request }
+    );
+    let approval_repository = repository.approval_judge_repository();
+    let prepared = ready_approval_judge(
+        approval_repository
+            .prepare(
+                session,
+                turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 9)),
+                Some(DirectModelSelection::from_uuid(Uuid::from_u128(901))),
+            )
+            .await?,
+    );
+    Ok((repository, prepared, turn, request))
+}
+
 async fn evaluate_second_conflict(
     fixture: &DispatchFixture,
 ) -> Result<RepoWatchRuleEvaluationOutcome, Box<dyn Error>> {
@@ -1555,6 +1729,121 @@ async fn stale_stopped_dispatch_requeues_and_redispatches_after_release()
         evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?,
     );
     assert_ne!(successor_sessions[0], fixture.session(0));
+    Ok(())
+}
+
+/// INV-REPO-WATCH-HEADLESS-APPROVAL-ESCALATION-REARMS: a completed judge
+/// escalation in a repository-watch-created session cannot retain the
+/// singleton as unattended active work. Its normal failed-turn/blocked-goal
+/// closeout releases the dispatch, leaves an auditable escalation record, and
+/// makes the same event eligible for a fresh dispatch.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn headless_approval_escalation_releases_rearms_and_redispatches()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_240;
+    let (model_repository, prepared, turn, request) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let authority = prepared_pull_request_authority(&prepared);
+    let expected_context = context(FIRST_HEAD)?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable dispatch fence",
+    ))?;
+
+    let outcome = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + 0x2_000_000,
+                ))
+            },
+        )
+        .await?;
+    let audit: (
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        String,
+        bool,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT lifecycle.state_kind,
+                    lifecycle.terminal_disposition_kind,
+                    latest_goal.event_kind,
+                    latest_goal.blocked_reason,
+                    audit.rationale,
+                    audit.released_at IS NOT NULL,
+                    audit.obligation_id IS NOT NULL
+               FROM repo_watch_headless_approval_escalation_audit AS audit
+               JOIN turn_lifecycle AS lifecycle
+                 ON lifecycle.session_id = audit.session_id
+                AND lifecycle.turn_id = audit.turn_id
+               JOIN LATERAL (
+                    SELECT event_kind, blocked_reason
+                      FROM goal_event
+                     WHERE session_id = audit.session_id
+                     ORDER BY event_ordinal DESC
+                     LIMIT 1
+               ) AS latest_goal ON true
+              WHERE audit.model_call_id = $1",
+    )
+    .bind(prepared.call().as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let obligation = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the headless escalation obligation is ready after release");
+    let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let (_successor_dispatch, successor_sessions) = dispatched(
+        evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?,
+    );
+
+    assert_eq!(authority.dispatch(), fixture.dispatch_id);
+    assert_eq!(authority.repository(), &fixture.repository);
+    assert_eq!(authority.pull_request(), expected_context.number());
+    assert_eq!(authority.head_sha(), expected_context.head_sha());
+    assert_eq!(
+        authority.head_repository(),
+        expected_context.head_repository()
+    );
+    assert_eq!(authority.head_branch(), expected_context.head_branch());
+    assert_eq!(authority.base_branch(), expected_context.base_branch());
+    assert_eq!(
+        outcome,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationReleased
+    );
+    assert_eq!(audit.0, "terminal");
+    assert_eq!(audit.1.as_deref(), Some("failed"));
+    assert_eq!(audit.2, "blocked");
+    assert_eq!(audit.3.as_deref(), Some("execution_failure"));
+    assert_eq!(audit.4, rationale.as_str());
+    assert!(audit.5);
+    assert!(audit.6);
+    assert_ne!(successor_sessions[0], fixture.session(0));
+    assert_eq!(prepared.request().id(), request);
+    assert_eq!(turn, prepared.request().turn());
     Ok(())
 }
 
