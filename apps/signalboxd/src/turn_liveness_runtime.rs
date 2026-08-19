@@ -59,17 +59,34 @@ const PASS_FAILURE_CAUSE: &str = "turn_liveness_pass_failed";
 /// Why a rotation was abandoned without deciding anything.
 const ROTATION_CEILING_CAUSE: &str = "turn_liveness_rotation_ceiling_reached";
 
-/// How many pages one scan may read before abandoning its rotation.
+/// How many candidate-bearing pages one scan may read.
 ///
 /// The rotation terminates on its own — sessions are distinct and the cursor
 /// advances strictly — so this is not what ends the loop. It is the fail-safe
 /// against a rotation that does not converge, and it is set where reaching it
-/// is itself the defect: at the page size it multiplies to roughly a million
-/// simultaneously quiescent turns, which the session population cannot reach
-/// before something else has failed. A scan that reaches it decides nothing
-/// rather than deciding on a partial population.
+/// is itself the defect: multiplied by the page size it is a capacity of
+/// 1,048,576 simultaneously quiescent turns, which the session population
+/// cannot reach before something else has failed. A scan whose rotation exceeds
+/// that decides nothing rather than deciding on a partial population.
+///
+/// The capacity is that product exactly, not one page short of it. A population
+/// that is an exact multiple of the page size fills its last candidate-bearing
+/// page, so the rotation's end is learned from one further read that returns
+/// nothing; the loop allows that probe past this ceiling and counts no
+/// candidates from it.
 // numeric-bound: ceiling - bounds one scan's reads against a non-converging rotation
 const QUIESCENT_ROTATION_PAGE_CEILING: usize = 4_096;
+
+/// How many inventory reads one scan may perform.
+///
+/// Every candidate-bearing page the ceiling allows, plus the one read that
+/// proves the rotation ended. The `+ 1` is not slack: a full page never proves
+/// the end, so a population filling the last allowed page needs one further
+/// read returning nothing, and without it the pass would discard every rotation
+/// at exactly the capacity the ceiling advertises.
+const fn rotation_reads_allowed() -> usize {
+    QUIESCENT_ROTATION_PAGE_CEILING + 1
+}
 
 /// What woke the supervising loop.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -181,7 +198,7 @@ async fn drain_quiescent_rotation(
 ) -> Option<Vec<StaleTurnCandidate>> {
     let mut quiescent = Vec::new();
     let mut cursor: Option<SessionId> = None;
-    for _ in 0..QUIESCENT_ROTATION_PAGE_CEILING {
+    for _ in 0..rotation_reads_allowed() {
         let page = match repository.quiescent_active_turns(cursor).await {
             Ok(page) => page,
             // An unreadable inventory is not evidence that anything is stale.
@@ -200,7 +217,7 @@ async fn drain_quiescent_rotation(
         cause_code = ROTATION_CEILING_CAUSE,
         page_ceiling = QUIESCENT_ROTATION_PAGE_CEILING,
         observed_turns = quiescent.len(),
-        "turn-liveness rotation did not end within its page ceiling"
+        "turn-liveness rotation exceeded the quiescent population its scan can drain"
     );
     None
 }
@@ -284,6 +301,7 @@ mod tests {
         PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, ROTATION_CEILING_CAUSE,
         STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_STEERING_BLOCKED_CAUSE, STALE_TURN_SUPERSEDED_CAUSE,
         STALE_TURN_TERMINAL_CAUSE, TurnLivenessWake, next_turn_liveness_wake,
+        rotation_reads_allowed,
     };
     use signalbox_application::StaleActiveTurnBound;
     use std::time::Duration;
@@ -333,6 +351,14 @@ mod tests {
         let wake = next_turn_liveness_wake(&mut receiver, &mut ticker).await;
 
         assert_eq!(wake, TurnLivenessWake::Shutdown);
+    }
+
+    /// A population filling every allowed page still drains, because the read
+    /// that proves the rotation ended is allowed past the page ceiling.
+    #[test]
+    fn one_read_past_the_page_ceiling_proves_the_rotation_ended() {
+        assert_eq!(QUIESCENT_ROTATION_PAGE_CEILING, 4_096);
+        assert_eq!(rotation_reads_allowed(), 4_097);
     }
 
     /// The audited cause codes are stable strings an operator can search.

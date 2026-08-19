@@ -540,12 +540,15 @@ one that fails to converge within its page ceiling — ends the scan with no
 decision and the ledger unchanged, rather than deciding on a partial population.
 
 **Constants.** The staleness bound is a hard safety ceiling of 30 minutes and
-the scan interval is one minute; both are compiled in. Configuration may lower
-the effective staleness bound and can never raise it past the compiled ceiling.
-The bound the pass runs with is supplied to it rather than reloaded from the
-ceiling, so a lowered bound is the one that decides turns and the one the audit
-line reports; the ceiling stays the only maximum, enforced where the bound is
-built.
+the scan interval is one minute; both are compiled in. The bound the pass runs
+with is supplied at its composition site rather than reloaded from the ceiling,
+so whichever bound decides turns is also the bound the audit line reports. A
+shorter one is constructible only through a checked constructor that refuses
+zero, refuses precision finer than a whole second, and refuses anything above
+the compiled ceiling — the single place the ceiling is enforced as the only
+maximum, and the reason no caller can raise it. signalboxd composes the ceiling
+itself: no operator setting lowers it, and that surface is deferred with the
+other scheduling-cadence tuning listed under Open edges.
 
 **Terminalization.** A due turn ends through the same committed failed-turn
 transition startup recovery commits, through the same reviewed statement and so
@@ -1236,8 +1239,8 @@ from child transcript state nor depend on process-local wake memory.
   watchdog-ended turn from a restart-recovered one in the rows rather than only
   in the operator log, is an
   [open question](../open-questions.md#turn-lifecycle).
-- Per-session scan gating, sweep interval, and fairness tuning remain
-  operational open questions; the process-wide advisory singleton guard is
-  specified by [process-protocol](process-protocol.md).
+- Per-session scan gating, sweep interval, turn-liveness staleness bound, and
+  fairness tuning remain operational open questions; the process-wide advisory
+  singleton guard is specified by [process-protocol](process-protocol.md).
 - LISTEN/NOTIFY remains the documented multi-process extension only; the
   baseline is single-process nudge plus sweep.
