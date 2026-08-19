@@ -734,10 +734,13 @@ impl PostgresApprovalJudgeRepository {
 ///
 /// It claims no release, because a batch a sibling action still pursues is not
 /// released by this escalation and becomes so only when that sibling ends. It
-/// also states that no automatic resumption is coming, which is true of this
-/// block alone among execution-failure blocks and is why it names the repair
-/// itself.
-const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. Repository watch retries the dispatched work under a fresh dispatch once its batch ends, and no automatic resumption is scheduled for this block. Resume this goal only to continue this session by hand.";
+/// promises no redispatch either: `repo_watch_owe_dispatch_requeue` records the
+/// replacement obligation only while the rule remains active and, for a
+/// pull-request target, while a later close or merge has not made the work
+/// stale. It states that no automatic resumption is coming, which is true of
+/// this block alone among execution-failure blocks and is why it names the
+/// repair itself — the repair is the whole of what an operator is promised.
+const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. Repository watch redispatches the work under a fresh dispatch once its batch ends, unless its rule has been deactivated or the pull request has closed or merged since; no automatic resumption is scheduled for this block either way. Resume this goal only to continue this session by hand.";
 
 /// The generation a repository-watch dispatch commissions in the session it
 /// creates, which is the only generation its authority describes.
@@ -1001,8 +1004,11 @@ async fn persist_headless_escalation(
         // exists and is a different one — repository watch redispatches the
         // work under a fresh dispatch, so resuming the goal here would re-run
         // the same escalating turn against a request no user is attending, up
-        // to the resumption budget, beside that redispatch. The need text above
-        // therefore names the repair itself rather than promising resumption.
+        // to the resumption budget, beside that redispatch. Where that
+        // redispatch is withheld, because the rule was deactivated or the pull
+        // request closed, the work is not wanted at all and resuming it is
+        // worse still. The need text above therefore names the repair itself
+        // rather than promising resumption.
         let need = GoalNeed::try_new(String::from(HEADLESS_ESCALATION_GOAL_NEED))
             .map_err(|_| ApprovalJudgeCorruption::Inconsistent("headless escalation goal need"))?;
         let outcome = goal::block_execution_failure_locked(

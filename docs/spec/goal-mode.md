@@ -240,10 +240,14 @@ in the transaction that fails its turn, described by
 [repository watch](repo-watch.md). It arms no attempt, and its need text states
 that and names the operator repair directly instead. The work that block ended
 is already owed a retry, and a different one — repository watch redispatches it
-under a fresh dispatch — so resuming this goal would re-run an escalating turn
-against a request no user is attending, beside that redispatch, until the budget
-ran out. Every other execution-failure block owes the bounded resumption above,
-including one appended for a session repository watch created.
+under a fresh dispatch while its rule and target remain eligible — so resuming
+this goal would re-run an escalating turn against a request no user is
+attending, beside that redispatch, until the budget ran out. Where that
+redispatch is withheld, because the rule was deactivated or the pull request
+closed or merged, the work is not wanted at all, and an automatic resumption
+would be the only thing still pursuing it. Every other execution-failure block
+owes the bounded resumption above, including one appended for a session
+repository watch created.
 
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The

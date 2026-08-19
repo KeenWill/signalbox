@@ -235,8 +235,13 @@ the completed call but no approval decision and leaves the same request parked.
 A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous` terminal judge call
 likewise retains that attended park while immediately admitting a user decision,
 so a terminal judge failure cannot prevent that decision. In a
-repository-watch-created session, no user attends the approval wait. A completed
-`EscalateToHuman` therefore closes every unresolved request in the active batch
+repository-watch-created session, no user attends the approval wait — unless
+steering accepted while the judge was outstanding still names the judged turn,
+which is a user attending it. That turn keeps the attended park described above:
+its completed `EscalateToHuman` leaves the turn active and the request parked
+for whoever steered, exactly as in a session no dispatch created, and no steer
+is reclassified or stranded by a terminalization it did not expect. Otherwise a
+completed `EscalateToHuman` closes every unresolved request in the active batch
 as `ToolClosed`, appends `TurnFailed`, terminalizes the turn with the completed
 judge escalation as its typed cause, and blocks the commissioned goal for
 execution failure. The same transaction records an append-only audit row linking
