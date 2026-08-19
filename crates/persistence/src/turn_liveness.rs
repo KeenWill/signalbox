@@ -255,6 +255,14 @@ impl QuiescentActiveTurnPage {
 /// `running`, so every durable wait — approval parking included — is outside
 /// the result rather than judged by it.
 ///
+/// The attempt arm admits `prepared` as well as `running`. An attempt becomes
+/// `running` only when a model call is authorized on it, so `prepared` is a
+/// turn activated but never dispatched — and nothing else reaches that shape:
+/// the eligibility sweep's active arm requires a live tool round, so it does
+/// not re-drive a turn that has none. Excluding `prepared` left exactly that
+/// wedge unowned. `stop_requested` and `ended` stay out, the first because an
+/// interrupt is in flight and the second because the attempt already closed.
+///
 /// Newest identities are read with `ORDER BY … DESC LIMIT 1` rather than an
 /// aggregate: PostgreSQL defines no `max(uuid)`, verified against 18.4, the
 /// version the integration suite runs. The ordering is `uuid`'s native
@@ -291,7 +299,9 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
         AND active.active_tool_round_call_id IS NULL
         AND active.approval_tool_request_id IS NULL
         AND active.recovery_tool_attempt_id IS NULL
-        AND tenure.state_kind = 'running'
+        AND tenure.state_kind IN ('prepared', 'running')
+        AND tenure.end_variant IS NULL
+        AND tenure.end_disposition IS NULL
         AND ($1::uuid IS NULL OR active.session_id = $1)
         AND ($2::uuid IS NULL OR active.session_id > $2)
         AND NOT EXISTS (

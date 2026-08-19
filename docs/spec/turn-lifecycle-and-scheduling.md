@@ -473,14 +473,20 @@ exactly the ones no pass is scheduled for.
 once: its lifecycle row is `active` with an `accepted_input` origin and is not
 delegation-runtime-terminal; its active phase is `running`; it names no active
 tool round, no approval request, and no recovery tool attempt; its current
-attempt is `running` rather than `prepared` or `stop_requested`; its session has
-no `model_call` outside `terminal`, no dedicated compaction call outside
-`terminal`, and no `tool_attempt` outside `terminal`; and its session holds no
-`pending_steering` accepted input. The phase filter is what excludes approval
-parking, `awaiting_child`, both recovery waits, and the runner-loss wait: those
-are durable waits this pass judges no part of. Every conjunct is an absence the
-candidate query proves for itself, so a shape it cannot consult is a shape it
-does not clear — absent evidence skips the turn rather than condemning it.
+attempt is `prepared` or `running` and has not ended, rather than
+`stop_requested`; its session has no `model_call` outside `terminal`, no
+dedicated compaction call outside `terminal`, and no `tool_attempt` outside
+`terminal`; and its session holds no `pending_steering` accepted input. The
+phase filter is what excludes approval parking, `awaiting_child`, both recovery
+waits, and the runner-loss wait: those are durable waits this pass judges no
+part of. The attempt filter admits `prepared` because an attempt reaches
+`running` only when a model call is authorized on it, so a `prepared` attempt is
+a turn activated but never dispatched — a wedge nothing else reaches, since the
+eligibility sweep's active arm requires a live tool round. `stop_requested`
+stays out because an interrupt is in flight and is owned elsewhere. Every
+conjunct is an absence the candidate query proves for itself, so a shape it
+cannot consult is a shape it does not clear — absent evidence skips the turn
+rather than condemning it.
 
 **Staleness.** No lifecycle table stores an activity timestamp, and this page
 introduces none: a stored clock would be one more thing to keep true. Staleness

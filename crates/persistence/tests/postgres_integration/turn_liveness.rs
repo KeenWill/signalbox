@@ -293,7 +293,7 @@ async fn the_newest_identity_columns_resolve_over_a_worked_session() -> Result<(
                 0x14_202,
                 0x14_003,
                 "second input",
-                2,
+                1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
             AcceptedInputId::from_uuid(Uuid::from_u128(0x14_203)),
