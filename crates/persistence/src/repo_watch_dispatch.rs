@@ -5,6 +5,7 @@ use std::{
     error::Error,
     fmt,
     num::NonZeroU64,
+    time::Duration,
 };
 
 use rust_decimal::Decimal;
@@ -35,6 +36,12 @@ use crate::{
 };
 
 const CONFIGURATION_LOCK: &str = "repo-watch\u{1f}configuration";
+// numeric-bound: ceiling - bounds accepted repository-watch work without a model call
+const DISPATCH_START_LEASE_LIMIT: Duration = Duration::from_secs(5 * 60);
+// numeric-bound: tunable - preserves a positive lowered lease for tests and composition
+const MINIMUM_DISPATCH_START_LEASE: Duration = Duration::from_millis(1);
+// numeric-bound: tunable - bounds one repository reconciliation nudge batch
+const UNSTARTED_DISPATCH_NUDGE_BATCH_SIZE: i64 = 16;
 
 struct ConfiguredRuleIdentity {
     content_digest: [u8; 32],
@@ -189,6 +196,7 @@ impl From<sqlx::Error> for RepoWatchDispatchRepositoryError {
 pub struct PostgresRepoWatchDispatchStore {
     pool: PgPool,
     credential_pin: crate::SessionCredentialPin,
+    dispatch_start_lease: Duration,
 }
 
 impl PostgresRepoWatchDispatchStore {
@@ -196,11 +204,211 @@ impl PostgresRepoWatchDispatchStore {
         Self {
             pool,
             credential_pin,
+            dispatch_start_lease: DISPATCH_START_LEASE_LIMIT,
         }
+    }
+
+    /// Lowers the dispatch-start lease for a composed runtime or test.
+    ///
+    /// Requests above the production ceiling are clamped rather than creating
+    /// a path that can raise the safety bound.
+    pub fn with_dispatch_start_lease(mut self, requested: Duration) -> Self {
+        self.dispatch_start_lease = requested
+            .max(MINIMUM_DISPATCH_START_LEASE)
+            .min(DISPATCH_START_LEASE_LIMIT);
+        self
     }
 
     pub(crate) const fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Loads bounded durable dispatch starts that still need priority admission.
+    pub async fn load_unstarted_dispatch_sessions(
+        &self,
+        repository: &RepositorySlug,
+    ) -> Result<Vec<SessionId>, RepoWatchDispatchRepositoryError> {
+        let sessions = sqlx::query_scalar::<_, Uuid>(
+            "SELECT lease.session_id
+               FROM repo_watch_dispatch_start_lease AS lease
+               JOIN repo_watch_dispatch_batch AS batch
+                 ON batch.dispatch_id = lease.dispatch_id
+               JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
+              WHERE origin.repository = $1
+                AND lease.expires_at > clock_timestamp()
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM model_call AS call
+                     WHERE call.session_id = lease.session_id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_dispatch_start_lease_expiration AS expired
+                     WHERE expired.dispatch_id = lease.dispatch_id
+                       AND expired.action_ordinal = lease.action_ordinal
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_dispatch_release AS released
+                     WHERE released.dispatch_id = lease.dispatch_id
+                )
+                AND EXISTS (
+                    SELECT 1
+                      FROM goal_event AS current_goal
+                     WHERE current_goal.session_id = lease.session_id
+                       AND current_goal.event_ordinal = (
+                            SELECT max(candidate.event_ordinal)
+                              FROM goal_event AS candidate
+                             WHERE candidate.session_id = lease.session_id
+                       )
+                       AND current_goal.event_kind IN (
+                            'commissioned', 'resumed', 'superseded'
+                       )
+                )
+              ORDER BY lease.leased_at, lease.session_id
+              LIMIT $2",
+        )
+        .bind(repository.as_str())
+        .bind(UNSTARTED_DISPATCH_NUDGE_BATCH_SIZE)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(sessions
+            .into_iter()
+            .map(SessionId::from_uuid)
+            .collect::<Vec<_>>())
+    }
+
+    /// Retires one expired evidence-free dispatch through ordinary goal authority.
+    pub async fn process_next_expired_start_lease<NextCommandId>(
+        &self,
+        repository: &RepositorySlug,
+        mut next_command_id: NextCommandId,
+    ) -> Result<bool, RepoWatchDispatchRepositoryError>
+    where
+        NextCommandId: FnMut() -> DurableCommandId,
+    {
+        let mut transaction = self.pool.begin().await?;
+        lock_text(&mut transaction, repository.as_str()).await?;
+        let candidate = sqlx::query(
+            "SELECT lease.dispatch_id, lease.action_ordinal, lease.session_id
+               FROM repo_watch_dispatch_start_lease AS lease
+               JOIN repo_watch_dispatch_batch AS batch
+                 ON batch.dispatch_id = lease.dispatch_id
+               JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
+              WHERE origin.repository = $1
+                AND lease.expires_at <= clock_timestamp()
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM model_call AS call
+                     WHERE call.session_id = lease.session_id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_dispatch_start_lease_expiration AS expired
+                     WHERE expired.dispatch_id = lease.dispatch_id
+                       AND expired.action_ordinal = lease.action_ordinal
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_dispatch_release AS released
+                     WHERE released.dispatch_id = lease.dispatch_id
+                )
+                AND EXISTS (
+                    SELECT 1
+                      FROM goal_event AS current_goal
+                     WHERE current_goal.session_id = lease.session_id
+                       AND current_goal.event_ordinal = (
+                            SELECT max(candidate.event_ordinal)
+                              FROM goal_event AS candidate
+                             WHERE candidate.session_id = lease.session_id
+                       )
+                       AND current_goal.event_kind IN (
+                            'commissioned', 'resumed', 'superseded'
+                       )
+                )
+              ORDER BY lease.expires_at, lease.session_id
+              LIMIT 1
+              FOR UPDATE OF lease SKIP LOCKED",
+        )
+        .bind(repository.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(candidate) = candidate else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let dispatch_id: Uuid = candidate.try_get("dispatch_id")?;
+        let action_ordinal: i32 = candidate.try_get("action_ordinal")?;
+        let session_id: Uuid = candidate.try_get("session_id")?;
+        sqlx::query("SELECT 1 FROM session WHERE session_id = $1 FOR UPDATE")
+            .bind(session_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+        let model_call_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM model_call WHERE session_id = $1
+            )",
+        )
+        .bind(session_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if model_call_exists {
+            transaction.rollback().await?;
+            return Ok(true);
+        }
+        let current_goal_is_pursuing: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM goal_event AS current_goal
+                 WHERE current_goal.session_id = $1
+                   AND current_goal.event_ordinal = (
+                        SELECT max(candidate.event_ordinal)
+                          FROM goal_event AS candidate
+                         WHERE candidate.session_id = $1
+                   )
+                   AND current_goal.event_kind IN (
+                        'commissioned', 'resumed', 'superseded'
+                   )
+            )",
+        )
+        .bind(session_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !current_goal_is_pursuing {
+            transaction.rollback().await?;
+            return Ok(true);
+        }
+        let session = SessionId::from_uuid(session_id);
+        let command = GoalUserCommand::new(
+            next_command_id(),
+            session,
+            GoalUserAction::Stop {
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            },
+        );
+        let stopped =
+            crate::goal::insert_repo_watch_composed_stop(&mut transaction, command.clone())
+                .await
+                .map_err(RepoWatchDispatchRepositoryError::GoalCutoff)?;
+        if !stopped {
+            transaction.rollback().await?;
+            return Err(RepoWatchDispatchRepositoryError::Corruption(
+                "expired dispatch start lease remained attached to a non-stoppable goal",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO repo_watch_dispatch_start_lease_expiration
+                (dispatch_id, action_ordinal, session_id, goal_command_id)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(dispatch_id)
+        .bind(action_ordinal)
+        .bind(session_id)
+        .bind(command.command_id().as_uuid())
+        .execute(&mut *transaction)
+        .await?;
+        commit(transaction).await?;
+        Ok(true)
     }
 
     /// Processes the oldest unhandled pull-request closure and withdraws every
@@ -905,6 +1113,12 @@ impl PostgresRepoWatchDispatchStore {
                 let action_count = i32::try_from(actions.len()).map_err(|_| {
                     RepoWatchDispatchRepositoryError::Corruption("action count exceeds storage")
                 })?;
+                let dispatch_start_lease_millis =
+                    i64::try_from(self.dispatch_start_lease.as_millis()).map_err(|_| {
+                        RepoWatchDispatchRepositoryError::Corruption(
+                            "dispatch start lease exceeds storage",
+                        )
+                    })?;
                 let cooldown_seconds = i64::try_from(cooldown.as_secs()).map_err(|_| {
                     RepoWatchDispatchRepositoryError::Corruption("cooldown exceeds storage")
                 })?;
@@ -978,6 +1192,21 @@ impl PostgresRepoWatchDispatchStore {
                     .bind(command_id.as_uuid())
                     .bind(template_name)
                     .bind(template_digest)
+                    .execute(&mut *transaction)
+                    .await?;
+                    sqlx::query(
+                        "INSERT INTO repo_watch_dispatch_start_lease
+                            (dispatch_id, action_ordinal, session_id, expires_at)
+                         VALUES (
+                            $1, $2, $3,
+                            transaction_timestamp()
+                                + $4 * INTERVAL '1 millisecond'
+                         )",
+                    )
+                    .bind(dispatch_id.as_uuid())
+                    .bind(ordinal)
+                    .bind(session_id_to_uuid(session))
+                    .bind(dispatch_start_lease_millis)
                     .execute(&mut *transaction)
                     .await?;
                     crate::submit_input::insert_fresh_initial_input(

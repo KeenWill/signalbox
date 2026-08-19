@@ -8266,12 +8266,14 @@ pub struct InvalidReconciliationSweepInterval;
 
 pub enum EligibilityNudgeOutcome {
     Enqueued,
+    Coalesced,
     DroppedAtCapacity,
     WorkSourceClosed,
 }
 
 pub trait EligibilityNudge {
     fn nudge(&self, session: SessionId) -> EligibilityNudgeOutcome;
+    fn nudge_dispatch_start(&self, session: SessionId) -> EligibilityNudgeOutcome;
 }
 
 pub trait EligibilitySweep {
@@ -8292,6 +8294,7 @@ pub trait EligibilityWorkSource {
     type Error;
 
     fn next(&mut self) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
+    fn take_returned_dispatch_start(&mut self, _session: SessionId) -> bool;
 }
 
 pub trait EligibilityPass {
