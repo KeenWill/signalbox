@@ -30,6 +30,7 @@ const INVALID_INSPECT_ARGUMENTS: &str =
     "expected exactly a canonical digest and optional visible-part selector";
 const INVALID_READ_ARGUMENTS: &str =
     "expected exactly a canonical digest, view, object options, and optional selector";
+const RESULT_TOO_LARGE_DETAIL: &str = r#"{"status":"result_too_large"}"#;
 
 /// Checked service request for `file_inspect`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -511,7 +512,9 @@ fn completed_json(value: Value) -> ToolExecutorEvidence {
 }
 
 fn known_failure(value: Value) -> ToolExecutorEvidence {
-    let detail = ToolExecutionErrorDetail::try_new(value.to_string()).ok();
+    let detail = ToolExecutionErrorDetail::try_new(value.to_string())
+        .or_else(|_| ToolExecutionErrorDetail::try_new(String::from(RESULT_TOO_LARGE_DETAIL)))
+        .ok();
     ToolExecutorEvidence::KnownFailed { detail }
 }
 
@@ -622,5 +625,21 @@ mod tests {
             evidence,
             ToolExecutorEvidence::KnownFailed { detail: Some(_) }
         ));
+    }
+
+    #[test]
+    fn oversized_known_failure_retains_compact_typed_evidence() {
+        let evidence = known_failure(json!({
+            "status": "ambiguous",
+            "media_types": ["x".repeat(4_096)],
+        }));
+
+        let ToolExecutorEvidence::KnownFailed {
+            detail: Some(detail),
+        } = evidence
+        else {
+            panic!("an oversized known failure must retain fallback detail");
+        };
+        assert_eq!(detail.as_str(), RESULT_TOO_LARGE_DETAIL);
     }
 }

@@ -562,6 +562,17 @@ impl<'de> Visitor<'de> for DuplicateAwareJsonVisitor {
     {
         let mut values = serde_json::Map::new();
         while let Some(name) = object.next_key::<String>()? {
+            if name == "$serde_json::private::Number" && values.is_empty() {
+                let encoded = object.next_value::<String>()?;
+                if object.next_key::<String>()?.is_some() {
+                    return Err(Access::Error::custom(
+                        "invalid arbitrary-precision JSON number",
+                    ));
+                }
+                let number = serde_json::Number::from_str(&encoded)
+                    .map_err(|_| Access::Error::custom("invalid JSON number"))?;
+                return Ok(serde_json::Value::Number(number));
+            }
             if values.contains_key(&name) {
                 return Err(Access::Error::custom("duplicate JSON object member"));
             }
@@ -664,6 +675,15 @@ mod tests {
         let outcome = BoundedMetadata::try_new(r#"{"kind":"safe","kind":"attacker"}"#);
 
         assert_eq!(outcome, Err(RegistryValueError::Metadata));
+    }
+
+    #[test]
+    fn metadata_preserves_arbitrary_precision_numbers() {
+        let input = r#"{"n":123456789012345678901234567890}"#;
+        let metadata = BoundedMetadata::try_new(input)
+            .expect("arbitrary-precision fixture remains valid metadata");
+
+        assert_eq!(metadata.as_str(), input);
     }
 
     #[test]
