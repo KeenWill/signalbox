@@ -692,7 +692,7 @@ fn spent_automatic_resume_attempts(goal: &Goal) -> u32 {
     let mut head = events.next();
     // The run is the same whether or not the failure that reads it has already
     // been appended, so a trailing failure block is skipped rather than counted.
-    if head.is_some_and(|event| is_execution_failure_block(event)) {
+    if head.is_some_and(is_execution_failure_block) {
         head = events.next();
     }
     let mut spent = 0;
