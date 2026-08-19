@@ -726,11 +726,12 @@ matches that fact is beside the point, and every event is tested against every
 park as it is evaluated: a rule watching one narrow signal would otherwise stay
 parked on an obsolete head however far the pull request moved. Progress must
 also follow the state the lineage stalled on, and one event releases one lineage
-once: a single repository event is evaluated once per active rule, so without
-both an older event replayed by a lagging rule, or a newer one seen again after
-a second park, would hand back a budget the pull request never earned. Rule,
-repository, and stack singletons collapse many pull requests onto one
-obligation, so the fact must name that same pull request: a neighbour's head
+once, counted across the successor obligations that lineage opens as it settles
+and requeues: a single repository event is evaluated once per active rule, so
+without both an older event replayed by a lagging rule, or a newer one seen
+again after a second park, would hand back a budget the pull request never
+earned. Rule, repository, and stack singletons collapse many pull requests onto
+one obligation, so the fact must name that same pull request: a neighbour's head
 differs from the stalled one almost always, and would otherwise restore the
 budget on every unrelated match. A branch target carries no head and no review
 activity at all, so an obligation stalled on one is released only by an

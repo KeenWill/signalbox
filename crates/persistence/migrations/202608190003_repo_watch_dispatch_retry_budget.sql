@@ -349,14 +349,30 @@ BEGIN
            -- a newer park and hand back a budget the pull request never earned.
            AND (incoming.cursor_generation, incoming.event_ordinal)
                 > (parked_state.cursor_generation, parked_state.event_ordinal)
-           -- And one event buys one release. The evaluations of a single event
-           -- are spread across rules, so a lineage that parks again between two
-           -- of them would otherwise be released twice by the same fact.
+           -- And one event buys one release per lineage. The evaluations of a
+           -- single event are spread across rules, so a lineage that parks
+           -- again between two of them would otherwise be released twice by the
+           -- same fact. The spend is read across the whole lineage rather than
+           -- the row holding it, because settlement retires that row and the
+           -- requeue opens a successor: a lineage that parked, dispatched, and
+           -- exhausted itself again would otherwise take a second full budget
+           -- from a fact it had already spent.
            AND NOT EXISTS (
                 SELECT 1
                   FROM repo_watch_dispatch_obligation_park AS spent
-                 WHERE spent.obligation_id = obligation.obligation_id
-                   AND spent.release_event_id = progress_event_id
+                  JOIN repo_watch_dispatch_obligation AS spent_on
+                    ON spent_on.obligation_id = spent.obligation_id
+                 WHERE spent.release_event_id = progress_event_id
+                   AND spent_on.rule_id = obligation.rule_id
+                   AND spent_on.rule_version = obligation.rule_version
+                   AND spent_on.singleton_scope = obligation.singleton_scope
+                   AND spent_on.singleton_repository
+                        IS NOT DISTINCT FROM obligation.singleton_repository
+                   AND spent_on.singleton_pull_request_number
+                        IS NOT DISTINCT FROM obligation.singleton_pull_request_number
+                   AND spent_on.singleton_stack_root_pull_request_number
+                        IS NOT DISTINCT FROM
+                            obligation.singleton_stack_root_pull_request_number
            )
          ORDER BY obligation.obligation_id
     LOOP
@@ -743,6 +759,10 @@ SELECT obligation.obligation_id,
     ON parked_state.event_id = obligation.parked_state_event_id
  WHERE obligation.settled_kind IS NULL
    AND obligation.parked_at IS NOT NULL;
+
+CREATE INDEX repo_watch_dispatch_obligation_park_release_event
+    ON repo_watch_dispatch_obligation_park (release_event_id)
+    WHERE release_event_id IS NOT NULL;
 
 CREATE INDEX repo_watch_dispatch_obligation_parked
     ON repo_watch_dispatch_obligation (repository, rule_id, rule_version)
