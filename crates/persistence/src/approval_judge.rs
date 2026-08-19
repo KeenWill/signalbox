@@ -210,6 +210,8 @@ pub enum CompleteApprovalJudgeOutcome {
     Decided,
     /// The judge explicitly left the request parked for a user decision.
     EscalatedToHuman,
+    /// An unattended turn was terminalized while a sibling still holds the dispatch.
+    HeadlessEscalationTerminalized,
     /// An unattended dispatch was terminalized, audited, released, and re-armed.
     HeadlessEscalationReleased,
 }
@@ -601,7 +603,7 @@ impl PostgresApprovalJudgeRepository {
                         &mut next_closed_result_entry,
                     )
                     .await?;
-                    CompleteApprovalJudgeOutcome::HeadlessEscalationReleased
+                    headless_escalation_outcome(&mut transaction, prepared.call).await?
                 } else {
                     CompleteApprovalJudgeOutcome::EscalatedToHuman
                 }
@@ -783,14 +785,26 @@ async fn persist_headless_escalation(
         let result = match rows.as_slice() {
             [] => {
                 let entry = next_closed_result_entry(request.id());
+                let decision_kind: Option<String> = sqlx::query_scalar(
+                    "SELECT decision_kind FROM tool_approval_decision WHERE request_id = $1",
+                )
+                .bind(tool_request_id_to_uuid(request.id()))
+                .fetch_optional(&mut *connection)
+                .await?;
+                let payload_kind = if decision_kind.as_deref() == Some("deny") {
+                    "tool_denied"
+                } else {
+                    "tool_closed_by_turn_end"
+                };
                 sqlx::query(
                     "INSERT INTO semantic_transcript_entry
                         (source_session_id, semantic_entry_id, payload_kind,
                          tool_result_request_id)
-                     VALUES ($1, $2, 'tool_closed_by_turn_end', $3)",
+                     VALUES ($1, $2, $3, $4)",
                 )
                 .bind(session_id_to_uuid(session))
                 .bind(entry.into_uuid())
+                .bind(payload_kind)
                 .bind(tool_request_id_to_uuid(request.id()))
                 .execute(&mut *connection)
                 .await
@@ -929,6 +943,11 @@ async fn persist_headless_escalation(
             .into());
         }
     }
+    sqlx::query("SELECT repo_watch_release_completed_dispatch_batches_for_turn($1, $2)")
+        .bind(turn_id_to_uuid(turn))
+        .bind(session_id_to_uuid(session))
+        .execute(&mut *connection)
+        .await?;
     Ok(())
 }
 
@@ -1489,30 +1508,51 @@ async fn exact_completed(
     }
     let continuation_exact = stored == Some(DelegateApprovalRecommendation::EscalateToHuman)
         || exact_completion_continuation(connection, prepared, continuation_attempt).await?;
-    let headless_released = if stored == Some(DelegateApprovalRecommendation::EscalateToHuman) {
-        sqlx::query_scalar(
-            "SELECT EXISTS (
-                SELECT 1 FROM repo_watch_headless_approval_escalation
-                 WHERE model_call_id = $1
-            )",
-        )
-        .bind(prepared.call.into_uuid())
-        .fetch_one(&mut *connection)
-        .await?
-    } else {
-        false
-    };
     Ok(continuation_exact.then_some(match stored {
         Some(DelegateApprovalRecommendation::Approve | DelegateApprovalRecommendation::Deny) => {
             CompleteApprovalJudgeOutcome::Decided
         }
-        Some(DelegateApprovalRecommendation::EscalateToHuman) if headless_released => {
-            CompleteApprovalJudgeOutcome::HeadlessEscalationReleased
+        Some(DelegateApprovalRecommendation::EscalateToHuman) => {
+            let headless: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM repo_watch_headless_approval_escalation
+                     WHERE model_call_id = $1
+                )",
+            )
+            .bind(prepared.call.into_uuid())
+            .fetch_one(&mut *connection)
+            .await?;
+            if headless {
+                headless_escalation_outcome(connection, prepared.call).await?
+            } else {
+                CompleteApprovalJudgeOutcome::EscalatedToHuman
+            }
         }
-        Some(DelegateApprovalRecommendation::EscalateToHuman) | None => {
-            CompleteApprovalJudgeOutcome::EscalatedToHuman
-        }
+        None => CompleteApprovalJudgeOutcome::EscalatedToHuman,
     }))
+}
+
+async fn headless_escalation_outcome(
+    connection: &mut PgConnection,
+    call: ModelCallId,
+) -> Result<CompleteApprovalJudgeOutcome, ApprovalJudgeRepositoryError> {
+    let released: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM repo_watch_headless_approval_escalation AS escalation
+              JOIN repo_watch_dispatch_release AS release
+                ON release.dispatch_id = escalation.dispatch_id
+             WHERE escalation.model_call_id = $1
+        )",
+    )
+    .bind(call.into_uuid())
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(if released {
+        CompleteApprovalJudgeOutcome::HeadlessEscalationReleased
+    } else {
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    })
 }
 
 async fn exact_completion_continuation(

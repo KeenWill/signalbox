@@ -1207,7 +1207,28 @@ async fn checkpoint_dispatched_delegated_approval(
         PostgresModelCallRepository,
         PreparedApprovalJudge,
         TurnId,
-        ToolRequestId,
+        Vec<ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
+    checkpoint_dispatched_delegated_approval_for(
+        fixture,
+        seed,
+        &[("exec", r#"{"cmd":"git fetch origin main"}"#)],
+    )
+    .await
+}
+
+async fn checkpoint_dispatched_delegated_approval_for(
+    fixture: &DispatchFixture,
+    seed: u128,
+    proposals: &[(&str, &str)],
+) -> Result<
+    (
+        PostgresModelCallRepository,
+        PreparedApprovalJudge,
+        TurnId,
+        Vec<ToolRequestId>,
     ),
     Box<dyn Error>,
 > {
@@ -1274,18 +1295,29 @@ async fn checkpoint_dispatched_delegated_approval(
     else {
         panic!("the initial model call authorizes")
     };
-    let request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 6));
-    let response =
-        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
-            ToolCallProposal::new(
-                ToolName::try_new(String::from("exec")).expect("the fixture tool name is admitted"),
-                NormalizedToolArguments::try_from_provider_text(String::from(
-                    r#"{"cmd":"git fetch origin main"}"#,
+    let requests = proposals
+        .iter()
+        .enumerate()
+        .map(|(ordinal, _)| {
+            ToolRequestId::from_uuid(Uuid::from_u128(
+                seed + 6 + u128::try_from(ordinal).expect("fixture ordinal fits u128"),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let response = ToolUsingAssistantResponse::try_from_parts(
+        proposals
+            .iter()
+            .map(|(name, arguments)| {
+                AssistantResponsePart::ToolCall(ToolCallProposal::new(
+                    ToolName::try_new(String::from(*name))
+                        .expect("the fixture tool name is admitted"),
+                    NormalizedToolArguments::try_from_provider_text(String::from(*arguments))
+                        .expect("the fixture arguments are admitted"),
                 ))
-                .expect("the fixture arguments are admitted"),
-            ),
-        )])
-        .expect("one proposal forms a tool-using response");
+            })
+            .collect(),
+    )
+    .expect("the proposals form a tool-using response");
     let observation = authorized
         .observation_correlation()
         .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
@@ -1294,11 +1326,20 @@ async fn checkpoint_dispatched_delegated_approval(
             session,
             observation,
             ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
-                vec![ToolResponsePartIdentity::tool_call(
-                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 7)),
-                    request,
-                    InitialToolApproval::Delegated,
-                )],
+                requests
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, request)| {
+                        ToolResponsePartIdentity::tool_call(
+                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                                seed + 100
+                                    + u128::try_from(ordinal).expect("fixture ordinal fits u128"),
+                            )),
+                            *request,
+                            InitialToolApproval::Delegated,
+                        )
+                    })
+                    .collect(),
                 ContextFrontierId::from_uuid(Uuid::from_u128(seed + 8)),
                 None,
             )),
@@ -1310,7 +1351,9 @@ async fn checkpoint_dispatched_delegated_approval(
     };
     assert_eq!(
         round.next_phase(),
-        &ActiveTurnPhase::AwaitingApproval { request }
+        &ActiveTurnPhase::AwaitingApproval {
+            request: requests[0],
+        }
     );
     let approval_repository = repository.approval_judge_repository();
     let prepared = ready_approval_judge(
@@ -1325,7 +1368,7 @@ async fn checkpoint_dispatched_delegated_approval(
             )
             .await?,
     );
-    Ok((repository, prepared, turn, request))
+    Ok((repository, prepared, turn, requests))
 }
 
 async fn evaluate_second_conflict(
@@ -1761,8 +1804,11 @@ async fn headless_approval_escalation_releases_rearms_and_redispatches()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
     let seed = 0x50_240;
-    let (model_repository, prepared, turn, request) =
+    let (model_repository, prepared, turn, requests) =
         checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
     let authority = prepared_pull_request_authority(&prepared);
     let expected_context = context(FIRST_HEAD)?;
     let approval_repository = model_repository.approval_judge_repository();
@@ -1852,8 +1898,165 @@ async fn headless_approval_escalation_releases_rearms_and_redispatches()
     assert!(audit.dispatch_released);
     assert!(audit.replacement_owed);
     assert_ne!(successor_sessions[0], fixture.session(0));
-    assert_eq!(prepared.request().id(), request);
+    assert_eq!(prepared.request().id(), *request);
     assert_eq!(turn, prepared.request().turn());
+    Ok(())
+}
+
+/// A denial decided earlier in the same delegated batch remains a denial when
+/// a later request escalates and terminalizes the unattended turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn headless_escalation_preserves_an_earlier_delegate_denial() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_260;
+    let (model_repository, first, turn, requests) = checkpoint_dispatched_delegated_approval_for(
+        &fixture,
+        seed,
+        &[("exec", "{}"), ("workspace", "{}")],
+    )
+    .await?;
+    let [denied_request, escalated_request] = requests.as_slice() else {
+        panic!("the fixture has two delegated requests")
+    };
+    let repository = model_repository.approval_judge_repository();
+    repository.authorize(&first).await?;
+    let denied = repository
+        .complete(
+            &first,
+            DelegateApprovalRecommendation::Deny,
+            ToolDecisionRationale::try_new(String::from("the first request is denied"))?,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 30)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let second = ready_approval_judge(
+        repository
+            .prepare(
+                fixture.session(0),
+                turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 40)),
+                None,
+            )
+            .await?,
+    );
+    repository.authorize(&second).await?;
+    let escalated = repository
+        .complete(
+            &second,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            ToolDecisionRationale::try_new(String::from("the second request needs a human"))?,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 41)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 42)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 43)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let result_kinds: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT tool_result_request_id, payload_kind
+           FROM semantic_transcript_entry
+          WHERE tool_result_request_id IN ($1, $2)
+          ORDER BY tool_result_request_id",
+    )
+    .bind(denied_request.as_uuid())
+    .bind(escalated_request.as_uuid())
+    .fetch_all(&fixture.pool)
+    .await?;
+
+    assert_eq!(denied, CompleteApprovalJudgeOutcome::Decided);
+    assert_eq!(
+        escalated,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationReleased
+    );
+    assert_eq!(
+        result_kinds,
+        vec![
+            (*denied_request.as_uuid(), String::from("tool_denied")),
+            (
+                *escalated_request.as_uuid(),
+                String::from("tool_closed_by_turn_end"),
+            ),
+        ]
+    );
+    Ok(())
+}
+
+/// Terminalizing one action in a multi-action dispatch does not claim release
+/// while its sibling remains pursuing, and exact replay reports the same
+/// pending durable effect.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn headless_escalation_waits_for_a_multi_action_dispatch_sibling()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let seed = 0x50_280;
+    let (model_repository, prepared, _, _) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let repository = model_repository.approval_judge_repository();
+    repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the unattended request needs a human decision",
+    ))?;
+
+    let outcome = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let replay = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+
+    assert_eq!(
+        outcome,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(replay, outcome);
+    assert_eq!(release_count(&fixture).await?, 0);
     Ok(())
 }
 
