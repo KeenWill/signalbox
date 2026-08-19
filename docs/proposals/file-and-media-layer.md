@@ -180,13 +180,19 @@ Detection follows one fixed algorithm:
     replica traversal while materializing the immutable request-local snapshot.
     The executor first attempts the owning blob path's non-waiting direct-read
     admission while retaining its scheduler-pass slot. If admission is
-    unavailable, it retains the pass and returns `BlobUnavailable`; it creates
-    no waiter that would later need a pass merely to commit failure. Only after
-    acquiring direct-read admission does the durable handoff release the
-    scheduler-pass slot, immediately before store traversal. Completion,
+    unavailable, it retains the pass and returns `ProcessorUnavailable` -
+    occupied daemon capacity rather than a replica condition, so
+    `BlobUnavailable` stays reserved for exhausted replica candidates; it
+    creates no waiter that would later need a pass merely to commit failure.
+    Only after acquiring direct-read admission does the durable handoff release
+    the scheduler-pass slot, immediately before store traversal. Completion,
     failure, and cancellation reacquire a pass only through that owning path's
     bounded queue; no store I/O begins while both capacities are held, and
-    reacquisition cannot exceed the inspection-wide deadline. Verification may
+    reacquisition cannot exceed the inspection-wide deadline. If the bounded
+    queue rejects a reacquisition or the deadline expires while it waits, the
+    owning path commits the terminal outcome through a pass-free failure path -
+    `ProcessorUnavailable` for rejection, `ProcessorTimedOut` for expiry - and
+    tears down the request-local snapshot and its reservation. Verification may
     perform one complete traversal per recorded replica candidate, in the owning
     replica order, until one candidate verifies or the finite catalog snapshot
     is exhausted. Each traversal is bounded by the catalog's authenticated
@@ -348,33 +354,37 @@ above-process limits, unbounded access/output, or unavailable isolation. Every
 view declares its maximum range count and cumulative reader-source bytes; the
 registry rejects either value above the common per-read ceilings below. It also
 computes the complete worst-case detection schedule for every possible declared
-type and rejects a snapshot that could require more than 32 probes. No runtime
-prefilter may omit a byte probe based on declared type or filename. Image views
-must bound dimensions, pixels, and bytes; audio views duration, samples,
-channels, and bytes; structured views nesting, nodes, strings, and bytes. Each
-provider has at most 64 views, and registry construction encodes the worst-case
-successful `file_inspect` projection, including provider metadata and all
-ordered view declarations and argument schemas. It rejects a declaration whose
-complete projection exceeds the 786,432-byte text-or-JSON body ceiling, so an
-admitted provider's views are always reachable through inspection. Every image,
-audio, or file view also declares the finite set of canonical media types it can
-emit. Each model adapter declares its accepted canonical media types per
-presentation kind and its maximum materialized and provider-wire bytes for one
-reference of each accepted type. For every direct or uploaded representation,
-the adapter also declares a deterministic checked worst-case wire projection
-from materialized length to complete provider payload length, including base64,
-multipart, JSON escaping, framing, and fixed metadata. Registry construction
-rejects an absent, overflowing, or non-monotonic projection. Each adapter
-additionally declares one aggregate provider-wire payload maximum per target:
-the bound on the complete encoded request payload rather than on any single
-part. Before processing or reserving a reference, `file_read` requires the
-view's complete emitted-type set to be accepted by the selected adapter and
-applies that projection to each declared presentation-byte maximum. Both the
-materialized maximum and projected wire maximum must fit their target-specific
-limits, and the sum of the checked worst-case wire projections across every
-reference bound to one provider call must fit the declared aggregate payload
-maximum, unless the view instead guarantees normalization to one accepted type
-and bound. Admission first projects and reserves the complete encoded non-media
+type and rejects a snapshot that could require more than 32 probes, or whose
+summed declared probe ranges or probe source bytes exceed the request-wide probe
+aggregates, so an admitted registry can never drive a conforming input into the
+runtime probe budget. No runtime prefilter may omit a byte probe based on
+declared type or filename. Image views must bound dimensions, pixels, and bytes;
+audio views duration, samples, channels, and bytes; structured views nesting,
+nodes, strings, and bytes. Each provider has at most 64 views, and registry
+construction encodes the worst-case successful `file_inspect` projection,
+including provider metadata and all ordered view declarations and argument
+schemas. It rejects a declaration whose complete projection exceeds the
+786,432-byte text-or-JSON body ceiling, so an admitted provider's views are
+always reachable through inspection. Every image, audio, or file view also
+declares the finite set of canonical media types it can emit. Each model adapter
+declares its accepted canonical media types per presentation kind and its
+maximum materialized and provider-wire bytes for one reference of each accepted
+type. For every direct or uploaded representation, the adapter also declares a
+deterministic checked worst-case wire projection from materialized length to
+complete provider payload length, including base64, multipart, JSON escaping,
+framing, and fixed metadata. Registry construction rejects an absent,
+overflowing, or non-monotonic projection. Each adapter additionally declares one
+aggregate provider-wire payload maximum per target: the bound on the complete
+encoded request payload rather than on any single part. Before processing or
+reserving a reference, `file_read` requires the view's complete emitted-type set
+to be accepted by the selected adapter and applies that projection to each
+declared presentation-byte maximum. Both the materialized maximum and projected
+wire maximum must fit their target-specific limits, unless the view instead
+guarantees normalization to one accepted type and bound, in which case the
+normalized type and bound are what those per-reference checks admit. The sum of
+the checked worst-case wire projections across every reference bound to one
+provider call, normalized or not, must fit the declared aggregate payload
+maximum. Admission first projects and reserves the complete encoded non-media
 baseline for the pinned provider call, including text, tool schemas, history,
 and all non-reference framing. It then accumulates every existing and newly
 admitted reference's checked worst-case wire projection against the remaining
@@ -388,8 +398,8 @@ intrinsic bound but would overflow aggregate capacity remaining after the
 baseline or earlier references instead returns
 `TargetPayloadTooLarge { maximum_bytes }`; sibling order never reclassifies the
 source itself as oversized. Either failure publishes, reserves, and commits
-nothing. An unsupported type returns typed modality-unsupported failure;
-an oversized target projection returns `SourceTooLarge` with the target-specific
+nothing. An unsupported type returns typed modality-unsupported failure; an
+oversized target projection returns `SourceTooLarge` with the target-specific
 maximum. Neither path can publish, reserve, or commit a reference.
 
 Registry construction's 786,432-byte body ceiling is only a declaration bound.
@@ -397,8 +407,10 @@ Before committing a successful `file_inspect`, the tool loop prospectively
 projects its complete rendered result into the pinned target and current
 frontier, including mandatory continuation-call framing and reserved output
 capacity. If that exact result cannot fit the target's remaining input capacity,
-the request returns `OutputUnitTooLarge` and commits no result; automatic
-compaction is not an admission mechanism.
+the request returns `TargetPayloadTooLarge { maximum_bytes }` and commits no
+result; `OutputUnitTooLarge` stays reserved for a single semantic unit that is
+intrinsically oversized for its view bound, and automatic compaction is not an
+admission mechanism.
 
 Configuration may disable compiled providers and lower bounds. It cannot add
 aliases, choose precedence, raise compiled ceilings, or load executable plugins.
@@ -475,8 +487,11 @@ host file. Every open, read, positioned read, mapping fault, and reread is
 mediated and atomically charged against the selected operation's declared range
 and cumulative source-byte limits before bytes are supplied. Cache hits are
 charged again. Crossing the cumulative source-byte limit supplies no further
-bytes, terminates the worker, and returns `SourceTooLarge`; exhausting the
-range-count limit does the same but returns
+bytes and terminates the worker; it returns `SourceTooLarge` only when the
+authenticated `byte_length` alone exceeds the bound, and otherwise returns
+`ExpansionLimitExceeded { limit_kind }` naming the cumulative source-byte limit,
+because reread and overlap amplification is a property of the access pattern,
+not of the source. Exhausting the range-count limit does the same but returns
 `ExpansionLimitExceeded { limit_kind }` naming that limit. Thus seeking or
 mapping cannot bypass the broker's accounting. The mount and path disappear only
 after whole-process-tree termination. The CLI inherits the same write-only
@@ -557,22 +572,22 @@ and rendered-projection bound from their registered tool contract; a tool with
 no finite target projection cannot be admitted in the batch. File-media tools
 use the registry-bounded inspection projection, the selected text or structured
 view bound, or the rich-reference projection and media bounds below. A request
-that cannot obtain its cumulative reservation returns `OutputUnitTooLarge`,
-performs no external I/O, and commits no result or continuation state.
-Reservations for admitted siblings remain charged until their completion
-transactions consume the actual result and release unused capacity, so
-independently fitting siblings can never overfill the combined continuation
-call. Steering accepted while the batch executes uses the same pinned-target
-continuation-capacity and aggregate provider-wire ledgers. Before a steering
-input becomes pending, a short transaction projects both its complete rendered
-bytes after the already reserved sibling results and its checked complete
-provider-wire encoding after the reserved non-media baseline and references,
-then atomically consumes remaining capacity from both ledgers. Steering that
-cannot obtain both reservations is not accepted into this batch and remains
-eligible for a later turn; it can never be appended as unreserved pending input.
-Its reservations remain charged through continuation creation or terminal batch
-failure. Automatic compaction, arrival time, and completion order are not
-admission mechanisms.
+that cannot obtain its cumulative reservation returns
+`TargetPayloadTooLarge { maximum_bytes }`, performs no external I/O, and commits
+no result or continuation state. Reservations for admitted siblings remain
+charged until their completion transactions consume the actual result and
+release unused capacity, so independently fitting siblings can never overfill
+the combined continuation call. Steering accepted while the batch executes uses
+the same pinned-target continuation-capacity and aggregate provider-wire
+ledgers. Before a steering input becomes pending, a short transaction projects
+both its complete rendered bytes after the already reserved sibling results and
+its checked complete provider-wire encoding after the reserved non-media
+baseline and references, then atomically consumes remaining capacity from both
+ledgers. Steering that cannot obtain both reservations is not accepted into this
+batch and remains eligible for a later turn; it can never be appended as
+unreserved pending input. Its reservations remain charged through continuation
+creation or terminal batch failure. Automatic compaction, arrival time, and
+completion order are not admission mechanisms.
 
 Pagination uses a common opaque authenticated cursor of at most 1,024 bytes. The
 cursor is only a random token for bounded process-local state; it does not embed
@@ -642,46 +657,46 @@ projection, including per-type materialized and provider-wire limits and the
 mandatory continuation call's remaining input capacity, and verifies that the
 selected view fits it. It rejects the read before creating output if that
 already-reserved allocation is insufficient, then ends before any worker or
-store I/O begins. Publication consumes no more than the durable subdivision.
-The byte reservation separately records
-the maximum materialized length and the adapter's checked worst-case complete
-provider-wire projection for that length; encoded expansion is therefore
-reserved before execution rather than inferred from materialized bytes. A short
-completion transaction atomically registers the verified blob, consumes the
-reservation, releases unused bytes, and commits the reference; a known-failure
-completion transaction releases the reservation without registering a blob.
-Every crash-lost authorized `ExternalEffect` attempt remains ambiguous and keeps
-its reservation through the owning tool loop's reconciliation lifecycle; it
-cannot be retried. The bottom tool-loop specification diff in the implementation
-stack must add an explicit, durable reconciliation closure before this
-reservation mechanism can ship. A closure that proves success consumes the
-reservation while committing the exact result; one that proves known failure or
-records an operator's explicit terminal abandonment releases it. Abandonment is
-irreversible, records that no later result may be committed for the attempt, and
-is the only safe release when the external effect remains unknowable. Until one
-of those terminal closures commits, the reservation has no timeout and remains
-charged. This proposal adds no pre-effect checkpoint and does not treat daemon
-restart or elapsed time as closure. A publication or completion failure may
-leave an unreferenced orphan, never a dangling result, but capacity rejection
-registers nothing. Thus every committed reference is admissible to its mandatory
-continuation call, no transaction spans processor or store I/O, and crash
-recovery never erases an external effect. Equal output bytes converge by digest,
-and ambiguous publication cannot become tool success.
+store I/O begins. Publication consumes no more than the durable subdivision. The
+byte reservation separately records the maximum materialized length and the
+adapter's checked worst-case complete provider-wire projection for that length;
+encoded expansion is therefore reserved before execution rather than inferred
+from materialized bytes. A short completion transaction atomically registers the
+verified blob, consumes the reservation, releases unused bytes, and commits the
+reference; a known-failure completion transaction releases the reservation
+without registering a blob. Every crash-lost authorized `ExternalEffect` attempt
+remains ambiguous and keeps its reservation through the owning tool loop's
+reconciliation lifecycle; it cannot be retried. The bottom tool-loop
+specification diff in the implementation stack must add an explicit, durable
+reconciliation closure before this reservation mechanism can ship. A closure
+that proves success consumes the reservation while committing the exact result;
+one that proves known failure or records an operator's explicit terminal
+abandonment releases it. Abandonment is irreversible, records that no later
+result may be committed for the attempt, and is the only safe release when the
+external effect remains unknowable. Until one of those terminal closures
+commits, the reservation has no timeout and remains charged. This proposal adds
+no pre-effect checkpoint and does not treat daemon restart or elapsed time as
+closure. A publication or completion failure may leave an unreferenced orphan,
+never a dangling result, but capacity rejection registers nothing. Thus every
+committed reference is admissible to its mandatory continuation call, no
+transaction spans processor or store I/O, and crash recovery never erases an
+external effect. Equal output bytes converge by digest, and ambiguous
+publication cannot become tool success.
 
 For a rich view that directly presents the verified source instead of producing
 binary output, the broker first requires the returned `media_type` to equal the
 source's validated `detected_media_type`. Only then may it copy
 `source_validation` into `presentation_validation`; a declaration-permitted but
-different emitted type is `ProcessorFailed { reason_code:
-undeclared_worker_outcome }` and commits no reference. The broker also checks the
-authenticated source `byte_length` before commit. The length must fit the view's
-declared presentation maximum, the presentation kind's process ceiling, and the
-target-specific materialized maximum. The adapter's checked worst-case wire
-projection of that exact length must independently fit the target provider-wire
-maximum and the wire portion of the durable reservation. Failure returns
-`SourceTooLarge` with the effective maximum and commits no reference. A direct
-reference cannot bypass a generated-output channel's bounds merely because its
-bytes already exist.
+different emitted type is
+`ProcessorFailed { reason_code: undeclared_worker_outcome }` and commits no
+reference. The broker also checks the authenticated source `byte_length` before
+commit. The length must fit the view's declared presentation maximum, the
+presentation kind's process ceiling, and the target-specific materialized
+maximum. The adapter's checked worst-case wire projection of that exact length
+must independently fit the target provider-wire maximum and the wire portion of
+the durable reservation. Failure returns `SourceTooLarge` with the effective
+maximum and commits no reference. A direct reference cannot bypass a
+generated-output channel's bounds merely because its bytes already exist.
 
 Rendering first emits a bounded textual stub. Preparation then:
 
@@ -846,8 +861,10 @@ One shared suite proves every provider and isolation implementation:
   occupied capacity, releases capacity only after deletion, and removes crash
   leftovers before startup admission;
 - declarations above 4,096 reader ranges or 1,073,741,824 reader-source bytes
-  are rejected, and runtime exhaustion returns `SourceTooLarge` without another
-  source byte;
+  are rejected; runtime cumulative source-byte exhaustion returns
+  `SourceTooLarge` and runtime range-count exhaustion returns
+  `ExpansionLimitExceeded { limit_kind }` naming the range-count limit, either
+  way without another source byte;
 - any scheduled relevant probe's crash, cancellation, timeout, memory/output
   kill, or framing defect terminates inspection with its exact operational
   outcome before candidate classification and produces no partial success;
