@@ -178,22 +178,30 @@ Detection follows one fixed algorithm:
     verification. Reserve the authenticated exact byte length from the bounded
     snapshot pools, then verify source digest and length through ordinary
     replica traversal while materializing the immutable request-local snapshot.
-    Before acquiring blob direct-read admission or beginning store traversal,
-    the executor releases its scheduler-pass slot through the same durable
-    handoff used by model-originated `blob_read`. Completion, failure, and
-    cancellation reacquire a pass only through that owning path's bounded queue;
-    the request never owns a scheduler-pass slot and a direct-read permit
-    simultaneously, and reacquisition cannot exceed the inspection-wide
-    deadline. Verification performs at most one complete traversal bounded by
-    the catalog's authenticated `byte_length`; those integrity bytes use the
-    blob layer's traversal accounting and process-wide traversal admission, not
-    the reader-work ceiling. Every later source range is served from the
-    completed snapshot and cannot observe another replica generation. Exhausting
-    the wall deadline returns `ProcessorTimedOut`. Ordinary blob traversal's
-    longer deadline cannot extend the inspection deadline. Missing, corrupt,
-    unavailable, or no-longer-visible sources propagate as `BlobMissing`,
-    `BlobCorrupt`, `BlobUnavailable`, or `BlobNotVisible` before candidate
-    selection.
+    The executor first attempts the owning blob path's non-waiting direct-read
+    admission while retaining its scheduler-pass slot. If admission is
+    unavailable, it retains the pass and returns `BlobUnavailable`; it creates
+    no waiter that would later need a pass merely to commit failure. Only after
+    acquiring direct-read admission does the durable handoff release the
+    scheduler-pass slot, immediately before store traversal. Completion,
+    failure, and cancellation reacquire a pass only through that owning path's
+    bounded queue; no store I/O begins while both capacities are held, and
+    reacquisition cannot exceed the inspection-wide deadline. Verification may
+    perform one complete traversal per recorded replica candidate, in the
+    owning replica order, until one candidate verifies or the finite catalog
+    snapshot is exhausted. Each traversal is bounded by the catalog's
+    authenticated `byte_length`; the checked aggregate is bounded by that
+    length times the recorded candidate count and remains under the same wall
+    deadline and process-wide traversal admission. Corruption or unavailability
+    of one candidate falls through to the next candidate exactly as the owning
+    blob path requires. Those integrity bytes use the blob layer's traversal
+    accounting, not the reader-work ceiling. Every later source range is served
+    from the completed snapshot and cannot observe another replica generation.
+    Exhausting the wall deadline returns `ProcessorTimedOut`. Ordinary blob
+    traversal's longer deadline cannot extend the inspection deadline. Only
+    exhaustion of the recorded candidates propagates `BlobCorrupt` or
+    `BlobUnavailable`; missing or no-longer-visible sources propagate as
+    `BlobMissing` or `BlobNotVisible` before candidate selection.
 02. Run relevant probes in isolation under both their provider limits and the
     same inspection-wide deadline, plus the request-wide probe-count,
     concurrency, memory, CPU, range, and probe-source-byte budgets below.
@@ -364,9 +372,15 @@ materialized maximum and projected wire maximum must fit their target-specific
 limits, and the sum of the checked worst-case wire projections across every
 reference bound to one provider call must fit the declared aggregate payload
 maximum, unless the view instead guarantees normalization to one accepted type
-and bound. References that fit individually but overflow the aggregate return
-`SourceTooLarge` with the aggregate target maximum and publish, reserve, and
-commit nothing. An unsupported type returns typed modality-unsupported failure;
+and bound. Admission first projects and reserves the complete encoded non-media
+baseline for the pinned provider call, including text, tool schemas, history,
+and all non-reference framing. It then accumulates every existing and newly
+admitted reference's checked worst-case wire projection against the remaining
+aggregate capacity. Thus the baseline plus all references, rather than the
+references alone, must fit the complete-request maximum. A baseline that already
+exceeds the maximum or a reference that would overflow the remainder returns
+`SourceTooLarge` with the aggregate target maximum and publishes, reserves, and
+commits nothing. An unsupported type returns typed modality-unsupported failure;
 an oversized target projection returns `SourceTooLarge` with the target-specific
 maximum. Neither path can publish, reserve, or commit a reference.
 
@@ -681,7 +695,7 @@ may lower but never raise these process ceilings:
 | Probes / concurrent workers per inspect | 32 / 2                 |
 | Aggregate probe ranges / source bytes   | 64 / 1,048,576         |
 | Aggregate probe memory / CPU / wall     | 1 GiB / 120 s / 120 s  |
-| Source verification traversals / bytes  | 1 / exact byte length  |
+| Source verification traversals / bytes  | inventory / aggregate  |
 | Snapshot bytes per request / process    | 64 GiB / 256 GiB       |
 | Per-read ranges / cumulative source     | 4,096 / 1,073,741,824  |
 | Control frame / text-or-JSON body       | 1,048,576 / 786,432    |
@@ -801,7 +815,10 @@ One shared suite proves every provider and isolation implementation:
   before candidate selection;
 - filesystem and unversioned-S3 fixtures mutate the selected replica after the
   verification traversal and prove every probe/read range still observes only
-  the completed verified snapshot;
+  the completed verified snapshot; replica fixtures also corrupt or make
+  unavailable an earlier recorded candidate and prove verification falls
+  through in owning order to a later valid candidate under the per-candidate,
+  checked aggregate, and inspection-deadline bounds;
 - snapshot admission reserves exact bytes before traversal, rejects exhausted
   process capacity without source I/O, classifies a length above the effective
   configured per-request maximum as `SourceTooLarge` with that maximum, uses
@@ -851,9 +868,12 @@ One shared suite proves every provider and isolation implementation:
   same ledger before becoming pending; and rich views are rejected before
   processing when either their materialized maximum or the adapter's checked
   worst-case complete encoded-wire projection exceeds its target-specific limit;
-- snapshot traversal releases scheduler-pass ownership before acquiring
-  direct-read admission and uses the owning blob path's bounded reacquisition,
-  proving that no request retains both capacities during store I/O; and
+- snapshot traversal acquires non-waiting direct-read admission before releasing
+  scheduler-pass ownership, retains the pass when admission fails, begins no
+  store I/O while both capacities are held, and uses the owning blob path's
+  bounded reacquisition; aggregate provider-wire fixtures reserve the complete
+  encoded non-media baseline before existing and new reference projections and
+  reject a call whose baseline-plus-references exceeds the target maximum; and
 - preparation rejects missing, corrupt, malformed, oversized, and
   modality-unsupported references before send authorization.
 
