@@ -6,14 +6,18 @@
 //! reflects the deployed judge rather than a reimplementation. Nothing here is
 //! reachable from daemon execution; the daemon path keeps its own wiring.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, num::NonZeroU64};
 
-use signalbox_application::ApprovalJudgeAuthorization;
+use signalbox_application::{
+    ApprovalJudgeAuthorization, ApprovalJudgeDispatchAuthority, ApprovalJudgePullRequestAuthority,
+    ApprovalJudgePullRequestAuthorityInput,
+};
 use signalbox_domain::{
-    DelegateApprovalRecommendation, DirectModelSelection, GoalStatement, ModelCallId,
-    NormalizedToolArguments, ResolvedProviderTarget, SessionId, SessionSystemPrompt,
-    SessionTemplateName, ToolApprovalPosture, ToolName, ToolRequest, ToolRequestId,
-    ToolRequestOrdinal, ToolRequestReconstitutionInput, TurnId,
+    BranchName, CommitSha, DelegateApprovalRecommendation, DirectModelSelection, GoalStatement,
+    ModelCallId, NormalizedToolArguments, PullRequestNumber, RepoWatchDispatchId, RepositorySlug,
+    ResolvedProviderTarget, SessionId, SessionSystemPrompt, SessionTemplateName,
+    ToolApprovalPosture, ToolName, ToolRequest, ToolRequestId, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, TurnId,
 };
 use signalbox_model_provider_runtime::{ApprovalJudgeModel, ApprovalJudgeModelRequest};
 use signalbox_model_runtime::TokenUsage;
@@ -36,6 +40,35 @@ pub struct ApprovalJudgeEvalCase {
     pub template: Option<String>,
     /// Frozen system prompt carried in the untrusted context block.
     pub system_prompt: Option<String>,
+    /// Repository-watch pull-request fence, when the case is a dispatched one.
+    ///
+    /// Without it a case renders `session_dispatch_authority` absent, which is
+    /// the shape of a session no dispatch created. A case that means to
+    /// exercise a fenced decision — anything turning on the recorded head, head
+    /// branch, or base branch — has to carry one, or it tests the textual grant
+    /// in its goal and prompt instead.
+    pub dispatch: Option<ApprovalJudgeEvalDispatchFence>,
+}
+
+/// The pull-request fence a dispatched session's judge reads as data.
+///
+/// Only the pull-request shape is expressible here, because that is the shape
+/// review-response and merge-forward dispatches carry; a branch-dispatch case
+/// needs this type extended before it can be written.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalJudgeEvalDispatchFence {
+    /// Watched repository the dispatch names.
+    pub repository: String,
+    /// Watched pull-request number.
+    pub pull_request: u64,
+    /// Exact head commit recorded when the dispatch was created.
+    pub head_sha: String,
+    /// Repository the head branch lives in.
+    pub head_repository: String,
+    /// Head branch the dispatched work may publish to.
+    pub head_branch: String,
+    /// Base branch the pull request targets.
+    pub base_branch: String,
 }
 
 /// The provider binding an eval run resolves once from configuration.
@@ -239,7 +272,64 @@ fn eval_session_context(
             })
         })
         .transpose()?;
-    Ok(SessionAuthorityContext::new(goal, template, system_prompt))
+    let context = SessionAuthorityContext::new(goal, template, system_prompt);
+    let Some(fence) = case.dispatch.as_ref() else {
+        return Ok(context);
+    };
+    // The identity is derived from the case name rather than carried, because
+    // a fence's dispatch identifier is evidence of provenance and no eval case
+    // has a durable dispatch behind it to name.
+    let mut identity_material = case.name.as_bytes().to_vec();
+    identity_material.extend_from_slice(b"\0dispatch");
+    let dispatch =
+        RepoWatchDispatchId::from_uuid(production_shaped_uuid(fnv1a_128(&identity_material)));
+    let input = ApprovalJudgePullRequestAuthorityInput {
+        dispatch,
+        repository: admitted(
+            &fence.repository,
+            "dispatch.repository",
+            RepositorySlug::try_new,
+        )?,
+        pull_request: NonZeroU64::new(fence.pull_request)
+            .map(PullRequestNumber::new)
+            .ok_or_else(|| ApprovalJudgeEvalCaseError {
+                field: "dispatch.pull_request",
+                admission_failure: String::from("pull-request numbers are positive"),
+            })?,
+        head_sha: admitted(&fence.head_sha, "dispatch.head_sha", CommitSha::try_new)?,
+        head_repository: admitted(
+            &fence.head_repository,
+            "dispatch.head_repository",
+            RepositorySlug::try_new,
+        )?,
+        head_branch: admitted(
+            &fence.head_branch,
+            "dispatch.head_branch",
+            BranchName::try_new,
+        )?,
+        base_branch: admitted(
+            &fence.base_branch,
+            "dispatch.base_branch",
+            BranchName::try_new,
+        )?,
+    };
+    Ok(
+        context.with_dispatch(ApprovalJudgeDispatchAuthority::PullRequest(
+            ApprovalJudgePullRequestAuthority::new(input),
+        )),
+    )
+}
+
+/// Admits one fence field, naming the field a rejection came from.
+fn admitted<Value, Error: fmt::Display>(
+    text: &str,
+    field: &'static str,
+    admit: impl FnOnce(String) -> Result<Value, Error>,
+) -> Result<Value, ApprovalJudgeEvalCaseError> {
+    admit(text.to_owned()).map_err(|error| ApprovalJudgeEvalCaseError {
+        field,
+        admission_failure: error.to_string(),
+    })
 }
 
 /// Stable 128-bit FNV-1a so case identities survive toolchain upgrades.
@@ -296,7 +386,70 @@ mod tests {
             goal: Some(String::from("Fix the reviewer finding on the head branch.")),
             template: Some(String::from("review-response")),
             system_prompt: Some(String::from("Push only the head branch.")),
+            dispatch: None,
         }
+    }
+
+    fn fence() -> ApprovalJudgeEvalDispatchFence {
+        ApprovalJudgeEvalDispatchFence {
+            repository: String::from("sample-user/sample-repository"),
+            pull_request: 12,
+            head_sha: String::from("1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"),
+            head_repository: String::from("sample-user/sample-repository"),
+            head_branch: String::from("agent/sample-feature"),
+            base_branch: String::from("main"),
+        }
+    }
+
+    fn rendered_context(case: &ApprovalJudgeEvalCase) -> String {
+        let rendered = render_eval_case(case).expect("fixture case renders");
+        let payload: serde_json::Value =
+            serde_json::from_str(&rendered).expect("rendered payload is JSON");
+        payload["session_context"]
+            .as_str()
+            .expect("session_context renders as text")
+            .to_owned()
+    }
+
+    /// A case without a fence renders the field absent, which is the shape of a
+    /// session no dispatch created; a case with one renders the exact recorded
+    /// values, so a case whose verdict turns on the fence exercises it.
+    #[test]
+    fn a_dispatch_fence_renders_only_for_the_case_that_carries_one() {
+        let mut dispatched = case();
+        dispatched.dispatch = Some(fence());
+
+        let plain = rendered_context(&case());
+        let fenced = rendered_context(&dispatched);
+
+        assert!(plain.contains(
+            "-----BEGIN UNTRUSTED SESSION CONTEXT: session_dispatch_authority-----\n(absent)\n"
+        ));
+        assert!(fenced.contains("1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"));
+        assert!(fenced.contains("agent/sample-feature"));
+        assert!(fenced.contains("\"base_branch\":\"main\""));
+        assert!(
+            !fenced.contains(
+                "(absent)\n-----END UNTRUSTED SESSION CONTEXT: session_dispatch_authority"
+            )
+        );
+    }
+
+    /// The fence identity is derived from the case name, so replaying one case
+    /// twice cannot look like two dispatches and two cases cannot collide.
+    #[test]
+    fn a_derived_fence_identity_is_stable_per_case() {
+        let mut dispatched = case();
+        dispatched.dispatch = Some(fence());
+        let mut renamed = dispatched.clone();
+        renamed.name = String::from("fixture-push-other-case");
+
+        let first = rendered_context(&dispatched);
+        let second = rendered_context(&dispatched);
+        let other = rendered_context(&renamed);
+
+        assert_eq!(first, second);
+        assert_ne!(first, other);
     }
 
     #[test]
