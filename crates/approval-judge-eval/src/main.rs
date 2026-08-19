@@ -120,12 +120,12 @@ fn validate_responses(
         // A stable id is not enough: the recorded decision answers one exact
         // rendered request, so a response also names the fingerprint of the
         // request context it was recorded against.
-        let expected_fingerprint = request_fingerprint(&case.request);
+        let expected_fingerprint = request_fingerprint(case);
         if response.request_fingerprint != expected_fingerprint {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "offline response for case {} was recorded against a different                      request context (fingerprint {} does not match {})",
+                    "offline response for case {} was recorded against a different request context (fingerprint {} does not match {})",
                     case.id, response.request_fingerprint, expected_fingerprint
                 ),
             ));

@@ -17,7 +17,8 @@ use sha2::{Digest, Sha256};
 use signalbox_domain::DelegateApprovalRecommendation;
 use signalbox_model_provider_runtime::ApprovalJudgeModel;
 use signalboxd::approval_judge_eval::{
-    ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, judge_eval_case, render_eval_case,
+    ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, judge_eval_case, judge_system_prompt,
+    render_eval_case,
 };
 
 /// The only corpus format this pre-alpha harness currently accepts.
@@ -104,16 +105,24 @@ pub fn load_corpus(path: impl AsRef<Path>) -> Result<ApprovalJudgeCorpus, Corpus
         path: path.to_path_buf(),
         source,
     })?;
-    decode_corpus(&bytes)
+    decode_corpus(&bytes).map_err(|error| match error {
+        CorpusLoadError::Json(source) => CorpusLoadError::JsonInFile {
+            path: path.to_path_buf(),
+            source,
+        },
+        other => other,
+    })
 }
 
-/// Lowercase hexadecimal SHA-256 binding a case's rendered request context.
+/// Lowercase hexadecimal SHA-256 binding a case's rendered request identity.
 ///
 /// The digest input follows the corpus digest conventions: one JSON object
 /// with bytewise-sorted keys and no insignificant whitespace; absent optional
-/// fields serialize as `null`.
+/// fields serialize as `null`. It covers the case id, every request field,
+/// and the exact judge system prompt, so a recorded response is invalidated
+/// by a case rename, a request edit, or a prompt revision alike.
 #[must_use]
-pub fn request_fingerprint(request: &ApprovalJudgeRequestContext) -> String {
+pub fn request_fingerprint(case: &ApprovalJudgeCase) -> String {
     // The canonical object is written field by field in bytewise key order,
     // with `serde_json::Value`'s infallible display doing the string
     // escaping, so no fallible serializer sits on this path.
@@ -123,11 +132,14 @@ pub fn request_fingerprint(request: &ApprovalJudgeRequestContext) -> String {
             |text| serde_json::Value::from(text).to_string(),
         )
     }
+    let request = &case.request;
     let encoded = format!(
-        "{{\"arguments\":{},\"commissioned_goal\":{},\"frozen_system_prompt\":{},\"session_template\":{},\"tool\":{}}}",
+        "{{\"arguments\":{},\"case_id\":{},\"commissioned_goal\":{},\"frozen_system_prompt\":{},\"judge_system_prompt\":{},\"session_template\":{},\"tool\":{}}}",
         field(Some(request.arguments.as_str())),
+        field(Some(case.id.as_str())),
         field(request.commissioned_goal.as_deref()),
         field(request.frozen_system_prompt.as_deref()),
+        field(Some(judge_system_prompt())),
         field(request.session_template.as_deref()),
         field(Some(request.tool.as_str())),
     );
@@ -178,6 +190,13 @@ pub enum CorpusLoadError {
     },
     /// JSON decoding or strict shape validation failed.
     Json(serde_json::Error),
+    /// JSON decoding or strict shape validation failed for a named file.
+    JsonInFile {
+        /// Corpus file that failed to decode.
+        path: PathBuf,
+        /// Underlying decode failure.
+        source: serde_json::Error,
+    },
     /// The corpus names a format this harness does not implement.
     UnsupportedFormatVersion {
         /// Version found in the document.
@@ -210,6 +229,11 @@ impl fmt::Display for CorpusLoadError {
                 )
             }
             Self::Json(source) => write!(formatter, "corpus JSON is invalid: {source}"),
+            Self::JsonInFile { path, source } => write!(
+                formatter,
+                "corpus {} is not valid corpus JSON: {source}",
+                path.display()
+            ),
             Self::UnsupportedFormatVersion { observed } => write!(
                 formatter,
                 "corpus format version {observed} is unsupported; expected {CORPUS_FORMAT_VERSION}"
@@ -234,6 +258,7 @@ impl Error for CorpusLoadError {
         match self {
             Self::Read { source, .. } => Some(source),
             Self::Json(source) => Some(source),
+            Self::JsonInFile { source, .. } => Some(source),
             Self::UnsupportedFormatVersion { .. }
             | Self::EmptyCorpus
             | Self::DuplicateCaseId { .. }
@@ -577,25 +602,32 @@ mod tests {
         assert!(matches!(error, ScoreError::BlankCaseId));
     }
 
+    fn assert_seed_fingerprint(
+        corpus: &ApprovalJudgeCorpus,
+        responses: &serde_json::Value,
+        index: usize,
+    ) {
+        let case = &corpus.cases[index];
+        let recorded = responses["responses"][index]["request_fingerprint"]
+            .as_str()
+            .expect("the seed response names a fingerprint");
+        assert_eq!(
+            recorded,
+            request_fingerprint(case),
+            "fingerprint mismatch for case {}",
+            case.id
+        );
+    }
+
     #[test]
     fn seed_response_fingerprints_match_the_seed_corpus() {
         let corpus = decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
         let responses: serde_json::Value =
             serde_json::from_slice(SEED_RESPONSES).expect("the seed responses parse");
-        for (case, response) in corpus
-            .cases
-            .iter()
-            .zip(responses["responses"].as_array().expect("responses array"))
-        {
-            assert_eq!(
-                response["request_fingerprint"]
-                    .as_str()
-                    .expect("fingerprint"),
-                request_fingerprint(&case.request),
-                "fingerprint mismatch for case {}",
-                case.id
-            );
-        }
+
+        assert_seed_fingerprint(&corpus, &responses, 0);
+        assert_seed_fingerprint(&corpus, &responses, 1);
+        assert_seed_fingerprint(&corpus, &responses, 2);
     }
 
     #[test]
@@ -647,7 +679,8 @@ mod tests {
             .await
             .expect("the scripted judge scores every seed case");
 
-        assert_eq!(scorecard.accuracy, MetricRate::new(1, corpus.cases.len()));
+        assert_eq!(scorecard.accuracy.numerator, 1);
+        assert_eq!(scorecard.accuracy.denominator, 3);
     }
 
     #[tokio::test]

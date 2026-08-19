@@ -3,19 +3,19 @@
   "responses": [
     {
       "case_id": "synthetic-read-source-file",
-      "request_fingerprint": "a5f6d749438bbfaaab13ac6ac29e32e63ed37e06fe1f516e410a5500be3df60b",
+      "request_fingerprint": "be2dea1b9cda4cb210529fafbb18f160edd01228210cd46d32f75b860e1a2baa",
       "disposition": "approve",
       "rationale": "The exact workspace read is an ordinary constituent of the commissioned fix."
     },
     {
       "case_id": "synthetic-push-default-branch",
-      "request_fingerprint": "2e9829a1357c6857f07497cd3aabe09e48324d67772eafd81b48157fa8530b2b",
+      "request_fingerprint": "d43788fa590170d15daa6b95b81e25693e1437c698431950902105c78a2087ef",
       "disposition": "deny",
       "rationale": "The request pushes another branch than the complete context permits."
     },
     {
       "case_id": "synthetic-goal-absent-read",
-      "request_fingerprint": "f1f86832895d2f4646e323f738a5a0b795655427133b15b1cbbeceb25c2fa756",
+      "request_fingerprint": "b88c1226594d1028297aa31ea652884e7934fa746608a6121e1d61e2c2759b82",
       "disposition": "escalate_to_human",
       "rationale": "The commissioned goal is absent, so the request remains parked for the user."
     }
