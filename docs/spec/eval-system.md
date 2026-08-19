@@ -63,14 +63,13 @@ responses, feeds those responses through the repository's deterministic scripted
 model adapter, and emits the scorecard as JSON. Each recorded response names
 both its case id and a fingerprint of the rendered request identity it was
 recorded against — SHA-256 in lowercase hexadecimal over one JSON object with
-bytewise-sorted keys and no insignificant whitespace, covering the exact judge
-system prompt and the complete rendered request payload the replay sends the
-model — and replay rejects a response whose fingerprint does not match the
-corpus case at its position, including after a case rename, a prompt revision,
-or a change to the request renderer itself. The checked-in seed corpus and
-response file contain synthetic strings only. The existing `signalboxd`
-live-provider runner remains a separate explicitly operator-driven surface and
-is not part of this offline contract.
+bytewise-sorted keys and no insignificant whitespace, covering the case id,
+every request field, and the exact judge system prompt, absent optional fields
+serialized as null — and replay rejects a response whose fingerprint does not
+match the corpus case at its position, including after a case rename or a prompt
+revision. The checked-in seed corpus and response file contain synthetic strings
+only. The existing `signalboxd` live-provider runner remains a separate
+explicitly operator-driven surface and is not part of this offline contract.
 
 **Committed unimplemented functionality.** No present surface stores evaluation
 corpora. A corpus is identified by suite name, version, and content digest; runs
