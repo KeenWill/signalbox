@@ -37,6 +37,30 @@ pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION: &str =
       WHERE obligation_id = $1
       FOR UPDATE";
 
+pub(crate) const REPO_WATCH_ACTIVE_DISPATCH_OBLIGATION: &str = "SELECT obligation.obligation_id,
+                obligation.failed_attempts,
+                obligation.parked_at IS NOT NULL AS parked,
+                (
+                    parked_state.head_sha IS DISTINCT FROM incoming.head_sha
+                    OR incoming.event_kind IN (
+                        'review_submitted', 'thread_opened', 'thread_resolved'
+                    )
+                ) AS releases_park
+           FROM repo_watch_dispatch_obligation AS obligation
+           LEFT JOIN repo_watch_event AS parked_state
+                  ON parked_state.event_id = obligation.latest_event_id
+           LEFT JOIN repo_watch_event AS incoming
+                  ON incoming.event_id = $7
+          WHERE obligation.rule_id = $1
+            AND obligation.rule_version = $2
+            AND obligation.singleton_scope = $3
+            AND obligation.singleton_repository IS NOT DISTINCT FROM $4
+            AND obligation.singleton_pull_request_number IS NOT DISTINCT FROM $5
+            AND obligation.singleton_stack_root_pull_request_number
+                 IS NOT DISTINCT FROM $6
+            AND obligation.settled_kind IS NULL
+            FOR UPDATE OF obligation";
+
 pub(crate) const REPO_WATCH_WEBHOOK_DELIVERY: &str = "SELECT receipt_sequence
        FROM repo_watch_webhook_delivery
       WHERE hook_id = $1 AND delivery_id = $2

@@ -411,40 +411,16 @@ pub(crate) async fn record_dispatch_obligation(
     // already carries moving on, or review activity against it. Anything else
     // joins the obligation without restoring its budget, so label churn or a
     // recomputed mergeable state cannot buy further attempts.
-    let active = sqlx::query(
-        "SELECT obligation.obligation_id,
-                obligation.failed_attempts,
-                obligation.parked_at IS NOT NULL AS parked,
-                (
-                    parked_state.head_sha IS DISTINCT FROM incoming.head_sha
-                    OR incoming.event_kind IN (
-                        'review_submitted', 'thread_opened', 'thread_resolved'
-                    )
-                ) AS releases_park
-           FROM repo_watch_dispatch_obligation AS obligation
-           LEFT JOIN repo_watch_event AS parked_state
-                  ON parked_state.event_id = obligation.latest_event_id
-           LEFT JOIN repo_watch_event AS incoming
-                  ON incoming.event_id = $7
-          WHERE obligation.rule_id = $1
-            AND obligation.rule_version = $2
-            AND obligation.singleton_scope = $3
-            AND obligation.singleton_repository IS NOT DISTINCT FROM $4
-            AND obligation.singleton_pull_request_number IS NOT DISTINCT FROM $5
-            AND obligation.singleton_stack_root_pull_request_number
-                 IS NOT DISTINCT FROM $6
-            AND obligation.settled_kind IS NULL
-            FOR UPDATE OF obligation",
-    )
-    .bind(rule_id.as_str())
-    .bind(stored_rule_version(rule_version)?)
-    .bind(repo_watch_singleton_scope_to_str(singleton.scope))
-    .bind(singleton.repository.as_deref())
-    .bind(singleton.pull_request)
-    .bind(singleton.stack_root_pull_request)
-    .bind(event.id().as_uuid())
-    .fetch_optional(&mut **transaction)
-    .await?;
+    let active = sqlx::query(crate::lock_inventory::REPO_WATCH_ACTIVE_DISPATCH_OBLIGATION)
+        .bind(rule_id.as_str())
+        .bind(stored_rule_version(rule_version)?)
+        .bind(repo_watch_singleton_scope_to_str(singleton.scope))
+        .bind(singleton.repository.as_deref())
+        .bind(singleton.pull_request)
+        .bind(singleton.stack_root_pull_request)
+        .bind(event.id().as_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?;
     if let Some(active) = active {
         let obligation_id: Uuid = active.try_get("obligation_id")?;
         let parked: bool = active.try_get("parked")?;
