@@ -598,7 +598,9 @@ impl PostgresApprovalJudgeRepository {
                 CompleteApprovalJudgeOutcome::Decided
             }
             None => {
-                if unattended_escalation_applies(&mut transaction, prepared).await? {
+                if unattended_escalation_applies(&mut transaction, prepared, authority_stands)
+                    .await?
+                {
                     persist_headless_escalation(
                         &mut transaction,
                         prepared,
@@ -747,17 +749,25 @@ const DISPATCH_COMMISSIONED_GENERATION: GoalGeneration = GoalGeneration::new(Non
 /// reclassifying the steer into a queued successor would start fresh work in a
 /// session whose dispatch is being released for redispatch.
 ///
-/// A dispatch that has already released is the third. The unattended path
-/// exists to free the singleton and owe a replacement, and
+/// A released dispatch whose goal authority still stands is the third. The
+/// unattended path exists to free the singleton and owe a replacement, and
 /// `repo_watch_release_completed_dispatch_batches_for_turn` owes that
 /// replacement only on the release that this escalation causes; a batch already
-/// released spends nothing further. Such work is also an operator's — the goal
-/// was blocked and resumed by hand to reach here — and a park costs repository
-/// watch nothing, because the batch that turn once held is no longer its
-/// occupancy.
+/// released spends nothing further. A park there costs repository watch nothing
+/// either, because the batch that turn once held is no longer its occupancy.
+///
+/// The authority is what says a person is there, and a release row alone does
+/// not: a lifecycle cutoff releases the batch too, by stopping the goal while
+/// this turn still awaits its judge, and that release is automated. Standing
+/// authority on an already-released batch means the goal was blocked and
+/// resumed by hand, so the escalation waits for whoever resumed it. Withdrawn
+/// authority means the work is stale, so it is terminalized instead of parking
+/// for a user who will never come — and terminalizing it owes no second
+/// redispatch, because the release row already spent the requeue.
 async fn unattended_escalation_applies(
     connection: &mut PgConnection,
     prepared: &PreparedApprovalJudge,
+    authority_stands: bool,
 ) -> Result<bool, ApprovalJudgeRepositoryError> {
     let Some(dispatch) = prepared
         .session_context
@@ -783,7 +793,7 @@ async fn unattended_escalation_applies(
     .bind(dispatch.as_uuid())
     .fetch_one(&mut *connection)
     .await?;
-    Ok(!released)
+    Ok(!(released && authority_stands))
 }
 
 /// Whether a `pending_steering` accepted input still names this turn.

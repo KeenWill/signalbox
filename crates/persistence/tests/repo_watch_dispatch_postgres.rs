@@ -143,6 +143,7 @@ const STEERED_DISPATCH_INPUT_ID: u128 = 0x5d_400;
 const RESUMED_DISPATCH_COMMAND_ID: u128 = 0x5d_500;
 const RESUMED_DISPATCH_INPUT_ID: u128 = 0x5d_600;
 const RESUMED_DISPATCH_TURN_ID: u128 = 0x5d_700;
+const CUTOFF_ESCALATION_STOP_COMMAND_ID: u128 = 0x5d_800;
 const TEMPLATE_MODEL_SELECTION_ID: u128 = 901;
 const APPROVAL_JUDGE_PROVIDER_ID: u128 = 902;
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "fixture-credential";
@@ -2332,6 +2333,90 @@ async fn a_released_dispatch_escalates_resumed_work_to_its_operator() -> Result<
         escalations, 1,
         "the resumed escalation records no second audit row"
     );
+    assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+/// A release row does not mean a user is there. A lifecycle cutoff stops the
+/// goal while the turn still awaits its judge, which releases the batch because
+/// a stopped generation's turn is no longer runtime-relevant. That work is
+/// stale, so its escalation is terminalized rather than parked for nobody — and
+/// with the authority already ended, no execution-failure block is appended.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_cutoff_released_dispatch_terminalizes_stale_work() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_320;
+    let (model_repository, prepared, turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        CUTOFF_ESCALATION_STOP_COMMAND_ID,
+    )
+    .await?;
+    let released_before_completion = release_count(&fixture).await?;
+
+    let outcome = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            ToolDecisionRationale::try_new(String::from(
+                "the provider requests authority beyond the immutable dispatch fence",
+            ))?,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let lifecycle: String = sqlx::query_scalar(
+        "SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1 AND session_id = $2",
+    )
+    .bind(turn.as_uuid())
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let latest_goal_event: String = sqlx::query_scalar(
+        "SELECT event_kind
+           FROM goal_event
+          WHERE session_id = $1
+          ORDER BY event_ordinal DESC
+          LIMIT 1",
+    )
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let escalations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_headless_approval_escalation WHERE session_id = $1",
+    )
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(
+        released_before_completion, 1,
+        "stopping the goal releases the batch while its turn is still active"
+    );
+    assert_eq!(
+        outcome,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(lifecycle, "terminal");
+    assert_eq!(
+        latest_goal_event, "user_stopped",
+        "an ended generation records no execution-failure block"
+    );
+    assert_eq!(escalations, 1);
     assert_eq!(release_count(&fixture).await?, 1);
     Ok(())
 }

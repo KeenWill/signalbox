@@ -707,26 +707,33 @@ dispatch authority, which the rule above binds to the generation that dispatch
 commissioned, is an execution-failure terminal transition rather than an
 attended approval wait. An escalation in any other generation of the same
 session resolves no such authority and stays the attended wait. It fails the
-active turn, blocks the commissioned goal, and therefore enters the same
-latest-state obligation and singleton-release path described above. Once release
-commits, the replacement obligation — where the requeue rules above still owe
-one, which a deactivated rule or a later close or merge withdraws — becomes
-eligible under the ordinary cooldown and can create a fresh dispatch; the ended
-session does not remain load-bearing occupancy either way. Two turns are not
-terminalized this way, and each parks for a user exactly as it would in a
-session no dispatch created. A turn a steer still names is attended by
-definition, so its escalation parks for the user who steered, leaving the turn
-active and its batch held; terminalizing it would strand that steer against the
-rule that no turn becomes terminal while pending steering names it, and
-reclassifying the steer into a queued successor would start fresh work in a
-session whose dispatch is being released for redispatch. A turn whose dispatch
-has already released parks too, because this path has nothing left to spend
-there: it cannot free a singleton the session no longer holds, and the requeue
-above is owed only on the release an escalation itself causes, so a batch with a
-release row receives no second replacement. Reaching that state means the
-blocked goal was resumed by hand, so a park reaches the operator who resumed it,
-and it costs no occupancy — the batch that turn once held is no longer this
-session's. The block the escalation writes claims no release — a batch a sibling
+active turn and blocks the commissioned goal while that goal's authority still
+stands — a generation stopped, achieved, or superseded during the provider
+round-trip is not blocked, because the authority the block would record has
+already ended — and therefore enters the same latest-state obligation and
+singleton-release path described above. Once release commits, the replacement
+obligation — where the requeue rules above still owe one, which a deactivated
+rule or a later close or merge withdraws — becomes eligible under the ordinary
+cooldown and can create a fresh dispatch; the ended session does not remain
+load-bearing occupancy either way. Two turns are not terminalized this way, and
+each parks for a user exactly as it would in a session no dispatch created. A
+turn a steer still names is attended by definition, so its escalation parks for
+the user who steered, leaving the turn active and its batch held; terminalizing
+it would strand that steer against the rule that no turn becomes terminal while
+pending steering names it, and reclassifying the steer into a queued successor
+would start fresh work in a session whose dispatch is being released for
+redispatch. A turn whose dispatch has already released, and whose goal authority
+still stands, parks too, because this path has nothing left to spend there: it
+cannot free a singleton the session no longer holds, and the requeue above is
+owed only on the release an escalation itself causes, so a batch with a release
+row receives no second replacement. It costs no occupancy either — the batch
+that turn once held is no longer this session's. Standing authority is what says
+a person is there: a release row alone does not, since a lifecycle cutoff
+releases the batch by stopping the goal while the turn still awaits its judge. A
+released batch whose authority has ended is stale work, so its escalation is
+terminalized rather than parked for a user who will never come, and
+terminalizing it owes no second redispatch because the release already spent the
+requeue. The block the escalation writes claims no release — a batch a sibling
 action still pursues releases only when that sibling ends — and states that no
 automatic resumption is scheduled, which [goal mode](goal-mode.md) admits as its
 one exception and which is why that need text names the operator repair itself.

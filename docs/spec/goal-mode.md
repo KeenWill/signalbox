@@ -112,10 +112,11 @@ resolves to nothing. That escalates rather than committing a decision formed
 under authority no longer in force. Escalating means the attended park, except
 for a turn [repository watch](repo-watch.md) sends down its unattended terminal
 path — one judged under dispatch authority, unsteered, and whose dispatch has
-not yet released — which fails the turn without blocking the generation that has
-already closed. A judge that read no statement decided without one, so a
-generation attached since withdraws nothing and leaves that decision alone: the
-comparison pins withdrawal, not novelty.
+not yet released or has released while this authority still stood — which fails
+the turn without blocking the generation that has already closed. A judge that
+read no statement decided without one, so a generation attached since withdraws
+nothing and leaves that decision alone: the comparison pins withdrawal, not
+novelty.
 
 **Implemented behavior.** The commit-time resolution is not the reading
 resolution. Reading binds a recorded generation exactly, so a supersession while
