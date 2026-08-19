@@ -411,13 +411,19 @@ pub(crate) async fn load_obligation_admission(
     if latest_event != *event.as_uuid() {
         return Ok(ObligationAdmission::Superseded);
     }
-    // The handle admission holds was read before this transaction opened, so
-    // the parked state is rechecked here rather than trusted from the load.
-    if row.try_get::<bool, _>("parked")? {
-        return Ok(ObligationAdmission::Parked);
-    }
+    // Settlement before parking. A settled obligation keeps its parking stamp
+    // as the record of why it stopped being dispatched, so reading the stamp
+    // first would answer "not now" for work that is already finished and would
+    // lose the outcome a settled obligation carries, including the sessions a
+    // dispatched one replays.
     let settled_kind: Option<String> = row.try_get("settled_kind")?;
     let Some(settled_kind) = settled_kind else {
+        // The handle admission holds was read before this transaction opened,
+        // so the parked state is rechecked here rather than trusted from the
+        // load.
+        if row.try_get::<bool, _>("parked")? {
+            return Ok(ObligationAdmission::Parked);
+        }
         return Ok(ObligationAdmission::Pending);
     };
     match repo_watch_obligation_settlement_from_str(&settled_kind) {

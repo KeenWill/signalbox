@@ -91,6 +91,9 @@ const STARTUP_DRAIN_STOP_COMMAND_ID: u128 = 0x57_110;
 const PARK_FIRST_STOP_COMMAND_ID: u128 = 0x58_100;
 const CROSS_TARGET_OPENED_EVENT_ID: u128 = 0x58_500;
 const PARKED_TARGET_CUTOFF_EVENT_ID: u128 = 0x58_800;
+const SPENT_FRONTIER_OLDER_EVENT_ID: u128 = 0x58_900;
+const SPENT_FRONTIER_NEWER_EVENT_ID: u128 = 0x58_901;
+const SPENT_FRONTIER_STOP_COMMAND_ID: u128 = 0x58_902;
 const PARKED_TARGET_CUTOFF_COMMAND_ID: u128 = 0x58_801;
 const NONMATCHING_PROGRESS_EVENT_ID: u128 = 0x58_600;
 const SIBLING_COUNT_FIRST_STOP_COMMAND_ID: u128 = 0x58_700;
@@ -1968,6 +1971,87 @@ async fn a_failed_attempt_waits_out_its_delay_before_redispatch() -> Result<(), 
         undelayed.map(|obligation| obligation.failed_attempts()),
         Some(1)
     );
+    Ok(())
+}
+
+/// Several progress facts can follow the stalled state, and parking spends only
+/// the newest of them. The older one stays unevaluated by any rule that lags, so
+/// a spend test comparing identity alone would let it release a later park that
+/// a newer fact had already been spent on.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_progress_fact_older_than_one_already_spent_releases_nothing()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        SPENT_FRONTIER_STOP_COMMAND_ID,
+    )
+    .await?;
+    // Durable and after the stalled state, but never evaluated, so neither is
+    // spent by an ordinary release.
+    commit_lifecycle(
+        &fixture,
+        observation(context(SECOND_HEAD)?)?,
+        conflict_event(SPENT_FRONTIER_OLDER_EVENT_ID, SECOND_HEAD)?,
+    )
+    .await?;
+    commit_lifecycle(
+        &fixture,
+        observation(context(THIRD_HEAD)?)?,
+        conflict_event(SPENT_FRONTIER_NEWER_EVENT_ID, THIRD_HEAD)?,
+    )
+    .await?;
+
+    exhaust_and_park(&fixture).await?;
+    let spent_on_the_newest: Option<Uuid> = sqlx::query_scalar(
+        "SELECT release_event_id
+           FROM repo_watch_dispatch_obligation_park
+          WHERE release_event_id IS NOT NULL
+          ORDER BY transition_ordinal DESC
+          LIMIT 1",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    exhaust_and_park(&fixture).await?;
+
+    let older_releases: i64 =
+        sqlx::query_scalar("SELECT repo_watch_release_dispatch_obligation_parks_for_event($1)")
+            .bind(Uuid::from_u128(SPENT_FRONTIER_OLDER_EVENT_ID))
+            .fetch_one(&fixture.pool)
+            .await?;
+
+    assert_eq!(
+        spent_on_the_newest,
+        Some(Uuid::from_u128(SPENT_FRONTIER_NEWER_EVENT_ID))
+    );
+    assert_eq!(older_releases, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM repo_watch_parked_dispatch_obligation")
+            .fetch_one(&fixture.pool)
+            .await?,
+        1
+    );
+    Ok(())
+}
+
+/// Drives the outstanding obligation to its budget and parks it, without
+/// spending six real dispatches on a sequence whose subject is the park.
+async fn exhaust_and_park(fixture: &DispatchFixture) -> Result<(), Box<dyn Error>> {
+    let obligation: Uuid = sqlx::query_scalar(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget(),
+                last_failed_attempt_at = clock_timestamp()
+          WHERE settled_kind IS NULL
+        RETURNING obligation_id",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    sqlx::query("SELECT repo_watch_park_exhausted_dispatch_obligation($1)")
+        .bind(obligation)
+        .execute(&fixture.pool)
+        .await?;
     Ok(())
 }
 
