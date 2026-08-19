@@ -510,14 +510,20 @@ them costs the same whatever a session's history weighs: the attempt is a column
 of the lifecycle row already read, and the newest entry is one backward index
 lookup on that table's `(session, entry)` primary key. Aggregates over a
 session's history would have made a once-a-minute pass cost more the longer a
-session lived. Nothing is lost by leaving model calls out of the evidence: a
-call that leaves nothing in the transcript cannot leave a turn quiescent either,
-because while it is outstanding the turn is not a candidate at all and has
-already left the ledger. The staleness bound is also refused below whole-second
-precision, so the bound an audit line reports is exactly the bound in force.
-That ledger is process-local and carries no authority: losing it to a restart
-costs one more bound before a wedged turn is reached, which is the direction
-that cannot end live work.
+session lived. The same requirement binds the in-flight conjuncts above, which
+are absence checks over append-only tables: each one is answered from an index
+leading with the session, and the two that had none — the dedicated compaction
+call and the tool attempt — are indexed partially on the live rows those checks
+name, so what is indexed is bounded by how much is happening at once rather than
+by how much has ever happened. No part of one inventory read scans a history.
+Nothing is lost by leaving model calls out of the evidence: a call that leaves
+nothing in the transcript cannot leave a turn quiescent either, because while it
+is outstanding the turn is not a candidate at all and has already left the
+ledger. The staleness bound is also refused below whole-second precision, so the
+bound an audit line reports is exactly the bound in force. That ledger is
+process-local and carries no authority: losing it to a restart costs one more
+bound before a wedged turn is reached, which is the direction that cannot end
+live work.
 
 **Coverage.** One scan observes the whole quiescent population, so the bound is
 a property of the binary rather than of how many sessions happen to be
