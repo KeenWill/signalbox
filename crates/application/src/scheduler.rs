@@ -51,6 +51,7 @@ const SCHEDULER_PASS_ADMISSION_CAP: usize = 16;
 ///
 /// The reservation is inside the shared pass cap. Long-lived recovery and
 /// execution passes therefore cannot occupy every admission slot.
+// numeric-bound: tunable - preserves dispatch-start progress inside shared pressure limit
 const DISPATCH_START_RESERVED_PASS_CAPACITY: usize = 1;
 
 /// Returns the shared product cap for concurrent authoritative passes.
