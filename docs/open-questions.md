@@ -102,6 +102,20 @@ specification diff. Accepted cross-component and wire contracts live in the
   provider request-status API — with its polling posture and evidence classes —
   as the resolution path; the full analysis is in git history. Later scope.
   (S02)
+- **Operator control of scheduling and liveness cadence.** The scheduler's sweep
+  interval, per-session scan gating, fairness between contending sessions, and
+  the turn-liveness staleness bound and scan interval are all compiled constants
+  today
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)). Each
+  has a checked constructor that refuses a value outside its compiled ceiling,
+  so the enforcement point for any future setting already exists and the ceiling
+  direction is settled: a setting may lower a bound and may never raise one.
+  What is undecided is whether signalboxd should carry such settings at all, and
+  if so whether they belong together as one operational surface rather than
+  arriving one constant at a time — which is the shape that would leave a
+  deployment tuning cadence without a coherent view of it. Leaning: one surface,
+  introduced when a deployment needs a value the compiled one cannot serve,
+  rather than pre-emptively. Later scope. (S01, S02)
 - **Terminalizing a turn that holds pending steering.** Every steering row bound
   to a turn must be closed before that turn terminalizes, and the interrupt and
   model-call terminal paths satisfy that by reclassifying the steering into a

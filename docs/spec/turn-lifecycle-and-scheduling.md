@@ -547,8 +547,9 @@ shorter one is constructible only through a checked constructor that refuses
 zero, refuses precision finer than a whole second, and refuses anything above
 the compiled ceiling — the single place the ceiling is enforced as the only
 maximum, and the reason no caller can raise it. signalboxd composes the ceiling
-itself: no operator setting lowers it, and that surface is deferred with the
-other scheduling-cadence tuning listed under Open edges.
+itself: no operator setting lowers it, and whether one should exist is an
+[open question](../open-questions.md#turn-lifecycle) it shares with the other
+scheduling cadences.
 
 **Terminalization.** A due turn ends through the same committed failed-turn
 transition startup recovery commits, through the same reviewed statement and so
@@ -1239,8 +1240,10 @@ from child transcript state nor depend on process-local wake memory.
   watchdog-ended turn from a restart-recovered one in the rows rather than only
   in the operator log, is an
   [open question](../open-questions.md#turn-lifecycle).
-- Per-session scan gating, sweep interval, turn-liveness staleness bound, and
-  fairness tuning remain operational open questions; the process-wide advisory
-  singleton guard is specified by [process-protocol](process-protocol.md).
+- Operator control of scan gating, sweep interval, the turn-liveness staleness
+  bound, and fairness is an
+  [open question](../open-questions.md#turn-lifecycle); the process-wide
+  advisory singleton guard is specified by
+  [process-protocol](process-protocol.md).
 - LISTEN/NOTIFY remains the documented multi-process extension only; the
   baseline is single-process nudge plus sweep.

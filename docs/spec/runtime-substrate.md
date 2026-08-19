@@ -30,29 +30,30 @@ adapter-scoped file catalogs are verified against this PR
 (`agent/credential-pools-parser`). The Anthropic adapter's server-side
 `fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The HTTP fallback-body redaction
-ordering was verified through PR #330 (`agent/audit-verified-fixes`). The five
+ordering was verified through PR #330 (`agent/audit-verified-fixes`). The
 persistence-repository families in the operator-failure inventory were verified
-through PR #288 (`agent/audit-fix-docs-coherence`). The streamed-delivery bridge
-and ephemeral text-delta projection were verified through PR #300
-(`agent/token-level-streaming`); the Claude 5-family thinking-signature stream
-shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
-CLI redaction contract was verified through PR #316
-(`agent/redaction-hardening`; shape coverage, absorbing suppression, enumerated
-single-split parity, and geometric work bound). Exact Codex CLI usage-axis
-projection is verified against PR #389 (`agent/cost-accounting`). Model-settings
-mappings and advisory exceptions are verified against PR #437
-(`agent/model-settings-adapters`). The Claude Code CLI adapter's daemon
-composition is verified against this PR (`agent/wire-claude-cli-adapter`), and
-the OpenAI adapter's against this PR (`agent/wire-openai-adapter`). The
-Anthropic compatibility smoke was verified through PR #465
-(`agent/anthropic-api-smoke`), and the OpenAI compatibility smoke through PR
-`#466` (`agent/openai-api-smoke`). The cross-adapter `ToolCallsAtLoss` fact
-carried in boundary-loss evidence is verified against this PR
-(`agent/typed-loss-cause`), against every streamed and buffered loss path in the
-four adapters. This page covers the provider-neutral operation, observation, and
-evidence vocabulary; SSE framing; structured-output and tool decode;
-`ScriptedModel`; the four provider adapters; and their credential boundaries.
-Layer-2 authorization and evidence classification
+through PR #288 (`agent/audit-fix-docs-coherence`) when there were five of them,
+and the sixth, turn liveness, against this PR (`agent/turn-liveness-watchdog`).
+The streamed-delivery bridge and ephemeral text-delta projection were verified
+through PR #300 (`agent/token-level-streaming`); the Claude 5-family
+thinking-signature stream shape was verified through PR #305
+(`agent/sonnet-streamed-tool-use`). The Codex CLI redaction contract was
+verified through PR #316 (`agent/redaction-hardening`; shape coverage, absorbing
+suppression, enumerated single-split parity, and geometric work bound). Exact
+Codex CLI usage-axis projection is verified against PR #389
+(`agent/cost-accounting`). Model-settings mappings and advisory exceptions are
+verified against PR #437 (`agent/model-settings-adapters`). The Claude Code CLI
+adapter's daemon composition is verified against this PR
+(`agent/wire-claude-cli-adapter`), and the OpenAI adapter's against this PR
+(`agent/wire-openai-adapter`). The Anthropic compatibility smoke was verified
+through PR #465 (`agent/anthropic-api-smoke`), and the OpenAI compatibility
+smoke through PR `#466` (`agent/openai-api-smoke`). The cross-adapter
+`ToolCallsAtLoss` fact carried in boundary-loss evidence is verified against
+this PR (`agent/typed-loss-cause`), against every streamed and buffered loss
+path in the four adapters. This page covers the provider-neutral operation,
+observation, and evidence vocabulary; SSE framing; structured-output and tool
+decode; `ScriptedModel`; the four provider adapters; and their credential
+boundaries. Layer-2 authorization and evidence classification
 ([model-call-execution](model-call-execution.md)), credential channels,
 delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
@@ -1355,11 +1356,10 @@ eligibility sweep, model-call repository, tool-loop repository, and turn
 liveness) map into `OperatorFailureClass` through the `ClassifyOperatorFailure`
 trait, exposing a user-content-free classification to shared telemetry while the
 underlying error keeps its diagnostic detail internally. The turn-liveness
-family was verified against this PR (`agent/turn-liveness-watchdog`); it
-separates a failed inventory read, which is a pass that decided nothing, from a
-failed terminalization, which is a decision that could not be carried out, and
-forwards the shared failed-turn transition's own classification unchanged when
-that transition is what refused. The four classes:
+family separates a failed inventory read, which is a pass that decided nothing,
+from a failed terminalization, which is a decision that could not be carried
+out, and forwards the shared failed-turn transition's own classification
+unchanged when that transition is what refused. The four classes:
 
 - **`Infrastructure { commit_ambiguous }`** — the operation could not complete;
   the flag marks failures whose transaction fate is unknown (commit-ambiguity

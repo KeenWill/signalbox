@@ -6,6 +6,8 @@
 //! scheduler pass, because the sessions it exists to reach are exactly the
 //! ones no pass is scheduled for.
 
+use std::future::Future;
+
 use signalbox_application::{
     ClassifyOperatorFailure, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
     TurnLivenessLedger, TurnLivenessScanInterval,
@@ -77,15 +79,36 @@ const ROTATION_CEILING_CAUSE: &str = "turn_liveness_rotation_ceiling_reached";
 // numeric-bound: ceiling - bounds one scan's reads against a non-converging rotation
 const QUIESCENT_ROTATION_PAGE_CEILING: usize = 4_096;
 
-/// How many inventory reads one scan may perform.
+/// One inventory read, as the rotation consumes it.
 ///
-/// Every candidate-bearing page the ceiling allows, plus the one read that
-/// proves the rotation ended. The `+ 1` is not slack: a full page never proves
-/// the end, so a population filling the last allowed page needs one further
-/// read returning nothing, and without it the pass would discard every rotation
-/// at exactly the capacity the ceiling advertises.
-const fn rotation_reads_allowed() -> usize {
-    QUIESCENT_ROTATION_PAGE_CEILING + 1
+/// The rotation cares about two things a page reports: what it observed, and
+/// whether anything follows it. Naming them here is what lets the drain be
+/// exercised without a database, which two boundary defects in it have earned.
+struct InventoryPage {
+    candidates: Box<[StaleTurnCandidate]>,
+    resume_after: Option<SessionId>,
+}
+
+/// Reads one page of the quiescent inventory.
+trait QuiescentInventory {
+    fn read_page(
+        &self,
+        after: Option<SessionId>,
+    ) -> impl Future<Output = Result<InventoryPage, TurnLivenessRepositoryError>> + Send;
+}
+
+impl QuiescentInventory for PostgresTurnLivenessRepository {
+    async fn read_page(
+        &self,
+        after: Option<SessionId>,
+    ) -> Result<InventoryPage, TurnLivenessRepositoryError> {
+        let page = self.quiescent_active_turns(after).await?;
+        let resume_after = page.resume_after();
+        Ok(InventoryPage {
+            candidates: page.into_candidates(),
+            resume_after,
+        })
+    }
 }
 
 /// What woke the supervising loop.
@@ -183,7 +206,9 @@ async fn reconcile_turn_liveness(
     // A rotation that could not be drained is not a smaller population; the
     // pass therefore ends without a decision and the ledger keeps what it had,
     // rather than forgetting every turn the unread pages would have carried.
-    let Some(quiescent) = drain_quiescent_rotation(repository).await else {
+    let Some(quiescent) =
+        drain_quiescent_rotation(repository, QUIESCENT_ROTATION_PAGE_CEILING).await
+    else {
         return;
     };
     let due = ledger.reconcile(&quiescent, Instant::now());
@@ -193,33 +218,62 @@ async fn reconcile_turn_liveness(
 }
 
 /// Reads pages until the rotation ends, or reports why it could not.
-async fn drain_quiescent_rotation(
-    repository: &PostgresTurnLivenessRepository,
-) -> Option<Vec<StaleTurnCandidate>> {
+///
+/// `page_ceiling` bounds the candidate-bearing pages one scan may read, so the
+/// capacity is exactly that many pages' worth of turns. A page that does not
+/// fill ends the rotation where it stands. A ceiling reached on a full page ends
+/// it only if one further read — the probe — returns nothing: a full page never
+/// proves the end, and a probe carrying candidates proves the opposite, that the
+/// population is past the capacity. Accepting those candidates would raise the
+/// ceiling by up to one page without saying so, so the probe ends the rotation
+/// or fails it, and never contributes to it.
+async fn drain_quiescent_rotation<Inventory>(
+    inventory: &Inventory,
+    page_ceiling: usize,
+) -> Option<Vec<StaleTurnCandidate>>
+where
+    Inventory: QuiescentInventory,
+{
     let mut quiescent = Vec::new();
     let mut cursor: Option<SessionId> = None;
-    for _ in 0..rotation_reads_allowed() {
-        let page = match repository.quiescent_active_turns(cursor).await {
-            Ok(page) => page,
-            // An unreadable inventory is not evidence that anything is stale.
-            Err(error) => {
-                report_turn_liveness_failure(&error);
-                return None;
-            }
-        };
-        cursor = page.resume_after();
-        quiescent.extend(page.into_candidates());
+    for _ in 0..page_ceiling {
+        let page = read_inventory_page(inventory, cursor).await?;
+        cursor = page.resume_after;
+        quiescent.extend(page.candidates);
         if cursor.is_none() {
             return Some(quiescent);
         }
     }
+    let probe = read_inventory_page(inventory, cursor).await?;
+    if probe.candidates.is_empty() {
+        return Some(quiescent);
+    }
     tracing::warn!(
         cause_code = ROTATION_CEILING_CAUSE,
-        page_ceiling = QUIESCENT_ROTATION_PAGE_CEILING,
+        page_ceiling,
         observed_turns = quiescent.len(),
         "turn-liveness rotation exceeded the quiescent population its scan can drain"
     );
     None
+}
+
+/// Reads one page, reporting an unreadable inventory as no decision.
+///
+/// An unreadable inventory is not evidence that anything is stale.
+async fn read_inventory_page<Inventory>(
+    inventory: &Inventory,
+    after: Option<SessionId>,
+) -> Option<InventoryPage>
+where
+    Inventory: QuiescentInventory,
+{
+    match inventory.read_page(after).await {
+        Ok(page) => Some(page),
+        Err(error) => {
+            report_turn_liveness_failure(&error);
+            None
+        }
+    }
 }
 
 async fn terminalize_stale_turn(
@@ -298,13 +352,87 @@ fn report_turn_liveness_failure(error: &TurnLivenessRepositoryError) {
 #[cfg(test)]
 mod tests {
     use super::{
-        PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, ROTATION_CEILING_CAUSE,
-        STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_STEERING_BLOCKED_CAUSE, STALE_TURN_SUPERSEDED_CAUSE,
-        STALE_TURN_TERMINAL_CAUSE, TurnLivenessWake, next_turn_liveness_wake,
-        rotation_reads_allowed,
+        InventoryPage, PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, QuiescentInventory,
+        ROTATION_CEILING_CAUSE, STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_STEERING_BLOCKED_CAUSE,
+        STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE, TurnLivenessWake,
+        drain_quiescent_rotation, next_turn_liveness_wake,
     };
-    use signalbox_application::StaleActiveTurnBound;
-    use std::time::Duration;
+    use signalbox_application::{StaleActiveTurnBound, StaleTurnCandidate, TurnLivenessEvidence};
+    use signalbox_domain::{SessionId, TurnAttemptId, TurnId};
+    use signalbox_persistence::turn_liveness::TurnLivenessRepositoryError;
+    use std::{
+        sync::{Mutex, atomic::AtomicUsize, atomic::Ordering},
+        time::Duration,
+    };
+    use uuid::Uuid;
+
+    fn candidate(seed: u128) -> StaleTurnCandidate {
+        StaleTurnCandidate::new(
+            SessionId::from_uuid(Uuid::from_u128(seed)),
+            TurnId::from_uuid(Uuid::from_u128(0xa_0000 + seed)),
+            TurnLivenessEvidence::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(0xb_0000 + seed)),
+                None,
+            ),
+        )
+    }
+
+    /// A page that filled, so the rotation continues past its last session.
+    fn full_page(seed: u128) -> InventoryPage {
+        InventoryPage {
+            candidates: Box::new([candidate(seed)]),
+            resume_after: Some(SessionId::from_uuid(Uuid::from_u128(seed))),
+        }
+    }
+
+    /// A page that did not fill, so it is where the rotation ends.
+    fn last_page(seed: u128) -> InventoryPage {
+        InventoryPage {
+            candidates: Box::new([candidate(seed)]),
+            resume_after: None,
+        }
+    }
+
+    fn empty_page() -> InventoryPage {
+        InventoryPage {
+            candidates: Box::new([]),
+            resume_after: None,
+        }
+    }
+
+    struct ScriptedInventory {
+        pages: Mutex<std::vec::IntoIter<InventoryPage>>,
+        reads: AtomicUsize,
+    }
+
+    impl ScriptedInventory {
+        fn new<const PAGES: usize>(pages: [InventoryPage; PAGES]) -> Self {
+            Self {
+                pages: Mutex::new(pages.into_iter().collect::<Vec<_>>().into_iter()),
+                reads: AtomicUsize::new(0),
+            }
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::Relaxed)
+        }
+    }
+
+    impl QuiescentInventory for ScriptedInventory {
+        async fn read_page(
+            &self,
+            _after: Option<SessionId>,
+        ) -> Result<InventoryPage, TurnLivenessRepositoryError> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            let page = self
+                .pages
+                .lock()
+                .expect("the script is not poisoned")
+                .next()
+                .expect("the script supplies every read the drain takes");
+            Ok(page)
+        }
+    }
     use tokio::{
         sync::watch,
         time::{MissedTickBehavior, interval},
@@ -353,12 +481,47 @@ mod tests {
         assert_eq!(wake, TurnLivenessWake::Shutdown);
     }
 
-    /// A population filling every allowed page still drains, because the read
-    /// that proves the rotation ended is allowed past the page ceiling.
+    /// The compiled ceiling is the capacity the page states.
     #[test]
-    fn one_read_past_the_page_ceiling_proves_the_rotation_ended() {
+    fn the_page_ceiling_is_four_thousand_and_ninety_six() {
         assert_eq!(QUIESCENT_ROTATION_PAGE_CEILING, 4_096);
-        assert_eq!(rotation_reads_allowed(), 4_097);
+    }
+
+    /// A population that ends inside the ceiling drains where it ends, and no
+    /// probe is read because no page before it filled.
+    #[tokio::test]
+    async fn a_rotation_ending_inside_the_ceiling_drains() {
+        let inventory = ScriptedInventory::new([full_page(1), last_page(2)]);
+
+        let drained = drain_quiescent_rotation(&inventory, 2).await;
+
+        assert_eq!(drained.map(|turns| turns.len()), Some(2));
+        assert_eq!(inventory.reads(), 2);
+    }
+
+    /// A population filling every allowed page still drains: the probe returns
+    /// nothing, which is what proves the rotation ended on the last full page.
+    #[tokio::test]
+    async fn an_empty_probe_proves_a_full_last_page_ended_the_rotation() {
+        let inventory = ScriptedInventory::new([full_page(1), full_page(2), empty_page()]);
+
+        let drained = drain_quiescent_rotation(&inventory, 2).await;
+
+        assert_eq!(drained.map(|turns| turns.len()), Some(2));
+        assert_eq!(inventory.reads(), 3);
+    }
+
+    /// One turn past the capacity — every allowed page full and the probe
+    /// carrying a candidate — decides nothing. Folding that probe in would
+    /// raise the advertised ceiling by up to a page without saying so.
+    #[tokio::test]
+    async fn a_candidate_bearing_probe_decides_nothing() {
+        let inventory = ScriptedInventory::new([full_page(1), full_page(2), last_page(3)]);
+
+        let drained = drain_quiescent_rotation(&inventory, 2).await;
+
+        assert!(drained.is_none());
+        assert_eq!(inventory.reads(), 3);
     }
 
     /// The audited cause codes are stable strings an operator can search.
