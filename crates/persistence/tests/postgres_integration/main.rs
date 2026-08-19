@@ -3478,6 +3478,9 @@ fn assert_goal_command_applied(outcome: GoalCommandHandlingOutcome) {
         GoalCommandHandlingOutcome::ConflictingReuse { command_id } => {
             panic!("the fixture goal command identity is already used: {command_id:?}")
         }
+        GoalCommandHandlingOutcome::LineageMoved => {
+            panic!("the fixture goal command expected a lineage head that had moved")
+        }
     }
 }
 

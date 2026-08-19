@@ -13672,6 +13672,18 @@ where
             )
             .await
         }
+        // A client goal command names no expected lineage head, so it applies
+        // to whatever state the session lock reveals. Reaching this answer
+        // means the repository decided a question this request never asked.
+        Ok(GoalCommandHandlingOutcome::LineageMoved) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
+            )
+            .await
+        }
         Err(error) => {
             write_goal_repository_error(
                 writer,
