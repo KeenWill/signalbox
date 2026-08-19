@@ -603,8 +603,8 @@ that [AGENTS.md](../../AGENTS.md) states.
 accepted input belongs to the submit command that delivered the tagged context,
 and that same input is recorded as the commissioned generation's first goal
 turn, so one dispatched event queues one turn and runs its template once. Every
-later turn in that session is an ordinary goal continuation scheduled from it,
-and the generation is readable from the turn doing the dispatched work, so a
+later turn of that generation is an ordinary goal continuation scheduled from
+it, and the generation is readable from the turn doing the dispatched work, so a
 supersession while that turn is parked cannot broaden the authority a consumer
 reads for it. What this requires of the durable goal rules — a goal turn whose
 accepted input carries the command that accepted it, and which therefore does
@@ -702,34 +702,39 @@ continuation. Goal blocking, achievement, or user stop rechecks release after
 pursuit ends. The append-only dispatch records identify the sessions responsible
 for the PR; no mutable assignment flag replaces them.
 
-**Implemented behavior.** A completed approval-judge escalation in a dispatched
-session is an execution-failure terminal transition, not an attended approval
-wait. It fails the active turn, blocks the commissioned goal, and therefore
-enters the same latest-state obligation and singleton-release path described
-above. Once release commits, the obligation becomes eligible under the ordinary
-cooldown and can create a fresh dispatch; the ended session does not remain
-load-bearing occupancy. One turn is not terminalized this way: a turn a steer
-still names is attended by definition, and its escalation parks for the user who
-steered exactly as it would in a session no dispatch created, leaving the turn
-active and its batch held. Terminalizing it would strand that steer against the
-rule that no turn becomes terminal while pending steering names it, and
-reclassifying the steer into a queued successor would start fresh work in a
-session whose dispatch is being released for redispatch. The block the
-escalation writes claims no release — a batch a sibling action still pursues
-releases only when that sibling ends — and states that no automatic resumption
-is scheduled, which [goal mode](goal-mode.md) admits as its one exception and
-which is why that need text names the operator repair itself. Whether the batch
-released is likewise a fact about the batch: it is recorded in the release row
-and the escalation audit view, not reported as this completion's own effect,
-because a sibling settling later would otherwise change the answer an identical
-replay receives. `repo_watch_headless_approval_escalation_audit` joins the
-append-only escalation cause and rationale to its dispatch release and
-replacement obligation, including whether and when that obligation settled. The
-terminal attempt, failure transcript entry, and terminal frontier it recorded
-are all durable evidence of that transition, so a replayed completion offering
-any other one of them is reported as a mismatched replay rather than answered
-with the recorded outcome — the same treatment a differing recommendation,
-rationale, usage, or continuation attempt already receives.
+**Implemented behavior.** A completed approval-judge escalation judged under
+dispatch authority, which the rule above binds to the generation that dispatch
+commissioned, is an execution-failure terminal transition rather than an
+attended approval wait. An escalation in any other generation of the same
+session resolves no such authority and stays the attended wait. It fails the
+active turn, blocks the commissioned goal, and therefore enters the same
+latest-state obligation and singleton-release path described above. Once release
+commits, the replacement obligation — where the requeue rules above still owe
+one, which a deactivated rule or a later close or merge withdraws — becomes
+eligible under the ordinary cooldown and can create a fresh dispatch; the ended
+session does not remain load-bearing occupancy either way. One turn is not
+terminalized this way: a turn a steer still names is attended by definition, and
+its escalation parks for the user who steered exactly as it would in a session
+no dispatch created, leaving the turn active and its batch held. Terminalizing
+it would strand that steer against the rule that no turn becomes terminal while
+pending steering names it, and reclassifying the steer into a queued successor
+would start fresh work in a session whose dispatch is being released for
+redispatch. The block the escalation writes claims no release — a batch a
+sibling action still pursues releases only when that sibling ends — and states
+that no automatic resumption is scheduled, which [goal mode](goal-mode.md)
+admits as its one exception and which is why that need text names the operator
+repair itself. Whether the batch released is likewise a fact about the batch: it
+is recorded in the release row and the escalation audit view, not reported as
+this completion's own effect, because a sibling settling later would otherwise
+change the answer an identical replay receives.
+`repo_watch_headless_approval_escalation_audit` joins the append-only escalation
+cause and rationale to its dispatch release and replacement obligation,
+including whether and when that obligation settled. The terminal attempt,
+failure transcript entry, and terminal frontier it recorded are all durable
+evidence of that transition, so a replayed completion offering any other one of
+them is reported as a mismatched replay rather than answered with the recorded
+outcome — the same treatment a differing recommendation, rationale, usage, or
+continuation attempt already receives.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies
