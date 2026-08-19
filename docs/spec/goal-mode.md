@@ -109,13 +109,13 @@ resolves to nothing now belongs to a generation that closed, whether it was
 stopped, achieved, or replaced by a supersession — a replacement closes the
 generation the decision was formed under rather than restating it, so it too
 resolves to nothing. That escalates rather than committing a decision formed
-under authority no longer in force. Escalating means the attended park for a
-turn no repository-watch dispatch authority covers; a turn judged under that
-authority instead takes the unattended terminal path
-[repository watch](repo-watch.md) states, which fails the turn without blocking
-the generation that has already closed. A judge that read no statement decided
-without one, so a generation attached since withdraws nothing and leaves that
-decision alone: the comparison pins withdrawal, not novelty.
+under authority no longer in force. Escalating means the attended park, except
+for a turn [repository watch](repo-watch.md) sends down its unattended terminal
+path — one judged under dispatch authority, unsteered, and whose dispatch has
+not yet released — which fails the turn without blocking the generation that has
+already closed. A judge that read no statement decided without one, so a
+generation attached since withdraws nothing and leaves that decision alone: the
+comparison pins withdrawal, not novelty.
 
 **Implemented behavior.** The commit-time resolution is not the reading
 resolution. Reading binds a recorded generation exactly, so a supersession while

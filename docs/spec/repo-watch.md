@@ -712,29 +712,35 @@ latest-state obligation and singleton-release path described above. Once release
 commits, the replacement obligation — where the requeue rules above still owe
 one, which a deactivated rule or a later close or merge withdraws — becomes
 eligible under the ordinary cooldown and can create a fresh dispatch; the ended
-session does not remain load-bearing occupancy either way. One turn is not
-terminalized this way: a turn a steer still names is attended by definition, and
-its escalation parks for the user who steered exactly as it would in a session
-no dispatch created, leaving the turn active and its batch held. Terminalizing
-it would strand that steer against the rule that no turn becomes terminal while
-pending steering names it, and reclassifying the steer into a queued successor
-would start fresh work in a session whose dispatch is being released for
-redispatch. The block the escalation writes claims no release — a batch a
-sibling action still pursues releases only when that sibling ends — and states
-that no automatic resumption is scheduled, which [goal mode](goal-mode.md)
-admits as its one exception and which is why that need text names the operator
-repair itself. Whether the batch released is likewise a fact about the batch: it
-is recorded in the release row and the escalation audit view, not reported as
-this completion's own effect, because a sibling settling later would otherwise
-change the answer an identical replay receives.
-`repo_watch_headless_approval_escalation_audit` joins the append-only escalation
-cause and rationale to its dispatch release and replacement obligation,
-including whether and when that obligation settled. The terminal attempt,
-failure transcript entry, and terminal frontier it recorded are all durable
-evidence of that transition, so a replayed completion offering any other one of
-them is reported as a mismatched replay rather than answered with the recorded
-outcome — the same treatment a differing recommendation, rationale, usage, or
-continuation attempt already receives.
+session does not remain load-bearing occupancy either way. Two turns are not
+terminalized this way, and each parks for a user exactly as it would in a
+session no dispatch created. A turn a steer still names is attended by
+definition, so its escalation parks for the user who steered, leaving the turn
+active and its batch held; terminalizing it would strand that steer against the
+rule that no turn becomes terminal while pending steering names it, and
+reclassifying the steer into a queued successor would start fresh work in a
+session whose dispatch is being released for redispatch. A turn whose dispatch
+has already released parks too, because this path has nothing left to spend
+there: it cannot free a singleton the session no longer holds, and the requeue
+above is owed only on the release an escalation itself causes, so a batch with a
+release row receives no second replacement. Reaching that state means the
+blocked goal was resumed by hand, so a park reaches the operator who resumed it,
+and it costs no occupancy — the batch that turn once held is no longer this
+session's. The block the escalation writes claims no release — a batch a sibling
+action still pursues releases only when that sibling ends — and states that no
+automatic resumption is scheduled, which [goal mode](goal-mode.md) admits as its
+one exception and which is why that need text names the operator repair itself.
+Whether the batch released is likewise a fact about the batch: it is recorded in
+the release row and the escalation audit view, not reported as this completion's
+own effect, because a sibling settling later would otherwise change the answer
+an identical replay receives. `repo_watch_headless_approval_escalation_audit`
+joins the append-only escalation cause and rationale to its dispatch release and
+replacement obligation, including whether and when that obligation settled. The
+terminal attempt, failure transcript entry, and terminal frontier it recorded
+are all durable evidence of that transition, so a replayed completion offering
+any other one of them is reported as a mismatched replay rather than answered
+with the recorded outcome — the same treatment a differing recommendation,
+rationale, usage, or continuation attempt already receives.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies
