@@ -6,7 +6,7 @@
 //! daemon's durable decision path.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::HashSet,
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
@@ -114,28 +114,24 @@ pub fn load_corpus(path: impl AsRef<Path>) -> Result<ApprovalJudgeCorpus, Corpus
 /// fields serialize as `null`.
 #[must_use]
 pub fn request_fingerprint(request: &ApprovalJudgeRequestContext) -> String {
-    let canonical = BTreeMap::from([
-        (
-            "arguments",
-            serde_json::Value::from(request.arguments.as_str()),
-        ),
-        (
-            "commissioned_goal",
-            request.commissioned_goal.as_deref().into(),
-        ),
-        (
-            "frozen_system_prompt",
-            request.frozen_system_prompt.as_deref().into(),
-        ),
-        (
-            "session_template",
-            request.session_template.as_deref().into(),
-        ),
-        ("tool", serde_json::Value::from(request.tool.as_str())),
-    ]);
-    let encoded =
-        serde_json::to_vec(&canonical).expect("the canonical fingerprint input serializes");
-    let digest = Sha256::digest(&encoded);
+    // The canonical object is written field by field in bytewise key order,
+    // with `serde_json::Value`'s infallible display doing the string
+    // escaping, so no fallible serializer sits on this path.
+    fn field(value: Option<&str>) -> String {
+        value.map_or_else(
+            || String::from("null"),
+            |text| serde_json::Value::from(text).to_string(),
+        )
+    }
+    let encoded = format!(
+        "{{\"arguments\":{},\"commissioned_goal\":{},\"frozen_system_prompt\":{},\"session_template\":{},\"tool\":{}}}",
+        field(Some(request.arguments.as_str())),
+        field(request.commissioned_goal.as_deref()),
+        field(request.frozen_system_prompt.as_deref()),
+        field(request.session_template.as_deref()),
+        field(Some(request.tool.as_str())),
+    );
+    let digest = Sha256::digest(encoded.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
