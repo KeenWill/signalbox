@@ -635,44 +635,85 @@ impl PostgresGoalPassDisposition {
     /// A lost commit acknowledgement leaves the caller unable to say whether the
     /// block it was appending exists, and the appended need text expects
     /// automatic resumption either way. Reading the lineage back answers the
-    /// question the acknowledgement did not. Arming a block some other pass
-    /// already armed is harmless, because both attempts derive the same command
-    /// identity and the second one replays.
-    async fn arm_after_ambiguous_commit(
+    /// question the acknowledgement did not, so the read is owed the same
+    /// persistence a resume attempt is owed. It runs off the disposition path
+    /// that raised the ambiguity, which returns its error without waiting.
+    fn arm_after_ambiguous_commit(
         &self,
         session: SessionId,
         error: &PostgresGoalPassDispositionError,
     ) {
-        if !matches!(
-            error,
-            PostgresGoalPassDispositionError::Repository(GoalRepositoryError::CommitAmbiguous(_))
-        ) {
+        if !commit_is_ambiguous(error) {
             return;
         }
-        let reread = match self.repository.load_goal(session).await {
-            Ok(Some(goal)) => goal,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::error!(
-                    session = %session.into_uuid(),
-                    cause_code = "goal_ambiguous_block_reread_failed",
-                    cause = %error,
-                    "an ambiguous goal commit cannot be resolved into an armed resumption"
-                );
-                return;
-            }
-        };
-        let Some(event) = reread
-            .events()
-            .last()
-            .filter(|event| is_execution_failure_block(event))
-        else {
-            return;
-        };
-        let resumption =
-            AutomaticResumption::after_spent_attempts(spent_automatic_resume_attempts(&reread));
-        self.arm_automatic_resumption(session, event.ordinal(), resumption);
+        let adapter = self.clone();
+        drop(tokio::spawn(async move {
+            adapter.reconcile_ambiguous_block(session).await;
+        }));
     }
+
+    /// Arms whatever execution-failure block the lineage turns out to end at.
+    ///
+    /// The block's event ordinal is the one thing an ambiguous commit does not
+    /// report, and the derived command identity is a function of it, so nothing
+    /// can be armed without reading it back — which is why an unavailable
+    /// database is retried here rather than abandoned. Arming a block some
+    /// other pass already armed is harmless, because both derive the same
+    /// identity and the second attempt replays.
+    async fn reconcile_ambiguous_block(&self, session: SessionId) {
+        let mut remaining = AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES;
+        loop {
+            match self.repository.load_goal(session).await {
+                Ok(None) => return,
+                Ok(Some(goal)) => {
+                    let Some(event) = goal
+                        .events()
+                        .last()
+                        .filter(|event| is_execution_failure_block(event))
+                    else {
+                        return;
+                    };
+                    let resumption = AutomaticResumption::after_spent_attempts(
+                        spent_automatic_resume_attempts(&goal),
+                    );
+                    self.arm_automatic_resumption(session, event.ordinal(), resumption);
+                    return;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        session = %session.into_uuid(),
+                        cause_code = "goal_ambiguous_block_reread_failed",
+                        cause = %error,
+                        "an ambiguous goal commit cannot yet be resolved into an armed resumption"
+                    );
+                    if remaining == 0 {
+                        tracing::error!(
+                            session = %session.into_uuid(),
+                            retries = AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES,
+                            cause_code = "goal_ambiguous_block_abandoned",
+                            "an ambiguous goal commit abandoned a possibly blocked goal to the operator"
+                        );
+                        return;
+                    }
+                    remaining = remaining.saturating_sub(1);
+                    tokio::time::sleep(AUTOMATIC_RESUME_BASE_BACKOFF).await;
+                }
+            }
+        }
+    }
+}
+
+/// Whether a disposition failure left a commit outcome unknown.
+///
+/// Only an ambiguous commit may have appended the block whose need text expects
+/// resumption. Every other failure either appended nothing or already said so,
+/// and reading the lineage back for one would arm a block this pass never
+/// wrote.
+fn commit_is_ambiguous(error: &PostgresGoalPassDispositionError) -> bool {
+    matches!(
+        error,
+        PostgresGoalPassDispositionError::Repository(GoalRepositoryError::CommitAmbiguous(_))
+    )
 }
 
 /// Whether one automatic resume attempt reached a durable answer.
@@ -711,7 +752,7 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     let error = PostgresGoalPassDispositionError::from(error);
-                    adapter.arm_after_ambiguous_commit(session, &error).await;
+                    adapter.arm_after_ambiguous_commit(session, &error);
                     return Err(error);
                 }
             };
@@ -748,7 +789,7 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     let error = PostgresGoalPassDispositionError::from(error);
-                    adapter.arm_after_ambiguous_commit(session, &error).await;
+                    adapter.arm_after_ambiguous_commit(session, &error);
                     return Err(error);
                 }
             };
@@ -1076,6 +1117,28 @@ mod tests {
                 .as_str(),
             "Automatic resumption is exhausted after 5 consecutive execution failures. Resolve the failed goal turn's execution condition, then resume the goal."
         );
+    }
+
+    /// Only an ambiguous commit may have appended a block this pass cannot see,
+    /// so only an ambiguous commit is worth reading the lineage back for.
+    #[test]
+    fn only_an_ambiguous_commit_asks_for_a_lineage_reread() {
+        assert!(commit_is_ambiguous(
+            &PostgresGoalPassDispositionError::Repository(GoalRepositoryError::CommitAmbiguous(
+                sqlx::Error::PoolClosed
+            ))
+        ));
+        assert!(!commit_is_ambiguous(
+            &PostgresGoalPassDispositionError::Repository(GoalRepositoryError::Database(
+                sqlx::Error::PoolClosed
+            ))
+        ));
+        assert!(!commit_is_ambiguous(
+            &PostgresGoalPassDispositionError::UnknownModelAlias
+        ));
+        assert!(!commit_is_ambiguous(
+            &PostgresGoalPassDispositionError::InvalidStaticNeed
+        ));
     }
 
     /// An armed attempt can fail to resume by being durably rejected, by losing

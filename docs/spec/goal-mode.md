@@ -227,9 +227,12 @@ identity so a retry that follows a lost acknowledgement replays rather than
 resumes twice. Blocking whose own commit acknowledgement is lost is reconciled
 the same way — the daemon reads the lineage back and arms the execution-failure
 block it finds, since the need text it was appending expects resumption whether
-or not the acknowledgement arrived. Arming a block another pass already armed is
-harmless for the same reason a retry is: both derive one identity, and the
-second attempt replays it.
+or not the acknowledgement arrived. That read is retried under the same bound,
+because the event ordinal it recovers is the one thing the lost acknowledgement
+did not report and the derived identity is a function of it, and it runs off the
+scheduler pass, which returns its ambiguity without waiting. Arming a block
+another pass already armed is harmless for the same reason a retry is: both
+derive one identity, and the second attempt replays it.
 
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The
