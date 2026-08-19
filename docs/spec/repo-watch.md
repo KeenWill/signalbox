@@ -29,8 +29,10 @@ completion generations are verified against PR #541
 (`fix/check-run-updated-at`). Eager merge-forward dispatch is verified against
 PR #886 (`agent/eager-merge-forward`). Requeue after non-converged dispatch
 termination is verified against PR #894
-(`agent/dispatch-requeue-on-invalidation`). Safe rule revision admission and
-configuration diagnostics are verified against PR #863
+(`agent/dispatch-requeue-on-invalidation`). The dispatch attempt budget, the
+delay between attempts, the parked state, and both ways out of it are verified
+against PR #980 (`agent/dispatch-retry-budget`). Safe rule revision admission
+and configuration diagnostics are verified against PR #863
 (`agent/repo-watch-rule-robustness`). The source-independent event occurrence
 identity, its durable frontier, the commit-time coalescing of a restated
 occurrence, and the storage migration are verified against PR #870
@@ -693,13 +695,16 @@ attempt however many of its sessions terminate. A dispatch that converges owes
 no successor and leaves the lineage no count at all. Redispatching a counted
 lineage waits out a delay that starts at ten minutes after the first failed
 attempt and doubles per further consecutive failure to a one-hour ceiling. Six
-consecutive failed attempts park the obligation: it is excluded from dispatch,
-stamped with the time it parked, and readable in the
-`repo_watch_parked_dispatch_obligation` projection alongside its count, pull
-request, and the head it stalled on. Exclusion follows from the count rather
-than from the parking stamp, so an obligation past its budget is never
-dispatched even before its parking is recorded. The attempt budget and both
-delay bounds are compiled in and may only be lowered, never raised.
+consecutive failed attempts park the obligation in the transaction that counts
+the exhausting attempt: it is excluded from dispatch, stamped with the time it
+parked, and readable in the `repo_watch_parked_dispatch_obligation` projection
+alongside its count, pull request, and the head it stalled on. The delay is
+measured from the release of the whole batch, not from the first of its actions
+to fail: a batch holds its singleton until every action is terminal, so a clock
+started at the first termination would run out while the batch still occupied
+the slot. The attempt budget is a schema constant, so parking, the readiness
+projection, and the dispatch loader cannot disagree about it; the two delay
+bounds are compiled into the daemon and may only be lowered, never raised.
 
 **Implemented behavior.** Two things return a parked obligation to dispatch. An
 operator calls `repo_watch_release_parked_dispatch_obligation` with their
@@ -713,10 +718,13 @@ restoring anything, so churn against an unchanged pull request buys no further
 attempts. Event content identity already refuses a replay of the same fact, so
 the same event never reaches that test twice. Every park and every release
 appends a journal row naming the count at the transition and, for a release, its
-operator or the event that caused it. Readiness in
-`repo_watch_outstanding_dispatch_obligation` excludes a parked obligation but
-does not model the delay between attempts, which the dispatch loader applies
-against constants no projection can see.
+operator or the event that caused it; both releases are schema-owned, so the
+journal's vocabulary is spelled only where the constraint closing it lives.
+Readiness in `repo_watch_outstanding_dispatch_obligation` excludes a parked
+obligation and, independently, one whose count has reached the budget, so no
+ordering of parking against that read reports an exhausted obligation as ready.
+It does not model the delay between attempts, which the dispatch loader applies
+against bounds no projection can see.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies

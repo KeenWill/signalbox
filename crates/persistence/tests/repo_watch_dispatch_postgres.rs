@@ -89,6 +89,8 @@ const TERMINAL_RULE_MERGED_EVENT_ID: u128 = 0x54_100;
 const STARTUP_DRAIN_CUTOFF_EVENT_ID: u128 = 0x57_100;
 const STARTUP_DRAIN_STOP_COMMAND_ID: u128 = 0x57_110;
 const PARK_FIRST_STOP_COMMAND_ID: u128 = 0x58_100;
+const BATCH_DELAY_FIRST_STOP_COMMAND_ID: u128 = 0x58_400;
+const BATCH_DELAY_SECOND_STOP_COMMAND_ID: u128 = 0x58_401;
 const PARK_RELEASING_EVENT_ID: u128 = 0x58_200;
 const PARK_STALE_EVENT_ID: u128 = 0x58_300;
 const PARK_RELEASE_ACTOR: &str = "operator-under-test";
@@ -1291,50 +1293,54 @@ async fn corrupt_goal_generation(pool: &PgPool, session: SessionId) -> Result<()
 }
 
 /// The shipped delay would hold every requeued obligation past the life of a
-/// test container. Only the delay is lowered; the attempt budget stays as it
-/// ships so the tests below that do not park cannot park by accident.
+/// test container. Only the delay is lowered; the attempt budget belongs to the
+/// schema and is spent for real by the tests that park.
 fn immediate_retry_policy() -> RepoWatchDispatchRetryPolicy {
-    RepoWatchDispatchRetryPolicy::production().lowered_to(u32::MAX, Duration::ZERO, Duration::ZERO)
+    RepoWatchDispatchRetryPolicy::production().lowered_to(Duration::ZERO, Duration::ZERO)
 }
 
-/// Two attempts, so parking is two dispatched sessions away rather than six.
-fn parking_retry_policy() -> RepoWatchDispatchRetryPolicy {
-    RepoWatchDispatchRetryPolicy::production().lowered_to(2, Duration::ZERO, Duration::ZERO)
+async fn dispatch_attempt_budget(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT repo_watch_dispatch_attempt_budget()")
+        .fetch_one(pool)
+        .await
 }
 
-/// Spends a two-attempt budget on the fixture's lineage and records its
-/// parking, returning the parked obligation.
-async fn park_dispatch_obligation(
+/// Fails one dispatched session and redispatches the obligation it leaves,
+/// returning the session the successor created.
+async fn spend_one_attempt(
     fixture: &DispatchFixture,
+    session: SessionId,
     identity_seed: u128,
-) -> Result<Uuid, Box<dyn Error>> {
-    withdraw_dispatched_goal(&fixture.pool, fixture.session(0), identity_seed).await?;
-    let requeued = fixture
-        .store
-        .load_next_dispatch_obligation(
-            &fixture.repository,
-            fixture.rule.id(),
-            fixture.rule.version(),
-            parking_retry_policy(),
-        )
+) -> Result<SessionId, Box<dyn Error>> {
+    withdraw_dispatched_goal(&fixture.pool, session, identity_seed).await?;
+    let requeued = load_next_obligation(fixture)
         .await?
-        .expect("the first failed attempt leaves a dispatchable obligation");
+        .expect("a failed attempt inside the budget leaves a dispatchable obligation");
     let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
         .load_cursor(&fixture.repository)
         .await?
         .expect("fixture cursor exists");
     let (_successor, successor_sessions) =
         dispatched(evaluate_obligation(fixture, requeued, cursor.candidate().observation()).await?);
-    withdraw_dispatched_goal(&fixture.pool, successor_sessions[0], identity_seed + 1).await?;
-    fixture
-        .store
-        .park_exhausted_dispatch_obligations(
-            &fixture.repository,
-            fixture.rule.id(),
-            fixture.rule.version(),
-            parking_retry_policy(),
-        )
-        .await?;
+    Ok(successor_sessions[0])
+}
+
+/// Spends the whole shipped budget on the fixture's lineage, returning the
+/// obligation its exhausting attempt parked.
+///
+/// Written out rather than iterated: the budget is a schema constant, and a
+/// walk of named attempts fails on the one whose behavior changed.
+async fn park_dispatch_obligation(
+    fixture: &DispatchFixture,
+    identity_seed: u128,
+) -> Result<Uuid, Box<dyn Error>> {
+    assert_eq!(dispatch_attempt_budget(&fixture.pool).await?, 6);
+    let second = spend_one_attempt(fixture, fixture.session(0), identity_seed).await?;
+    let third = spend_one_attempt(fixture, second, identity_seed + 1).await?;
+    let fourth = spend_one_attempt(fixture, third, identity_seed + 2).await?;
+    let fifth = spend_one_attempt(fixture, fourth, identity_seed + 3).await?;
+    let sixth = spend_one_attempt(fixture, fifth, identity_seed + 4).await?;
+    withdraw_dispatched_goal(&fixture.pool, sixth, identity_seed + 5).await?;
     Ok(
         sqlx::query_scalar("SELECT obligation_id FROM repo_watch_parked_dispatch_obligation")
             .fetch_one(&fixture.pool)
@@ -1342,7 +1348,7 @@ async fn park_dispatch_obligation(
     )
 }
 
-async fn load_parking_retry_obligation(
+async fn load_next_obligation(
     fixture: &DispatchFixture,
 ) -> Result<Option<RepoWatchDispatchObligation>, Box<dyn Error>> {
     Ok(fixture
@@ -1351,9 +1357,30 @@ async fn load_parking_retry_obligation(
             &fixture.repository,
             fixture.rule.id(),
             fixture.rule.version(),
-            parking_retry_policy(),
+            immediate_retry_policy(),
         )
         .await?)
+}
+
+async fn failed_attempt_epoch(pool: &PgPool) -> Result<f64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT extract(epoch FROM last_failed_attempt_at)::double precision
+           FROM repo_watch_dispatch_obligation
+          WHERE settled_kind IS NULL",
+    )
+    .fetch_one(pool)
+    .await
+}
+
+async fn batch_release_epoch(fixture: &DispatchFixture) -> Result<f64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT extract(epoch FROM released_at)::double precision
+           FROM repo_watch_dispatch_release
+          WHERE dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await
 }
 
 async fn park_transitions(pool: &PgPool) -> Result<Vec<ParkTransitionVisibility>, sqlx::Error> {
@@ -1697,6 +1724,38 @@ async fn a_failed_attempt_waits_out_its_delay_before_redispatch() -> Result<(), 
     Ok(())
 }
 
+/// A batch holds its singleton until every one of its actions is terminal, so a
+/// delay measured from the first sibling to fail would be spent while the batch
+/// still occupied the slot and the successor would be dispatchable the instant
+/// the batch released. The clock therefore starts at the release.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_delay_starts_when_the_whole_batch_releases() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        BATCH_DELAY_FIRST_STOP_COMMAND_ID,
+    )
+    .await?;
+    let stamped_at_first_termination = failed_attempt_epoch(&fixture.pool).await?;
+    let held = release_count(&fixture).await?;
+
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(1),
+        BATCH_DELAY_SECOND_STOP_COMMAND_ID,
+    )
+    .await?;
+
+    let stamped_at_release = failed_attempt_epoch(&fixture.pool).await?;
+    assert_eq!(held, 0);
+    assert_eq!(release_count(&fixture).await?, 1);
+    assert!(stamped_at_release > stamped_at_first_termination);
+    assert!(stamped_at_release >= batch_release_epoch(&fixture).await?);
+    Ok(())
+}
+
 /// The unbounded case this budget exists for: a lineage whose sessions keep
 /// ending without meeting it stops being dispatched at all, rather than
 /// re-dispatching for as long as the rule's cooldown allows.
@@ -1714,14 +1773,17 @@ async fn a_lineage_that_spends_its_attempt_budget_parks() -> Result<(), Box<dyn 
     .fetch_one(&fixture.pool)
     .await?;
     assert_eq!(parked.obligation_id, parked_obligation);
-    assert_eq!(parked.failed_attempts, 2);
+    assert_eq!(
+        parked.failed_attempts,
+        dispatch_attempt_budget(&fixture.pool).await?
+    );
     assert_eq!(parked.head_sha.as_deref(), Some(FIRST_HEAD));
-    assert!(load_parking_retry_obligation(&fixture).await?.is_none());
+    assert!(load_next_obligation(&fixture).await?.is_none());
     assert_eq!(
         park_transitions(&fixture.pool).await?,
         vec![ParkTransitionVisibility {
             transition_kind: String::from("parked"),
-            failed_attempts: 2,
+            failed_attempts: 6,
             release_reason: None,
             release_actor: None,
         }]
@@ -1743,7 +1805,7 @@ async fn a_parked_obligation_survives_a_reconstructed_store() -> Result<(), Box<
             &fixture.repository,
             fixture.rule.id(),
             fixture.rule.version(),
-            parking_retry_policy(),
+            immediate_retry_policy(),
         )
         .await?;
 
@@ -1764,7 +1826,7 @@ async fn an_operator_release_restores_the_whole_budget() -> Result<(), Box<dyn E
         .release_parked_dispatch_obligation(parked_obligation, PARK_RELEASE_ACTOR)
         .await?;
 
-    let released = load_parking_retry_obligation(&fixture).await?;
+    let released = load_next_obligation(&fixture).await?;
     assert_eq!(release, RepoWatchObligationParkRelease::Released);
     assert_eq!(
         released.map(|obligation| obligation.failed_attempts()),
@@ -1775,13 +1837,13 @@ async fn an_operator_release_restores_the_whole_budget() -> Result<(), Box<dyn E
         vec![
             ParkTransitionVisibility {
                 transition_kind: String::from("parked"),
-                failed_attempts: 2,
+                failed_attempts: 6,
                 release_reason: None,
                 release_actor: None,
             },
             ParkTransitionVisibility {
                 transition_kind: String::from("released"),
-                failed_attempts: 2,
+                failed_attempts: 6,
                 release_reason: Some(String::from("operator")),
                 release_actor: Some(String::from(PARK_RELEASE_ACTOR)),
             },
@@ -1832,7 +1894,7 @@ async fn a_new_head_releases_a_parked_obligation() -> Result<(), Box<dyn Error>>
 
     let advanced = evaluate_conflict(&fixture, PARK_RELEASING_EVENT_ID, SECOND_HEAD).await?;
 
-    let released = load_parking_retry_obligation(&fixture).await?;
+    let released = load_next_obligation(&fixture).await?;
     assert_eq!(advanced.outcome, RepoWatchRuleEvaluationOutcome::Occupied);
     assert_eq!(
         released
@@ -1872,8 +1934,11 @@ async fn a_matching_event_on_the_parked_head_buys_no_further_attempt() -> Result
     .fetch_one(&fixture.pool)
     .await?;
     assert_eq!(unchanged.outcome, RepoWatchRuleEvaluationOutcome::Occupied);
-    assert_eq!(collapsed.failed_attempts, 2);
-    assert!(load_parking_retry_obligation(&fixture).await?.is_none());
+    assert_eq!(
+        collapsed.failed_attempts,
+        dispatch_attempt_budget(&fixture.pool).await?
+    );
+    assert!(load_next_obligation(&fixture).await?.is_none());
     Ok(())
 }
 

@@ -70,6 +70,23 @@ BEFORE TRUNCATE ON repo_watch_dispatch_obligation_park
 FOR EACH STATEMENT
 EXECUTE FUNCTION reject_repo_watch_table_truncate();
 
+-- Consecutive dispatches of one obligation lineage that may end without meeting
+-- it before the lineage stops being dispatched at all. Transient runner,
+-- provider, and quota failures clear within an attempt or two; a lineage that
+-- has spent six sessions on a pull request nothing has changed on is not going
+-- to be finished by a seventh.
+--
+-- The schema owns this value alone. Parking, the readiness projection, and the
+-- dispatch loader all read it here, so no second copy can disagree with the
+-- vocabulary the parked state is defined against.
+CREATE FUNCTION repo_watch_dispatch_attempt_budget()
+RETURNS bigint
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT 6::bigint;
+$$;
+
 -- Appends one park transition, assigning its ordinal under the obligation row
 -- the caller already holds. Every park and release goes through here so the
 -- ordinal is minted in exactly one place.
@@ -99,6 +116,124 @@ AS $$
            reason,
            progress_event_id,
            actor;
+$$;
+
+-- Parks an obligation that has spent its budget. Runs in the transaction that
+-- counted the exhausting attempt, so no observer sees an obligation whose count
+-- is spent but whose parked state is not yet recorded. The parked_at guard is
+-- the whole idempotency: sibling actions of one batch each reach this, and only
+-- the first finds a row to park.
+CREATE FUNCTION repo_watch_park_exhausted_dispatch_obligation(
+    subject_obligation_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    parked_attempts bigint;
+BEGIN
+    UPDATE repo_watch_dispatch_obligation
+       SET parked_at = clock_timestamp()
+     WHERE obligation_id = subject_obligation_id
+       AND settled_kind IS NULL
+       AND parked_at IS NULL
+       AND failed_attempts >= repo_watch_dispatch_attempt_budget()
+    RETURNING failed_attempts INTO parked_attempts;
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    PERFORM repo_watch_record_dispatch_obligation_park_transition(
+        subject_obligation_id,
+        'parked',
+        parked_attempts,
+        NULL::text,
+        NULL::uuid,
+        NULL::text
+    );
+END;
+$$;
+
+-- The delay between attempts measures from the end of one whole batch, not from
+-- the first sibling action to terminate. A batch holds its singleton until every
+-- action is terminal, so a stamp taken at the first termination would burn the
+-- delay while the batch still occupied the slot and leave the successor
+-- immediately dispatchable. The requeue stamps a placeholder to keep the count
+-- and its time paired; this restarts the clock when the batch actually ends.
+CREATE FUNCTION repo_watch_restart_dispatch_obligation_backoff()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE repo_watch_dispatch_obligation AS obligation
+       SET last_failed_attempt_at = clock_timestamp()
+      FROM repo_watch_dispatch_batch AS batch
+     WHERE batch.dispatch_id = NEW.dispatch_id
+       AND obligation.rule_id = batch.rule_id
+       AND obligation.rule_version = batch.rule_version
+       AND obligation.singleton_scope = batch.singleton_scope
+       AND obligation.singleton_repository
+            IS NOT DISTINCT FROM batch.singleton_repository
+       AND obligation.singleton_pull_request_number
+            IS NOT DISTINCT FROM batch.singleton_pull_request_number
+       AND obligation.singleton_stack_root_pull_request_number
+            IS NOT DISTINCT FROM batch.singleton_stack_root_pull_request_number
+       AND obligation.settled_kind IS NULL
+       AND obligation.failed_attempts > 0;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER repo_watch_dispatch_release_restarts_obligation_backoff
+AFTER INSERT ON repo_watch_dispatch_release
+FOR EACH ROW
+EXECUTE FUNCTION repo_watch_restart_dispatch_obligation_backoff();
+
+-- Returns a parked obligation to dispatch because the pull request produced a
+-- fact the obligation has not seen. Mirrors the operator release so that both
+-- ways out of a park restore the same thing and write the same journal shape,
+-- and so that every spelling in that journal is owned by this schema rather
+-- than restated by a caller.
+CREATE FUNCTION repo_watch_release_dispatch_obligation_park_for_progress(
+    parked_obligation_id uuid,
+    progress_event_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    parked_attempts bigint;
+BEGIN
+    SELECT obligation.failed_attempts
+      INTO parked_attempts
+      FROM repo_watch_dispatch_obligation AS obligation
+     WHERE obligation.obligation_id = parked_obligation_id
+       AND obligation.settled_kind IS NULL
+       AND obligation.parked_at IS NOT NULL
+       FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    PERFORM repo_watch_record_dispatch_obligation_park_transition(
+        parked_obligation_id,
+        'released',
+        parked_attempts,
+        'pull_request_progress',
+        progress_event_id,
+        NULL::text
+    );
+
+    UPDATE repo_watch_dispatch_obligation
+       SET parked_at = NULL,
+           failed_attempts = 0,
+           last_failed_attempt_at = NULL
+     WHERE obligation_id = parked_obligation_id;
+
+    RETURN true;
+END;
 $$;
 
 -- Returns a parked obligation to dispatch on an operator's say-so. The whole
@@ -161,6 +296,7 @@ DECLARE
     candidate_rule_version bigint;
     candidate_singleton_key text;
     terminal_goal_kind text;
+    owed_obligation_id uuid;
 BEGIN
     -- The terminal event that matters is the one ending the generation this
     -- dispatch commissioned, not whatever the session is doing now. A session
@@ -228,6 +364,7 @@ BEGIN
     -- achieved against state that is still current. The active-singleton
     -- index collapses sibling terminations and preserves any later matching
     -- event already recorded by ordinary evaluation.
+    WITH owed AS (
     INSERT INTO repo_watch_dispatch_obligation
         (obligation_id, repository, rule_id, rule_version,
          singleton_scope, singleton_repository, singleton_pull_request_number,
@@ -340,15 +477,27 @@ BEGIN
             repo_watch_dispatch_obligation.failed_attempts,
             EXCLUDED.failed_attempts
         ),
-        last_failed_attempt_at = clock_timestamp();
+        last_failed_attempt_at = clock_timestamp()
+    RETURNING obligation_id
+    )
+    SELECT owed.obligation_id INTO owed_obligation_id FROM owed;
+
+    -- Same transaction as the count that exhausted the budget, so an
+    -- obligation is never readable with its budget spent and its parked state
+    -- still unwritten.
+    IF owed_obligation_id IS NOT NULL THEN
+        PERFORM repo_watch_park_exhausted_dispatch_obligation(owed_obligation_id);
+    END IF;
 END;
 $$;
 
 -- Supersedes the projection from
 -- 202608140003_repo_watch_dispatch_obligation.sql. Readiness now excludes a
--- parked obligation; the backoff between attempts is applied by the dispatch
--- loader against constants this projection cannot see, so an obligation
--- reported ready may still be waiting out its delay.
+-- parked obligation and, independently, one whose count has reached the budget,
+-- so no ordering of parking against this read can report an exhausted
+-- obligation as ready. The delay between attempts is applied by the dispatch
+-- loader against bounds this projection cannot see, so an obligation reported
+-- ready may still be waiting one out.
 CREATE OR REPLACE VIEW repo_watch_outstanding_dispatch_obligation AS
 SELECT obligation.obligation_id,
        obligation.repository,
@@ -370,6 +519,7 @@ SELECT obligation.obligation_id,
        occupying.dispatch_id IS NULL
            AND (cooldown.eligible_at IS NULL OR cooldown.eligible_at <= clock_timestamp())
            AND obligation.parked_at IS NULL
+           AND obligation.failed_attempts < repo_watch_dispatch_attempt_budget()
            AS ready,
        obligation.failed_attempts,
        obligation.last_failed_attempt_at,

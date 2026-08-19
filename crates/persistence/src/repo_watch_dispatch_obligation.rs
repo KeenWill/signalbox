@@ -20,20 +20,16 @@ use crate::repo_watch_dispatch::{
     stored_rule_version,
 };
 
-// Consecutive dispatches of one obligation lineage that may end without meeting
-// it before the lineage stops being dispatched at all. Transient runner,
-// provider, and quota failures clear within an attempt or two; a lineage that
-// has spent six sessions on a pull request nothing has changed on is not going
-// to be finished by a seventh.
-const DISPATCH_ATTEMPT_BUDGET: u32 = 6;
 // Delay after the first failed attempt, doubling per further consecutive
 // failure. Below the interval at which a watched repository is polled the delay
 // would not separate attempts at all; well above it, a lineage recovering from
 // one transient failure would stall behind a delay nothing else needs.
 const DISPATCH_RETRY_BACKOFF_BASE: Duration = Duration::from_secs(10 * 60);
-// The doubling stops here, two doublings before the budget runs out, so the
-// last attempts of an exhausting lineage are spaced by this rather than by an
-// interval that keeps growing past the point of parking.
+// The doubling stops here, within three doublings of the base, so the last
+// attempts of an exhausting lineage are spaced by this rather than by an
+// interval that keeps growing past the point of parking. The attempt budget the
+// doubling runs out against is owned by the schema, in
+// repo_watch_dispatch_attempt_budget().
 const DISPATCH_RETRY_BACKOFF_CAP: Duration = Duration::from_secs(60 * 60);
 // Doublings are clamped so the shift the load query applies cannot overflow its
 // bigint, whatever attempt count storage holds.
@@ -42,13 +38,14 @@ const DISPATCH_RETRY_MAX_DOUBLINGS: i64 = 30;
 // constraint so an over-long value is refused before it reaches the database.
 const MAX_PARK_RELEASE_ACTOR_CHARS: usize = 200;
 
-/// Bound on how often one obligation lineage may be redispatched.
+/// Delay one obligation lineage waits out between redispatches.
 ///
-/// Every field is a ceiling: [`Self::lowered_to`] reduces one, nothing raises
-/// one, so no caller can widen what production runs under.
+/// Both fields are ceilings: [`Self::lowered_to`] reduces one, nothing raises
+/// one, so no caller can widen what production runs under. The attempt budget
+/// these delays run out against is not here — the schema owns it, so that
+/// parking, the readiness projection, and the dispatch loader cannot disagree.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RepoWatchDispatchRetryPolicy {
-    attempt_budget: u32,
     backoff_base: Duration,
     backoff_cap: Duration,
 }
@@ -56,33 +53,18 @@ pub struct RepoWatchDispatchRetryPolicy {
 impl RepoWatchDispatchRetryPolicy {
     pub const fn production() -> Self {
         Self {
-            attempt_budget: DISPATCH_ATTEMPT_BUDGET,
             backoff_base: DISPATCH_RETRY_BACKOFF_BASE,
             backoff_cap: DISPATCH_RETRY_BACKOFF_CAP,
         }
     }
 
     /// Takes the lower of each field and the argument.
-    ///
-    /// A budget of zero would park an obligation that has not yet failed once,
-    /// which is a different behavior rather than a smaller allowance, so one
-    /// attempt is the floor.
     #[must_use]
-    pub fn lowered_to(
-        self,
-        attempt_budget: u32,
-        backoff_base: Duration,
-        backoff_cap: Duration,
-    ) -> Self {
+    pub fn lowered_to(self, backoff_base: Duration, backoff_cap: Duration) -> Self {
         Self {
-            attempt_budget: self.attempt_budget.min(attempt_budget).max(1),
             backoff_base: self.backoff_base.min(backoff_base),
             backoff_cap: self.backoff_cap.min(backoff_cap),
         }
-    }
-
-    pub const fn attempt_budget(&self) -> u32 {
-        self.attempt_budget
     }
 
     pub const fn backoff_base(&self) -> Duration {
@@ -91,10 +73,6 @@ impl RepoWatchDispatchRetryPolicy {
 
     pub const fn backoff_cap(&self) -> Duration {
         self.backoff_cap
-    }
-
-    fn stored_attempt_budget(&self) -> i64 {
-        i64::from(self.attempt_budget)
     }
 
     fn stored_backoff_base_seconds(&self) -> i64 {
@@ -170,50 +148,6 @@ pub(crate) enum ObligationAdmission {
 }
 
 impl PostgresRepoWatchDispatchStore {
-    /// Records the durable parked state of every lineage past its budget.
-    ///
-    /// Exclusion from dispatch does not depend on this having run: the load
-    /// below refuses an exhausted lineage whether or not its parking is
-    /// recorded yet. This is what makes the state operator-visible.
-    pub async fn park_exhausted_dispatch_obligations(
-        &self,
-        repository: &RepositorySlug,
-        rule_id: &RepoWatchRuleId,
-        rule_version: RepoWatchRuleVersion,
-        policy: RepoWatchDispatchRetryPolicy,
-    ) -> Result<u64, RepoWatchDispatchRepositoryError> {
-        let parked = sqlx::query(
-            "WITH exhausted AS (
-                 UPDATE repo_watch_dispatch_obligation AS obligation
-                    SET parked_at = clock_timestamp()
-                  WHERE obligation.repository = $1
-                    AND obligation.rule_id = $2
-                    AND obligation.rule_version = $3
-                    AND obligation.settled_kind IS NULL
-                    AND obligation.parked_at IS NULL
-                    AND obligation.failed_attempts >= $4
-                 RETURNING obligation.obligation_id, obligation.failed_attempts
-             )
-             SELECT repo_watch_record_dispatch_obligation_park_transition(
-                        exhausted.obligation_id,
-                        'parked',
-                        exhausted.failed_attempts,
-                        NULL::text,
-                        NULL::uuid,
-                        NULL::text
-                    )
-               FROM exhausted",
-        )
-        .bind(repository.as_str())
-        .bind(rule_id.as_str())
-        .bind(stored_rule_version(rule_version)?)
-        .bind(policy.stored_attempt_budget())
-        .fetch_all(self.pool())
-        .await?
-        .len();
-        Ok(u64::try_from(parked).unwrap_or(u64::MAX))
-    }
-
     /// Returns one parked obligation to dispatch on an operator's say-so.
     pub async fn release_parked_dispatch_obligation(
         &self,
@@ -258,17 +192,18 @@ impl PostgresRepoWatchDispatchStore {
                 AND obligation.rule_version = $3
                 AND obligation.settled_kind IS NULL
                 AND obligation.parked_at IS NULL
-                AND obligation.failed_attempts < $4
+                AND obligation.failed_attempts
+                     < repo_watch_dispatch_attempt_budget()
                 AND (
                     obligation.last_failed_attempt_at IS NULL
                     OR extract(epoch FROM (
                             clock_timestamp() - obligation.last_failed_attempt_at
                        )) >= LEAST(
-                            $5::bigint << LEAST(
+                            $4::bigint << LEAST(
                                 GREATEST(obligation.failed_attempts - 1, 0),
-                                $7::bigint
+                                $6::bigint
                             )::integer,
-                            $6::bigint
+                            $5::bigint
                        )
                 )
                 AND NOT EXISTS (
@@ -319,7 +254,6 @@ impl PostgresRepoWatchDispatchStore {
         .bind(repository.as_str())
         .bind(rule_id.as_str())
         .bind(stored_rule_version(rule_version)?)
-        .bind(policy.stored_attempt_budget())
         .bind(policy.stored_backoff_base_seconds())
         .bind(policy.stored_backoff_cap_seconds())
         .bind(DISPATCH_RETRY_MAX_DOUBLINGS)
@@ -429,17 +363,15 @@ pub(crate) async fn record_dispatch_obligation(
                 .try_get::<Option<bool>, _>("releases_park")?
                 .unwrap_or(false);
         if releases_park {
-            let failed_attempts: i64 = active.try_get("failed_attempts")?;
-            sqlx::query(
-                "SELECT repo_watch_record_dispatch_obligation_park_transition(
-                            $1, 'released', $2, 'pull_request_progress', $3, NULL::text
-                        )",
-            )
-            .bind(obligation_id)
-            .bind(failed_attempts)
-            .bind(event.id().as_uuid())
-            .execute(&mut **transaction)
-            .await?;
+            // The release resets the count and writes the journal row. Both
+            // ways out of a park go through the schema, so every value the
+            // journal's vocabulary is closed over is spelled once, where the
+            // constraint that closes it lives.
+            sqlx::query("SELECT repo_watch_release_dispatch_obligation_park_for_progress($1, $2)")
+                .bind(obligation_id)
+                .bind(event.id().as_uuid())
+                .execute(&mut **transaction)
+                .await?;
         }
         sqlx::query(
             "UPDATE repo_watch_dispatch_obligation
@@ -447,18 +379,13 @@ pub(crate) async fn record_dispatch_obligation(
                     latest_event_id = $2,
                     matched_event_count = matched_event_count + 1,
                     blocking_dispatch_id = COALESCE($3, blocking_dispatch_id),
-                    latest_match_at = clock_timestamp(),
-                    failed_attempts = CASE WHEN $5 THEN 0 ELSE failed_attempts END,
-                    last_failed_attempt_at =
-                        CASE WHEN $5 THEN NULL ELSE last_failed_attempt_at END,
-                    parked_at = CASE WHEN $5 THEN NULL ELSE parked_at END
+                    latest_match_at = clock_timestamp()
               WHERE obligation_id = $4",
         )
         .bind(event.repository().as_str())
         .bind(event.id().as_uuid())
         .bind(blocking_dispatch.map(|value| *value.as_uuid()))
         .bind(obligation_id)
-        .bind(releases_park)
         .execute(&mut **transaction)
         .await?;
         return Ok(());
@@ -651,13 +578,9 @@ mod tests {
 
     #[test]
     fn a_lower_argument_replaces_every_production_bound() {
-        let lowered = RepoWatchDispatchRetryPolicy::production().lowered_to(
-            2,
-            Duration::from_secs(1),
-            Duration::from_secs(4),
-        );
+        let lowered = RepoWatchDispatchRetryPolicy::production()
+            .lowered_to(Duration::from_secs(1), Duration::from_secs(4));
 
-        assert_eq!(lowered.attempt_budget(), 2);
         assert_eq!(lowered.backoff_base(), Duration::from_secs(1));
         assert_eq!(lowered.backoff_cap(), Duration::from_secs(4));
     }
@@ -667,7 +590,6 @@ mod tests {
         let production = RepoWatchDispatchRetryPolicy::production();
 
         let raised = production.lowered_to(
-            u32::MAX,
             Duration::from_secs(u64::from(u32::MAX)),
             Duration::from_secs(u64::from(u32::MAX)),
         );
@@ -675,28 +597,15 @@ mod tests {
         assert_eq!(raised, production);
     }
 
-    /// Zero attempts would park an obligation that has never been dispatched,
-    /// which is a different behavior rather than a tighter bound.
+    /// A cap the doubling never reaches is not a cap. Three doublings is well
+    /// inside the attempt budget the schema holds, so the last attempts of an
+    /// exhausting lineage are spaced by the cap rather than by a delay that
+    /// keeps growing.
     #[test]
-    fn a_budget_below_one_attempt_is_refused() {
-        let lowered = RepoWatchDispatchRetryPolicy::production().lowered_to(
-            0,
-            Duration::ZERO,
-            Duration::ZERO,
-        );
-
-        assert_eq!(lowered.attempt_budget(), 1);
-    }
-
-    /// The cap has to bind before the budget runs out, or nothing ever reaches
-    /// it and the backoff is a plain doubling with a dead ceiling.
-    #[test]
-    fn the_backoff_cap_binds_before_the_attempt_budget_is_spent() {
+    fn the_backoff_cap_binds_within_three_doublings_of_the_base() {
         let production = RepoWatchDispatchRetryPolicy::production();
 
-        let uncapped_final_delay =
-            production.backoff_base() * 2_u32.pow(production.attempt_budget().saturating_sub(2));
-
-        assert!(uncapped_final_delay > production.backoff_cap());
+        assert!(production.backoff_cap() > production.backoff_base());
+        assert!(production.backoff_cap() < production.backoff_base() * 8);
     }
 }
