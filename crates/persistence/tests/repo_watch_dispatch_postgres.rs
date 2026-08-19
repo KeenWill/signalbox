@@ -2094,6 +2094,28 @@ async fn a_new_head_releases_a_parked_obligation() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
+/// The stalled target must survive a neighbour's match. A collapsed singleton
+/// advances its latest-event projection on any matching event, so reading the
+/// stalled target from that projection would hand the release condition to the
+/// neighbour and take it away from the pull request that actually stalled.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_neighbours_match_does_not_move_the_parked_target() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(repository_scoped_conflict_rule()?).await?;
+    park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+    evaluate_neighbour_conflict(&fixture).await?;
+
+    let progress = evaluate_nonmatching_head_change(&fixture).await?;
+
+    let released = load_next_obligation(&fixture).await?;
+    assert_eq!(progress, RepoWatchRuleEvaluationOutcome::NotMatched);
+    assert_eq!(
+        released.map(|obligation| obligation.failed_attempts()),
+        Some(0)
+    );
+    Ok(())
+}
+
 /// A rule watching one narrow signal parks on a pull request that keeps
 /// failing, and the head then moves under an event that rule never matches.
 /// Reading progress only from matching events would leave that obligation

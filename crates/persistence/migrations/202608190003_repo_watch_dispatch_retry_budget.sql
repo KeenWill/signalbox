@@ -14,12 +14,24 @@ ALTER TABLE repo_watch_dispatch_obligation
     -- resets the count, and a later sibling recomputing it would undo the
     -- release and repark work the pull request had just bought another attempt
     -- for.
-    ADD COLUMN counted_dispatch_id uuid;
+    ADD COLUMN counted_dispatch_id uuid,
+    -- The state the lineage stalled on, held still for as long as it is parked.
+    -- Rule, repository, and stack singletons collapse many pull requests onto
+    -- one obligation, whose latest-event projection any matching event
+    -- advances; reading the stalled target from that projection would let a
+    -- neighbour's match move it, so that the neighbour could then release the
+    -- park and the pull request that actually stalled could not.
+    ADD COLUMN parked_state_event_id uuid;
 
 ALTER TABLE repo_watch_dispatch_obligation
     ADD CONSTRAINT repo_watch_dispatch_obligation_counted_dispatch_id_fkey
     FOREIGN KEY (counted_dispatch_id)
         REFERENCES repo_watch_dispatch_batch(dispatch_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT,
+    ADD CONSTRAINT repo_watch_dispatch_obligation_parked_state_event_id_fkey
+    FOREIGN KEY (parked_state_event_id)
+        REFERENCES repo_watch_event(event_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT;
 
@@ -32,7 +44,9 @@ ALTER TABLE repo_watch_dispatch_obligation
     -- obligation stopped being dispatched, so only an unfailed obligation is
     -- refused the stamp.
     ADD CONSTRAINT repo_watch_dispatch_obligation_parked_shape_check
-        CHECK (parked_at IS NULL OR failed_attempts > 0);
+        CHECK (parked_at IS NULL OR failed_attempts > 0),
+    ADD CONSTRAINT repo_watch_dispatch_obligation_parked_state_check
+        CHECK ((parked_state_event_id IS NULL) = (parked_at IS NULL));
 
 CREATE TABLE repo_watch_dispatch_obligation_park (
     obligation_id uuid NOT NULL,
@@ -148,7 +162,8 @@ DECLARE
     parked_attempts bigint;
 BEGIN
     UPDATE repo_watch_dispatch_obligation
-       SET parked_at = clock_timestamp()
+       SET parked_at = clock_timestamp(),
+           parked_state_event_id = latest_event_id
      WHERE obligation_id = subject_obligation_id
        AND settled_kind IS NULL
        AND parked_at IS NULL
@@ -243,6 +258,7 @@ BEGIN
 
     UPDATE repo_watch_dispatch_obligation
        SET parked_at = NULL,
+           parked_state_event_id = NULL,
            failed_attempts = 0,
            last_failed_attempt_at = NULL
      WHERE obligation_id = parked_obligation_id;
@@ -278,7 +294,7 @@ BEGIN
         SELECT obligation.obligation_id
           FROM repo_watch_dispatch_obligation AS obligation
           JOIN repo_watch_event AS parked_state
-            ON parked_state.event_id = obligation.latest_event_id
+            ON parked_state.event_id = obligation.parked_state_event_id
           JOIN repo_watch_event AS incoming
             ON incoming.event_id = progress_event_id
          WHERE obligation.settled_kind IS NULL
@@ -342,6 +358,7 @@ BEGIN
 
     UPDATE repo_watch_dispatch_obligation
        SET parked_at = NULL,
+           parked_state_event_id = NULL,
            failed_attempts = 0,
            last_failed_attempt_at = NULL
      WHERE obligation_id = parked_obligation_id;
@@ -665,6 +682,7 @@ SELECT obligation.obligation_id,
        obligation.failed_attempts,
        obligation.last_failed_attempt_at,
        obligation.parked_at,
+       obligation.parked_state_event_id,
        parked_state.pull_request_number,
        parked_state.head_sha,
        (SELECT max(park.recorded_at)
@@ -673,7 +691,7 @@ SELECT obligation.obligation_id,
            AND park.transition_kind = 'parked') AS latest_park_recorded_at
   FROM repo_watch_dispatch_obligation AS obligation
   JOIN repo_watch_event AS parked_state
-    ON parked_state.event_id = obligation.latest_event_id
+    ON parked_state.event_id = obligation.parked_state_event_id
  WHERE obligation.settled_kind IS NULL
    AND obligation.parked_at IS NOT NULL;
 

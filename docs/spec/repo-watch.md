@@ -700,13 +700,17 @@ failed attempt and doubles per further consecutive failure to a one-hour
 ceiling. Six consecutive failed attempts park the obligation in the transaction
 that counts the exhausting attempt: it is excluded from dispatch, stamped with
 the time it parked, and readable in the `repo_watch_parked_dispatch_obligation`
-projection alongside its count, pull request, and the head it stalled on. The
-delay is measured from the release of the whole batch, not from the first of its
-actions to fail: a batch holds its singleton until every action is terminal, so
-a clock started at the first termination would run out while the batch still
-occupied the slot. The attempt budget is a schema constant, so parking, the
-readiness projection, and the dispatch loader cannot disagree about it; the two
-delay bounds are compiled into the daemon and may only be lowered, never raised.
+projection alongside its count, pull request, and the head it stalled on. That
+stalled state is held still for as long as the obligation is parked: a collapsed
+singleton advances its latest-event projection on any match, including one from
+another pull request, and the release condition is decided against the state the
+lineage stalled on rather than against whatever matched last. The delay is
+measured from the release of the whole batch, not from the first of its actions
+to fail: a batch holds its singleton until every action is terminal, so a clock
+started at the first termination would run out while the batch still occupied
+the slot. The attempt budget is a schema constant, so parking, the readiness
+projection, and the dispatch loader cannot disagree about it; the two delay
+bounds are compiled into the daemon and may only be lowered, never raised.
 
 **Implemented behavior.** Two things return a parked obligation to dispatch. An
 operator calls `repo_watch_release_parked_dispatch_obligation` with their
