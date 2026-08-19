@@ -761,8 +761,11 @@ cooldown readiness, and reaches a parked obligation through the target it
 stalled on as well as through its latest-event projection, since parked work
 cannot dispatch the close and would otherwise hold its singleton forever; the
 admission recheck is the race-closing backstop. Either path settles stale
-nonterminal work as `target_closed` without creating a session. A rule that
-matches the `PullRequestClosed` or `PullRequestMerged` event itself remains
+nonterminal work as `target_closed` without creating a session. Cutoff
+processing settles after it has stopped the goals it commissioned, so it takes
+session rows before obligation rows and cannot close a lock cycle against a
+dispatch session terminating into the same obligation. A rule that matches the
+`PullRequestClosed` or `PullRequestMerged` event itself remains
 dispatch-eligible, and a non-converged termination of that dispatch still owes
 its requeue while its own cutoff remains the latest one; the terminal event is
 the cutoff fact, not work made stale by that fact. Corruption in one

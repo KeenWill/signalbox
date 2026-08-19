@@ -282,13 +282,6 @@ impl PostgresRepoWatchDispatchStore {
         .await?;
         let mut cutoff_corruption = None;
         if disposition == RepoWatchLifecycleCutoffDispositionStorageKind::Terminal {
-            crate::repo_watch_dispatch_obligation::settle_terminal_target_obligations(
-                &mut transaction,
-                repository,
-                pull_request_number,
-                RepoWatchEventId::from_uuid(event_id),
-            )
-            .await?;
             let sessions = sqlx::query_scalar::<_, Uuid>(
                 "SELECT DISTINCT action.session_id
                    FROM repo_watch_dispatch_action AS action
@@ -347,6 +340,17 @@ impl PostgresRepoWatchDispatchStore {
                     }
                 }
             }
+            // After the stops, not before. A goal termination holds its session
+            // row and then waits for its obligation row inside the requeue, so a
+            // cutoff that took obligation rows first and session rows second
+            // would close a lock cycle against any sibling still terminating.
+            crate::repo_watch_dispatch_obligation::settle_terminal_target_obligations(
+                &mut transaction,
+                repository,
+                pull_request_number,
+                RepoWatchEventId::from_uuid(event_id),
+            )
+            .await?;
         }
         commit(transaction).await?;
         if let Some(error) = cutoff_corruption {

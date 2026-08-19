@@ -176,23 +176,47 @@ BEGIN
     END IF;
 
     -- The pull request may have moved while the exhausting attempt ran, under
-    -- an event no rule of this lineage matched. That head is progress that
-    -- buys another attempt, and nothing will restate it later, so it is read
-    -- from the pull request's durable state here rather than waited for.
+    -- an event that reached its evaluation before there was a park to release.
+    -- Nothing restates that fact afterwards, so the durable record is read here
+    -- rather than waited for. Progress means the same thing as it does to a
+    -- release -- a head other than the stalled one, or review activity -- and
+    -- is spent the same way, so one fact cannot hold a lineage out of parking
+    -- indefinitely.
     IF EXISTS (
         SELECT 1
           FROM repo_watch_event AS stalled
+          JOIN repo_watch_event AS later
+            ON later.repository = stalled.repository
+           AND later.pull_request_number = stalled.pull_request_number
          WHERE stalled.event_id = stalled_event_id
            AND stalled.target_kind = 'pull_request'
-           AND stalled.head_sha IS DISTINCT FROM (
-                SELECT current_state.head_sha
-                  FROM repo_watch_event AS current_state
-                 WHERE current_state.repository = stalled.repository
-                   AND current_state.pull_request_number
-                        = stalled.pull_request_number
-                 ORDER BY current_state.cursor_generation DESC,
-                          current_state.event_ordinal DESC
-                 LIMIT 1
+           AND later.target_kind = 'pull_request'
+           AND (later.cursor_generation, later.event_ordinal)
+                > (stalled.cursor_generation, stalled.event_ordinal)
+           AND (
+                later.head_sha IS DISTINCT FROM stalled.head_sha
+                OR later.event_kind IN (
+                    'review_submitted', 'thread_opened', 'thread_resolved'
+                )
+           )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM repo_watch_dispatch_obligation_park AS spent
+                  JOIN repo_watch_dispatch_obligation AS spent_on
+                    ON spent_on.obligation_id = spent.obligation_id
+                  JOIN repo_watch_dispatch_obligation AS subject
+                    ON subject.obligation_id = subject_obligation_id
+                 WHERE spent.release_event_id = later.event_id
+                   AND spent_on.rule_id = subject.rule_id
+                   AND spent_on.rule_version = subject.rule_version
+                   AND spent_on.singleton_scope = subject.singleton_scope
+                   AND spent_on.singleton_repository
+                        IS NOT DISTINCT FROM subject.singleton_repository
+                   AND spent_on.singleton_pull_request_number
+                        IS NOT DISTINCT FROM subject.singleton_pull_request_number
+                   AND spent_on.singleton_stack_root_pull_request_number
+                        IS NOT DISTINCT FROM
+                            subject.singleton_stack_root_pull_request_number
            )
     ) THEN
         UPDATE repo_watch_dispatch_obligation
