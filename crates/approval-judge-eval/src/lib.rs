@@ -17,8 +17,8 @@ use sha2::{Digest, Sha256};
 use signalbox_domain::DelegateApprovalRecommendation;
 use signalbox_model_provider_runtime::ApprovalJudgeModel;
 use signalboxd::approval_judge_eval::{
-    ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, judge_eval_case, judge_system_prompt,
-    render_eval_case,
+    ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, ApprovalJudgeEvalCaseError, judge_eval_case,
+    judge_system_prompt, render_eval_case,
 };
 
 /// The only corpus format this pre-alpha harness currently accepts.
@@ -116,35 +116,23 @@ pub fn load_corpus(path: impl AsRef<Path>) -> Result<ApprovalJudgeCorpus, Corpus
 
 /// Lowercase hexadecimal SHA-256 binding a case's rendered request identity.
 ///
-/// The digest input follows the corpus digest conventions: one JSON object
-/// with bytewise-sorted keys and no insignificant whitespace; absent optional
-/// fields serialize as `null`. It covers the case id, every request field,
-/// and the exact judge system prompt, so a recorded response is invalidated
-/// by a case rename, a request edit, or a prompt revision alike.
-#[must_use]
-pub fn request_fingerprint(case: &ApprovalJudgeCase) -> String {
-    // The canonical object is written field by field in bytewise key order,
-    // with `serde_json::Value`'s infallible display doing the string
-    // escaping, so no fallible serializer sits on this path.
-    fn field(value: Option<&str>) -> String {
-        value.map_or_else(
-            || String::from("null"),
-            |text| serde_json::Value::from(text).to_string(),
-        )
-    }
-    let request = &case.request;
+/// The digest input is one JSON object with bytewise-sorted keys and no
+/// insignificant whitespace, covering the exact judge system prompt and the
+/// complete rendered request payload for the case - the same bytes
+/// `score_corpus` sends the model. Any change to the corpus fields, the case
+/// id, the prompt, or the request renderer therefore invalidates recorded
+/// responses. Fails exactly when the case is inadmissible to the renderer.
+pub fn request_fingerprint(case: &ApprovalJudgeCase) -> Result<String, ApprovalJudgeEvalCaseError> {
+    let rendered = render_eval_case(&eval_case(case))?;
+    // `serde_json::Value`'s infallible display does the string escaping, so
+    // no fallible serializer sits on this path.
     let encoded = format!(
-        "{{\"arguments\":{},\"case_id\":{},\"commissioned_goal\":{},\"frozen_system_prompt\":{},\"judge_system_prompt\":{},\"session_template\":{},\"tool\":{}}}",
-        field(Some(request.arguments.as_str())),
-        field(Some(case.id.as_str())),
-        field(request.commissioned_goal.as_deref()),
-        field(request.frozen_system_prompt.as_deref()),
-        field(Some(judge_system_prompt())),
-        field(request.session_template.as_deref()),
-        field(Some(request.tool.as_str())),
+        "{{\"judge_system_prompt\":{},\"rendered_request\":{}}}",
+        serde_json::Value::from(judge_system_prompt()),
+        serde_json::Value::from(rendered.as_str()),
     );
     let digest = Sha256::digest(encoded.as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Decodes and validates a corpus JSON document from bytes.
@@ -611,9 +599,9 @@ mod tests {
         let recorded = responses["responses"][index]["request_fingerprint"]
             .as_str()
             .expect("the seed response names a fingerprint");
+        let computed = request_fingerprint(case).expect("the seed case renders");
         assert_eq!(
-            recorded,
-            request_fingerprint(case),
+            recorded, computed,
             "fingerprint mismatch for case {}",
             case.id
         );

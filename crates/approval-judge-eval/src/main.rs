@@ -120,7 +120,12 @@ fn validate_responses(
         // A stable id is not enough: the recorded decision answers one exact
         // rendered request, so a response also names the fingerprint of the
         // request context it was recorded against.
-        let expected_fingerprint = request_fingerprint(case);
+        let expected_fingerprint = request_fingerprint(case).map_err(|source| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("corpus case {} does not render: {source}", case.id),
+            )
+        })?;
         if response.request_fingerprint != expected_fingerprint {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
