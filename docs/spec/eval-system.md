@@ -96,13 +96,12 @@ formats and storage may change freely until first durable deployment.
 checks the expectation grammar described below. That grammar spans three check
 kinds — closed-vocabulary labels, typed numeric constraints
 (exact-within-tolerance, range, count, boolean), and reference-artifact
-comparisons by named continuous metric with thresholds — declared per case,
-each check optional. A case with a
-missing reference degrades that check to `unmeasured` and never loses its row. A
-reference artifact is an immutable blob a case pins by digest under the contract
-[blob storage](blob-storage.md) owns; no named-artifact aggregate is required —
-mutable aliases, producer provenance, and ownership above a blob remain the open
-aggregate question recorded in
+comparisons by named continuous metric with thresholds — declared per case, each
+check optional. A case with a missing reference degrades that check to
+`unmeasured` and never loses its row. A reference artifact is an immutable blob
+a case pins by digest under the contract [blob storage](blob-storage.md) owns;
+no named-artifact aggregate is required — mutable aliases, producer provenance,
+and ownership above a blob remain the open aggregate question recorded in
 [open-questions](../open-questions.md#general-purpose-artifacts), and nothing in
 this grammar depends on it.
 
