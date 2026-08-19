@@ -289,6 +289,9 @@ impl PostgresRepoWatchDispatchStore {
     {
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, repository.as_str()).await?;
+        // The repository lock serializes lease selection. The session lock
+        // below then excludes model-call preparation before its evidence
+        // recheck and the composed stop.
         let candidate = sqlx::query(
             "SELECT lease.dispatch_id, lease.action_ordinal, lease.session_id
                FROM repo_watch_dispatch_start_lease AS lease
@@ -327,8 +330,7 @@ impl PostgresRepoWatchDispatchStore {
                        )
                 )
               ORDER BY lease.expires_at, lease.session_id
-              LIMIT 1
-              FOR UPDATE OF lease SKIP LOCKED",
+              LIMIT 1",
         )
         .bind(repository.as_str())
         .fetch_optional(&mut *transaction)
@@ -340,10 +342,13 @@ impl PostgresRepoWatchDispatchStore {
         let dispatch_id: Uuid = candidate.try_get("dispatch_id")?;
         let action_ordinal: i32 = candidate.try_get("action_ordinal")?;
         let session_id: Uuid = candidate.try_get("session_id")?;
-        sqlx::query("SELECT 1 FROM session WHERE session_id = $1 FOR UPDATE")
-            .bind(session_id)
-            .fetch_one(&mut *transaction)
-            .await?;
+        let session = SessionId::from_uuid(session_id);
+        if !crate::goal::lock_session(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Err(RepoWatchDispatchRepositoryError::Corruption(
+                "expired dispatch start lease references a missing session",
+            ));
+        }
         let model_call_exists: bool = sqlx::query_scalar(
             "SELECT EXISTS (
                 SELECT 1 FROM model_call WHERE session_id = $1
@@ -378,7 +383,6 @@ impl PostgresRepoWatchDispatchStore {
             transaction.rollback().await?;
             return Ok(true);
         }
-        let session = SessionId::from_uuid(session_id);
         let command = GoalUserCommand::new(
             next_command_id(),
             session,
