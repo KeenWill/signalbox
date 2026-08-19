@@ -61,10 +61,17 @@ no decimal value and retains its zero denominator.
 The operator entry point is offline: it consumes a portable corpus manifest and
 ordered recorded responses, loads the corpus through the pluggable store
 contract, feeds those responses through the repository's deterministic scripted
-model adapter, and emits the scorecard as JSON. The checked-in seed manifest,
-corpus, and response file contain synthetic strings only. The existing
-`signalboxd` live-provider runner remains a separate explicitly operator-driven
-surface and is not part of this offline contract.
+model adapter, and emits the scorecard as JSON. Each recorded response names
+both its case id and a fingerprint of the rendered request identity it was
+recorded against — SHA-256 in lowercase hexadecimal over one JSON object with
+bytewise-sorted keys and no insignificant whitespace, covering the case id,
+every request field, and the exact judge system prompt, absent optional fields
+serialized as null — and replay rejects a response whose fingerprint does not
+match the corpus case at its position, including after a case rename or a prompt
+revision. The checked-in seed manifest, corpus, and response file contain
+synthetic strings only. The existing `signalboxd` live-provider runner remains a
+separate explicitly operator-driven surface and is not part of this offline
+contract.
 
 The standalone harness implements a pluggable corpus-store contract with
 enumeration and digest-verified load operations. Its disk store resolves a
@@ -122,16 +129,16 @@ store from that instance's repository/database/blob bindings, verify or import
 the manifest, update the instance's registration set, and make subsequent
 evaluation dispatch resolve through that refreshed set.
 
-**Committed unimplemented functionality.** No present surface checks
-expectations. Expectations are one typed grammar over three check kinds —
-closed-vocabulary labels, typed numeric constraints (exact-within-tolerance,
-range, count, boolean), and reference-artifact comparisons by named continuous
-metric with thresholds — declared per case, each check optional. A case with a
-missing reference degrades that check to `unmeasured` and never loses its row. A
-reference artifact is an immutable blob a case pins by digest under the contract
-[blob storage](blob-storage.md) owns; no named-artifact aggregate is required —
-mutable aliases, producer provenance, and ownership above a blob remain the open
-aggregate question recorded in
+**Committed unimplemented functionality.** No present general substrate surface
+checks the expectation grammar described below. That grammar spans three check
+kinds — closed-vocabulary labels, typed numeric constraints
+(exact-within-tolerance, range, count, boolean), and reference-artifact
+comparisons by named continuous metric with thresholds — declared per case, each
+check optional. A case with a missing reference degrades that check to
+`unmeasured` and never loses its row. A reference artifact is an immutable blob
+a case pins by digest under the contract [blob storage](blob-storage.md) owns;
+no named-artifact aggregate is required — mutable aliases, producer provenance,
+and ownership above a blob remain the open aggregate question recorded in
 [open-questions](../open-questions.md#general-purpose-artifacts), and nothing in
 this grammar depends on it.
 

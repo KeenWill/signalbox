@@ -1,8 +1,11 @@
+//! Offline operator CLI for replaying recorded approval-judge responses.
+
 use std::{env, error::Error, fs, io};
 
 use serde::Deserialize;
 use signalbox_approval_judge_eval::{
-    ApprovalDisposition, CORPUS_FORMAT_VERSION, CorpusStore, DiskCorpusStore, score_corpus,
+    ApprovalDisposition, CORPUS_FORMAT_VERSION, CorpusStore, DiskCorpusStore, request_fingerprint,
+    score_corpus,
 };
 use signalbox_domain::{
     DirectModelSelection, ModelCallId, ProviderModelIdentity, ResolvedProviderTarget,
@@ -18,6 +21,14 @@ use signalboxd::approval_judge_eval::ApprovalJudgeEvalBinding;
 use uuid::Uuid;
 
 const OFFLINE_PROVIDER_MODEL: &str = "offline-recorded-approval-judge";
+// Arbitrary constructor parameter: scripted replay reports usage as
+// unreported and enforces no output bound, so this only satisfies the model
+// definition.
+const OFFLINE_MAX_OUTPUT_TOKENS: u32 = 256;
+// Arbitrary constructor parameter: the offline replay path never reads the
+// context window, so this satisfies the model definition without enforcing
+// any bound.
+const OFFLINE_CONTEXT_WINDOW_TOKENS: u32 = 4_096;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +41,7 @@ struct OfflineResponseFile {
 #[serde(deny_unknown_fields)]
 struct OfflineResponse {
     case_id: String,
+    request_fingerprint: String,
     disposition: ApprovalDisposition,
     rationale: String,
 }
@@ -49,8 +61,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "disk corpus store is empty"))?;
     let corpus = store.load(registration.key()).await?;
-    let response_bytes = fs::read(responses_path)?;
-    let responses: OfflineResponseFile = serde_json::from_slice(&response_bytes)?;
+    let response_bytes = fs::read(&responses_path).map_err(|source| {
+        io::Error::new(
+            source.kind(),
+            format!("could not read offline responses {responses_path}: {source}"),
+        )
+    })?;
+    let responses: OfflineResponseFile =
+        serde_json::from_slice(&response_bytes).map_err(|source| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("offline responses {responses_path} are not valid response JSON: {source}"),
+            )
+        })?;
     validate_responses(&corpus, &responses)?;
 
     let scripts = responses.responses.iter().map(response_script);
@@ -100,6 +123,19 @@ fn validate_responses(
                 ),
             ));
         }
+        // A stable id is not enough: the recorded decision answers one exact
+        // rendered request, so a response also names the fingerprint of the
+        // request context it was recorded against.
+        let expected_fingerprint = request_fingerprint(case);
+        if response.request_fingerprint != expected_fingerprint {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "offline response for case {} was recorded against a different request context (fingerprint {} does not match {})",
+                    case.id, response.request_fingerprint, expected_fingerprint
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -115,9 +151,13 @@ fn offline_model(
 > {
     let target =
         ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(30)));
-    let definition =
-        RuntimeModelDefinition::try_new(target, String::from(OFFLINE_PROVIDER_MODEL), 256, 4_096)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+    let definition = RuntimeModelDefinition::try_new(
+        target,
+        String::from(OFFLINE_PROVIDER_MODEL),
+        OFFLINE_MAX_OUTPUT_TOKENS,
+        OFFLINE_CONTEXT_WINDOW_TOKENS,
+    )
+    .map_err(|error| io::Error::other(error.to_string()))?;
     let catalog = RuntimeModelCatalog::try_from_definitions([definition])
         .map_err(|error| io::Error::other(error.to_string()))?;
     Ok((

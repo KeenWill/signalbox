@@ -13,10 +13,12 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use signalbox_domain::DelegateApprovalRecommendation;
 use signalbox_model_provider_runtime::ApprovalJudgeModel;
 use signalboxd::approval_judge_eval::{
-    ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, judge_eval_case, render_eval_case,
+    ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, judge_eval_case, judge_system_prompt,
+    render_eval_case,
 };
 
 mod database;
@@ -113,7 +115,46 @@ pub fn load_corpus(path: impl AsRef<Path>) -> Result<ApprovalJudgeCorpus, Corpus
         path: path.to_path_buf(),
         source,
     })?;
-    decode_corpus(&bytes)
+    decode_corpus(&bytes).map_err(|error| match error {
+        CorpusLoadError::Json(source) => CorpusLoadError::JsonInFile {
+            path: path.to_path_buf(),
+            source,
+        },
+        other => other,
+    })
+}
+
+/// Lowercase hexadecimal SHA-256 binding a case's rendered request identity.
+///
+/// The digest input follows the corpus digest conventions: one JSON object
+/// with bytewise-sorted keys and no insignificant whitespace; absent optional
+/// fields serialize as `null`. It covers the case id, every request field,
+/// and the exact judge system prompt, so a recorded response is invalidated
+/// by a case rename, a request edit, or a prompt revision alike.
+#[must_use]
+pub fn request_fingerprint(case: &ApprovalJudgeCase) -> String {
+    // The canonical object is written field by field in bytewise key order,
+    // with `serde_json::Value`'s infallible display doing the string
+    // escaping, so no fallible serializer sits on this path.
+    fn field(value: Option<&str>) -> String {
+        value.map_or_else(
+            || String::from("null"),
+            |text| serde_json::Value::from(text).to_string(),
+        )
+    }
+    let request = &case.request;
+    let encoded = format!(
+        "{{\"arguments\":{},\"case_id\":{},\"commissioned_goal\":{},\"frozen_system_prompt\":{},\"judge_system_prompt\":{},\"session_template\":{},\"tool\":{}}}",
+        field(Some(request.arguments.as_str())),
+        field(Some(case.id.as_str())),
+        field(request.commissioned_goal.as_deref()),
+        field(request.frozen_system_prompt.as_deref()),
+        field(Some(judge_system_prompt())),
+        field(request.session_template.as_deref()),
+        field(Some(request.tool.as_str())),
+    );
+    let digest = Sha256::digest(encoded.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Decodes and validates a corpus JSON document from bytes.
@@ -135,6 +176,9 @@ pub(crate) fn validate_corpus(corpus: &ApprovalJudgeCorpus) -> Result<(), Corpus
     }
     let mut case_ids = HashSet::with_capacity(corpus.cases.len());
     for case in &corpus.cases {
+        if case.id.trim().is_empty() {
+            return Err(CorpusLoadError::BlankCaseId);
+        }
         if !case_ids.insert(case.id.as_str()) {
             return Err(CorpusLoadError::DuplicateCaseId {
                 id: case.id.clone(),
@@ -161,6 +205,13 @@ pub enum CorpusLoadError {
     },
     /// JSON decoding or strict shape validation failed.
     Json(serde_json::Error),
+    /// JSON decoding or strict shape validation failed for a named file.
+    JsonInFile {
+        /// Corpus file that failed to decode.
+        path: PathBuf,
+        /// Underlying decode failure.
+        source: serde_json::Error,
+    },
     /// The corpus names a format this harness does not implement.
     UnsupportedFormatVersion {
         /// Version found in the document.
@@ -173,6 +224,8 @@ pub enum CorpusLoadError {
         /// Repeated case identity.
         id: String,
     },
+    /// A case id is empty or whitespace-only and carries no stable identity.
+    BlankCaseId,
     /// A case does not identify the source of its expected label.
     MissingLabelProvenance {
         /// Case without meaningful label provenance.
@@ -191,6 +244,11 @@ impl fmt::Display for CorpusLoadError {
                 )
             }
             Self::Json(source) => write!(formatter, "corpus JSON is invalid: {source}"),
+            Self::JsonInFile { path, source } => write!(
+                formatter,
+                "corpus {} is not valid corpus JSON: {source}",
+                path.display()
+            ),
             Self::UnsupportedFormatVersion { observed } => write!(
                 formatter,
                 "corpus format version {observed} is unsupported; expected {CORPUS_FORMAT_VERSION}"
@@ -199,6 +257,10 @@ impl fmt::Display for CorpusLoadError {
             Self::DuplicateCaseId { id } => {
                 write!(formatter, "corpus case id {id} appears more than once")
             }
+            Self::BlankCaseId => write!(
+                formatter,
+                "corpus contains a case whose id is empty or whitespace-only"
+            ),
             Self::MissingLabelProvenance { id } => {
                 write!(formatter, "corpus case {id} has no label provenance")
             }
@@ -211,9 +273,11 @@ impl Error for CorpusLoadError {
         match self {
             Self::Read { source, .. } => Some(source),
             Self::Json(source) => Some(source),
+            Self::JsonInFile { source, .. } => Some(source),
             Self::UnsupportedFormatVersion { .. }
             | Self::EmptyCorpus
             | Self::DuplicateCaseId { .. }
+            | Self::BlankCaseId
             | Self::MissingLabelProvenance { .. } => None,
         }
     }
@@ -235,6 +299,9 @@ pub async fn score_corpus(
     }
     let mut case_ids = HashSet::with_capacity(corpus.cases.len());
     for case in &corpus.cases {
+        if case.id.trim().is_empty() {
+            return Err(ScoreError::BlankCaseId);
+        }
         if !case_ids.insert(case.id.as_str()) {
             return Err(ScoreError::DuplicateCaseId {
                 id: case.id.clone(),
@@ -413,6 +480,8 @@ pub enum ScoreError {
         /// Repeated case identity.
         id: String,
     },
+    /// A case id is empty or whitespace-only and carries no stable identity.
+    BlankCaseId,
     /// A case does not identify the source of its expected label.
     MissingLabelProvenance {
         /// Case without meaningful label provenance.
@@ -432,7 +501,7 @@ impl ScoreError {
     #[must_use]
     pub fn case_id(&self) -> Option<&str> {
         match self {
-            Self::UnsupportedFormatVersion { .. } | Self::EmptyCorpus => None,
+            Self::UnsupportedFormatVersion { .. } | Self::EmptyCorpus | Self::BlankCaseId => None,
             Self::DuplicateCaseId { id } | Self::MissingLabelProvenance { id } => Some(id),
             Self::Case { case_id, .. } => Some(case_id),
         }
@@ -450,6 +519,10 @@ impl fmt::Display for ScoreError {
             Self::DuplicateCaseId { id } => {
                 write!(formatter, "corpus case id {id} appears more than once")
             }
+            Self::BlankCaseId => write!(
+                formatter,
+                "corpus contains a case whose id is empty or whitespace-only"
+            ),
             Self::MissingLabelProvenance { id } => {
                 write!(formatter, "corpus case {id} has no label provenance")
             }
@@ -467,6 +540,7 @@ impl Error for ScoreError {
             Self::UnsupportedFormatVersion { .. }
             | Self::EmptyCorpus
             | Self::DuplicateCaseId { .. }
+            | Self::BlankCaseId
             | Self::MissingLabelProvenance { .. } => None,
             Self::Case { source, .. } => Some(source.as_ref()),
         }
@@ -492,10 +566,15 @@ mod tests {
 
     use super::{
         ApprovalDisposition, ApprovalJudgeCorpus, CORPUS_FORMAT_VERSION, DispositionMetrics,
-        MetricRate, decode_corpus, score_corpus,
+        MetricRate, ScoreError, decode_corpus, request_fingerprint, score_corpus,
     };
 
     const SEED_CORPUS: &[u8] = include_bytes!("../corpora/seed-v1.json");
+    const SEED_RESPONSES: &[u8] = include_bytes!("../corpora/seed-responses-v1.json");
+    // Arbitrary admitted-fixture constructor parameters: replay reads neither,
+    // they only need to form a request-safe model definition.
+    const FIXTURE_MAX_OUTPUT_TOKENS: u32 = 256;
+    const FIXTURE_CONTEXT_WINDOW_TOKENS: u32 = 4_096;
     const PROVIDER_MODEL: &str = "offline-fixture-judge";
     const APPROVE_RATIONALE: &str = "The exact read is plainly within the grant.";
     const DENY_RATIONALE: &str = "The request crosses the named branch boundary.";
@@ -525,6 +604,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoring_rejects_directly_constructed_blank_case_id() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        corpus.cases[0].id = "   ".to_string();
+        let (model, binding) = fixture_model([]);
+
+        let error = score_corpus(&model, &binding, &corpus)
+            .await
+            .expect_err("the scoring boundary rejects a blank case id");
+
+        assert!(matches!(error, ScoreError::BlankCaseId));
+    }
+
+    fn assert_seed_fingerprint(
+        corpus: &ApprovalJudgeCorpus,
+        responses: &serde_json::Value,
+        index: usize,
+    ) {
+        let case = &corpus.cases[index];
+        let recorded = responses["responses"][index]["request_fingerprint"]
+            .as_str()
+            .expect("the seed response names a fingerprint");
+        assert_eq!(
+            recorded,
+            request_fingerprint(case),
+            "fingerprint mismatch for case {}",
+            case.id
+        );
+    }
+
+    #[test]
+    fn seed_response_fingerprints_match_the_seed_corpus() {
+        let corpus = decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let responses: serde_json::Value =
+            serde_json::from_slice(SEED_RESPONSES).expect("the seed responses parse");
+
+        assert_seed_fingerprint(&corpus, &responses, 0);
+        assert_seed_fingerprint(&corpus, &responses, 1);
+        assert_seed_fingerprint(&corpus, &responses, 2);
+    }
+
+    #[test]
+    fn blank_corpus_case_ids_fail_closed() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        corpus.cases[0].id = "   ".to_string();
+        let encoded = serde_json::to_vec(&corpus).expect("the blank-id fixture serializes");
+
+        let error = decode_corpus(&encoded).expect_err("a blank case id is rejected");
+
+        expect![["corpus contains a case whose id is empty or whitespace-only"]]
+            .assert_eq(&error.to_string());
+    }
+
+    #[tokio::test]
     async fn scorer_reports_case_verdicts() {
         let corpus = decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
         let response_fixture = [
@@ -548,6 +682,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scorer_reports_aggregate_accuracy() {
+        let corpus = decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let (model, binding) = fixture_model([
+            scripted_decision(ApprovalDisposition::Approve, APPROVE_RATIONALE),
+            scripted_decision(ApprovalDisposition::EscalateToHuman, ESCALATE_RATIONALE),
+            scripted_decision(ApprovalDisposition::Deny, DENY_RATIONALE),
+        ]);
+
+        let scorecard = score_corpus(&model, &binding, &corpus)
+            .await
+            .expect("the scripted judge scores every seed case");
+
+        assert_eq!(scorecard.accuracy.numerator, 1);
+        assert_eq!(scorecard.accuracy.denominator, 3);
+    }
+
+    #[tokio::test]
     async fn scorer_reports_per_disposition_precision_recall() {
         let corpus = decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
         let (model, binding) = fixture_model([
@@ -560,7 +711,6 @@ mod tests {
             .await
             .expect("the scripted judge scores every seed case");
 
-        assert_eq!(scorecard.accuracy, MetricRate::new(1, corpus.cases.len()));
         assert_eq!(
             scorecard.dispositions[0],
             DispositionMetrics {
@@ -607,8 +757,8 @@ mod tests {
         let catalog = RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
             target,
             String::from(PROVIDER_MODEL),
-            256,
-            4_096,
+            FIXTURE_MAX_OUTPUT_TOKENS,
+            FIXTURE_CONTEXT_WINDOW_TOKENS,
         )
         .expect("the fixture model definition is request-safe")])
         .expect("the fixture catalog names one target once");
@@ -741,6 +891,7 @@ mod tests {
             .await
             .expect_err("the scoring boundary rejects missing label provenance");
 
+        assert!(matches!(error, ScoreError::MissingLabelProvenance { .. }));
         assert_eq!(error.case_id(), Some(missing_provenance_case_id.as_str()));
     }
 
