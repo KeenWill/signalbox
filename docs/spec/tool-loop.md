@@ -217,30 +217,35 @@ in model-call history with its selection, resolved provider target, credential
 reference, state, disposition, and reported token usage. Its closed result is
 `Approve`, `Deny`, or `EscalateToHuman`, always with rationale.
 
-For a repository-watch-created session, preparation also reads the immutable
-dispatch authority linked to that session. Pull-request authority contains the
-dispatch identity, watched repository, pull-request number, exact head commit,
-head repository and branch, and base branch; branch authority contains the
-dispatch identity, repository, and branch. The judge receives this structured
-authority beside the commissioned goal, template, and frozen system prompt.
-Every session-derived field is separately delimited and quoted as untrusted
-evidence, and the judge prompt treats it as scope to compare with the proposed
-request rather than as instruction. The context comes from the append-only
-dispatch action and triggering event, not from mutable provider state or text
-reconstructed from the goal.
+For a turn recorded in the generation a repository-watch dispatch commissioned,
+preparation also reads the immutable dispatch authority linked to that dispatch.
+Pull-request authority contains the dispatch identity, watched repository,
+pull-request number, exact head commit, head repository and branch, and base
+branch; branch authority contains the dispatch identity, repository, and branch.
+The judge receives this structured authority beside the commissioned goal,
+template, and frozen system prompt. A judged turn in any other generation of
+that session — an unrelated successor goal it later accepted — resolves no such
+authority, as does a turn no generation recorded: the dispatch described
+neither. Those turns are prepared, judged, and escalated exactly as in a session
+no dispatch created, which [repository watch](repo-watch.md) states from the
+dispatch side. Every session-derived field is separately delimited and quoted as
+untrusted evidence, and the judge prompt treats it as scope to compare with the
+proposed request rather than as instruction. The context comes from the
+append-only dispatch action and triggering event, not from mutable provider
+state or text reconstructed from the goal.
 
 The judge may approve or deny only a request frozen as `Delegated`. In a session
 without repository-watch dispatch authority, an `EscalateToHuman` result stores
 the completed call but no approval decision and leaves the same request parked.
 A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous` terminal judge call
 likewise retains that attended park while immediately admitting a user decision,
-so a terminal judge failure cannot prevent that decision. In a
-repository-watch-created session, no user attends the approval wait — unless
-steering accepted while the judge was outstanding still names the judged turn,
-which is a user attending it. That turn keeps the attended park described above:
-its completed `EscalateToHuman` leaves the turn active and the request parked
-for whoever steered, exactly as in a session no dispatch created, and no steer
-is reclassified or stranded by a terminalization it did not expect. Otherwise a
+so a terminal judge failure cannot prevent that decision. In a session judged
+under dispatch authority, no user attends the approval wait — unless steering
+accepted while the judge was outstanding still names the judged turn, which is a
+user attending it. That turn keeps the attended park described above: its
+completed `EscalateToHuman` leaves the turn active and the request parked for
+whoever steered, exactly as in a session no dispatch created, and no steer is
+reclassified or stranded by a terminalization it did not expect. Otherwise a
 completed `EscalateToHuman` closes every unresolved request in the active batch
 as `ToolClosed`, appends `TurnFailed`, terminalizes the turn with the completed
 judge escalation as its typed cause, and blocks the commissioned goal for
