@@ -160,19 +160,53 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     parked_attempts bigint;
+    stalled_event_id uuid;
 BEGIN
-    UPDATE repo_watch_dispatch_obligation
-       SET parked_at = clock_timestamp(),
-           parked_state_event_id = latest_event_id
-     WHERE obligation_id = subject_obligation_id
-       AND settled_kind IS NULL
-       AND parked_at IS NULL
-       AND failed_attempts >= repo_watch_dispatch_attempt_budget()
-    RETURNING failed_attempts INTO parked_attempts;
+    SELECT obligation.latest_event_id
+      INTO stalled_event_id
+      FROM repo_watch_dispatch_obligation AS obligation
+     WHERE obligation.obligation_id = subject_obligation_id
+       AND obligation.settled_kind IS NULL
+       AND obligation.parked_at IS NULL
+       AND obligation.failed_attempts >= repo_watch_dispatch_attempt_budget()
+       FOR UPDATE;
 
     IF NOT FOUND THEN
         RETURN;
     END IF;
+
+    -- The pull request may have moved while the exhausting attempt ran, under
+    -- an event no rule of this lineage matched. That head is progress that
+    -- buys another attempt, and nothing will restate it later, so it is read
+    -- from the pull request's durable state here rather than waited for.
+    IF EXISTS (
+        SELECT 1
+          FROM repo_watch_event AS stalled
+         WHERE stalled.event_id = stalled_event_id
+           AND stalled.target_kind = 'pull_request'
+           AND stalled.head_sha IS DISTINCT FROM (
+                SELECT current_state.head_sha
+                  FROM repo_watch_event AS current_state
+                 WHERE current_state.repository = stalled.repository
+                   AND current_state.pull_request_number
+                        = stalled.pull_request_number
+                 ORDER BY current_state.cursor_generation DESC,
+                          current_state.event_ordinal DESC
+                 LIMIT 1
+           )
+    ) THEN
+        UPDATE repo_watch_dispatch_obligation
+           SET failed_attempts = 0,
+               last_failed_attempt_at = NULL
+         WHERE obligation_id = subject_obligation_id;
+        RETURN;
+    END IF;
+
+    UPDATE repo_watch_dispatch_obligation
+       SET parked_at = clock_timestamp(),
+           parked_state_event_id = latest_event_id
+     WHERE obligation_id = subject_obligation_id
+    RETURNING failed_attempts INTO parked_attempts;
 
     PERFORM repo_watch_record_dispatch_obligation_park_transition(
         subject_obligation_id,
@@ -308,6 +342,21 @@ BEGIN
                 OR incoming.event_kind IN (
                     'review_submitted', 'thread_opened', 'thread_resolved'
                 )
+           )
+           -- Progress is what follows the stalled state. One repository event
+           -- is evaluated once per active rule, so without this a rule lagging
+           -- behind its siblings would eventually replay an older event against
+           -- a newer park and hand back a budget the pull request never earned.
+           AND (incoming.cursor_generation, incoming.event_ordinal)
+                > (parked_state.cursor_generation, parked_state.event_ordinal)
+           -- And one event buys one release. The evaluations of a single event
+           -- are spread across rules, so a lineage that parks again between two
+           -- of them would otherwise be released twice by the same fact.
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM repo_watch_dispatch_obligation_park AS spent
+                 WHERE spent.obligation_id = obligation.obligation_id
+                   AND spent.release_event_id = progress_event_id
            )
          ORDER BY obligation.obligation_id
     LOOP

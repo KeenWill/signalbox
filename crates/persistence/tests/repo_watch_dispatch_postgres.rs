@@ -2094,6 +2094,35 @@ async fn a_new_head_releases_a_parked_obligation() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
+/// The head can move while the exhausting attempt is still running, under an
+/// event no rule of the lineage matches. Nothing restates that head afterwards,
+/// so a park that only ever read matched events would strand the lineage on a
+/// state the pull request had already left.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_head_that_moved_during_the_last_attempt_refuses_the_park() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let second =
+        spend_one_attempt(&fixture, fixture.session(0), PARK_FIRST_STOP_COMMAND_ID).await?;
+    let third = spend_one_attempt(&fixture, second, PARK_FIRST_STOP_COMMAND_ID + 1).await?;
+    let fourth = spend_one_attempt(&fixture, third, PARK_FIRST_STOP_COMMAND_ID + 2).await?;
+    let fifth = spend_one_attempt(&fixture, fourth, PARK_FIRST_STOP_COMMAND_ID + 3).await?;
+    let sixth = spend_one_attempt(&fixture, fifth, PARK_FIRST_STOP_COMMAND_ID + 4).await?;
+
+    evaluate_nonmatching_head_change(&fixture).await?;
+    withdraw_dispatched_goal(&fixture.pool, sixth, PARK_FIRST_STOP_COMMAND_ID + 5).await?;
+
+    let parked: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_parked_dispatch_obligation")
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(parked, 0);
+    assert_eq!(outstanding_failed_attempts(&fixture.pool).await?, 0);
+    assert!(load_next_obligation(&fixture).await?.is_some());
+    Ok(())
+}
+
 /// The stalled target must survive a neighbour's match. A collapsed singleton
 /// advances its latest-event projection on any matching event, so reading the
 /// stalled target from that projection would hand the release condition to the

@@ -727,6 +727,7 @@ impl PostgresRepoWatchDispatchStore {
                 cooldown,
                 actions,
             } => {
+                self.release_parked_obligations_for_event(&event).await?;
                 let mut transaction = self.pool.begin().await?;
                 let (singleton, matched_admission) = match admission {
                     EvaluationAdmission::Fresh => (
@@ -792,7 +793,6 @@ impl PostgresRepoWatchDispatchStore {
                     transaction.rollback().await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::Inactive);
                 }
-                release_parked_obligations_for_event(&mut transaction, &event).await?;
                 let terminal_event = matches!(
                     event.kind(),
                     RepoWatchEventKindV1::PullRequestClosed
@@ -1093,23 +1093,31 @@ impl RepoWatchDispatchTransaction for PostgresRepoWatchDispatchStore {
     }
 }
 
-/// Releases every parked obligation this event is progress for.
-///
-/// Called from both terminal evaluation paths because a parked lineage is
-/// released by its pull request moving on, not by the moving event happening to
-/// match the rule that parked it.
-async fn release_parked_obligations_for_event(
-    transaction: &mut Transaction<'_, Postgres>,
-    event: &RepoWatchEvent,
-) -> Result<(), RepoWatchDispatchRepositoryError> {
-    sqlx::query("SELECT repo_watch_release_dispatch_obligation_parks_for_event($1)")
-        .bind(event.id().as_uuid())
-        .execute(&mut **transaction)
-        .await?;
-    Ok(())
-}
-
 impl PostgresRepoWatchDispatchStore {
+    /// Releases every parked obligation this event is progress for.
+    ///
+    /// Both terminal evaluation paths call this, because a parked lineage is
+    /// released by its pull request moving on and not by the moving event
+    /// happening to match the rule that parked it.
+    ///
+    /// Committed on its own, before any singleton key is taken. A rule-scoped
+    /// singleton spans repositories, so an evaluation holding one can own the
+    /// obligation row of a lineage parked in another repository while this scan
+    /// wants a row that another repository's evaluation owns the same way;
+    /// inside the critical section those two waits close a cycle. Releasing
+    /// first costs only idempotent repetition if the evaluation that follows
+    /// fails, since a release is recorded against the event that bought it.
+    async fn release_parked_obligations_for_event(
+        &self,
+        event: &RepoWatchEvent,
+    ) -> Result<(), RepoWatchDispatchRepositoryError> {
+        sqlx::query("SELECT repo_watch_release_dispatch_obligation_parks_for_event($1)")
+            .bind(event.id().as_uuid())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn record_simple_outcome(
         &self,
         event: &RepoWatchEvent,
@@ -1117,6 +1125,7 @@ impl PostgresRepoWatchDispatchStore {
         rule_version: RepoWatchRuleVersion,
         outcome: RepoWatchEvaluationOutcomeStorageKind,
     ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError> {
+        self.release_parked_obligations_for_event(event).await?;
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, event.repository().as_str()).await?;
         if let Some(recorded) =
@@ -1129,7 +1138,6 @@ impl PostgresRepoWatchDispatchStore {
             transaction.rollback().await?;
             return Ok(RepoWatchRuleEvaluationOutcome::Inactive);
         }
-        release_parked_obligations_for_event(&mut transaction, event).await?;
         insert_evaluation(
             &mut transaction,
             event,
