@@ -67,7 +67,7 @@ def write_manifest_workflow(root: Path, *names: str) -> None:
     workflow.write_text(
         "jobs:\n"
         "  postgres-integration-run:\n"
-        "    runs-on: signalbox-docker\n"
+        "    runs-on: ${{ matrix.runner }}\n"
         "    steps:\n"
         "      - env:\n"
         "          SUITE: ${{ matrix.suite }}\n"
@@ -946,7 +946,7 @@ class DocsConsistencyTests(unittest.TestCase):
         workflow.write_text(
             "jobs:\n"
             "  postgres-integration-run:\n"
-            "    runs-on: signalbox-docker\n"
+            "    runs-on: ${{ matrix.runner }}\n"
             "    steps:\n"
             "      - env:\n"
             "          SUITE: ${{ matrix.suite }}\n"
@@ -1020,7 +1020,7 @@ class DocsConsistencyTests(unittest.TestCase):
         workflow.write_text(
             workflow.read_text(encoding="utf-8").replace(
                 "  postgres-integration-run:\n"
-                "    runs-on: signalbox-docker\n",
+                "    runs-on: ${{ matrix.runner }}\n",
                 "  postgres-integration-run:\n"
                 "    runs-on: macos-latest\n",
             ),

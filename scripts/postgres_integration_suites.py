@@ -87,7 +87,7 @@ ARCHIVE_ARTIFACT = re.compile(
     r"(?P<suite>postgres-integration-archive-[A-Za-z0-9][A-Za-z0-9-]*)[ ]*$"
 )
 SUITE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
-RUNS_ON = re.compile(r"^[ ]*runs-on:[ ]*(?P<target>[^ #\n]+)", re.MULTILINE)
+RUNS_ON = re.compile(r"^[ ]*runs-on:[ ]*(?P<target>.*?)[ ]*$", re.MULTILINE)
 SHELL_SCALAR = re.compile(r"^(?P<indent>[ ]*)(?:-[ ]+)?(?:run|command):(?P<inline>.*)$")
 # A block header carries its chomping and indentation indicators in either
 # order: `|2-` and `|-2` are the same scalar.
@@ -121,8 +121,12 @@ WORKSPACE_SELECTORS = ("--workspace", "--all")
 AGGREGATE_JOB = "postgres-integration"
 RUN_JOB = "postgres-integration-run"
 BUILD_JOB = "postgres-integration-build"
-BUILD_RUNNER = "signalbox-docker"
-RUN_RUNNER = "signalbox-docker"
+PRODUCTION_RUNNER = "signalbox-docker"
+NVME_CANARY_RUNNER = "signalbox-docker-nvme-canary"
+NVME_CANARY_SUITE = "persistence"
+NVME_CANARY_PARTITIONS = frozenset({1, 2, 3, 4})
+BUILD_RUNNER = PRODUCTION_RUNNER
+RUN_RUNNER = "${{ matrix.runner }}"
 # A step or job that may fail without failing anything above it. The archived
 # run carrying this would let every shard fail while the matrix job reports
 # success and the aggregate's assertion passes.
@@ -330,7 +334,9 @@ def run_matrix(suites: tuple[Suite, ...]) -> dict[str, list[dict[str, object]]]:
     """Expand the suites into the workflow's `strategy.matrix` object.
 
     One entry per shard, so a suite declaring one shard costs exactly one
-    runner and stays in the same machinery as a sharded one.
+    runner and stays in the same machinery as a sharded one. The first four
+    persistence shards are the bounded node-local-NVMe canary load; every other
+    shard remains on the production Docker pool.
     """
     include: list[dict[str, object]] = []
     for suite in suites:
@@ -341,6 +347,12 @@ def run_matrix(suites: tuple[Suite, ...]) -> dict[str, list[dict[str, object]]]:
                     "partition": partition,
                     "partitions": suite.shards,
                     "filter": suite.filterset(),
+                    "runner": (
+                        NVME_CANARY_RUNNER
+                        if suite.name == NVME_CANARY_SUITE
+                        and partition in NVME_CANARY_PARTITIONS
+                        else PRODUCTION_RUNNER
+                    ),
                 }
             )
     return {"include": include}
@@ -788,10 +800,11 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
                 f"take that value from the matrix {MANIFEST} generates"
             )
 
-    # The build and run shards must share the dedicated Docker fleet's image and
-    # absolute work-path shape: nextest archives retain paths from compilation,
-    # and every shard needs an isolated Docker daemon for PostgreSQL. Check each
-    # job independently so either half cannot drift to another environment.
+    # The build and run shards must use the dedicated Docker fleets' common
+    # image and absolute work-path shape: nextest archives retain paths from
+    # compilation, and every shard needs an isolated Docker daemon for
+    # PostgreSQL. Check each job independently so either half cannot drift to
+    # another environment or stop honoring the generated runner selection.
     expected_targets = {
         BUILD_JOB: BUILD_RUNNER,
         RUN_JOB: RUN_RUNNER,
