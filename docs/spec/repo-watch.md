@@ -728,20 +728,22 @@ cannot free a singleton the session no longer holds, and the requeue above is
 owed only on the release an escalation itself causes, so a batch with a release
 row receives no second replacement. It costs no occupancy either — the batch
 that turn once held is no longer this session's. Standing authority is what says
-a person is there: a release row alone does not, since a lifecycle cutoff
-releases the batch by stopping the goal while the turn still awaits its judge. A
-released batch whose authority has ended is stale work, so its escalation is
-terminalized rather than parked for a user who will never come, and
-terminalizing it owes no second redispatch because the release already spent the
-requeue. The block the escalation writes claims no release — a batch a sibling
-action still pursues releases only when that sibling ends — and states that no
-automatic resumption is scheduled, which [goal mode](goal-mode.md) admits as its
-one exception and which is why that need text names the operator repair itself.
-Whether the batch released is likewise a fact about the batch: it is recorded in
-the release row and the escalation audit view, not reported as this completion's
-own effect, because a sibling settling later would otherwise change the answer
-an identical replay receives. `repo_watch_headless_approval_escalation_audit`
-joins the append-only escalation cause and rationale to its dispatch release and
+a person is still behind the work. A batch cannot release while the turn is
+active, because an active turn stays runtime-relevant whatever its goal
+recorded, so the only way an escalation meets a released batch is on work an
+operator resumed after an earlier escalation released it. A goal that has ended
+again since that resumption leaves stale work, so its escalation is terminalized
+rather than parked for a user who will never come, and terminalizing it owes no
+second redispatch because the release already spent the requeue. The block the
+escalation writes claims no release — a batch a sibling action still pursues
+releases only when that sibling ends — and states that no automatic resumption
+is scheduled, which [goal mode](goal-mode.md) admits as its one exception and
+which is why that need text names the operator repair itself. Whether the batch
+released is likewise a fact about the batch: it is recorded in the release row
+and the escalation audit view, not reported as this completion's own effect,
+because a sibling settling later would otherwise change the answer an identical
+replay receives. `repo_watch_headless_approval_escalation_audit` joins the
+append-only escalation cause and rationale to its dispatch release and
 replacement obligation, including whether and when that obligation settled. The
 terminal attempt, failure transcript entry, and terminal frontier it recorded
 are all durable evidence of that transition, so a replayed completion offering

@@ -143,7 +143,10 @@ const STEERED_DISPATCH_INPUT_ID: u128 = 0x5d_400;
 const RESUMED_DISPATCH_COMMAND_ID: u128 = 0x5d_500;
 const RESUMED_DISPATCH_INPUT_ID: u128 = 0x5d_600;
 const RESUMED_DISPATCH_TURN_ID: u128 = 0x5d_700;
-const CUTOFF_ESCALATION_STOP_COMMAND_ID: u128 = 0x5d_800;
+const STALE_DISPATCH_RESUME_COMMAND_ID: u128 = 0x5d_800;
+const STALE_DISPATCH_INPUT_ID: u128 = 0x5d_900;
+const STALE_DISPATCH_TURN_ID: u128 = 0x5d_a00;
+const STALE_DISPATCH_STOP_COMMAND_ID: u128 = 0x5d_b00;
 const TEMPLATE_MODEL_SELECTION_ID: u128 = 901;
 const APPROVAL_JUDGE_PROVIDER_ID: u128 = 902;
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "fixture-credential";
@@ -2337,35 +2340,29 @@ async fn a_released_dispatch_escalates_resumed_work_to_its_operator() -> Result<
     Ok(())
 }
 
-/// A release row does not mean a user is there. A lifecycle cutoff stops the
-/// goal while the turn still awaits its judge, which releases the batch because
-/// a stopped generation's turn is no longer runtime-relevant. That work is
-/// stale, so its escalation is terminalized rather than parked for nobody — and
-/// with the authority already ended, no execution-failure block is appended.
+/// A released batch parks only while a person is still behind the work. The
+/// reachable stale case is the resumed one: an earlier escalation terminalized
+/// its turn and released the batch, an operator resumed the goal, and the goal
+/// then ended while the resumed turn's judge was in flight. That escalation is
+/// terminalized rather than parked for nobody, and with the authority already
+/// ended no execution-failure block is appended and no requeue is owed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn a_cutoff_released_dispatch_terminalizes_stale_work() -> Result<(), Box<dyn Error>> {
+async fn a_released_dispatch_terminalizes_work_whose_goal_ended() -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
     let seed = 0x50_320;
-    let (model_repository, prepared, turn, _requests) =
+    let (model_repository, prepared, _turn, _requests) =
         checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
     let approval_repository = model_repository.approval_judge_repository();
     approval_repository.authorize(&prepared).await?;
-    withdraw_dispatched_goal(
-        &fixture.pool,
-        fixture.session(0),
-        CUTOFF_ESCALATION_STOP_COMMAND_ID,
-    )
-    .await?;
-    let released_before_completion = release_count(&fixture).await?;
-
-    let outcome = approval_repository
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable dispatch fence",
+    ))?;
+    let unattended = approval_repository
         .complete(
             &prepared,
             DelegateApprovalRecommendation::EscalateToHuman,
-            ToolDecisionRationale::try_new(String::from(
-                "the provider requests authority beyond the immutable dispatch fence",
-            ))?,
+            rationale.clone(),
             ProviderReportedTokenUsage::unreported(),
             ApprovalJudgeCompletionIdentities::new(
                 TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
@@ -2379,10 +2376,63 @@ async fn a_cutoff_released_dispatch_terminalizes_stale_work() -> Result<(), Box<
             },
         )
         .await?;
+    let released = release_count(&fixture).await?;
+
+    let stale_turn = TurnId::from_uuid(Uuid::from_u128(STALE_DISPATCH_TURN_ID));
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(STALE_DISPATCH_RESUME_COMMAND_ID)),
+                    fixture.session(0),
+                    GoalUserAction::Resume(None),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(STALE_DISPATCH_INPUT_ID)),
+                    stale_turn,
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+    let (resumed_repository, resumed_prepared, resumed_turn, _resumed_requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, 0x50_340).await?;
+    let resumed_approvals = resumed_repository.approval_judge_repository();
+    resumed_approvals.authorize(&resumed_prepared).await?;
+    // The goal ends while this judge is in flight, which is what makes the
+    // resumed work stale. The turn stays active until the completion below
+    // terminalizes it: an active turn is runtime-relevant whatever its goal
+    // recorded, so ending the goal releases nothing by itself.
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        STALE_DISPATCH_STOP_COMMAND_ID,
+    )
+    .await?;
+    let released_before_completion = release_count(&fixture).await?;
+
+    let outcome = resumed_approvals
+        .complete(
+            &resumed_prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(0x50_340 + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x50_340 + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x50_340 + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET + 1,
+                ))
+            },
+        )
+        .await?;
     let lifecycle: String = sqlx::query_scalar(
         "SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1 AND session_id = $2",
     )
-    .bind(turn.as_uuid())
+    .bind(resumed_turn.as_uuid())
     .bind(fixture.session(0).as_uuid())
     .fetch_one(&fixture.pool)
     .await?;
@@ -2404,8 +2454,14 @@ async fn a_cutoff_released_dispatch_terminalizes_stale_work() -> Result<(), Box<
     .await?;
 
     assert_eq!(
+        unattended,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(released, 1);
+    assert_eq!(resumed_turn, stale_turn);
+    assert_eq!(
         released_before_completion, 1,
-        "stopping the goal releases the batch while its turn is still active"
+        "ending the goal releases nothing further while the resumed turn is active"
     );
     assert_eq!(
         outcome,
@@ -2416,7 +2472,7 @@ async fn a_cutoff_released_dispatch_terminalizes_stale_work() -> Result<(), Box<
         latest_goal_event, "user_stopped",
         "an ended generation records no execution-failure block"
     );
-    assert_eq!(escalations, 1);
+    assert_eq!(escalations, 2);
     assert_eq!(release_count(&fixture).await?, 1);
     Ok(())
 }

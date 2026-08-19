@@ -756,14 +756,17 @@ const DISPATCH_COMMISSIONED_GENERATION: GoalGeneration = GoalGeneration::new(Non
 /// released spends nothing further. A park there costs repository watch nothing
 /// either, because the batch that turn once held is no longer its occupancy.
 ///
-/// The authority is what says a person is there, and a release row alone does
-/// not: a lifecycle cutoff releases the batch too, by stopping the goal while
-/// this turn still awaits its judge, and that release is automated. Standing
-/// authority on an already-released batch means the goal was blocked and
-/// resumed by hand, so the escalation waits for whoever resumed it. Withdrawn
-/// authority means the work is stale, so it is terminalized instead of parking
-/// for a user who will never come — and terminalizing it owes no second
-/// redispatch, because the release row already spent the requeue.
+/// The authority is what says a person is still behind the work. A batch
+/// cannot release while this turn is active — `goal_turn_is_queue_order_relevant`
+/// holds any non-queued turn runtime-relevant whatever its goal recorded, so
+/// the release predicate's live-turn clause excludes the action — which leaves
+/// one way to reach a released batch here: an earlier escalation terminalized
+/// its turn and released, and an operator resumed the goal. Standing authority
+/// is that operator, so the escalation waits for them. Withdrawn authority
+/// means the goal ended again while this judge was in flight, leaving stale
+/// work, so it is terminalized instead of parking for a user who will never
+/// come — and terminalizing it owes no second redispatch, because the release
+/// row already spent the requeue.
 async fn unattended_escalation_applies(
     connection: &mut PgConnection,
     prepared: &PreparedApprovalJudge,
