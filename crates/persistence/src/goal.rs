@@ -651,8 +651,8 @@ impl GoalRepository {
 ///
 /// Approval-judge headless closeout uses this boundary so its turn failure,
 /// blocked goal event, repository-watch requeue, and singleton release share
-/// one commit. The ordinary public method remains the owner of independent
-/// scheduler passes.
+/// one commit. The ordinary public method remains the entry point for
+/// independent scheduler passes.
 pub(crate) async fn block_execution_failure_locked(
     connection: &mut PgConnection,
     session: SessionId,
