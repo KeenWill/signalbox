@@ -766,13 +766,14 @@ recheck is the race-closing backstop. Either path settles stale nonterminal work
 as `target_closed` without creating a session. Cutoff processing settles after
 it has stopped the goals it commissioned, so it takes session rows before
 obligation rows and cannot close a lock cycle against a dispatch session
-terminating into the same obligation. A rule that matches the
-`PullRequestClosed` or `PullRequestMerged` event itself remains
-dispatch-eligible, and a non-converged termination of that dispatch still owes
-its requeue while its own cutoff remains the latest one; the terminal event is
-the cutoff fact, not work made stale by that fact. Corruption in one
-commissioned goal rolls back that goal's stop to a savepoint but does not roll
-back the cutoff: the terminal event remains durably dispositioned, healthy
+terminating into the same obligation, and it takes those obligation rows in the
+order the progress-release scan takes them, which runs outside the repository
+lock. A rule that matches the `PullRequestClosed` or `PullRequestMerged` event
+itself remains dispatch-eligible, and a non-converged termination of that
+dispatch still owes its requeue while its own cutoff remains the latest one; the
+terminal event is the cutoff fact, not work made stale by that fact. Corruption
+in one commissioned goal rolls back that goal's stop to a savepoint but does not
+roll back the cutoff: the terminal event remains durably dispositioned, healthy
 commissioned goals are stopped, and later cutoffs remain eligible for
 processing.
 

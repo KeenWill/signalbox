@@ -49,6 +49,30 @@ pub(crate) const REPO_WATCH_ACTIVE_DISPATCH_OBLIGATION: &str = "SELECT obligatio
             AND obligation.settled_kind IS NULL
             FOR UPDATE";
 
+pub(crate) const REPO_WATCH_TERMINAL_TARGET_OBLIGATIONS: &str = "SELECT obligation.obligation_id
+           FROM repo_watch_dispatch_obligation AS obligation
+          WHERE obligation.settled_kind IS NULL
+            AND (
+                EXISTS (
+                    SELECT 1
+                      FROM repo_watch_event AS event
+                     WHERE event.event_id = obligation.latest_event_id
+                       AND event.repository = $1
+                       AND event.pull_request_number = $2
+                       AND event.event_id <> $3
+                )
+                OR EXISTS (
+                    SELECT 1
+                      FROM repo_watch_event AS parked_state
+                     WHERE parked_state.event_id = obligation.parked_state_event_id
+                       AND parked_state.repository = $1
+                       AND parked_state.pull_request_number = $2
+                       AND parked_state.event_id <> $3
+                )
+            )
+          ORDER BY obligation.obligation_id
+            FOR UPDATE";
+
 pub(crate) const REPO_WATCH_WEBHOOK_DELIVERY: &str = "SELECT receipt_sequence
        FROM repo_watch_webhook_delivery
       WHERE hook_id = $1 AND delivery_id = $2

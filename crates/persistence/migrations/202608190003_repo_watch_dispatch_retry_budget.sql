@@ -162,9 +162,23 @@ DECLARE
     parked_attempts bigint;
     progress_event_id uuid;
 BEGIN
+    -- The state the exhausting attempt was actually given, not the obligation's
+    -- latest-event projection: a fresh match arriving while that attempt ran
+    -- coalesces into the same row and advances the projection, so parking
+    -- against it would park state no attempt has been spent on and would hide
+    -- that state from the progress test below. Only a batch admitted before the
+    -- delivered state was recorded has none, and there the projection is all
+    -- there is.
     UPDATE repo_watch_dispatch_obligation
        SET parked_at = clock_timestamp(),
-           parked_state_event_id = latest_event_id
+           parked_state_event_id = coalesce(
+                (
+                    SELECT batch.delivered_state_event_id
+                      FROM repo_watch_dispatch_batch AS batch
+                     WHERE batch.dispatch_id = counted_dispatch_id
+                ),
+                latest_event_id
+           )
      WHERE obligation_id = subject_obligation_id
        AND settled_kind IS NULL
        AND parked_at IS NULL

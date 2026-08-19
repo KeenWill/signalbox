@@ -494,6 +494,16 @@ pub(crate) async fn settle_terminal_target_obligations(
     pull_request: Decimal,
     cutoff_event: RepoWatchEventId,
 ) -> Result<(), RepoWatchDispatchRepositoryError> {
+    // Taken in obligation order before the settlement writes, because the
+    // progress-release scan takes the same rows in the same order and runs
+    // outside the repository key this holds. An unordered multi-row update
+    // could meet that scan from the other end.
+    sqlx::query(crate::lock_inventory::REPO_WATCH_TERMINAL_TARGET_OBLIGATIONS)
+        .bind(repository.as_str())
+        .bind(pull_request)
+        .bind(cutoff_event.as_uuid())
+        .fetch_all(&mut **transaction)
+        .await?;
     sqlx::query(
         "UPDATE repo_watch_dispatch_obligation AS obligation
             SET settled_kind = $3,
