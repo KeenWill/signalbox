@@ -708,8 +708,22 @@ wait. It fails the active turn, blocks the commissioned goal, and therefore
 enters the same latest-state obligation and singleton-release path described
 above. Once release commits, the obligation becomes eligible under the ordinary
 cooldown and can create a fresh dispatch; the ended session does not remain
-load-bearing occupancy. `repo_watch_headless_approval_escalation_audit` joins
-the append-only escalation cause and rationale to its dispatch release and
+load-bearing occupancy. One turn is not terminalized this way: a turn a steer
+still names is attended by definition, and its escalation parks for the user who
+steered exactly as it would in a session no dispatch created, leaving the turn
+active and its batch held. Terminalizing it would strand that steer against the
+rule that no turn becomes terminal while pending steering names it, and
+reclassifying the steer into a queued successor would start fresh work in a
+session whose dispatch is being released for redispatch. The block the
+escalation writes claims no release — a batch a sibling action still pursues
+releases only when that sibling ends — and states that no automatic resumption
+is scheduled, which [goal mode](goal-mode.md) admits as its one exception and
+which is why that need text names the operator repair itself. Whether the batch
+released is likewise a fact about the batch: it is recorded in the release row
+and the escalation audit view, not reported as this completion's own effect,
+because a sibling settling later would otherwise change the answer an identical
+replay receives. `repo_watch_headless_approval_escalation_audit` joins the
+append-only escalation cause and rationale to its dispatch release and
 replacement obligation, including whether and when that obligation settled. The
 terminal attempt, failure transcript entry, and terminal frontier it recorded
 are all durable evidence of that transition, so a replayed completion offering

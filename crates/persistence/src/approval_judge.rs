@@ -210,10 +210,15 @@ pub enum CompleteApprovalJudgeOutcome {
     Decided,
     /// The judge explicitly left the request parked for a user decision.
     EscalatedToHuman,
-    /// An unattended turn was terminalized while a sibling still holds the dispatch.
+    /// An unattended turn was terminalized and audited for its dispatch.
+    ///
+    /// Whether the batch released is a fact about the batch rather than about
+    /// this completion — a sibling action still pursuing holds it, and settles
+    /// it later — so it is read from `repo_watch_dispatch_release` and the
+    /// escalation audit view instead of being reported here. Reporting it here
+    /// made an exact replay answer differently once a sibling finished, and
+    /// credited this completion with that sibling's effect.
     HeadlessEscalationTerminalized,
-    /// An unattended dispatch was terminalized, audited, released, and re-armed.
-    HeadlessEscalationReleased,
 }
 
 /// Closed failure disposition stored for a judge call that cannot decide.
@@ -593,7 +598,26 @@ impl PostgresApprovalJudgeRepository {
                 CompleteApprovalJudgeOutcome::Decided
             }
             None => {
-                if prepared.session_context.dispatch().is_some() {
+                // A steer accepted while this turn awaited its judge is a user
+                // attending the session, and the unattended path is for a
+                // session with none. It is also the one shape that path cannot
+                // durably take: terminalizing a turn a `pending_steering` input
+                // still names violates `turn_lifecycle_pending_steering_closed`
+                // and would fail this whole completion, leaving the request
+                // parked and the judge call in flight. Reclassifying the steer
+                // into a queued successor, as the model-execution terminal
+                // paths do, would instead start fresh work in a session whose
+                // dispatch was just released for redispatch. So the escalation
+                // parks for the user who steered, exactly as it does for a
+                // session no dispatch created.
+                if prepared.session_context.dispatch().is_some()
+                    && !turn_awaits_pending_steering(
+                        &mut transaction,
+                        prepared.request.session(),
+                        prepared.request.turn(),
+                    )
+                    .await?
+                {
                     persist_headless_escalation(
                         &mut transaction,
                         prepared,
@@ -603,7 +627,7 @@ impl PostgresApprovalJudgeRepository {
                         &mut next_closed_result_entry,
                     )
                     .await?;
-                    headless_escalation_outcome(&mut transaction, prepared.call).await?
+                    CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
                 } else {
                     CompleteApprovalJudgeOutcome::EscalatedToHuman
                 }
@@ -706,7 +730,14 @@ impl PostgresApprovalJudgeRepository {
     }
 }
 
-const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated approval escalated without an attending user; the repository-watch dispatch was released for retry.";
+/// Need text for the execution-failure block an unattended escalation appends.
+///
+/// It claims no release, because a batch a sibling action still pursues is not
+/// released by this escalation and becomes so only when that sibling ends. It
+/// also states that no automatic resumption is coming, which is true of this
+/// block alone among execution-failure blocks and is why it names the repair
+/// itself.
+const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. Repository watch retries the dispatched work under a fresh dispatch once its batch ends, and no automatic resumption is scheduled for this block. Resume this goal only to continue this session by hand.";
 
 /// The generation a repository-watch dispatch commissions in the session it
 /// creates, which is the only generation its authority describes.
@@ -716,6 +747,32 @@ const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated approval escalated with
 /// watch identifies the commission it owns the same way where it stops one
 /// (`goal::insert_repo_watch_composed_stop`).
 const DISPATCH_COMMISSIONED_GENERATION: GoalGeneration = GoalGeneration::new(NonZeroU64::MIN);
+
+/// Whether a `pending_steering` accepted input still names this turn.
+///
+/// The session row is already held, so the answer cannot change under the
+/// caller: accepting pending steering locks the same row to check that its
+/// source turn is active.
+async fn turn_awaits_pending_steering(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<bool, ApprovalJudgeRepositoryError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM accepted_input
+             WHERE session_id = $1
+               AND expected_active_turn_id = $2
+               AND disposition_kind = 'pending_steering'
+        )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(Into::into)
+}
 
 async fn persist_headless_escalation(
     connection: &mut PgConnection,
@@ -935,6 +992,17 @@ async fn persist_headless_escalation(
     require_single(audited, "headless escalation audit")?;
 
     if authority_stands {
+        // Deliberately not routed through `PostgresGoalPassDisposition`, which
+        // owns the bounded automatic resumption every other execution-failure
+        // block receives (`docs/spec/goal-mode.md`). Two reasons, both stated
+        // by that page's exception for this block. It must commit inside this
+        // transaction, atomically with the terminalization, the audit row, and
+        // the release attempt below; and the retry this failure is owed already
+        // exists and is a different one — repository watch redispatches the
+        // work under a fresh dispatch, so resuming the goal here would re-run
+        // the same escalating turn against a request no user is attending, up
+        // to the resumption budget, beside that redispatch. The need text above
+        // therefore names the repair itself rather than promising resumption.
         let need = GoalNeed::try_new(String::from(HEADLESS_ESCALATION_GOAL_NEED))
             .map_err(|_| ApprovalJudgeCorruption::Inconsistent("headless escalation goal need"))?;
         let outcome = goal::block_execution_failure_locked(
@@ -1569,7 +1637,7 @@ async fn exact_completed(
                 // identities, so a replay offering any other one is a
                 // structurally different call rather than the same one twice.
                 Some(persisted) if persisted != identities => return Ok(None),
-                Some(_) => headless_escalation_outcome(connection, prepared.call).await?,
+                Some(_) => CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized,
             }
         }
         None => CompleteApprovalJudgeOutcome::EscalatedToHuman,
@@ -1599,29 +1667,6 @@ async fn headless_escalation_identities(
         SemanticTranscriptEntryId::from_uuid(required(&row, "failure_entry_id")?),
         ContextFrontierId::from_uuid(required(&row, "terminal_frontier_id")?),
     )))
-}
-
-async fn headless_escalation_outcome(
-    connection: &mut PgConnection,
-    call: ModelCallId,
-) -> Result<CompleteApprovalJudgeOutcome, ApprovalJudgeRepositoryError> {
-    let released: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-            SELECT 1
-              FROM repo_watch_headless_approval_escalation AS escalation
-              JOIN repo_watch_dispatch_release AS release
-                ON release.dispatch_id = escalation.dispatch_id
-             WHERE escalation.model_call_id = $1
-        )",
-    )
-    .bind(call.into_uuid())
-    .fetch_one(&mut *connection)
-    .await?;
-    Ok(if released {
-        CompleteApprovalJudgeOutcome::HeadlessEscalationReleased
-    } else {
-        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
-    })
 }
 
 async fn exact_completion_continuation(

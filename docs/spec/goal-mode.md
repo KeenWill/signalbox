@@ -234,6 +234,17 @@ scheduler pass, which returns its ambiguity without waiting. Arming a block
 another pass already armed is harmless for the same reason a retry is: both
 derive one identity, and the second attempt replays it.
 
+**Implemented behavior.** One execution-failure block is exempt from automatic
+resumption: the block an unattended repository-watch approval escalation appends
+in the transaction that fails its turn, described by
+[repository watch](repo-watch.md). It arms no attempt, and its need text states
+that and names the operator repair directly instead. The work that block ended
+is already owed a retry, and a different one — repository watch redispatches it
+under a fresh dispatch — so resuming this goal would re-run an escalating turn
+against a request no user is attending, beside that redispatch, until the budget
+ran out. Every other execution-failure block owes the bounded resumption above,
+including one appended for a session repository watch created.
+
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The
 initial post-startup sweep therefore recovers a process loss between turn

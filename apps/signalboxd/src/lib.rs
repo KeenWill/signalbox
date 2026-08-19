@@ -1153,8 +1153,7 @@ async fn execute_approval_judge(
     Ok(match outcome {
         CompleteApprovalJudgeOutcome::Decided => ApprovalJudgeLoopOutcome::Continue,
         CompleteApprovalJudgeOutcome::EscalatedToHuman
-        | CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
-        | CompleteApprovalJudgeOutcome::HeadlessEscalationReleased => {
+        | CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized => {
             ApprovalJudgeLoopOutcome::Parked
         }
     })
