@@ -224,8 +224,10 @@ Detection follows one fixed algorithm:
     type from different readers and a strong claim accompanied by a structural
     candidate for another type or reader. `DeclaredCandidate` is nomination from
     caller metadata, not byte evidence, and never participates in this conflict
-    set. Multiple malformed claims for the same type and reader collapse to that
-    reader's deterministic registered reason code.
+    set. Multiple malformed claims for the same type and reader collapse only
+    when every claim carries the same registered reason code. Differing reason
+    codes return `ProcessorFailed { reason_code: inconsistent_probe_state }`;
+    probe completion, registration, and iteration order never select one.
 04. With no conflicting claim, any `RecognizedMalformed` result returns
     `Malformed` immediately. It never falls back to a candidate, declared type,
     or text.
@@ -380,9 +382,13 @@ aggregate capacity. Thus the baseline plus all references, rather than the
 references alone, must fit the complete-request maximum. A baseline that already
 exceeds the maximum returns `TargetPayloadTooLarge { maximum_bytes }`, because
 the target request is full independently of any referenced source. A reference
-whose checked projection would overflow the remainder returns `SourceTooLarge`
-with the aggregate target maximum. Either failure publishes, reserves, and
-commits nothing. An unsupported type returns typed modality-unsupported failure;
+that is intrinsically above its per-reference materialized or wire maximum
+returns `SourceTooLarge` with that specific maximum. A reference that fits every
+intrinsic bound but would overflow aggregate capacity remaining after the
+baseline or earlier references instead returns
+`TargetPayloadTooLarge { maximum_bytes }`; sibling order never reclassifies the
+source itself as oversized. Either failure publishes, reserves, and commits
+nothing. An unsupported type returns typed modality-unsupported failure;
 an oversized target projection returns `SourceTooLarge` with the target-specific
 maximum. Neither path can publish, reserve, or commit a reference.
 
@@ -628,14 +634,16 @@ and order.
 New output streams through generated-artifact ingest. Publication and
 verification precede registration; registration precedes result commit. After
 authorization and before processor or store I/O, a separate short pre-execution
-transaction prospectively projects the complete rendered frontier and durably
-reserves one reference slot and the view's maximum presented bytes for this
-request. The projection includes the pinned target's per-type materialized and
-provider-wire byte limits and the mandatory continuation call's remaining input
-capacity. It rejects the read before creating output when the reservation would
-exceed any target-specific, reference-count, aggregate-media, or context-input
-boundary, then ends before any worker or store I/O begins. Publication consumes
-no more than the durable reservation. The byte reservation separately records
+transaction durably subdivides this request's reservation already obtained by
+batch admission into one reference slot and the view's maximum presented bytes;
+it never charges the reference, media, provider-wire, or context-input ledgers a
+second time. The subdivision retains the batch reservation's pinned-target
+projection, including per-type materialized and provider-wire limits and the
+mandatory continuation call's remaining input capacity, and verifies that the
+selected view fits it. It rejects the read before creating output if that
+already-reserved allocation is insufficient, then ends before any worker or
+store I/O begins. Publication consumes no more than the durable subdivision.
+The byte reservation separately records
 the maximum materialized length and the adapter's checked worst-case complete
 provider-wire projection for that length; encoded expansion is therefore
 reserved before execution rather than inferred from materialized bytes. A short
@@ -661,14 +669,19 @@ recovery never erases an external effect. Equal output bytes converge by digest,
 and ambiguous publication cannot become tool success.
 
 For a rich view that directly presents the verified source instead of producing
-binary output, the broker checks the authenticated source `byte_length` before
-committing the reference. The length must fit the view's declared presentation
-maximum, the presentation kind's process ceiling, and the target-specific
-materialized maximum. The adapter's checked worst-case wire projection of that
-exact length must independently fit the target provider-wire maximum and the
-wire portion of the durable reservation. Failure returns `SourceTooLarge` with
-the effective maximum and commits no reference. A direct reference cannot bypass
-a generated-output channel's bounds merely because its bytes already exist.
+binary output, the broker first requires the returned `media_type` to equal the
+source's validated `detected_media_type`. Only then may it copy
+`source_validation` into `presentation_validation`; a declaration-permitted but
+different emitted type is `ProcessorFailed { reason_code:
+undeclared_worker_outcome }` and commits no reference. The broker also checks the
+authenticated source `byte_length` before commit. The length must fit the view's
+declared presentation maximum, the presentation kind's process ceiling, and the
+target-specific materialized maximum. The adapter's checked worst-case wire
+projection of that exact length must independently fit the target provider-wire
+maximum and the wire portion of the durable reservation. Failure returns
+`SourceTooLarge` with the effective maximum and commits no reference. A direct
+reference cannot bypass a generated-output channel's bounds merely because its
+bytes already exist.
 
 Rendering first emits a bounded textual stub. Preparation then:
 
@@ -896,9 +909,12 @@ normal review budget.
 1. **Runtime and registry:** neutral types, registry, bounded ports, failure
    algebra, scripted provider, and shared suite; compose an empty registry.
 2. **Isolation and inspection:** ruled sandbox, verified-source broker,
-   supervision, `file_inspect`, and one small pure-Rust text/structure adapter.
-3. **Text and structure:** ruled document adapters, paged `file_read` results,
-   and durable turn work accounting.
+   supervision, `file_inspect`, and the scripted conformance provider; the
+   production registry remains empty.
+3. **First ruled formats:** only after the owner selects the initial format
+   inventory, add the selected adapters and their matching bounded `file_read`
+   result paths, plus durable turn work accounting. Split this slice by family
+   when the ruling would exceed the normal review budget.
 4. **Image groundwork:** ruled adapters, pixel validation, region/fit view
    declarations, and conformance fixtures; this slice exposes no rich result.
 5. **Images and provider input:** generated previews, `BlobReference::Image`,
