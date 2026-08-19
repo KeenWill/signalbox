@@ -33,3 +33,25 @@ CREATE INDEX tool_attempt_live_by_session
 CREATE INDEX model_call_live_by_session
     ON model_call (session_id)
     WHERE state_kind <> 'terminal';
+
+-- The pass also reads a session's newest turn-progress event as its evidence
+-- that the active turn is moving. Not every outbox event means that: accepting
+-- queued input, changing session model settings, retiring a goal turn, creating
+-- a session, and a runner state transition are all things that happen *to* a
+-- session while its active turn sits still. Including them would let a user
+-- extend a wedged turn's life indefinitely by submitting input.
+--
+-- The exclusion is written as a list of what cannot mean turn progress rather
+-- than a list of what can, so a kind added later is read as progress until
+-- someone decides otherwise. That is the safe default: counting an unrelated
+-- event as progress delays terminalizing a wedge, while missing a real one
+-- would end a turn that was working.
+CREATE INDEX outbox_event_turn_progress_by_session
+    ON outbox_event (session_id, event_sequence)
+    WHERE event_kind NOT IN (
+        'session_created',
+        'session_model_settings_changed',
+        'input_accepted',
+        'goal_turn_retired',
+        'runner_state_transition'
+    );

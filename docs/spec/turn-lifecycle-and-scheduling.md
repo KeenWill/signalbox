@@ -501,34 +501,47 @@ rather than condemning it.
 **Staleness.** No lifecycle table stores an activity timestamp, and this page
 introduces none: a stored clock would be one more thing to keep true. Staleness
 is decided by repeated observation instead. Each pass records, per candidate
-turn, its session's outbox frontier — the greatest `event_sequence` the session
-has emitted — and the turn's current attempt. A turn is due only once that
-evidence has been observed unchanged for at least the staleness bound. Any
-progress at all restarts the bound, so a turn that resumed cannot be ended on
-the strength of its earlier silence.
+turn, its session's turn-progress frontier — the greatest `event_sequence` the
+session has emitted for an event that a turn's own execution produces — and the
+turn's current attempt. A turn is due only once that evidence has been observed
+unchanged for at least the staleness bound. Any progress at all restarts the
+bound, so a turn that resumed cannot be ended on the strength of its earlier
+silence.
 
 The frontier is the outbox's rather than the transcript's because the outbox
 assigns its sequence in commit order, and every session-scoped transition kind
-lands in that one table. An identity ordering would have been unsound here: a
-backward clock adjustment, or an earlier mint skewed into the future, lets a
-freshly appended identity sort below the recorded one, and a frontier that does
-not move reads as silence on a session that progressed — which is the one error
-this pass may never make. A commit-ordered sequence cannot move backwards
-whatever a clock does. Both observations are also chosen so that reading them
-costs the same whatever a session's history weighs: the attempt is a column of
-the lifecycle row already read, and the frontier is one backward index lookup on
-`outbox_event (session_id, event_sequence)`. Aggregates over a session's history
-would have made a once-a-minute pass cost more the longer a session lived. The
-same requirement binds the in-flight conjuncts above, which are absence checks
-over append-only tables: each one is answered from an index leading with the
-session, and the two that had none — the dedicated compaction call and the tool
-attempt — are indexed partially on the live rows those checks name, so what is
-indexed is bounded by how much is happening at once rather than by how much has
-ever happened. No part of one inventory read scans a history. The staleness
-bound is also refused below whole-second precision, so the bound an audit line
-reports is exactly the bound in force. That ledger is process-local and carries
-no authority: losing it to a restart costs one more bound before a wedged turn
-is reached, which is the direction that cannot end live work.
+lands in that one table. It is scoped to turn progress rather than to the
+session because five of those kinds are things that happen *to* a session while
+its active turn sits still — accepting queued input, changing session model
+settings, retiring a goal turn, creating a session, a runner state transition —
+and reading those as progress would let a user hold a wedged turn open
+indefinitely by submitting input. What remains is emitted only by a transition
+of a turn, its model calls, its tool rounds, or its approvals, none of which can
+occur while the turn does nothing. The scope is written as those five exclusions
+rather than as a list of what counts, so a kind added later is read as progress
+until someone decides otherwise: counting an unrelated event delays
+terminalizing a wedge, where missing a real one would end a turn that was
+working. An identity ordering would have been unsound here: a backward clock
+adjustment, or an earlier mint skewed into the future, lets a freshly appended
+identity sort below the recorded one, and a frontier that does not move reads as
+silence on a session that progressed — which is the one error this pass may
+never make. A commit-ordered sequence cannot move backwards whatever a clock
+does. Both observations are also chosen so that reading them costs the same
+whatever a session's history weighs: the attempt is a column of the lifecycle
+row already read, and the frontier is one backward index lookup on
+`outbox_event_turn_progress_by_session`, whose partial predicate is that same
+exclusion. Aggregates over a session's history would have made a once-a-minute
+pass cost more the longer a session lived. The same requirement binds the
+in-flight conjuncts above, which are absence checks over append-only tables:
+each one is answered from an index leading with the session, and the two that
+had none — the dedicated compaction call and the tool attempt — are indexed
+partially on the live rows those checks name, so what is indexed is bounded by
+how much is happening at once rather than by how much has ever happened. No part
+of one inventory read scans a history. The staleness bound is also refused below
+whole-second precision, so the bound an audit line reports is exactly the bound
+in force. That ledger is process-local and carries no authority: losing it to a
+restart costs one more bound before a wedged turn is reached, which is the
+direction that cannot end live work.
 
 **Coverage.** One scan observes the whole quiescent population, so the bound is
 a property of the binary rather than of how many sessions happen to be
@@ -551,10 +564,23 @@ resumes past the turn it last attempted rather than starting again at the lowest
 session, because a turn can be due forever without ending — one holding pending
 steering is refused by every scan — and a window taken from the front would hand
 those turns every slot on every scan while the turns behind them waited for one
-that never came. Deferring costs one interval and nothing else: a turn left
-alone had nothing change, so the next scan observes the same evidence and finds
-it due again — where draining the whole cohort would delay that scan by however
-long the cohort took.
+that never came.
+
+What that costs is stated exactly, because it is the one number here that
+depends on population. The staleness bound governs when a turn becomes *due*,
+and that remains independent of how many turns are quiescent: every turn is
+observed on every scan. Ending them is not. A cohort of more than one window
+takes a scan per windowful to attempt in full, so the delay between a turn
+becoming due and being attempted is up to `⌈cohort ÷ 64⌉ − 1` scan intervals —
+one extra minute per 64 turns already due ahead of it. A cohort at the
+inventory's capacity would take over eleven days to work through. That is
+accepted rather than overlooked: the alternative is a scan that runs until its
+cohort is drained, which delays the next observation of *every* session,
+including the ones whose turns are working. A watchdog may be slow to finish; it
+may not stop watching. Deferring costs one interval and nothing else: a turn
+left alone had nothing change, so the next scan observes the same evidence and
+finds it due again — where draining the whole cohort would delay that scan by
+however long the cohort took.
 
 **Constants.** The staleness bound is a hard safety ceiling of 30 minutes and
 the scan interval is one minute; both are compiled in. The bound the pass runs

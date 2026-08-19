@@ -276,25 +276,42 @@ impl QuiescentActiveTurnPage {
 /// wedge unowned. `stop_requested` and `ended` stay out, the first because an
 /// interrupt is in flight and the second because the attempt already closed.
 ///
-/// The progress observation is the session's outbox frontier. `event_sequence`
-/// is assigned by the outbox in commit order, so it rises on every durable
-/// transition and cannot be moved backwards by a clock — unlike an identity
-/// ordering, where a backward adjustment or a future-skewed mint would let a
-/// fresh row sort below the recorded frontier and read as silence on a session
-/// that had progressed. Every session-scoped transition kind lands in this one
-/// table, so nothing that means progress is outside it.
+/// The progress observation is the session's newest turn-progress outbox event.
+/// `event_sequence` is assigned by the outbox in commit order, so it rises on
+/// every durable transition and cannot be moved backwards by a clock — unlike
+/// an identity ordering, where a backward adjustment or a future-skewed mint
+/// would let a fresh row sort below the recorded frontier and read as silence
+/// on a session that had progressed.
+///
+/// The excluded kinds are the ones that happen *to* a session while its active
+/// turn sits still: accepting queued input, changing session model settings,
+/// retiring a goal turn, creating a session, a runner state transition. Reading
+/// those as progress would let a user keep a wedged turn alive indefinitely by
+/// submitting input. Everything else is emitted by a transition of a turn, its
+/// model calls, its tool rounds, or its approvals, so it cannot advance while
+/// the turn does nothing. Naming what to exclude rather than what to include
+/// means a kind added later reads as progress until someone decides otherwise,
+/// which delays a terminalization rather than risking a live turn.
 ///
 /// It is read with `ORDER BY … DESC LIMIT 1` over
-/// `outbox_event_by_session_sequence`, one backward index lookup whatever a
-/// session's history weighs. Every observation this statement reports is
-/// bounded that way: the `LIMIT` caps returned rows, and nothing per row scans
-/// a history.
+/// `outbox_event_turn_progress_by_session`, whose partial predicate is this
+/// exclusion — so the scan descends past no excluded row and the read stays one
+/// index lookup whatever a session's history weighs. Every observation this
+/// statement reports is bounded that way: the `LIMIT` caps returned rows, and
+/// nothing per row scans a history.
 const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
             active.turn_id,
             active.current_attempt_id,
             (SELECT newest.event_sequence
                FROM outbox_event AS newest
               WHERE newest.session_id = active.session_id
+                AND newest.event_kind NOT IN (
+                    'session_created',
+                    'session_model_settings_changed',
+                    'input_accepted',
+                    'goal_turn_retired',
+                    'runner_state_transition'
+                )
               ORDER BY newest.event_sequence DESC
               LIMIT 1) AS outbox_frontier
        FROM turn_lifecycle AS active
