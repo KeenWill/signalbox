@@ -282,13 +282,6 @@ impl PostgresRepoWatchDispatchStore {
         .await?;
         let mut cutoff_corruption = None;
         if disposition == RepoWatchLifecycleCutoffDispositionStorageKind::Terminal {
-            crate::repo_watch_dispatch_obligation::settle_terminal_target_obligations(
-                &mut transaction,
-                repository,
-                pull_request_number,
-                RepoWatchEventId::from_uuid(event_id),
-            )
-            .await?;
             let sessions = sqlx::query_scalar::<_, Uuid>(
                 "SELECT DISTINCT action.session_id
                    FROM repo_watch_dispatch_action AS action
@@ -347,6 +340,17 @@ impl PostgresRepoWatchDispatchStore {
                     }
                 }
             }
+            // After the stops, not before. A goal termination holds its session
+            // row and then waits for its obligation row inside the requeue, so a
+            // cutoff that took obligation rows first and session rows second
+            // would close a lock cycle against any sibling still terminating.
+            crate::repo_watch_dispatch_obligation::settle_terminal_target_obligations(
+                &mut transaction,
+                repository,
+                pull_request_number,
+                RepoWatchEventId::from_uuid(event_id),
+            )
+            .await?;
         }
         commit(transaction).await?;
         if let Some(error) = cutoff_corruption {
@@ -727,6 +731,7 @@ impl PostgresRepoWatchDispatchStore {
                 cooldown,
                 actions,
             } => {
+                self.release_parked_obligations_for_event(&event).await?;
                 let mut transaction = self.pool.begin().await?;
                 let (singleton, matched_admission) = match admission {
                     EvaluationAdmission::Fresh => (
@@ -774,7 +779,10 @@ impl PostgresRepoWatchDispatchStore {
                         .await?
                         {
                             ObligationAdmission::Pending => {}
-                            ObligationAdmission::Superseded => {
+                            // Parking withholds the obligation rather than
+                            // settling it, so it reads as unfinished work no
+                            // dispatch currently owns.
+                            ObligationAdmission::Superseded | ObligationAdmission::Parked => {
                                 transaction.rollback().await?;
                                 return Ok(RepoWatchRuleEvaluationOutcome::Occupied);
                             }
@@ -1090,6 +1098,30 @@ impl RepoWatchDispatchTransaction for PostgresRepoWatchDispatchStore {
 }
 
 impl PostgresRepoWatchDispatchStore {
+    /// Releases every parked obligation this event is progress for.
+    ///
+    /// Both terminal evaluation paths call this, because a parked lineage is
+    /// released by its pull request moving on and not by the moving event
+    /// happening to match the rule that parked it.
+    ///
+    /// Committed on its own, before any singleton key is taken. A rule-scoped
+    /// singleton spans repositories, so an evaluation holding one can own the
+    /// obligation row of a lineage parked in another repository while this scan
+    /// wants a row that another repository's evaluation owns the same way;
+    /// inside the critical section those two waits close a cycle. Releasing
+    /// first costs only idempotent repetition if the evaluation that follows
+    /// fails, since a release is recorded against the event that bought it.
+    async fn release_parked_obligations_for_event(
+        &self,
+        event: &RepoWatchEvent,
+    ) -> Result<(), RepoWatchDispatchRepositoryError> {
+        sqlx::query("SELECT repo_watch_release_dispatch_obligation_parks_for_event($1)")
+            .bind(event.id().as_uuid())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn record_simple_outcome(
         &self,
         event: &RepoWatchEvent,
@@ -1097,6 +1129,7 @@ impl PostgresRepoWatchDispatchStore {
         rule_version: RepoWatchRuleVersion,
         outcome: RepoWatchEvaluationOutcomeStorageKind,
     ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError> {
+        self.release_parked_obligations_for_event(event).await?;
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, event.repository().as_str()).await?;
         if let Some(recorded) =
