@@ -47,6 +47,9 @@ jobs:
           docs_only=false
           if [ "$EVENT_NAME" = pull_request ]; then
             docs_only=true
+            changed_paths="$RUNNER_TEMP/rust-changed-files"
+            git diff --no-renames --name-only -z \
+              "$BASE_SHA...$HEAD_SHA" > "$changed_paths"
             while IFS= read -r -d '' path; do
               case "$path" in
                 docs/* | *.md)
@@ -56,7 +59,7 @@ jobs:
                   break
                   ;;
               esac
-            done < <(git diff --name-only -z "$BASE_SHA" "$HEAD_SHA")
+            done < "$changed_paths"
           fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
 
