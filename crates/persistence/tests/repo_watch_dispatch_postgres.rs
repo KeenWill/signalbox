@@ -41,7 +41,8 @@ use signalbox_domain::{
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
     approval_judge::{
-        CompleteApprovalJudgeOutcome, PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
+        ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, CompleteApprovalJudgeOutcome,
+        PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
     },
     disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
@@ -131,6 +132,9 @@ const SIBLING_STOP_COMMAND_ID: u128 = 0x5b_200;
 const SIBLING_GOAL_INPUT_ID: u128 = 0x5b_300;
 const SIBLING_GOAL_TURN_ID: u128 = 0x5b_400;
 const UNKNOWN_DELIVERED_REQUEST_ID: u128 = 0x5c_000;
+const SUCCESSOR_JUDGE_SUPERSEDE_COMMAND_ID: u128 = 0x5d_000;
+const SUCCESSOR_JUDGE_INPUT_ID: u128 = 0x5d_100;
+const SUCCESSOR_JUDGE_TURN_ID: u128 = 0x5d_200;
 const TEMPLATE_MODEL_SELECTION_ID: u128 = 901;
 const APPROVAL_JUDGE_PROVIDER_ID: u128 = 902;
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "fixture-credential";
@@ -1901,6 +1905,141 @@ async fn headless_approval_escalation_releases_rearms_and_redispatches()
     assert_eq!(prepared.request().id(), *request);
     assert_eq!(turn, prepared.request().turn());
     Ok(())
+}
+
+/// INV-069: the dispatch fence describes the generation the dispatch
+/// commissioned and nothing else. A session that goes on to accept an unrelated
+/// successor goal judges that goal's requests without the fence, so its
+/// escalation parks for the user whose goal it is instead of taking the
+/// headless path that fails the turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_successor_generation_is_judged_without_the_dispatch_fence() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    let successor_turn = TurnId::from_uuid(Uuid::from_u128(SUCCESSOR_JUDGE_TURN_ID));
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(
+                        SUCCESSOR_JUDGE_SUPERSEDE_COMMAND_ID,
+                    )),
+                    session,
+                    GoalUserAction::Supersede(GoalStatement::try_new(String::from(
+                        "an unrelated successor goal this session accepted",
+                    ))?),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(SUCCESSOR_JUDGE_INPUT_ID)),
+                    successor_turn,
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+
+    let (_repository, prepared, judged_turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, 0x50_280).await?;
+
+    assert_eq!(
+        judged_turn, successor_turn,
+        "supersession retires the dispatched turn, so the successor's turn is the eligible one"
+    );
+    assert!(
+        prepared.session_context().dispatch().is_none(),
+        "the dispatch authority describes only the generation it commissioned"
+    );
+    Ok(())
+}
+
+/// A headless escalation terminalizes its turn under three fresh identities.
+/// Replaying the completion with any other one is a structurally different call
+/// rather than the same one twice, so it is reported instead of replayed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_headless_escalation_replay_binds_every_terminal_identity() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_2a0;
+    let (model_repository, prepared, _turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable dispatch fence",
+    ))?;
+    let identities = ApprovalJudgeCompletionIdentities::new(
+        TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+    );
+    let complete = async |identities| {
+        approval_repository
+            .complete(
+                &prepared,
+                DelegateApprovalRecommendation::EscalateToHuman,
+                rationale.clone(),
+                ProviderReportedTokenUsage::unreported(),
+                identities,
+                |closed_request| {
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                        closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                    ))
+                },
+            )
+            .await
+    };
+    let escalated = complete(identities).await?;
+
+    let other_failure_entry = complete(ApprovalJudgeCompletionIdentities::new(
+        identities.continuation_attempt(),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+        identities.terminal_frontier(),
+    ))
+    .await
+    .expect_err("a replay naming another failure entry is not the same completion");
+    let other_terminal_frontier = complete(ApprovalJudgeCompletionIdentities::new(
+        identities.continuation_attempt(),
+        identities.failure_entry(),
+        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
+    ))
+    .await
+    .expect_err("a replay naming another terminal frontier is not the same completion");
+    let other_attempt = complete(ApprovalJudgeCompletionIdentities::new(
+        TurnAttemptId::from_uuid(Uuid::from_u128(seed + 30)),
+        identities.failure_entry(),
+        identities.terminal_frontier(),
+    ))
+    .await
+    .expect_err("a replay naming another terminal attempt is not the same completion");
+    let replayed = complete(identities).await?;
+
+    assert_eq!(
+        escalated,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationReleased
+    );
+    assert_mismatched_replay(other_failure_entry);
+    assert_mismatched_replay(other_terminal_frontier);
+    assert_mismatched_replay(other_attempt);
+    assert_eq!(
+        replayed, escalated,
+        "the completion still replays under the identities it committed"
+    );
+    Ok(())
+}
+
+/// Fails naming the error a mismatched headless replay produced, so an
+/// unrelated failure is not read as the replay refusal under test.
+#[track_caller]
+fn assert_mismatched_replay(error: ApprovalJudgeRepositoryError) {
+    let ApprovalJudgeRepositoryError::Corruption(ApprovalJudgeCorruption::Inconsistent(
+        "completed judge replay",
+    )) = error
+    else {
+        panic!("a mismatched headless replay is reported as one: {error:?}")
+    };
 }
 
 /// A denial decided earlier in the same delegated batch remains a denial when

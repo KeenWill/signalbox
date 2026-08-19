@@ -611,13 +611,19 @@ accepted input carries the command that accepted it, and which therefore does
 not restate its statement — is stated in [goal mode](goal-mode.md).
 
 **Implemented behavior.** The dispatch action is also the immutable authority
-source for an approval judge invoked by that session. A pull-request dispatch
-supplies its repository, pull-request number, exact head commit, head repository
-and branch, and base branch; a branch dispatch supplies its repository and
-branch. These values are read from the append-only dispatch event and action,
-not inferred from the synthesized goal or refreshed provider state. The tool
-approval contract governs their quoted rendering and the judge's decision use in
-[tool loop](tool-loop.md#approval-policy-and-decision-sources).
+source for an approval judge invoked by the generation that dispatch
+commissioned. A pull-request dispatch supplies its repository, pull-request
+number, exact head commit, head repository and branch, and base branch; a branch
+dispatch supplies its repository and branch. These values are read from the
+append-only dispatch event and action, not inferred from the synthesized goal or
+refreshed provider state. A judged turn recorded in any other generation of that
+session — an unrelated successor goal the session later accepted — resolves no
+dispatch authority at all, as does a turn no generation recorded: the dispatch
+described neither, and judging them against its repository, head, and base
+values would both apply a fence to work it never named and route their
+escalations down the unattended path below rather than to the user whose goal it
+is. The tool approval contract governs their quoted rendering and the judge's
+decision use in [tool loop](tool-loop.md#approval-policy-and-decision-sources).
 
 **Committed unimplemented functionality.** No present session-creation or
 input-submission surface identifies repository watch as a purpose-specific actor
@@ -704,7 +710,12 @@ above. Once release commits, the obligation becomes eligible under the ordinary
 cooldown and can create a fresh dispatch; the ended session does not remain
 load-bearing occupancy. `repo_watch_headless_approval_escalation_audit` joins
 the append-only escalation cause and rationale to its dispatch release and
-replacement obligation, including whether and when that obligation settled.
+replacement obligation, including whether and when that obligation settled. The
+terminal attempt, failure transcript entry, and terminal frontier it recorded
+are all durable evidence of that transition, so a replayed completion offering
+any other one of them is reported as a mismatched replay rather than answered
+with the recorded outcome — the same treatment a differing recommendation,
+rationale, usage, or continuation attempt already receives.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies
