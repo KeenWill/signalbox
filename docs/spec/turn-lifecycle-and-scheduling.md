@@ -542,24 +542,31 @@ line reports; the ceiling stays the only maximum, enforced where the bound is
 built.
 
 **Terminalization.** A due turn ends through the same committed failed-turn
-transition startup recovery commits, taking the same lock in the same order: the
-session's `session_scheduler` row is locked `FOR UPDATE` and nothing else is,
-because that row is the one every pass touching a session takes first, and it is
-therefore what serializes this pass against activation, model-call execution,
-and the tool loop. The complete candidate predicate is re-decided under that
-lock against rows no concurrent pass can be changing, and the ordinary
-`prepare_active_turn_lost_failure` candidate is committed — Lost attempt end,
-`TurnFailed` semantic entry, terminal frontier, `terminal`/`failed` lifecycle
-row, and the `TurnFailed` outbox event. No terminal state, disposition, or
-direct row edit is introduced for this pass. A revalidation that no longer
-matches the observation, and a preparation the domain refuses, both leave the
-turn untouched for a later pass. Steering pending on the turn is the one refusal
-with a name of its own: every steering row bound to a turn must be closed before
-it terminalizes — the `turn_lifecycle_pending_steering_closed` constraint
-enforces it — and this transition closes none, so the pass reports the turn by
-identity under `turn_liveness_steering_blocks_terminalization` on every scan
-rather than ending it. Such a turn stays wedged; a terminalization that also
-reclassifies its steering into a queued successor is an
+transition startup recovery commits, through the same reviewed statement and so
+taking the same lock: the session's `session_scheduler` row is locked
+`FOR UPDATE`, and nothing else is. That places this among the scheduler-family
+transactions holding only that row. The session/scheduler pair order recorded by
+`crates/persistence/src/lock_inventory.rs` — the `session` row first — governs
+the transactions that lock both, which this is not; a scheduler-first
+acquisition of the pair would deadlock against every path that takes them in
+that order and must not be introduced here or anywhere else. Holding the
+scheduler row serializes this pass against the other transactions that take it,
+which include turn activation and startup recovery directly, and submit input
+once it reaches the scheduler row behind the session row. The complete candidate
+predicate is re-decided under that lock against rows no concurrent pass can be
+changing, and the ordinary `prepare_active_turn_lost_failure` candidate is
+committed — Lost attempt end, `TurnFailed` semantic entry, terminal frontier,
+`terminal`/`failed` lifecycle row, and the `TurnFailed` outbox event. No
+terminal state, disposition, or direct row edit is introduced for this pass. A
+revalidation that no longer matches the observation, and a preparation the
+domain refuses, both leave the turn untouched for a later pass. Steering pending
+on the turn is the one refusal with a name of its own: every steering row bound
+to a turn must be closed before it terminalizes — the
+`turn_lifecycle_pending_steering_closed` constraint enforces it — and this
+transition closes none, so the pass reports the turn by identity under
+`turn_liveness_steering_blocks_terminalization` on every scan rather than ending
+it. Such a turn stays wedged; a terminalization that also reclassifies its
+steering into a queued successor is an
 [open question](../open-questions.md#turn-lifecycle). Because the turn ends
 through the ordinary lifecycle write, every trigger watching a turn reach
 `terminal` fires unchanged, so a repository-watch dispatch occupying this
@@ -573,10 +580,14 @@ search keyed by it returns turns this pass ended and nothing else: a candidate
 left alone under the lock carries `turn_liveness_candidate_superseded` instead,
 and a commit the database never acknowledged carries
 `turn_liveness_terminalization_ambiguous` — the same identity and bound, under a
-cause that does not claim the turn ended, because that outcome is the one case
-where no later pass can report the turn again. The durable record is the
-ordinary `TurnFailed` shape, which has no cause column, so a watchdog-ended turn
-is not durably distinguishable from a restart-recovered one.
+cause that does not claim the turn ended. It is reported because it is the one
+outcome whose durable effect is unknown from here: if the commit landed, the
+turn is terminal and no later pass reports it again; if it did not, the
+candidate is unchanged, stays due, and a later pass retries it. A later pass
+cannot tell those apart either, so this line is the only record naming the turn
+at the moment its outcome became unknown. The durable record is the ordinary
+`TurnFailed` shape, which has no cause column, so a watchdog-ended turn is not
+durably distinguishable from a restart-recovered one.
 
 ## Startup scan and recovery
 

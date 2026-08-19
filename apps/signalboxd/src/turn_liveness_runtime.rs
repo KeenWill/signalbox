@@ -238,11 +238,12 @@ async fn terminalize_stale_turn(
             staleness_bound_seconds = staleness_bound.as_secs(),
             "stale active turn holds pending steering that no present transition can close"
         ),
-        // An ambiguous commit is the one failure that may already have ended
-        // the turn. The next scan will not see it again either way, and the
-        // durable `TurnFailed` shape carries no cause, so this is the only
-        // chance to record which turn it was — reported without claiming the
-        // commit landed.
+        // An ambiguous commit is the one failure whose durable effect is
+        // unknown from here: if it landed, the turn is terminal and no later
+        // scan reports it; if it did not, the candidate is unchanged and a
+        // later scan retries it. Nothing here distinguishes those, and the
+        // durable `TurnFailed` shape carries no cause, so this line is the only
+        // record naming the turn — written without claiming the commit landed.
         Err(
             error @ TurnLivenessRepositoryError::TerminalizationDatabase {
                 commit_ambiguous: true,
