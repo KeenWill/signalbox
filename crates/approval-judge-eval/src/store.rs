@@ -135,7 +135,7 @@ impl Error for DigestParseError {}
 
 /// Durable provenance for a corpus registration.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CorpusSourceDescriptor {
     /// Cases loaded from a repository checkout at a relative path.
     Repository {
@@ -188,6 +188,34 @@ impl CorpusRegistration {
         Ok(Self {
             key,
             format_version: corpus.format_version,
+            corpus_sha256,
+            case_count,
+            source,
+        })
+    }
+
+    /// Reconstructs validated registration metadata without loading case rows.
+    pub(crate) fn from_stored_metadata(
+        key: CorpusKey,
+        format_version: u32,
+        corpus_sha256: Sha256Digest,
+        case_count: u64,
+        source: CorpusSourceDescriptor,
+    ) -> Result<Self, crate::manifest::ManifestError> {
+        if format_version != crate::CORPUS_FORMAT_VERSION {
+            return Err(crate::manifest::ManifestError::UnsupportedCorpusVersion {
+                observed: format_version,
+            });
+        }
+        if case_count == 0 {
+            return Err(crate::manifest::ManifestError::Corpus(
+                crate::CorpusLoadError::EmptyCorpus,
+            ));
+        }
+        crate::manifest::validate_registration_metadata(&key, &source)?;
+        Ok(Self {
+            key,
+            format_version,
             corpus_sha256,
             case_count,
             source,
@@ -291,6 +319,8 @@ pub enum CorpusStoreError {
     CorruptRegistration(CorpusStoreCorruption),
     /// The manifest names a blob, but this slice has no blob backend.
     BlobBackendUnavailable,
+    /// Repository content was supplied without verified manifest source bytes.
+    RepositorySourceRequiresManifestImport,
 }
 
 /// Closed corruption classifications for durable corpus rows and registrations.
@@ -393,6 +423,9 @@ impl fmt::Display for CorpusStoreError {
             Self::BlobBackendUnavailable => formatter.write_str(
                 "blob-backed corpus content cannot be loaded: no blob corpus backend is configured",
             ),
+            Self::RepositorySourceRequiresManifestImport => formatter.write_str(
+                "repository-backed corpus content must be imported through a verified manifest",
+            ),
         }
     }
 }
@@ -403,7 +436,10 @@ impl Error for CorpusStoreError {
             Self::Manifest(source) => Some(source),
             Self::Database(source) => Some(source),
             Self::StoredCaseJson(source) => Some(source),
-            Self::NotFound(_) | Self::CorruptRegistration(_) | Self::BlobBackendUnavailable => None,
+            Self::NotFound(_)
+            | Self::CorruptRegistration(_)
+            | Self::BlobBackendUnavailable
+            | Self::RepositorySourceRequiresManifestImport => None,
         }
     }
 }
@@ -411,5 +447,23 @@ impl Error for CorpusStoreError {
 impl From<sqlx::Error> for CorpusStoreError {
     fn from(source: sqlx::Error) -> Self {
         Self::Database(source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CorpusSourceDescriptor;
+
+    #[test]
+    fn source_descriptor_rejects_unknown_variant_fields() {
+        let error = serde_json::from_value::<CorpusSourceDescriptor>(serde_json::json!({
+            "kind": "repository",
+            "repository": "KeenWill/signalbox",
+            "path": "corpora/cases.json",
+            "digest": "0000000000000000000000000000000000000000000000000000000000000000"
+        }))
+        .expect_err("unknown source metadata is rejected");
+
+        assert!(error.to_string().contains("unknown field `digest`"));
     }
 }

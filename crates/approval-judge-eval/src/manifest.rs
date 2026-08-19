@@ -243,6 +243,7 @@ fn validate_manifest_header(manifest: &CorpusManifest) -> Result<(), ManifestErr
     }
     validate_identity_component("name", &manifest.name)?;
     validate_identity_component("version", &manifest.version)?;
+    validate_integrity_case_ids(&manifest.integrity.cases)?;
     match &manifest.case_source {
         ManifestCaseSource::Repository { repository, path } => {
             validate_bounded_text("repository", repository, MAX_REPOSITORY_BYTES)?;
@@ -377,6 +378,17 @@ fn portable_path_component(component: &str) -> bool {
 }
 
 fn validate_unique_case_ids(cases: &[ApprovalJudgeCase]) -> Result<(), ManifestError> {
+    let mut ids = BTreeSet::new();
+    for case in cases {
+        validate_identity_component("case id", &case.id)?;
+        if !ids.insert(&case.id) {
+            return Err(ManifestError::DuplicateCaseId(case.id.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn validate_integrity_case_ids(cases: &[CaseIntegrity]) -> Result<(), ManifestError> {
     let mut ids = BTreeSet::new();
     for case in cases {
         validate_identity_component("case id", &case.id)?;
@@ -721,6 +733,32 @@ mod tests {
             decode_manifest(&encoded).expect_err("an unknown source-variant field is rejected");
 
         assert!(error.to_string().contains("unknown field `future_field`"));
+    }
+
+    #[test]
+    fn manifest_integrity_rejects_blank_case_ids_during_decoding() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        manifest["integrity"]["cases"][0]["id"] = serde_json::Value::String(String::from(" \t "));
+        let encoded = serde_json::to_vec(&manifest).expect("the modified manifest serializes");
+
+        let error = decode_manifest(&encoded)
+            .expect_err("a blank integrity case identity is rejected during decoding");
+
+        assert!(error.to_string().contains("case id"));
+    }
+
+    #[test]
+    fn manifest_integrity_rejects_duplicate_case_ids_during_decoding() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        manifest["integrity"]["cases"][1]["id"] = manifest["integrity"]["cases"][0]["id"].clone();
+        let encoded = serde_json::to_vec(&manifest).expect("the modified manifest serializes");
+
+        let error = decode_manifest(&encoded)
+            .expect_err("duplicate integrity case identities are rejected during decoding");
+
+        assert!(error.to_string().contains("occurs more than once"));
     }
 
     #[test]

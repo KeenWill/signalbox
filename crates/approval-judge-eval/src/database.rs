@@ -37,11 +37,28 @@ impl DatabaseCorpusStore {
         manifest_path: impl AsRef<Path>,
     ) -> Result<CorpusRegistration, CorpusStoreError> {
         let loaded = load_manifest_corpus(manifest_path).map_err(CorpusStoreError::Manifest)?;
-        self.put(loaded.registration, &loaded.corpus).await
+        self.put_verified(loaded.registration, &loaded.corpus).await
     }
 
-    /// Stores verified cases and their registration metadata atomically.
+    /// Stores database-native cases and their registration metadata atomically.
     pub async fn put(
+        &self,
+        registration: CorpusRegistration,
+        corpus: &ApprovalJudgeCorpus,
+    ) -> Result<CorpusRegistration, CorpusStoreError> {
+        match registration.source() {
+            CorpusSourceDescriptor::DatabaseNative => {}
+            CorpusSourceDescriptor::Repository { .. } => {
+                return Err(CorpusStoreError::RepositorySourceRequiresManifestImport);
+            }
+            CorpusSourceDescriptor::BlobReference { .. } => {
+                return Err(CorpusStoreError::BlobBackendUnavailable);
+            }
+        }
+        self.put_verified(registration, corpus).await
+    }
+
+    async fn put_verified(
         &self,
         registration: CorpusRegistration,
         corpus: &ApprovalJudgeCorpus,
@@ -153,8 +170,7 @@ impl DatabaseCorpusStore {
         let mut registrations = Vec::with_capacity(rows.len());
         for row in &rows {
             let stored = decode_registration(row)?;
-            let corpus = self.load_stored_corpus(&stored).await?;
-            registrations.push(registration_from_stored(stored, &corpus)?);
+            registrations.push(registration_metadata_from_stored(stored)?);
         }
         Ok(registrations)
     }
@@ -182,6 +198,12 @@ impl DatabaseCorpusStore {
         &self,
         registration: &StoredRegistration,
     ) -> Result<ApprovalJudgeCorpus, CorpusStoreError> {
+        if matches!(
+            &registration.source,
+            CorpusSourceDescriptor::BlobReference { .. }
+        ) {
+            return Err(CorpusStoreError::BlobBackendUnavailable);
+        }
         let rows = sqlx::query(
             "SELECT case_id, case_json::text AS case_json
                FROM evaluation_corpus_case
@@ -226,12 +248,6 @@ fn validate_registration(
     registration: &CorpusRegistration,
     corpus: &ApprovalJudgeCorpus,
 ) -> Result<(), CorpusStoreError> {
-    if matches!(
-        registration.source(),
-        CorpusSourceDescriptor::BlobReference { .. }
-    ) {
-        return Err(CorpusStoreError::BlobBackendUnavailable);
-    }
     let count = u64::try_from(corpus.cases.len()).map_err(|_| {
         CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::CaseCountOutOfRange)
     })?;
@@ -411,6 +427,19 @@ fn registration_from_stored(
         ));
     }
     Ok(registration)
+}
+
+fn registration_metadata_from_stored(
+    stored: StoredRegistration,
+) -> Result<CorpusRegistration, CorpusStoreError> {
+    CorpusRegistration::from_stored_metadata(
+        stored.key,
+        stored.format_version,
+        stored.corpus_sha256,
+        stored.case_count,
+        stored.source,
+    )
+    .map_err(CorpusStoreError::Manifest)
 }
 
 fn required_column<Value>(

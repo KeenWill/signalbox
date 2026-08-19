@@ -245,6 +245,88 @@ async fn direct_put_rejects_unverified_blob_registration() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
+async fn direct_put_rejects_unverified_repository_registration() -> Result<(), Box<dyn Error>> {
+    let disk = DiskCorpusStore::open(seed_manifest_path())?;
+    let registration = disk
+        .enumerate()
+        .await?
+        .into_iter()
+        .next()
+        .expect("the seed store has one registration");
+    let corpus = disk.load(registration.key()).await?;
+    let repository_registration = CorpusRegistration::new(
+        CorpusKey {
+            name: String::from("unverified-repository"),
+            version: String::from("v1"),
+        },
+        CorpusSourceDescriptor::Repository {
+            repository: String::from("KeenWill/signalbox"),
+            path: String::from("corpora/seed-v1.json"),
+        },
+        &corpus,
+    )?;
+    let pool = PgPoolOptions::new().connect_lazy("postgres://localhost/signalbox_eval_corpus")?;
+    let database = DatabaseCorpusStore::new(pool);
+
+    let error = database
+        .put(repository_registration, &corpus)
+        .await
+        .expect_err("repository metadata is rejected before database access");
+
+    assert!(error.to_string().contains("verified manifest"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn enumeration_does_not_decode_stored_cases() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let database = DatabaseCorpusStore::new(pool.clone());
+    let imported = database.import_manifest(seed_manifest_path()).await?;
+    sqlx::query(
+        "UPDATE evaluation_corpus_case
+            SET case_json = '{}'::jsonb
+          WHERE corpus_name = $1 AND corpus_version = $2 AND replay_position = 0",
+    )
+    .bind(&imported.key().name)
+    .bind(&imported.key().version)
+    .execute(&pool)
+    .await?;
+
+    let registrations = database.enumerate().await?;
+
+    assert_eq!(registrations, vec![imported]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stored_blob_registration_is_rejected_before_case_loading() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let digest = [0_u8; 32];
+    insert_blob_registration(&pool, "stored-blob", Some(&digest), Some("1")).await?;
+    let database = DatabaseCorpusStore::new(pool.clone());
+    let key = CorpusKey {
+        name: String::from("constraint-fixture"),
+        version: String::from("stored-blob"),
+    };
+
+    let error = database
+        .load(&key)
+        .await
+        .expect_err("blob registrations are rejected before stored cases are read");
+
+    assert!(error.to_string().contains("no blob corpus backend"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn stored_replay_order_must_match_its_durable_digest() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
