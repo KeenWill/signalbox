@@ -1518,6 +1518,73 @@ async fn evaluate_nonmatching_head_change(
     )
 }
 
+/// The fixture's pull request at the head it stalled on, restated with one
+/// field changed.
+///
+/// The event store refuses a commit that carries events without moving the
+/// observation, and what this exercises is a matching event carrying no new
+/// head, so something other than the head has to differ.
+fn restated_context() -> Result<PullRequestEventContext, Box<dyn Error>> {
+    Ok(PullRequestEventContext::new(PullRequestEventContextInput {
+        number: PullRequestNumber::new(BOTTOM_PULL_REQUEST_NUMBER.try_into()?),
+        head_sha: CommitSha::try_new(FIRST_HEAD.to_owned())?,
+        head_repository: RepositorySlug::try_new(HEAD_REPOSITORY.to_owned())?,
+        base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+        head_branch: BranchName::try_new(HEAD_BRANCH.to_owned())?,
+        title: PullRequestTitle::try_new("Merge forward, restated".to_owned())?,
+        body: PullRequestBody::try_new("Resolve the conflict.".to_owned())?,
+        labels: Vec::new(),
+        draft: false,
+        author: Some(RepoWatchAuthorLogin::try_new("fixture-author".to_owned())?),
+    }))
+}
+
+/// Commits and evaluates a matching conflict on the stalled head.
+async fn evaluate_restated_conflict(
+    fixture: &DispatchFixture,
+) -> Result<RepoWatchRuleEvaluationOutcome, Box<dyn Error>> {
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let cursor = event_store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let context = restated_context()?;
+    let observation = observation(context.clone())?;
+    event_store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(cursor.generation()),
+                RepoWatchCursorCandidate::new(observation.clone()),
+                vec![identified_event(conflict_event_for(
+                    PARK_STALE_EVENT_ID,
+                    context,
+                )?)],
+            ),
+        )
+        .await?;
+    let loaded = fixture
+        .store
+        .load_next_event(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the restated conflict remains unevaluated");
+    Ok(
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                loaded,
+                &fixture.rule,
+                &observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?,
+    )
+}
+
 async fn load_next_obligation(
     fixture: &DispatchFixture,
 ) -> Result<Option<RepoWatchDispatchObligation>, Box<dyn Error>> {
@@ -2325,7 +2392,7 @@ async fn a_matching_event_on_the_parked_head_buys_no_further_attempt() -> Result
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
     park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
 
-    let unchanged = evaluate_conflict(&fixture, PARK_STALE_EVENT_ID, FIRST_HEAD).await?;
+    let unchanged = evaluate_restated_conflict(&fixture).await?;
 
     let collapsed: ParkedObligationVisibility = sqlx::query_as(
         "SELECT obligation_id, failed_attempts, head_sha
@@ -2333,7 +2400,7 @@ async fn a_matching_event_on_the_parked_head_buys_no_further_attempt() -> Result
     )
     .fetch_one(&fixture.pool)
     .await?;
-    assert_eq!(unchanged.outcome, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(unchanged, RepoWatchRuleEvaluationOutcome::Occupied);
     assert_eq!(
         collapsed.failed_attempts,
         dispatch_attempt_budget(&fixture.pool).await?
