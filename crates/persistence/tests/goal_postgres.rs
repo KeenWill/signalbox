@@ -865,6 +865,100 @@ async fn s_goal_inv048_inv053_goal_owned_input_activates_without_a_user_command(
     Ok(())
 }
 
+/// INV-048: an expected-head resume applies to exactly the blocked event it
+/// names, and an unmet expectation appends nothing and spends no identity.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let repository = GoalRepository::new(pool.clone());
+    let attached_turn = turn_candidates(0xb70);
+    let attached = repository
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(ATTACH_COMMAND),
+                session(SESSION),
+                GoalUserAction::Attach(statement("finish the commissioned task")),
+            ),
+            Some(attached_turn),
+            |_| None,
+        )
+        .await?;
+    let GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(attached)) = attached
+    else {
+        panic!("fixture attach must apply");
+    };
+    assert_eq!(
+        activate_goal_turn(&pool, 0xd70).await?,
+        attached_turn.turn()
+    );
+    terminalize_goal_turn_as_failed(&pool, 0xe70).await?;
+    let blocked = repository
+        .block_execution_failure(
+            session(SESSION),
+            GoalNeed::try_new(String::from("repair execution")).expect("fixture need is admitted"),
+            GoalSchedulerProvenance::new(attached_turn.turn()),
+        )
+        .await?;
+    let GoalTransitionOutcome::Applied(blocked) = blocked else {
+        panic!("fixture execution-failure block must apply");
+    };
+
+    // The attach event is no longer the lineage head, so a command expecting it
+    // answers a state that has moved on.
+    let stale = repository
+        .handle_expected_user_command(
+            GoalUserCommand::new(
+                command(RESUME_COMMAND),
+                session(SESSION),
+                GoalUserAction::Resume(None),
+            ),
+            Some(turn_candidates(0xb71)),
+            attached.ordinal(),
+            |_| None,
+        )
+        .await?;
+    assert_eq!(stale, GoalCommandHandlingOutcome::LineageMoved);
+    let unspent: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+            .bind(Uuid::from_u128(RESUME_COMMAND))
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(unspent, 0);
+
+    let resumed = repository
+        .handle_expected_user_command(
+            GoalUserCommand::new(
+                command(RESUME_COMMAND),
+                session(SESSION),
+                GoalUserAction::Resume(None),
+            ),
+            Some(turn_candidates(0xb72)),
+            blocked.ordinal(),
+            |_| None,
+        )
+        .await?;
+    assert_applied_command(resumed);
+    let spent: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+            .bind(Uuid::from_u128(RESUME_COMMAND))
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(spent, 1);
+    let state = repository
+        .load_goal(session(SESSION))
+        .await?
+        .expect("resumed goal is attached");
+    assert_eq!(state.current().state(), &GoalState::Pursuing);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-048: resuming a blocked goal schedules exactly one next turn whose
 /// accepted input is the exact optional user guidance.
 #[tokio::test(flavor = "multi_thread")]

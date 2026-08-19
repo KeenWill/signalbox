@@ -191,13 +191,17 @@ consecutive automatic resumptions the current run has already spent: the run is
 the trailing alternation of execution-failure blocks and the resumptions that
 answered them, and every other event ends it. Below a budget of five consecutive
 attempts, the appended need text states that automatic resumption is scheduled
-and that no operator action is required, and exactly one resume follows after a
-backoff of two minutes doubled per attempt already spent, to a thirty-minute
-maximum. At the budget the goal stays blocked, and its need text states that
-automatic resumption is exhausted and states the operator repair. All three
-bounds are code-defined and lowerable only: an automatic resumption spends
-provider budget on a session no operator asked about, so its cadence and its end
-are product decisions rather than deployment ones. Resumption does not bypass
+and names the operator repair for a goal still blocked once resumption ends, and
+exactly one resume follows after a backoff of two minutes doubled per attempt
+already spent, to a thirty-minute maximum. At the budget the goal stays blocked,
+and its need text states that automatic resumption is exhausted and states the
+operator repair. All three bounds are fixed in source and no configuration reads
+them: an automatic resumption spends provider budget on a session no operator
+asked about, so its cadence and its end are product decisions rather than
+deployment ones. Every need text an execution-failure block carries names the
+operator repair, because an armed attempt can also fail to resume by being
+durably rejected, by losing its process, or by never reaching the database, and
+in each case that text is what an operator reads. Resumption does not bypass
 execution-failure blocking or make a failure a silent retry — the block is
 appended first, and every attempt is an ordinary recorded `resumed` event.
 
@@ -206,11 +210,26 @@ derived from the session and the exact blocked event it answers rather than
 minted. A repeated attempt is therefore an exact command replay rather than a
 second resume, and the recorded `resumed` event is self-identifying: a resume
 carrying any other identity is an operator's, ends the run, and restarts the
-budget. Each attempt re-reads the goal before issuing and abandons itself unless
-the lineage still ends at exactly the blocked event it answers, so a goal since
-resumed, stopped, superseded, or blocked for another reason is left alone. The
-model-selectable reasons are never automatically resumed: each names a condition
-no retry can clear, and only execution-failure blocking arms an attempt.
+budget. Each attempt carries the blocked event it answers into the command, and
+that expectation is checked against the lineage under the same session lock the
+resume would append within: an automatic resume applies to exactly that blocked
+event or to nothing, and an unmet expectation appends nothing and leaves the
+derived identity unspent. A goal since resumed, stopped, superseded, or blocked
+for another reason is therefore left alone even when it moved between the
+attempt's read and its lock. The model-selectable reasons are never
+automatically resumed: each names a condition no retry can clear, and only
+execution-failure blocking arms an attempt.
+
+**Implemented behavior.** An attempt that reaches no durable answer is owed
+another, because nothing else re-reads a blocked goal: an attempt whose database
+call fails retries up to three times at the base backoff, reusing its derived
+identity so a retry that follows a lost acknowledgement replays rather than
+resumes twice. Blocking whose own commit acknowledgement is lost is reconciled
+the same way — the daemon reads the lineage back and arms the execution-failure
+block it finds, since the need text it was appending expects resumption whether
+or not the acknowledgement arrived. Arming a block another pass already armed is
+harmless for the same reason a retry is: both derive one identity, and the
+second attempt replays it.
 
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The
@@ -336,18 +355,8 @@ re-entering completion.
 
 ## Open edges
 
-**Deferred or undecided work.** A pending automatic resumption lives only in the
-daemon process that armed it. The event history records how many attempts a run
-has spent but not when any of them was recorded, so a restart during a backoff
-loses the pending attempt and the goal stays blocked until an operator resumes
-it; goals blocked before this behavior shipped are in that same position.
-Re-arming across a restart needs a durable record of when the failure was
-appended, which no present goal table carries.
-
-**Deferred or undecided work.** The run a budget is derived from ends only at an
-event, so consecutive execution failures separated by successful turns are
-counted together. A long pursuit that fails transiently five times, however far
-apart and however much work succeeded between them, therefore exhausts its
-budget and parks for an operator. The conservative direction was chosen
-deliberately: the alternative reads turn dispositions the goal event stream does
-not carry.
+**Deferred or undecided work.** Re-arming a pending automatic resumption across
+a daemon restart, and separating consecutive execution failures from ones
+distant in the same pursuit, are recorded under
+[goal mode](../open-questions.md#goal-mode). No other goal-mode open question is
+recorded by this version-one contract.

@@ -62,7 +62,13 @@ const GOAL_DECLARE_REJECTED: &str =
 const GOAL_DECLARE_RESULT: &str = "{\"status\":\"applied\"}";
 const EXECUTION_FAILURE_NEED: &str =
     "Resolve the failed goal turn's execution condition, then resume the goal.";
-const EXECUTION_FAILURE_RESUMING_NEED: &str = "The goal turn failed to execute and automatic resumption is scheduled. No operator action is required unless automatic resumption is exhausted.";
+/// Preamble for an execution-failure block automatic resumption still owes.
+///
+/// The repair follows it rather than replacing it with a promise of automation,
+/// because every way an armed attempt can fail to resume — an exhausted budget,
+/// a durably rejected command, a daemon restart, an unreachable database —
+/// leaves this text as what the operator reads.
+const EXECUTION_FAILURE_RESUMING_PREAMBLE: &str = "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator.";
 /// Delay before the first automatic resumption of a failed goal turn.
 ///
 /// Each further consecutive failure doubles this delay up to
@@ -75,11 +81,18 @@ const AUTOMATIC_RESUME_BASE_BACKOFF: Duration = Duration::from_secs(120);
 const AUTOMATIC_RESUME_BACKOFF_CAP: Duration = Duration::from_secs(1_800);
 /// Consecutive automatic resumptions one blocked goal may spend.
 ///
-/// Deployment configuration cannot raise any of the three constants above: an
-/// automatic resumption spends provider budget on a session no operator asked
-/// about, so its cadence and its end are product decisions.
+/// No configuration reads any of the three constants above, so no deployment
+/// changes them: an automatic resumption spends provider budget on a session no
+/// operator asked about, so its cadence and its end are product decisions.
 // numeric-bound: ceiling - protects provider spend from an endlessly failing goal
 const AUTOMATIC_RESUME_ATTEMPT_BUDGET: u32 = 5;
+/// Retries one armed attempt may spend on a database that answers nothing.
+///
+/// These are not resumptions and do not spend the attempt budget: nothing was
+/// recorded, so the goal is owed the attempt it was promised. The bound keeps a
+/// database outage from holding a task open indefinitely.
+// numeric-bound: ceiling - protects the daemon from retrying an unreachable database forever
+const AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES: u32 = 3;
 /// Domain separation for the derived automatic-resume command identity.
 ///
 /// The identity must not collide with any other derived durable command, and
@@ -492,8 +505,41 @@ impl PostgresGoalPassDisposition {
         }));
     }
 
-    /// Resumes the goal still blocked by exactly the named failure event.
+    /// Resumes the goal still blocked by exactly the named failure event,
+    /// retrying only while the database keeps the attempt from settling.
+    ///
+    /// A repository failure leaves the goal blocked with need text that expects
+    /// resumption while nothing else re-reads blocked goals, so an attempt that
+    /// never reached a durable answer is owed another try. Each retry reuses the
+    /// derived identity, so a retry that follows a lost acknowledgement replays
+    /// rather than resumes twice.
     async fn resume_after_execution_failure(&self, session: SessionId, blocked: GoalEventOrdinal) {
+        let mut remaining = AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES;
+        loop {
+            if self.attempt_automatic_resume(session, blocked).await == ResumeAttempt::Settled {
+                return;
+            }
+            if remaining == 0 {
+                tracing::error!(
+                    session = %session.into_uuid(),
+                    event_ordinal = blocked.get(),
+                    retries = AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES,
+                    cause_code = "goal_automatic_resume_abandoned",
+                    "automatic goal resumption abandoned a blocked goal to the operator"
+                );
+                return;
+            }
+            remaining = remaining.saturating_sub(1);
+            tokio::time::sleep(AUTOMATIC_RESUME_BASE_BACKOFF).await;
+        }
+    }
+
+    /// Issues one automatic resume bound to exactly the named failure event.
+    async fn attempt_automatic_resume(
+        &self,
+        session: SessionId,
+        blocked: GoalEventOrdinal,
+    ) -> ResumeAttempt {
         let reread = match self.repository.load_goal(session).await {
             Ok(goal) => goal,
             Err(error) => {
@@ -504,11 +550,11 @@ impl PostgresGoalPassDisposition {
                     cause = %error,
                     "automatic goal resumption cannot confirm the goal is still blocked"
                 );
-                return;
+                return ResumeAttempt::Unsettled;
             }
         };
         if !reread.is_some_and(|goal| awaits_automatic_resumption(&goal, blocked)) {
-            return;
+            return ResumeAttempt::Settled;
         }
         let command = GoalUserCommand::new(
             automatic_resume_command(session, blocked),
@@ -519,9 +565,14 @@ impl PostgresGoalPassDisposition {
             AcceptedInputId::from_uuid(Uuid::now_v7()),
             TurnId::from_uuid(Uuid::now_v7()),
         );
+        // The reread above is a separate transaction, so the goal may move
+        // between it and the session lock. Naming the expected event makes the
+        // command apply to that block or to nothing: without it a lineage that
+        // reached an operator-required block in that window would be resumed by
+        // a command that answered a different failure.
         let outcome = self
             .repository
-            .handle_user_command(command, Some(candidates), |alias| {
+            .handle_expected_user_command(command, Some(candidates), blocked, |alias| {
                 self.model_configuration.resolve_alias(alias)
             })
             .await;
@@ -534,14 +585,28 @@ impl PostgresGoalPassDisposition {
                     blocked_event_ordinal = blocked.get(),
                     "automatically resumed a goal blocked by execution failure"
                 );
+                ResumeAttempt::Settled
             }
             Ok(GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Rejected(rejection))) => {
-                tracing::info!(
+                // A durable rejection spends the derived identity, so this
+                // block will never be resumed automatically. Its need text
+                // already names the operator repair for exactly this case.
+                tracing::error!(
                     session = %session.into_uuid(),
                     event_ordinal = blocked.get(),
                     rejection = ?rejection,
-                    "automatic goal resumption was durably rejected"
+                    cause_code = "goal_automatic_resume_rejected",
+                    "automatic goal resumption was durably rejected and the goal awaits an operator"
                 );
+                ResumeAttempt::Settled
+            }
+            Ok(GoalCommandHandlingOutcome::LineageMoved) => {
+                tracing::info!(
+                    session = %session.into_uuid(),
+                    event_ordinal = blocked.get(),
+                    "automatic goal resumption abandoned a goal that moved on"
+                );
+                ResumeAttempt::Settled
             }
             Ok(GoalCommandHandlingOutcome::ConflictingReuse { .. }) => {
                 tracing::error!(
@@ -550,6 +615,7 @@ impl PostgresGoalPassDisposition {
                     cause_code = "goal_automatic_resume_identity_conflict",
                     "the derived automatic goal-resume identity already means something else"
                 );
+                ResumeAttempt::Settled
             }
             Err(error) => {
                 tracing::error!(
@@ -559,9 +625,63 @@ impl PostgresGoalPassDisposition {
                     cause = %error,
                     "automatic goal resumption could not be recorded"
                 );
+                ResumeAttempt::Unsettled
             }
         }
     }
+
+    /// Arms the execution-failure block an ambiguous commit may have written.
+    ///
+    /// A lost commit acknowledgement leaves the caller unable to say whether the
+    /// block it was appending exists, and the appended need text expects
+    /// automatic resumption either way. Reading the lineage back answers the
+    /// question the acknowledgement did not. Arming a block some other pass
+    /// already armed is harmless, because both attempts derive the same command
+    /// identity and the second one replays.
+    async fn arm_after_ambiguous_commit(
+        &self,
+        session: SessionId,
+        error: &PostgresGoalPassDispositionError,
+    ) {
+        if !matches!(
+            error,
+            PostgresGoalPassDispositionError::Repository(GoalRepositoryError::CommitAmbiguous(_))
+        ) {
+            return;
+        }
+        let reread = match self.repository.load_goal(session).await {
+            Ok(Some(goal)) => goal,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::error!(
+                    session = %session.into_uuid(),
+                    cause_code = "goal_ambiguous_block_reread_failed",
+                    cause = %error,
+                    "an ambiguous goal commit cannot be resolved into an armed resumption"
+                );
+                return;
+            }
+        };
+        let Some(event) = reread
+            .events()
+            .last()
+            .filter(|event| is_execution_failure_block(event))
+        else {
+            return;
+        };
+        let resumption =
+            AutomaticResumption::after_spent_attempts(spent_automatic_resume_attempts(&reread));
+        self.arm_automatic_resumption(session, event.ordinal(), resumption);
+    }
+}
+
+/// Whether one automatic resume attempt reached a durable answer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResumeAttempt {
+    /// The attempt resumed, was refused, or found nothing left to answer.
+    Settled,
+    /// The database prevented any answer, so the attempt is still owed.
+    Unsettled,
 }
 
 impl GoalPassDisposition for PostgresGoalPassDisposition {
@@ -578,7 +698,7 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                 AcceptedInputId::from_uuid(Uuid::now_v7()),
                 TurnId::from_uuid(Uuid::now_v7()),
             );
-            let outcome = adapter
+            let outcome = match adapter
                 .repository
                 .reconcile_current_after_execution(
                     session,
@@ -586,7 +706,15 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
                     resumption.need()?,
                     |alias| adapter.model_configuration.resolve_alias(alias),
                 )
-                .await?;
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let error = PostgresGoalPassDispositionError::from(error);
+                    adapter.arm_after_ambiguous_commit(session, &error).await;
+                    return Err(error);
+                }
+            };
             match continuation_disposition(outcome)? {
                 ContinuationDisposition::Scheduled => {
                     let _ = adapter.eligibility_nudge.nudge(session);
@@ -608,14 +736,22 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
         let adapter = self.clone();
         async move {
             let resumption = adapter.plan_automatic_resumption(session).await?;
-            let outcome = adapter
+            let outcome = match adapter
                 .repository
                 .block_execution_failure(
                     session,
                     resumption.need()?,
                     GoalSchedulerProvenance::new(turn),
                 )
-                .await?;
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let error = PostgresGoalPassDispositionError::from(error);
+                    adapter.arm_after_ambiguous_commit(session, &error).await;
+                    return Err(error);
+                }
+            };
             match outcome {
                 GoalTransitionOutcome::Applied(event) => {
                     adapter.arm_automatic_resumption(session, event.ordinal(), resumption);
@@ -670,7 +806,9 @@ impl AutomaticResumption {
     /// Renders the need text the next execution-failure block will carry.
     fn need(self) -> Result<GoalNeed, PostgresGoalPassDispositionError> {
         let text = match self {
-            Self::Scheduled { .. } => String::from(EXECUTION_FAILURE_RESUMING_NEED),
+            Self::Scheduled { .. } => {
+                format!("{EXECUTION_FAILURE_RESUMING_PREAMBLE} {EXECUTION_FAILURE_NEED}")
+            }
             Self::Exhausted => format!(
                 "Automatic resumption is exhausted after {AUTOMATIC_RESUME_ATTEMPT_BUDGET} consecutive execution failures. {EXECUTION_FAILURE_NEED}"
             ),
@@ -937,6 +1075,29 @@ mod tests {
                 .expect("the exhausted need is admitted")
                 .as_str(),
             "Automatic resumption is exhausted after 5 consecutive execution failures. Resolve the failed goal turn's execution condition, then resume the goal."
+        );
+    }
+
+    /// An armed attempt can fail to resume by being durably rejected, by losing
+    /// the process that armed it, or by never reaching the database, and in
+    /// each case the need text an operator reads is the one written before the
+    /// attempt. Every one of them therefore names the repair.
+    #[test]
+    fn every_execution_failure_need_names_the_operator_repair() {
+        let scheduled = AutomaticResumption::Scheduled {
+            delay: AUTOMATIC_RESUME_BASE_BACKOFF,
+        }
+        .need()
+        .expect("the scheduled need is admitted");
+        let exhausted = AutomaticResumption::Exhausted
+            .need()
+            .expect("the exhausted need is admitted");
+
+        assert!(scheduled.as_str().ends_with(EXECUTION_FAILURE_NEED));
+        assert!(exhausted.as_str().ends_with(EXECUTION_FAILURE_NEED));
+        assert_eq!(
+            scheduled.as_str(),
+            "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator. Resolve the failed goal turn's execution condition, then resume the goal."
         );
     }
 
