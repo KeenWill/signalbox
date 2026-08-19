@@ -230,3 +230,5 @@ credential delivery are specified in
 ## License
 
 Signalbox is licensed under the [MIT License](LICENSE).
+
+<!-- Temporary docs-only CI timing probe; this change is not intended to merge. -->
