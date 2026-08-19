@@ -378,6 +378,29 @@ The questions below remain open.
   workspace portability question above. Blocks automatic placement, not manual
   placement. (S16, S30–S32)
 
+## Goal mode
+
+Statement lineage, transition authority, scheduler continuation, and the bounded
+automatic resumption of an execution-failure block are specified in
+[goal mode](spec/goal-mode.md). The questions below remain open.
+
+- **Re-arming automatic resumption across a daemon restart.** A pending
+  automatic resumption lives only in the daemon process that armed it. The goal
+  event history records how many attempts a run has spent but not when any of
+  them was recorded, so a restart during a backoff loses the pending attempt and
+  the goal stays blocked until an operator resumes it; a goal blocked before
+  that behavior shipped is in the same position. Deciding this needs a durable
+  record of when a failure was appended, which no present goal table carries,
+  and a reader that re-arms from it at startup. Blocks unattended recovery of a
+  goal whose backoff spanned a restart.
+- **Separating consecutive execution failures from distant ones.** The run an
+  attempt budget is derived from ends only at a goal event, so consecutive
+  execution failures separated by successful turns count together: a pursuit
+  that fails transiently five times, however far apart and however much work
+  succeeded between them, exhausts its budget and parks for an operator. The
+  conservative direction is deliberate, because the alternative reads turn
+  dispositions the goal event stream does not carry. Blocks nothing committed.
+
 ## Tool safety
 
 ### Review-slog toolkit adoption

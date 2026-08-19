@@ -53,6 +53,9 @@ pub enum GoalCommandHandlingOutcome {
         /// The retained conflicting command identity.
         command_id: DurableCommandId,
     },
+    /// The expected lineage head no longer held under the session lock, so
+    /// nothing was applied and the identity remains unspent.
+    LineageMoved,
 }
 
 /// Result of a scheduler- or model-provenance transition.
@@ -214,6 +217,44 @@ impl GoalRepository {
     where
         SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     {
+        self.handle_command(command, candidates, None, select_definition)
+            .await
+    }
+
+    /// Handles a user command only while the goal's last recorded event is
+    /// still `expected_head`, deciding that under the same session lock the
+    /// command applies under.
+    ///
+    /// A caller that read the lineage in an earlier transaction cannot
+    /// otherwise know which state its command lands on: between that read and
+    /// this lock the goal may have been resumed, blocked again for an unrelated
+    /// reason, stopped, or superseded, and an unconditional command would apply
+    /// to whatever it finds. An unmet expectation rolls the claim back, so the
+    /// identity stays unspent and a later attempt may still use it.
+    pub async fn handle_expected_user_command<SelectDefinition>(
+        &self,
+        command: GoalUserCommand,
+        candidates: Option<GoalTurnCandidates>,
+        expected_head: GoalEventOrdinal,
+        select_definition: SelectDefinition,
+    ) -> Result<GoalCommandHandlingOutcome, GoalRepositoryError>
+    where
+        SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    {
+        self.handle_command(command, candidates, Some(expected_head), select_definition)
+            .await
+    }
+
+    async fn handle_command<SelectDefinition>(
+        &self,
+        command: GoalUserCommand,
+        candidates: Option<GoalTurnCandidates>,
+        expected_head: Option<GoalEventOrdinal>,
+        select_definition: SelectDefinition,
+    ) -> Result<GoalCommandHandlingOutcome, GoalRepositoryError>
+    where
+        SelectDefinition: FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    {
         let command_id = command.command_id();
         let mut transaction = self.pool.begin().await?;
         if let Some(kind) = inspect_registry(&mut transaction, command_id).await? {
@@ -263,7 +304,15 @@ impl GoalRepository {
         let mut result = if !session_exists {
             GoalCommandResult::Rejected(GoalCommandRejection::SessionNotFound)
         } else {
-            apply_user_command(&mut transaction, &command).await?
+            match apply_user_command(&mut transaction, &command, expected_head).await? {
+                UserCommandApplication::Recorded(result) => result,
+                UserCommandApplication::LineageMoved => {
+                    // Rolling back releases the claim as well as the command's
+                    // own writes, which is what leaves the identity unspent.
+                    transaction.rollback().await?;
+                    return Ok(GoalCommandHandlingOutcome::LineageMoved);
+                }
+            }
         };
         let starts_pursuit = match &result {
             GoalCommandResult::Applied(event) => event_starts_pursuit(event),
@@ -733,7 +782,7 @@ pub(crate) async fn insert_fresh_commissioned_goal(
     if !lock_session(connection, command.session()).await? {
         return Err(GoalCorruption::Missing("dispatched goal session").into());
     }
-    let result = apply_user_command(connection, &command).await?;
+    let result = apply_unconditional_user_command(connection, &command).await?;
     let GoalCommandResult::Applied(event) = &result else {
         return Err(GoalCorruption::Inconsistent("rejected dispatch goal commission").into());
     };
@@ -808,7 +857,7 @@ pub(crate) async fn insert_repo_watch_composed_stop(
             GoalCorruption::Inconsistent("fresh repository-watch cutoff command identity").into(),
         );
     }
-    let result = apply_user_command(connection, &command).await?;
+    let result = apply_unconditional_user_command(connection, &command).await?;
     let GoalCommandResult::Applied(event) = &result else {
         return Err(GoalCorruption::Inconsistent(
             "repository-watch cutoff stop was rejected after locking",
@@ -965,11 +1014,46 @@ impl SystemTransition {
     }
 }
 
-async fn apply_user_command(
+/// Applies a command whose caller requires no particular lineage head.
+///
+/// Passing no expectation is what makes the moved-lineage answer impossible,
+/// so reaching it means the check answered a question nobody asked.
+async fn apply_unconditional_user_command(
     connection: &mut PgConnection,
     command: &GoalUserCommand,
 ) -> Result<GoalCommandResult, GoalRepositoryError> {
+    match apply_user_command(connection, command, None).await? {
+        UserCommandApplication::Recorded(result) => Ok(result),
+        UserCommandApplication::LineageMoved => Err(GoalCorruption::Inconsistent(
+            "unconditional goal command reported a moved lineage",
+        )
+        .into()),
+    }
+}
+
+/// What one user command did to the lineage the session lock revealed.
+enum UserCommandApplication {
+    /// The command produced this durable result.
+    Recorded(GoalCommandResult),
+    /// The caller's expected lineage head no longer held, so nothing applied.
+    LineageMoved,
+}
+
+async fn apply_user_command(
+    connection: &mut PgConnection,
+    command: &GoalUserCommand,
+    expected_head: Option<GoalEventOrdinal>,
+) -> Result<UserCommandApplication, GoalRepositoryError> {
     let existing = load_goal_from_connection(connection, command.session()).await?;
+    if let Some(expected) = expected_head
+        && existing
+            .as_ref()
+            .and_then(|goal| goal.events().last())
+            .map(GoalEvent::ordinal)
+            != Some(expected)
+    {
+        return Ok(UserCommandApplication::LineageMoved);
+    }
     let transitioned = match (command.action(), existing) {
         (GoalUserAction::Attach(statement), None) => Ok(Goal::commission(
             command.session(),
@@ -983,8 +1067,8 @@ async fn apply_user_command(
         (GoalUserAction::Resume(_), None)
         | (GoalUserAction::Stop { .. }, None)
         | (GoalUserAction::Supersede(_), None) => {
-            return Ok(GoalCommandResult::Rejected(
-                GoalCommandRejection::GoalNotAttached,
+            return Ok(UserCommandApplication::Recorded(
+                GoalCommandResult::Rejected(GoalCommandRejection::GoalNotAttached),
             ));
         }
         (GoalUserAction::Resume(guidance), Some(goal)) => goal.resume(
@@ -1000,10 +1084,12 @@ async fn apply_user_command(
         ),
     };
     match transitioned {
-        Ok(goal) => Ok(GoalCommandResult::Applied(latest_event(&goal)?)),
-        Err(error) => Ok(GoalCommandResult::Rejected(rejection_from_transition(
-            error.failure(),
-        )?)),
+        Ok(goal) => Ok(UserCommandApplication::Recorded(
+            GoalCommandResult::Applied(latest_event(&goal)?),
+        )),
+        Err(error) => Ok(UserCommandApplication::Recorded(
+            GoalCommandResult::Rejected(rejection_from_transition(error.failure())?),
+        )),
     }
 }
 
