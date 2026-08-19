@@ -5,7 +5,8 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     error::Error,
     fmt,
-    num::NonZeroU64,
+    future::Future,
+    num::{NonZeroU16, NonZeroU64},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
@@ -23,36 +24,48 @@ use signalbox_application::{
     EligibilityNudge, InProcessEligibilityNudge, RepoWatchBranchHead,
     RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
     RepoWatchCheckSuiteObservation, RepoWatchDifferFailureKind, RepoWatchDispatchService,
-    RepoWatchDispatchTransaction, RepoWatchObservation, RepoWatchPullRequestLifecycle,
+    RepoWatchDispatchTransaction, RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1,
+    RepoWatchObservation, RepoWatchObservationApplyV1, RepoWatchPullRequestLifecycle,
     RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
     RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
-    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTargetedRefreshCoalescerV1,
+    RepoWatchTargetedRefreshV1, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
+    RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
+    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
+    UuidV7RepoWatchEventIdGenerator, apply_repo_watch_observation_patch_v1,
+    derive_repo_watch_events, map_repo_watch_webhook_delivery_v1,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, DurableCommandId,
     GitHubObjectId, LabelName, MergeableState, ModelAlias, PullRequestBody,
     PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
     ReactionChange, ReactionContent, ReactionSubject, RepoWatchAuthorLogin, RepoWatchEvent,
-    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule, RepoWatchWorkflowRunAttempt,
-    RepositorySlug, ReviewState, ReviewThreadId, UserContent, WorkflowName,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchRule,
+    RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId, UserContent,
+    WorkflowName,
 };
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
-    PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
+    PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest, RepoWatchCursor,
     RepoWatchCursorCandidate, RepoWatchCursorGeneration,
 };
 use signalbox_persistence::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
 };
 use signalbox_persistence::repo_watch_dispatch_obligation::RepoWatchDispatchObligation;
+use signalbox_persistence::repo_watch_webhook::{
+    PendingRepoWatchWebhookDelivery, PostgresRepoWatchWebhookStore, RepoWatchWebhookDeliveryKey,
+    RepoWatchWebhookDisposition, RepoWatchWebhookParityCauseV1, RepoWatchWebhookPendingPageSize,
+    RepoWatchWebhookProjection, RepoWatchWebhookStoreError, RepoWatchWebhookTargetedQuery,
+    RepoWatchWebhookTerminalRequest,
+};
 use sqlx::PgPool;
 use tokio::{
     select,
     sync::watch,
     task::JoinSet,
-    time::{Instant, sleep},
+    time::{Instant, sleep, sleep_until},
 };
 
 use crate::SessionTemplateConfiguration;
@@ -60,6 +73,7 @@ use crate::configuration::{
     FileCredentialAccess, HubModelConfiguration, RepositoryWatchConfiguration,
     WatchedRepositoryConfiguration,
 };
+use crate::repo_watch_webhook_runtime::{RepoWatchWebhookRuntime, RepoWatchWebhookRuntimeError};
 
 const REST_BASE_URL: &str = "https://api.github.com/";
 const API_VERSION: &str = "2026-03-10";
@@ -69,6 +83,7 @@ const PAGE_SIZE: usize = 100;
 const MAX_RESULT_PAGES: u16 = 100;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
+const WEBHOOK_PAYLOAD_PURGE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_ENTITY_TAG_BYTES: usize = 1_024;
 const MAX_REQUESTS_PER_POLL: usize = 20_000;
 const MAX_CACHED_RESOURCES: usize = 20_000;
@@ -82,6 +97,45 @@ const MAX_POLL_WIRE_BYTES: usize = 768 * 1024 * 1024;
 // and therefore multiplies by the configured repository count. Deliberately not
 // raised with the per-attempt bound: transfer is transient, retention is not.
 const MAX_CACHED_WIRE_BYTES: usize = 64 * 1024 * 1024;
+const WEBHOOK_PENDING_PAGE_SIZE: NonZeroU16 =
+    NonZeroU16::new(100).expect("webhook pending page size is positive");
+const WEBHOOK_DRAIN_RETRY_DELAY: Duration = Duration::from_secs(5);
+// Consecutive drain failures double the retry delay up to this ceiling. A
+// delivery whose projection cannot succeed while it stays pending would
+// otherwise re-read and re-attempt the same page every five seconds for as long
+// as it remained, turning one admitted burst into unbounded repeated database
+// and credentialed provider work.
+const WEBHOOK_DRAIN_RETRY_MAX_DELAY: Duration = Duration::from_secs(300);
+// Six doublings carry the base delay past the ceiling above, so the ceiling is
+// what bounds the delay rather than the doubling count.
+const WEBHOOK_DRAIN_RETRY_MAX_DOUBLINGS: u32 = 6;
+// A separate task inspects durable pending work at this cadence, so a wedged
+// serialized repository task cannot also silence the observer meant to
+// expose it.
+const WEBHOOK_DRAIN_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
+// Pending webhook work ordinarily drains in seconds. One minute leaves ample
+// room for an in-flight bounded provider request while ensuring a task wedge
+// becomes an operator-visible error well before the next full poll.
+const WEBHOOK_DRAIN_STALL_THRESHOLD: Duration = Duration::from_secs(60);
+// The monitor reads through the shared daemon pool, whose connections wedged
+// repositories can hold all of. An unbounded acquisition would leave the
+// observer silent during exactly the degradation it exists to expose, so the
+// inspection is bounded and expiry is itself an operator-visible signal. Well
+// under the stall threshold, so a bounded failure is reported within the
+// cadence rather than displacing the report it exists to produce.
+const WEBHOOK_DRAIN_MONITOR_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+// One webhook drain visits at most this many pending pages before returning to
+// the scheduler. Webhook wakes accelerate reconciliation and must never crowd
+// out the full poll that performs it, so a sustained stream re-arms its own wake
+// instead of holding the worker across poll deadlines.
+const WEBHOOK_DRAIN_PAGE_LIMIT: usize = 2;
+// How many times one terminal record may be re-attempted while PostgreSQL keeps
+// losing its commit result. Each attempt is settled by a read, so this bounds a
+// flapping connection rather than a genuinely undecided outcome.
+const MAX_WEBHOOK_TERMINAL_ATTEMPTS: u32 = 5;
+// What separates those attempts, so a dropping connection cannot become a hot
+// loop against the pool.
+const WEBHOOK_TERMINAL_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 const REVIEW_THREADS_QUERY: &str = r#"
 query RepositoryWatchReviewThreads(
@@ -115,6 +169,9 @@ impl Error for RepositoryWatchRuntimeConstructionError {}
 pub enum RepositoryWatchRuntimeError {
     RepositoryTaskExited,
     RepositoryTaskPanicked,
+    WebhookMonitorExited,
+    WebhookListenerExited,
+    WebhookListenerFailed,
     TaskSetEmpty,
 }
 
@@ -123,6 +180,13 @@ impl fmt::Display for RepositoryWatchRuntimeError {
         formatter.write_str(match self {
             Self::RepositoryTaskExited => "repository-watch task exited before shutdown",
             Self::RepositoryTaskPanicked => "repository-watch task panicked",
+            Self::WebhookMonitorExited => {
+                "repository-watch webhook drain monitor exited before shutdown"
+            }
+            Self::WebhookListenerExited => {
+                "repository-watch webhook listener exited before shutdown"
+            }
+            Self::WebhookListenerFailed => "repository-watch webhook listener failed",
             Self::TaskSetEmpty => "repository-watch task set became empty",
         })
     }
@@ -133,6 +197,7 @@ impl Error for RepositoryWatchRuntimeError {}
 /// Supervisor for one independent polling task per configured repository.
 pub struct RepositoryWatchRuntime {
     tasks: Vec<RepositoryWatchTask>,
+    webhook: Option<RepoWatchWebhookRuntime>,
 }
 
 impl RepositoryWatchRuntime {
@@ -146,7 +211,21 @@ impl RepositoryWatchRuntime {
         eligibility_nudge: InProcessEligibilityNudge,
     ) -> Result<Self, RepositoryWatchRuntimeConstructionError> {
         let mut tasks = Vec::with_capacity(configuration.repositories().len());
+        let mut webhook_workers = HashMap::new();
+        let payload_purge = WebhookPayloadPurgeSchedule::starting_now();
         for repository in configuration.repositories() {
+            let mut webhook_nudge = None;
+            let webhook_work = repository.webhook().map(|_| {
+                let (sender, receiver) = watch::channel(());
+                // Shared rather than cloned: a `watch` sender cannot be
+                // cloned, and both the listener and the worker publish here.
+                let sender = Arc::new(sender);
+                webhook_workers.insert(repository.repository().clone(), Arc::clone(&sender));
+                // The worker keeps a wake of its own so a bounded drain can hand
+                // the scheduler its turn and still resume.
+                webhook_nudge = Some(sender);
+                receiver
+            });
             tasks.push(RepositoryWatchTask::try_new(
                 repository,
                 RepositoryWatchTaskContext {
@@ -157,10 +236,15 @@ impl RepositoryWatchRuntime {
                     models: models.clone(),
                     credential_pin: credential_pin.clone(),
                     eligibility_nudge: eligibility_nudge.clone(),
+                    webhook_work,
+                    webhook_nudge,
+                    payload_purge: payload_purge.clone(),
                 },
             )?);
         }
-        Ok(Self { tasks })
+        let webhook = RepoWatchWebhookRuntime::try_new(pool, configuration, webhook_workers)
+            .map_err(|_| RepositoryWatchRuntimeConstructionError)?;
+        Ok(Self { tasks, webhook })
     }
 
     /// Runs every repository task until the daemon broadcasts shutdown.
@@ -174,15 +258,40 @@ impl RepositoryWatchRuntime {
         let mut tasks = JoinSet::new();
         let mut pollers = Vec::with_capacity(self.tasks.len());
         for task in self.tasks {
+            if task.webhook_work.is_some() {
+                let repository = task.repository.clone();
+                let store = task.webhook_store.clone();
+                let monitor_shutdown = shutdown.clone();
+                tasks.spawn(async move {
+                    monitor_webhook_drain(repository, store, monitor_shutdown).await;
+                    RepositoryWatchChildExit::WebhookMonitor
+                });
+            }
             pollers.push(Arc::clone(&task.poller));
-            tasks.spawn(task.run(shutdown.clone()));
+            let task_shutdown = shutdown.clone();
+            tasks.spawn(async move {
+                task.run(task_shutdown).await;
+                RepositoryWatchChildExit::Repository
+            });
+        }
+        if let Some(webhook) = self.webhook {
+            let webhook_shutdown = shutdown.clone();
+            tasks.spawn(async move {
+                RepositoryWatchChildExit::Webhook(webhook.run(webhook_shutdown).await)
+            });
         }
         supervise_repository_tasks(tasks, pollers, shutdown).await
     }
 }
 
+enum RepositoryWatchChildExit {
+    Repository,
+    WebhookMonitor,
+    Webhook(Result<(), RepoWatchWebhookRuntimeError>),
+}
+
 async fn supervise_repository_tasks(
-    mut tasks: JoinSet<()>,
+    mut tasks: JoinSet<RepositoryWatchChildExit>,
     pollers: Vec<Arc<GitHubRepositoryPoller>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), RepositoryWatchRuntimeError> {
@@ -206,13 +315,24 @@ async fn supervise_repository_tasks(
                 }
                 completed = tasks.join_next() => {
                     return match completed {
-                        Some(Ok(())) if *shutdown.borrow() => {
+                        Some(Ok(_)) if *shutdown.borrow() => {
                             while let Some(result) = tasks.join_next().await {
                                 result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
                             }
                             Ok(())
                         }
-                        Some(Ok(())) => Err(RepositoryWatchRuntimeError::RepositoryTaskExited),
+                        Some(Ok(RepositoryWatchChildExit::Repository)) => {
+                            Err(RepositoryWatchRuntimeError::RepositoryTaskExited)
+                        }
+                        Some(Ok(RepositoryWatchChildExit::WebhookMonitor)) => {
+                            Err(RepositoryWatchRuntimeError::WebhookMonitorExited)
+                        }
+                        Some(Ok(RepositoryWatchChildExit::Webhook(Ok(())))) => {
+                            Err(RepositoryWatchRuntimeError::WebhookListenerExited)
+                        }
+                        Some(Ok(RepositoryWatchChildExit::Webhook(Err(_)))) => {
+                            Err(RepositoryWatchRuntimeError::WebhookListenerFailed)
+                        }
                         Some(Err(_)) => Err(RepositoryWatchRuntimeError::RepositoryTaskPanicked),
                         None => Err(RepositoryWatchRuntimeError::TaskSetEmpty),
                     };
@@ -230,6 +350,540 @@ async fn supervise_repository_tasks(
     result
 }
 
+async fn receive_webhook_work(receiver: &mut Option<watch::Receiver<()>>) -> bool {
+    let received = match receiver {
+        Some(receiver) => receiver.changed().await.is_ok(),
+        None => std::future::pending().await,
+    };
+    if !received {
+        *receiver = None;
+    }
+    received
+}
+
+/// Marks a wake already covered by the immediately following durable drain.
+///
+/// The scheduler may select an equally ready poll deadline ahead of this wake.
+/// Observing it before the drain means a delivery admitted while the drain is
+/// running publishes a later change and remains visible to the provider-sweep
+/// interrupt arm.
+fn observe_webhook_work_before_drain(receiver: &mut Option<watch::Receiver<()>>) {
+    let Some(active_receiver) = receiver.as_mut() else {
+        return;
+    };
+    let disconnected = match active_receiver.has_changed() {
+        Ok(true) => {
+            active_receiver.borrow_and_update();
+            false
+        }
+        Ok(false) => false,
+        Err(_) => true,
+    };
+    if disconnected {
+        *receiver = None;
+    }
+}
+
+enum PollAttemptWait<T> {
+    Completed(T),
+    Continue,
+    Shutdown,
+    Webhook,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookPollInterrupt {
+    Enabled,
+    Suppressed,
+}
+
+impl WebhookPollInterrupt {
+    const fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+async fn await_poll_or_interrupt<F>(
+    poll: F,
+    shutdown: &mut watch::Receiver<bool>,
+    webhook_work: &mut Option<watch::Receiver<()>>,
+    webhook_interrupt: WebhookPollInterrupt,
+) -> PollAttemptWait<F::Output>
+where
+    F: Future,
+{
+    select! {
+        biased;
+        changed = shutdown.changed() => {
+            if changed.is_err() || *shutdown.borrow() {
+                PollAttemptWait::Shutdown
+            } else {
+                PollAttemptWait::Continue
+            }
+        }
+        admitted = receive_webhook_work(webhook_work), if webhook_interrupt.is_enabled() => {
+            if admitted {
+                PollAttemptWait::Webhook
+            } else {
+                PollAttemptWait::Continue
+            }
+        }
+        result = poll => PollAttemptWait::Completed(result),
+    }
+}
+
+#[derive(Default)]
+struct WebhookDrainRetry {
+    deadline: Option<Instant>,
+    deadline_kind: Option<WebhookRetryDeadlineKind>,
+    consecutive_failures: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookRetryDeadlineKind {
+    DrainBackoff,
+    DispatchFollowUp,
+}
+
+impl WebhookDrainRetry {
+    /// The delay the most recent failure earned.
+    ///
+    /// A first failure waits `WEBHOOK_DRAIN_RETRY_DELAY`, which keeps an
+    /// ordinary transient failure — a dropped connection, a lock contended past
+    /// its timeout — draining promptly. Each further consecutive failure
+    /// doubles that up to `WEBHOOK_DRAIN_RETRY_MAX_DELAY`, so a delivery that
+    /// cannot be projected at all costs bounded repeated work instead of a
+    /// fixed five-second loop for as long as it stays pending. The drain
+    /// monitor reports such a delivery independently of this delay.
+    fn delay(&self) -> Duration {
+        let doublings = self
+            .consecutive_failures
+            .saturating_sub(1)
+            .min(WEBHOOK_DRAIN_RETRY_MAX_DOUBLINGS);
+        WEBHOOK_DRAIN_RETRY_DELAY
+            .saturating_mul(1_u32 << doublings)
+            .min(WEBHOOK_DRAIN_RETRY_MAX_DELAY)
+    }
+
+    fn schedule(&mut self) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.deadline = Some(Instant::now() + self.delay());
+        self.deadline_kind = Some(WebhookRetryDeadlineKind::DrainBackoff);
+    }
+
+    /// Whether projection backoff is currently in force.
+    ///
+    /// A dispatch follow-up also owns a deadline, but it must not suppress
+    /// admission wakes or make a full poll omit healthy drain work. The
+    /// deadline is what makes a kind in force: a spent one is retained only so
+    /// that rearming can restore it.
+    const fn is_backing_off(&self) -> bool {
+        self.deadline.is_some()
+            && matches!(
+                self.deadline_kind,
+                Some(WebhookRetryDeadlineKind::DrainBackoff)
+            )
+    }
+
+    /// What a full polling attempt should do about its own drain step.
+    const fn poll_drain(&self) -> WebhookDrain {
+        if self.is_backing_off() {
+            WebhookDrain::Deferred
+        } else {
+            WebhookDrain::Run
+        }
+    }
+
+    /// Spends the earned backoff and arms a retry at the base delay.
+    ///
+    /// The drain itself succeeded, so the consecutive-failure count it earned
+    /// is spent. The work that failed after it runs only from a later
+    /// repository attempt, and the delivery that would have woken one is
+    /// already terminal — its admission wake is spent too — so without an armed
+    /// retry that work waits for another admission or the next full poll rather
+    /// than the delay this schedule promises. The drain's own escalation does
+    /// not apply, because the drain is not what failed.
+    fn arm_follow_up(&mut self, now: Instant) {
+        self.consecutive_failures = 0;
+        self.deadline = Some(now + self.delay());
+        self.deadline_kind = Some(WebhookRetryDeadlineKind::DispatchFollowUp);
+    }
+
+    /// Marks the owed retry as taken, keeping the delay it has earned.
+    ///
+    /// The retry arm firing is that retry being spent. Leaving the deadline
+    /// owed would select the same attempt again on the next pass, because the
+    /// retry arm precedes the poll arm, and the delay would never be waited
+    /// out. What follows decides the next deadline: a drain failure advances
+    /// it, a success clears the backoff, and a failure before the drain arms it
+    /// again at the same delay and the same kind. The kind is therefore
+    /// retained rather than dropped; the absent deadline is what marks the
+    /// retry as spent.
+    fn consume(&mut self) {
+        self.deadline = None;
+    }
+
+    /// Arms a retry when none is owed, without counting a drain failure.
+    ///
+    /// Two failures reach here and neither is the drain's: a full poll, and an
+    /// attempt that failed before reaching its drain. The delay therefore does
+    /// not advance — only consecutive drain failures may move it.
+    ///
+    /// An owed deadline is left exactly as it stands, including one that
+    /// expired while the failing attempt ran. That attempt did not take the
+    /// retry, so the next pass must find it ready: moving it forward here would
+    /// let a poll interval shorter than the delay push the retry out on every
+    /// slow failure and starve the drain indefinitely, which is the starvation
+    /// the retry arm's priority exists to prevent.
+    ///
+    /// A deadline the retry arm just spent keeps its kind. The attempt that
+    /// followed it failed before its drain, so it says nothing about
+    /// projection: a follow-up whose trailing work failed again would otherwise
+    /// rearm as backoff and begin suppressing admission wakes and poll drains
+    /// while projection was healthy, which is exactly what the two kinds exist
+    /// to keep apart.
+    fn arm_if_unowed(&mut self, now: Instant) {
+        if self.deadline.is_none() {
+            self.deadline = Some(now + self.delay());
+            self.deadline_kind = self
+                .deadline_kind
+                .or(Some(WebhookRetryDeadlineKind::DrainBackoff));
+        }
+    }
+
+    fn clear(&mut self) {
+        self.deadline = None;
+        self.deadline_kind = None;
+        self.consecutive_failures = 0;
+    }
+
+    /// `trailing_failure` is the attempt's cutoff or dispatch work after the
+    /// drain, which the drain's own outcome cannot report: both run once the
+    /// drain has committed, and a delivery already terminal will not wake
+    /// another attempt for them.
+    fn update_after_poll_drain(
+        &mut self,
+        outcome: WebhookDrainOutcome,
+        trailing_failure: Option<RepositoryWatchAttemptError>,
+        now: Instant,
+    ) {
+        match outcome {
+            WebhookDrainOutcome::Drained if trailing_failure.is_some() => {
+                self.arm_follow_up(now);
+            }
+            WebhookDrainOutcome::Drained => self.update_after(&Ok(())),
+            WebhookDrainOutcome::DispatchFailedAfterTerminal(_) => {
+                self.arm_follow_up(now);
+            }
+            WebhookDrainOutcome::ProjectionFailed(error) => {
+                self.update_after(&Err(error));
+            }
+        }
+    }
+
+    fn update_after(&mut self, result: &Result<(), RepositoryWatchAttemptError>) {
+        match result {
+            Ok(()) => self.clear(),
+            Err(_) => self.schedule(),
+        }
+    }
+
+    async fn due(&self) {
+        match self.deadline {
+            Some(deadline) => sleep_until(deadline).await,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+/// Which schedule ran a webhook attempt, reported as a field so its three
+/// callers share one set of records rather than three near-identical ones.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookAttemptTrigger {
+    Startup,
+    Wake,
+    Retry,
+}
+
+impl WebhookAttemptTrigger {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::Wake => "wake",
+            Self::Retry => "retry",
+        }
+    }
+}
+
+/// How one drain ended, so work after a delivery reached terminal state is not
+/// charged to projection.
+///
+/// A dispatch failure cannot be retried by draining again — the delivery it
+/// followed is already terminal and will not be reloaded — so counting it as a
+/// projection failure would grow the backoff, suppress admission wakes, and
+/// make polls omit their drain steps while every projection was succeeding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookDrainOutcome {
+    /// Every delivery this drain visited reached terminal state.
+    Drained,
+    /// A delivery could not be projected, and the drain retains it.
+    ProjectionFailed(RepositoryWatchAttemptError),
+    /// Every delivery reached terminal state and dispatch work for one of them
+    /// then failed.
+    DispatchFailedAfterTerminal(RepositoryWatchAttemptError),
+}
+
+impl WebhookDrainOutcome {
+    /// The drain's failure, whichever step produced it.
+    const fn failure(self) -> Option<RepositoryWatchAttemptError> {
+        match self {
+            Self::Drained => None,
+            Self::ProjectionFailed(error) | Self::DispatchFailedAfterTerminal(error) => Some(error),
+        }
+    }
+}
+
+/// How one webhook-triggered attempt ended, with the drain's own outcome held
+/// apart from the cutoff and dispatch work around it.
+///
+/// The backoff measures the drain, so only a drain failure may advance it.
+/// Dispatch work that kept failing would otherwise grow the delay to its
+/// ceiling, suppress admission wakes, and make full polls omit their drain
+/// steps while projection itself was healthy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookAttemptOutcome {
+    /// Every step succeeded.
+    Completed,
+    /// The drain itself failed, so the backoff advances.
+    DrainFailed(RepositoryWatchAttemptError),
+    /// The drain succeeded and the dispatch work after it failed, so the
+    /// backoff is cleared: the drain is what it measures.
+    DrainedThenFailed(RepositoryWatchAttemptError),
+    /// A step before the drain failed, so the drain never ran. It has earned
+    /// neither a longer delay nor a clear, and a retry is armed only if none is
+    /// already owed.
+    FailedBeforeDrain(RepositoryWatchAttemptError),
+}
+
+impl WebhookAttemptOutcome {
+    /// The attempt's failure, whichever step produced it.
+    const fn failure(self) -> Option<RepositoryWatchAttemptError> {
+        match self {
+            Self::Completed => None,
+            Self::DrainFailed(error)
+            | Self::DrainedThenFailed(error)
+            | Self::FailedBeforeDrain(error) => Some(error),
+        }
+    }
+}
+
+/// Whether a full polling attempt performs its own webhook drain step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookDrain {
+    /// No retry is owed, so this attempt drains durable pending deliveries.
+    Run,
+    /// A retry already owes that drain. Running it here would repeat at the
+    /// poll cadence exactly the work the backoff exists to space out.
+    Deferred,
+}
+
+/// What a repository task's next wake asks it to do.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepositoryWatchWake {
+    /// Shutdown was observed, or its sender was dropped.
+    Stop,
+    /// A durable webhook drain retry came due.
+    WebhookRetry,
+    /// The next full poll came due.
+    Poll,
+    /// A wake published by webhook admission arrived.
+    WebhookWork,
+    /// Nothing actionable happened; the deadlines are re-evaluated.
+    Continue,
+}
+
+/// Chooses a repository task's next action, cancelled by shutdown.
+///
+/// The order is load-bearing. An overdue drain retry precedes an overdue poll:
+/// when a full poll consistently outlasts its own interval — a provider request
+/// timing out repeatedly, say — the poll deadline is already elapsed on entry
+/// to every pass, and a biased poll arm ahead of the retry would win every one
+/// of them and leave durable webhook deliveries pending for as long as polling
+/// kept failing. Deferring a poll costs at most one drain attempt, because
+/// taking the retry reschedules its deadline before the next pass.
+///
+/// An admission wake is disabled while projection backoff is owed, so it cannot
+/// start a drain the backoff has deferred. A dispatch follow-up remains in this
+/// schedule without activating that suppression. Admission is authenticated but
+/// not trusted to pace this worker: replays are acknowledged at the intake rate,
+/// and each one publishing an immediate drain would drive provider and database
+/// work at that rate for as long as the drain kept failing. Nothing is lost by
+/// waiting, because the wake coalesces and an unobserved one stays observable for
+/// the attempt that follows the retry.
+async fn next_repository_wake(
+    shutdown: &mut watch::Receiver<bool>,
+    next_poll: Instant,
+    webhook_retry: &WebhookDrainRetry,
+    webhook_work: &mut Option<watch::Receiver<()>>,
+) -> RepositoryWatchWake {
+    select! {
+        biased;
+        changed = shutdown.changed() => {
+            if changed.is_err() || *shutdown.borrow() {
+                RepositoryWatchWake::Stop
+            } else {
+                RepositoryWatchWake::Continue
+            }
+        }
+        () = webhook_retry.due() => RepositoryWatchWake::WebhookRetry,
+        () = sleep_until(next_poll) => RepositoryWatchWake::Poll,
+        admitted = receive_webhook_work(webhook_work), if !webhook_retry.is_backing_off() => {
+            if admitted {
+                RepositoryWatchWake::WebhookWork
+            } else {
+                RepositoryWatchWake::Continue
+            }
+        }
+    }
+}
+
+/// The next deadline on a fixed cadence anchored at `previous`.
+///
+/// The cadence holds while the work between deadlines fits inside the interval,
+/// so neither a poll attempt nor a monitor query accrues its own duration into
+/// the rate. Work that outlasts the interval cannot hold that cadence, and
+/// leaving the missed tick in the past would keep the timer ready on entry to
+/// every pass, so an overrun starts a fresh interval from now. Every pass then
+/// reaches a real sleep, which is what lets a repository task's other arms be
+/// polled at all.
+fn next_cadence_deadline(previous: Instant, interval: Duration, now: Instant) -> Instant {
+    let anchored = previous + interval;
+    if anchored > now {
+        anchored
+    } else {
+        now + interval
+    }
+}
+
+/// Awaits `work`, leaving it cancellable by shutdown.
+///
+/// Returns `None` when shutdown — or a dropped sender — cancelled the work
+/// before it produced an output; a channel notification that is not shutdown
+/// resumes the same work rather than abandoning it. Every await a supervised
+/// child performs outside its own `select!` has to pass through here:
+/// `supervise_repository_tasks` joins each child before aborting the set, so a
+/// single uncancellable database await would hang daemon termination for as
+/// long as PostgreSQL stayed unresponsive.
+async fn run_until_shutdown<F>(shutdown: &mut watch::Receiver<bool>, work: F) -> Option<F::Output>
+where
+    F: Future,
+{
+    let mut work = std::pin::pin!(work);
+    loop {
+        select! {
+            output = &mut work => return Some(output),
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+async fn monitor_webhook_drain(
+    repository: RepositorySlug,
+    store: PostgresRepoWatchWebhookStore,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut next_inspection = Instant::now() + WEBHOOK_DRAIN_MONITOR_INTERVAL;
+    loop {
+        select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+                continue;
+            }
+            () = sleep_until(next_inspection) => {}
+        }
+        // Anchored before the inspection rather than after it. A slow query
+        // would otherwise push the cadence out by its own duration and delay
+        // the stall report precisely when the database is degraded, which is
+        // when that report matters.
+        next_inspection = next_cadence_deadline(
+            next_inspection,
+            WEBHOOK_DRAIN_MONITOR_INTERVAL,
+            Instant::now(),
+        );
+        // The inspection acquires a pooled connection and queries, neither of
+        // which this task bounds. Awaiting it outside shutdown would hold this
+        // child while PostgreSQL was unresponsive, and the supervisor joins
+        // every child before aborting the set, so the daemon could not stop.
+        if run_until_shutdown(
+            &mut shutdown,
+            inspect_webhook_drain(&repository, &store, WEBHOOK_DRAIN_STALL_THRESHOLD),
+        )
+        .await
+        .is_none()
+        {
+            return;
+        }
+    }
+}
+
+async fn inspect_webhook_drain(
+    repository: &RepositorySlug,
+    store: &PostgresRepoWatchWebhookStore,
+    stall_threshold: Duration,
+) {
+    // Identity and receipt only, never the admitted body. This runs on a fixed
+    // cadence for every webhook repository, so loading a pending page here
+    // would transfer the payload — up to the 25 MiB admission ceiling — on
+    // every pass, for every stalled repository at once, precisely while the
+    // system is already degraded.
+    let inspection = tokio::time::timeout(
+        WEBHOOK_DRAIN_MONITOR_QUERY_TIMEOUT,
+        store.load_oldest_pending_receipt(repository),
+    );
+    let oldest = match inspection.await {
+        Ok(Ok(Some(oldest))) => oldest,
+        Ok(Ok(None)) => return,
+        Err(_) => {
+            tracing::error!(
+                repository = %repository.as_str(),
+                timeout_seconds = WEBHOOK_DRAIN_MONITOR_QUERY_TIMEOUT.as_secs(),
+                cause_code = "webhook_drain_monitor_query_timed_out",
+                "repository-watch webhook drain monitor cannot reach durable work"
+            );
+            return;
+        }
+        Ok(Err(error)) => {
+            tracing::error!(
+                repository = %repository.as_str(),
+                cause_code = "webhook_drain_monitor_query_failed",
+                cause = %error,
+                "repository-watch webhook drain monitor cannot inspect durable work"
+            );
+            return;
+        }
+    };
+    let pending_for = oldest.pending_for();
+    if pending_for < stall_threshold {
+        return;
+    }
+    tracing::error!(
+        repository = %repository.as_str(),
+        hook_id = oldest.key().hook_id().get(),
+        delivery_id = %oldest.key().delivery_id(),
+        receipt_sequence = oldest.receipt().sequence().get(),
+        pending_seconds = pending_for.as_secs(),
+        cause_code = "webhook_projection_drain_stalled",
+        "durable repository-watch webhook delivery remains undispositioned"
+    );
+}
+
 struct RepositoryWatchTask {
     repository: RepositorySlug,
     interval: Duration,
@@ -240,7 +894,31 @@ struct RepositoryWatchTask {
     templates: SessionTemplateConfiguration,
     models: HubModelConfiguration,
     eligibility_nudge: InProcessEligibilityNudge,
+    webhook_store: PostgresRepoWatchWebhookStore,
+    webhook_work: Option<watch::Receiver<()>>,
+    webhook_nudge: Option<Arc<watch::Sender<()>>>,
+    webhook_shadow: Option<WebhookShadowBaseline>,
+    webhook_shadow_superseded: bool,
+    payload_purge: WebhookPayloadPurgeSchedule,
     rules_activated: bool,
+}
+
+/// One process-wide schedule for the expired-payload purge.
+///
+/// Every repository task shares it, so a multi-repository daemon purges at
+/// most once per interval rather than once per repository, and the lock is
+/// held across the deletion so concurrent tasks cannot run it redundantly.
+#[derive(Clone)]
+struct WebhookPayloadPurgeSchedule {
+    next: Arc<tokio::sync::Mutex<Instant>>,
+}
+
+impl WebhookPayloadPurgeSchedule {
+    fn starting_now() -> Self {
+        Self {
+            next: Arc::new(tokio::sync::Mutex::new(Instant::now())),
+        }
+    }
 }
 
 struct RepositoryWatchTaskContext {
@@ -251,6 +929,9 @@ struct RepositoryWatchTaskContext {
     models: HubModelConfiguration,
     credential_pin: signalbox_persistence::SessionCredentialPin,
     eligibility_nudge: InProcessEligibilityNudge,
+    webhook_work: Option<watch::Receiver<()>>,
+    webhook_nudge: Option<Arc<watch::Sender<()>>>,
+    payload_purge: WebhookPayloadPurgeSchedule,
 }
 
 impl RepositoryWatchTask {
@@ -266,6 +947,9 @@ impl RepositoryWatchTask {
             models,
             credential_pin,
             eligibility_nudge,
+            webhook_work,
+            webhook_nudge,
+            payload_purge,
         } = context;
         let credential_reference = configuration.credential_reference();
         let credentials = FileCredentialAccess::new_bounded(
@@ -284,65 +968,208 @@ impl RepositoryWatchTask {
                 credential_reference,
             )?),
             store,
-            dispatch_store: PostgresRepoWatchDispatchStore::new(pool, credential_pin),
+            dispatch_store: PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin),
+            webhook_store: PostgresRepoWatchWebhookStore::new(pool),
             rules,
             templates,
             models,
             eligibility_nudge,
+            webhook_work,
+            webhook_nudge,
+            webhook_shadow: None,
+            webhook_shadow_superseded: false,
+            payload_purge,
             rules_activated: false,
         })
     }
 
     async fn run(mut self, mut shutdown: watch::Receiver<bool>) {
+        if *shutdown.borrow() {
+            return;
+        }
+        let mut webhook_retry = WebhookDrainRetry::default();
+        if self.webhook_work.is_some() {
+            let Some(outcome) = self.run_webhook_attempt_until_shutdown(&mut shutdown).await else {
+                return;
+            };
+            if self.record_webhook_attempt(
+                WebhookAttemptTrigger::Startup,
+                outcome,
+                &mut webhook_retry,
+            ) {
+                return;
+            }
+        }
+        let mut next_poll = Instant::now();
         loop {
             if *shutdown.borrow() {
                 return;
             }
-            let cycle_started = Instant::now();
-            let mut attempt_cancelled = false;
-            select! {
-                result = self.run_attempt() => {
+            match next_repository_wake(
+                &mut shutdown,
+                next_poll,
+                &webhook_retry,
+                &mut self.webhook_work,
+            )
+            .await
+            {
+                RepositoryWatchWake::Stop => return,
+                RepositoryWatchWake::Continue => {}
+                RepositoryWatchWake::Poll => {
+                    let cycle_started = Instant::now();
+                    let drain = webhook_retry.poll_drain();
+                    let mut drained = None;
+                    let mut trailing_failure = None;
+                    let webhook_interrupt = match webhook_retry.is_backing_off() {
+                        true => WebhookPollInterrupt::Suppressed,
+                        false => WebhookPollInterrupt::Enabled,
+                    };
+                    let outcome = self
+                        .run_preemptible_attempt_until_shutdown(
+                            drain,
+                            &mut shutdown,
+                            webhook_interrupt,
+                            &mut drained,
+                            &mut trailing_failure,
+                        )
+                        .await;
+                    let result = match outcome {
+                        PollAttemptWait::Completed(result) => result,
+                        PollAttemptWait::Shutdown => {
+                            // A cancelled full poll may own spawned PR fetches.
+                            self.poller.drain_fetches().await;
+                            self.poller.invalidate_freshness();
+                            return;
+                        }
+                        PollAttemptWait::Continue => {
+                            self.poller.drain_fetches().await;
+                            self.poller.invalidate_freshness();
+                            continue;
+                        }
+                        PollAttemptWait::Webhook => {
+                            self.poller.drain_fetches().await;
+                            // A cancelled child can publish freshness until its
+                            // final await completes. Invalidate only after every
+                            // child is joined so none can repopulate partial state.
+                            self.poller.invalidate_freshness();
+                            let Some(outcome) =
+                                self.run_webhook_attempt_until_shutdown(&mut shutdown).await
+                            else {
+                                return;
+                            };
+                            if self.record_webhook_attempt(
+                                WebhookAttemptTrigger::Wake,
+                                outcome,
+                                &mut webhook_retry,
+                            ) {
+                                return;
+                            }
+                            tracing::debug!(
+                                repository = %self.repository.as_str(),
+                                "repository-watch webhook work preempted a full poll"
+                            );
+                            // One wake may preempt a due poll. Its resumed
+                            // attempt is deliberately not interruptible, so a
+                            // sustained valid webhook stream cannot starve the
+                            // complete reconciliation sweep. Any later wake
+                            // remains coalesced for the next scheduling pass.
+                            let resumed_drain = webhook_retry.poll_drain();
+                            // The preempting webhook attempt has already updated
+                            // retry state. Only a drain performed by the resumed
+                            // poll may disposition that state below.
+                            drained = None;
+                            trailing_failure = None;
+                            let Some(result) = run_until_shutdown(
+                                &mut shutdown,
+                                self.run_attempt(
+                                    resumed_drain,
+                                    &mut drained,
+                                    &mut trailing_failure,
+                                ),
+                            )
+                            .await
+                            else {
+                                self.poller.drain_fetches().await;
+                                self.poller.invalidate_freshness();
+                                return;
+                            };
+                            result
+                        }
+                    };
                     let metrics = self.poller.attempt_metrics();
-                    match result {
-                        Ok(()) => tracing::debug!(
-                            repository = %self.repository.as_str(),
-                            "repository-watch polling attempt completed"
+                    // A drain a poll performed decides the backoff exactly as one
+                    // a wake or a retry performed does. Reading only the poll's
+                    // own result would erase that: a dispatch failure after
+                    // terminal state would arm a retry with nothing left to
+                    // drain, and a projection failure would not be counted.
+                    match drained {
+                        Some(outcome) => webhook_retry.update_after_poll_drain(
+                            outcome,
+                            trailing_failure,
+                            Instant::now(),
                         ),
-                        Err(error) => tracing::warn!(
-                            repository = %self.repository.as_str(),
-                            cause_code = error.cause_code(),
-                            request_count = metrics.requests,
-                            poll_wire_bytes = metrics.poll_wire_bytes,
-                            cached_resource_count = metrics.cached_resources,
-                            cached_wire_bytes = metrics.cached_wire_bytes,
-                            "repository-watch polling attempt failed closed"
-                        ),
+                        // The poll deferred its drain to an owed retry, or
+                        // failed before reaching it.
+                        None => {
+                            if result.is_err() && self.webhook_work.is_some() {
+                                webhook_retry.arm_if_unowed(Instant::now());
+                            }
+                        }
+                    }
+                    match &result {
+                        Ok(()) => {
+                            tracing::debug!(
+                                repository = %self.repository.as_str(),
+                                "repository-watch polling attempt completed"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                repository = %self.repository.as_str(),
+                                cause_code = error.cause_code(),
+                                request_count = metrics.requests,
+                                poll_wire_bytes = metrics.poll_wire_bytes,
+                                cached_resource_count = metrics.cached_resources,
+                                cached_wire_bytes = metrics.cached_wire_bytes,
+                                "repository-watch polling attempt failed closed"
+                            );
+                        }
                     }
                     if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
                         return;
                     }
+                    next_poll = next_cadence_deadline(cycle_started, self.interval, Instant::now());
                 }
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() {
-                        attempt_cancelled = true;
+                RepositoryWatchWake::WebhookWork => {
+                    let Some(outcome) =
+                        self.run_webhook_attempt_until_shutdown(&mut shutdown).await
+                    else {
+                        return;
+                    };
+                    if self.record_webhook_attempt(
+                        WebhookAttemptTrigger::Wake,
+                        outcome,
+                        &mut webhook_retry,
+                    ) {
+                        return;
                     }
                 }
-            }
-            if attempt_cancelled {
-                // Winning this race dropped the attempt future, which aborts
-                // its spawned pull-request fetches without joining them. Join
-                // them before returning, so the supervisor's clean stop means
-                // every child has actually finished.
-                self.poller.drain_fetches().await;
-                return;
-            }
-            select! {
-                () = sleep(remaining_interval(PollCycleTiming {
-                    interval: self.interval,
-                    elapsed: cycle_started.elapsed(),
-                })) => {}
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() {
+                RepositoryWatchWake::WebhookRetry => {
+                    // Taking the retry spends its deadline, so what the attempt
+                    // earns decides the next one. Without this the deadline
+                    // stays elapsed and this arm, which precedes the poll arm,
+                    // selects the same attempt again on the very next pass.
+                    webhook_retry.consume();
+                    let Some(outcome) =
+                        self.run_webhook_attempt_until_shutdown(&mut shutdown).await
+                    else {
+                        return;
+                    };
+                    if self.record_webhook_attempt(
+                        WebhookAttemptTrigger::Retry,
+                        outcome,
+                        &mut webhook_retry,
+                    ) {
                         return;
                     }
                 }
@@ -350,18 +1177,129 @@ impl RepositoryWatchTask {
         }
     }
 
-    async fn run_attempt(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+    async fn run_webhook_attempt_until_shutdown(
+        &mut self,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Option<WebhookAttemptOutcome> {
+        run_until_shutdown(shutdown, self.run_webhook_attempt()).await
+    }
+
+    /// Applies one attempt's outcome to the drain backoff and reports it.
+    ///
+    /// Answers whether the repository task must stop, which a permanent failure
+    /// requires whichever step produced it.
+    fn record_webhook_attempt(
+        &self,
+        trigger: WebhookAttemptTrigger,
+        outcome: WebhookAttemptOutcome,
+        webhook_retry: &mut WebhookDrainRetry,
+    ) -> bool {
+        match outcome {
+            WebhookAttemptOutcome::Completed => {
+                webhook_retry.update_after(&Ok(()));
+                tracing::debug!(
+                    repository = %self.repository.as_str(),
+                    trigger = trigger.as_str(),
+                    "repository-watch webhook attempt drained durable work"
+                );
+            }
+            WebhookAttemptOutcome::DrainFailed(error) => {
+                webhook_retry.update_after(&Err(error));
+                tracing::error!(
+                    repository = %self.repository.as_str(),
+                    trigger = trigger.as_str(),
+                    cause_code = error.cause_code(),
+                    retry_seconds = webhook_retry.delay().as_secs(),
+                    "repository-watch webhook drain failed; retry scheduled"
+                );
+            }
+            WebhookAttemptOutcome::DrainedThenFailed(error) => {
+                webhook_retry.arm_follow_up(Instant::now());
+                tracing::error!(
+                    repository = %self.repository.as_str(),
+                    trigger = trigger.as_str(),
+                    cause_code = error.cause_code(),
+                    retry_seconds = webhook_retry.delay().as_secs(),
+                    "repository-watch webhook attempt drained but its dispatch work failed"
+                );
+            }
+            WebhookAttemptOutcome::FailedBeforeDrain(error) => {
+                webhook_retry.arm_if_unowed(Instant::now());
+                tracing::error!(
+                    repository = %self.repository.as_str(),
+                    trigger = trigger.as_str(),
+                    cause_code = error.cause_code(),
+                    retry_seconds = webhook_retry.delay().as_secs(),
+                    "repository-watch webhook attempt failed before its drain; retry scheduled"
+                );
+            }
+        }
+        outcome
+            .failure()
+            .is_some_and(RepositoryWatchAttemptError::is_permanent)
+    }
+
+    /// Deletes expired terminal payload bytes after a successful full poll, at
+    /// most once per purge interval, starting with the first poll after boot,
+    /// independently of whether the surrounding attempt reports a deferred
+    /// drain failure.
+    ///
+    /// A purge failure never fails the watch: the deletion covers only
+    /// already-terminal deliveries, so it is retried on the next successful
+    /// poll rather than propagated.
+    async fn maybe_purge_expired_payloads(&mut self) {
+        let mut next = self.payload_purge.next.lock().await;
+        if Instant::now() < *next {
+            return;
+        }
+        match self.webhook_store.purge_expired_payloads().await {
+            Ok(purged) => {
+                *next = Instant::now() + WEBHOOK_PAYLOAD_PURGE_INTERVAL;
+                if purged > 0 {
+                    tracing::info!(
+                        repository = %self.repository.as_str(),
+                        purged,
+                        "expired webhook payload bytes deleted"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    repository = %self.repository.as_str(),
+                    error = ?error,
+                    "expired webhook payload purge failed"
+                );
+            }
+        }
+    }
+
+    /// One full polling attempt, draining durable webhook work as part of its
+    /// own sequence unless a retry already owes that drain.
+    ///
+    /// The drain is a step of this attempt, so running it while the backoff is
+    /// owed would repeat at the poll cadence exactly the work the backoff
+    /// exists to space out. The owed retry performs it instead.
+    /// Reports the drain it performed through `drained`, so the caller can
+    /// apply it to the backoff. A poll's own result cannot stand in for it:
+    /// polling fails for reasons the drain never saw, and a drain can fail
+    /// after every delivery it visited reached terminal state. Reports the
+    /// cutoff and dispatch work that ran after that drain through
+    /// `trailing_failure`, which the drain's outcome likewise cannot carry:
+    /// nothing is left pending to wake a later attempt for it.
+    async fn run_attempt(
+        &mut self,
+        drain: WebhookDrain,
+        drained: &mut Option<WebhookDrainOutcome>,
+        trailing_failure: &mut Option<RepositoryWatchAttemptError>,
+    ) -> Result<(), RepositoryWatchAttemptError> {
         self.poller.begin_attempt();
         let result = async {
-            if !self.rules_activated {
-                self.activate_rules().await?;
-                self.rules_activated = true;
-            }
-            self.process_cutoffs().await?;
-            self.process_dispatches().await?;
-            self.poll_and_commit().await?;
-            self.process_cutoffs().await?;
-            self.process_dispatches().await
+            let accelerated = self
+                .run_attempt_prelude(drain, drained, trailing_failure)
+                .await?;
+            let prepared = self.prepare_complete_poll().await?;
+            self.finish_attempt(drain, accelerated, prepared, drained, trailing_failure)
+                .await
         }
         .await;
         if result.is_err() {
@@ -370,6 +1308,847 @@ impl RepositoryWatchTask {
             self.poller.invalidate_freshness();
         }
         result
+    }
+
+    /// Runs one due poll with only its provider sweep cancellable by a webhook.
+    ///
+    /// Rule activation, dispatch, webhook projection, and cursor commit all
+    /// remain outside that cancellation region. Cancelling the provider sweep
+    /// therefore abandons only read-side work and its spawned fetches.
+    async fn run_preemptible_attempt_until_shutdown(
+        &mut self,
+        drain: WebhookDrain,
+        shutdown: &mut watch::Receiver<bool>,
+        webhook_interrupt: WebhookPollInterrupt,
+        drained: &mut Option<WebhookDrainOutcome>,
+        trailing_failure: &mut Option<RepositoryWatchAttemptError>,
+    ) -> PollAttemptWait<Result<(), RepositoryWatchAttemptError>> {
+        self.poller.begin_attempt();
+        match drain {
+            WebhookDrain::Run => observe_webhook_work_before_drain(&mut self.webhook_work),
+            WebhookDrain::Deferred => {}
+        }
+        let Some(prelude) = run_until_shutdown(
+            shutdown,
+            self.run_attempt_prelude(drain, drained, trailing_failure),
+        )
+        .await
+        else {
+            self.poller.invalidate_freshness();
+            return PollAttemptWait::Shutdown;
+        };
+        let accelerated = match prelude {
+            Ok(accelerated) => accelerated,
+            Err(error) => {
+                self.poller.invalidate_freshness();
+                return PollAttemptWait::Completed(Err(error));
+            }
+        };
+        let webhook_interrupt = match &accelerated {
+            Ok(()) => webhook_interrupt,
+            Err(_) => WebhookPollInterrupt::Suppressed,
+        };
+
+        let mut webhook_work = self.webhook_work.take();
+        let outcome = await_poll_or_interrupt(
+            self.prepare_complete_poll(),
+            shutdown,
+            &mut webhook_work,
+            webhook_interrupt,
+        )
+        .await;
+        self.webhook_work = webhook_work;
+        let prepared = match outcome {
+            PollAttemptWait::Completed(Ok(prepared)) => prepared,
+            PollAttemptWait::Completed(Err(error)) => {
+                self.poller.invalidate_freshness();
+                return PollAttemptWait::Completed(Err(error));
+            }
+            PollAttemptWait::Continue => {
+                self.poller.invalidate_freshness();
+                return PollAttemptWait::Continue;
+            }
+            PollAttemptWait::Shutdown => {
+                self.poller.invalidate_freshness();
+                return PollAttemptWait::Shutdown;
+            }
+            PollAttemptWait::Webhook => {
+                self.poller.invalidate_freshness();
+                return PollAttemptWait::Webhook;
+            }
+        };
+
+        let Some(result) = run_until_shutdown(
+            shutdown,
+            self.finish_attempt(drain, accelerated, prepared, drained, trailing_failure),
+        )
+        .await
+        else {
+            self.poller.invalidate_freshness();
+            return PollAttemptWait::Shutdown;
+        };
+        if result.is_err() {
+            self.poller.invalidate_freshness();
+        }
+        PollAttemptWait::Completed(result)
+    }
+
+    /// Performs the mutation-bearing work before the complete provider sweep.
+    async fn run_attempt_prelude(
+        &mut self,
+        drain: WebhookDrain,
+        drained: &mut Option<WebhookDrainOutcome>,
+        trailing_failure: &mut Option<RepositoryWatchAttemptError>,
+    ) -> Result<Result<(), RepositoryWatchAttemptError>, RepositoryWatchAttemptError> {
+        if !self.rules_activated {
+            self.activate_rules().await?;
+            self.rules_activated = true;
+        }
+        // A leading reconciliation failure is recorded and not
+        // propagated: the pre-poll drain owes none of that work, and the
+        // same steps run again after the poll, where a repeated failure
+        // reports through `trailing_failure`.
+        if let Err(error) = async {
+            self.process_cutoffs().await?;
+            self.process_dispatches().await
+        }
+        .await
+        {
+            tracing::warn!(
+                repository = %self.repository.as_str(),
+                cause_code = error.cause_code(),
+                "repository-watch leading reconciliation failed; the poll and its drains continue"
+            );
+            // Recorded before the poll so an attempt that exits ahead of
+            // the trailing pass still owes the dispatch its follow-up; the
+            // trailing pass clears it when it meets the obligation.
+            *trailing_failure = Some(error);
+        }
+        // Deliveries already admitted are projected before this poll runs.
+        // A poll that observes the same transition would otherwise advance
+        // the cursor past them, and every one of them would then apply to
+        // state that already contains it and record nothing.
+        //
+        // The pre-poll failure is reported but not propagated here:
+        // acceleration failing must not cancel the reconciliation sweep, or
+        // one delivery whose targeted request keeps failing would abort
+        // every scheduled poll.
+        let accelerated = match drain {
+            WebhookDrain::Run => {
+                let outcome = self.process_webhook_deliveries().await;
+                *drained = Some(outcome);
+                outcome.failure().map_or(Ok(()), Err)
+            }
+            WebhookDrain::Deferred => Ok(()),
+        };
+        match drained.as_ref() {
+            Some(WebhookDrainOutcome::ProjectionFailed(error)) => tracing::warn!(
+                repository = %self.repository.as_str(),
+                cause_code = error.cause_code(),
+                "repository-watch webhook pre-poll drain failed; polling continues"
+            ),
+            Some(WebhookDrainOutcome::DispatchFailedAfterTerminal(error)) => tracing::warn!(
+                repository = %self.repository.as_str(),
+                cause_code = error.cause_code(),
+                "repository-watch webhook pre-poll dispatch work failed after terminal records; polling continues"
+            ),
+            _ => {}
+        }
+        Ok(accelerated)
+    }
+
+    async fn finish_attempt(
+        &mut self,
+        drain: WebhookDrain,
+        accelerated: Result<(), RepositoryWatchAttemptError>,
+        prepared: PreparedCompletePoll,
+        drained: &mut Option<WebhookDrainOutcome>,
+        trailing_failure: &mut Option<RepositoryWatchAttemptError>,
+    ) -> Result<(), RepositoryWatchAttemptError> {
+        self.commit_complete_poll(prepared).await?;
+        // Keyed on the poll succeeding rather than the whole attempt, so a
+        // deferred drain failure cannot starve retention while one delivery
+        // persistently fails.
+        self.maybe_purge_expired_payloads().await;
+        // Only once the pre-poll drain's projections succeeded: repeating
+        // a projection-failed drain would spend the same provider and
+        // database work twice inside one attempt, ahead of the backoff
+        // that exists to space exactly that work out. A terminal dispatch
+        // failure does not gate it — projection succeeded, and the
+        // post-poll step still owes newly admitted deliveries their drain.
+        let pre_drain_projection_failed = matches!(
+            drained.as_ref(),
+            Some(WebhookDrainOutcome::ProjectionFailed(_))
+        );
+        if drain == WebhookDrain::Run && !pre_drain_projection_failed {
+            let outcome = self.process_webhook_deliveries().await;
+            if let Some(error) = outcome.failure() {
+                *drained = Some(outcome);
+                return Err(error);
+            }
+            // A successful second drain does not erase a terminal dispatch
+            // failure the first one reported: the caller's retry state
+            // still owes that dispatch its follow-up.
+            if !matches!(
+                drained.as_ref(),
+                Some(WebhookDrainOutcome::DispatchFailedAfterTerminal(_))
+            ) {
+                *drained = Some(outcome);
+            }
+        }
+        accelerated?;
+        // Both trailing steps report through `trailing_failure` rather than
+        // escaping, because a drain that has already committed its work
+        // owns neither of them. Letting the cutoff `?` out would leave the
+        // caller reading a bare `Drained`: it would clear the deadline the
+        // committed work needs and skip the dispatch step below, so that
+        // work would wait for an unrelated admission or the next poll
+        // instead of the follow-up this failure is owed.
+        if let Err(error) = self.process_cutoffs().await {
+            *trailing_failure = Some(error);
+            return Err(error);
+        }
+        match self.process_dispatches().await {
+            Ok(()) => {
+                // The trailing pass met any leading dispatch obligation, so
+                // the recorded leading failure no longer owes a follow-up.
+                *trailing_failure = None;
+                Ok(())
+            }
+            Err(error) => {
+                *trailing_failure = Some(error);
+                Err(error)
+            }
+        }
+    }
+
+    async fn run_webhook_attempt(&mut self) -> WebhookAttemptOutcome {
+        self.poller.begin_attempt();
+        let outcome = async {
+            if !self.rules_activated {
+                if let Err(error) = self.activate_rules().await {
+                    return WebhookAttemptOutcome::FailedBeforeDrain(error);
+                }
+                self.rules_activated = true;
+            }
+            // Leading reconciliation failures no longer gate the drain:
+            // pending deliveries owe none of that work, and gating here left
+            // every newly admitted delivery waiting on unrelated dispatch
+            // trouble. The failure is preserved and reported once the drain
+            // has run.
+            let leading_failure = if let Err(error) = self.process_cutoffs().await {
+                Some(error)
+            } else {
+                self.process_dispatches().await.err()
+            };
+            match self.process_webhook_deliveries().await {
+                WebhookDrainOutcome::Drained => {}
+                WebhookDrainOutcome::ProjectionFailed(error) => {
+                    return WebhookAttemptOutcome::DrainFailed(error);
+                }
+                // The delivery is terminal and will not be reloaded, so this
+                // failure is the surrounding dispatch work's, not the drain's.
+                WebhookDrainOutcome::DispatchFailedAfterTerminal(error) => {
+                    return WebhookAttemptOutcome::DrainedThenFailed(error);
+                }
+            }
+            if let Some(error) = leading_failure {
+                // The drain committed its work; the leading failure is the
+                // surrounding dispatch work's, so it follows up rather than
+                // advancing the drain backoff.
+                return WebhookAttemptOutcome::DrainedThenFailed(error);
+            }
+            if let Err(error) = self.process_cutoffs().await {
+                return WebhookAttemptOutcome::DrainedThenFailed(error);
+            }
+            match self.process_dispatches().await {
+                Ok(()) => WebhookAttemptOutcome::Completed,
+                Err(error) => WebhookAttemptOutcome::DrainedThenFailed(error),
+            }
+        }
+        .await;
+        if outcome.failure().is_some() {
+            self.poller.invalidate_freshness();
+        }
+        outcome
+    }
+
+    async fn process_webhook_deliveries(&mut self) -> WebhookDrainOutcome {
+        let Ok(page_size) = RepoWatchWebhookPendingPageSize::try_new(WEBHOOK_PENDING_PAGE_SIZE)
+        else {
+            return WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::Persistence);
+        };
+        let mut deferred: HashSet<RepoWatchWebhookDeliveryKey> = HashSet::new();
+        let mut first_failure: Option<RepositoryWatchAttemptError> = None;
+        let mut dispatch_failure: Option<RepositoryWatchAttemptError> = None;
+        // The chronological first failure of either kind, because the drain's
+        // error-level record names the first cause while the outcome keeps
+        // projection priority for backoff classification.
+        let mut chronological_first: Option<RepositoryWatchAttemptError> = None;
+        let mut pages = 0_usize;
+        // Every receipt this drain has visited, so a deferred head cannot be
+        // reloaded ahead of what follows it. A page bounded by bytes can hold
+        // nothing but that head, which would otherwise leave every later
+        // receipt permanently unreachable.
+        let mut after_receipt: Option<NonZeroU64> = None;
+        loop {
+            let deliveries = match self
+                .webhook_store
+                .load_pending(&self.repository, page_size, after_receipt)
+                .await
+            {
+                Ok(deliveries) => deliveries,
+                Err(error) => {
+                    // The same error-level record a per-delivery failure earns:
+                    // a page this drain could not read is a drain failure, and
+                    // the poll caller's own record is a warning about polling.
+                    // The record names the chronological first cause when a
+                    // delivery already failed on an earlier page; the outcome
+                    // keeps the page-load error for classification.
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        cause_code = chronological_first
+                            .unwrap_or(RepositoryWatchAttemptError::Persistence)
+                            .cause_code(),
+                        cause = %error,
+                        "repository-watch webhook drain could not load its pending page"
+                    );
+                    return WebhookDrainOutcome::ProjectionFailed(
+                        RepositoryWatchAttemptError::Persistence,
+                    );
+                }
+            };
+            if deliveries.is_empty() {
+                if deferred.is_empty() {
+                    // Nothing is pending at all, so a poll that left the shadow
+                    // in place hands it over now. There is no await between the
+                    // observation and the replacement.
+                    self.replace_superseded_webhook_shadow();
+                }
+                break;
+            }
+            let mut page = RepoWatchTargetedRefreshCoalescerV1::for_delivery_page();
+            for delivery in &deliveries {
+                after_receipt = Some(delivery.receipt().sequence());
+                if deferred.contains(&delivery.key()) {
+                    continue;
+                }
+                match self
+                    .process_webhook_delivery(delivery, &mut page, &mut dispatch_failure)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(error) => {
+                        // A delivery whose targeted refresh cannot succeed stays
+                        // the oldest pending row, so failing the whole drain on
+                        // it would starve every later receipt sequence forever.
+                        // The shadow baseline is left alone: this delivery
+                        // recorded nothing, and discarding what earlier ones
+                        // projected would supersede their dependents.
+                        tracing::warn!(
+                            repository = %self.repository.as_str(),
+                            hook_id = delivery.key().hook_id().get(),
+                            delivery_id = %delivery.key().delivery_id(),
+                            cause_code = error.cause_code(),
+                            "webhook delivery deferred so later receipts drain"
+                        );
+                        deferred.insert(delivery.key());
+                        if first_failure.is_none() {
+                            first_failure = Some(error);
+                        }
+                    }
+                }
+                if chronological_first.is_none() {
+                    chronological_first = first_failure.or(dispatch_failure);
+                }
+            }
+            pages += 1;
+            if pages >= WEBHOOK_DRAIN_PAGE_LIMIT {
+                // More may remain behind this page, so the shadow this drain
+                // advanced still speaks for deliveries the next one will read.
+                self.request_webhook_drain_continuation();
+                break;
+            }
+        }
+        // A projection failure outranks a dispatch one: it is the failure a
+        // later drain can still retry, and it is what the backoff spaces out.
+        // The error-level record instead names the chronological first cause,
+        // which the drain contract promises an error-only sink.
+        match first_failure.or(dispatch_failure) {
+            // Emitted here rather than by the caller because all three callers
+            // — startup, wake, and retry — reach the drain through this one
+            // function, and a full poll's own failure record is a warning about
+            // polling. An error-only sink would otherwise learn nothing about a
+            // drain that failed inside a poll.
+            Some(error) => {
+                tracing::error!(
+                    repository = %self.repository.as_str(),
+                    cause_code = chronological_first.unwrap_or(error).cause_code(),
+                    "repository-watch webhook drain page retained a failed delivery"
+                );
+                match first_failure {
+                    Some(error) => WebhookDrainOutcome::ProjectionFailed(error),
+                    None => WebhookDrainOutcome::DispatchFailedAfterTerminal(error),
+                }
+            }
+            None => WebhookDrainOutcome::Drained,
+        }
+    }
+
+    /// Hands the shadow baseline over to the cursor a full poll committed.
+    ///
+    /// Called only where the pending page has just been observed empty, with no
+    /// await between the two, so a delivery admitted after that observation is
+    /// newer than the committed cursor and correctly reloads from it.
+    fn replace_superseded_webhook_shadow(&mut self) {
+        if self.webhook_shadow_superseded {
+            self.webhook_shadow = None;
+            self.webhook_shadow_superseded = false;
+        }
+    }
+
+    /// Seeds the shadow baseline from the durable cursor when the repository
+    /// task does not already carry one.
+    ///
+    /// Reports whether it had to, because a delivery projected against a
+    /// freshly seeded baseline is the accepted cross-drain gap and carries that
+    /// cause on its projections.
+    async fn seed_webhook_shadow(&mut self) -> Result<bool, RepositoryWatchAttemptError> {
+        if self.webhook_shadow.is_some() {
+            return Ok(false);
+        }
+        let cursor = self
+            .store
+            .load_cursor(&self.repository)
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+            .ok_or(RepositoryWatchAttemptError::Persistence)?;
+        self.webhook_shadow = Some(WebhookShadowBaseline::from_cursor(&cursor));
+        Ok(true)
+    }
+
+    /// Re-arms this repository's own webhook wake so a bounded drain resumes
+    /// after the scheduler has had its turn.
+    fn request_webhook_drain_continuation(&self) {
+        if let Some(nudge) = &self.webhook_nudge {
+            // The wake coalesces, so one already unobserved carries this too,
+            // and a send fails only once the worker's own receiver is gone.
+            let _ = nudge.send(());
+        }
+    }
+
+    /// Projects one delivery to terminal state.
+    ///
+    /// A failure of the dispatch work that follows a terminal disposition is
+    /// reported through `dispatch_failure` rather than returned, because the
+    /// delivery is durable by then: draining again cannot retry it, and the
+    /// drain's backoff must not treat it as a projection that failed.
+    async fn process_webhook_delivery(
+        &mut self,
+        pending: &PendingRepoWatchWebhookDelivery,
+        page: &mut RepoWatchTargetedRefreshCoalescerV1,
+        dispatch_failure: &mut Option<RepositoryWatchAttemptError>,
+    ) -> Result<(), RepositoryWatchAttemptError> {
+        let delivery = RepoWatchWebhookDeliveryV1::new(RepoWatchWebhookDeliveryV1Input {
+            repository: pending.repository().clone(),
+            hook_id: pending.key().hook_id(),
+            delivery_id: pending.key().delivery_id(),
+            event: pending.event_name().to_owned(),
+            action: pending.action_name().map(str::to_owned),
+            receipt_sequence: pending.receipt().sequence(),
+            body_digest: *pending.body_digest(),
+        });
+        let mapping = match map_repo_watch_webhook_delivery_v1(&delivery, pending.body()) {
+            Ok(mapping) => mapping,
+            Err(error) => {
+                self.record_webhook_terminal(
+                    pending,
+                    Vec::new(),
+                    RepoWatchWebhookDisposition::Quarantined,
+                    Some(webhook_mapping_error_code(error)),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        match mapping {
+            RepoWatchWebhookMappingV1::Ignored(reason) => {
+                let outcome_code = webhook_ignored_reason_code(reason);
+                tracing::debug!(
+                    repository = %self.repository.as_str(),
+                    hook_id = pending.key().hook_id().get(),
+                    delivery_id = %pending.key().delivery_id(),
+                    event = pending.event_name(),
+                    action = pending.action_name(),
+                    outcome_code,
+                    "signature-valid webhook delivery is outside the mapped set"
+                );
+                self.record_webhook_terminal(
+                    pending,
+                    Vec::new(),
+                    RepoWatchWebhookDisposition::Ignored,
+                    Some(outcome_code),
+                )
+                .await
+            }
+            RepoWatchWebhookMappingV1::MappedNoChange(reason) => {
+                self.record_webhook_terminal(
+                    pending,
+                    Vec::new(),
+                    RepoWatchWebhookDisposition::Ignored,
+                    Some(webhook_no_change_code(reason)),
+                )
+                .await
+            }
+            RepoWatchWebhookMappingV1::Patch(patch) => {
+                let cause = self
+                    .seed_webhook_shadow()
+                    .await?
+                    .then_some(RepoWatchWebhookParityCauseV1::CrossDrainShadowGap);
+                let Some(shadow) = self.webhook_shadow.as_ref() else {
+                    return Err(RepositoryWatchAttemptError::Persistence);
+                };
+                let applied =
+                    match apply_repo_watch_observation_patch_v1(&shadow.observation, &patch) {
+                        Ok(applied) => applied,
+                        Err(_) => {
+                            self.record_webhook_terminal(
+                                pending,
+                                Vec::new(),
+                                RepoWatchWebhookDisposition::Quarantined,
+                                Some("patch_incoherent"),
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    };
+                match applied {
+                    RepoWatchObservationApplyV1::DuplicateState => {
+                        self.record_webhook_terminal(
+                            pending,
+                            Vec::new(),
+                            RepoWatchWebhookDisposition::DuplicateState,
+                            None,
+                        )
+                        .await
+                    }
+                    RepoWatchObservationApplyV1::Superseded => {
+                        self.record_webhook_terminal(
+                            pending,
+                            Vec::new(),
+                            RepoWatchWebhookDisposition::Superseded,
+                            None,
+                        )
+                        .await
+                    }
+                    RepoWatchObservationApplyV1::Ignored(reason) => {
+                        // Projecting nothing is the point: polling could never
+                        // produce this fact, so a projection would stand as a
+                        // webhook-only parity row nothing can ever match.
+                        self.record_webhook_terminal(
+                            pending,
+                            Vec::new(),
+                            RepoWatchWebhookDisposition::Ignored,
+                            Some(webhook_ignored_reason_code(reason)),
+                        )
+                        .await
+                    }
+                    RepoWatchObservationApplyV1::Applied(observation) => {
+                        let (projections, identity_frontier) = shadow_event_projections(
+                            &self.repository,
+                            shadow,
+                            &observation,
+                            cause,
+                        )?;
+                        self.record_webhook_terminal(
+                            pending,
+                            projections,
+                            RepoWatchWebhookDisposition::Projected,
+                            None,
+                        )
+                        .await?;
+                        // The shadow advances only once the disposition is
+                        // durable, so a retry after a failed record derives the
+                        // same projections rather than an empty duplicate.
+                        // Advancing it also clears any supersession a poll left
+                        // pending: the baseline now carries facts newer than
+                        // that cursor, so handing it over would discard them.
+                        self.webhook_shadow = Some(WebhookShadowBaseline {
+                            observation,
+                            identity_frontier,
+                        });
+                        self.webhook_shadow_superseded = false;
+                        Ok(())
+                    }
+                    RepoWatchObservationApplyV1::NeedsTargetedRefresh {
+                        observation,
+                        refreshes,
+                    } => {
+                        let (mut projections, identity_frontier) = shadow_event_projections(
+                            &self.repository,
+                            shadow,
+                            &observation,
+                            cause,
+                        )?;
+                        let unissued = page.unissued(&refreshes);
+                        // The provider query runs before anything is recorded, so
+                        // a transient fetch failure leaves this delivery pending
+                        // and retryable instead of terminal with a targeted query
+                        // that never happened.
+                        let prepared = match self.prepare_targeted_refresh(&unissued).await? {
+                            PreparedTargetedRefreshOutcome::SupersededTarget => {
+                                // The provider proved a targeted head stale
+                                // before anything was recorded: the derived
+                                // projections describe state the repository has
+                                // already left, so the delivery is superseded
+                                // and the shadow stays exactly as it was.
+                                return self
+                                    .record_webhook_terminal(
+                                        pending,
+                                        Vec::new(),
+                                        RepoWatchWebhookDisposition::Superseded,
+                                        None,
+                                    )
+                                    .await;
+                            }
+                            PreparedTargetedRefreshOutcome::NoTargets => None,
+                            PreparedTargetedRefreshOutcome::Prepared(prepared) => Some(prepared),
+                        };
+                        // Only refreshes actually sent are recorded, so neither a
+                        // branch-only delivery naming no pull request nor one
+                        // whose hydration this page already issued can claim a
+                        // query the poller never made.
+                        let issued = prepared
+                            .as_ref()
+                            .map(|prepared| prepared.queried.clone())
+                            .unwrap_or_default();
+                        projections.extend(
+                            issued
+                                .iter()
+                                .map(targeted_query_projection)
+                                .collect::<Result<Vec<_>, _>>()?,
+                        );
+                        if let Some(prepared) = prepared {
+                            // A targeted poll reconciles only the pull requests it
+                            // names, so its cursor does not carry what the webhook
+                            // stream has projected for anything else. The shadow
+                            // is kept rather than reloaded; the next full poll is
+                            // the complete sweep that replaces it.
+                            self.commit_targeted_refresh(prepared).await?;
+                            // Recorded only once the refresh has landed, so a
+                            // failure above leaves the hydration for the page's
+                            // remaining deliveries to reissue.
+                            page.record_issued(&issued);
+                        }
+                        // The delivery becomes terminal only once every durable
+                        // write it asked for has landed, so a failed cursor commit
+                        // leaves it pending and the whole step is retried.
+                        //
+                        // Recording after the commit was unsafe while projections
+                        // were derived from the durable cursor, because a retry
+                        // would then derive against a cursor that had moved. They
+                        // are derived from the repository task's shadow baseline
+                        // now, which a targeted commit deliberately does not
+                        // replace, so a retry reproduces these same projections.
+                        self.record_webhook_terminal(
+                            pending,
+                            projections,
+                            RepoWatchWebhookDisposition::Projected,
+                            None,
+                        )
+                        .await?;
+                        // The shadow advances only once that disposition is
+                        // durable, so the two never disagree. Advancing it also
+                        // clears any supersession a poll left pending: the
+                        // baseline now carries facts newer than that cursor, so
+                        // handing it over would discard them.
+                        self.webhook_shadow = Some(WebhookShadowBaseline {
+                            observation,
+                            identity_frontier,
+                        });
+                        self.webhook_shadow_superseded = false;
+                        if let Err(error) = self.process_dispatches().await {
+                            // Carries the identity here because this delivery
+                            // is already terminal: it never reaches the drain
+                            // page's deferral record, and the classified
+                            // outcome the attempt reports names only a cause.
+                            tracing::warn!(
+                                repository = %self.repository.as_str(),
+                                hook_id = pending.key().hook_id().get(),
+                                delivery_id = %pending.key().delivery_id(),
+                                receipt_sequence = pending.receipt().sequence().get(),
+                                cause_code = error.cause_code(),
+                                "webhook delivery dispatch failed after it reached terminal state"
+                            );
+                            dispatch_failure.get_or_insert(error);
+                        }
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+
+    async fn record_webhook_terminal(
+        &mut self,
+        pending: &PendingRepoWatchWebhookDelivery,
+        projections: Vec<RepoWatchWebhookProjection>,
+        disposition: RepoWatchWebhookDisposition,
+        outcome_code: Option<&str>,
+    ) -> Result<(), RepositoryWatchAttemptError> {
+        // Only a projected record is followed by a shadow advance, so only its
+        // uncertain durability can leave the baseline silently missing a
+        // delivery. Records that change no shadow fact keep the accumulated
+        // baseline even when their settlement stays unknown.
+        let advances_shadow = matches!(disposition, RepoWatchWebhookDisposition::Projected);
+        let request = RepoWatchWebhookTerminalRequest::try_new(
+            projections,
+            disposition,
+            outcome_code.map(str::to_owned),
+        )
+        .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        for attempt in 1..=MAX_WEBHOOK_TERMINAL_ATTEMPTS {
+            match self
+                .webhook_store
+                .record_terminal(pending.key(), &request)
+                .await
+            {
+                Ok(_) => return Ok(()),
+                // A commit whose result was lost in transit may already be
+                // durable, and the delivery would then never be loaded again.
+                // Reading settles which happened and cannot itself be
+                // ambiguous, so the outcome is definitive without retrying the
+                // write indefinitely against a connection that keeps dropping.
+                Err(RepoWatchWebhookStoreError::CommitAmbiguous(_)) => {
+                    match self
+                        .webhook_store
+                        .terminal_disposition_exists(pending.key())
+                        .await
+                    {
+                        Ok(true) => return Ok(()),
+                        // A read that fails settles nothing, so it is retried
+                        // rather than propagated: propagating would abandon a
+                        // delivery that may already be durable.
+                        Ok(false) | Err(_) => {
+                            if attempt < MAX_WEBHOOK_TERMINAL_ATTEMPTS {
+                                sleep(WEBHOOK_TERMINAL_RETRY_DELAY).await;
+                            }
+                        }
+                    }
+                }
+                Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
+            }
+        }
+        // Every attempt was ambiguous or unreadable, so whether a disposition
+        // is durable is unknown. A projected record's shadow is discarded
+        // rather than trusted: if one did land, this delivery will never be
+        // loaded again, and a baseline that silently missed it would supersede
+        // its dependents. The next delivery re-seeds from the cursor and
+        // records the gap.
+        if advances_shadow {
+            self.webhook_shadow = None;
+        }
+        Err(RepositoryWatchAttemptError::Persistence)
+    }
+
+    /// Runs one delivery's targeted provider queries without writing anything.
+    ///
+    /// The fetch is separated from its commit so a transient provider failure
+    /// leaves the delivery pending and retryable, rather than terminal with a
+    /// targeted query that never ran.
+    async fn prepare_targeted_refresh(
+        &mut self,
+        refreshes: &[RepoWatchTargetedRefreshV1],
+    ) -> Result<PreparedTargetedRefreshOutcome, RepositoryWatchAttemptError> {
+        if refreshes.is_empty() {
+            return Ok(PreparedTargetedRefreshOutcome::NoTargets);
+        }
+        let cursor = self
+            .store
+            .load_cursor(&self.repository)
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+            .ok_or(RepositoryWatchAttemptError::Persistence)?;
+        let targets = targeted_pull_requests(cursor.candidate().observation(), refreshes)?;
+        if targets.is_empty() {
+            return Ok(PreparedTargetedRefreshOutcome::NoTargets);
+        }
+        let mut event_identity_frontier = cursor.candidate().event_identity_frontier().clone();
+        let (observation, superseded_targets) = match self
+            .poller
+            .poll_targeted_pull_requests_against_cursor(cursor.candidate().observation(), &targets)
+            .await?
+        {
+            TargetedPollOutcome::Observation {
+                observation,
+                superseded_targets,
+            } => (observation, superseded_targets),
+            TargetedPollOutcome::SupersededTarget => {
+                return Ok(PreparedTargetedRefreshOutcome::SupersededTarget);
+            }
+        };
+        // A refresh naming no pull request the cursor carries is never sent,
+        // and one reaching only targets the provider proved stale never landed,
+        // so neither is recorded as a query that happened.
+        let applied_targets = targets
+            .iter()
+            .filter(|target| !superseded_targets.contains(&target.number))
+            .cloned()
+            .collect::<Vec<_>>();
+        let queried = refreshes
+            .iter()
+            .filter(|refresh| refresh_reaches_a_target(refresh, &applied_targets))
+            .cloned()
+            .collect::<Vec<_>>();
+        let events = derive_repo_watch_events(
+            &self.repository,
+            Some(cursor.candidate().observation()),
+            &observation,
+            &mut event_identity_frontier,
+            &mut UuidV7RepoWatchEventIdGenerator,
+        )
+        .map_err(|_| RepositoryWatchAttemptError::Differ)?;
+        Ok(PreparedTargetedRefreshOutcome::Prepared(
+            PreparedTargetedRefresh {
+                generation: cursor.generation(),
+                candidate: RepoWatchCursorCandidate::with_event_identity_frontier(
+                    observation,
+                    event_identity_frontier,
+                ),
+                events,
+                queried,
+            },
+        ))
+    }
+
+    /// Commits one prepared targeted refresh against the generation it read.
+    async fn commit_targeted_refresh(
+        &self,
+        prepared: PreparedTargetedRefresh,
+    ) -> Result<(), RepositoryWatchAttemptError> {
+        let outcome = self
+            .store
+            .commit(
+                &self.repository,
+                RepoWatchCommitRequest::new(
+                    Some(prepared.generation),
+                    prepared.candidate,
+                    prepared.events,
+                ),
+            )
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        match outcome {
+            RepoWatchCommitOutcome::Committed(cursor)
+            | RepoWatchCommitOutcome::Replayed(cursor)
+            | RepoWatchCommitOutcome::Unchanged(cursor) => {
+                self.poller.publish_freshness(cursor.generation());
+                Ok(())
+            }
+            RepoWatchCommitOutcome::Conflict { current: _ } => {
+                Err(RepositoryWatchAttemptError::Persistence)
+            }
+        }
     }
 
     async fn process_cutoffs(&self) -> Result<(), RepositoryWatchAttemptError> {
@@ -500,7 +2279,14 @@ impl RepositoryWatchTask {
         }
     }
 
-    async fn poll_and_commit(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+    /// Loads the durable baseline and performs the read-only provider sweep.
+    ///
+    /// This phase may be abandoned for a webhook wake. It deliberately stops
+    /// before the cursor commit so cancellation cannot leave a durable result
+    /// whose caller did not observe.
+    async fn prepare_complete_poll(
+        &mut self,
+    ) -> Result<PreparedCompletePoll, RepositoryWatchAttemptError> {
         let cursor = self
             .store
             .load_cursor(&self.repository)
@@ -540,17 +2326,29 @@ impl RepositoryWatchTask {
                 RepositoryWatchAttemptError::IdentityFrontier
             }
         })?;
+        Ok(PreparedCompletePoll {
+            cursor_generation,
+            candidate: RepoWatchCursorCandidate::with_event_identity_frontier(
+                observation,
+                event_identity_frontier,
+            ),
+            events,
+        })
+    }
+
+    /// Commits a completed provider sweep outside webhook cancellation.
+    async fn commit_complete_poll(
+        &mut self,
+        prepared: PreparedCompletePoll,
+    ) -> Result<(), RepositoryWatchAttemptError> {
         let outcome = self
             .store
             .commit(
                 &self.repository,
                 RepoWatchCommitRequest::new(
-                    cursor_generation,
-                    RepoWatchCursorCandidate::with_event_identity_frontier(
-                        observation,
-                        event_identity_frontier,
-                    ),
-                    events,
+                    prepared.cursor_generation,
+                    prepared.candidate,
+                    prepared.events,
                 ),
             )
             .await
@@ -560,12 +2358,273 @@ impl RepositoryWatchTask {
             | RepoWatchCommitOutcome::Replayed(cursor)
             | RepoWatchCommitOutcome::Unchanged(cursor) => {
                 self.poller.publish_freshness(cursor.generation());
+                // A full poll is the complete reconciliation sweep, so the
+                // cursor it commits supersedes everything the webhook stream
+                // had accumulated in memory. It is not handed over here: this
+                // task cannot read the queue atomically with an admission
+                // committing on the listener, so a delivery admitted while this
+                // poll was fetching could be applied to a cursor that already
+                // contains its transition. The handoff happens in the drain
+                // instead, where an empty page and the replacement are decided
+                // without an await between them.
+                self.webhook_shadow_superseded = true;
                 Ok(())
             }
             RepoWatchCommitOutcome::Conflict { current: _ } => {
                 Err(RepositoryWatchAttemptError::Persistence)
             }
         }
+    }
+}
+
+/// One complete provider sweep derived against a durable cursor but not yet
+/// committed.
+struct PreparedCompletePoll {
+    cursor_generation: Option<RepoWatchCursorGeneration>,
+    candidate: RepoWatchCursorCandidate,
+    events: Vec<RepoWatchEventOccurrenceV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TargetedPullRequest {
+    number: PullRequestNumber,
+    expected_head: Option<CommitSha>,
+}
+
+/// One targeted refresh that has been fetched and derived but not committed.
+/// What a targeted poll produced: a reconciled observation alongside any
+/// targets the provider proved stale, or proof that every target moved.
+#[derive(Debug, PartialEq)]
+enum TargetedPollOutcome {
+    Observation {
+        observation: RepoWatchObservation,
+        superseded_targets: Vec<PullRequestNumber>,
+    },
+    SupersededTarget,
+}
+
+/// What preparing a targeted refresh decided for the delivery that asked.
+enum PreparedTargetedRefreshOutcome {
+    /// No named pull request is carried by the cursor; nothing was queried.
+    NoTargets,
+    /// The provider proved a targeted head stale; the delivery is superseded.
+    SupersededTarget,
+    Prepared(PreparedTargetedRefresh),
+}
+
+struct PreparedTargetedRefresh {
+    generation: RepoWatchCursorGeneration,
+    candidate: RepoWatchCursorCandidate,
+    events: Vec<RepoWatchEventOccurrenceV1>,
+    /// The requested refreshes a provider request was actually issued for.
+    queried: Vec<RepoWatchTargetedRefreshV1>,
+}
+
+/// What one webhook drain has already projected, carried across the batch.
+///
+/// Dependent deliveries are drained together, and a projection that leaves the
+/// durable cursor alone still moves the shadow experiment's baseline. Reloading
+/// the unchanged cursor for every delivery would compare the second of two
+/// dependent branch pushes against the first one's predecessor and record a
+/// valid occurrence as superseded.
+#[derive(Clone, Debug)]
+struct WebhookShadowBaseline {
+    observation: RepoWatchObservation,
+    identity_frontier: RepoWatchEventIdentityFrontierV1,
+}
+
+impl WebhookShadowBaseline {
+    fn from_cursor(cursor: &RepoWatchCursor) -> Self {
+        Self {
+            observation: cursor.candidate().observation().clone(),
+            identity_frontier: cursor.candidate().event_identity_frontier().clone(),
+        }
+    }
+}
+
+/// Derives one delivery's shadow projections and the frontier they advance to.
+///
+/// The baseline is read rather than advanced, so a delivery whose disposition
+/// fails to record leaves the repository's accumulated shadow exactly as it was.
+fn shadow_event_projections(
+    repository: &RepositorySlug,
+    baseline: &WebhookShadowBaseline,
+    observation: &RepoWatchObservation,
+    cause: Option<RepoWatchWebhookParityCauseV1>,
+) -> Result<
+    (
+        Vec<RepoWatchWebhookProjection>,
+        RepoWatchEventIdentityFrontierV1,
+    ),
+    RepositoryWatchAttemptError,
+> {
+    let mut identity_frontier = baseline.identity_frontier.clone();
+    let projections = derive_repo_watch_events(
+        repository,
+        Some(&baseline.observation),
+        observation,
+        &mut identity_frontier,
+        &mut UuidV7RepoWatchEventIdGenerator,
+    )
+    .map_err(|_| RepositoryWatchAttemptError::Differ)?
+    .into_iter()
+    // A delivery carries neither computed mergeability nor an aggregate check
+    // rollup, so an occurrence of either kind here is an artefact of rebuilding
+    // state rather than something the payload observed. Projecting it would
+    // invent a webhook-only row for a value only polling can supply.
+    .filter(|occurrence| {
+        !matches!(
+            occurrence.event().kind().name(),
+            RepoWatchEventKindNameV1::MergeableStateChanged
+                | RepoWatchEventKindNameV1::ChecksCompleted
+        )
+    })
+    .map(|occurrence| {
+        let content_identity = occurrence.content_identity();
+        RepoWatchWebhookProjection::event(
+            content_identity,
+            occurrence.event().kind().name(),
+            content_identity.as_bytes().to_vec(),
+            cause,
+        )
+        .map_err(|_| RepositoryWatchAttemptError::Persistence)
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    Ok((projections, identity_frontier))
+}
+
+fn targeted_query_projection(
+    refresh: &RepoWatchTargetedRefreshV1,
+) -> Result<RepoWatchWebhookProjection, RepositoryWatchAttemptError> {
+    Ok(RepoWatchWebhookProjection::TargetedQuery(match refresh {
+        RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request } => {
+            RepoWatchWebhookTargetedQuery::PullRequestHydration(*pull_request)
+        }
+        RepoWatchTargetedRefreshV1::Mergeability {
+            pull_request,
+            expected_head: _,
+        } => RepoWatchWebhookTargetedQuery::Mergeability(*pull_request),
+        RepoWatchTargetedRefreshV1::CheckRollup {
+            pull_request: _,
+            expected_head,
+        }
+        | RepoWatchTargetedRefreshV1::CheckRollupForCommit {
+            head: expected_head,
+        } => RepoWatchWebhookTargetedQuery::CheckRollup(expected_head.clone()),
+    }))
+}
+
+fn targeted_pull_requests(
+    previous: &RepoWatchObservation,
+    refreshes: &[RepoWatchTargetedRefreshV1],
+) -> Result<Vec<TargetedPullRequest>, RepositoryWatchAttemptError> {
+    let mut targets = BTreeMap::new();
+    for refresh in refreshes {
+        match refresh {
+            RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request } => {
+                insert_targeted_pull_request(&mut targets, *pull_request, None)?;
+            }
+            RepoWatchTargetedRefreshV1::Mergeability {
+                pull_request,
+                expected_head,
+            }
+            | RepoWatchTargetedRefreshV1::CheckRollup {
+                pull_request,
+                expected_head,
+            } => {
+                insert_targeted_pull_request(
+                    &mut targets,
+                    *pull_request,
+                    Some(expected_head.clone()),
+                )?;
+            }
+            RepoWatchTargetedRefreshV1::CheckRollupForCommit { head } => {
+                for pull_request in previous.state().pull_requests() {
+                    if pull_request.context().head_sha() == head {
+                        insert_targeted_pull_request(
+                            &mut targets,
+                            pull_request.context().number(),
+                            Some(head.clone()),
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(targets.into_values().collect())
+}
+
+/// Whether one requested refresh names a pull request the poller will fetch.
+fn refresh_reaches_a_target(
+    refresh: &RepoWatchTargetedRefreshV1,
+    targets: &[TargetedPullRequest],
+) -> bool {
+    match refresh {
+        RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request }
+        | RepoWatchTargetedRefreshV1::Mergeability { pull_request, .. }
+        | RepoWatchTargetedRefreshV1::CheckRollup { pull_request, .. } => {
+            targets.iter().any(|target| target.number == *pull_request)
+        }
+        RepoWatchTargetedRefreshV1::CheckRollupForCommit { head } => targets
+            .iter()
+            .any(|target| target.expected_head.as_ref() == Some(head)),
+    }
+}
+
+fn insert_targeted_pull_request(
+    targets: &mut BTreeMap<u64, TargetedPullRequest>,
+    number: PullRequestNumber,
+    expected_head: Option<CommitSha>,
+) -> Result<(), RepositoryWatchAttemptError> {
+    match targets.entry(number.get()) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(TargetedPullRequest {
+                number,
+                expected_head,
+            });
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            let retained = entry.get_mut();
+            match (&retained.expected_head, expected_head) {
+                (None, Some(expected)) => retained.expected_head = Some(expected),
+                (Some(retained), Some(expected)) if retained != &expected => {
+                    return Err(RepositoryWatchAttemptError::Normalization);
+                }
+                (None, None) | (Some(_), None) | (Some(_), Some(_)) => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+const fn webhook_mapping_error_code(error: RepoWatchWebhookMappingError) -> &'static str {
+    match error {
+        RepoWatchWebhookMappingError::MalformedJson => "malformed_json",
+        RepoWatchWebhookMappingError::MissingField(_) => "missing_field",
+        RepoWatchWebhookMappingError::InvalidField(_) => "invalid_field",
+        RepoWatchWebhookMappingError::RepositoryMismatch => "repository_mismatch",
+        RepoWatchWebhookMappingError::ActionMismatch => "action_mismatch",
+    }
+}
+
+const fn webhook_ignored_reason_code(reason: RepoWatchWebhookIgnoredReasonV1) -> &'static str {
+    match reason {
+        RepoWatchWebhookIgnoredReasonV1::UnmappedEvent => "unmapped_event",
+        RepoWatchWebhookIgnoredReasonV1::UnmappedAction => "unmapped_action",
+        RepoWatchWebhookIgnoredReasonV1::NonBranchPush => "non_branch_push",
+        RepoWatchWebhookIgnoredReasonV1::ForeignWorkflowRepository => "foreign_workflow_repository",
+        RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowBranch => "absent_workflow_branch",
+        RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadRepository => {
+            "absent_workflow_head_repository"
+        }
+        RepoWatchWebhookIgnoredReasonV1::AbsentWorkflowHeadBranch => "absent_workflow_head_branch",
+    }
+}
+
+const fn webhook_no_change_code(reason: RepoWatchWebhookMappedNoChangeV1) -> &'static str {
+    match reason {
+        RepoWatchWebhookMappedNoChangeV1::Ping => "ping",
+        RepoWatchWebhookMappedNoChangeV1::ReviewDismissed => "review_dismissed",
     }
 }
 
@@ -1214,6 +3273,62 @@ impl GitHubRepositoryPoller {
             self.cache().complete_poll();
         }
         result
+    }
+
+    async fn poll_targeted_pull_requests_against_cursor(
+        &self,
+        previous: &RepoWatchObservation,
+        targets: &[TargetedPullRequest],
+    ) -> Result<TargetedPollOutcome, RepositoryWatchAttemptError> {
+        let mut state = RepoWatchRepositoryStateInput {
+            pull_requests: previous.state().pull_requests().to_vec(),
+            workflow_runs: previous.state().workflow_runs().to_vec(),
+            branch_heads: previous.state().branch_heads().to_vec(),
+        };
+        let mut superseded_targets = Vec::new();
+        for target in targets {
+            let retained_index = state
+                .pull_requests
+                .iter()
+                .position(|pull_request| pull_request.context().number() == target.number);
+            let retained = retained_index.map(|index| state.pull_requests[index].clone());
+            self.forget_pull_request(target.number.get());
+            let fetched = self
+                .fetch_pull_request(target.number.get(), retained.as_ref())
+                .await?;
+            if target
+                .expected_head
+                .as_ref()
+                .is_some_and(|expected| fetched.state.context().head_sha() != expected)
+            {
+                // The provider has already moved past the head this target
+                // expected. A multi-target refresh keeps reconciling the
+                // targets that still match; the caller drops this one so
+                // retained state is never committed as if it were fetched.
+                tracing::debug!(
+                    repository = %self.repository.as_str(),
+                    pull_request = target.number.get(),
+                    "targeted repository refresh was superseded before its response"
+                );
+                superseded_targets.push(target.number);
+                continue;
+            }
+            match retained_index {
+                Some(index) => state.pull_requests[index] = fetched.state,
+                None => state.pull_requests.push(fetched.state),
+            }
+        }
+        if superseded_targets.len() == targets.len() {
+            // Every target moved: nothing this delivery hydrated is current,
+            // so the caller records the whole delivery superseded.
+            return Ok(TargetedPollOutcome::SupersededTarget);
+        }
+        let state = RepoWatchRepositoryState::try_new(state)
+            .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        Ok(TargetedPollOutcome::Observation {
+            observation: RepoWatchObservation::new(self.signal_reviewers.clone(), state),
+            superseded_targets,
+        })
     }
 
     async fn poll_complete(
@@ -2583,15 +4698,6 @@ impl PollCache {
     }
 }
 
-struct PollCycleTiming {
-    interval: Duration,
-    elapsed: Duration,
-}
-
-const fn remaining_interval(timing: PollCycleTiming) -> Duration {
-    timing.interval.saturating_sub(timing.elapsed)
-}
-
 fn reuse_pull_request(
     previous: &RepoWatchPullRequestState,
     reviews: Vec<RepoWatchReviewObservation>,
@@ -2979,7 +5085,9 @@ struct PageInfo {
 mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
+        error::Error,
         fs,
+        io::{self, Write},
         num::NonZeroU64,
         path::PathBuf,
         sync::{
@@ -2995,25 +5103,33 @@ mod tests {
         net::{TcpListener, TcpStream},
         sync::{Notify, watch},
         task::{JoinHandle, JoinSet},
-        time::sleep,
+        time::{Instant, sleep},
     };
 
     use super::{
         CheckConclusion, ChecksOutcome, EntityTag, FileCredentialAccess, GitHubRepositoryPoller,
         ListedPullRequest, MAX_CACHED_WIRE_BYTES, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
         MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
-        PollCache, PollCycleTiming, PullRequestSettlement, PullResponse, ReactionContent,
+        PollAttemptWait, PollCache, PullRequestSettlement, PullResponse, ReactionContent,
         RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
-        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchRuntimeConstructionError,
-        RepositoryWatchRuntimeError, ResourceKey, ReviewState, Url,
-        UuidV7RepoWatchEventIdGenerator, WorkflowName, WorkflowResponse, derive_repo_watch_events,
-        dispatch_context_json, normalize_checks_outcome, normalize_pull_request_context, object_id,
-        owed_dispatch_context_json_parts, remaining_interval, rule_activation_error,
-        supervise_repository_tasks,
+        RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchChildExit,
+        RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
+        RepositoryWatchWake, ResourceKey, ReviewState, TargetedPollOutcome, TargetedPullRequest,
+        Url, UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY,
+        WEBHOOK_DRAIN_RETRY_MAX_DELAY, WebhookDrain, WebhookDrainOutcome, WebhookDrainRetry,
+        WebhookPayloadPurgeSchedule, WebhookPollInterrupt, WorkflowName, WorkflowResponse,
+        await_poll_or_interrupt, derive_repo_watch_events, dispatch_context_json,
+        inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
+        normalize_checks_outcome, normalize_pull_request_context, object_id,
+        observe_webhook_work_before_drain, owed_dispatch_context_json_parts, rule_activation_error,
+        run_until_shutdown, supervise_repository_tasks, targeted_pull_requests,
     };
-    use signalbox_application::RepoWatchEventIdentityFrontierV1;
+    use signalbox_application::{
+        InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
+        RepoWatchTargetedRefreshV1,
+    };
     use signalbox_domain::{
         BranchName, CommitSha, PullRequestBody, PullRequestEventContext,
         PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, ReactionSubject,
@@ -3021,7 +5137,25 @@ mod tests {
         RepoWatchRuleIdentityField, RepoWatchRuleVersion,
     };
     use signalbox_model_runtime::CredentialReference;
-    use signalbox_persistence::repo_watch_dispatch::RepoWatchDispatchRepositoryError;
+    use signalbox_persistence::{
+        disposable_test_container_labels, local_test_connection_options, migrate,
+        repo_watch::{PostgresRepoWatchStore, RepoWatchCommitRequest, RepoWatchCursorCandidate},
+        repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
+        repo_watch_webhook::{
+            PostgresRepoWatchWebhookStore, RepoWatchWebhookAdmission, RepoWatchWebhookDeliveryKey,
+            RepoWatchWebhookDisposition,
+        },
+        scheduler::PostgresEligibilitySweep,
+    };
+    use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
+    use testcontainers_modules::{
+        postgres::Postgres,
+        testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
+    };
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    use crate::{SessionTemplateConfiguration, configuration::checked_in_example_configuration};
 
     const WATCHED_REPOSITORY: &str = "namespace/project";
     const CREDENTIAL_REFERENCE: &str = "repository-watch:namespace/project";
@@ -3155,6 +5289,231 @@ mod tests {
     const PROVIDER_PULL_AUTHOR: &str = "Pull-Author";
     const PROVIDER_REVIEWER: &str = "Signal-Reviewer";
     const SCRIPTED_SERVER_TIMEOUT: Duration = Duration::from_secs(5);
+    const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+    const DATABASE_NAME: &str = "signalbox_webhook_drain";
+    const DATABASE_USER: &str = "signalbox";
+    const DATABASE_PASSWORD: &str = "signalbox-test-only";
+    const FIRST_WEBHOOK_DELIVERY: u128 = 0x7a01;
+    const SECOND_WEBHOOK_DELIVERY: u128 = 0x7a02;
+    const THIRD_WEBHOOK_DELIVERY: u128 = 0x7a03;
+    const FIRST_WEBHOOK_REVIEW: u64 = 9_001;
+    const SECOND_WEBHOOK_REVIEW: u64 = 9_002;
+    const WEBHOOK_BODY_DIGEST_FILL: u8 = 0x71;
+    const WEBHOOK_HOOK_ID: NonZeroU64 =
+        NonZeroU64::new(7_001).expect("fixture webhook hook ID is positive");
+    const WEBHOOK_PROJECTION_ADVISORY_LOCK: i64 = 70_001;
+
+    async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+        let container = Postgres::default()
+            .with_db_name(DATABASE_NAME)
+            .with_user(DATABASE_USER)
+            .with_password(DATABASE_PASSWORD)
+            .with_fsync_enabled()
+            .with_tag(POSTGRES_IMAGE_TAG)
+            .with_labels(disposable_test_container_labels())
+            .start()
+            .await?;
+        let host = container.get_host().await?;
+        let port = container.get_host_port_ipv4(5432).await?;
+        let database_url =
+            format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect_with(local_test_connection_options(&database_url)?)
+            .await?;
+        migrate(&pool).await?;
+        Ok((container, pool))
+    }
+
+    fn webhook_delivery_key(value: u128) -> RepoWatchWebhookDeliveryKey {
+        RepoWatchWebhookDeliveryKey::new(WEBHOOK_HOOK_ID, Uuid::from_u128(value))
+    }
+
+    fn submitted_review_admission(
+        delivery: u128,
+        review: u64,
+    ) -> Result<RepoWatchWebhookAdmission, Box<dyn Error>> {
+        let body = serde_json::json!({
+            "action": "submitted",
+            "number": PULL_NUMBER,
+            "repository": {"full_name": WATCHED_REPOSITORY},
+            "pull_request": {"head": {"sha": HEAD_SHA}},
+            "review": {
+                "id": review,
+                "user": {"login": "reviewer"},
+                "state": "approved",
+                "commit_id": HEAD_SHA,
+            },
+        })
+        .to_string()
+        .into_bytes();
+        Ok(RepoWatchWebhookAdmission::try_new(
+            webhook_delivery_key(delivery),
+            RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?,
+            "pull_request_review".to_owned(),
+            Some("submitted".to_owned()),
+            [WEBHOOK_BODY_DIGEST_FILL; 32],
+            body,
+        )?)
+    }
+
+    const fn drain_failure() -> Result<(), RepositoryWatchAttemptError> {
+        Err(RepositoryWatchAttemptError::Persistence)
+    }
+
+    fn synchronize_admission(delivery: u128) -> Result<RepoWatchWebhookAdmission, Box<dyn Error>> {
+        let body = serde_json::json!({
+            "action": "synchronize",
+            "number": PULL_NUMBER,
+            "repository": {"full_name": WATCHED_REPOSITORY},
+            "before": HEAD_SHA,
+            "pull_request": {
+                "title": PULL_TITLE,
+                "body": PULL_BODY,
+                "draft": false,
+                "merged": false,
+                "user": {"login": PROVIDER_PULL_AUTHOR},
+                "labels": [],
+                "base": {"ref": BASE_BRANCH},
+                "head": {
+                    "sha": CHANGED_LISTED_HEAD_SHA,
+                    "ref": HEAD_BRANCH,
+                    "repo": {"full_name": PROVIDER_HEAD_REPOSITORY}
+                }
+            }
+        })
+        .to_string()
+        .into_bytes();
+        Ok(RepoWatchWebhookAdmission::try_new(
+            webhook_delivery_key(delivery),
+            RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?,
+            "pull_request".to_owned(),
+            Some("synchronize".to_owned()),
+            [WEBHOOK_BODY_DIGEST_FILL; 32],
+            body,
+        )?)
+    }
+
+    struct WebhookTaskFixture {
+        task: RepositoryWatchTask,
+        // The poller resolves its credential from a file in this directory on
+        // every request, so a fixture that dropped it would fail every fetch
+        // closed instead of exercising the scripted response.
+        _credential_directory: TempDir,
+    }
+
+    async fn webhook_task(pool: &PgPool) -> Result<WebhookTaskFixture, Box<dyn Error>> {
+        webhook_task_against(
+            pool,
+            Url::parse("http://127.0.0.1:9/").expect("fixture poller base URL is valid"),
+        )
+        .await
+    }
+
+    async fn webhook_task_against(
+        pool: &PgPool,
+        rest_base: Url,
+    ) -> Result<WebhookTaskFixture, Box<dyn Error>> {
+        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?;
+        let observation = complete_typed_observation().await;
+        let store = PostgresRepoWatchStore::new(pool.clone());
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(observation),
+                    Vec::new(),
+                ),
+            )
+            .await?;
+        let models = checked_in_example_configuration()?;
+        let credential_pin = models.session_credential_pin();
+        let (eligibility_nudge, _work_source) =
+            InProcessEligibilityWorkSource::new(PostgresEligibilitySweep::new(pool.clone()));
+        let fixture = poller_fixture(rest_base)?;
+        let poller = Arc::clone(&fixture.poller);
+        Ok(WebhookTaskFixture {
+            task: RepositoryWatchTask {
+                webhook_nudge: None,
+                webhook_shadow: None,
+                webhook_shadow_superseded: false,
+                repository,
+                interval: POLL_INTERVAL,
+                poller,
+                store,
+                dispatch_store: PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin),
+                rules: Vec::new(),
+                templates: SessionTemplateConfiguration::default(),
+                models,
+                eligibility_nudge,
+                webhook_store: PostgresRepoWatchWebhookStore::new(pool.clone()),
+                webhook_work: None,
+                payload_purge: WebhookPayloadPurgeSchedule::starting_now(),
+                rules_activated: true,
+            },
+            _credential_directory: fixture._credential_directory,
+        })
+    }
+
+    async fn wait_for_webhook_projection_wedge(store: &PostgresRepoWatchWebhookStore) {
+        let wait = async {
+            loop {
+                if store
+                    .projection_wedge_is_reached()
+                    .await
+                    .expect("the fixture can inspect the wedge")
+                {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(SCRIPTED_SERVER_TIMEOUT, wait)
+            .await
+            .expect("the first webhook projection reaches its deliberate wedge");
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().expect("captured log locks").clone())
+                .expect("captured webhook telemetry is UTF-8")
+        }
+    }
+
+    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedLogWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("captured log locks")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> MakeWriter<'writer> for CapturedLog {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedLogWriter(Arc::clone(&self.0))
+        }
+    }
+
+    async fn webhook_disposition_exists(
+        store: &PostgresRepoWatchWebhookStore,
+        key: RepoWatchWebhookDeliveryKey,
+    ) -> Result<bool, Box<dyn Error>> {
+        Ok(store.load_disposition(key).await?.is_some())
+    }
 
     fn pulls_with_one() -> String {
         serde_json::json!([{
@@ -3742,6 +6101,19 @@ mod tests {
             }
         }
 
+        fn not_found(target: RequestTarget) -> Self {
+            Self {
+                method: "GET",
+                target: target.0,
+                validator: None,
+                status: "404 Not Found",
+                entity_tag: None,
+                link: None,
+                body: String::from("{}"),
+                delay: Duration::ZERO,
+            }
+        }
+
         fn not_modified(target: RequestTarget) -> Self {
             Self {
                 method: "GET",
@@ -4108,6 +6480,14 @@ mod tests {
                 ResponseBody(main_workflow_run()),
             ),
         ]
+    }
+
+    fn complete_pull_request_responses() -> Vec<ScriptedResponse> {
+        complete_typed_observation_responses()
+            .into_iter()
+            .skip(1)
+            .take(11)
+            .collect()
     }
 
     /// Descends as the pull number ascends, so an implementation that
@@ -4481,13 +6861,876 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn targeted_refresh_reuses_the_repository_poller_and_preserves_untouched_state() {
+        let previous = complete_typed_observation().await;
+        let server = ScriptedServer::start(complete_pull_request_responses()).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let target = TargetedPullRequest {
+            number: PullRequestNumber::new(
+                NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+            ),
+            expected_head: Some(
+                CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture head SHA is canonical"),
+            ),
+        };
+
+        let refreshed = fixture
+            .poller
+            .poll_targeted_pull_requests_against_cursor(&previous, &[target])
+            .await
+            .expect("targeted refresh succeeds");
+
+        server.finish().await;
+        assert_eq!(
+            refreshed,
+            TargetedPollOutcome::Observation {
+                observation: previous,
+                superseded_targets: Vec::new(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn targeted_refresh_reports_a_moved_head_as_superseded() {
+        let previous = complete_typed_observation().await;
+        let server = ScriptedServer::start(complete_pull_request_responses()).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        let target = TargetedPullRequest {
+            number: PullRequestNumber::new(
+                NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+            ),
+            expected_head: Some(
+                CommitSha::try_new(String::from("beefbeefbeefbeefbeefbeefbeefbeefbeefbeef"))
+                    .expect("fixture head SHA is canonical"),
+            ),
+        };
+
+        let refreshed = fixture
+            .poller
+            .poll_targeted_pull_requests_against_cursor(&previous, &[target])
+            .await
+            .expect("targeted refresh succeeds");
+
+        server.finish().await;
+        assert_eq!(refreshed, TargetedPollOutcome::SupersededTarget);
+    }
+
+    #[tokio::test]
+    async fn targeted_query_coalescing_retains_the_stricter_head_guard() {
+        let previous = complete_typed_observation().await;
+        let pull_request = PullRequestNumber::new(
+            NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+        );
+        let expected_head =
+            CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture head SHA is canonical");
+        let refreshes = [
+            RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request },
+            RepoWatchTargetedRefreshV1::Mergeability {
+                pull_request,
+                expected_head: expected_head.clone(),
+            },
+        ];
+
+        let targets = targeted_pull_requests(&previous, &refreshes)
+            .expect("compatible targeted queries coalesce");
+
+        assert_eq!(
+            targets,
+            vec![TargetedPullRequest {
+                number: pull_request,
+                expected_head: Some(expected_head),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_targeted_head_guards_fail_closed() {
+        let previous = complete_typed_observation().await;
+        let pull_request = PullRequestNumber::new(
+            NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+        );
+        let first_head =
+            CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture head SHA is canonical");
+        let second_head = CommitSha::try_new(CHANGED_LISTED_HEAD_SHA.to_owned())
+            .expect("changed fixture head SHA is canonical");
+        let refreshes = [
+            RepoWatchTargetedRefreshV1::Mergeability {
+                pull_request,
+                expected_head: first_head,
+            },
+            RepoWatchTargetedRefreshV1::CheckRollup {
+                pull_request,
+                expected_head: second_head,
+            },
+        ];
+
+        let result = targeted_pull_requests(&previous, &refreshes);
+
+        assert_eq!(result, Err(RepositoryWatchAttemptError::Normalization));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_webhook_drain_schedules_an_independent_retry() {
+        let scheduled_at = Instant::now();
+        let mut retry = WebhookDrainRetry::default();
+
+        retry.update_after(&Err(RepositoryWatchAttemptError::Persistence));
+
+        assert_eq!(
+            retry.deadline,
+            Some(scheduled_at + WEBHOOK_DRAIN_RETRY_DELAY)
+        );
+        tokio::time::advance(WEBHOOK_DRAIN_RETRY_DELAY).await;
+        retry.due().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_second_consecutive_drain_failure_doubles_the_retry_delay() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
+
+        retry.update_after(&drain_failure());
+
+        assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_DELAY * 2);
+    }
+
+    /// The seventh consecutive failure is the first whose doubling reaches the
+    /// ceiling, and the eighth stays there rather than growing past it.
+    #[tokio::test(start_paused = true)]
+    async fn consecutive_drain_failures_stop_doubling_at_the_ceiling() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_DELAY * 32);
+
+        retry.update_after(&drain_failure());
+        assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_MAX_DELAY);
+
+        retry.update_after(&drain_failure());
+
+        assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_MAX_DELAY);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_drained_webhook_page_clears_the_retry_backoff() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+
+        retry.update_after(&Ok(()));
+
+        assert_eq!(retry.deadline, None);
+        assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_DELAY);
+    }
+
+    /// A failure that is not the drain's must not push an already-earned retry
+    /// further out: with a poll interval shorter than the current delay, every
+    /// failure would reschedule the deadline and the retry would never come
+    /// due.
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_outside_the_retry_never_defers_a_retry_that_is_already_owed() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        let owed = retry.deadline;
+
+        retry.arm_if_unowed(Instant::now());
+
+        assert_eq!(retry.deadline, owed);
+    }
+
+    /// A poll that began before an owed retry and outlived it did not take that
+    /// retry, so its own failure must leave the deadline expired for the next
+    /// pass. Moving it forward would let a poll interval shorter than the delay
+    /// starve the drain on every slow failure.
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_outside_the_retry_preserves_a_deadline_it_outlived() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
+        let owed = retry.deadline;
+        tokio::time::advance(WEBHOOK_DRAIN_RETRY_DELAY * 2).await;
+
+        retry.arm_if_unowed(Instant::now());
+
+        assert_eq!(retry.deadline, owed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_outside_the_retry_arms_one_when_none_is_owed() {
+        let armed_at = Instant::now();
+        let mut retry = WebhookDrainRetry::default();
+
+        retry.arm_if_unowed(armed_at);
+
+        assert_eq!(retry.deadline, Some(armed_at + WEBHOOK_DRAIN_RETRY_DELAY));
+    }
+
+    /// The dispatch work that failed runs only from a later attempt, and the
+    /// delivery that would have woken one is already terminal, so the drain
+    /// succeeding must still leave a retry owed — at the base delay, because
+    /// the drain is not what failed.
+    #[tokio::test(start_paused = true)]
+    async fn a_drain_whose_dispatch_failed_arms_a_follow_up_at_the_base_delay() {
+        let armed_at = Instant::now();
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_DELAY * 2);
+
+        retry.arm_follow_up(armed_at);
+
+        assert_eq!(retry.deadline, Some(armed_at + WEBHOOK_DRAIN_RETRY_DELAY));
+        assert_eq!(retry.delay(), WEBHOOK_DRAIN_RETRY_DELAY);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dispatch_follow_up_keeps_poll_drains_enabled() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.arm_follow_up(Instant::now());
+
+        let drain = retry.poll_drain();
+
+        assert_eq!(drain, WebhookDrain::Run);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dispatch_follow_up_does_not_suppress_an_admission_wake() {
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let (admissions, admitted) = watch::channel(());
+        let mut webhook_work = Some(admitted);
+        let mut retry = WebhookDrainRetry::default();
+        retry.arm_follow_up(Instant::now());
+        admissions
+            .send(())
+            .expect("the fixture task still holds the wake receiver");
+
+        let wake = next_repository_wake(
+            &mut shutdown_receiver,
+            Instant::now() + POLL_INTERVAL,
+            &retry,
+            &mut webhook_work,
+        )
+        .await;
+
+        assert_eq!(wake, RepositoryWatchWake::WebhookWork);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_trailing_poll_dispatch_failure_arms_a_follow_up() {
+        let armed_at = Instant::now();
+        let mut retry = WebhookDrainRetry::default();
+
+        retry.update_after_poll_drain(
+            WebhookDrainOutcome::Drained,
+            Some(RepositoryWatchAttemptError::Dispatch),
+            armed_at,
+        );
+
+        assert_eq!(retry.deadline, Some(armed_at + WEBHOOK_DRAIN_RETRY_DELAY));
+        assert_eq!(retry.poll_drain(), WebhookDrain::Run);
+    }
+
+    /// The work a follow-up owes runs before the drain, so failing it again is
+    /// the same trailing failure rather than a projection one. Rearming as
+    /// backoff would start suppressing admission wakes and poll drains on the
+    /// strength of a failure that never reached projection.
+    #[tokio::test(start_paused = true)]
+    async fn a_follow_up_that_failed_again_rearms_as_a_follow_up() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.arm_follow_up(Instant::now());
+        retry.consume();
+        let rearmed_at = Instant::now();
+
+        retry.arm_if_unowed(rearmed_at);
+
+        assert_eq!(retry.deadline, Some(rearmed_at + WEBHOOK_DRAIN_RETRY_DELAY));
+        assert!(!retry.is_backing_off());
+        assert_eq!(retry.poll_drain(), WebhookDrain::Run);
+    }
+
+    /// The other side of the same rearm: a spent backoff whose attempt failed
+    /// before reaching the drain is still owed that drain, so the poll must go
+    /// on leaving it to the retry.
+    #[tokio::test(start_paused = true)]
+    async fn a_backoff_that_failed_before_its_drain_rearms_as_backoff() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
+        retry.consume();
+
+        retry.arm_if_unowed(Instant::now());
+
+        assert!(retry.is_backing_off());
+        assert_eq!(retry.poll_drain(), WebhookDrain::Deferred);
+    }
+
+    /// The retry arm precedes the poll arm, so a deadline left owed once its
+    /// retry has been taken selects the same attempt again immediately.
+    #[tokio::test(start_paused = true)]
+    async fn a_taken_retry_spends_its_deadline_and_keeps_its_delay() {
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after(&drain_failure());
+        retry.update_after(&drain_failure());
+        let earned = retry.delay();
+
+        retry.consume();
+
+        assert_eq!(retry.deadline, None);
+        assert_eq!(retry.delay(), earned);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_overdue_webhook_retry_precedes_an_overdue_poll() {
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let (_admissions, admitted) = watch::channel(());
+        let mut webhook_work = Some(admitted);
+        let mut webhook_retry = WebhookDrainRetry::default();
+        webhook_retry.update_after(&Err(RepositoryWatchAttemptError::Persistence));
+        tokio::time::advance(WEBHOOK_DRAIN_RETRY_DELAY).await;
+        let overdue_poll = Instant::now() - Duration::from_secs(1);
+
+        let wake = next_repository_wake(
+            &mut shutdown_receiver,
+            overdue_poll,
+            &webhook_retry,
+            &mut webhook_work,
+        )
+        .await;
+
+        assert_eq!(wake, RepositoryWatchWake::WebhookRetry);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_overdue_poll_runs_when_no_webhook_retry_is_due() {
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let (_admissions, admitted) = watch::channel(());
+        let mut webhook_work = Some(admitted);
+        let webhook_retry = WebhookDrainRetry::default();
+        let overdue_poll = Instant::now() - Duration::from_secs(1);
+
+        let wake = next_repository_wake(
+            &mut shutdown_receiver,
+            overdue_poll,
+            &webhook_retry,
+            &mut webhook_work,
+        )
+        .await;
+
+        assert_eq!(wake, RepositoryWatchWake::Poll);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_admitted_wake_reaches_the_task_before_its_next_poll() {
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let (admissions, admitted) = watch::channel(());
+        let mut webhook_work = Some(admitted);
+        let webhook_retry = WebhookDrainRetry::default();
+        let next_poll = Instant::now() + POLL_INTERVAL;
+        admissions
+            .send(())
+            .expect("the fixture task still holds the wake receiver");
+
+        let wake = next_repository_wake(
+            &mut shutdown_receiver,
+            next_poll,
+            &webhook_retry,
+            &mut webhook_work,
+        )
+        .await;
+
+        assert_eq!(wake, RepositoryWatchWake::WebhookWork);
+    }
+
+    /// An authenticated sender can replay an admitted delivery at the intake
+    /// rate, so a wake must not start a drain the backoff has deferred.
+    #[tokio::test(start_paused = true)]
+    async fn an_admission_wake_defers_to_an_owed_retry() {
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let (admissions, admitted) = watch::channel(());
+        let mut webhook_work = Some(admitted);
+        let mut webhook_retry = WebhookDrainRetry::default();
+        webhook_retry.update_after(&drain_failure());
+        admissions
+            .send(())
+            .expect("the fixture task still holds the wake receiver");
+
+        let wake = next_repository_wake(
+            &mut shutdown_receiver,
+            Instant::now() + POLL_INTERVAL,
+            &webhook_retry,
+            &mut webhook_work,
+        )
+        .await;
+
+        assert_eq!(wake, RepositoryWatchWake::WebhookRetry);
+    }
+
+    /// The wake coalesces, so one deferred by the backoff is still there for
+    /// the attempt that follows the retry rather than being lost.
+    #[tokio::test(start_paused = true)]
+    async fn a_deferred_admission_wake_survives_the_backoff() {
+        let (_shutdown, mut shutdown_receiver) = watch::channel(false);
+        let (admissions, admitted) = watch::channel(());
+        let mut webhook_work = Some(admitted);
+        let mut webhook_retry = WebhookDrainRetry::default();
+        webhook_retry.update_after(&drain_failure());
+        admissions
+            .send(())
+            .expect("the fixture task still holds the wake receiver");
+        webhook_retry.update_after(&Ok(()));
+
+        let wake = next_repository_wake(
+            &mut shutdown_receiver,
+            Instant::now() + POLL_INTERVAL,
+            &webhook_retry,
+            &mut webhook_work,
+        )
+        .await;
+
+        assert_eq!(wake, RepositoryWatchWake::WebhookWork);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_precedes_every_overdue_repository_deadline() {
+        let (shutdown, mut shutdown_receiver) = watch::channel(false);
+        let (_admissions, admitted) = watch::channel(());
+        let mut webhook_work = Some(admitted);
+        let mut webhook_retry = WebhookDrainRetry::default();
+        webhook_retry.update_after(&Err(RepositoryWatchAttemptError::Persistence));
+        tokio::time::advance(WEBHOOK_DRAIN_RETRY_DELAY).await;
+        let overdue_poll = Instant::now() - Duration::from_secs(1);
+        shutdown
+            .send(true)
+            .expect("the fixture task still holds the shutdown receiver");
+
+        let wake = next_repository_wake(
+            &mut shutdown_receiver,
+            overdue_poll,
+            &webhook_retry,
+            &mut webhook_work,
+        )
+        .await;
+
+        assert_eq!(wake, RepositoryWatchWake::Stop);
+    }
+
+    /// The supervisor joins every child before aborting the set, so a drain
+    /// inspection that never returns — an unresponsive database, a connection
+    /// that never becomes available — has to be cancellable or the daemon
+    /// cannot terminate.
+    #[tokio::test]
+    async fn shutdown_cancels_supervised_work_that_never_returns() {
+        // The sender stays with the fixture throughout: a dropped sender also
+        // ends the wait, so a test that let it go could pass without ever
+        // observing shutdown itself.
+        let (shutdown, mut shutdown_receiver) = watch::channel(false);
+        shutdown
+            .send(true)
+            .expect("the fixture still holds the shutdown receiver");
+
+        let outcome =
+            run_until_shutdown(&mut shutdown_receiver, std::future::pending::<()>()).await;
+
+        assert_eq!(outcome, None);
+        drop(shutdown);
+    }
+
+    #[tokio::test]
+    async fn a_notification_that_is_not_shutdown_resumes_supervised_work() {
+        let (shutdown, mut shutdown_receiver) = watch::channel(false);
+        const COMPLETION: u8 = 7;
+        let (completion, completed) = tokio::sync::oneshot::channel::<u8>();
+        // Pending before the wait begins, so the notification is delivered
+        // while the work is still outstanding.
+        shutdown
+            .send(false)
+            .expect("the fixture still holds the shutdown receiver");
+        let signal = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            completion
+                .send(COMPLETION)
+                .expect("the fixture still awaits the supervised work");
+        });
+
+        let outcome = run_until_shutdown(&mut shutdown_receiver, async move {
+            completed.await.expect("the fixture completes the work")
+        })
+        .await;
+
+        signal.await.expect("the fixture signal completes");
+        assert_eq!(outcome, Some(COMPLETION));
+        drop(shutdown);
+    }
+
+    #[tokio::test]
+    async fn a_webhook_wake_preempts_an_in_flight_complete_poll() {
+        let (webhook_sender, webhook_receiver) = watch::channel(());
+        let mut webhook_work = Some(webhook_receiver);
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        webhook_sender.send_replace(());
+
+        let outcome = await_poll_or_interrupt(
+            std::future::pending::<()>(),
+            &mut shutdown,
+            &mut webhook_work,
+            WebhookPollInterrupt::Enabled,
+        )
+        .await;
+
+        assert!(matches!(outcome, PollAttemptWait::Webhook));
+    }
+
+    #[tokio::test]
+    async fn a_complete_poll_wins_without_an_interrupt() {
+        let (_webhook_sender, webhook_receiver) = watch::channel(());
+        let mut webhook_work = Some(webhook_receiver);
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        const COMPLETION: u8 = 7;
+
+        let outcome = await_poll_or_interrupt(
+            async { COMPLETION },
+            &mut shutdown,
+            &mut webhook_work,
+            WebhookPollInterrupt::Enabled,
+        )
+        .await;
+
+        assert!(matches!(outcome, PollAttemptWait::Completed(COMPLETION)));
+    }
+
+    #[tokio::test]
+    async fn a_backed_off_webhook_does_not_preempt_a_complete_poll() {
+        let (webhook_sender, webhook_receiver) = watch::channel(());
+        let mut webhook_work = Some(webhook_receiver);
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        const COMPLETION: u8 = 11;
+        webhook_sender.send_replace(());
+
+        let outcome = await_poll_or_interrupt(
+            async { COMPLETION },
+            &mut shutdown,
+            &mut webhook_work,
+            WebhookPollInterrupt::Suppressed,
+        )
+        .await;
+
+        assert!(matches!(outcome, PollAttemptWait::Completed(COMPLETION)));
+    }
+
+    #[test]
+    fn a_pending_webhook_wake_is_observed_before_its_drain() {
+        let (webhook_sender, webhook_receiver) = watch::channel(());
+        let mut webhook_work = Some(webhook_receiver);
+        webhook_sender.send_replace(());
+
+        observe_webhook_work_before_drain(&mut webhook_work);
+
+        assert!(
+            !webhook_work
+                .as_ref()
+                .expect("the fixture keeps its webhook sender")
+                .has_changed()
+                .expect("the fixture keeps its webhook sender")
+        );
+    }
+
+    #[test]
+    fn a_webhook_wake_after_the_observation_remains_pending() {
+        let (webhook_sender, webhook_receiver) = watch::channel(());
+        let mut webhook_work = Some(webhook_receiver);
+        webhook_sender.send_replace(());
+        observe_webhook_work_before_drain(&mut webhook_work);
+
+        webhook_sender.send_replace(());
+
+        assert!(
+            webhook_work
+                .as_ref()
+                .expect("the fixture keeps its webhook sender")
+                .has_changed()
+                .expect("the fixture keeps its webhook sender")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn one_projection_error_does_not_halt_its_page() -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let first = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        let second = submitted_review_admission(SECOND_WEBHOOK_DELIVERY, SECOND_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&first).await?;
+        webhook_store.admit(&second).await?;
+        webhook_store
+            .inject_projection_rejection(first.key())
+            .await?;
+        let mut fixture = webhook_task(&pool).await?;
+
+        let attempt = fixture.task.process_webhook_deliveries().await;
+
+        assert_eq!(
+            attempt,
+            WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::Persistence)
+        );
+        assert!(!webhook_disposition_exists(&webhook_store, first.key()).await?);
+        let peer = webhook_store
+            .load_disposition(second.key())
+            .await?
+            .expect("the page peer reached a terminal disposition");
+        assert_eq!(peer.disposition(), RepoWatchWebhookDisposition::Projected);
+        assert_eq!(peer.outcome_code(), None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_retry_drains_the_delivery_a_projection_error_retained() -> Result<(), Box<dyn Error>>
+    {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let retained = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&retained).await?;
+        let rejection = webhook_store
+            .inject_projection_rejection(retained.key())
+            .await?;
+        let mut fixture = webhook_task(&pool).await?;
+        let failed = fixture.task.process_webhook_deliveries().await;
+        assert_eq!(
+            failed,
+            WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::Persistence)
+        );
+        rejection.restore().await?;
+
+        let retried = fixture.task.process_webhook_deliveries().await;
+
+        assert_eq!(retried, WebhookDrainOutcome::Drained);
+        assert!(webhook_disposition_exists(&webhook_store, retained.key()).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn admission_during_a_concurrent_drain_is_drained_by_the_same_task_run()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let first = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        let second = submitted_review_admission(SECOND_WEBHOOK_DELIVERY, SECOND_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&first).await?;
+        webhook_store
+            .inject_projection_wedge(first.key(), WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .await?;
+        let mut blocker = pool.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .execute(&mut *blocker)
+            .await?;
+        let fixture = webhook_task(&pool).await?;
+        let mut task = fixture.task;
+        let drain = tokio::spawn(async move { task.process_webhook_deliveries().await });
+        wait_for_webhook_projection_wedge(&webhook_store).await;
+
+        webhook_store.admit(&second).await?;
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+            .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .fetch_one(&mut *blocker)
+            .await?;
+        assert_eq!(drain.await?, WebhookDrainOutcome::Drained);
+
+        assert!(unlocked, "the fixture releases its deliberate drain wedge");
+        assert!(webhook_disposition_exists(&webhook_store, first.key()).await?);
+        assert!(webhook_disposition_exists(&webhook_store, second.key()).await?);
+        Ok(())
+    }
+
+    /// A full poll drains durable webhook work as part of its own sequence, so
+    /// leaving that step in while a retry is owed would repeat at the poll
+    /// cadence exactly the work the backoff exists to space out.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_poll_leaves_the_drain_to_a_retry_that_is_already_owed() -> Result<(), Box<dyn Error>>
+    {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let admission = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&admission).await?;
+        let deferring = ScriptedServer::start(complete_typed_observation_responses()).await;
+        let mut fixture = webhook_task_against(&pool, deferring.base_url.clone()).await?;
+
+        let mut deferred_drain = None;
+        let mut deferred_dispatch_failure = None;
+        fixture
+            .task
+            .run_attempt(
+                WebhookDrain::Deferred,
+                &mut deferred_drain,
+                &mut deferred_dispatch_failure,
+            )
+            .await
+            .expect("the polling attempt itself succeeds");
+
+        deferring.finish().await;
+        assert_eq!(
+            deferred_drain, None,
+            "a deferred poll reports no drain for the backoff to read"
+        );
+        assert!(
+            !webhook_disposition_exists(&webhook_store, admission.key()).await?,
+            "a poll must leave a pending delivery to the retry that owes it"
+        );
+
+        let draining = ScriptedServer::start(complete_typed_observation_responses()).await;
+        let mut owed_nothing = webhook_task_against(&pool, draining.base_url.clone()).await?;
+
+        let mut performed_drain = None;
+        let mut performed_dispatch_failure = None;
+        owed_nothing
+            .task
+            .run_attempt(
+                WebhookDrain::Run,
+                &mut performed_drain,
+                &mut performed_dispatch_failure,
+            )
+            .await
+            .expect("the polling attempt drains when no retry is owed");
+
+        draining.finish().await;
+        assert_eq!(performed_drain, Some(WebhookDrainOutcome::Drained));
+        assert!(webhook_disposition_exists(&webhook_store, admission.key()).await?);
+        Ok(())
+    }
+
+    /// Cutoff work after the drain belongs to the same follow-up classification
+    /// as the dispatch work beside it: the deliveries it follows are terminal
+    /// and will wake no later attempt, so an attempt that let this failure
+    /// escape would report a bare `Drained`, clear the deadline the committed
+    /// work needs, and leave that work to an unrelated admission or the next
+    /// poll. The fixture fault arms itself from the drain's terminal write, so
+    /// the cutoff pass this attempt ran before its drain is left succeeding.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_trailing_poll_cutoff_failure_arms_a_follow_up() -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let admission = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&admission).await?;
+        let server = ScriptedServer::start(complete_typed_observation_responses()).await;
+        let mut fixture = webhook_task_against(&pool, server.base_url.clone()).await?;
+        fixture
+            .task
+            .dispatch_store
+            .inject_post_drain_lifecycle_cutoff_fault()
+            .await?;
+
+        let mut drained = None;
+        let mut trailing_failure = None;
+        let attempt = fixture
+            .task
+            .run_attempt(WebhookDrain::Run, &mut drained, &mut trailing_failure)
+            .await;
+
+        server.finish().await;
+        assert_eq!(attempt, Err(RepositoryWatchAttemptError::Persistence));
+        assert_eq!(
+            drained,
+            Some(WebhookDrainOutcome::Drained),
+            "every delivery the drain visited reached terminal state"
+        );
+        assert_eq!(
+            trailing_failure,
+            Some(RepositoryWatchAttemptError::Persistence),
+            "the cutoff that failed after the drain committed is reported, not swallowed"
+        );
+        assert!(
+            webhook_disposition_exists(&webhook_store, admission.key()).await?,
+            "the drain committed the work whose follow-up this failure owes"
+        );
+        let armed_at = Instant::now();
+        let mut retry = WebhookDrainRetry::default();
+        retry.update_after_poll_drain(
+            drained.expect("the attempt reported the drain it performed"),
+            trailing_failure,
+            armed_at,
+        );
+        assert_eq!(retry.deadline, Some(armed_at + WEBHOOK_DRAIN_RETRY_DELAY));
+        Ok(())
+    }
+
+    /// A refresh the provider will not serve leaves its delivery pending rather
+    /// than terminal, because the query runs before anything is recorded and a
+    /// transient fetch failure must stay retryable. What keeps an admitted
+    /// burst of unservable targets from denying webhook projection is that the
+    /// drain defers such a delivery for the rest of the page: every newer
+    /// receipt behind it still reaches terminal state.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn an_unservable_refresh_target_defers_rather_than_pinning_its_page()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let unservable = synchronize_admission(THIRD_WEBHOOK_DELIVERY)?;
+        let behind_it = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&unservable).await?;
+        webhook_store.admit(&behind_it).await?;
+        let server = ScriptedServer::start(vec![ScriptedResponse::not_found(RequestTarget(
+            PULL_DETAIL_TARGET.to_owned(),
+        ))])
+        .await;
+        let mut fixture = webhook_task_against(&pool, server.base_url.clone()).await?;
+
+        let attempt = fixture.task.process_webhook_deliveries().await;
+
+        server.finish().await;
+        assert_eq!(
+            attempt,
+            WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::Rejected)
+        );
+        assert!(!webhook_disposition_exists(&webhook_store, unservable.key()).await?);
+        assert!(webhook_disposition_exists(&webhook_store, behind_it.key()).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn wedged_webhook_drain_emits_an_error_with_its_cause() -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let store = PostgresRepoWatchWebhookStore::new(pool);
+        let admission = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        store.admit(&admission).await?;
+        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?;
+        let captured = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(captured.clone())
+            .finish();
+
+        inspect_webhook_drain(&repository, &store, Duration::ZERO)
+            .with_subscriber(subscriber)
+            .await;
+
+        let telemetry = captured.text();
+        assert!(telemetry.contains("ERROR"));
+        assert!(telemetry.contains("cause_code=\"webhook_projection_drain_stalled\""));
+        assert!(telemetry.contains(&admission.key().delivery_id().to_string()));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn shutdown_wins_when_a_repository_task_exits_cleanly_at_the_same_time() {
         let (sender, receiver) = watch::channel(false);
         let exit = Arc::new(Notify::new());
         let mut tasks = JoinSet::new();
         tasks.spawn({
             let exit = Arc::clone(&exit);
-            async move { exit.notified().await }
+            async move {
+                exit.notified().await;
+                RepositoryWatchChildExit::Repository
+            }
         });
         let trigger = tokio::spawn(async move {
             tokio::task::yield_now().await;
@@ -4532,6 +7775,7 @@ mod tests {
                         Some(RepoWatchCursorGeneration::INITIAL),
                     )
                     .await;
+                RepositoryWatchChildExit::Repository
             }
         });
         server.request_in_flight().await;
@@ -4581,6 +7825,7 @@ mod tests {
                         Some(RepoWatchCursorGeneration::INITIAL),
                     )
                     .await;
+                RepositoryWatchChildExit::Repository
             }
         });
         server.request_in_flight().await;
@@ -5079,37 +8324,40 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_cycle_shorter_than_the_interval_waits_out_the_remainder() {
+    #[tokio::test(start_paused = true)]
+    async fn a_cycle_shorter_than_the_interval_waits_out_the_remainder() {
+        let cycle_started = Instant::now();
+        let completed = cycle_started + SHORT_CYCLE;
+
+        let next_poll = next_cadence_deadline(cycle_started, POLL_INTERVAL, completed);
+
+        assert_eq!(next_poll, cycle_started + POLL_INTERVAL);
+        assert_eq!(next_poll - completed, SHORT_CYCLE_REMAINDER);
+    }
+
+    /// Following such a cycle immediately would leave the poll deadline elapsed
+    /// on entry to every pass, so the task would never sleep and never reach
+    /// the arms that drain durable webhook work.
+    #[tokio::test(start_paused = true)]
+    async fn a_cycle_that_reaches_the_interval_starts_a_fresh_interval() {
+        let cycle_started = Instant::now();
+        let completed = cycle_started + POLL_INTERVAL;
+
         assert_eq!(
-            remaining_interval(PollCycleTiming {
-                interval: POLL_INTERVAL,
-                elapsed: SHORT_CYCLE,
-            }),
-            SHORT_CYCLE_REMAINDER
+            next_cadence_deadline(cycle_started, POLL_INTERVAL, completed),
+            completed + POLL_INTERVAL
         );
     }
 
-    #[test]
-    fn a_cycle_that_reaches_the_interval_starts_the_next_immediately() {
-        assert_eq!(
-            remaining_interval(PollCycleTiming {
-                interval: POLL_INTERVAL,
-                elapsed: POLL_INTERVAL,
-            }),
-            Duration::ZERO
-        );
-    }
+    #[tokio::test(start_paused = true)]
+    async fn a_cycle_that_overruns_the_interval_starts_a_fresh_interval() {
+        let cycle_started = Instant::now();
+        let completed = cycle_started + OVERRUNNING_CYCLE;
 
-    #[test]
-    fn a_cycle_that_overruns_the_interval_starts_the_next_immediately() {
-        assert_eq!(
-            remaining_interval(PollCycleTiming {
-                interval: POLL_INTERVAL,
-                elapsed: OVERRUNNING_CYCLE,
-            }),
-            Duration::ZERO
-        );
+        let next_poll = next_cadence_deadline(cycle_started, POLL_INTERVAL, completed);
+
+        assert_eq!(next_poll, completed + POLL_INTERVAL);
+        assert!(next_poll > completed, "an elapsed deadline never sleeps");
     }
 
     #[tokio::test]

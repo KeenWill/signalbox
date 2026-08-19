@@ -7359,6 +7359,185 @@ pub enum RepoWatchDispatchServiceError<TransactionError> {
 }
 ```
 
+## application: repo_watch_webhook
+
+```rust
+pub struct RepoWatchWebhookBodyReferenceV1 { /* private */ }
+impl RepoWatchWebhookBodyReferenceV1 {
+    pub const fn new(hook_id: NonZeroU64, delivery_id: Uuid) -> Self;
+    // accessors: hook_id(), delivery_id()
+}
+
+pub struct RepoWatchWebhookDeliveryV1Input {
+    pub repository: RepositorySlug,
+    pub hook_id: NonZeroU64,
+    pub delivery_id: Uuid,
+    pub event: String,
+    pub action: Option<String>,
+    pub receipt_sequence: NonZeroU64,
+    pub body_digest: [u8; 32],
+}
+
+pub struct RepoWatchWebhookDeliveryV1 { /* private */ }
+impl RepoWatchWebhookDeliveryV1 {
+    pub fn new(input: RepoWatchWebhookDeliveryV1Input) -> Self;
+    // accessors: repository(), hook_id(), delivery_id(), event(), action(),
+    // receipt_sequence(), body_digest(), body_reference()
+}
+
+pub enum RepoWatchPullRequestMissingPolicyV1 {
+    HydrateBeforeApplying,
+    RefreshInstead,
+}
+
+pub enum RepoWatchPullRequestHeadGuardV1 {
+    AbsentOrMatching(CommitSha),
+    Expected(CommitSha),
+}
+
+pub struct RepoWatchWebhookPullRequestContextV1Input {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub head_repository: Option<RepositorySlug>,
+    pub base_branch: BranchName,
+    pub head_branch: BranchName,
+    pub title: PullRequestTitle,
+    pub body: PullRequestBody,
+    pub labels: Vec<LabelName>,
+    pub draft: bool,
+    pub author: Option<RepoWatchAuthorLogin>,
+}
+
+pub struct RepoWatchWebhookPullRequestContextV1 { /* private */ }
+impl RepoWatchWebhookPullRequestContextV1 {
+    pub fn new(input: RepoWatchWebhookPullRequestContextV1Input) -> Self;
+    pub fn delivered(&self) -> Option<PullRequestEventContext>;
+    pub fn with_retained_head_repository(
+        &self,
+        retained: &RepositorySlug,
+    ) -> PullRequestEventContext;
+    // accessors: number(), head_sha(), head_repository()
+}
+
+pub enum RepoWatchObservationChangeV1 {
+    PullRequestContext {
+        context: RepoWatchWebhookPullRequestContextV1,
+        lifecycle: Option<RepoWatchPullRequestLifecycle>,
+        head_guard: RepoWatchPullRequestHeadGuardV1,
+        missing: RepoWatchPullRequestMissingPolicyV1,
+    },
+    ReviewUnion {
+        pull_request: PullRequestNumber,
+        expected_head: CommitSha,
+        review: RepoWatchReviewObservation,
+    },
+    ThreadState {
+        pull_request: PullRequestNumber,
+        expected_head: CommitSha,
+        thread: RepoWatchThreadObservation,
+    },
+    CheckRunUnion {
+        pull_request: PullRequestNumber,
+        expected_head: CommitSha,
+        check_run: RepoWatchCheckRunObservation,
+    },
+    WorkflowRun { run: RepoWatchWorkflowRunObservation },
+    BranchHead {
+        previous: RepoWatchBranchHeadPreviousV1,
+        current: RepoWatchBranchHead,
+    },
+    BranchDeleted {
+        branch: BranchName,
+        expected_previous: CommitSha,
+    },
+}
+
+pub enum RepoWatchBranchHeadPreviousV1 {
+    Absent,
+    Expected(CommitSha),
+}
+
+pub enum RepoWatchTargetedRefreshV1 {
+    PullRequestHydration { pull_request: PullRequestNumber },
+    Mergeability {
+        pull_request: PullRequestNumber,
+        expected_head: CommitSha,
+    },
+    CheckRollup {
+        pull_request: PullRequestNumber,
+        expected_head: CommitSha,
+    },
+    CheckRollupForCommit { head: CommitSha },
+}
+
+pub struct RepoWatchTargetedRefreshCoalescerV1 { /* private */ }
+impl RepoWatchTargetedRefreshCoalescerV1 {
+    pub fn for_delivery_page() -> Self;
+    pub fn unissued(&self, refreshes: &[RepoWatchTargetedRefreshV1]) -> Vec<RepoWatchTargetedRefreshV1>;
+    pub fn record_issued(&mut self, refreshes: &[RepoWatchTargetedRefreshV1]);
+}
+
+pub struct RepoWatchObservationPatchV1 { /* private */ }
+impl RepoWatchObservationPatchV1 {
+    // accessors: changes(), targeted_refreshes()
+}
+
+pub enum RepoWatchObservationApplyV1 {
+    Applied(RepoWatchObservation),
+    DuplicateState,
+    Superseded,
+    Ignored(RepoWatchWebhookIgnoredReasonV1),
+    NeedsTargetedRefresh {
+        observation: RepoWatchObservation,
+        refreshes: Box<[RepoWatchTargetedRefreshV1]>,
+    },
+}
+
+pub enum RepoWatchWebhookApplyError {
+    RepositoryState(RepoWatchRepositoryStateError),
+    ConflictingImmutableFact(&'static str),
+}
+
+pub enum RepoWatchWebhookMappedNoChangeV1 {
+    Ping,
+    ReviewDismissed,
+}
+
+pub enum RepoWatchWebhookIgnoredReasonV1 {
+    UnmappedEvent,
+    UnmappedAction,
+    NonBranchPush,
+    ForeignWorkflowRepository,
+    AbsentWorkflowBranch,
+    AbsentWorkflowHeadRepository,
+    AbsentWorkflowHeadBranch,
+}
+
+pub enum RepoWatchWebhookMappingV1 {
+    Patch(RepoWatchObservationPatchV1),
+    MappedNoChange(RepoWatchWebhookMappedNoChangeV1),
+    Ignored(RepoWatchWebhookIgnoredReasonV1),
+}
+
+pub enum RepoWatchWebhookMappingError {
+    MalformedJson,
+    MissingField(&'static str),
+    InvalidField(&'static str),
+    RepositoryMismatch,
+    ActionMismatch,
+}
+
+pub fn apply_repo_watch_observation_patch_v1(
+    previous: &RepoWatchObservation,
+    patch: &RepoWatchObservationPatchV1,
+) -> Result<RepoWatchObservationApplyV1, RepoWatchWebhookApplyError>;
+
+pub fn map_repo_watch_webhook_delivery_v1(
+    delivery: &RepoWatchWebhookDeliveryV1,
+    exact_body: &[u8],
+) -> Result<RepoWatchWebhookMappingV1, RepoWatchWebhookMappingError>;
+```
+
 ## application: review_orchestration
 
 ```rust
@@ -8071,6 +8250,8 @@ impl<
 ## application: scheduler
 
 ```rust
+pub const fn scheduler_pass_admission_cap() -> usize;
+
 pub struct ReconciliationSweepInterval(/* private */);
 impl ReconciliationSweepInterval {
     pub const fn baseline() -> Self;
@@ -8186,6 +8367,7 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
         pass: Pass,
         max_in_flight_passes: NonZeroUsize,
     ) -> Self;
+    pub const fn paused(work_source: WorkSource, pass: Pass) -> Self;
     pub fn into_parts(self) -> (WorkSource, Pass);
 }
 impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass>
@@ -10702,14 +10884,15 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
 | application: repo_watch                            | 38 (+2 free fn) (incl. 4 traits) |
+| application: repo_watch_webhook                    | 18 (+2 free fn)                  |
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
 | application: session_metadata                      | 12 (incl. 4 traits)              |
-| application: scheduler                             | 15 (incl. 5 traits)              |
+| application: scheduler                             | 15 (+1 free fn) (incl. 5 traits) |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)               |
 | application: startup_scan                          | 7 (incl. 2 traits)               |
 | application: submit_input                          | 7 (incl. 2 traits)               |
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
-| **signalbox-application total**                    | **257 (+3 free fn)**             |
+| **signalbox-application total**                    | **275 (+6 free fn)**             |

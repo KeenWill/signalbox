@@ -13,6 +13,7 @@ use std::{
     ffi::OsString,
     fmt, fs,
     future::Future,
+    num::NonZeroUsize,
     path::{Component, Path, PathBuf},
     process::ExitCode,
     sync::Arc,
@@ -277,7 +278,13 @@ impl HubConfiguration {
     fn repository_watch_credential_conflicts(&self, configuration: &HubModelConfiguration) -> bool {
         configuration.repository_watch().is_some_and(|watch| {
             watch.repositories().iter().any(|repository| {
+                // A webhook secret is a repository-watch credential like the
+                // polling token, so the same credential boundary applies: neither
+                // may equal or alias the session GitHub credential.
                 credential_files_conflict(&self.github_token_file, repository.credential_file())
+                    || repository.webhook().is_some_and(|webhook| {
+                        credential_files_conflict(&self.github_token_file, webhook.secret_file())
+                    })
             })
         })
     }
@@ -1690,7 +1697,20 @@ async fn run_hub(
             eligibility_nudge,
         ),
     );
-    let mut scheduler = SchedulerLoop::new(work_source, pass);
+    let scheduler_max_in_flight_passes = model_configuration.scheduler_max_in_flight_passes();
+    let mut scheduler = match scheduler_max_in_flight_passes {
+        Some(limit) => match NonZeroUsize::new(limit) {
+            Some(limit) => SchedulerLoop::with_max_in_flight(work_source, pass, limit),
+            None => SchedulerLoop::paused(work_source, pass),
+        },
+        None => SchedulerLoop::new(work_source, pass),
+    };
+    if let Some(limit) = scheduler_max_in_flight_passes {
+        tracing::info!(
+            max_in_flight_passes = limit,
+            "scheduler pass admission uses the deployment override"
+        );
+    }
     let (scheduler_shutdown, scheduler_shutdown_receiver) = oneshot::channel();
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);

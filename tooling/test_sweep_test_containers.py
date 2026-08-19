@@ -184,7 +184,7 @@ CHAIN_LINE_LIMIT = 40
 
 # Re-verified against the head; a scan that silently matched nothing would
 # otherwise satisfy the marking test with no evidence at all.
-CONTAINER_START_SITES = 34
+CONTAINER_START_SITES = 37
 
 
 def container_start_sites() -> tuple[list[str], list[str]]:
@@ -318,6 +318,18 @@ class SweepRun:
         return [value for flag, value in pairs if flag == "--filter"]
 
 
+def restore_cancellation_signal_dispositions() -> None:
+    """Give the sweep default dispositions for the signals these tests deliver.
+
+    Daemonized CI runner services commonly start their children with SIGHUP and
+    SIGQUIT ignored, and an ignored-at-entry signal cannot be trapped by the
+    sweep's shell, so the cancellation would never be delivered: the sweep would
+    outlive the hang and exit 0 instead of reporting the signal.
+    """
+    for number in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM):
+        signal.signal(number, signal.SIG_DFL)
+
+
 def cancel_a_hung_sweep(
     arguments: list[str],
     environment: dict[str, str],
@@ -336,6 +348,7 @@ def cancel_a_hung_sweep(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        preexec_fn=restore_cancellation_signal_dispositions,
     )
     began = time.monotonic()
     while not start_log.exists() and time.monotonic() - began < SWEEP_TIMEOUT_SECONDS:

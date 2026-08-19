@@ -355,6 +355,52 @@ impl PostgresRepoWatchDispatchStore {
         Ok(true)
     }
 
+    /// Fails lifecycle-cutoff processing from the first webhook disposition on,
+    /// for a composed attempt test.
+    ///
+    /// An attempt runs cutoffs both before its drain and after it, and what is
+    /// being exercised is the pass after: a fault installed up front would fail
+    /// the earlier pass instead and the attempt would never reach the later
+    /// one. So the fault arms itself from the drain's own terminal write. It
+    /// withdraws the table rather than rejecting a record, because a cutoff
+    /// that finds no candidate must fail too — the attempt under test is one
+    /// whose trailing cutoff fails transiently, not one that happens to have
+    /// closure work waiting. Left in place for the container's lifetime.
+    #[cfg(feature = "test-support")]
+    pub async fn inject_post_drain_lifecycle_cutoff_fault(
+        &self,
+    ) -> Result<(), RepoWatchDispatchRepositoryError> {
+        sqlx::query(
+            "CREATE FUNCTION withdraw_repo_watch_lifecycle_cutoff()
+             RETURNS trigger
+             LANGUAGE plpgsql
+             AS $$
+             BEGIN
+                 IF EXISTS (
+                     SELECT 1
+                       FROM pg_class
+                      WHERE relname = 'repo_watch_lifecycle_cutoff'
+                 ) THEN
+                     ALTER TABLE repo_watch_lifecycle_cutoff
+                        RENAME TO repo_watch_lifecycle_cutoff_withdrawn;
+                 END IF;
+                 RETURN NEW;
+             END
+             $$",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE TRIGGER withdraw_repo_watch_lifecycle_cutoff
+             AFTER INSERT ON repo_watch_webhook_disposition
+             FOR EACH ROW
+             EXECUTE FUNCTION withdraw_repo_watch_lifecycle_cutoff()",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Drains durable lifecycle cutoffs before repository-specific tasks start.
     pub async fn process_pending_lifecycle_cutoffs<NextCommandId>(
         &self,
