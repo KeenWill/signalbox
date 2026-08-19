@@ -55,8 +55,25 @@ const STALE_TURN_AMBIGUOUS_CAUSE: &str = "turn_liveness_terminalization_ambiguou
 /// nothing about it is expected to resolve on its own.
 const STALE_TURN_STEERING_BLOCKED_CAUSE: &str = "turn_liveness_steering_blocks_terminalization";
 
+/// Why turns that came due were left for a later scan.
+const TERMINALIZATION_DEFERRED_CAUSE: &str = "turn_liveness_terminalization_deferred";
+
 /// Why one turn-liveness pass produced no decision.
 const PASS_FAILURE_CAUSE: &str = "turn_liveness_pass_failed";
+
+/// How many turns one scan terminalizes before leaving the rest.
+///
+/// Terminalizations run one at a time, each a short transaction under the
+/// session's scheduler lock, and the next scan cannot start until the phase
+/// ends — so an unbounded phase would let a large stale cohort push the next
+/// observation arbitrarily far past the scan interval, which is the
+/// population-independent behaviour this pass exists to have. At a pessimistic
+/// fifth of a second per transaction this cap is a phase of about thirteen
+/// seconds against a one-minute interval, leaving the cadence intact under
+/// conditions well worse than any observed. Turns over the cap are not lost:
+/// nothing about them changed, so the next scan finds them due again.
+// numeric-bound: tunable - bounds one scan's terminalization phase
+const TERMINALIZATIONS_PER_SCAN: usize = 64;
 
 /// Why a rotation was abandoned without deciding anything.
 const ROTATION_CEILING_CAUSE: &str = "turn_liveness_rotation_ceiling_reached";
@@ -87,6 +104,25 @@ const QUIESCENT_ROTATION_PAGE_CEILING: usize = 4_096;
 struct InventoryPage {
     candidates: Box<[StaleTurnCandidate]>,
     resume_after: Option<SessionId>,
+}
+
+/// Ends one turn observed boundedly stale.
+trait StaleTurnTerminalizer {
+    fn terminalize(
+        &self,
+        candidate: StaleTurnCandidate,
+        identities: AcceptedInputTurnFailureIdentities,
+    ) -> impl Future<Output = Result<StaleTurnOutcome, TurnLivenessRepositoryError>> + Send;
+}
+
+impl StaleTurnTerminalizer for PostgresTurnLivenessRepository {
+    async fn terminalize(
+        &self,
+        candidate: StaleTurnCandidate,
+        identities: AcceptedInputTurnFailureIdentities,
+    ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
+        self.terminalize_stale_turn(candidate, identities).await
+    }
 }
 
 /// Reads one page of the quiescent inventory.
@@ -160,8 +196,13 @@ impl TurnLivenessRuntime {
             match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
                 TurnLivenessWake::Shutdown => return,
                 TurnLivenessWake::Scan => {
-                    reconcile_turn_liveness(&self.repository, &mut ledger, self.staleness_bound)
-                        .await;
+                    reconcile_turn_liveness(
+                        &self.repository,
+                        &mut ledger,
+                        self.staleness_bound,
+                        TERMINALIZATIONS_PER_SCAN,
+                    )
+                    .await;
                 }
             }
         }
@@ -198,11 +239,14 @@ async fn next_turn_liveness_wake(
 /// wakes instead would tie the time to reach a turn to the population size,
 /// and the staleness bound is a property of the binary, not of how many
 /// sessions happen to be quiescent.
-async fn reconcile_turn_liveness(
-    repository: &PostgresTurnLivenessRepository,
+async fn reconcile_turn_liveness<Repository>(
+    repository: &Repository,
     ledger: &mut TurnLivenessLedger,
     staleness_bound: StaleActiveTurnBound,
-) {
+    terminalization_cap: usize,
+) where
+    Repository: QuiescentInventory + StaleTurnTerminalizer,
+{
     // A rotation that could not be drained is not a smaller population; the
     // pass therefore ends without a decision and the ledger keeps what it had,
     // rather than forgetting every turn the unread pages would have carried.
@@ -212,8 +256,24 @@ async fn reconcile_turn_liveness(
         return;
     };
     let due = ledger.reconcile(&quiescent, Instant::now());
-    for candidate in due {
-        terminalize_stale_turn(repository, candidate, staleness_bound).await;
+    for candidate in due.iter().take(terminalization_cap) {
+        terminalize_stale_turn(repository, *candidate, staleness_bound).await;
+    }
+    // Deferring costs a scan interval and nothing else: a turn left here had
+    // nothing change, so the next scan observes the same evidence and finds it
+    // due again. Draining the whole cohort instead would delay that scan by as
+    // long as the cohort takes.
+    if let Some(deferred) = due
+        .len()
+        .checked_sub(terminalization_cap)
+        .filter(|count| *count > 0)
+    {
+        tracing::info!(
+            cause_code = TERMINALIZATION_DEFERRED_CAUSE,
+            deferred_turns = deferred,
+            terminalization_cap,
+            "more turns came due than one scan terminalizes; the rest wait for the next scan"
+        );
     }
 }
 
@@ -276,19 +336,18 @@ where
     }
 }
 
-async fn terminalize_stale_turn(
-    repository: &PostgresTurnLivenessRepository,
+async fn terminalize_stale_turn<Terminalizer>(
+    repository: &Terminalizer,
     candidate: StaleTurnCandidate,
     staleness_bound: StaleActiveTurnBound,
-) {
+) where
+    Terminalizer: StaleTurnTerminalizer,
+{
     let identities = AcceptedInputTurnFailureIdentities::new(
         SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
         ContextFrontierId::from_uuid(Uuid::now_v7()),
     );
-    match repository
-        .terminalize_stale_turn(candidate, identities)
-        .await
-    {
+    match repository.terminalize(candidate, identities).await {
         Ok(StaleTurnOutcome::Terminalized) => tracing::warn!(
             cause_code = STALE_TURN_TERMINAL_CAUSE,
             session_id = %candidate.session().as_uuid(),
@@ -354,11 +413,15 @@ mod tests {
     use super::{
         InventoryPage, PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, QuiescentInventory,
         ROTATION_CEILING_CAUSE, STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_STEERING_BLOCKED_CAUSE,
-        STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE, TurnLivenessWake,
-        drain_quiescent_rotation, next_turn_liveness_wake,
+        STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE, StaleTurnTerminalizer,
+        TERMINALIZATION_DEFERRED_CAUSE, TERMINALIZATIONS_PER_SCAN, TurnLivenessWake,
+        drain_quiescent_rotation, next_turn_liveness_wake, reconcile_turn_liveness,
     };
-    use signalbox_application::{StaleActiveTurnBound, StaleTurnCandidate, TurnLivenessEvidence};
-    use signalbox_domain::{SessionId, TurnAttemptId, TurnId};
+    use signalbox_application::{
+        StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
+        TurnLivenessLedger,
+    };
+    use signalbox_domain::{AcceptedInputTurnFailureIdentities, SessionId, TurnAttemptId, TurnId};
     use signalbox_persistence::turn_liveness::TurnLivenessRepositoryError;
     use std::{
         sync::{Mutex, atomic::AtomicUsize, atomic::Ordering},
@@ -415,6 +478,66 @@ mod tests {
 
         fn reads(&self) -> usize {
             self.reads.load(Ordering::Relaxed)
+        }
+    }
+
+    /// Returns every candidate it still holds as one page, and drops a turn
+    /// when it terminalizes — which is what the real inventory does, since a
+    /// terminal turn is no longer active.
+    struct CountingRepository {
+        remaining: Mutex<Vec<StaleTurnCandidate>>,
+        terminalized: AtomicUsize,
+    }
+
+    impl CountingRepository {
+        fn new(candidates: Vec<StaleTurnCandidate>) -> Self {
+            Self {
+                remaining: Mutex::new(candidates),
+                terminalized: AtomicUsize::new(0),
+            }
+        }
+
+        fn terminalized(&self) -> usize {
+            self.terminalized.load(Ordering::Relaxed)
+        }
+
+        fn still_active(&self) -> usize {
+            self.remaining
+                .lock()
+                .expect("the fixture is not poisoned")
+                .len()
+        }
+    }
+
+    impl QuiescentInventory for CountingRepository {
+        async fn read_page(
+            &self,
+            _after: Option<SessionId>,
+        ) -> Result<InventoryPage, TurnLivenessRepositoryError> {
+            let candidates = self
+                .remaining
+                .lock()
+                .expect("the fixture is not poisoned")
+                .clone();
+            Ok(InventoryPage {
+                candidates: candidates.into_boxed_slice(),
+                resume_after: None,
+            })
+        }
+    }
+
+    impl StaleTurnTerminalizer for CountingRepository {
+        async fn terminalize(
+            &self,
+            candidate: StaleTurnCandidate,
+            _identities: AcceptedInputTurnFailureIdentities,
+        ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
+            self.terminalized.fetch_add(1, Ordering::Relaxed);
+            self.remaining
+                .lock()
+                .expect("the fixture is not poisoned")
+                .retain(|held| held.turn() != candidate.turn());
+            Ok(StaleTurnOutcome::Terminalized)
         }
     }
 
@@ -481,6 +604,45 @@ mod tests {
         assert_eq!(wake, TurnLivenessWake::Shutdown);
     }
 
+    /// A cohort larger than the cap is terminalized up to it and no further,
+    /// so the phase cannot push the next scan past the interval.
+    #[tokio::test(start_paused = true)]
+    async fn one_scan_terminalizes_no_more_than_its_cap() {
+        let bound = StaleActiveTurnBound::hard_ceiling();
+        let repository = CountingRepository::new(vec![candidate(1), candidate(2), candidate(3)]);
+        let mut ledger = TurnLivenessLedger::new(bound);
+        reconcile_turn_liveness(&repository, &mut ledger, bound, 2).await;
+        tokio::time::advance(bound.get()).await;
+
+        reconcile_turn_liveness(&repository, &mut ledger, bound, 2).await;
+
+        assert_eq!(repository.terminalized(), 2);
+        assert_eq!(repository.still_active(), 1);
+    }
+
+    /// What one scan defers the next one ends: nothing about a deferred turn
+    /// changed, so it is observed unchanged and comes due again.
+    #[tokio::test(start_paused = true)]
+    async fn the_next_scan_ends_what_the_cap_deferred() {
+        let bound = StaleActiveTurnBound::hard_ceiling();
+        let repository = CountingRepository::new(vec![candidate(1), candidate(2), candidate(3)]);
+        let mut ledger = TurnLivenessLedger::new(bound);
+        reconcile_turn_liveness(&repository, &mut ledger, bound, 2).await;
+        tokio::time::advance(bound.get()).await;
+        reconcile_turn_liveness(&repository, &mut ledger, bound, 2).await;
+
+        reconcile_turn_liveness(&repository, &mut ledger, bound, 2).await;
+
+        assert_eq!(repository.terminalized(), 3);
+        assert_eq!(repository.still_active(), 0);
+    }
+
+    /// The compiled cap is the value the page states.
+    #[test]
+    fn one_scan_terminalizes_at_most_sixty_four_turns() {
+        assert_eq!(TERMINALIZATIONS_PER_SCAN, 64);
+    }
+
     /// The compiled ceiling is the capacity the page states.
     #[test]
     fn the_page_ceiling_is_four_thousand_and_ninety_six() {
@@ -545,11 +707,16 @@ mod tests {
             STALE_TURN_STEERING_BLOCKED_CAUSE,
             "turn_liveness_steering_blocks_terminalization"
         );
+        assert_eq!(
+            TERMINALIZATION_DEFERRED_CAUSE,
+            "turn_liveness_terminalization_deferred"
+        );
         assert_ne!(STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_ne!(STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_ne!(STALE_TURN_STEERING_BLOCKED_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_ne!(PASS_FAILURE_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_ne!(ROTATION_CEILING_CAUSE, STALE_TURN_TERMINAL_CAUSE);
+        assert_ne!(TERMINALIZATION_DEFERRED_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_eq!(QUIESCENT_ROTATION_PAGE_CEILING, 4_096);
     }
 

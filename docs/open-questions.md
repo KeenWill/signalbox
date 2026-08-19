@@ -106,16 +106,20 @@ specification diff. Accepted cross-component and wire contracts live in the
   interval, per-session scan gating, fairness between contending sessions, and
   the turn-liveness staleness bound and scan interval are all compiled constants
   today
-  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)). Each
-  has a checked constructor that refuses a value outside its compiled ceiling,
-  so the enforcement point for any future setting already exists and the ceiling
-  direction is settled: a setting may lower a bound and may never raise one.
-  What is undecided is whether signalboxd should carry such settings at all, and
-  if so whether they belong together as one operational surface rather than
-  arriving one constant at a time — which is the shape that would leave a
-  deployment tuning cadence without a coherent view of it. Leaning: one surface,
-  introduced when a deployment needs a value the compiled one cannot serve,
-  rather than pre-emptively. Later scope. (S01, S02)
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)), and
+  almost none of them has anywhere to validate a supplied value. Only the
+  turn-liveness staleness bound has a lowering constructor that enforces its
+  compiled ceiling; the sweep interval's constructor refuses a zero or
+  unrepresentable duration and no more, so it fixes no maximum; and the scan
+  interval, per-session scan gating, and fairness expose no constructor at all.
+  The enforcement points for a configuration surface would therefore have to be
+  built rather than merely called. Undecided with them: whether signalboxd
+  should carry such settings at all; whether they arrive as one operational
+  surface or one constant at a time; and, for each, whether its compiled value
+  is a ceiling that may only be lowered or an ordinary default that may move
+  either way — settled so far only for the staleness bound. Leaning: one
+  surface, introduced when a deployment needs a value the compiled one cannot
+  serve, rather than pre-emptively. Later scope. (S01, S02)
 - **Terminalizing a turn that holds pending steering.** Every steering row bound
   to a turn must be closed before that turn terminalizes, and the interrupt and
   model-call terminal paths satisfy that by reclassifying the steering into a

@@ -539,6 +539,13 @@ present population. A rotation that cannot be drained — an unreadable page, or
 one that fails to converge within its page ceiling — ends the scan with no
 decision and the ledger unchanged, rather than deciding on a partial population.
 
+Terminalizing what a scan found due is bounded the same way. Those transactions
+run one at a time and the next scan waits for the last of them, so a scan ends
+at most sixty-four turns and leaves any remainder. Deferring costs one interval
+and nothing else: a turn left alone had nothing change, so the next scan
+observes the same evidence and finds it due again — where draining the whole
+cohort would delay that scan by however long the cohort took.
+
 **Constants.** The staleness bound is a hard safety ceiling of 30 minutes and
 the scan interval is one minute; both are compiled in. The bound the pass runs
 with is supplied at its composition site rather than reloaded from the ceiling,
