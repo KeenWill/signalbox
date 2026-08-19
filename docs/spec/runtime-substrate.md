@@ -1377,7 +1377,7 @@ The class states only how bad a failure is. The orthogonal sanitized cause code
 stating *what happened* is owned by whichever page owns the behavior that raises
 it: for provider and model-call failures — carried by the model-call bridge,
 reusing this page's `ProviderErrorKind` vocabulary verbatim for definitive
-provider errors — that owner is
+provider errors — the owning page is
 [model-call-execution](model-call-execution.md#operator-diagnostics), and the
 turn-liveness causes are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md). No page owns
