@@ -354,15 +354,21 @@ reference of each accepted type. For every direct or uploaded representation,
 the adapter also declares a deterministic checked worst-case wire projection
 from materialized length to complete provider payload length, including base64,
 multipart, JSON escaping, framing, and fixed metadata. Registry construction
-rejects an absent, overflowing, or non-monotonic projection. Before processing
-or reserving a reference, `file_read` requires the view's complete emitted-type
-set to be accepted by the selected adapter and applies that projection to each
-declared presentation-byte maximum. Both the materialized maximum and projected
-wire maximum must fit their target-specific limits, unless the view instead
-guarantees normalization to one accepted type and bound. An unsupported type
-returns typed modality-unsupported failure; an oversized target projection
-returns `SourceTooLarge` with the target-specific maximum. Neither path can
-publish, reserve, or commit a reference.
+rejects an absent, overflowing, or non-monotonic projection. Each adapter
+additionally declares one aggregate provider-wire payload maximum per target:
+the bound on the complete encoded request payload rather than on any single
+part. Before processing or reserving a reference, `file_read` requires the
+view's complete emitted-type set to be accepted by the selected adapter and
+applies that projection to each declared presentation-byte maximum. Both the
+materialized maximum and projected wire maximum must fit their target-specific
+limits, and the sum of the checked worst-case wire projections across every
+reference bound to one provider call must fit the declared aggregate payload
+maximum, unless the view instead guarantees normalization to one accepted type
+and bound. References that fit individually but overflow the aggregate return
+`SourceTooLarge` with the aggregate target maximum and publish, reserve, and
+commit nothing. An unsupported type returns typed modality-unsupported failure;
+an oversized target projection returns `SourceTooLarge` with the target-specific
+maximum. Neither path can publish, reserve, or commit a reference.
 
 Registry construction's 786,432-byte body ceiling is only a declaration bound.
 Before committing a successful `file_inspect`, the tool loop prospectively
@@ -403,9 +409,12 @@ streaming, and is never interpreted as a control frame.
 
 The broker checks every range against source length, the provider declaration,
 the common per-read maximum of 4,096 ranges and 1,073,741,824 cumulative source
-bytes, and cancellation before snapshot I/O. Crossing either boundary returns
-`SourceTooLarge { maximum_bytes: 1073741824 }` and supplies no further bytes.
-The supervisor enforces finite resident memory, CPU, wall time, descendants,
+bytes, and cancellation before snapshot I/O. Exceeding the cumulative
+source-byte bound returns `SourceTooLarge { maximum_bytes: 1073741824 }`.
+Exhausting the range-count bound is a property of the reader's request pattern,
+not of the source, so it returns `ExpansionLimitExceeded { limit_kind }` naming
+the range-count limit. Either way the broker supplies no further bytes. The
+supervisor enforces finite resident memory, CPU, wall time, descendants,
 descriptors, and output. Before spawning, it atomically reserves one slot and
 the declared memory limit from a process-wide pool of four workers and 2 GiB;
 unavailable capacity returns `ProcessorUnavailable` without spawning or reading
