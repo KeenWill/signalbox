@@ -509,6 +509,13 @@ pub(crate) async fn settle_terminal_target_obligations(
             SET settled_kind = $3,
                 settled_at = clock_timestamp()
           WHERE obligation.settled_kind IS NULL
+            -- An obligation stalled on this cutoff owes the close automation
+            -- and an operator release is what lets it run, so it survives the
+            -- cutoff whatever else has matched since. Checked outside the
+            -- disjunction below: a later match on the same pull request
+            -- advances the latest-event projection, and the arm reading that
+            -- projection would otherwise settle it anyway.
+            AND obligation.parked_state_event_id IS DISTINCT FROM $4
             AND (
                 EXISTS (
                     SELECT 1
@@ -521,18 +528,13 @@ pub(crate) async fn settle_terminal_target_obligations(
                 -- A parked lineage keeps the target it stalled on while its
                 -- latest-event projection follows whatever matched since, which
                 -- under a collapsed singleton can be another pull request, so
-                -- the close of the stalled target has to reach it here. The
-                -- cutoff-event exception carries over: an obligation stalled on
-                -- the close itself owes the close automation, and an operator
-                -- release is what lets it run rather than work this cutoff
-                -- would be discarding.
+                -- the close of the stalled target has to reach it here.
                 OR EXISTS (
                     SELECT 1
                       FROM repo_watch_event AS parked_state
                      WHERE parked_state.event_id = obligation.parked_state_event_id
                        AND parked_state.repository = $1
                        AND parked_state.pull_request_number = $2
-                       AND parked_state.event_id <> $4
                 )
             )",
     )

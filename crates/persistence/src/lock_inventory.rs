@@ -52,6 +52,7 @@ pub(crate) const REPO_WATCH_ACTIVE_DISPATCH_OBLIGATION: &str = "SELECT obligatio
 pub(crate) const REPO_WATCH_TERMINAL_TARGET_OBLIGATIONS: &str = "SELECT obligation.obligation_id
            FROM repo_watch_dispatch_obligation AS obligation
           WHERE obligation.settled_kind IS NULL
+            AND obligation.parked_state_event_id IS DISTINCT FROM $3
             AND (
                 EXISTS (
                     SELECT 1
@@ -67,7 +68,6 @@ pub(crate) const REPO_WATCH_TERMINAL_TARGET_OBLIGATIONS: &str = "SELECT obligati
                      WHERE parked_state.event_id = obligation.parked_state_event_id
                        AND parked_state.repository = $1
                        AND parked_state.pull_request_number = $2
-                       AND parked_state.event_id <> $3
                 )
             )
           ORDER BY obligation.obligation_id

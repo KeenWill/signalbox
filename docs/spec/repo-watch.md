@@ -760,22 +760,22 @@ obligation for that pull request immediately, without waiting for singleton or
 cooldown readiness, and reaches a parked obligation through the target it
 stalled on as well as through its latest-event projection, since a collapsed
 singleton lets that projection follow another pull request; an obligation
-stalled on the cutoff event itself is preserved either way, because it owes the
-close automation and an operator release is what lets it run; the admission
-recheck is the race-closing backstop. Either path settles stale nonterminal work
-as `target_closed` without creating a session. Cutoff processing settles after
-it has stopped the goals it commissioned, so it takes session rows before
-obligation rows and cannot close a lock cycle against a dispatch session
-terminating into the same obligation, and it takes those obligation rows in the
-order the progress-release scan takes them, which runs outside the repository
-lock. A rule that matches the `PullRequestClosed` or `PullRequestMerged` event
-itself remains dispatch-eligible, and a non-converged termination of that
-dispatch still owes its requeue while its own cutoff remains the latest one; the
-terminal event is the cutoff fact, not work made stale by that fact. Corruption
-in one commissioned goal rolls back that goal's stop to a savepoint but does not
-roll back the cutoff: the terminal event remains durably dispositioned, healthy
-commissioned goals are stopped, and later cutoffs remain eligible for
-processing.
+stalled on the cutoff event itself is preserved whatever has matched since,
+because it owes the close automation and an operator release is what lets it
+run; the admission recheck is the race-closing backstop. Either path settles
+stale nonterminal work as `target_closed` without creating a session. Cutoff
+processing settles after it has stopped the goals it commissioned, so it takes
+session rows before obligation rows and cannot close a lock cycle against a
+dispatch session terminating into the same obligation, and it takes those
+obligation rows in the order the progress-release scan takes them, which runs
+outside the repository lock. A rule that matches the `PullRequestClosed` or
+`PullRequestMerged` event itself remains dispatch-eligible, and a non-converged
+termination of that dispatch still owes its requeue while its own cutoff remains
+the latest one; the terminal event is the cutoff fact, not work made stale by
+that fact. Corruption in one commissioned goal rolls back that goal's stop to a
+savepoint but does not roll back the cutoff: the terminal event remains durably
+dispositioned, healthy commissioned goals are stopped, and later cutoffs remain
+eligible for processing.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
