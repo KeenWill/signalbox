@@ -756,14 +756,17 @@ or an unrelated session. A later open event makes an earlier unprocessed cutoff
 a recorded reopen instead. Dispatch admission rechecks the latest durable
 lifecycle under the repository lock. A terminal cutoff settles every outstanding
 obligation for that pull request immediately, without waiting for singleton or
-cooldown readiness; the admission recheck is the race-closing backstop. Either
-path settles stale nonterminal work as `target_closed` without creating a
-session. A rule that matches the `PullRequestClosed` or `PullRequestMerged`
-event itself remains dispatch-eligible, and a non-converged termination of that
-dispatch still owes its requeue while its own cutoff remains the latest one; the
-terminal event is the cutoff fact, not work made stale by that fact. Corruption
-in one commissioned goal rolls back that goal's stop to a savepoint but does not
-roll back the cutoff: the terminal event remains durably dispositioned, healthy
+cooldown readiness, and reaches a parked obligation through the target it
+stalled on as well as through its latest-event projection, since parked work
+cannot dispatch the close and would otherwise hold its singleton forever; the
+admission recheck is the race-closing backstop. Either path settles stale
+nonterminal work as `target_closed` without creating a session. A rule that
+matches the `PullRequestClosed` or `PullRequestMerged` event itself remains
+dispatch-eligible, and a non-converged termination of that dispatch still owes
+its requeue while its own cutoff remains the latest one; the terminal event is
+the cutoff fact, not work made stale by that fact. Corruption in one
+commissioned goal rolls back that goal's stop to a savepoint but does not roll
+back the cutoff: the terminal event remains durably dispositioned, healthy
 commissioned goals are stopped, and later cutoffs remain eligible for
 processing.
 

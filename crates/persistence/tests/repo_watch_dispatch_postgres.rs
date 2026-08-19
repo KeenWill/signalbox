@@ -90,6 +90,8 @@ const STARTUP_DRAIN_CUTOFF_EVENT_ID: u128 = 0x57_100;
 const STARTUP_DRAIN_STOP_COMMAND_ID: u128 = 0x57_110;
 const PARK_FIRST_STOP_COMMAND_ID: u128 = 0x58_100;
 const CROSS_TARGET_OPENED_EVENT_ID: u128 = 0x58_500;
+const PARKED_TARGET_CUTOFF_EVENT_ID: u128 = 0x58_800;
+const PARKED_TARGET_CUTOFF_COMMAND_ID: u128 = 0x58_801;
 const NONMATCHING_PROGRESS_EVENT_ID: u128 = 0x58_600;
 const SIBLING_COUNT_FIRST_STOP_COMMAND_ID: u128 = 0x58_700;
 const SIBLING_COUNT_SECOND_STOP_COMMAND_ID: u128 = 0x58_701;
@@ -2091,6 +2093,42 @@ async fn a_new_head_releases_a_parked_obligation() -> Result<(), Box<dyn Error>>
             .map(|transition| transition.release_reason.clone()),
         Some(Some(String::from("pull_request_progress")))
     );
+    Ok(())
+}
+
+/// A parked lineage still holds its singleton. If its stalled pull request
+/// closes while the latest-event projection points at a neighbour, settling
+/// only through that projection would record the close as handled and leave the
+/// singleton held forever.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn closing_the_stalled_pull_request_settles_a_parked_obligation() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(repository_scoped_conflict_rule()?).await?;
+    park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+    evaluate_neighbour_conflict(&fixture).await?;
+    commit_merge(&fixture, PARKED_TARGET_CUTOFF_EVENT_ID).await?;
+
+    fixture
+        .store
+        .process_next_lifecycle_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(PARKED_TARGET_CUTOFF_COMMAND_ID))
+        })
+        .await?;
+
+    let settlement: Option<String> = sqlx::query_scalar(
+        "SELECT settled_kind
+           FROM repo_watch_dispatch_obligation
+          WHERE parked_state_event_id IS NOT NULL",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let parked: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_parked_dispatch_obligation")
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(settlement.as_deref(), Some("target_closed"));
+    assert_eq!(parked, 0);
     Ok(())
 }
 

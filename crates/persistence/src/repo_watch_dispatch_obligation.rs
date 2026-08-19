@@ -498,12 +498,31 @@ pub(crate) async fn settle_terminal_target_obligations(
         "UPDATE repo_watch_dispatch_obligation AS obligation
             SET settled_kind = $3,
                 settled_at = clock_timestamp()
-           FROM repo_watch_event AS event
-          WHERE obligation.latest_event_id = event.event_id
-            AND obligation.settled_kind IS NULL
-            AND event.repository = $1
-            AND event.pull_request_number = $2
-            AND event.event_id <> $4",
+          WHERE obligation.settled_kind IS NULL
+            AND (
+                EXISTS (
+                    SELECT 1
+                      FROM repo_watch_event AS event
+                     WHERE event.event_id = obligation.latest_event_id
+                       AND event.repository = $1
+                       AND event.pull_request_number = $2
+                       AND event.event_id <> $4
+                )
+                -- A parked lineage keeps the target it stalled on while its
+                -- latest-event projection follows whatever matched since, which
+                -- under a collapsed singleton can be another pull request. It is
+                -- settled by the close of the target it stalled on, and unlike
+                -- the projection above it keeps no exception for the cutoff
+                -- event itself: parked work cannot dispatch the close, so
+                -- holding the singleton for it would hold it forever.
+                OR EXISTS (
+                    SELECT 1
+                      FROM repo_watch_event AS parked_state
+                     WHERE parked_state.event_id = obligation.parked_state_event_id
+                       AND parked_state.repository = $1
+                       AND parked_state.pull_request_number = $2
+                )
+            )",
     )
     .bind(repository.as_str())
     .bind(pull_request)
