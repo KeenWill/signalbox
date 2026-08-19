@@ -187,14 +187,14 @@ Detection follows one fixed algorithm:
     failure, and cancellation reacquire a pass only through that owning path's
     bounded queue; no store I/O begins while both capacities are held, and
     reacquisition cannot exceed the inspection-wide deadline. Verification may
-    perform one complete traversal per recorded replica candidate, in the
-    owning replica order, until one candidate verifies or the finite catalog
-    snapshot is exhausted. Each traversal is bounded by the catalog's
-    authenticated `byte_length`; the checked aggregate is bounded by that
-    length times the recorded candidate count and remains under the same wall
-    deadline and process-wide traversal admission. Corruption or unavailability
-    of one candidate falls through to the next candidate exactly as the owning
-    blob path requires. Those integrity bytes use the blob layer's traversal
+    perform one complete traversal per recorded replica candidate, in the owning
+    replica order, until one candidate verifies or the finite catalog snapshot
+    is exhausted. Each traversal is bounded by the catalog's authenticated
+    `byte_length`; the checked aggregate is bounded by that length times the
+    recorded candidate count and remains under the same wall deadline and
+    process-wide traversal admission. Corruption or unavailability of one
+    candidate falls through to the next candidate exactly as the owning blob
+    path requires. Those integrity bytes use the blob layer's traversal
     accounting, not the reader-work ceiling. Every later source range is served
     from the completed snapshot and cannot observe another replica generation.
     Exhausting the wall deadline returns `ProcessorTimedOut`. Ordinary blob
@@ -378,8 +378,10 @@ and all non-reference framing. It then accumulates every existing and newly
 admitted reference's checked worst-case wire projection against the remaining
 aggregate capacity. Thus the baseline plus all references, rather than the
 references alone, must fit the complete-request maximum. A baseline that already
-exceeds the maximum or a reference that would overflow the remainder returns
-`SourceTooLarge` with the aggregate target maximum and publishes, reserves, and
+exceeds the maximum returns `TargetPayloadTooLarge { maximum_bytes }`, because
+the target request is full independently of any referenced source. A reference
+whose checked projection would overflow the remainder returns `SourceTooLarge`
+with the aggregate target maximum. Either failure publishes, reserves, and
 commits nothing. An unsupported type returns typed modality-unsupported failure;
 an oversized target projection returns `SourceTooLarge` with the target-specific
 maximum. Neither path can publish, reserve, or commit a reference.
@@ -466,10 +468,12 @@ over the exact authorized snapshot; it never receives an ordinary materialized
 host file. Every open, read, positioned read, mapping fault, and reread is
 mediated and atomically charged against the selected operation's declared range
 and cumulative source-byte limits before bytes are supplied. Cache hits are
-charged again, and crossing either limit supplies no further bytes, terminates
-the worker, and returns `SourceTooLarge`, so seeking or mapping cannot bypass
-the broker's accounting. The mount and path disappear only after
-whole-process-tree termination. The CLI inherits the same write-only
+charged again. Crossing the cumulative source-byte limit supplies no further
+bytes, terminates the worker, and returns `SourceTooLarge`; exhausting the
+range-count limit does the same but returns
+`ExpansionLimitExceeded { limit_kind }` naming that limit. Thus seeking or
+mapping cannot bypass the broker's accounting. The mount and path disappear only
+after whole-process-tree termination. The CLI inherits the same write-only
 length-delimited control descriptor and optional bounded binary descriptor as
 any other worker. Success requires one valid terminal frame, exact binary
 length/digest agreement when present, clean exit, and no extra output;
@@ -553,12 +557,14 @@ Reservations for admitted siblings remain charged until their completion
 transactions consume the actual result and release unused capacity, so
 independently fitting siblings can never overfill the combined continuation
 call. Steering accepted while the batch executes uses the same pinned-target
-capacity ledger: before a steering input becomes pending, a short transaction
-projects its complete rendered bytes after the already reserved sibling results
-and atomically consumes remaining continuation capacity. Steering that cannot
-obtain that reservation is not accepted into this batch and remains eligible for
-a later turn; it can never be appended as unreserved pending input. Its
-reservation remains charged through continuation creation or terminal batch
+continuation-capacity and aggregate provider-wire ledgers. Before a steering
+input becomes pending, a short transaction projects both its complete rendered
+bytes after the already reserved sibling results and its checked complete
+provider-wire encoding after the reserved non-media baseline and references,
+then atomically consumes remaining capacity from both ledgers. Steering that
+cannot obtain both reservations is not accepted into this batch and remains
+eligible for a later turn; it can never be appended as unreserved pending input.
+Its reservations remain charged through continuation creation or terminal batch
 failure. Automatic compaction, arrival time, and completion order are not
 admission mechanisms.
 
@@ -750,7 +756,8 @@ BlobNotVisible | BlobMissing | BlobCorrupt | BlobUnavailable
 | InvalidViewArguments | InvalidContinuation
 | ContinuationCapacityExceeded | ReaderRevisionUnavailable
 | SourceTooLarge { maximum_bytes } | ExpansionLimitExceeded { limit_kind }
-| OutputUnitTooLarge | ProcessorUnavailable
+| OutputUnitTooLarge | TargetPayloadTooLarge { maximum_bytes }
+| ProcessorUnavailable
 | ProcessorFailed { reason_code } | ProcessorTimedOut | Cancelled
 ```
 
@@ -816,9 +823,9 @@ One shared suite proves every provider and isolation implementation:
 - filesystem and unversioned-S3 fixtures mutate the selected replica after the
   verification traversal and prove every probe/read range still observes only
   the completed verified snapshot; replica fixtures also corrupt or make
-  unavailable an earlier recorded candidate and prove verification falls
-  through in owning order to a later valid candidate under the per-candidate,
-  checked aggregate, and inspection-deadline bounds;
+  unavailable an earlier recorded candidate and prove verification falls through
+  in owning order to a later valid candidate under the per-candidate, checked
+  aggregate, and inspection-deadline bounds;
 - snapshot admission reserves exact bytes before traversal, rejects exhausted
   process capacity without source I/O, classifies a length above the effective
   configured per-request maximum as `SourceTooLarge` with that maximum, uses
