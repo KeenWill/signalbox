@@ -16,10 +16,9 @@ use signalbox_application::{
     TurnLivenessEvidence,
 };
 use signalbox_domain::{
-    AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, SemanticTranscriptEntryId,
-    SessionId, TurnAttemptId,
+    AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, SessionId, TurnAttemptId,
 };
-use sqlx::{PgConnection, PgPool, Row, types::Uuid};
+use sqlx::{PgConnection, PgPool, Row, types::Decimal, types::Uuid};
 
 use crate::mapping::{
     session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
@@ -277,23 +276,27 @@ impl QuiescentActiveTurnPage {
 /// wedge unowned. `stop_requested` and `ended` stay out, the first because an
 /// interrupt is in flight and the second because the attempt already closed.
 ///
-/// The transcript frontier is read with `ORDER BY … DESC LIMIT 1` rather than an
-/// aggregate for two reasons. PostgreSQL defines no `max(uuid)`, verified
-/// against 18.4, the version the integration suite runs. And the ordering is
-/// `uuid`'s native big-endian byte comparison — time order for the UUIDv7
-/// identities this schema mints — over `semantic_transcript_entry`'s
-/// `(source_session_id, semantic_entry_id)` primary key, so it is one backward
-/// index lookup whatever a session's history weighs. Every observation this
-/// statement reports is bounded that way: the `LIMIT` caps returned rows, and
-/// nothing per row scans a history.
+/// The progress observation is the session's outbox frontier. `event_sequence`
+/// is assigned by the outbox in commit order, so it rises on every durable
+/// transition and cannot be moved backwards by a clock — unlike an identity
+/// ordering, where a backward adjustment or a future-skewed mint would let a
+/// fresh row sort below the recorded frontier and read as silence on a session
+/// that had progressed. Every session-scoped transition kind lands in this one
+/// table, so nothing that means progress is outside it.
+///
+/// It is read with `ORDER BY … DESC LIMIT 1` over
+/// `outbox_event_by_session_sequence`, one backward index lookup whatever a
+/// session's history weighs. Every observation this statement reports is
+/// bounded that way: the `LIMIT` caps returned rows, and nothing per row scans
+/// a history.
 const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
             active.turn_id,
             active.current_attempt_id,
-            (SELECT newest.semantic_entry_id
-               FROM semantic_transcript_entry AS newest
-              WHERE newest.source_session_id = active.session_id
-              ORDER BY newest.semantic_entry_id DESC
-              LIMIT 1) AS latest_transcript_entry_id
+            (SELECT newest.event_sequence
+               FROM outbox_event AS newest
+              WHERE newest.session_id = active.session_id
+              ORDER BY newest.event_sequence DESC
+              LIMIT 1) AS outbox_frontier
        FROM turn_lifecycle AS active
        JOIN turn_attempt AS tenure
          ON tenure.turn_attempt_id = active.current_attempt_id
@@ -353,17 +356,31 @@ async fn read_quiescent_active_turns(
         let session: Uuid = row.try_get("session_id")?;
         let turn: Uuid = row.try_get("turn_id")?;
         let attempt: Uuid = row.try_get("current_attempt_id")?;
-        let latest_transcript_entry: Option<Uuid> = row.try_get("latest_transcript_entry_id")?;
+        let outbox_frontier: Option<Decimal> = row.try_get("outbox_frontier")?;
         candidates.push(StaleTurnCandidate::new(
             session_id_from_uuid(session),
             turn_id_from_uuid(turn),
             TurnLivenessEvidence::new(
                 TurnAttemptId::from_uuid(attempt),
-                latest_transcript_entry.map(SemanticTranscriptEntryId::from_uuid),
+                outbox_frontier.and_then(decode_outbox_frontier),
             ),
         ));
     }
     Ok(candidates.into_boxed_slice())
+}
+
+/// Reads one outbox sequence as the token the ledger compares.
+///
+/// A row outside `u64` cannot exist — the column is constrained to that range —
+/// and if one did, treating the frontier as absent is the direction that
+/// restarts a bound rather than ending a live turn on evidence this pass could
+/// not read.
+fn decode_outbox_frontier(sequence: Decimal) -> Option<u64> {
+    if sequence.fract().is_zero() {
+        u64::try_from(sequence).ok()
+    } else {
+        None
+    }
 }
 
 async fn terminalize_in_transaction(

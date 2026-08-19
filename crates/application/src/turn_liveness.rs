@@ -10,7 +10,7 @@
 
 use std::{collections::HashMap, error::Error, fmt, time::Duration};
 
-use signalbox_domain::{SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId};
+use signalbox_domain::{SessionId, TurnAttemptId, TurnId};
 use tokio::time::Instant;
 
 /// How long a turn's durable evidence may stand still before the turn is
@@ -115,34 +115,36 @@ impl Error for TurnLivenessBoundError {}
 /// observing this evidence unchanged across the bound rather than by reading a
 /// stored clock.
 ///
-/// Both members are chosen so that reading them costs the same whatever a
-/// session's history weighs: the attempt is a column of the lifecycle row
-/// already being read, and the newest transcript entry is one backward index
-/// lookup on that table's `(session, entry)` primary key. Aggregates over a
-/// session's history would have made a once-a-minute pass cost more the longer
-/// a session lived, which is the opposite of what a watchdog may do.
+/// Progress is read from the session's outbox frontier: every durable
+/// transition a session makes — a model call changing state, a tool batch
+/// moving, a turn activating or completing — appends an outbox event, and each
+/// event carries a sequence assigned in commit order. The frontier therefore
+/// advances on exactly the transitions that mean the turn is not wedged.
 ///
-/// The transcript frontier is what detects progress, because a model call that
-/// leaves nothing in the transcript cannot leave a turn quiescent either: while
-/// the call is outstanding the turn is not a candidate at all, so it has already
-/// left the ledger, and the next complete scan restarts its bound. The attempt
-/// identity covers the remaining case of a fresh tenure over an unchanged
-/// transcript.
+/// That sequence is what makes the comparison sound. It is minted by the
+/// outbox, not derived from a clock, so no adjustment of the system clock and
+/// no skew between processes can produce an append that leaves the frontier
+/// unchanged — which would read as silence on a turn that had in fact
+/// progressed, and is the one error this pass must never make.
+///
+/// Both members are also chosen so that reading them costs the same whatever a
+/// session's history weighs: the attempt is a column of the lifecycle row
+/// already being read, and the frontier is one backward index lookup on
+/// `outbox_event (session_id, event_sequence)`. Aggregates over a session's
+/// history would have made a once-a-minute pass cost more the longer a session
+/// lived, which is the opposite of what a watchdog may do.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TurnLivenessEvidence {
     current_attempt: TurnAttemptId,
-    latest_transcript_entry: Option<SemanticTranscriptEntryId>,
+    outbox_frontier: Option<u64>,
 }
 
 impl TurnLivenessEvidence {
     /// Records one complete observation of a session's progress evidence.
-    pub const fn new(
-        current_attempt: TurnAttemptId,
-        latest_transcript_entry: Option<SemanticTranscriptEntryId>,
-    ) -> Self {
+    pub const fn new(current_attempt: TurnAttemptId, outbox_frontier: Option<u64>) -> Self {
         Self {
             current_attempt,
-            latest_transcript_entry,
+            outbox_frontier,
         }
     }
 
@@ -151,9 +153,9 @@ impl TurnLivenessEvidence {
         self.current_attempt
     }
 
-    /// Returns the session's newest transcript-entry identity, if any exists.
-    pub const fn latest_transcript_entry(self) -> Option<SemanticTranscriptEntryId> {
-        self.latest_transcript_entry
+    /// Returns the session's newest outbox sequence, if it has emitted one.
+    pub const fn outbox_frontier(self) -> Option<u64> {
+        self.outbox_frontier
     }
 }
 
@@ -291,7 +293,7 @@ mod tests {
         StaleActiveTurnBound, StaleTurnCandidate, TurnLivenessBoundError, TurnLivenessEvidence,
         TurnLivenessLedger, TurnLivenessScanInterval,
     };
-    use signalbox_domain::{SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId};
+    use signalbox_domain::{SessionId, TurnAttemptId, TurnId};
     use std::time::Duration;
     use tokio::time::Instant;
 
@@ -309,16 +311,11 @@ mod tests {
         TurnAttemptId::from_uuid(uuid::Uuid::from_u128(0xa7_0001))
     }
 
-    fn evidence(frontier: u128) -> TurnLivenessEvidence {
-        TurnLivenessEvidence::new(
-            attempt(),
-            Some(SemanticTranscriptEntryId::from_uuid(uuid::Uuid::from_u128(
-                0xe0_0000 + frontier,
-            ))),
-        )
+    fn evidence(frontier: u64) -> TurnLivenessEvidence {
+        TurnLivenessEvidence::new(attempt(), Some(frontier))
     }
 
-    fn candidate(frontier: u128) -> StaleTurnCandidate {
+    fn candidate(frontier: u64) -> StaleTurnCandidate {
         StaleTurnCandidate::new(session(), turn(1), evidence(frontier))
     }
 

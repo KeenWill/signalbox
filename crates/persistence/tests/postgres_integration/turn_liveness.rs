@@ -3,7 +3,6 @@
 use crate::*;
 
 use signalbox_application::{StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence};
-use signalbox_domain::SemanticTranscriptEntryId;
 use signalbox_persistence::turn_liveness::PostgresTurnLivenessRepository;
 
 struct WatchdogFixture {
@@ -231,12 +230,7 @@ async fn a_changed_observation_is_superseded() -> Result<(), Box<dyn Error>> {
     let stale = StaleTurnCandidate::new(
         observed.session(),
         observed.turn(),
-        TurnLivenessEvidence::new(
-            observed.evidence().current_attempt(),
-            Some(SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
-                0x13_200,
-            ))),
-        ),
+        TurnLivenessEvidence::new(observed.evidence().current_attempt(), Some(u64::MAX)),
     );
 
     let outcome = repository
@@ -262,12 +256,12 @@ async fn a_changed_observation_is_superseded() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// The transcript frontier is read with an ordered subquery because PostgreSQL
-/// defines no `max(uuid)`; a session whose earlier turn already completed is
-/// what proves it resolves to a real identity rather than null.
+/// The outbox frontier is what proves a session progressed, so a session whose
+/// earlier turn already completed must report one: every durable transition it
+/// made appended an outbox event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn the_transcript_frontier_resolves_over_a_worked_session() -> Result<(), Box<dyn Error>> {
+async fn the_outbox_frontier_resolves_over_a_worked_session() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x14_000).await?;
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
@@ -316,8 +310,8 @@ async fn the_transcript_frontier_resolves_over_a_worked_session() -> Result<(), 
 
     assert_eq!(candidate.turn(), successor);
     assert!(
-        candidate.evidence().latest_transcript_entry().is_some(),
-        "the completed first turn left entries behind for the frontier to resolve"
+        candidate.evidence().outbox_frontier().is_some(),
+        "the completed first turn left outbox events behind for the frontier to resolve"
     );
 
     pool.close().await;

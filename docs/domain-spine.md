@@ -8796,12 +8796,9 @@ pub enum TurnLivenessBoundError {
 
 pub struct TurnLivenessEvidence { /* private */ }
 impl TurnLivenessEvidence {
-    pub const fn new(
-        current_attempt: TurnAttemptId,
-        latest_transcript_entry: Option<SemanticTranscriptEntryId>,
-    ) -> Self;
+    pub const fn new(current_attempt: TurnAttemptId, outbox_frontier: Option<u64>) -> Self;
     pub const fn current_attempt(self) -> TurnAttemptId;
-    pub const fn latest_transcript_entry(self) -> Option<SemanticTranscriptEntryId>;
+    pub const fn outbox_frontier(self) -> Option<u64>;
 }
 
 pub struct StaleTurnCandidate { /* private */ }

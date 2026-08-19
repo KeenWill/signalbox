@@ -96,6 +96,50 @@ const ROTATION_CEILING_CAUSE: &str = "turn_liveness_rotation_ceiling_reached";
 // numeric-bound: ceiling - bounds one scan's reads against a non-converging rotation
 const QUIESCENT_ROTATION_PAGE_CEILING: usize = 4_096;
 
+/// The capped, rotating window of due turns one scan terminalizes.
+///
+/// The cap alone is not fair. Due turns arrive in session order, and a turn can
+/// be due forever without ever ending — one holding pending steering is
+/// refused by every scan — so a cap taken from the front of that order would
+/// hand the same undrainable turns the whole window on every scan, and a turn
+/// behind them would wait for a slot that never comes. The window therefore
+/// resumes past the last turn it attempted, so each scan starts where the last
+/// left off and every due turn is attempted within one lap of the cohort,
+/// whatever any of them does when attempted.
+struct TerminalizationWindow {
+    capacity: usize,
+    resume_after: Option<SessionId>,
+}
+
+impl TerminalizationWindow {
+    const fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            resume_after: None,
+        }
+    }
+
+    /// Returns this scan's turns, and remembers where the next scan resumes.
+    ///
+    /// `due` is in ascending session order. The window starts at the first turn
+    /// past its cursor, wrapping to the front when the cursor has fallen off
+    /// the end — which is what makes a lap of a cohort larger than the capacity
+    /// visit every member.
+    fn take<'due>(&mut self, due: &'due [StaleTurnCandidate]) -> &'due [StaleTurnCandidate] {
+        let start = match self.resume_after {
+            Some(cursor) => due
+                .iter()
+                .position(|candidate| candidate.session() > cursor)
+                .unwrap_or(0),
+            None => 0,
+        };
+        let end = due.len().min(start + self.capacity);
+        let window = &due[start..end];
+        self.resume_after = window.last().map(|last| last.session());
+        window
+    }
+}
+
 /// One inventory read, as the rotation consumes it.
 ///
 /// The rotation cares about two things a page reports: what it observed, and
@@ -192,6 +236,7 @@ impl TurnLivenessRuntime {
         let mut ticker = interval(self.scan_interval.get());
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut ledger = TurnLivenessLedger::new(self.staleness_bound);
+        let mut window = TerminalizationWindow::new(TERMINALIZATIONS_PER_SCAN);
         loop {
             match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
                 TurnLivenessWake::Shutdown => return,
@@ -200,7 +245,7 @@ impl TurnLivenessRuntime {
                         &self.repository,
                         &mut ledger,
                         self.staleness_bound,
-                        TERMINALIZATIONS_PER_SCAN,
+                        &mut window,
                     )
                     .await;
                 }
@@ -243,7 +288,7 @@ async fn reconcile_turn_liveness<Repository>(
     repository: &Repository,
     ledger: &mut TurnLivenessLedger,
     staleness_bound: StaleActiveTurnBound,
-    terminalization_cap: usize,
+    window: &mut TerminalizationWindow,
 ) where
     Repository: QuiescentInventory + StaleTurnTerminalizer,
 {
@@ -256,23 +301,22 @@ async fn reconcile_turn_liveness<Repository>(
         return;
     };
     let due = ledger.reconcile(&quiescent, Instant::now());
-    for candidate in due.iter().take(terminalization_cap) {
+    let attempted = window.take(&due);
+    for candidate in attempted {
         terminalize_stale_turn(repository, *candidate, staleness_bound).await;
     }
-    // Deferring costs a scan interval and nothing else: a turn left here had
-    // nothing change, so the next scan observes the same evidence and finds it
-    // due again. Draining the whole cohort instead would delay that scan by as
-    // long as the cohort takes.
-    if let Some(deferred) = due
-        .len()
-        .checked_sub(terminalization_cap)
-        .filter(|count| *count > 0)
-    {
+    // Deferring costs a lap of the cohort and nothing else: a turn left here
+    // had nothing change, so it is observed unchanged and comes due again, and
+    // the window resumes past what it attempted rather than beginning again.
+    // Draining the whole cohort instead would delay the next scan — and so
+    // every other session's next observation — by as long as the cohort takes.
+    let deferred = due.len() - attempted.len();
+    if deferred > 0 {
         tracing::info!(
             cause_code = TERMINALIZATION_DEFERRED_CAUSE,
             deferred_turns = deferred,
-            terminalization_cap,
-            "more turns came due than one scan terminalizes; the rest wait for the next scan"
+            terminalized_turns = attempted.len(),
+            "more turns came due than one scan terminalizes; the rest wait for a later scan"
         );
     }
 }
@@ -414,8 +458,9 @@ mod tests {
         InventoryPage, PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, QuiescentInventory,
         ROTATION_CEILING_CAUSE, STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_STEERING_BLOCKED_CAUSE,
         STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE, StaleTurnTerminalizer,
-        TERMINALIZATION_DEFERRED_CAUSE, TERMINALIZATIONS_PER_SCAN, TurnLivenessWake,
-        drain_quiescent_rotation, next_turn_liveness_wake, reconcile_turn_liveness,
+        TERMINALIZATION_DEFERRED_CAUSE, TERMINALIZATIONS_PER_SCAN, TerminalizationWindow,
+        TurnLivenessWake, drain_quiescent_rotation, next_turn_liveness_wake,
+        reconcile_turn_liveness,
     };
     use signalbox_application::{
         StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
@@ -435,7 +480,7 @@ mod tests {
             TurnId::from_uuid(Uuid::from_u128(0xa_0000 + seed)),
             TurnLivenessEvidence::new(
                 TurnAttemptId::from_uuid(Uuid::from_u128(0xb_0000 + seed)),
-                None,
+                Some(7),
             ),
         )
     }
@@ -486,6 +531,8 @@ mod tests {
     /// terminal turn is no longer active.
     struct CountingRepository {
         remaining: Mutex<Vec<StaleTurnCandidate>>,
+        undrainable: Vec<TurnId>,
+        attempted: Mutex<Vec<TurnId>>,
         terminalized: AtomicUsize,
     }
 
@@ -493,8 +540,26 @@ mod tests {
         fn new(candidates: Vec<StaleTurnCandidate>) -> Self {
             Self {
                 remaining: Mutex::new(candidates),
+                undrainable: Vec::new(),
+                attempted: Mutex::new(Vec::new()),
                 terminalized: AtomicUsize::new(0),
             }
+        }
+
+        /// Every attempt on these turns reports pending steering, so they stay
+        /// due for as long as the daemon runs.
+        fn with_undrainable(candidates: Vec<StaleTurnCandidate>, undrainable: Vec<TurnId>) -> Self {
+            Self {
+                undrainable,
+                ..Self::new(candidates)
+            }
+        }
+
+        fn attempted(&self) -> Vec<TurnId> {
+            self.attempted
+                .lock()
+                .expect("the fixture is not poisoned")
+                .clone()
         }
 
         fn terminalized(&self) -> usize {
@@ -532,6 +597,15 @@ mod tests {
             candidate: StaleTurnCandidate,
             _identities: AcceptedInputTurnFailureIdentities,
         ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
+            self.attempted
+                .lock()
+                .expect("the fixture is not poisoned")
+                .push(candidate.turn());
+            if self.undrainable.contains(&candidate.turn()) {
+                // A turn holding pending steering: attempted every time it is
+                // reached, ended never.
+                return Ok(StaleTurnOutcome::BlockedByPendingSteering);
+            }
             self.terminalized.fetch_add(1, Ordering::Relaxed);
             self.remaining
                 .lock()
@@ -611,10 +685,11 @@ mod tests {
         let bound = StaleActiveTurnBound::hard_ceiling();
         let repository = CountingRepository::new(vec![candidate(1), candidate(2), candidate(3)]);
         let mut ledger = TurnLivenessLedger::new(bound);
-        reconcile_turn_liveness(&repository, &mut ledger, bound, 2).await;
+        let mut window = TerminalizationWindow::new(2);
+        reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
         tokio::time::advance(bound.get()).await;
 
-        reconcile_turn_liveness(&repository, &mut ledger, bound, 2).await;
+        reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
 
         assert_eq!(repository.terminalized(), 2);
         assert_eq!(repository.still_active(), 1);
@@ -627,14 +702,41 @@ mod tests {
         let bound = StaleActiveTurnBound::hard_ceiling();
         let repository = CountingRepository::new(vec![candidate(1), candidate(2), candidate(3)]);
         let mut ledger = TurnLivenessLedger::new(bound);
-        reconcile_turn_liveness(&repository, &mut ledger, bound, 2).await;
+        let mut window = TerminalizationWindow::new(2);
+        reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
         tokio::time::advance(bound.get()).await;
-        reconcile_turn_liveness(&repository, &mut ledger, bound, 2).await;
+        reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
 
-        reconcile_turn_liveness(&repository, &mut ledger, bound, 2).await;
+        reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
 
         assert_eq!(repository.terminalized(), 3);
         assert_eq!(repository.still_active(), 0);
+    }
+
+    /// A turn that can never be ended must not hold the window against turns
+    /// behind it: with a cap of one, the second scan reaches the blocked turn
+    /// and the third resumes past it rather than starting over.
+    #[tokio::test(start_paused = true)]
+    async fn an_undrainable_turn_does_not_starve_the_turn_behind_it() {
+        let bound = StaleActiveTurnBound::hard_ceiling();
+        let blocked = candidate(1);
+        let behind = candidate(2);
+        let repository =
+            CountingRepository::with_undrainable(vec![blocked, behind], vec![blocked.turn()]);
+        let mut ledger = TurnLivenessLedger::new(bound);
+        let mut window = TerminalizationWindow::new(1);
+        reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
+        tokio::time::advance(bound.get()).await;
+        reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
+
+        reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
+
+        assert_eq!(
+            repository.attempted(),
+            vec![blocked.turn(), behind.turn()],
+            "the second scan resumed past the turn the first could not end"
+        );
+        assert_eq!(repository.terminalized(), 1);
     }
 
     /// The compiled cap is the value the page states.
