@@ -454,6 +454,67 @@ bridge; application and persistence still declare no runtime-crate dependency.
 The same execution composition drives approval, tool attempts, and continuation
 through the ports owned by [tool-loop](tool-loop.md).
 
+## Turn-liveness watchdog
+
+Every component deadline covers one physical operation. Nothing covers the space
+between them: a turn that is `active` in the `running` phase while no model
+call, tool attempt, or durable wait is outstanding is unreachable by all of
+them, and holds its session's progressing slot indefinitely. A periodic pass
+independent of dispatch slots owns that liveness and terminalizes such a turn as
+`Failed`, so goal-level recovery and re-dispatch can proceed. Why a separate
+timer rather than a scheduler pass: the sessions this exists to reach are
+exactly the ones no pass is scheduled for.
+
+**The quiescent shape.** A turn is a candidate only when all of these hold at
+once: its lifecycle row is `active` with an `accepted_input` origin and is not
+delegation-runtime-terminal; its active phase is `running`; it names no active
+tool round, no approval request, and no recovery tool attempt; its current
+attempt is `running` rather than `prepared` or `stop_requested`; its session has
+no `model_call` outside `terminal`, no dedicated compaction call outside
+`terminal`, and no `tool_attempt` outside `terminal`; and its session holds no
+`pending_steering` accepted input. The phase filter is what excludes approval
+parking, `awaiting_child`, both recovery waits, and the runner-loss wait: those
+are durable waits this pass judges no part of. Every conjunct is an absence the
+candidate query proves for itself, so a shape it cannot consult is a shape it
+does not clear — absent evidence skips the turn rather than condemning it.
+
+**Staleness.** No lifecycle table stores an activity timestamp, and this page
+introduces none: a stored clock would be one more thing to keep true. Staleness
+is decided by repeated observation instead. Each pass records, per candidate
+turn, its session's model-call count and newest model-call identity, its
+semantic-entry count and newest entry identity, and the turn's current attempt.
+A turn is due only once that evidence has been observed unchanged for at least
+the staleness bound. Any progress at all — a fresh call, a fresh entry, a fresh
+attempt — restarts the bound, and a turn absent from one pass is forgotten
+rather than credited on its return. That ledger is process-local and carries no
+authority: losing it to a restart costs one more bound before a wedged turn is
+reached, which is the direction that cannot end live work.
+
+**Constants.** The staleness bound is a hard safety ceiling of 30 minutes and
+the scan interval is one minute; both are compiled in. Configuration may lower
+the effective staleness bound and can never raise it past the compiled ceiling.
+
+**Terminalization.** A due turn ends through the same committed failed-turn
+transition startup recovery commits: the session and scheduler rows are locked,
+the complete candidate predicate is re-decided under those locks against rows no
+concurrent pass can be changing, and the ordinary
+`prepare_active_turn_lost_failure` candidate is committed — Lost attempt end,
+`TurnFailed` semantic entry, terminal frontier, `terminal`/`failed` lifecycle
+row, and the `TurnFailed` outbox event. No terminal state, disposition, or
+direct row edit is introduced for this pass. A revalidation that no longer
+matches the observation, and a preparation the domain refuses, both leave the
+turn untouched for a later pass. Because the turn ends through the ordinary
+lifecycle write, every trigger watching a turn reach `terminal` fires unchanged,
+so a repository-watch dispatch occupying this session releases its singleton and
+records its requeue obligation without this pass naming either.
+
+**Audit.** Terminalization emits a key-bearing operator log line carrying the
+cause code `turn_liveness_watchdog_stale` with the session, the turn, and the
+bound in force. The durable record is the ordinary `TurnFailed` shape, which has
+no cause column, so a watchdog-ended turn is not durably distinguishable from a
+restart-recovered one. Closing that gap is deferred to whichever change first
+gives a terminal turn a stored cause.
+
 ## Startup scan and recovery
 
 After configuration and database connection, signalboxd acquires the dedicated
@@ -930,14 +991,14 @@ a directory nothing is now watching, so scavenging it before admitting work is
 what bounds how long those tokens outlive the process that minted them. No
 present composition performs any of the five. It then binds the runner socket,
 binds the process socket, then concurrently admits runner enrollment and
-protocol requests, dispatches the outbox, and schedules eligible work. On a
-database without the fence migration, the guarded first migration creates the
-fence row before the daemon initializes its first fenced pool. No request,
-dispatch cursor advance, or scheduler pass occurs before recovery completes. Any
-phase failure is a failed startup with a classified, key-bearing log line and a
-failure exit code. Runner recovery-only binding and reconciliation remain the
-committed unimplemented ordering stated under
-[startup scan and recovery](#startup-scan-and-recovery).
+protocol requests, dispatches the outbox, schedules eligible work, and
+supervises turn liveness. On a database without the fence migration, the guarded
+first migration creates the fence row before the daemon initializes its first
+fenced pool. No request, dispatch cursor advance, or scheduler pass occurs
+before recovery completes. Any phase failure is a failed startup with a
+classified, key-bearing log line and a failure exit code. Runner recovery-only
+binding and reconciliation remain the committed unimplemented ordering stated
+under [startup scan and recovery](#startup-scan-and-recovery).
 
 The dedicated guard connection is checked once per second while the runtime is
 active. Losing that session is a fatal fencing event: admission, dispatch, and
@@ -950,20 +1011,21 @@ Observability and the operator failure taxonomy are
 [runtime-substrate](runtime-substrate.md) scope.
 
 On SIGINT/SIGTERM the listener stops accepting requests, follow streams are
-closed, the dispatcher stops starting transactions, and the scheduler stops
-admitting passes. Finite request handlers, the current dispatcher transaction,
-and in-flight scheduler passes share the bounded 30-second grace window to let
-authoritative transactions commit or abort. A clean exit closes the fenced pool,
-waits on the guard session's exclusive current-generation fence so even detached
-pool sessions have ended, removes only this daemon's identity-pinned and
-revalidated socket, and releases the advisory locks by closing its dedicated
-guard connection. Window expiry abandons remaining tasks, warns, and skips the
-unbounded pool drain; process exit releases its sessions. Why signal-driven
-shutdown is polish, not correctness: abrupt exit at any point is safe because
-durable rows plus the next guarded startup scan recover work and the durable
-outbox cursor redelivers an uncommitted offer (INV-032, INV-034), so the grace
-window buys only latency. Repositories and services are cheap per-invocation
-clones over the shared pool; no shared locked service instance exists.
+closed, the dispatcher stops starting transactions, the scheduler stops
+admitting passes, and the turn-liveness pass stops scanning. Finite request
+handlers, the current dispatcher transaction, and in-flight scheduler passes
+share the bounded 30-second grace window to let authoritative transactions
+commit or abort. A clean exit closes the fenced pool, waits on the guard
+session's exclusive current-generation fence so even detached pool sessions have
+ended, removes only this daemon's identity-pinned and revalidated socket, and
+releases the advisory locks by closing its dedicated guard connection. Window
+expiry abandons remaining tasks, warns, and skips the unbounded pool drain;
+process exit releases its sessions. Why signal-driven shutdown is polish, not
+correctness: abrupt exit at any point is safe because durable rows plus the next
+guarded startup scan recover work and the durable outbox cursor redelivers an
+uncommitted offer (INV-032, INV-034), so the grace window buys only latency.
+Repositories and services are cheap per-invocation clones over the shared pool;
+no shared locked service instance exists.
 
 ## Delegated waits, messages, and wake turns
 
