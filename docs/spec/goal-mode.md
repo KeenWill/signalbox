@@ -13,7 +13,9 @@ generation was verified through PR #578 (`agent/commission-binding`). Resolving
 that authority again when a consumer commits is verified against this PR
 (`agent/judge-completion-recheck`). Repository-watch-composed stops are verified
 against this PR (`agent/daemon-ops-overnight`). This bottom specification diff
-owns both stack slices. Identity and durable-command mechanics remain owned by
+owns both stack slices. Bounded automatic resumption of execution-failure blocks
+is verified against this PR (`agent/goal-blocked-autoresume`). Identity and
+durable-command mechanics remain owned by
 [identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
 by [tool loop](tool-loop.md), and framing by
@@ -172,16 +174,43 @@ instead of classifying valid durable state as corrupt.
 
 **Implemented behavior.** A failed goal turn is not retried; in the same
 scheduler disposition path the daemon appends `blocked` with reason
-`execution_failure`, need text describing the execution repair required, and the
-exact failed-turn provenance. That scheduler-turn provenance is single-use and
-durably requires the current goal turn to have an unsuccessful terminal
-disposition. A delayed replay of an already-recorded failure returns that
-blocked transition without appending a second event, including after resume. An
-unrecorded failure from an older turn returns `NotCurrentGoalTurn` once resume
-has made a successor turn current, so it cannot block the resumed pursuit.
-Continuation stops on blocked, achieved, user-stopped, and a superseded
-generation; supersession's successor is pursuing and therefore independently
-eligible to continue.
+`execution_failure`, need text stating either the scheduled automatic resumption
+or the operator repair required, and the exact failed-turn provenance. That
+scheduler-turn provenance is single-use and durably requires the current goal
+turn to have an unsuccessful terminal disposition. A delayed replay of an
+already-recorded failure returns that blocked transition without appending a
+second event, including after resume. An unrecorded failure from an older turn
+returns `NotCurrentGoalTurn` once resume has made a successor turn current, so
+it cannot block the resumed pursuit. Continuation stops on blocked, achieved,
+user-stopped, and a superseded generation; supersession's successor is pursuing
+and therefore independently eligible to continue.
+
+**Implemented behavior.** An execution-failure block owes its own bounded
+automatic resumption. The daemon derives from the goal event history how many
+consecutive automatic resumptions the current run has already spent: the run is
+the trailing alternation of execution-failure blocks and the resumptions that
+answered them, and every other event ends it. Below a budget of five consecutive
+attempts, the appended need text states that automatic resumption is scheduled
+and that no operator action is required, and exactly one resume follows after a
+backoff of two minutes doubled per attempt already spent, to a thirty-minute
+maximum. At the budget the goal stays blocked, and its need text states that
+automatic resumption is exhausted and states the operator repair. All three
+bounds are code-defined and lowerable only: an automatic resumption spends
+provider budget on a session no operator asked about, so its cadence and its end
+are product decisions rather than deployment ones. Resumption does not bypass
+execution-failure blocking or make a failure a silent retry — the block is
+appended first, and every attempt is an ordinary recorded `resumed` event.
+
+**Implemented behavior.** An automatic resumption's durable command identity is
+derived from the session and the exact blocked event it answers rather than
+minted. A repeated attempt is therefore an exact command replay rather than a
+second resume, and the recorded `resumed` event is self-identifying: a resume
+carrying any other identity is an operator's, ends the run, and restarts the
+budget. Each attempt re-reads the goal before issuing and abandons itself unless
+the lineage still ends at exactly the blocked event it answers, so a goal since
+resumed, stopped, superseded, or blocked for another reason is left alone. The
+model-selectable reasons are never automatically resumed: each names a condition
+no retry can clear, and only execution-failure blocking arms an attempt.
 
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The
@@ -307,5 +336,18 @@ re-entering completion.
 
 ## Open edges
 
-**Deferred or undecided work.** No goal-mode open question is recorded by this
-version-one contract.
+**Deferred or undecided work.** A pending automatic resumption lives only in the
+daemon process that armed it. The event history records how many attempts a run
+has spent but not when any of them was recorded, so a restart during a backoff
+loses the pending attempt and the goal stays blocked until an operator resumes
+it; goals blocked before this behavior shipped are in that same position.
+Re-arming across a restart needs a durable record of when the failure was
+appended, which no present goal table carries.
+
+**Deferred or undecided work.** The run a budget is derived from ends only at an
+event, so consecutive execution failures separated by successful turns are
+counted together. A long pursuit that fails transiently five times, however far
+apart and however much work succeeded between them, therefore exhausts its
+budget and parks for an operator. The conservative direction was chosen
+deliberately: the alternative reads turn dispositions the goal event stream does
+not carry.

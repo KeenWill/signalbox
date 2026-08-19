@@ -1,7 +1,8 @@
 //! Daemon-owned scheduling and model declaration for commissioned goals.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, time::Duration};
 
+use sha2::{Digest as _, Sha256};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     EligibilityNudge, GoalPassDisposition, InProcessEligibilityNudge, OperatorFailureClass,
@@ -9,12 +10,15 @@ use signalbox_application::{
     ToolExecutorEvidence, ToolInputSchema,
 };
 use signalbox_domain::{
-    AcceptedInputId, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed, GoalReport,
-    GoalSchedulerProvenance, NormalizedToolArguments, SessionId, ToolEffectClass,
-    ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, TurnId,
+    AcceptedInputId, DurableCommandId, Goal, GoalBlockProvenance, GoalCommandResult, GoalEvent,
+    GoalEventKind, GoalEventOrdinal, GoalModelBlockedReasonKind, GoalModelProvenance, GoalNeed,
+    GoalReport, GoalSchedulerProvenance, GoalUserAction, GoalUserCommand, NormalizedToolArguments,
+    SessionId, ToolEffectClass, ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, TurnId,
 };
 use signalbox_persistence::{
-    goal::{GoalRepository, GoalRepositoryError, GoalTransitionOutcome},
+    goal::{
+        GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError, GoalTransitionOutcome,
+    },
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
 };
 use sqlx::PgPool;
@@ -58,6 +62,30 @@ const GOAL_DECLARE_REJECTED: &str =
 const GOAL_DECLARE_RESULT: &str = "{\"status\":\"applied\"}";
 const EXECUTION_FAILURE_NEED: &str =
     "Resolve the failed goal turn's execution condition, then resume the goal.";
+const EXECUTION_FAILURE_RESUMING_NEED: &str = "The goal turn failed to execute and automatic resumption is scheduled. No operator action is required unless automatic resumption is exhausted.";
+/// Delay before the first automatic resumption of a failed goal turn.
+///
+/// Each further consecutive failure doubles this delay up to
+/// [`AUTOMATIC_RESUME_BACKOFF_CAP`], so a provider or infrastructure condition
+/// that clears in minutes is waited out without operator attention.
+// numeric-bound: tunable - controls the first automatic goal-resume delay
+const AUTOMATIC_RESUME_BASE_BACKOFF: Duration = Duration::from_secs(120);
+/// Longest delay any single automatic resumption waits.
+// numeric-bound: ceiling - protects goal latency from unbounded backoff growth
+const AUTOMATIC_RESUME_BACKOFF_CAP: Duration = Duration::from_secs(1_800);
+/// Consecutive automatic resumptions one blocked goal may spend.
+///
+/// Deployment configuration cannot raise any of the three constants above: an
+/// automatic resumption spends provider budget on a session no operator asked
+/// about, so its cadence and its end are product decisions.
+// numeric-bound: ceiling - protects provider spend from an endlessly failing goal
+const AUTOMATIC_RESUME_ATTEMPT_BUDGET: u32 = 5;
+/// Domain separation for the derived automatic-resume command identity.
+///
+/// The identity must not collide with any other derived durable command, and
+/// changing this value changes every derivation, which retires the automatic
+/// resumptions already recorded under the old one.
+const AUTOMATIC_RESUME_IDENTITY_DOMAIN: &[u8] = b"signalbox.goal.automatic-resume.v1";
 
 /// A static `goal_declare` declaration could not be compiled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -423,6 +451,117 @@ impl PostgresGoalPassDisposition {
             eligibility_nudge,
         }
     }
+
+    /// Reads the lineage a pending execution-failure block would extend.
+    ///
+    /// The plan is read before the block is appended because the appended need
+    /// text states whether automatic resumption is still owed.
+    async fn plan_automatic_resumption(
+        &self,
+        session: SessionId,
+    ) -> Result<AutomaticResumption, PostgresGoalPassDispositionError> {
+        let goal = self.repository.load_goal(session).await?;
+        Ok(AutomaticResumption::after_spent_attempts(
+            goal.as_ref().map_or(0, spent_automatic_resume_attempts),
+        ))
+    }
+
+    /// Owes one delayed resume attempt to an appended execution-failure block.
+    fn arm_automatic_resumption(
+        &self,
+        session: SessionId,
+        blocked: GoalEventOrdinal,
+        resumption: AutomaticResumption,
+    ) {
+        let AutomaticResumption::Scheduled { delay } = resumption else {
+            tracing::warn!(
+                session = %session.into_uuid(),
+                event_ordinal = blocked.get(),
+                attempt_budget = AUTOMATIC_RESUME_ATTEMPT_BUDGET,
+                cause_code = "goal_automatic_resume_exhausted",
+                "blocked goal exhausted automatic resumption and awaits an operator"
+            );
+            return;
+        };
+        let adapter = self.clone();
+        drop(tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            adapter
+                .resume_after_execution_failure(session, blocked)
+                .await;
+        }));
+    }
+
+    /// Resumes the goal still blocked by exactly the named failure event.
+    async fn resume_after_execution_failure(&self, session: SessionId, blocked: GoalEventOrdinal) {
+        let reread = match self.repository.load_goal(session).await {
+            Ok(goal) => goal,
+            Err(error) => {
+                tracing::error!(
+                    session = %session.into_uuid(),
+                    event_ordinal = blocked.get(),
+                    cause_code = "goal_automatic_resume_reread_failed",
+                    cause = %error,
+                    "automatic goal resumption cannot confirm the goal is still blocked"
+                );
+                return;
+            }
+        };
+        if !reread.is_some_and(|goal| awaits_automatic_resumption(&goal, blocked)) {
+            return;
+        }
+        let command = GoalUserCommand::new(
+            automatic_resume_command(session, blocked),
+            session,
+            GoalUserAction::Resume(None),
+        );
+        let candidates = GoalTurnCandidates::new(
+            AcceptedInputId::from_uuid(Uuid::now_v7()),
+            TurnId::from_uuid(Uuid::now_v7()),
+        );
+        let outcome = self
+            .repository
+            .handle_user_command(command, Some(candidates), |alias| {
+                self.model_configuration.resolve_alias(alias)
+            })
+            .await;
+        match outcome {
+            Ok(GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Applied(event))) => {
+                let _ = self.eligibility_nudge.nudge(session);
+                tracing::info!(
+                    session = %session.into_uuid(),
+                    event_ordinal = event.ordinal().get(),
+                    blocked_event_ordinal = blocked.get(),
+                    "automatically resumed a goal blocked by execution failure"
+                );
+            }
+            Ok(GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Rejected(rejection))) => {
+                tracing::info!(
+                    session = %session.into_uuid(),
+                    event_ordinal = blocked.get(),
+                    rejection = ?rejection,
+                    "automatic goal resumption was durably rejected"
+                );
+            }
+            Ok(GoalCommandHandlingOutcome::ConflictingReuse { .. }) => {
+                tracing::error!(
+                    session = %session.into_uuid(),
+                    event_ordinal = blocked.get(),
+                    cause_code = "goal_automatic_resume_identity_conflict",
+                    "the derived automatic goal-resume identity already means something else"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    session = %session.into_uuid(),
+                    event_ordinal = blocked.get(),
+                    cause_code = "goal_automatic_resume_failed",
+                    cause = %error,
+                    "automatic goal resumption could not be recorded"
+                );
+            }
+        }
+    }
 }
 
 impl GoalPassDisposition for PostgresGoalPassDisposition {
@@ -434,19 +573,28 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let adapter = self.clone();
         async move {
-            let need = execution_failure_need()?;
+            let resumption = adapter.plan_automatic_resumption(session).await?;
             let candidates = GoalTurnCandidates::new(
                 AcceptedInputId::from_uuid(Uuid::now_v7()),
                 TurnId::from_uuid(Uuid::now_v7()),
             );
             let outcome = adapter
                 .repository
-                .reconcile_current_after_execution(session, candidates, need, |alias| {
-                    adapter.model_configuration.resolve_alias(alias)
-                })
+                .reconcile_current_after_execution(
+                    session,
+                    candidates,
+                    resumption.need()?,
+                    |alias| adapter.model_configuration.resolve_alias(alias),
+                )
                 .await?;
-            if continuation_scheduled(outcome)? {
-                let _ = adapter.eligibility_nudge.nudge(session);
+            match continuation_disposition(outcome)? {
+                ContinuationDisposition::Scheduled => {
+                    let _ = adapter.eligibility_nudge.nudge(session);
+                }
+                ContinuationDisposition::Blocked { event } => {
+                    adapter.arm_automatic_resumption(session, event, resumption);
+                }
+                ContinuationDisposition::Undisposed => {}
             }
             Ok(())
         }
@@ -457,35 +605,169 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
         session: SessionId,
         turn: TurnId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        let repository = self.repository.clone();
+        let adapter = self.clone();
         async move {
-            let outcome = repository
+            let resumption = adapter.plan_automatic_resumption(session).await?;
+            let outcome = adapter
+                .repository
                 .block_execution_failure(
                     session,
-                    execution_failure_need()?,
+                    resumption.need()?,
                     GoalSchedulerProvenance::new(turn),
                 )
                 .await?;
             match outcome {
-                GoalTransitionOutcome::Applied(_)
-                | GoalTransitionOutcome::GoalNotAttached
+                GoalTransitionOutcome::Applied(event) => {
+                    adapter.arm_automatic_resumption(session, event.ordinal(), resumption);
+                }
+                GoalTransitionOutcome::GoalNotAttached
                 | GoalTransitionOutcome::Rejected(_)
-                | GoalTransitionOutcome::NotCurrentGoalTurn => Ok(()),
+                | GoalTransitionOutcome::NotCurrentGoalTurn => {}
             }
+            Ok(())
         }
     }
 }
 
-fn continuation_scheduled(
+/// What one goal-continuation outcome owes the scheduler next.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContinuationDisposition {
+    /// A successor goal turn was queued and wants a scheduler hint.
+    Scheduled,
+    /// The named event blocked pursuit with execution-failure provenance.
+    Blocked {
+        /// The appended blocked event.
+        event: GoalEventOrdinal,
+    },
+    /// Nothing was appended and nothing is owed.
+    Undisposed,
+}
+
+/// Whether automatic resumption is still owed, and how long it waits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AutomaticResumption {
+    /// One further attempt is owed after this delay.
+    Scheduled {
+        /// Backoff before the attempt.
+        delay: Duration,
+    },
+    /// The consecutive-attempt budget is spent; only an operator can resume.
+    Exhausted,
+}
+
+impl AutomaticResumption {
+    fn after_spent_attempts(spent: u32) -> Self {
+        if spent >= AUTOMATIC_RESUME_ATTEMPT_BUDGET {
+            return Self::Exhausted;
+        }
+        Self::Scheduled {
+            delay: AUTOMATIC_RESUME_BASE_BACKOFF
+                .saturating_mul(2_u32.saturating_pow(spent))
+                .min(AUTOMATIC_RESUME_BACKOFF_CAP),
+        }
+    }
+
+    /// Renders the need text the next execution-failure block will carry.
+    fn need(self) -> Result<GoalNeed, PostgresGoalPassDispositionError> {
+        let text = match self {
+            Self::Scheduled { .. } => String::from(EXECUTION_FAILURE_RESUMING_NEED),
+            Self::Exhausted => format!(
+                "Automatic resumption is exhausted after {AUTOMATIC_RESUME_ATTEMPT_BUDGET} consecutive execution failures. {EXECUTION_FAILURE_NEED}"
+            ),
+        };
+        GoalNeed::try_new(text).map_err(|_| PostgresGoalPassDispositionError::InvalidStaticNeed)
+    }
+}
+
+/// Counts the automatic resumptions already spent on the current block run.
+///
+/// The run is the trailing alternation of execution-failure blocks and the
+/// automatic resumptions that answered them, so any other event — a
+/// model-declared block, an operator resume, a commission, or a supersession —
+/// ends it and the budget starts over.
+fn spent_automatic_resume_attempts(goal: &Goal) -> u32 {
+    let session = goal.session();
+    let generation = goal.current().generation();
+    let mut events = goal.events().iter().rev();
+    let mut head = events.next();
+    // The run is the same whether or not the failure that reads it has already
+    // been appended, so a trailing failure block is skipped rather than counted.
+    if head.is_some_and(|event| is_execution_failure_block(event)) {
+        head = events.next();
+    }
+    let mut spent = 0;
+    loop {
+        let (Some(resumed), Some(blocked)) = (head, events.next()) else {
+            return spent;
+        };
+        if resumed.generation() != generation || blocked.generation() != generation {
+            return spent;
+        }
+        let GoalEventKind::Resumed { provenance, .. } = resumed.kind() else {
+            return spent;
+        };
+        if !is_execution_failure_block(blocked)
+            || provenance.command() != automatic_resume_command(session, blocked.ordinal())
+        {
+            return spent;
+        }
+        spent = spent.saturating_add(1);
+        head = events.next();
+    }
+}
+
+/// Whether the goal is still blocked by exactly the named failure event.
+fn awaits_automatic_resumption(goal: &Goal, blocked: GoalEventOrdinal) -> bool {
+    goal.events()
+        .last()
+        .is_some_and(|event| event.ordinal() == blocked && is_execution_failure_block(event))
+}
+
+fn is_execution_failure_block(event: &GoalEvent) -> bool {
+    matches!(
+        event.kind(),
+        GoalEventKind::Blocked {
+            block: GoalBlockProvenance::ExecutionFailure { .. },
+            ..
+        }
+    )
+}
+
+/// Derives the durable identity one automatic resumption may ever claim.
+///
+/// Deriving rather than minting makes a repeated attempt an exact command
+/// replay instead of a second resume, and makes the recorded resume event
+/// self-identifying: a resume carrying any other identity is an operator's.
+fn automatic_resume_command(session: SessionId, blocked: GoalEventOrdinal) -> DurableCommandId {
+    let mut digest = Sha256::new();
+    digest.update(AUTOMATIC_RESUME_IDENTITY_DOMAIN);
+    digest.update(session.into_uuid().as_bytes());
+    digest.update(blocked.get().to_be_bytes());
+    let hash: [u8; 32] = digest.finalize().into();
+    let mut identity = [0_u8; 16];
+    identity
+        .iter_mut()
+        .zip(hash)
+        .for_each(|(byte, digested)| *byte = digested);
+    // RFC 9562 version 8 and variant bits: the value is a derived name, not a
+    // time-ordered or random identity, and must not claim to be one.
+    identity[6] = (identity[6] & 0x0f) | 0x80;
+    identity[8] = (identity[8] & 0x3f) | 0x80;
+    DurableCommandId::from_uuid(Uuid::from_bytes(identity))
+}
+
+fn continuation_disposition(
     outcome: GoalTurnContinuationOutcome,
-) -> Result<bool, PostgresGoalPassDispositionError> {
+) -> Result<ContinuationDisposition, PostgresGoalPassDispositionError> {
     match outcome {
-        GoalTurnContinuationOutcome::Scheduled { .. } => Ok(true),
+        GoalTurnContinuationOutcome::Scheduled { .. } => Ok(ContinuationDisposition::Scheduled),
+        GoalTurnContinuationOutcome::Blocked { event } => {
+            Ok(ContinuationDisposition::Blocked { event })
+        }
         GoalTurnContinuationOutcome::NotTerminal
-        | GoalTurnContinuationOutcome::Blocked { .. }
         | GoalTurnContinuationOutcome::NotPursuing
         | GoalTurnContinuationOutcome::NotCurrentGoalTurn
-        | GoalTurnContinuationOutcome::AlreadyScheduled => Ok(false),
+        | GoalTurnContinuationOutcome::AlreadyScheduled => Ok(ContinuationDisposition::Undisposed),
         GoalTurnContinuationOutcome::UnknownModelAlias { .. } => {
             Err(PostgresGoalPassDispositionError::UnknownModelAlias)
         }
@@ -498,19 +780,236 @@ fn continuation_scheduled(
     }
 }
 
-fn execution_failure_need() -> Result<GoalNeed, PostgresGoalPassDispositionError> {
-    GoalNeed::try_new(String::from(EXECUTION_FAILURE_NEED))
-        .map_err(|_| PostgresGoalPassDispositionError::InvalidStaticNeed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroU64;
+
+    use signalbox_domain::{GoalStatement, GoalUserProvenance, ToolRequestId};
     use signalbox_persistence::goal::GoalCorruption;
 
     fn arguments(value: &str) -> NormalizedToolArguments {
         NormalizedToolArguments::try_from_provider_text(value.to_owned())
             .expect("fixture arguments are admitted")
+    }
+
+    fn fixture_session() -> SessionId {
+        SessionId::from_uuid(Uuid::from_u128(0x5e))
+    }
+
+    fn pursuing_goal() -> Goal {
+        Goal::commission(
+            fixture_session(),
+            GoalStatement::try_new(String::from("pursue the fixture"))
+                .expect("the fixture statement is admitted"),
+            GoalUserProvenance::new(DurableCommandId::from_uuid(Uuid::from_u128(0xc0))),
+        )
+    }
+
+    fn failed(goal: Goal, turn: u128) -> Goal {
+        goal.block_execution_failure(
+            GoalNeed::try_new(String::from("the fixture turn failed"))
+                .expect("the fixture need is admitted"),
+            GoalSchedulerProvenance::new(TurnId::from_uuid(Uuid::from_u128(turn))),
+        )
+        .expect("a pursuing goal blocks on execution failure")
+    }
+
+    fn automatically_resumed(goal: Goal) -> Goal {
+        let blocked = goal
+            .events()
+            .last()
+            .expect("the fixture has recorded events")
+            .ordinal();
+        let command = automatic_resume_command(goal.session(), blocked);
+        goal.resume(None, GoalUserProvenance::new(command))
+            .expect("a blocked goal resumes")
+    }
+
+    fn operator_resumed(goal: Goal) -> Goal {
+        goal.resume(
+            None,
+            GoalUserProvenance::new(DurableCommandId::from_uuid(Uuid::from_u128(0x09e))),
+        )
+        .expect("a blocked goal resumes")
+    }
+
+    fn model_blocked(goal: Goal) -> Goal {
+        goal.declare_blocked(
+            GoalModelBlockedReasonKind::AuthorizationRequired,
+            GoalNeed::try_new(String::from("grant the fixture authority"))
+                .expect("the fixture need is admitted"),
+            GoalModelProvenance::new(
+                TurnId::from_uuid(Uuid::from_u128(0x77)),
+                ToolRequestId::from_uuid(Uuid::from_u128(0x78)),
+            ),
+        )
+        .expect("a pursuing goal blocks on a model declaration")
+    }
+
+    fn planned(goal: &Goal) -> AutomaticResumption {
+        AutomaticResumption::after_spent_attempts(spent_automatic_resume_attempts(goal))
+    }
+
+    #[test]
+    fn a_first_execution_failure_owes_one_attempt_after_the_base_backoff() {
+        let blocked = failed(pursuing_goal(), 0x01);
+
+        assert_eq!(spent_automatic_resume_attempts(&blocked), 0);
+        assert_eq!(
+            planned(&blocked),
+            AutomaticResumption::Scheduled {
+                delay: AUTOMATIC_RESUME_BASE_BACKOFF
+            }
+        );
+    }
+
+    /// The plan is read before the failure is appended and acted on after it,
+    /// so both readings must name the same attempt.
+    #[test]
+    fn the_spent_attempt_count_is_unchanged_by_appending_the_failure_it_plans() {
+        let pursuing = automatically_resumed(failed(pursuing_goal(), 0x01));
+        let blocked = failed(pursuing.clone(), 0x02);
+
+        assert_eq!(spent_automatic_resume_attempts(&pursuing), 1);
+        assert_eq!(spent_automatic_resume_attempts(&blocked), 1);
+    }
+
+    #[test]
+    fn consecutive_automatic_resumptions_double_the_backoff_up_to_the_cap() {
+        let second = failed(automatically_resumed(failed(pursuing_goal(), 0x01)), 0x02);
+        let fifth = failed(
+            automatically_resumed(failed(
+                automatically_resumed(failed(
+                    automatically_resumed(failed(
+                        automatically_resumed(failed(pursuing_goal(), 0x01)),
+                        0x02,
+                    )),
+                    0x03,
+                )),
+                0x04,
+            )),
+            0x05,
+        );
+
+        assert_eq!(
+            planned(&second),
+            AutomaticResumption::Scheduled {
+                delay: AUTOMATIC_RESUME_BASE_BACKOFF.saturating_mul(2)
+            }
+        );
+        assert_eq!(spent_automatic_resume_attempts(&fifth), 4);
+        assert_eq!(
+            planned(&fifth),
+            AutomaticResumption::Scheduled {
+                delay: AUTOMATIC_RESUME_BACKOFF_CAP
+            }
+        );
+    }
+
+    #[test]
+    fn an_exhausted_budget_blocks_permanently_and_states_the_operator_requirement() {
+        let exhausted = failed(
+            automatically_resumed(failed(
+                automatically_resumed(failed(
+                    automatically_resumed(failed(
+                        automatically_resumed(failed(
+                            automatically_resumed(failed(pursuing_goal(), 0x01)),
+                            0x02,
+                        )),
+                        0x03,
+                    )),
+                    0x04,
+                )),
+                0x05,
+            )),
+            0x06,
+        );
+
+        assert_eq!(
+            spent_automatic_resume_attempts(&exhausted),
+            AUTOMATIC_RESUME_ATTEMPT_BUDGET
+        );
+        assert_eq!(planned(&exhausted), AutomaticResumption::Exhausted);
+        assert_eq!(
+            AutomaticResumption::Exhausted
+                .need()
+                .expect("the exhausted need is admitted")
+                .as_str(),
+            "Automatic resumption is exhausted after 5 consecutive execution failures. Resolve the failed goal turn's execution condition, then resume the goal."
+        );
+    }
+
+    #[test]
+    fn an_operator_resume_restarts_the_attempt_budget() {
+        let after_operator = failed(
+            operator_resumed(failed(
+                automatically_resumed(failed(
+                    automatically_resumed(failed(pursuing_goal(), 0x01)),
+                    0x02,
+                )),
+                0x03,
+            )),
+            0x04,
+        );
+
+        assert_eq!(spent_automatic_resume_attempts(&after_operator), 0);
+        assert_eq!(
+            planned(&after_operator),
+            AutomaticResumption::Scheduled {
+                delay: AUTOMATIC_RESUME_BASE_BACKOFF
+            }
+        );
+    }
+
+    #[test]
+    fn a_model_declared_block_ends_the_automatic_run() {
+        let declared = model_blocked(automatically_resumed(failed(pursuing_goal(), 0x01)));
+
+        assert_eq!(spent_automatic_resume_attempts(&declared), 0);
+    }
+
+    /// A pending attempt names the exact failure event it answers, so a goal
+    /// that has moved on — including into a reason no automatic resumption may
+    /// ever clear — is left alone.
+    #[test]
+    fn a_stale_attempt_is_abandoned_once_the_goal_leaves_its_failure_event() {
+        let blocked = failed(pursuing_goal(), 0x01);
+        let failure_event = blocked
+            .events()
+            .last()
+            .expect("the fixture has recorded events")
+            .ordinal();
+        let declared = model_blocked(automatically_resumed(blocked.clone()));
+
+        assert!(awaits_automatic_resumption(&blocked, failure_event));
+        assert!(!awaits_automatic_resumption(&declared, failure_event));
+    }
+
+    #[test]
+    fn the_automatic_resume_identity_is_derived_per_session_and_failure_event() {
+        let other_session = SessionId::from_uuid(Uuid::from_u128(0x5f));
+        let first = GoalEventOrdinal::new(NonZeroU64::MIN);
+        let second = GoalEventOrdinal::new(NonZeroU64::new(2).expect("two is positive"));
+
+        assert_eq!(
+            automatic_resume_command(fixture_session(), first),
+            automatic_resume_command(fixture_session(), first)
+        );
+        assert_ne!(
+            automatic_resume_command(fixture_session(), first),
+            automatic_resume_command(fixture_session(), second)
+        );
+        assert_ne!(
+            automatic_resume_command(fixture_session(), first),
+            automatic_resume_command(other_session, first)
+        );
+        assert_eq!(
+            automatic_resume_command(fixture_session(), first)
+                .into_uuid()
+                .get_version_num(),
+            8
+        );
     }
 
     #[test]
@@ -617,15 +1116,15 @@ mod tests {
     #[test]
     fn terminal_continuation_boundaries_surface_closed_errors() {
         let unknown_alias =
-            continuation_scheduled(GoalTurnContinuationOutcome::UnknownModelAlias {
+            continuation_disposition(GoalTurnContinuationOutcome::UnknownModelAlias {
                 alias: signalbox_domain::ModelAlias::from_uuid(Uuid::from_u128(0x51)),
             })
             .expect_err("an unavailable continuation alias is surfaced");
         let event_ordinal =
-            continuation_scheduled(GoalTurnContinuationOutcome::EventOrdinalExhausted)
+            continuation_disposition(GoalTurnContinuationOutcome::EventOrdinalExhausted)
                 .expect_err("event ordinal exhaustion is surfaced");
         let acceptance_position =
-            continuation_scheduled(GoalTurnContinuationOutcome::AcceptancePositionExhausted {
+            continuation_disposition(GoalTurnContinuationOutcome::AcceptancePositionExhausted {
                 last: signalbox_domain::SessionInputPosition::first(),
             })
             .expect_err("acceptance position exhaustion is surfaced");

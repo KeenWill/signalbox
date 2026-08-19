@@ -251,7 +251,12 @@ fn assert_execution_failure_blocked(goal: &Goal) {
         panic!("fixture goal must be blocked");
     };
     assert_eq!(*reason, GoalBlockedReasonKind::ExecutionFailure);
-    assert!(!need.as_str().is_empty());
+    // The first failure of a run is under the automatic-resumption budget, so
+    // the need text states the scheduled attempt rather than operator repair.
+    assert_eq!(
+        need.as_str(),
+        "The goal turn failed to execute and automatic resumption is scheduled. No operator action is required unless automatic resumption is exhausted."
+    );
 }
 
 #[track_caller]
