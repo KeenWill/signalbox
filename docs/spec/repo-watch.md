@@ -685,6 +685,39 @@ continuation. Goal blocking, achievement, or user stop rechecks release after
 pursuit ends. The append-only dispatch records identify the sessions responsible
 for the PR; no mutable assignment flag replaces them.
 
+**Implemented behavior.** Each obligation lineage carries a durable count of
+consecutive dispatches that ended without meeting it. Any requeue increments the
+count on the successor it owes, whatever ended the dispatch; sibling actions of
+one batch contribute one increment between them, because one batch is one
+attempt however many of its sessions terminate. A dispatch that converges owes
+no successor and leaves the lineage no count at all. Redispatching a counted
+lineage waits out a delay that starts at ten minutes after the first failed
+attempt and doubles per further consecutive failure to a one-hour ceiling. Six
+consecutive failed attempts park the obligation: it is excluded from dispatch,
+stamped with the time it parked, and readable in the
+`repo_watch_parked_dispatch_obligation` projection alongside its count, pull
+request, and the head it stalled on. Exclusion follows from the count rather
+than from the parking stamp, so an obligation past its budget is never
+dispatched even before its parking is recorded. The attempt budget and both
+delay bounds are compiled in and may only be lowered, never raised.
+
+**Implemented behavior.** Two things return a parked obligation to dispatch. An
+operator calls `repo_watch_release_parked_dispatch_obligation` with their
+identity, which restores the whole budget: an operator asking for another
+attempt is asking for the allowance a lineage that never failed would have.
+Otherwise the pull request must produce a fact that is new about it — an event
+carrying a head other than the one the obligation stalled on, or review
+activity. Matching events that are neither, such as a recomputed mergeable state
+or a label change, join the obligation's latest-state projection without
+restoring anything, so churn against an unchanged pull request buys no further
+attempts. Event content identity already refuses a replay of the same fact, so
+the same event never reaches that test twice. Every park and every release
+appends a journal row naming the count at the transition and, for a release, its
+operator or the event that caused it. Readiness in
+`repo_watch_outstanding_dispatch_obligation` excludes a parked obligation but
+does not model the delay between attempts, which the dispatch loader applies
+against constants no projection can see.
+
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies
 the ordinary parent-only stop to each generation-one goal it commissioned for
@@ -713,10 +746,11 @@ release clause independently; and names every failing clause in `blockers`.
 `repo_watch_outstanding_dispatch_obligation` projection. Each row identifies the
 repository, rule, singleton and pull request or stack root, first and latest
 matched events, collapsed count and timestamps, any occupying dispatch and its
-sessions, cooldown eligibility, and present readiness. Rule deactivation settles
-an obligation without dispatch rather than leaving permanently owed work for
-semantics that are no longer configured; terminal-target settlement likewise
-records why the obligation no longer remains owed.
+sessions, cooldown eligibility, present readiness, failed-attempt count, and
+parking stamp. Rule deactivation settles an obligation without dispatch rather
+than leaving permanently owed work for semantics that are no longer configured;
+terminal-target settlement likewise records why the obligation no longer remains
+owed.
 
 **Implemented behavior.** A newly configured rule activates immediately after
 the repository's current durable event tail, before its task polls, and consumes

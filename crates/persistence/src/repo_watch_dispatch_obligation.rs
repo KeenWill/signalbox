@@ -1,5 +1,7 @@
 //! Durable, singleton-collapsed work owed after repository-watch refusal.
 
+use std::time::Duration;
+
 use rust_decimal::Decimal;
 use signalbox_application::RepoWatchRuleEvaluationOutcome;
 use signalbox_domain::{
@@ -18,6 +20,110 @@ use crate::repo_watch_dispatch::{
     stored_rule_version,
 };
 
+// Consecutive dispatches of one obligation lineage that may end without meeting
+// it before the lineage stops being dispatched at all. Transient runner,
+// provider, and quota failures clear within an attempt or two; a lineage that
+// has spent six sessions on a pull request nothing has changed on is not going
+// to be finished by a seventh.
+const DISPATCH_ATTEMPT_BUDGET: u32 = 6;
+// Delay after the first failed attempt, doubling per further consecutive
+// failure. Below the interval at which a watched repository is polled the delay
+// would not separate attempts at all; well above it, a lineage recovering from
+// one transient failure would stall behind a delay nothing else needs.
+const DISPATCH_RETRY_BACKOFF_BASE: Duration = Duration::from_secs(10 * 60);
+// The doubling stops here, two doublings before the budget runs out, so the
+// last attempts of an exhausting lineage are spaced by this rather than by an
+// interval that keeps growing past the point of parking.
+const DISPATCH_RETRY_BACKOFF_CAP: Duration = Duration::from_secs(60 * 60);
+// Doublings are clamped so the shift the load query applies cannot overflow its
+// bigint, whatever attempt count storage holds.
+const DISPATCH_RETRY_MAX_DOUBLINGS: i64 = 30;
+// Longest operator identifier the park journal accepts, matching its column
+// constraint so an over-long value is refused before it reaches the database.
+const MAX_PARK_RELEASE_ACTOR_CHARS: usize = 200;
+
+/// Bound on how often one obligation lineage may be redispatched.
+///
+/// Every field is a ceiling: [`Self::lowered_to`] reduces one, nothing raises
+/// one, so no caller can widen what production runs under.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepoWatchDispatchRetryPolicy {
+    attempt_budget: u32,
+    backoff_base: Duration,
+    backoff_cap: Duration,
+}
+
+impl RepoWatchDispatchRetryPolicy {
+    pub const fn production() -> Self {
+        Self {
+            attempt_budget: DISPATCH_ATTEMPT_BUDGET,
+            backoff_base: DISPATCH_RETRY_BACKOFF_BASE,
+            backoff_cap: DISPATCH_RETRY_BACKOFF_CAP,
+        }
+    }
+
+    /// Takes the lower of each field and the argument.
+    ///
+    /// A budget of zero would park an obligation that has not yet failed once,
+    /// which is a different behavior rather than a smaller allowance, so one
+    /// attempt is the floor.
+    #[must_use]
+    pub fn lowered_to(
+        self,
+        attempt_budget: u32,
+        backoff_base: Duration,
+        backoff_cap: Duration,
+    ) -> Self {
+        Self {
+            attempt_budget: self.attempt_budget.min(attempt_budget).max(1),
+            backoff_base: self.backoff_base.min(backoff_base),
+            backoff_cap: self.backoff_cap.min(backoff_cap),
+        }
+    }
+
+    pub const fn attempt_budget(&self) -> u32 {
+        self.attempt_budget
+    }
+
+    pub const fn backoff_base(&self) -> Duration {
+        self.backoff_base
+    }
+
+    pub const fn backoff_cap(&self) -> Duration {
+        self.backoff_cap
+    }
+
+    fn stored_attempt_budget(&self) -> i64 {
+        i64::from(self.attempt_budget)
+    }
+
+    fn stored_backoff_base_seconds(&self) -> i64 {
+        stored_seconds(self.backoff_base)
+    }
+
+    fn stored_backoff_cap_seconds(&self) -> i64 {
+        stored_seconds(self.backoff_cap)
+    }
+}
+
+impl Default for RepoWatchDispatchRetryPolicy {
+    fn default() -> Self {
+        Self::production()
+    }
+}
+
+fn stored_seconds(value: Duration) -> i64 {
+    i64::try_from(value.as_secs()).unwrap_or(i64::MAX)
+}
+
+/// Outcome of an operator's request to return a parked obligation to dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchObligationParkRelease {
+    Released,
+    NotParked,
+    ActorRejected,
+}
+
 /// One latest-state delivery obligation retained after singleton refusal.
 #[derive(Clone, Debug)]
 pub struct RepoWatchDispatchObligation {
@@ -25,6 +131,7 @@ pub struct RepoWatchDispatchObligation {
     first_event_id: RepoWatchEventId,
     latest_event: RepoWatchEvent,
     matched_event_count: u64,
+    failed_attempts: u64,
     singleton: StoredSingletonKey,
 }
 
@@ -45,6 +152,11 @@ impl RepoWatchDispatchObligation {
         self.matched_event_count
     }
 
+    /// Consecutive dispatches of this lineage that ended without meeting it.
+    pub const fn failed_attempts(&self) -> u64 {
+        self.failed_attempts
+    }
+
     pub(crate) fn into_parts(self) -> (Uuid, RepoWatchEvent, StoredSingletonKey) {
         (self.id, self.latest_event, self.singleton)
     }
@@ -53,20 +165,90 @@ impl RepoWatchDispatchObligation {
 pub(crate) enum ObligationAdmission {
     Pending,
     Superseded,
+    Parked,
     Settled(RepoWatchRuleEvaluationOutcome),
 }
 
 impl PostgresRepoWatchDispatchStore {
+    /// Records the durable parked state of every lineage past its budget.
+    ///
+    /// Exclusion from dispatch does not depend on this having run: the load
+    /// below refuses an exhausted lineage whether or not its parking is
+    /// recorded yet. This is what makes the state operator-visible.
+    pub async fn park_exhausted_dispatch_obligations(
+        &self,
+        repository: &RepositorySlug,
+        rule_id: &RepoWatchRuleId,
+        rule_version: RepoWatchRuleVersion,
+        policy: RepoWatchDispatchRetryPolicy,
+    ) -> Result<u64, RepoWatchDispatchRepositoryError> {
+        let parked = sqlx::query(
+            "WITH exhausted AS (
+                 UPDATE repo_watch_dispatch_obligation AS obligation
+                    SET parked_at = clock_timestamp()
+                  WHERE obligation.repository = $1
+                    AND obligation.rule_id = $2
+                    AND obligation.rule_version = $3
+                    AND obligation.settled_kind IS NULL
+                    AND obligation.parked_at IS NULL
+                    AND obligation.failed_attempts >= $4
+                 RETURNING obligation.obligation_id, obligation.failed_attempts
+             )
+             SELECT repo_watch_record_dispatch_obligation_park_transition(
+                        exhausted.obligation_id,
+                        'parked',
+                        exhausted.failed_attempts,
+                        NULL::text,
+                        NULL::uuid,
+                        NULL::text
+                    )
+               FROM exhausted",
+        )
+        .bind(repository.as_str())
+        .bind(rule_id.as_str())
+        .bind(stored_rule_version(rule_version)?)
+        .bind(policy.stored_attempt_budget())
+        .fetch_all(self.pool())
+        .await?
+        .len();
+        Ok(u64::try_from(parked).unwrap_or(u64::MAX))
+    }
+
+    /// Returns one parked obligation to dispatch on an operator's say-so.
+    pub async fn release_parked_dispatch_obligation(
+        &self,
+        obligation: Uuid,
+        actor: &str,
+    ) -> Result<RepoWatchObligationParkRelease, RepoWatchDispatchRepositoryError> {
+        let actor_chars = actor.chars().count();
+        if actor_chars == 0 || actor_chars > MAX_PARK_RELEASE_ACTOR_CHARS {
+            return Ok(RepoWatchObligationParkRelease::ActorRejected);
+        }
+        let released: bool =
+            sqlx::query_scalar("SELECT repo_watch_release_parked_dispatch_obligation($1, $2)")
+                .bind(obligation)
+                .bind(actor)
+                .fetch_one(self.pool())
+                .await?;
+        if released {
+            Ok(RepoWatchObligationParkRelease::Released)
+        } else {
+            Ok(RepoWatchObligationParkRelease::NotParked)
+        }
+    }
+
     /// Loads the oldest outstanding obligation whose singleton and cooldown are free.
     pub async fn load_next_dispatch_obligation(
         &self,
         repository: &RepositorySlug,
         rule_id: &RepoWatchRuleId,
         rule_version: RepoWatchRuleVersion,
+        policy: RepoWatchDispatchRetryPolicy,
     ) -> Result<Option<RepoWatchDispatchObligation>, RepoWatchDispatchRepositoryError> {
         let row = sqlx::query(
             "SELECT obligation.obligation_id, obligation.first_event_id,
                     obligation.latest_event_id, obligation.matched_event_count,
+                    obligation.failed_attempts,
                     obligation.singleton_scope, obligation.singleton_repository,
                     obligation.singleton_pull_request_number,
                     obligation.singleton_stack_root_pull_request_number
@@ -75,6 +257,20 @@ impl PostgresRepoWatchDispatchStore {
                 AND obligation.rule_id = $2
                 AND obligation.rule_version = $3
                 AND obligation.settled_kind IS NULL
+                AND obligation.parked_at IS NULL
+                AND obligation.failed_attempts < $4
+                AND (
+                    obligation.last_failed_attempt_at IS NULL
+                    OR extract(epoch FROM (
+                            clock_timestamp() - obligation.last_failed_attempt_at
+                       )) >= LEAST(
+                            $5::bigint << LEAST(
+                                GREATEST(obligation.failed_attempts - 1, 0),
+                                $7::bigint
+                            )::integer,
+                            $6::bigint
+                       )
+                )
                 AND NOT EXISTS (
                     SELECT 1
                       FROM repo_watch_rule_deactivation AS deactivation
@@ -123,6 +319,10 @@ impl PostgresRepoWatchDispatchStore {
         .bind(repository.as_str())
         .bind(rule_id.as_str())
         .bind(stored_rule_version(rule_version)?)
+        .bind(policy.stored_attempt_budget())
+        .bind(policy.stored_backoff_base_seconds())
+        .bind(policy.stored_backoff_cap_seconds())
+        .bind(DISPATCH_RETRY_MAX_DOUBLINGS)
         .fetch_optional(self.pool())
         .await?;
         let Some(row) = row else {
@@ -137,6 +337,7 @@ impl PostgresRepoWatchDispatchStore {
                 "owed repository-watch event disappeared",
             ))?;
         let matched_event_count: i64 = row.try_get("matched_event_count")?;
+        let failed_attempts: i64 = row.try_get("failed_attempts")?;
         Ok(Some(RepoWatchDispatchObligation {
             id: row.try_get("obligation_id")?,
             first_event_id: RepoWatchEventId::from_uuid(row.try_get("first_event_id")?),
@@ -144,6 +345,11 @@ impl PostgresRepoWatchDispatchStore {
             matched_event_count: u64::try_from(matched_event_count).map_err(|_| {
                 RepoWatchDispatchRepositoryError::Corruption(
                     "owed repository-watch match count is invalid",
+                )
+            })?,
+            failed_attempts: u64::try_from(failed_attempts).map_err(|_| {
+                RepoWatchDispatchRepositoryError::Corruption(
+                    "owed repository-watch attempt count is invalid",
                 )
             })?,
             singleton: StoredSingletonKey {
@@ -200,34 +406,85 @@ pub(crate) async fn record_dispatch_obligation(
     rule_version: RepoWatchRuleVersion,
     singleton: &StoredSingletonKey,
 ) -> Result<(), RepoWatchDispatchRepositoryError> {
-    let updated = sqlx::query(
-        "UPDATE repo_watch_dispatch_obligation
-            SET repository = $1,
-                latest_event_id = $2,
-                matched_event_count = matched_event_count + 1,
-                blocking_dispatch_id = COALESCE($3, blocking_dispatch_id),
-                latest_match_at = clock_timestamp()
-          WHERE rule_id = $4
-            AND rule_version = $5
-            AND singleton_scope = $6
-            AND singleton_repository IS NOT DISTINCT FROM $7
-            AND singleton_pull_request_number IS NOT DISTINCT FROM $8
-            AND singleton_stack_root_pull_request_number IS NOT DISTINCT FROM $9
-            AND settled_kind IS NULL",
+    // A parked lineage is released by a fact that is new about the pull
+    // request, not by a fact that merely arrives: the head this obligation
+    // already carries moving on, or review activity against it. Anything else
+    // joins the obligation without restoring its budget, so label churn or a
+    // recomputed mergeable state cannot buy further attempts.
+    let active = sqlx::query(
+        "SELECT obligation.obligation_id,
+                obligation.failed_attempts,
+                obligation.parked_at IS NOT NULL AS parked,
+                (
+                    parked_state.head_sha IS DISTINCT FROM incoming.head_sha
+                    OR incoming.event_kind IN (
+                        'review_submitted', 'thread_opened', 'thread_resolved'
+                    )
+                ) AS releases_park
+           FROM repo_watch_dispatch_obligation AS obligation
+           LEFT JOIN repo_watch_event AS parked_state
+                  ON parked_state.event_id = obligation.latest_event_id
+           LEFT JOIN repo_watch_event AS incoming
+                  ON incoming.event_id = $7
+          WHERE obligation.rule_id = $1
+            AND obligation.rule_version = $2
+            AND obligation.singleton_scope = $3
+            AND obligation.singleton_repository IS NOT DISTINCT FROM $4
+            AND obligation.singleton_pull_request_number IS NOT DISTINCT FROM $5
+            AND obligation.singleton_stack_root_pull_request_number
+                 IS NOT DISTINCT FROM $6
+            AND obligation.settled_kind IS NULL
+            FOR UPDATE OF obligation",
     )
-    .bind(event.repository().as_str())
-    .bind(event.id().as_uuid())
-    .bind(blocking_dispatch.map(|value| *value.as_uuid()))
     .bind(rule_id.as_str())
     .bind(stored_rule_version(rule_version)?)
     .bind(repo_watch_singleton_scope_to_str(singleton.scope))
     .bind(singleton.repository.as_deref())
     .bind(singleton.pull_request)
     .bind(singleton.stack_root_pull_request)
-    .execute(&mut **transaction)
-    .await?
-    .rows_affected();
-    if updated == 1 {
+    .bind(event.id().as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if let Some(active) = active {
+        let obligation_id: Uuid = active.try_get("obligation_id")?;
+        let parked: bool = active.try_get("parked")?;
+        let releases_park = parked
+            && active
+                .try_get::<Option<bool>, _>("releases_park")?
+                .unwrap_or(false);
+        if releases_park {
+            let failed_attempts: i64 = active.try_get("failed_attempts")?;
+            sqlx::query(
+                "SELECT repo_watch_record_dispatch_obligation_park_transition(
+                            $1, 'released', $2, 'pull_request_progress', $3, NULL::text
+                        )",
+            )
+            .bind(obligation_id)
+            .bind(failed_attempts)
+            .bind(event.id().as_uuid())
+            .execute(&mut **transaction)
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE repo_watch_dispatch_obligation
+                SET repository = $1,
+                    latest_event_id = $2,
+                    matched_event_count = matched_event_count + 1,
+                    blocking_dispatch_id = COALESCE($3, blocking_dispatch_id),
+                    latest_match_at = clock_timestamp(),
+                    failed_attempts = CASE WHEN $5 THEN 0 ELSE failed_attempts END,
+                    last_failed_attempt_at =
+                        CASE WHEN $5 THEN NULL ELSE last_failed_attempt_at END,
+                    parked_at = CASE WHEN $5 THEN NULL ELSE parked_at END
+              WHERE obligation_id = $4",
+        )
+        .bind(event.repository().as_str())
+        .bind(event.id().as_uuid())
+        .bind(blocking_dispatch.map(|value| *value.as_uuid()))
+        .bind(obligation_id)
+        .bind(releases_park)
+        .execute(&mut **transaction)
+        .await?;
         return Ok(());
     }
     let blocking_dispatch =
@@ -272,6 +529,11 @@ pub(crate) async fn load_obligation_admission(
     let latest_event: Uuid = row.try_get("latest_event_id")?;
     if latest_event != *event.as_uuid() {
         return Ok(ObligationAdmission::Superseded);
+    }
+    // The handle admission holds was read before this transaction opened, so
+    // the parked state is rechecked here rather than trusted from the load.
+    if row.try_get::<bool, _>("parked")? {
+        return Ok(ObligationAdmission::Parked);
     }
     let settled_kind: Option<String> = row.try_get("settled_kind")?;
     let Some(settled_kind) = settled_kind else {
@@ -403,4 +665,62 @@ pub(crate) async fn settle_dispatch_obligation(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::RepoWatchDispatchRetryPolicy;
+
+    #[test]
+    fn a_lower_argument_replaces_every_production_bound() {
+        let lowered = RepoWatchDispatchRetryPolicy::production().lowered_to(
+            2,
+            Duration::from_secs(1),
+            Duration::from_secs(4),
+        );
+
+        assert_eq!(lowered.attempt_budget(), 2);
+        assert_eq!(lowered.backoff_base(), Duration::from_secs(1));
+        assert_eq!(lowered.backoff_cap(), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn a_higher_argument_leaves_every_production_bound_in_place() {
+        let production = RepoWatchDispatchRetryPolicy::production();
+
+        let raised = production.lowered_to(
+            u32::MAX,
+            Duration::from_secs(u64::from(u32::MAX)),
+            Duration::from_secs(u64::from(u32::MAX)),
+        );
+
+        assert_eq!(raised, production);
+    }
+
+    /// Zero attempts would park an obligation that has never been dispatched,
+    /// which is a different behavior rather than a tighter bound.
+    #[test]
+    fn a_budget_below_one_attempt_is_refused() {
+        let lowered = RepoWatchDispatchRetryPolicy::production().lowered_to(
+            0,
+            Duration::ZERO,
+            Duration::ZERO,
+        );
+
+        assert_eq!(lowered.attempt_budget(), 1);
+    }
+
+    /// The cap has to bind before the budget runs out, or nothing ever reaches
+    /// it and the backoff is a plain doubling with a dead ceiling.
+    #[test]
+    fn the_backoff_cap_binds_before_the_attempt_budget_is_spent() {
+        let production = RepoWatchDispatchRetryPolicy::production();
+
+        let uncapped_final_delay =
+            production.backoff_base() * 2_u32.pow(production.attempt_budget().saturating_sub(2));
+
+        assert!(uncapped_final_delay > production.backoff_cap());
+    }
 }

@@ -53,7 +53,9 @@ use signalbox_persistence::repo_watch::{
 use signalbox_persistence::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
 };
-use signalbox_persistence::repo_watch_dispatch_obligation::RepoWatchDispatchObligation;
+use signalbox_persistence::repo_watch_dispatch_obligation::{
+    RepoWatchDispatchObligation, RepoWatchDispatchRetryPolicy,
+};
 use signalbox_persistence::repo_watch_webhook::{
     PendingRepoWatchWebhookDelivery, PostgresRepoWatchWebhookStore, RepoWatchWebhookDeliveryKey,
     RepoWatchWebhookDisposition, RepoWatchWebhookParityCauseV1, RepoWatchWebhookPendingPageSize,
@@ -2221,9 +2223,33 @@ impl RepositoryWatchTask {
                     .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
                 self.nudge_dispatched_sessions(&outcome);
             }
+            let parked = self
+                .dispatch_store
+                .park_exhausted_dispatch_obligations(
+                    &self.repository,
+                    rule.id(),
+                    rule.version(),
+                    RepoWatchDispatchRetryPolicy::production(),
+                )
+                .await
+                .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+            if parked > 0 {
+                tracing::warn!(
+                    repository = self.repository.as_str(),
+                    rule = rule.id().as_str(),
+                    parked,
+                    "repository-watch dispatch obligations spent their attempt budget \
+                     and are parked until released"
+                );
+            }
             while let Some(obligation) = self
                 .dispatch_store
-                .load_next_dispatch_obligation(&self.repository, rule.id(), rule.version())
+                .load_next_dispatch_obligation(
+                    &self.repository,
+                    rule.id(),
+                    rule.version(),
+                    RepoWatchDispatchRetryPolicy::production(),
+                )
                 .await
                 .map_err(|_| RepositoryWatchAttemptError::Persistence)?
             {

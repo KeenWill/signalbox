@@ -31,7 +31,8 @@ pub(crate) const PROGRAM_JOURNAL_SEQUENCE: &str = "SELECT
   FOR UPDATE";
 
 pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION: &str =
-    "SELECT latest_event_id, settled_kind, settled_dispatch_id
+    "SELECT latest_event_id, settled_kind, settled_dispatch_id,
+            parked_at IS NOT NULL AS parked
        FROM repo_watch_dispatch_obligation
       WHERE obligation_id = $1
       FOR UPDATE";

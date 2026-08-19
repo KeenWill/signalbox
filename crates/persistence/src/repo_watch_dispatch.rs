@@ -774,7 +774,10 @@ impl PostgresRepoWatchDispatchStore {
                         .await?
                         {
                             ObligationAdmission::Pending => {}
-                            ObligationAdmission::Superseded => {
+                            // Parking withholds the obligation rather than
+                            // settling it, so it reads as unfinished work no
+                            // dispatch currently owns.
+                            ObligationAdmission::Superseded | ObligationAdmission::Parked => {
                                 transaction.rollback().await?;
                                 return Ok(RepoWatchRuleEvaluationOutcome::Occupied);
                             }
