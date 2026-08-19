@@ -1349,12 +1349,17 @@ claiming general secret detection.
 
 `crates/application/src/operator_failure.rs` defines the one closed
 operator-facing failure classification shared by application services, the
-persistence adapters, and signalboxd telemetry: five scheduling, model-call, and
-tool-loop error families (startup scan, turn activation, eligibility sweep,
-model-call repository, and tool-loop repository) map into `OperatorFailureClass`
-through the `ClassifyOperatorFailure` trait, exposing a user-content-free
-classification to shared telemetry while the underlying error keeps its
-diagnostic detail internally. The four classes:
+persistence adapters, and signalboxd telemetry: six scheduling, model-call,
+tool-loop, and liveness error families (startup scan, turn activation,
+eligibility sweep, model-call repository, tool-loop repository, and turn
+liveness) map into `OperatorFailureClass` through the `ClassifyOperatorFailure`
+trait, exposing a user-content-free classification to shared telemetry while the
+underlying error keeps its diagnostic detail internally. The turn-liveness
+family was verified against this PR (`agent/turn-liveness-watchdog`); it
+separates a failed inventory read, which is a pass that decided nothing, from a
+failed terminalization, which is a decision that could not be carried out, and
+forwards the shared failed-turn transition's own classification unchanged when
+that transition is what refused. The four classes:
 
 - **`Infrastructure { commit_ambiguous }`** — the operation could not complete;
   the flag marks failures whose transaction fate is unknown (commit-ambiguity

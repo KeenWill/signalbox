@@ -19,6 +19,10 @@ The deployment-owned scheduler pass limit is verified against this PR
 Tool-attempt reconciliation predecessor replay was verified against this PR
 (`agent/tool-reconciliation-origin-replay`).
 
+The turn-liveness watchdog — its quiescent predicate, repeated-observation
+staleness, drained rotation, and reuse of the failed-turn transition — was
+verified against this PR (`agent/turn-liveness-watchdog`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -490,16 +494,19 @@ strength of its earlier silence. That ledger is process-local and carries no
 authority: losing it to a restart costs one more bound before a wedged turn is
 reached, which is the direction that cannot end live work.
 
-**Coverage.** One scan reads a bounded page ordered by session, so a population
-larger than a page is walked across passes: a full page advances a session-keyed
-cursor and the next scan resumes past it, and any other page restarts the
-rotation. Forgetting is tied to that coverage. A scan that began at the first
-turn and did not fill its page saw the whole population, so a turn missing from
-it has left the quiescent shape and is forgotten rather than credited on its
-return. A scan that saw only one page of a rotation forgets nothing, because
-absence from it means only that the turn lies outside this page — forgetting
-there would restart every turn's bound once per rotation and no turn past the
-first page could ever come due.
+**Coverage.** One scan observes the whole quiescent population, so the bound is
+a property of the binary rather than of how many sessions happen to be
+quiescent. Reads are paged to bound the size of one statement's result — a full
+page carries the session-keyed cursor the next read resumes strictly past, and
+an underfilled page is the end of the rotation — but the scan drains that
+rotation before deciding anything. Paging across scans instead would make the
+time to reach a turn scale with the population, which is exactly what the bound
+must not depend on. Every turn is therefore observed on every scan, and a turn
+missing from one has left the quiescent shape: it is forgotten rather than
+credited on its return, which is also what keeps the ledger the size of the
+present population. A rotation that cannot be drained — an unreadable page, or
+one that fails to converge within its page ceiling — ends the scan with no
+decision and the ledger unchanged, rather than deciding on a partial population.
 
 **Constants.** The staleness bound is a hard safety ceiling of 30 minutes and
 the scan interval is one minute; both are compiled in. Configuration may lower
@@ -527,8 +534,7 @@ records its requeue obligation without this pass naming either.
 cause code `turn_liveness_watchdog_stale` with the session, the turn, and the
 bound in force. The durable record is the ordinary `TurnFailed` shape, which has
 no cause column, so a watchdog-ended turn is not durably distinguishable from a
-restart-recovered one. Closing that gap is deferred to whichever change first
-gives a terminal turn a stored cause.
+restart-recovered one.
 
 ## Startup scan and recovery
 
@@ -1161,6 +1167,10 @@ from child transcript state nor depend on process-local wake memory.
   construct. Resolving the ambiguity itself from provider evidence remains an
   [open question](../open-questions.md#turn-lifecycle); the tool-attempt
   ambiguity wait keeps its own operator surface deferred with that question.
+- Whether a terminal turn carries a durable cause, which would separate a
+  watchdog-ended turn from a restart-recovered one in the rows rather than only
+  in the operator log, is an
+  [open question](../open-questions.md#turn-lifecycle).
 - Per-session scan gating, sweep interval, and fairness tuning remain
   operational open questions; the process-wide advisory singleton guard is
   specified by [process-protocol](process-protocol.md).

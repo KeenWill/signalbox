@@ -34,6 +34,21 @@ const STALE_TURN_TERMINAL_CAUSE: &str = "turn_liveness_watchdog_stale";
 /// Why one turn-liveness pass produced no decision.
 const PASS_FAILURE_CAUSE: &str = "turn_liveness_pass_failed";
 
+/// Why a rotation was abandoned without deciding anything.
+const ROTATION_CEILING_CAUSE: &str = "turn_liveness_rotation_ceiling_reached";
+
+/// How many pages one scan may read before abandoning its rotation.
+///
+/// The rotation terminates on its own — sessions are distinct and the cursor
+/// advances strictly — so this is not what ends the loop. It is the fail-safe
+/// against a rotation that does not converge, and it is set where reaching it
+/// is itself the defect: at the page size it multiplies to roughly a million
+/// simultaneously quiescent turns, which the session population cannot reach
+/// before something else has failed. A scan that reaches it decides nothing
+/// rather than deciding on a partial population.
+// numeric-bound: ceiling - bounds one scan's reads against a non-converging rotation
+const QUIESCENT_ROTATION_PAGE_CEILING: usize = 4_096;
+
 /// What woke the supervising loop.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TurnLivenessWake {
@@ -79,18 +94,12 @@ impl TurnLivenessRuntime {
         let mut ticker = interval(self.scan_interval.get());
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut ledger = TurnLivenessLedger::new(self.staleness_bound);
-        let mut cursor: Option<SessionId> = None;
         loop {
             match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
                 TurnLivenessWake::Shutdown => return,
                 TurnLivenessWake::Scan => {
-                    cursor = reconcile_turn_liveness(
-                        &self.repository,
-                        &mut ledger,
-                        cursor,
-                        self.staleness_bound,
-                    )
-                    .await;
+                    reconcile_turn_liveness(&self.repository, &mut ledger, self.staleness_bound)
+                        .await;
                 }
             }
         }
@@ -123,29 +132,55 @@ async fn next_turn_liveness_wake(
 
 /// Folds one durable observation into the ledger and acts on what is due.
 ///
-/// Returns the cursor the next pass resumes from: a saturated page leaves the
-/// rotation partway through the population, and any other page restarts it.
+/// The whole rotation is drained before anything is decided. Paging across
+/// wakes instead would tie the time to reach a turn to the population size,
+/// and the staleness bound is a property of the binary, not of how many
+/// sessions happen to be quiescent.
 async fn reconcile_turn_liveness(
     repository: &PostgresTurnLivenessRepository,
     ledger: &mut TurnLivenessLedger,
-    cursor: Option<SessionId>,
     staleness_bound: StaleActiveTurnBound,
-) -> Option<SessionId> {
-    let page = match repository.quiescent_active_turns(cursor).await {
-        Ok(page) => page,
-        // An unreadable inventory is not evidence that anything is stale, so
-        // the pass ends without a decision, the ledger keeps what it had, and
-        // the rotation restarts rather than skipping past unread turns.
-        Err(error) => {
-            report_turn_liveness_failure(&error);
-            return None;
-        }
+) {
+    // A rotation that could not be drained is not a smaller population; the
+    // pass therefore ends without a decision and the ledger keeps what it had,
+    // rather than forgetting every turn the unread pages would have carried.
+    let Some(quiescent) = drain_quiescent_rotation(repository).await else {
+        return;
     };
-    let due = ledger.reconcile(page.candidates(), page.coverage(), Instant::now());
+    let due = ledger.reconcile(&quiescent, Instant::now());
     for candidate in due {
         terminalize_stale_turn(repository, candidate, staleness_bound).await;
     }
-    page.resume_after()
+}
+
+/// Reads pages until the rotation ends, or reports why it could not.
+async fn drain_quiescent_rotation(
+    repository: &PostgresTurnLivenessRepository,
+) -> Option<Vec<StaleTurnCandidate>> {
+    let mut quiescent = Vec::new();
+    let mut cursor: Option<SessionId> = None;
+    for _ in 0..QUIESCENT_ROTATION_PAGE_CEILING {
+        let page = match repository.quiescent_active_turns(cursor).await {
+            Ok(page) => page,
+            // An unreadable inventory is not evidence that anything is stale.
+            Err(error) => {
+                report_turn_liveness_failure(&error);
+                return None;
+            }
+        };
+        cursor = page.resume_after();
+        quiescent.extend(page.into_candidates());
+        if cursor.is_none() {
+            return Some(quiescent);
+        }
+    }
+    tracing::warn!(
+        cause_code = ROTATION_CEILING_CAUSE,
+        page_ceiling = QUIESCENT_ROTATION_PAGE_CEILING,
+        observed_turns = quiescent.len(),
+        "turn-liveness rotation did not end within its page ceiling"
+    );
+    None
 }
 
 async fn terminalize_stale_turn(
@@ -190,7 +225,8 @@ fn report_turn_liveness_failure(error: &TurnLivenessRepositoryError) {
 #[cfg(test)]
 mod tests {
     use super::{
-        PASS_FAILURE_CAUSE, STALE_TURN_TERMINAL_CAUSE, TurnLivenessWake, next_turn_liveness_wake,
+        PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, ROTATION_CEILING_CAUSE,
+        STALE_TURN_TERMINAL_CAUSE, TurnLivenessWake, next_turn_liveness_wake,
     };
     use signalbox_application::StaleActiveTurnBound;
     use std::time::Duration;
@@ -247,6 +283,11 @@ mod tests {
     fn the_watchdog_cause_codes_are_distinct() {
         assert_eq!(STALE_TURN_TERMINAL_CAUSE, "turn_liveness_watchdog_stale");
         assert_eq!(PASS_FAILURE_CAUSE, "turn_liveness_pass_failed");
+        assert_eq!(
+            ROTATION_CEILING_CAUSE,
+            "turn_liveness_rotation_ceiling_reached"
+        );
+        assert_eq!(QUIESCENT_ROTATION_PAGE_CEILING, 4_096);
     }
 
     /// The bound reported beside a terminalized turn is the configured one, so

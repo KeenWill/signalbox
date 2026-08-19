@@ -102,6 +102,17 @@ specification diff. Accepted cross-component and wire contracts live in the
   provider request-status API — with its polling posture and evidence classes —
   as the resolution path; the full analysis is in git history. Later scope.
   (S02)
+- **Durable terminal cause for a failed turn.** The turn-liveness watchdog and
+  startup recovery commit the identical failed-turn transition
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)),
+  which is what keeps every terminal trigger firing for both, but the
+  `TurnFailed` shape carries no cause column — so the two are distinguishable
+  only in the operator log, and only while it is retained. Whether a terminal
+  turn should carry a stored cause, and whether that vocabulary is shared with
+  the operator cause codes or separate from them, is undecided; adding one is a
+  migration on a table several transitions write. Leaning: a cause belongs in
+  the rows, because an operator reconstructing why a session stopped should not
+  depend on log retention. Later scope. (S02, S07)
 - **Direct interrupt-only reconciliation from a running attempt.**
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) adds
   direct reconciliation only for fatal mismatch at a closed aggregate boundary;

@@ -170,8 +170,8 @@ pub use tool_loop_ports::{
     ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
 };
 pub use turn_liveness::{
-    QuiescentScanCoverage, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
-    TurnLivenessBoundError, TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
+    StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessBoundError,
+    TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
 };
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,

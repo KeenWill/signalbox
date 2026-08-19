@@ -202,20 +202,6 @@ pub enum StaleTurnOutcome {
     Superseded,
 }
 
-/// How much of the quiescent population one scan actually saw.
-///
-/// An inventory read is paged, so absence from its result means "not in this
-/// page" as often as it means "no longer quiescent". Only a scan that covered
-/// the whole population can distinguish them, and only that scan is allowed to
-/// forget a turn.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum QuiescentScanCoverage {
-    /// The scan started at the first turn and reached the last one.
-    Complete,
-    /// The scan saw one page of a larger rotation.
-    Partial,
-}
-
 /// Remembers how long each quiescent turn has stood still.
 ///
 /// The ledger is in-process state with no authority: losing it costs one more
@@ -257,27 +243,22 @@ impl TurnLivenessLedger {
         self.quiescent.len()
     }
 
-    /// Folds one scan into the ledger and returns the turns now due.
+    /// Folds one complete observation into the ledger and returns what is due.
     ///
-    /// A turn whose evidence differs from the last observation restarts its
-    /// bound: progress must reset the clock. A turn absent from the scan is
-    /// forgotten only when the scan was [`QuiescentScanCoverage::Complete`], so
-    /// that a turn which left the quiescent shape carries no credit back into
-    /// it, while a turn merely outside this page of a rotation keeps the time
-    /// it has already accrued. Forgetting on a partial scan would restart every
-    /// turn's bound once per rotation and no turn past the first page could
-    /// ever come due.
+    /// `quiescent` is the whole quiescent population, not a page of it: the
+    /// caller drains its rotation before reconciling, because a ledger fed
+    /// pages could neither forget a departed turn nor accumulate a bound for a
+    /// turn outside the current page. A turn whose evidence differs from the
+    /// last observation restarts its bound — progress must reset the clock —
+    /// and a turn absent from this scan is forgotten, since it left the
+    /// quiescent shape and must carry no credit into a later quiescent period.
     pub fn reconcile(
         &mut self,
         quiescent: &[StaleTurnCandidate],
-        coverage: QuiescentScanCoverage,
         now: Instant,
     ) -> Box<[StaleTurnCandidate]> {
         let bound = self.bound.get();
-        let mut retained = match coverage {
-            QuiescentScanCoverage::Complete => HashMap::with_capacity(quiescent.len()),
-            QuiescentScanCoverage::Partial => self.quiescent.clone(),
-        };
+        let mut retained = HashMap::with_capacity(quiescent.len());
         let mut due = Vec::new();
         for candidate in quiescent {
             let evidence = candidate.evidence();
@@ -298,8 +279,8 @@ impl TurnLivenessLedger {
 #[cfg(test)]
 mod tests {
     use super::{
-        QuiescentScanCoverage, StaleActiveTurnBound, StaleTurnCandidate, TurnLivenessBoundError,
-        TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
+        StaleActiveTurnBound, StaleTurnCandidate, TurnLivenessBoundError, TurnLivenessEvidence,
+        TurnLivenessLedger, TurnLivenessScanInterval,
     };
     use signalbox_domain::{ModelCallId, SessionId, TurnAttemptId, TurnId};
     use std::time::Duration;
@@ -373,11 +354,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(60 * 60)).await;
         let mut ledger = ledger();
 
-        let due = ledger.reconcile(
-            &[candidate(1)],
-            QuiescentScanCoverage::Complete,
-            Instant::now(),
-        );
+        let due = ledger.reconcile(&[candidate(1)], Instant::now());
 
         assert_eq!(due.len(), 0);
         assert_eq!(ledger.watched_turn_count(), 1);
@@ -387,18 +364,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn unchanged_evidence_across_the_bound_becomes_due() {
         let mut ledger = ledger();
-        let first = ledger.reconcile(
-            &[candidate(1)],
-            QuiescentScanCoverage::Complete,
-            Instant::now(),
-        );
+        let first = ledger.reconcile(&[candidate(1)], Instant::now());
         tokio::time::advance(BOUND).await;
 
-        let second = ledger.reconcile(
-            &[candidate(1)],
-            QuiescentScanCoverage::Complete,
-            Instant::now(),
-        );
+        let second = ledger.reconcile(&[candidate(1)], Instant::now());
 
         assert_eq!(first.len(), 0);
         assert_eq!(second.len(), 1);
@@ -410,24 +379,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn changed_evidence_restarts_the_bound() {
         let mut ledger = ledger();
-        let _ = ledger.reconcile(
-            &[candidate(1)],
-            QuiescentScanCoverage::Complete,
-            Instant::now(),
-        );
+        let _ = ledger.reconcile(&[candidate(1)], Instant::now());
         tokio::time::advance(BOUND - Duration::from_secs(1)).await;
-        let _ = ledger.reconcile(
-            &[candidate(2)],
-            QuiescentScanCoverage::Complete,
-            Instant::now(),
-        );
+        let _ = ledger.reconcile(&[candidate(2)], Instant::now());
         tokio::time::advance(BOUND - Duration::from_secs(1)).await;
 
-        let due = ledger.reconcile(
-            &[candidate(2)],
-            QuiescentScanCoverage::Complete,
-            Instant::now(),
-        );
+        let due = ledger.reconcile(&[candidate(2)], Instant::now());
 
         assert_eq!(due.len(), 0);
     }
@@ -437,51 +394,31 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_complete_scan_forgets_an_absent_turn() {
         let mut ledger = ledger();
-        let _ = ledger.reconcile(
-            &[candidate(1)],
-            QuiescentScanCoverage::Complete,
-            Instant::now(),
-        );
+        let _ = ledger.reconcile(&[candidate(1)], Instant::now());
         tokio::time::advance(BOUND - Duration::from_secs(1)).await;
-        let _ = ledger.reconcile(&[], QuiescentScanCoverage::Complete, Instant::now());
+        let _ = ledger.reconcile(&[], Instant::now());
         tokio::time::advance(BOUND - Duration::from_secs(1)).await;
 
-        let due = ledger.reconcile(
-            &[candidate(1)],
-            QuiescentScanCoverage::Complete,
-            Instant::now(),
-        );
+        let due = ledger.reconcile(&[candidate(1)], Instant::now());
 
         assert_eq!(due.len(), 0);
         assert_eq!(ledger.watched_turn_count(), 1);
     }
 
-    /// A turn outside this page of a rotation keeps the time it has accrued,
-    /// so a population larger than one page still terminalizes on schedule.
+    /// Every turn in the scan accrues its own bound, and only the turns this
+    /// scan no longer reports are pruned — one scan carries the whole
+    /// population, so neither outcome depends on how large it is.
     #[tokio::test(start_paused = true)]
-    async fn a_partial_scan_keeps_a_turn_it_did_not_page_in() {
+    async fn each_scanned_turn_accrues_its_own_bound_and_departures_are_pruned() {
         let mut ledger = ledger();
-        let _ = ledger.reconcile(
-            &[candidate(1)],
-            QuiescentScanCoverage::Partial,
-            Instant::now(),
-        );
+        let _ = ledger.reconcile(&[candidate(1), other_candidate()], Instant::now());
         tokio::time::advance(BOUND).await;
-        let other = ledger.reconcile(
-            &[other_candidate()],
-            QuiescentScanCoverage::Partial,
-            Instant::now(),
-        );
 
-        let due = ledger.reconcile(
-            &[candidate(1)],
-            QuiescentScanCoverage::Partial,
-            Instant::now(),
-        );
+        let due = ledger.reconcile(&[candidate(1)], Instant::now());
 
-        assert_eq!(other.len(), 0);
-        assert_eq!(ledger.watched_turn_count(), 2);
         assert_eq!(due.first().copied(), Some(candidate(1)));
+        assert_eq!(due.len(), 1);
+        assert_eq!(ledger.watched_turn_count(), 1);
     }
 
     /// The validated lowered bound is the one the ledger decides by, so a
@@ -491,18 +428,10 @@ mod tests {
         let lowered =
             StaleActiveTurnBound::try_lowered(Duration::from_secs(60)).expect("60s is below 30m");
         let mut ledger = TurnLivenessLedger::new(lowered);
-        let _ = ledger.reconcile(
-            &[candidate(1)],
-            QuiescentScanCoverage::Complete,
-            Instant::now(),
-        );
+        let _ = ledger.reconcile(&[candidate(1)], Instant::now());
         tokio::time::advance(Duration::from_secs(60)).await;
 
-        let due = ledger.reconcile(
-            &[candidate(1)],
-            QuiescentScanCoverage::Complete,
-            Instant::now(),
-        );
+        let due = ledger.reconcile(&[candidate(1)], Instant::now());
 
         assert_eq!(ledger.bound(), lowered);
         assert_eq!(due.first().copied(), Some(candidate(1)));

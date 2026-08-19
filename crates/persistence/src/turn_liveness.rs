@@ -12,8 +12,8 @@
 use std::{error::Error, fmt};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, OperatorFailureClass, QuiescentScanCoverage, StaleTurnCandidate,
-    StaleTurnOutcome, TurnLivenessEvidence,
+    ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StaleTurnOutcome,
+    TurnLivenessEvidence,
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, ModelCallId,
@@ -33,11 +33,10 @@ use crate::submit_input::load_scheduling_projection;
 
 /// How many quiescent turns one inventory read returns.
 ///
-/// This bounds the work one scan does, not how much of the population the pass
-/// can reach: a saturated page advances a session-keyed cursor so the next scan
-/// resumes past it, and the ledger keeps what a partial page did not revisit.
-/// Coverage latency is therefore one pass per page of the population, and every
-/// turn is observed however large that population grows.
+/// This bounds the size of one statement's result, not how much of the
+/// population a scan reaches: the caller drains its whole rotation before
+/// deciding anything, so every turn is observed on every scan and the staleness
+/// bound holds whatever the population is.
 const QUIESCENT_INVENTORY_PAGE_SIZE: i64 = 256;
 
 /// Infrastructure or integrity failure while supervising turn liveness.
@@ -159,7 +158,7 @@ impl PostgresTurnLivenessRepository {
         let candidates = read_quiescent_active_turns(&mut connection, None, after)
             .await
             .map_err(TurnLivenessRepositoryError::Inventory)?;
-        Ok(QuiescentActiveTurnPage::new(candidates, after))
+        Ok(QuiescentActiveTurnPage::new(candidates))
     }
 
     /// Terminalizes one observed-stale turn as failed under the session locks.
@@ -205,34 +204,30 @@ impl PostgresTurnLivenessRepository {
     }
 }
 
-/// One page of the quiescent inventory, with what the page covered.
+/// One page of the quiescent inventory, and where the rotation continues.
 #[derive(Clone, Debug)]
 pub struct QuiescentActiveTurnPage {
     candidates: Box<[StaleTurnCandidate]>,
-    coverage: QuiescentScanCoverage,
     resume_after: Option<SessionId>,
 }
 
 impl QuiescentActiveTurnPage {
-    /// Derives coverage and the next cursor from one page and its start.
+    /// Derives the continuation cursor from one page.
     ///
-    /// A page is the whole population only when it started at the beginning and
-    /// did not fill: a full page may have left rows behind it, and a page that
-    /// resumed mid-rotation says nothing about the turns before its cursor.
-    fn new(candidates: Box<[StaleTurnCandidate]>, after: Option<SessionId>) -> Self {
-        let saturated =
+    /// A page that filled may have rows behind it, so it carries the cursor to
+    /// resume past; a page that did not fill is the end of the rotation and
+    /// carries none. Sessions in the result are distinct, because the schema
+    /// admits one active turn per session, and the statement resumes strictly
+    /// past the cursor — so a rotation driven by these cursors advances on
+    /// every page and terminates.
+    fn new(candidates: Box<[StaleTurnCandidate]>) -> Self {
+        let filled =
             i64::try_from(candidates.len()).unwrap_or(i64::MAX) >= QUIESCENT_INVENTORY_PAGE_SIZE;
-        let coverage = if after.is_none() && !saturated {
-            QuiescentScanCoverage::Complete
-        } else {
-            QuiescentScanCoverage::Partial
-        };
-        let resume_after = saturated
+        let resume_after = filled
             .then(|| candidates.last().map(|last| last.session()))
             .flatten();
         Self {
             candidates,
-            coverage,
             resume_after,
         }
     }
@@ -242,12 +237,12 @@ impl QuiescentActiveTurnPage {
         &self.candidates
     }
 
-    /// Returns whether this page was the whole quiescent population.
-    pub const fn coverage(&self) -> QuiescentScanCoverage {
-        self.coverage
+    /// Consumes the page, yielding the turns it observed.
+    pub fn into_candidates(self) -> Box<[StaleTurnCandidate]> {
+        self.candidates
     }
 
-    /// Returns the cursor the next scan resumes from, or `None` to restart.
+    /// Returns the cursor the rotation continues from, `None` at its end.
     pub const fn resume_after(&self) -> Option<SessionId> {
         self.resume_after
     }
@@ -416,35 +411,102 @@ async fn terminalize_in_transaction(
     let scheduling = load_scheduling_projection(connection, session)
         .await
         .map_err(map_scheduling_error)?;
-    let prepared = match scheduling.prepare_active_turn_lost_failure(identities) {
-        Ok(prepared) => prepared,
-        // Every refusal is a shape the locked predicate said was absent, so
-        // none of them can be answered by forcing the transition. Reporting
-        // the turn as superseded leaves it for the next pass, which is the
-        // direction that cannot end live work.
-        Err(error) => match error.failure() {
-            AcceptedInputTurnFailureFailure::NoActiveTurn
-            | AcceptedInputTurnFailureFailure::PendingSteering { .. }
-            | AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
-            | AcceptedInputTurnFailureFailure::ActiveStartMissing
-            | AcceptedInputTurnFailureFailure::StartingSnapshotMissing
-            | AcceptedInputTurnFailureFailure::TerminalFrontierCannotAppend => {
-                return Ok(StaleTurnOutcome::Superseded);
-            }
-            AcceptedInputTurnFailureFailure::FailureEntryIdentityAlreadyExists => {
-                return Err(StartupScanRepositoryError::IdentityCollision(
-                    StartupScanIdentityCollision::FailureEntry,
-                )
-                .into());
-            }
-            AcceptedInputTurnFailureFailure::TerminalFrontierIdentityAlreadyExists => {
-                return Err(StartupScanRepositoryError::IdentityCollision(
-                    StartupScanIdentityCollision::TerminalFrontier,
-                )
-                .into());
-            }
-        },
-    };
+    let prepared =
+        match scheduling.prepare_active_turn_lost_failure(identities) {
+            Ok(prepared) => prepared,
+            // This is the identical transition startup recovery prepares, so it is
+            // classified identically: only a turn that is no longer active is a
+            // concurrent departure. Every other refusal contradicts something the
+            // locked predicate proved absent moments earlier, in the same
+            // transaction, under the same locks — a projection that disagrees with
+            // the rows it was built from is inconsistent durable state, not a race.
+            // Reporting those as supersession would retry them silently forever
+            // while the slot stayed wedged, which is exactly the failure this pass
+            // exists to end.
+            Err(error) => match error.failure() {
+                AcceptedInputTurnFailureFailure::NoActiveTurn => {
+                    return Ok(StaleTurnOutcome::Superseded);
+                }
+                AcceptedInputTurnFailureFailure::PendingSteering { .. }
+                | AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
+                | AcceptedInputTurnFailureFailure::ActiveStartMissing
+                | AcceptedInputTurnFailureFailure::StartingSnapshotMissing
+                | AcceptedInputTurnFailureFailure::TerminalFrontierCannotAppend => {
+                    return Err(StartupScanRepositoryError::from(
+                        StartupScanCorruption::Inconsistent("active failure preparation"),
+                    )
+                    .into());
+                }
+                AcceptedInputTurnFailureFailure::FailureEntryIdentityAlreadyExists => {
+                    return Err(StartupScanRepositoryError::IdentityCollision(
+                        StartupScanIdentityCollision::FailureEntry,
+                    )
+                    .into());
+                }
+                AcceptedInputTurnFailureFailure::TerminalFrontierIdentityAlreadyExists => {
+                    return Err(StartupScanRepositoryError::IdentityCollision(
+                        StartupScanIdentityCollision::TerminalFrontier,
+                    )
+                    .into());
+                }
+            },
+        };
     insert_prepared_failure(connection, prepared).await?;
     Ok(StaleTurnOutcome::Terminalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{QUIESCENT_INVENTORY_PAGE_SIZE, QuiescentActiveTurnPage};
+    use signalbox_application::{StaleTurnCandidate, TurnLivenessEvidence};
+    use signalbox_domain::{SessionId, TurnAttemptId, TurnId};
+    use sqlx::types::Uuid;
+
+    fn candidate(session: u128) -> StaleTurnCandidate {
+        StaleTurnCandidate::new(
+            SessionId::from_uuid(Uuid::from_u128(session)),
+            TurnId::from_uuid(Uuid::from_u128(0xa_0000 + session)),
+            TurnLivenessEvidence::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(0xb_0000 + session)),
+                0,
+                None,
+                0,
+                None,
+            ),
+        )
+    }
+
+    fn page(rows: usize) -> QuiescentActiveTurnPage {
+        QuiescentActiveTurnPage::new(
+            (1..=rows)
+                .map(|session| candidate(session as u128))
+                .collect(),
+        )
+    }
+
+    /// A page that did not fill is the end of the rotation, so a scan that
+    /// reads it has the whole population and needs no further read.
+    #[test]
+    fn an_underfilled_page_ends_the_rotation() {
+        let short = page(3);
+        let empty = page(0);
+
+        assert_eq!(short.resume_after(), None);
+        assert_eq!(short.candidates().len(), 3);
+        assert_eq!(empty.resume_after(), None);
+    }
+
+    /// A full page may have rows behind it, so it carries the cursor the next
+    /// read resumes strictly past — which is what makes the rotation advance.
+    #[test]
+    fn a_full_page_resumes_past_its_last_session() {
+        let rows = usize::try_from(QUIESCENT_INVENTORY_PAGE_SIZE).expect("the page size is small");
+        let full = page(rows);
+
+        assert_eq!(
+            full.resume_after(),
+            Some(candidate(rows as u128).session()),
+            "the cursor is the greatest session this page returned"
+        );
+    }
 }

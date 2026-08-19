@@ -2,9 +2,7 @@
 
 use crate::*;
 
-use signalbox_application::{
-    QuiescentScanCoverage, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
-};
+use signalbox_application::{StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence};
 use signalbox_persistence::turn_liveness::PostgresTurnLivenessRepository;
 
 struct WatchdogFixture {
@@ -141,8 +139,11 @@ async fn a_quiescent_active_turn_terminalizes_as_failed() -> Result<(), Box<dyn 
         .first()
         .expect("the activated turn has nothing in flight");
     assert_eq!(page.candidates().len(), 1);
-    assert_eq!(page.coverage(), QuiescentScanCoverage::Complete);
-    assert_eq!(page.resume_after(), None);
+    assert_eq!(
+        page.resume_after(),
+        None,
+        "one candidate does not fill a page, so the rotation ends here"
+    );
     assert_eq!(candidate.session(), fixture.session);
     assert_eq!(candidate.turn(), fixture.turn);
     assert_eq!(candidate.evidence().model_call_count(), 0);
