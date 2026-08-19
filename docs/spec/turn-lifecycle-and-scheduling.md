@@ -476,16 +476,26 @@ tool round, no approval request, and no recovery tool attempt; its current
 attempt is `prepared` or `running` and has not ended, rather than
 `stop_requested`; its session has no `model_call` outside `terminal`, no
 dedicated compaction call outside `terminal`, and no `tool_attempt` outside
-`terminal`; and its session holds no `pending_steering` accepted input. The
-phase filter is what excludes approval parking, `awaiting_child`, both recovery
-waits, and the runner-loss wait: those are durable waits this pass judges no
-part of. The attempt filter admits `prepared` because an attempt reaches
-`running` only when a model call is authorized on it, so a `prepared` attempt is
-a turn activated but never dispatched — a wedge nothing else reaches, since the
-eligibility sweep's active arm requires a live tool round. `stop_requested`
-stays out because an interrupt is in flight and is owned elsewhere. Every
-conjunct is an absence the candidate query proves for itself, so a shape it
-cannot consult is a shape it does not clear — absent evidence skips the turn
+`terminal`. The phase filter is what excludes approval parking,
+`awaiting_child`, both recovery waits, and the runner-loss wait: those are
+durable waits this pass judges no part of. The attempt filter admits `prepared`
+because an attempt reaches `running` only when a model call is authorized on it,
+so a `prepared` attempt is a turn activated but never dispatched — a wedge
+nothing else reaches, since the eligibility sweep's active arm requires a live
+tool round. `stop_requested` stays out because an interrupt is in flight and is
+owned elsewhere.
+
+Pending steering is deliberately not one of these conjuncts. A steering input is
+consumed at a safe point by a model call, so with every conjunct above already
+proving no call, attempt, or round is live, a steered turn that is otherwise
+quiescent is wedged rather than working — and it is the one wedge a user is
+actively trying to reach. Excluding it made that turn permanently invisible to
+this pass, since neither the eligibility sweep nor the submit-time nudge
+re-drives a running-phase turn with no tool round. A turn parked in any wait
+keeps its steering out of reach through the phase filter, not through this one.
+
+Every conjunct is an absence the candidate query proves for itself, so a shape
+it cannot consult is a shape it does not clear — absent evidence skips the turn
 rather than condemning it.
 
 **Staleness.** No lifecycle table stores an activity timestamp, and this page
@@ -543,10 +553,18 @@ lock against rows no concurrent pass can be changing, and the ordinary
 row, and the `TurnFailed` outbox event. No terminal state, disposition, or
 direct row edit is introduced for this pass. A revalidation that no longer
 matches the observation, and a preparation the domain refuses, both leave the
-turn untouched for a later pass. Because the turn ends through the ordinary
-lifecycle write, every trigger watching a turn reach `terminal` fires unchanged,
-so a repository-watch dispatch occupying this session releases its singleton and
-records its requeue obligation without this pass naming either.
+turn untouched for a later pass. Steering pending on the turn is the one refusal
+with a name of its own: every steering row bound to a turn must be closed before
+it terminalizes — the `turn_lifecycle_pending_steering_closed` constraint
+enforces it — and this transition closes none, so the pass reports the turn by
+identity under `turn_liveness_steering_blocks_terminalization` on every scan
+rather than ending it. Such a turn stays wedged; a terminalization that also
+reclassifies its steering into a queued successor is an
+[open question](../open-questions.md#turn-lifecycle). Because the turn ends
+through the ordinary lifecycle write, every trigger watching a turn reach
+`terminal` fires unchanged, so a repository-watch dispatch occupying this
+session releases its singleton and records its requeue obligation without this
+pass naming either.
 
 **Audit.** Terminalization emits a key-bearing operator log line carrying the
 cause code `turn_liveness_watchdog_stale` with the session, the turn, and the
@@ -1192,6 +1210,11 @@ from child transcript state nor depend on process-local wake memory.
   construct. Resolving the ambiguity itself from provider evidence remains an
   [open question](../open-questions.md#turn-lifecycle); the tool-attempt
   ambiguity wait keeps its own operator surface deferred with that question.
+- A turn holding pending steering cannot be ended by the liveness watchdog,
+  because the failed-turn transition it reuses closes no steering row. Giving
+  that transition the reclassification the interrupt and model-call terminal
+  paths already perform is an
+  [open question](../open-questions.md#turn-lifecycle).
 - Whether a terminal turn carries a durable cause, which would separate a
   watchdog-ended turn from a restart-recovered one in the rows rather than only
   in the operator log, is an

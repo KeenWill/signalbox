@@ -187,12 +187,16 @@ impl PostgresTurnLivenessRepository {
                 })?;
                 Ok(StaleTurnOutcome::Terminalized)
             }
-            Ok(StaleTurnOutcome::Superseded) => {
+            // Neither decided outcome wrote anything, so both roll back.
+            Ok(
+                outcome @ (StaleTurnOutcome::Superseded
+                | StaleTurnOutcome::BlockedByPendingSteering),
+            ) => {
                 transaction
                     .rollback()
                     .await
                     .map_err(TurnLivenessRepositoryError::terminalization)?;
-                Ok(StaleTurnOutcome::Superseded)
+                Ok(outcome)
             }
             // The originating failure is the one that classifies this outcome,
             // and it may be corruption — which an operator must not read as a
@@ -256,6 +260,15 @@ impl QuiescentActiveTurnPage {
 /// `running`, so every durable wait — approval parking included — is outside
 /// the result rather than judged by it.
 ///
+/// Pending steering is deliberately not one of these conjuncts. Nothing
+/// consumes a steering input without a model call to consume it at a safe
+/// point, and every conjunct here already proves that no call, attempt, or tool
+/// round is live — so a steered turn that is otherwise quiescent is wedged
+/// rather than working, and excluding it made it permanently invisible to the
+/// one pass that looks for wedges. Admitting it is what lets the turn be
+/// reported by identity; ending it needs a transition that closes the steering,
+/// which `docs/open-questions.md` records as undecided.
+///
 /// The attempt arm admits `prepared` as well as `running`. An attempt becomes
 /// `running` only when a model call is authorized on it, so `prepared` is a
 /// turn activated but never dispatched — and nothing else reaches that shape:
@@ -315,12 +328,6 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
               FROM tool_attempt AS live
              WHERE live.session_id = active.session_id
                AND live.state_kind <> 'terminal'
-        )
-        AND NOT EXISTS (
-            SELECT 1
-              FROM accepted_input AS steering
-             WHERE steering.session_id = active.session_id
-               AND steering.disposition_kind = 'pending_steering'
         )
       ORDER BY active.session_id
       LIMIT $3";
@@ -436,8 +443,16 @@ async fn terminalize_in_transaction(
                 AcceptedInputTurnFailureFailure::NoActiveTurn => {
                     return Ok(StaleTurnOutcome::Superseded);
                 }
-                AcceptedInputTurnFailureFailure::PendingSteering { .. }
-                | AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
+                // The candidate query no longer proves steering absent, so this
+                // refusal is an expected shape rather than an impossible one:
+                // the schema requires every steering row pending on a turn to
+                // be closed before it terminalizes, and this transition closes
+                // none. Reporting it as its own outcome keeps the wedge visible
+                // without claiming inconsistent durable state.
+                AcceptedInputTurnFailureFailure::PendingSteering { .. } => {
+                    return Ok(StaleTurnOutcome::BlockedByPendingSteering);
+                }
+                AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost
                 | AcceptedInputTurnFailureFailure::ActiveStartMissing
                 | AcceptedInputTurnFailureFailure::StartingSnapshotMissing
                 | AcceptedInputTurnFailureFailure::TerminalFrontierCannotAppend => {

@@ -331,3 +331,69 @@ async fn repository_page(pool: &PgPool) -> Result<Box<[StaleTurnCandidate]>, Box
         .await?;
     Ok(page.candidates().to_vec().into_boxed_slice())
 }
+
+/// Steering a wedged turn must not hide it. Nothing consumes a steering input
+/// without a model call to consume it at a safe point, so a steered turn that
+/// is otherwise quiescent stays wedged; it reaches the inventory, and
+/// terminalization reports by identity that no present transition can end it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pending_steering_leaves_a_wedged_turn_visible_and_unreachable()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = activated_watchdog_session(&pool, 0x15_000).await?;
+    let steering = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x15_301)),
+        fixture.session,
+        UserContent::try_text(String::from("steer the wedged turn"))
+            .expect("fixture steering content is admitted"),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: fixture.turn,
+        },
+    );
+    let recorded = SubmitInputRepository::new(pool.clone())
+        .handle(
+            steering,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x15_302)),
+            None,
+        )
+        .await?;
+    assert!(
+        matches!(
+            &recorded,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::PendingSteering(_)
+            ))
+        ),
+        "steering a turn holding the slot is accepted as pending: {recorded:?}"
+    );
+    let repository = PostgresTurnLivenessRepository::new(pool.clone());
+
+    let page = repository.quiescent_active_turns(None).await?;
+    let candidate = *page
+        .candidates()
+        .first()
+        .expect("pending steering is not work in flight, so the turn stays a candidate");
+    let outcome = repository
+        .terminalize_stale_turn(
+            candidate,
+            AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x15_400)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x15_401)),
+            ),
+        )
+        .await?;
+
+    assert_eq!(candidate.turn(), fixture.turn);
+    assert_eq!(outcome, StaleTurnOutcome::BlockedByPendingSteering);
+    let state: (String,) =
+        sqlx::query_as("SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(fixture.turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(state, (String::from("active"),));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

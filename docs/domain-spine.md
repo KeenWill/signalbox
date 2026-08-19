@@ -8819,6 +8819,7 @@ impl StaleTurnCandidate {
 pub enum StaleTurnOutcome {
     Terminalized,
     Superseded,
+    BlockedByPendingSteering,
 }
 
 pub struct TurnLivenessLedger { /* private */ }

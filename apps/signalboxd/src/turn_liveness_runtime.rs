@@ -44,6 +44,15 @@ const STALE_TURN_SUPERSEDED_CAUSE: &str = "turn_liveness_candidate_superseded";
 /// under a cause an operator can tell apart from a committed terminalization.
 const STALE_TURN_AMBIGUOUS_CAUSE: &str = "turn_liveness_terminalization_ambiguous";
 
+/// Why a wedged turn could not be ended at all.
+///
+/// Steering pending on a turn must be closed before the turn terminalizes, and
+/// the failed-turn transition this pass reuses closes none — so this reports a
+/// turn that is wedged and that no present transition can release. It is a
+/// warning rather than an informational line because, unlike supersession,
+/// nothing about it is expected to resolve on its own.
+const STALE_TURN_STEERING_BLOCKED_CAUSE: &str = "turn_liveness_steering_blocks_terminalization";
+
 /// Why one turn-liveness pass produced no decision.
 const PASS_FAILURE_CAUSE: &str = "turn_liveness_pass_failed";
 
@@ -222,6 +231,13 @@ async fn terminalize_stale_turn(
             turn_id = %candidate.turn().as_uuid(),
             "stale active turn changed under its locks and was left alone"
         ),
+        Ok(StaleTurnOutcome::BlockedByPendingSteering) => tracing::warn!(
+            cause_code = STALE_TURN_STEERING_BLOCKED_CAUSE,
+            session_id = %candidate.session().as_uuid(),
+            turn_id = %candidate.turn().as_uuid(),
+            staleness_bound_seconds = staleness_bound.as_secs(),
+            "stale active turn holds pending steering that no present transition can close"
+        ),
         // An ambiguous commit is the one failure that may already have ended
         // the turn. The next scan will not see it again either way, and the
         // durable `TurnFailed` shape carries no cause, so this is the only
@@ -265,8 +281,8 @@ fn report_turn_liveness_failure(error: &TurnLivenessRepositoryError) {
 mod tests {
     use super::{
         PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, ROTATION_CEILING_CAUSE,
-        STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE,
-        TurnLivenessWake, next_turn_liveness_wake,
+        STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_STEERING_BLOCKED_CAUSE, STALE_TURN_SUPERSEDED_CAUSE,
+        STALE_TURN_TERMINAL_CAUSE, TurnLivenessWake, next_turn_liveness_wake,
     };
     use signalbox_application::StaleActiveTurnBound;
     use std::time::Duration;
@@ -335,17 +351,15 @@ mod tests {
             STALE_TURN_AMBIGUOUS_CAUSE,
             "turn_liveness_terminalization_ambiguous"
         );
-        for cause in [
-            STALE_TURN_SUPERSEDED_CAUSE,
-            STALE_TURN_AMBIGUOUS_CAUSE,
-            PASS_FAILURE_CAUSE,
-            ROTATION_CEILING_CAUSE,
-        ] {
-            assert_ne!(
-                cause, STALE_TURN_TERMINAL_CAUSE,
-                "only a committed terminalization carries the terminal cause"
-            );
-        }
+        assert_eq!(
+            STALE_TURN_STEERING_BLOCKED_CAUSE,
+            "turn_liveness_steering_blocks_terminalization"
+        );
+        assert_ne!(STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE);
+        assert_ne!(STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_TERMINAL_CAUSE);
+        assert_ne!(STALE_TURN_STEERING_BLOCKED_CAUSE, STALE_TURN_TERMINAL_CAUSE);
+        assert_ne!(PASS_FAILURE_CAUSE, STALE_TURN_TERMINAL_CAUSE);
+        assert_ne!(ROTATION_CEILING_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_eq!(QUIESCENT_ROTATION_PAGE_CEILING, 4_096);
     }
 
