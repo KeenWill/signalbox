@@ -12,8 +12,8 @@
 use std::{error::Error, fmt};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StaleTurnOutcome,
-    TurnLivenessEvidence,
+    ClassifyOperatorFailure, OperatorFailureClass, QuiescentScanCoverage, StaleTurnCandidate,
+    StaleTurnOutcome, TurnLivenessEvidence,
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, ModelCallId,
@@ -33,18 +33,43 @@ use crate::submit_input::load_scheduling_projection;
 
 /// How many quiescent turns one inventory read returns.
 ///
-/// A wedge is rare and the pass repeats every scan interval, so a small page
-/// keeps the periodic read cheap while still draining any realistic backlog
-/// within a few passes.
-const QUIESCENT_INVENTORY_PAGE_SIZE: i64 = 32;
+/// This bounds the work one scan does, not how much of the population the pass
+/// can reach: a saturated page advances a session-keyed cursor so the next scan
+/// resumes past it, and the ledger keeps what a partial page did not revisit.
+/// Coverage latency is therefore one pass per page of the population, and every
+/// turn is observed however large that population grows.
+const QUIESCENT_INVENTORY_PAGE_SIZE: i64 = 256;
 
 /// Infrastructure or integrity failure while supervising turn liveness.
+///
+/// The two database arms are separate because they mean different things to an
+/// operator: a failed inventory read is a pass that made no decision at all,
+/// while a failed terminalization is a decision that could not be carried out
+/// on a turn already judged stale. No blanket `From<sqlx::Error>` exists, so
+/// neither path can silently borrow the other's cause code.
 #[derive(Debug)]
 pub enum TurnLivenessRepositoryError {
     /// Reading the quiescent active-turn inventory failed.
     Inventory(sqlx::Error),
+    /// A database operation on the terminalization path failed.
+    TerminalizationDatabase {
+        /// Whether the failure leaves the commit's outcome unknown.
+        commit_ambiguous: bool,
+        /// The originating driver failure.
+        source: sqlx::Error,
+    },
     /// The shared failed-turn transition could not be committed.
     Terminalization(StartupScanRepositoryError),
+}
+
+impl TurnLivenessRepositoryError {
+    /// Classifies an unambiguous driver failure on the terminalization path.
+    fn terminalization(error: sqlx::Error) -> Self {
+        Self::TerminalizationDatabase {
+            commit_ambiguous: false,
+            source: error,
+        }
+    }
 }
 
 impl fmt::Display for TurnLivenessRepositoryError {
@@ -56,6 +81,9 @@ impl fmt::Display for TurnLivenessRepositoryError {
                     "quiescent active-turn inventory failed: {source}"
                 )
             }
+            Self::TerminalizationDatabase { source, .. } => {
+                write!(formatter, "stale-turn terminalization failed: {source}")
+            }
             Self::Terminalization(source) => source.fmt(formatter),
         }
     }
@@ -64,7 +92,7 @@ impl fmt::Display for TurnLivenessRepositoryError {
 impl Error for TurnLivenessRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Inventory(source) => Some(source),
+            Self::Inventory(source) | Self::TerminalizationDatabase { source, .. } => Some(source),
             Self::Terminalization(source) => Some(source),
         }
     }
@@ -76,6 +104,11 @@ impl ClassifyOperatorFailure for TurnLivenessRepositoryError {
             Self::Inventory(_) => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
+            Self::TerminalizationDatabase {
+                commit_ambiguous, ..
+            } => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: *commit_ambiguous,
+            },
             Self::Terminalization(source) => source.operator_failure_class(),
         }
     }
@@ -83,14 +116,9 @@ impl ClassifyOperatorFailure for TurnLivenessRepositoryError {
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
             Self::Inventory(_) => "turn_liveness_inventory_failed",
+            Self::TerminalizationDatabase { .. } => "turn_liveness_terminalization_failed",
             Self::Terminalization(source) => source.operator_failure_cause_code(),
         }
-    }
-}
-
-impl From<sqlx::Error> for TurnLivenessRepositoryError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Inventory(error)
     }
 }
 
@@ -113,11 +141,25 @@ impl PostgresTurnLivenessRepository {
     }
 
     /// Reads one bounded page of active turns with no work in flight.
+    ///
+    /// `after` resumes a rotation: passing the last session of a saturated page
+    /// continues past it, and passing `None` starts again from the first. The
+    /// returned coverage says whether the page was the whole population, which
+    /// is the only condition under which absence means a turn stopped being
+    /// quiescent rather than merely falling outside this page.
     pub async fn quiescent_active_turns(
         &self,
-    ) -> Result<Box<[StaleTurnCandidate]>, TurnLivenessRepositoryError> {
-        let mut connection = self.pool.acquire().await?;
-        quiescent_active_turns(&mut connection, None).await
+        after: Option<SessionId>,
+    ) -> Result<QuiescentActiveTurnPage, TurnLivenessRepositoryError> {
+        let mut connection = self
+            .pool
+            .acquire()
+            .await
+            .map_err(TurnLivenessRepositoryError::Inventory)?;
+        let candidates = read_quiescent_active_turns(&mut connection, None, after)
+            .await
+            .map_err(TurnLivenessRepositoryError::Inventory)?;
+        Ok(QuiescentActiveTurnPage::new(candidates, after))
     }
 
     /// Terminalizes one observed-stale turn as failed under the session locks.
@@ -130,31 +172,84 @@ impl PostgresTurnLivenessRepository {
         candidate: StaleTurnCandidate,
         identities: AcceptedInputTurnFailureIdentities,
     ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
         let outcome = terminalize_in_transaction(&mut transaction, candidate, identities).await;
         match outcome {
             Ok(StaleTurnOutcome::Terminalized) => {
                 transaction.commit().await.map_err(|error| {
-                    TurnLivenessRepositoryError::Terminalization(
-                        StartupScanRepositoryError::Database {
-                            commit_ambiguous: crate::commit_failure_is_ambiguous(&error),
-                            source: error,
-                        },
-                    )
+                    TurnLivenessRepositoryError::TerminalizationDatabase {
+                        commit_ambiguous: crate::commit_failure_is_ambiguous(&error),
+                        source: error,
+                    }
                 })?;
                 Ok(StaleTurnOutcome::Terminalized)
             }
             Ok(StaleTurnOutcome::Superseded) => {
-                transaction.rollback().await?;
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(TurnLivenessRepositoryError::terminalization)?;
                 Ok(StaleTurnOutcome::Superseded)
             }
             Err(error) => {
                 if let Err(rollback_error) = transaction.rollback().await {
-                    return Err(rollback_error.into());
+                    return Err(TurnLivenessRepositoryError::terminalization(rollback_error));
                 }
                 Err(error)
             }
         }
+    }
+}
+
+/// One page of the quiescent inventory, with what the page covered.
+#[derive(Clone, Debug)]
+pub struct QuiescentActiveTurnPage {
+    candidates: Box<[StaleTurnCandidate]>,
+    coverage: QuiescentScanCoverage,
+    resume_after: Option<SessionId>,
+}
+
+impl QuiescentActiveTurnPage {
+    /// Derives coverage and the next cursor from one page and its start.
+    ///
+    /// A page is the whole population only when it started at the beginning and
+    /// did not fill: a full page may have left rows behind it, and a page that
+    /// resumed mid-rotation says nothing about the turns before its cursor.
+    fn new(candidates: Box<[StaleTurnCandidate]>, after: Option<SessionId>) -> Self {
+        let saturated =
+            i64::try_from(candidates.len()).unwrap_or(i64::MAX) >= QUIESCENT_INVENTORY_PAGE_SIZE;
+        let coverage = if after.is_none() && !saturated {
+            QuiescentScanCoverage::Complete
+        } else {
+            QuiescentScanCoverage::Partial
+        };
+        let resume_after = saturated
+            .then(|| candidates.last().map(|last| last.session()))
+            .flatten();
+        Self {
+            candidates,
+            coverage,
+            resume_after,
+        }
+    }
+
+    /// Returns the quiescent turns this page observed.
+    pub fn candidates(&self) -> &[StaleTurnCandidate] {
+        &self.candidates
+    }
+
+    /// Returns whether this page was the whole quiescent population.
+    pub const fn coverage(&self) -> QuiescentScanCoverage {
+        self.coverage
+    }
+
+    /// Returns the cursor the next scan resumes from, or `None` to restart.
+    pub const fn resume_after(&self) -> Option<SessionId> {
+        self.resume_after
     }
 }
 
@@ -164,21 +259,31 @@ impl PostgresTurnLivenessRepository {
 /// cannot see is a shape it does not clear: the phase filter admits only
 /// `running`, so every durable wait — approval parking included — is outside
 /// the result rather than judged by it.
+///
+/// Newest identities are read with `ORDER BY … DESC LIMIT 1` rather than an
+/// aggregate: PostgreSQL defines no `max(uuid)`, verified against 18.4, the
+/// version the integration suite runs. The ordering is `uuid`'s native
+/// big-endian byte comparison, which for the UUIDv7 identities this schema
+/// mints is time order, and it can be answered from an index.
 const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
             active.turn_id,
             active.current_attempt_id,
             (SELECT count(*)
                FROM model_call AS counted
               WHERE counted.session_id = active.session_id) AS model_call_count,
-            (SELECT max(newest.model_call_id)
+            (SELECT newest.model_call_id
                FROM model_call AS newest
-              WHERE newest.session_id = active.session_id) AS latest_model_call_id,
+              WHERE newest.session_id = active.session_id
+              ORDER BY newest.model_call_id DESC
+              LIMIT 1) AS latest_model_call_id,
             (SELECT count(*)
                FROM semantic_transcript_entry AS counted
               WHERE counted.source_session_id = active.session_id) AS transcript_entry_count,
-            (SELECT max(newest.semantic_entry_id)
+            (SELECT newest.semantic_entry_id
                FROM semantic_transcript_entry AS newest
-              WHERE newest.source_session_id = active.session_id) AS latest_transcript_entry_id
+              WHERE newest.source_session_id = active.session_id
+              ORDER BY newest.semantic_entry_id DESC
+              LIMIT 1) AS latest_transcript_entry_id
        FROM turn_lifecycle AS active
        JOIN turn_attempt AS tenure
          ON tenure.turn_attempt_id = active.current_attempt_id
@@ -193,6 +298,7 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
         AND active.recovery_tool_attempt_id IS NULL
         AND tenure.state_kind = 'running'
         AND ($1::uuid IS NULL OR active.session_id = $1)
+        AND ($2::uuid IS NULL OR active.session_id > $2)
         AND NOT EXISTS (
             SELECT 1
               FROM model_call AS live
@@ -218,14 +324,21 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
                AND steering.disposition_kind = 'pending_steering'
         )
       ORDER BY active.session_id
-      LIMIT $2";
+      LIMIT $3";
 
-async fn quiescent_active_turns(
+/// Reads one page, leaving classification of any failure to the caller.
+///
+/// The same statement serves the periodic scan and the locked revalidation, so
+/// it returns the driver's error unclassified: the scan reports an inventory
+/// failure and the revalidation a terminalization failure.
+async fn read_quiescent_active_turns(
     connection: &mut PgConnection,
     session: Option<SessionId>,
-) -> Result<Box<[StaleTurnCandidate]>, TurnLivenessRepositoryError> {
+    after: Option<SessionId>,
+) -> Result<Box<[StaleTurnCandidate]>, sqlx::Error> {
     let rows = sqlx::query(QUIESCENT_ACTIVE_TURNS)
         .bind(session.map(session_id_to_uuid))
+        .bind(after.map(session_id_to_uuid))
         .bind(QUIESCENT_INVENTORY_PAGE_SIZE)
         .fetch_all(connection)
         .await?;
@@ -261,10 +374,17 @@ async fn terminalize_in_transaction(
     let locks = sqlx::query(crate::lock_inventory::STARTUP_RECOVERY)
         .bind(session_id_to_uuid(candidate.session()))
         .fetch_one(&mut *connection)
-        .await?;
-    let session_exists: bool = locks.try_get(0)?;
-    let scheduler_session: Option<Uuid> = locks.try_get(1)?;
-    let active_turn: Option<Uuid> = locks.try_get(2)?;
+        .await
+        .map_err(TurnLivenessRepositoryError::terminalization)?;
+    let session_exists: bool = locks
+        .try_get(0)
+        .map_err(TurnLivenessRepositoryError::terminalization)?;
+    let scheduler_session: Option<Uuid> = locks
+        .try_get(1)
+        .map_err(TurnLivenessRepositoryError::terminalization)?;
+    let active_turn: Option<Uuid> = locks
+        .try_get(2)
+        .map_err(TurnLivenessRepositoryError::terminalization)?;
     if !session_exists
         || scheduler_session.is_none()
         || active_turn != Some(turn_id_to_uuid(candidate.turn()))
@@ -273,7 +393,9 @@ async fn terminalize_in_transaction(
     }
     // The scan ran without the scheduler lock, so the whole predicate is
     // re-decided here against rows no concurrent pass can now be changing.
-    let locked = quiescent_active_turns(connection, Some(candidate.session())).await?;
+    let locked = read_quiescent_active_turns(connection, Some(candidate.session()), None)
+        .await
+        .map_err(TurnLivenessRepositoryError::terminalization)?;
     if locked.first().copied() != Some(candidate) {
         return Ok(StaleTurnOutcome::Superseded);
     }

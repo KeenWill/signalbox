@@ -485,14 +485,29 @@ turn, its session's model-call count and newest model-call identity, its
 semantic-entry count and newest entry identity, and the turn's current attempt.
 A turn is due only once that evidence has been observed unchanged for at least
 the staleness bound. Any progress at all — a fresh call, a fresh entry, a fresh
-attempt — restarts the bound, and a turn absent from one pass is forgotten
-rather than credited on its return. That ledger is process-local and carries no
+attempt — restarts the bound, so a turn that resumed cannot be ended on the
+strength of its earlier silence. That ledger is process-local and carries no
 authority: losing it to a restart costs one more bound before a wedged turn is
 reached, which is the direction that cannot end live work.
+
+**Coverage.** One scan reads a bounded page ordered by session, so a population
+larger than a page is walked across passes: a full page advances a session-keyed
+cursor and the next scan resumes past it, and any other page restarts the
+rotation. Forgetting is tied to that coverage. A scan that began at the first
+turn and did not fill its page saw the whole population, so a turn missing from
+it has left the quiescent shape and is forgotten rather than credited on its
+return. A scan that saw only one page of a rotation forgets nothing, because
+absence from it means only that the turn lies outside this page — forgetting
+there would restart every turn's bound once per rotation and no turn past the
+first page could ever come due.
 
 **Constants.** The staleness bound is a hard safety ceiling of 30 minutes and
 the scan interval is one minute; both are compiled in. Configuration may lower
 the effective staleness bound and can never raise it past the compiled ceiling.
+The bound the pass runs with is supplied to it rather than reloaded from the
+ceiling, so a lowered bound is the one that decides turns and the one the audit
+line reports; the ceiling stays the only maximum, enforced where the bound is
+built.
 
 **Terminalization.** A due turn ends through the same committed failed-turn
 transition startup recovery commits: the session and scheduler rows are locked,

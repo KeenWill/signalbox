@@ -2,7 +2,9 @@
 
 use crate::*;
 
-use signalbox_application::{StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence};
+use signalbox_application::{
+    QuiescentScanCoverage, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
+};
 use signalbox_persistence::turn_liveness::PostgresTurnLivenessRepository;
 
 struct WatchdogFixture {
@@ -133,11 +135,14 @@ async fn a_quiescent_active_turn_terminalizes_as_failed() -> Result<(), Box<dyn 
     let fixture = activated_watchdog_session(&pool, 0x11_000).await?;
     let repository = PostgresTurnLivenessRepository::new(pool.clone());
 
-    let quiescent = repository.quiescent_active_turns().await?;
-    let candidate = *quiescent
+    let page = repository.quiescent_active_turns(None).await?;
+    let candidate = *page
+        .candidates()
         .first()
         .expect("the activated turn has nothing in flight");
-    assert_eq!(quiescent.len(), 1);
+    assert_eq!(page.candidates().len(), 1);
+    assert_eq!(page.coverage(), QuiescentScanCoverage::Complete);
+    assert_eq!(page.resume_after(), None);
     assert_eq!(candidate.session(), fixture.session);
     assert_eq!(candidate.turn(), fixture.turn);
     assert_eq!(candidate.evidence().model_call_count(), 0);
@@ -170,7 +175,10 @@ async fn a_quiescent_active_turn_terminalizes_as_failed() -> Result<(), Box<dyn 
         terminal,
         (String::from("terminal"), Some(String::from("failed")), 1)
     );
-    assert_eq!(repository.quiescent_active_turns().await?.len(), 0);
+    assert_eq!(
+        repository.quiescent_active_turns(None).await?.candidates(),
+        []
+    );
 
     pool.close().await;
     drop(container);
@@ -186,11 +194,21 @@ async fn an_outstanding_provider_call_keeps_its_turn_out_of_the_inventory()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x12_000).await?;
     let repository = PostgresTurnLivenessRepository::new(pool.clone());
-    assert_eq!(repository.quiescent_active_turns().await?.len(), 1);
+    assert_eq!(
+        repository
+            .quiescent_active_turns(None)
+            .await?
+            .candidates()
+            .len(),
+        1
+    );
 
     checkpoint_model_call(&pool, &fixture, 0x12_000).await?;
 
-    assert_eq!(repository.quiescent_active_turns().await?.len(), 0);
+    assert_eq!(
+        repository.quiescent_active_turns(None).await?.candidates(),
+        []
+    );
 
     pool.close().await;
     drop(container);
@@ -205,9 +223,9 @@ async fn a_changed_observation_is_superseded() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x13_000).await?;
     let repository = PostgresTurnLivenessRepository::new(pool.clone());
-    let observed = *repository
-        .quiescent_active_turns()
-        .await?
+    let page = repository.quiescent_active_turns(None).await?;
+    let observed = *page
+        .candidates()
         .first()
         .expect("the activated turn has nothing in flight");
     let stale = StaleTurnCandidate::new(
@@ -243,4 +261,86 @@ async fn a_changed_observation_is_superseded() -> Result<(), Box<dyn Error>> {
     pool.close().await;
     drop(container);
     Ok(())
+}
+
+/// The newest-identity columns are read with an ordered subquery because
+/// PostgreSQL defines no `max(uuid)`; a session whose earlier turn already
+/// completed is what proves they resolve to a real identity rather than null.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_newest_identity_columns_resolve_over_a_worked_session() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = activated_watchdog_session(&pool, 0x14_000).await?;
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        fixture.selection,
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(0x14_020))),
+    )])
+    .expect("one exact selection forms a target catalog");
+    complete_text_turn(
+        &pool,
+        fixture.session,
+        targets,
+        model_credential_reference(),
+        0x14_100,
+        "first reply",
+    )
+    .await?;
+    let successor = TurnId::from_uuid(Uuid::from_u128(0x14_201));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x14_202,
+                0x14_003,
+                "second input",
+                2,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x14_203)),
+            Some(successor),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: Uuid::from_u128(0x14_204),
+            starting_frontier: Uuid::from_u128(0x14_205),
+            initial_attempt: Uuid::from_u128(0x14_206),
+        },
+    )
+    .await?;
+
+    let page = repository_page(&pool).await?;
+    let candidate = *page
+        .first()
+        .expect("the successor turn has nothing in flight");
+
+    assert_eq!(candidate.turn(), successor);
+    assert!(
+        candidate.evidence().model_call_count() > 0,
+        "the completed first turn left model calls behind"
+    );
+    assert!(
+        candidate.evidence().latest_model_call().is_some(),
+        "the newest model-call subquery resolves an identity"
+    );
+    assert!(
+        candidate.evidence().transcript_entry_count() > 0,
+        "the completed first turn left transcript entries behind"
+    );
+    assert!(
+        candidate.evidence().latest_transcript_entry().is_some(),
+        "the newest transcript-entry subquery resolves an identity"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn repository_page(pool: &PgPool) -> Result<Box<[StaleTurnCandidate]>, Box<dyn Error>> {
+    let page = PostgresTurnLivenessRepository::new(pool.clone())
+        .quiescent_active_turns(None)
+        .await?;
+    Ok(page.candidates().to_vec().into_boxed_slice())
 }

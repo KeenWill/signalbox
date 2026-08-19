@@ -11,7 +11,7 @@ use signalbox_application::{
     TurnLivenessLedger, TurnLivenessScanInterval,
 };
 use signalbox_domain::{
-    AcceptedInputTurnFailureIdentities, ContextFrontierId, SemanticTranscriptEntryId,
+    AcceptedInputTurnFailureIdentities, ContextFrontierId, SemanticTranscriptEntryId, SessionId,
 };
 use signalbox_persistence::turn_liveness::{
     PostgresTurnLivenessRepository, TurnLivenessRepositoryError,
@@ -47,15 +47,25 @@ enum TurnLivenessWake {
 #[derive(Clone, Debug)]
 pub struct TurnLivenessRuntime {
     repository: PostgresTurnLivenessRepository,
+    staleness_bound: StaleActiveTurnBound,
     scan_interval: TurnLivenessScanInterval,
 }
 
 impl TurnLivenessRuntime {
-    /// Supervises turn liveness through the supplied shared pool.
-    pub fn new(pool: PgPool) -> Self {
+    /// Supervises turn liveness with the supplied bound and cadence.
+    ///
+    /// The bound is a parameter rather than a reload of the compiled ceiling so
+    /// a deployment that validated a shorter one actually runs with it; the
+    /// ceiling stays the only maximum, enforced where the bound is built.
+    pub fn new(
+        pool: PgPool,
+        staleness_bound: StaleActiveTurnBound,
+        scan_interval: TurnLivenessScanInterval,
+    ) -> Self {
         Self {
             repository: PostgresTurnLivenessRepository::new(pool),
-            scan_interval: TurnLivenessScanInterval::baseline(),
+            staleness_bound,
+            scan_interval,
         }
     }
 
@@ -63,16 +73,24 @@ impl TurnLivenessRuntime {
     ///
     /// A failed pass changes nothing and is retried at the next interval, so
     /// no pass outcome ends this task: the durable rows the next pass reads
-    /// are the only state it carries.
+    /// are the only state it carries. The cursor rotates across passes so a
+    /// quiescent population larger than one page is still covered in full.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
         let mut ticker = interval(self.scan_interval.get());
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let mut ledger = TurnLivenessLedger::new();
+        let mut ledger = TurnLivenessLedger::new(self.staleness_bound);
+        let mut cursor: Option<SessionId> = None;
         loop {
             match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
                 TurnLivenessWake::Shutdown => return,
                 TurnLivenessWake::Scan => {
-                    reconcile_turn_liveness(&self.repository, &mut ledger).await;
+                    cursor = reconcile_turn_liveness(
+                        &self.repository,
+                        &mut ledger,
+                        cursor,
+                        self.staleness_bound,
+                    )
+                    .await;
                 }
             }
         }
@@ -104,25 +122,36 @@ async fn next_turn_liveness_wake(
 }
 
 /// Folds one durable observation into the ledger and acts on what is due.
+///
+/// Returns the cursor the next pass resumes from: a saturated page leaves the
+/// rotation partway through the population, and any other page restarts it.
 async fn reconcile_turn_liveness(
     repository: &PostgresTurnLivenessRepository,
     ledger: &mut TurnLivenessLedger,
-) {
-    let quiescent = match repository.quiescent_active_turns().await {
-        Ok(quiescent) => quiescent,
+    cursor: Option<SessionId>,
+    staleness_bound: StaleActiveTurnBound,
+) -> Option<SessionId> {
+    let page = match repository.quiescent_active_turns(cursor).await {
+        Ok(page) => page,
         // An unreadable inventory is not evidence that anything is stale, so
-        // the pass ends without a decision and the ledger keeps what it had.
-        Err(error) => return report_turn_liveness_failure(&error),
+        // the pass ends without a decision, the ledger keeps what it had, and
+        // the rotation restarts rather than skipping past unread turns.
+        Err(error) => {
+            report_turn_liveness_failure(&error);
+            return None;
+        }
     };
-    let due = ledger.reconcile(&quiescent, Instant::now());
+    let due = ledger.reconcile(page.candidates(), page.coverage(), Instant::now());
     for candidate in due {
-        terminalize_stale_turn(repository, candidate).await;
+        terminalize_stale_turn(repository, candidate, staleness_bound).await;
     }
+    page.resume_after()
 }
 
 async fn terminalize_stale_turn(
     repository: &PostgresTurnLivenessRepository,
     candidate: StaleTurnCandidate,
+    staleness_bound: StaleActiveTurnBound,
 ) {
     let identities = AcceptedInputTurnFailureIdentities::new(
         SemanticTranscriptEntryId::from_uuid(Uuid::now_v7()),
@@ -136,7 +165,7 @@ async fn terminalize_stale_turn(
             cause_code = STALE_TURN_TERMINAL_CAUSE,
             session_id = %candidate.session().as_uuid(),
             turn_id = %candidate.turn().as_uuid(),
-            staleness_bound_seconds = stale_turn_bound_seconds(),
+            staleness_bound_seconds = staleness_bound.get().as_secs(),
             "active turn terminalized as failed after its durable evidence stood still"
         ),
         Ok(StaleTurnOutcome::Superseded) => tracing::info!(
@@ -158,16 +187,12 @@ fn report_turn_liveness_failure(error: &TurnLivenessRepositoryError) {
     );
 }
 
-fn stale_turn_bound_seconds() -> u64 {
-    StaleActiveTurnBound::hard_ceiling().get().as_secs()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         PASS_FAILURE_CAUSE, STALE_TURN_TERMINAL_CAUSE, TurnLivenessWake, next_turn_liveness_wake,
-        stale_turn_bound_seconds,
     };
+    use signalbox_application::StaleActiveTurnBound;
     use std::time::Duration;
     use tokio::{
         sync::watch,
@@ -222,6 +247,16 @@ mod tests {
     fn the_watchdog_cause_codes_are_distinct() {
         assert_eq!(STALE_TURN_TERMINAL_CAUSE, "turn_liveness_watchdog_stale");
         assert_eq!(PASS_FAILURE_CAUSE, "turn_liveness_pass_failed");
-        assert_eq!(stale_turn_bound_seconds(), 1_800);
+    }
+
+    /// The bound reported beside a terminalized turn is the configured one, so
+    /// an operator reading the line sees what actually decided the turn.
+    #[test]
+    fn the_audited_bound_is_the_configured_one() {
+        let lowered =
+            StaleActiveTurnBound::try_lowered(Duration::from_secs(300)).expect("300s is below 30m");
+
+        assert_eq!(lowered.get().as_secs(), 300);
+        assert_eq!(StaleActiveTurnBound::hard_ceiling().get().as_secs(), 1_800);
     }
 }

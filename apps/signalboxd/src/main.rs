@@ -23,8 +23,9 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
     InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService,
-    StartupScanService, UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, StaleActiveTurnBound,
+    StartEligibleTurnService, StartupScanService, TurnLivenessScanInterval,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -1694,7 +1695,11 @@ async fn run_hub(
         ),
         execution,
     );
-    let turn_liveness_runtime = TurnLivenessRuntime::new(scheduler_pool.clone());
+    let turn_liveness_runtime = TurnLivenessRuntime::new(
+        scheduler_pool.clone(),
+        StaleActiveTurnBound::hard_ceiling(),
+        TurnLivenessScanInterval::baseline(),
+    );
     let pass = GoalAwareEligibilityPass::new(
         activated_pass,
         PostgresGoalPassDisposition::new(

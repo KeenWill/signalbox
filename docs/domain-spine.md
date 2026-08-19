@@ -8825,13 +8825,20 @@ pub enum StaleTurnOutcome {
     Superseded,
 }
 
+pub enum QuiescentScanCoverage {
+    Complete,
+    Partial,
+}
+
 pub struct TurnLivenessLedger { /* private */ }
 impl TurnLivenessLedger {
-    pub fn new() -> Self;
+    pub fn new(bound: StaleActiveTurnBound) -> Self;
+    pub const fn bound(&self) -> StaleActiveTurnBound;
     pub fn watched_turn_count(&self) -> usize;
     pub fn reconcile(
         &mut self,
         quiescent: &[StaleTurnCandidate],
+        coverage: QuiescentScanCoverage,
         now: Instant,
     ) -> Box<[StaleTurnCandidate]>;
 }
@@ -10962,5 +10969,5 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
-| application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **282 (+6 free fn)**             |
+| application: turn_liveness                         | 8                                |
+| **signalbox-application total**                    | **283 (+6 free fn)**             |
