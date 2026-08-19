@@ -6,13 +6,14 @@
 //! daemon's durable decision path.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use signalbox_domain::DelegateApprovalRecommendation;
 use signalbox_model_provider_runtime::ApprovalJudgeModel;
 use signalboxd::approval_judge_eval::{
@@ -104,6 +105,38 @@ pub fn load_corpus(path: impl AsRef<Path>) -> Result<ApprovalJudgeCorpus, Corpus
         source,
     })?;
     decode_corpus(&bytes)
+}
+
+/// Lowercase hexadecimal SHA-256 binding a case's rendered request context.
+///
+/// The digest input follows the corpus digest conventions: one JSON object
+/// with bytewise-sorted keys and no insignificant whitespace; absent optional
+/// fields serialize as `null`.
+#[must_use]
+pub fn request_fingerprint(request: &ApprovalJudgeRequestContext) -> String {
+    let canonical = BTreeMap::from([
+        (
+            "arguments",
+            serde_json::Value::from(request.arguments.as_str()),
+        ),
+        (
+            "commissioned_goal",
+            request.commissioned_goal.as_deref().into(),
+        ),
+        (
+            "frozen_system_prompt",
+            request.frozen_system_prompt.as_deref().into(),
+        ),
+        (
+            "session_template",
+            request.session_template.as_deref().into(),
+        ),
+        ("tool", serde_json::Value::from(request.tool.as_str())),
+    ]);
+    let encoded =
+        serde_json::to_vec(&canonical).expect("the canonical fingerprint input serializes");
+    let digest = Sha256::digest(&encoded);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Decodes and validates a corpus JSON document from bytes.
@@ -497,10 +530,15 @@ mod tests {
 
     use super::{
         ApprovalDisposition, ApprovalJudgeCorpus, CORPUS_FORMAT_VERSION, DispositionMetrics,
-        MetricRate, decode_corpus, score_corpus,
+        MetricRate, ScoreError, decode_corpus, request_fingerprint, score_corpus,
     };
 
     const SEED_CORPUS: &[u8] = include_bytes!("../corpora/seed-v1.json");
+    const SEED_RESPONSES: &[u8] = include_bytes!("../corpora/seed-responses-v1.json");
+    // Arbitrary admitted-fixture constructor parameters: replay reads neither,
+    // they only need to form a request-safe model definition.
+    const FIXTURE_MAX_OUTPUT_TOKENS: u32 = 256;
+    const FIXTURE_CONTEXT_WINDOW_TOKENS: u32 = 4_096;
     const PROVIDER_MODEL: &str = "offline-fixture-judge";
     const APPROVE_RATIONALE: &str = "The exact read is plainly within the grant.";
     const DENY_RATIONALE: &str = "The request crosses the named branch boundary.";
@@ -527,6 +565,41 @@ mod tests {
 
         expect![["corpus case id synthetic-read-source-file appears more than once"]]
             .assert_eq(&error.to_string());
+    }
+
+    #[tokio::test]
+    async fn scoring_rejects_directly_constructed_blank_case_id() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        corpus.cases[0].id = "   ".to_string();
+        let (model, binding) = fixture_model([]);
+
+        let error = score_corpus(&model, &binding, &corpus)
+            .await
+            .expect_err("the scoring boundary rejects a blank case id");
+
+        assert!(matches!(error, ScoreError::BlankCaseId));
+    }
+
+    #[test]
+    fn seed_response_fingerprints_match_the_seed_corpus() {
+        let corpus = decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let responses: serde_json::Value =
+            serde_json::from_slice(SEED_RESPONSES).expect("the seed responses parse");
+        for (case, response) in corpus
+            .cases
+            .iter()
+            .zip(responses["responses"].as_array().expect("responses array"))
+        {
+            assert_eq!(
+                response["request_fingerprint"]
+                    .as_str()
+                    .expect("fingerprint"),
+                request_fingerprint(&case.request),
+                "fingerprint mismatch for case {}",
+                case.id
+            );
+        }
     }
 
     #[test]
@@ -566,7 +639,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scorer_reports_per_disposition_precision_recall() {
+    async fn scorer_reports_aggregate_accuracy() {
         let corpus = decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
         let (model, binding) = fixture_model([
             scripted_decision(ApprovalDisposition::Approve, APPROVE_RATIONALE),
@@ -579,6 +652,21 @@ mod tests {
             .expect("the scripted judge scores every seed case");
 
         assert_eq!(scorecard.accuracy, MetricRate::new(1, corpus.cases.len()));
+    }
+
+    #[tokio::test]
+    async fn scorer_reports_per_disposition_precision_recall() {
+        let corpus = decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        let (model, binding) = fixture_model([
+            scripted_decision(ApprovalDisposition::Approve, APPROVE_RATIONALE),
+            scripted_decision(ApprovalDisposition::EscalateToHuman, ESCALATE_RATIONALE),
+            scripted_decision(ApprovalDisposition::Deny, DENY_RATIONALE),
+        ]);
+
+        let scorecard = score_corpus(&model, &binding, &corpus)
+            .await
+            .expect("the scripted judge scores every seed case");
+
         assert_eq!(
             scorecard.dispositions[0],
             DispositionMetrics {
@@ -625,8 +713,8 @@ mod tests {
         let catalog = RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
             target,
             String::from(PROVIDER_MODEL),
-            256,
-            4_096,
+            FIXTURE_MAX_OUTPUT_TOKENS,
+            FIXTURE_CONTEXT_WINDOW_TOKENS,
         )
         .expect("the fixture model definition is request-safe")])
         .expect("the fixture catalog names one target once");
@@ -759,6 +847,7 @@ mod tests {
             .await
             .expect_err("the scoring boundary rejects missing label provenance");
 
+        assert!(matches!(error, ScoreError::MissingLabelProvenance { .. }));
         assert_eq!(error.case_id(), Some(missing_provenance_case_id.as_str()));
     }
 

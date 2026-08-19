@@ -60,10 +60,15 @@ no decimal value and retains its zero denominator.
 
 The operator entry point is offline: it consumes a corpus and ordered recorded
 responses, feeds those responses through the repository's deterministic scripted
-model adapter, and emits the scorecard as JSON. The checked-in seed corpus and
-response file contain synthetic strings only. The existing `signalboxd`
-live-provider runner remains a separate explicitly operator-driven surface and
-is not part of this offline contract.
+model adapter, and emits the scorecard as JSON. Each recorded response names
+both its case id and a fingerprint of the request context it was recorded
+against — SHA-256 in lowercase hexadecimal over the case's request fields as one
+JSON object with bytewise-sorted keys and no insignificant whitespace, absent
+optional fields serialized as null — and replay rejects a response whose
+fingerprint does not match the corpus case at its position. The checked-in seed
+corpus and response file contain synthetic strings only. The existing
+`signalboxd` live-provider runner remains a separate explicitly operator-driven
+surface and is not part of this offline contract.
 
 **Committed unimplemented functionality.** No present surface stores evaluation
 corpora. A corpus is identified by suite name, version, and content digest; runs

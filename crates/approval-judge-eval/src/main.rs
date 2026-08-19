@@ -4,7 +4,7 @@ use std::{env, error::Error, fs, io};
 
 use serde::Deserialize;
 use signalbox_approval_judge_eval::{
-    ApprovalDisposition, CORPUS_FORMAT_VERSION, load_corpus, score_corpus,
+    ApprovalDisposition, CORPUS_FORMAT_VERSION, load_corpus, request_fingerprint, score_corpus,
 };
 use signalbox_domain::{
     DirectModelSelection, ModelCallId, ProviderModelIdentity, ResolvedProviderTarget,
@@ -20,8 +20,9 @@ use signalboxd::approval_judge_eval::ApprovalJudgeEvalBinding;
 use uuid::Uuid;
 
 const OFFLINE_PROVIDER_MODEL: &str = "offline-recorded-approval-judge";
-// Tunable effective ceiling: recorded judge decisions are short, so this bounds
-// accidental output growth without representing a provider or safety limit.
+// Arbitrary constructor parameter: scripted replay reports usage as
+// unreported and enforces no output bound, so this only satisfies the model
+// definition.
 const OFFLINE_MAX_OUTPUT_TOKENS: u32 = 256;
 // Arbitrary constructor parameter: the offline replay path never reads the
 // context window, so this satisfies the model definition without enforcing
@@ -39,6 +40,7 @@ struct OfflineResponseFile {
 #[serde(deny_unknown_fields)]
 struct OfflineResponse {
     case_id: String,
+    request_fingerprint: String,
     disposition: ApprovalDisposition,
     rationale: String,
 }
@@ -59,7 +61,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             format!("could not read offline responses {responses_path}: {source}"),
         )
     })?;
-    let responses: OfflineResponseFile = serde_json::from_slice(&response_bytes)?;
+    let responses: OfflineResponseFile =
+        serde_json::from_slice(&response_bytes).map_err(|source| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("offline responses {responses_path} are not valid response JSON: {source}"),
+            )
+        })?;
     validate_responses(&corpus, &responses)?;
 
     let scripts = responses.responses.iter().map(response_script);
@@ -106,6 +114,19 @@ fn validate_responses(
                 format!(
                     "offline response case {} does not match corpus case {} at the same position",
                     response.case_id, case.id
+                ),
+            ));
+        }
+        // A stable id is not enough: the recorded decision answers one exact
+        // rendered request, so a response also names the fingerprint of the
+        // request context it was recorded against.
+        let expected_fingerprint = request_fingerprint(&case.request);
+        if response.request_fingerprint != expected_fingerprint {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "offline response for case {} was recorded against a different                      request context (fingerprint {} does not match {})",
+                    case.id, response.request_fingerprint, expected_fingerprint
                 ),
             ));
         }
