@@ -6,7 +6,22 @@
 ALTER TABLE repo_watch_dispatch_obligation
     ADD COLUMN failed_attempts bigint NOT NULL DEFAULT 0,
     ADD COLUMN last_failed_attempt_at timestamptz,
-    ADD COLUMN parked_at timestamptz;
+    ADD COLUMN parked_at timestamptz,
+    -- The batch this count last included. One batch is one attempt however many
+    -- of its actions terminate, and its siblings reach the requeue separately,
+    -- so the count has to say which batch it already covers rather than infer
+    -- it from the value: a release landing between two sibling terminations
+    -- resets the count, and a later sibling recomputing it would undo the
+    -- release and repark work the pull request had just bought another attempt
+    -- for.
+    ADD COLUMN counted_dispatch_id uuid;
+
+ALTER TABLE repo_watch_dispatch_obligation
+    ADD CONSTRAINT repo_watch_dispatch_obligation_counted_dispatch_id_fkey
+    FOREIGN KEY (counted_dispatch_id)
+        REFERENCES repo_watch_dispatch_batch(dispatch_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT;
 
 ALTER TABLE repo_watch_dispatch_obligation
     ADD CONSTRAINT repo_watch_dispatch_obligation_failed_attempts_check
@@ -236,6 +251,61 @@ BEGIN
 END;
 $$;
 
+-- Releases every park this event is progress for, whatever rule the event
+-- matched or failed to match. A parked lineage stalls on one pull request, and
+-- that pull request moving on is what buys another attempt; whether the rule
+-- that parked it also names the moving event is beside the point. A rule
+-- watching only check conclusions would otherwise stay parked on an obsolete
+-- head until an operator intervened, however much the pull request changed.
+--
+-- Rule, repository, and stack singletons collapse many pull requests onto one
+-- obligation, so progress has to name the same pull request the obligation
+-- stalled on. A branch target carries neither a head nor review activity, so it
+-- is never progress and never released here.
+--
+-- Ordered so that concurrent callers take the same rows in the same order.
+CREATE FUNCTION repo_watch_release_dispatch_obligation_parks_for_event(
+    progress_event_id uuid
+)
+RETURNS bigint
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    released_count bigint := 0;
+    parked_obligation_id uuid;
+BEGIN
+    FOR parked_obligation_id IN
+        SELECT obligation.obligation_id
+          FROM repo_watch_dispatch_obligation AS obligation
+          JOIN repo_watch_event AS parked_state
+            ON parked_state.event_id = obligation.latest_event_id
+          JOIN repo_watch_event AS incoming
+            ON incoming.event_id = progress_event_id
+         WHERE obligation.settled_kind IS NULL
+           AND obligation.parked_at IS NOT NULL
+           AND parked_state.target_kind = 'pull_request'
+           AND incoming.target_kind = 'pull_request'
+           AND incoming.repository = parked_state.repository
+           AND incoming.pull_request_number = parked_state.pull_request_number
+           AND (
+                parked_state.head_sha IS DISTINCT FROM incoming.head_sha
+                OR incoming.event_kind IN (
+                    'review_submitted', 'thread_opened', 'thread_resolved'
+                )
+           )
+         ORDER BY obligation.obligation_id
+    LOOP
+        IF repo_watch_release_dispatch_obligation_park_for_progress(
+               parked_obligation_id,
+               progress_event_id
+           ) THEN
+            released_count := released_count + 1;
+        END IF;
+    END LOOP;
+    RETURN released_count;
+END;
+$$;
+
 -- Returns a parked obligation to dispatch on an operator's say-so. The whole
 -- budget is restored: an operator asking for another attempt is asking for the
 -- same allowance a lineage that had never failed would get.
@@ -370,7 +440,8 @@ BEGIN
          singleton_scope, singleton_repository, singleton_pull_request_number,
          singleton_stack_root_pull_request_number, first_repository,
          first_event_id, latest_event_id, matched_event_count,
-         blocking_dispatch_id, failed_attempts, last_failed_attempt_at)
+         blocking_dispatch_id, failed_attempts, last_failed_attempt_at,
+         counted_dispatch_id)
     SELECT gen_random_uuid(), origin.repository, batch.rule_id,
            batch.rule_version, batch.singleton_scope,
            batch.singleton_repository, batch.singleton_pull_request_number,
@@ -379,7 +450,8 @@ BEGIN
            -- The settled predecessor carries the lineage count; a dispatch
            -- admitted from a fresh match settled none and starts the lineage.
            coalesce(settled.failed_attempts, 0) + 1,
-           clock_timestamp()
+           clock_timestamp(),
+           batch.dispatch_id
       FROM repo_watch_dispatch_batch AS batch
       JOIN repo_watch_event AS origin ON origin.event_id = batch.event_id
       LEFT JOIN repo_watch_event AS delivered
@@ -467,17 +539,21 @@ BEGIN
                  singleton_stack_root_pull_request_number)
         WHERE settled_kind IS NULL
     -- The absorbing obligation carries the lineage count forward. GREATEST
-    -- rather than addition because sibling actions of one batch each reach
-    -- this with the same successor count: one batch is one attempt however
-    -- many of its sessions terminate, and a match that opened the row while
-    -- the batch ran contributes a count of zero that must not erase the
-    -- lineage.
+    -- rather than addition because a match that opened the row while the batch
+    -- ran contributes a count of zero that must not erase the lineage. The
+    -- WHERE is what makes one batch one attempt: the second and later siblings
+    -- of the same batch find their own identifier already recorded and change
+    -- nothing, so neither the count nor a park release taken since the first
+    -- sibling terminated is disturbed.
     DO UPDATE SET
         failed_attempts = GREATEST(
             repo_watch_dispatch_obligation.failed_attempts,
             EXCLUDED.failed_attempts
         ),
-        last_failed_attempt_at = clock_timestamp()
+        last_failed_attempt_at = clock_timestamp(),
+        counted_dispatch_id = EXCLUDED.counted_dispatch_id
+    WHERE repo_watch_dispatch_obligation.counted_dispatch_id
+           IS DISTINCT FROM EXCLUDED.counted_dispatch_id
     RETURNING obligation_id
     )
     SELECT owed.obligation_id INTO owed_obligation_id FROM owed;

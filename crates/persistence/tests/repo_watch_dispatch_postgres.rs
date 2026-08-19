@@ -90,6 +90,9 @@ const STARTUP_DRAIN_CUTOFF_EVENT_ID: u128 = 0x57_100;
 const STARTUP_DRAIN_STOP_COMMAND_ID: u128 = 0x57_110;
 const PARK_FIRST_STOP_COMMAND_ID: u128 = 0x58_100;
 const CROSS_TARGET_OPENED_EVENT_ID: u128 = 0x58_500;
+const NONMATCHING_PROGRESS_EVENT_ID: u128 = 0x58_600;
+const SIBLING_COUNT_FIRST_STOP_COMMAND_ID: u128 = 0x58_700;
+const SIBLING_COUNT_SECOND_STOP_COMMAND_ID: u128 = 0x58_701;
 const CROSS_TARGET_CONFLICT_EVENT_ID: u128 = 0x58_501;
 const REPOSITORY_SCOPED_RULE: &str = "merge-forward-per-repository";
 const BATCH_DELAY_FIRST_STOP_COMMAND_ID: u128 = 0x58_400;
@@ -1465,6 +1468,54 @@ async fn evaluate_neighbour_conflict(
     )
 }
 
+/// Commits and evaluates a head change on the fixture's pull request. The
+/// fixture rule matches conflicts only, so this event is durable progress on the
+/// parked target that the parked rule itself never matches.
+async fn evaluate_nonmatching_head_change(
+    fixture: &DispatchFixture,
+) -> Result<RepoWatchRuleEvaluationOutcome, Box<dyn Error>> {
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let cursor = event_store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let observation = observation(context(SECOND_HEAD)?)?;
+    event_store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(cursor.generation()),
+                RepoWatchCursorCandidate::new(observation.clone()),
+                vec![identified_event(head_changed_event(
+                    NONMATCHING_PROGRESS_EVENT_ID,
+                    context(SECOND_HEAD)?,
+                    FIRST_HEAD,
+                )?)],
+            ),
+        )
+        .await?;
+    let loaded = fixture
+        .store
+        .load_next_event(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the head change remains unevaluated");
+    Ok(
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                loaded,
+                &fixture.rule,
+                &observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?,
+    )
+}
+
 async fn load_next_obligation(
     fixture: &DispatchFixture,
 ) -> Result<Option<RepoWatchDispatchObligation>, Box<dyn Error>> {
@@ -1477,6 +1528,16 @@ async fn load_next_obligation(
             immediate_retry_policy(),
         )
         .await?)
+}
+
+async fn outstanding_failed_attempts(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT failed_attempts
+           FROM repo_watch_dispatch_obligation
+          WHERE settled_kind IS NULL",
+    )
+    .fetch_one(pool)
+    .await
 }
 
 async fn failed_attempt_epoch(pool: &PgPool) -> Result<f64, sqlx::Error> {
@@ -2030,6 +2091,110 @@ async fn a_new_head_releases_a_parked_obligation() -> Result<(), Box<dyn Error>>
             .map(|transition| transition.release_reason.clone()),
         Some(Some(String::from("pull_request_progress")))
     );
+    Ok(())
+}
+
+/// A rule watching one narrow signal parks on a pull request that keeps
+/// failing, and the head then moves under an event that rule never matches.
+/// Reading progress only from matching events would leave that obligation
+/// parked on an obsolete head until an operator intervened.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_nonmatching_head_change_releases_a_parked_obligation() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+
+    let progress = evaluate_nonmatching_head_change(&fixture).await?;
+
+    let released = load_next_obligation(&fixture).await?;
+    assert_eq!(progress, RepoWatchRuleEvaluationOutcome::NotMatched);
+    assert_eq!(
+        released.map(|obligation| obligation.failed_attempts()),
+        Some(0)
+    );
+    assert_eq!(
+        park_transitions(&fixture.pool)
+            .await?
+            .last()
+            .map(|transition| transition.release_reason.clone()),
+        Some(Some(String::from("pull_request_progress")))
+    );
+    Ok(())
+}
+
+/// One batch is one attempt however many of its actions fail. Counting each
+/// sibling would spend the budget several times faster than the delay assumes,
+/// and would let a later sibling recompute a count that a release taken since
+/// the first sibling terminated had already cleared.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn one_batch_counts_one_attempt_however_many_siblings_fail() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        SIBLING_COUNT_FIRST_STOP_COMMAND_ID,
+    )
+    .await?;
+    let after_first_sibling = outstanding_failed_attempts(&fixture.pool).await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(1),
+        SIBLING_COUNT_SECOND_STOP_COMMAND_ID,
+    )
+    .await?;
+
+    assert_eq!(after_first_sibling, 1);
+    assert_eq!(outstanding_failed_attempts(&fixture.pool).await?, 1);
+    Ok(())
+}
+
+/// The same guard seen from the consequence that matters: a release taken while
+/// a sibling of the counted batch is still running must survive that sibling's
+/// own termination, or the pull request's progress is silently discarded and
+/// the lineage reparks on state it has already been given.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_release_survives_a_later_siblings_termination() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        SIBLING_COUNT_FIRST_STOP_COMMAND_ID,
+    )
+    .await?;
+    let obligation: Uuid = sqlx::query_scalar(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget()
+          WHERE settled_kind IS NULL
+        RETURNING obligation_id",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    sqlx::query("SELECT repo_watch_park_exhausted_dispatch_obligation($1)")
+        .bind(obligation)
+        .execute(&fixture.pool)
+        .await?;
+    sqlx::query("SELECT repo_watch_release_parked_dispatch_obligation($1, $2)")
+        .bind(obligation)
+        .bind(PARK_RELEASE_ACTOR)
+        .execute(&fixture.pool)
+        .await?;
+
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(1),
+        SIBLING_COUNT_SECOND_STOP_COMMAND_ID,
+    )
+    .await?;
+
+    let parked: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_parked_dispatch_obligation")
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(outstanding_failed_attempts(&fixture.pool).await?, 0);
+    assert_eq!(parked, 0);
     Ok(())
 }
 

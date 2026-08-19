@@ -792,6 +792,7 @@ impl PostgresRepoWatchDispatchStore {
                     transaction.rollback().await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::Inactive);
                 }
+                release_parked_obligations_for_event(&mut transaction, &event).await?;
                 let terminal_event = matches!(
                     event.kind(),
                     RepoWatchEventKindV1::PullRequestClosed
@@ -1092,6 +1093,22 @@ impl RepoWatchDispatchTransaction for PostgresRepoWatchDispatchStore {
     }
 }
 
+/// Releases every parked obligation this event is progress for.
+///
+/// Called from both terminal evaluation paths because a parked lineage is
+/// released by its pull request moving on, not by the moving event happening to
+/// match the rule that parked it.
+async fn release_parked_obligations_for_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: &RepoWatchEvent,
+) -> Result<(), RepoWatchDispatchRepositoryError> {
+    sqlx::query("SELECT repo_watch_release_dispatch_obligation_parks_for_event($1)")
+        .bind(event.id().as_uuid())
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
 impl PostgresRepoWatchDispatchStore {
     async fn record_simple_outcome(
         &self,
@@ -1112,6 +1129,7 @@ impl PostgresRepoWatchDispatchStore {
             transaction.rollback().await?;
             return Ok(RepoWatchRuleEvaluationOutcome::Inactive);
         }
+        release_parked_obligations_for_event(&mut transaction, event).await?;
         insert_evaluation(
             &mut transaction,
             event,
