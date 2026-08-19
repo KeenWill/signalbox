@@ -381,7 +381,13 @@ to be accepted by the selected adapter and applies that projection to each
 declared presentation-byte maximum. Both the materialized maximum and projected
 wire maximum must fit their target-specific limits, unless the view instead
 guarantees normalization to one accepted type and bound, in which case the
-normalized type and bound are what those per-reference checks admit. The sum of
+normalized type and bound are what those per-reference checks admit. Every
+worker result admitted through that exception must equal the promised normalized
+type, and its exact materialized length and checked wire projection must fit the
+normalized bound, before publication or commit. A different emitted type or an
+oversized normalized result returns
+`ProcessorFailed { reason_code: undeclared_worker_outcome }`, discards staged
+output, and commits no reference. The sum of
 the checked worst-case wire projections across every reference bound to one
 provider call, normalized or not, must fit the declared aggregate payload
 maximum. Admission first projects and reserves the complete encoded non-media
@@ -444,7 +450,11 @@ streaming, and is never interpreted as a control frame.
 The broker checks every range against source length, the provider declaration,
 the common per-read maximum of 4,096 ranges and 1,073,741,824 cumulative source
 bytes, and cancellation before snapshot I/O. Exceeding the cumulative
-source-byte bound returns `SourceTooLarge { maximum_bytes: 1073741824 }`.
+source-byte bound through rereads or overlap returns
+`ExpansionLimitExceeded { limit_kind }` naming the cumulative source-byte
+limit, because the exhaustion is a reader access-pattern violation rather than
+an intrinsic property of the source. An authenticated source length above an
+intrinsic source-size bound remains `SourceTooLarge { maximum_bytes }`.
 Exhausting the range-count bound is a property of the reader's request pattern,
 not of the source, so it returns `ExpansionLimitExceeded { limit_kind }` naming
 the range-count limit. Either way the broker supplies no further bytes. The
@@ -566,7 +576,13 @@ Before any request in one tool batch executes worker or store I/O, one short
 batch-admission transaction visits every request in stable request order,
 including siblings for tools outside this file-media layer. It starts from the
 pinned target and current frontier, reserves mandatory continuation-call framing
-and output capacity once for the batch, and cumulatively reserves each sibling's
+and output capacity once for the batch, then projects every steering input that
+is already `PendingSteering` and atomically charges its complete rendered and
+provider-wire encodings to the continuation-capacity and aggregate provider-wire
+ledgers. If an already-pending input cannot fit, no sibling executes and the
+batch remains pending rather than creating an under-reserved continuation. Only
+after both ledgers include all already-pending steering does admission
+cumulatively reserve each sibling's
 complete maximum rendered result against both the continuation-capacity and
 aggregate provider-wire ledgers, so a text, structured, inspection, or non-file
 result is charged wire bytes exactly as a reference is. Existing tools use the
@@ -575,13 +591,16 @@ contract; a tool with no finite target projection cannot be admitted in the
 batch. File-media tools use the registry-bounded inspection projection, the
 selected text or structured view bound, or the rich-reference projection and
 media bounds below. A request that cannot obtain its cumulative reservation
-returns `TargetPayloadTooLarge { maximum_bytes }` and performs no external I/O;
-the rejection itself commits as that request's bounded denial evidence, so the
-batch's continuation barrier can close over it, while no partial result or
-worker state commits. Reservations for admitted siblings remain charged until
-their completion transactions consume the actual result and release unused
-capacity, so independently fitting siblings can never overfill the combined
-continuation call. Steering accepted while the batch executes uses the same
+returns `TargetPayloadTooLarge { maximum_bytes }` and performs no external I/O.
+Because approval has already completed, the rejection commits a terminal
+`KnownFailed` tool attempt carrying the bounded `ToolExecutionResult` for that
+capacity error; it is never recorded as `ToolDenied`. The batch's continuation
+barrier can therefore close over execution-failure evidence while no partial
+result or worker state commits. Reservations for admitted siblings remain
+charged until their completion transactions consume the actual result and
+release unused capacity, so independently fitting siblings can never overfill
+the combined continuation call. Steering accepted while the batch executes uses
+the same
 pinned-target continuation-capacity and aggregate provider-wire ledgers. Before
 a steering input becomes pending, a short transaction projects both its complete
 rendered bytes after the already reserved sibling results and its checked
@@ -866,10 +885,11 @@ One shared suite proves every provider and isolation implementation:
   occupied capacity, releases capacity only after deletion, and removes crash
   leftovers before startup admission;
 - declarations above 4,096 reader ranges or 1,073,741,824 reader-source bytes
-  are rejected; runtime cumulative source-byte exhaustion returns
-  `SourceTooLarge` and runtime range-count exhaustion returns
-  `ExpansionLimitExceeded { limit_kind }` naming the range-count limit, either
-  way without another source byte;
+  are rejected; an authenticated source above an intrinsic size bound returns
+  `SourceTooLarge`, while runtime cumulative-byte exhaustion from rereads or
+  overlap returns `ExpansionLimitExceeded { limit_kind }` naming the cumulative
+  source-byte limit and range-count exhaustion returns the same variant naming
+  the range-count limit, in every case without another source byte;
 - any scheduled relevant probe's crash, cancellation, timeout, memory/output
   kill, or framing defect terminates inspection with its exact operational
   outcome before candidate classification and produces no partial success;
@@ -884,7 +904,8 @@ One shared suite proves every provider and isolation implementation:
   second-digest access;
 - path-based CLI fixtures prove seeks, positioned reads, mappings, and rereads
   are charged before delivery and cannot exceed the declared cumulative source
-  limit;
+  limit, and cumulative reread exhaustion has the same
+  `ExpansionLimitExceeded` classification as the shared broker;
 - text/JSON boundaries remain valid, and expansion/pixel/sample limits stop at
   the named value;
 - binary presentation can reach its declared ceiling without entering the
@@ -896,6 +917,8 @@ One shared suite proves every provider and isolation implementation:
 - direct rich references compare the authenticated source length with the view,
   process, target materialized, target wire, and durable reservation maxima
   before commit, and an oversized source commits no reference;
+- normalized rich-view fixtures return a different declared emitted type and an
+  over-bound result, and prove both are rejected before publication or commit;
 - durable replay does not rerun parsing or recharge the turn;
 - ambiguous rich-result reservations remain charged until durable reconciliation
   proves success or failure or records irreversible terminal abandonment, after
@@ -904,12 +927,15 @@ One shared suite proves every provider and isolation implementation:
   selector, reader identity, view, normalized initial options, and position;
 - one pre-execution batch admission reserves target-input capacity cumulatively
   in stable request order for every sibling tool result, including non-file
-  tools, plus one mandatory continuation frame; a tool without a finite rendered
-  projection is not admitted, independently fitting results cannot overfill the
-  combined call; steering accepted during execution atomically consumes that
-  same ledger before becoming pending; and rich views are rejected before
-  processing when either their materialized maximum or the adapter's checked
-  worst-case complete encoded-wire projection exceeds its target-specific limit;
+  tools, plus one mandatory continuation frame; it initializes both ledgers with
+  every already-pending steering input before admitting siblings; a tool without
+  a finite rendered projection is not admitted, independently fitting results
+  cannot overfill the combined call; an approved capacity rejection commits a
+  terminal `KnownFailed` attempt rather than denial evidence; steering accepted
+  during execution atomically consumes both ledgers before becoming pending; and
+  rich views are rejected before processing when either their materialized
+  maximum or the adapter's checked worst-case complete encoded-wire projection
+  exceeds its target-specific limit;
 - snapshot traversal acquires non-waiting direct-read admission before releasing
   scheduler-pass ownership, retains the pass when admission fails, begins no
   store I/O while both capacities are held, and uses the owning blob path's
