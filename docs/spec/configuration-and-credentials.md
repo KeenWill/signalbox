@@ -884,7 +884,10 @@ an explicit posture supersedes that legacy result for the request: `auto`
 records policy automation and `human` parks for a user even when the session
 blanket is enabled. `delegated` parks the request, invokes the approval judge,
 and exposes the ordinary user-decision path only after escalation or a terminal
-judge failure.
+judge failure — except where the escalation is judged under repository-watch
+dispatch authority and takes the unattended terminal path
+[repository watch](repo-watch.md) owns, which fails the turn instead of exposing
+that path to a user who is not there.
 
 The optional `[approval_judge]` table has exactly one `selection_id`, and the
 configuration parser requires it to name a configured direct selection. The

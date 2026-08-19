@@ -14,7 +14,9 @@ that authority again when a consumer commits is verified against this PR
 (`agent/judge-completion-recheck`). Repository-watch-composed stops are verified
 against this PR (`agent/daemon-ops-overnight`). This bottom specification diff
 owns both stack slices. Bounded automatic resumption of execution-failure blocks
-is verified against this PR (`agent/goal-blocked-autoresume`). Identity and
+is verified against this PR (`agent/goal-blocked-autoresume`), and its one
+exemption — the block an unattended repository-watch approval escalation appends
+— against this PR (`agent/headless-approval-escalation`). Identity and
 durable-command mechanics remain owned by
 [identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
@@ -106,10 +108,14 @@ read. Equal statements commit the decision. A statement that resolved before and
 resolves to nothing now belongs to a generation that closed, whether it was
 stopped, achieved, or replaced by a supersession — a replacement closes the
 generation the decision was formed under rather than restating it, so it too
-resolves to nothing. That escalates to a human rather than committing a decision
-formed under authority no longer in force. A judge that read no statement
-decided without one, so a generation attached since withdraws nothing and leaves
-that decision alone: the comparison pins withdrawal, not novelty.
+resolves to nothing. That escalates rather than committing a decision formed
+under authority no longer in force. Escalating means the attended park for a
+turn no repository-watch dispatch authority covers; a turn judged under that
+authority instead takes the unattended terminal path
+[repository watch](repo-watch.md) states, which fails the turn without blocking
+the generation that has already closed. A judge that read no statement decided
+without one, so a generation attached since withdraws nothing and leaves that
+decision alone: the comparison pins withdrawal, not novelty.
 
 **Implemented behavior.** The commit-time resolution is not the reading
 resolution. Reading binds a recorded generation exactly, so a supersession while

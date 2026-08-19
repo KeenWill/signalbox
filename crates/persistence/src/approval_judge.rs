@@ -598,26 +598,7 @@ impl PostgresApprovalJudgeRepository {
                 CompleteApprovalJudgeOutcome::Decided
             }
             None => {
-                // A steer accepted while this turn awaited its judge is a user
-                // attending the session, and the unattended path is for a
-                // session with none. It is also the one shape that path cannot
-                // durably take: terminalizing a turn a `pending_steering` input
-                // still names violates `turn_lifecycle_pending_steering_closed`
-                // and would fail this whole completion, leaving the request
-                // parked and the judge call in flight. Reclassifying the steer
-                // into a queued successor, as the model-execution terminal
-                // paths do, would instead start fresh work in a session whose
-                // dispatch was just released for redispatch. So the escalation
-                // parks for the user who steered, exactly as it does for a
-                // session no dispatch created.
-                if prepared.session_context.dispatch().is_some()
-                    && !turn_awaits_pending_steering(
-                        &mut transaction,
-                        prepared.request.session(),
-                        prepared.request.turn(),
-                    )
-                    .await?
-                {
+                if unattended_escalation_applies(&mut transaction, prepared).await? {
                     persist_headless_escalation(
                         &mut transaction,
                         prepared,
@@ -740,7 +721,7 @@ impl PostgresApprovalJudgeRepository {
 /// stale. It states that no automatic resumption is coming, which is true of
 /// this block alone among execution-failure blocks and is why it names the
 /// repair itself — the repair is the whole of what an operator is promised.
-const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. Repository watch redispatches the work under a fresh dispatch once its batch ends, unless its rule has been deactivated or the pull request has closed or merged since; no automatic resumption is scheduled for this block either way. Resume this goal only to continue this session by hand.";
+const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. Repository watch redispatches the work under a fresh dispatch once its batch ends, unless its rule has been deactivated or the pull request has closed or merged since; no automatic resumption is scheduled for this block either way. Resume this goal only to continue this session by hand: once its dispatch has released, a further escalation waits for you instead of failing the turn again.";
 
 /// The generation a repository-watch dispatch commissions in the session it
 /// creates, which is the only generation its authority describes.
@@ -750,6 +731,60 @@ const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated
 /// watch identifies the commission it owns the same way where it stops one
 /// (`goal::insert_repo_watch_composed_stop`).
 const DISPATCH_COMMISSIONED_GENERATION: GoalGeneration = GoalGeneration::new(NonZeroU64::MIN);
+
+/// Whether this escalation takes the unattended path rather than parking.
+///
+/// Three conditions, each answering a different question about whether a user
+/// is there and whether the path has anything left to do.
+///
+/// Without dispatch authority the session is an ordinary one, and the ordinary
+/// park is what its escalation gets. A steer accepted while this turn awaited
+/// its judge is a user attending the session, and is also the one shape the
+/// unattended path cannot durably take: terminalizing a turn a
+/// `pending_steering` input still names violates
+/// `turn_lifecycle_pending_steering_closed` and would fail the whole
+/// completion, leaving the request parked and the judge call in flight, while
+/// reclassifying the steer into a queued successor would start fresh work in a
+/// session whose dispatch is being released for redispatch.
+///
+/// A dispatch that has already released is the third. The unattended path
+/// exists to free the singleton and owe a replacement, and
+/// `repo_watch_release_completed_dispatch_batches_for_turn` owes that
+/// replacement only on the release that this escalation causes; a batch already
+/// released spends nothing further. Such work is also an operator's — the goal
+/// was blocked and resumed by hand to reach here — and a park costs repository
+/// watch nothing, because the batch that turn once held is no longer its
+/// occupancy.
+async fn unattended_escalation_applies(
+    connection: &mut PgConnection,
+    prepared: &PreparedApprovalJudge,
+) -> Result<bool, ApprovalJudgeRepositoryError> {
+    let Some(dispatch) = prepared
+        .session_context
+        .dispatch()
+        .map(ApprovalJudgeDispatchAuthority::dispatch)
+    else {
+        return Ok(false);
+    };
+    if turn_awaits_pending_steering(
+        connection,
+        prepared.request.session(),
+        prepared.request.turn(),
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+    let released: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM repo_watch_dispatch_release WHERE dispatch_id = $1
+        )",
+    )
+    .bind(dispatch.as_uuid())
+    .fetch_one(&mut *connection)
+    .await?;
+    Ok(!released)
+}
 
 /// Whether a `pending_steering` accepted input still names this turn.
 ///
