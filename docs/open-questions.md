@@ -378,6 +378,29 @@ The questions below remain open.
   workspace portability question above. Blocks automatic placement, not manual
   placement. (S16, S30–S32)
 
+## Goal mode
+
+Statement lineage, transition authority, scheduler continuation, and the bounded
+automatic resumption of an execution-failure block are specified in
+[goal mode](spec/goal-mode.md). The questions below remain open.
+
+- **Re-arming automatic resumption across a daemon restart.** A pending
+  automatic resumption lives only in the daemon process that armed it. The goal
+  event history records how many attempts a run has spent but not when any of
+  them was recorded, so a restart during a backoff loses the pending attempt and
+  the goal stays blocked until an operator resumes it; a goal blocked before
+  that behavior shipped is in the same position. Deciding this needs a durable
+  record of when a failure was appended, which no present goal table carries,
+  and a reader that re-arms from it at startup. Blocks unattended recovery of a
+  goal whose backoff spanned a restart.
+- **Separating consecutive execution failures from distant ones.** The run an
+  attempt budget is derived from ends only at a goal event, so consecutive
+  execution failures separated by successful turns count together: a pursuit
+  that fails transiently five times, however far apart and however much work
+  succeeded between them, exhausts its budget and parks for an operator. The
+  conservative direction is deliberate, because the alternative reads turn
+  dispositions the goal event stream does not carry. Blocks nothing committed.
+
 ## Tool safety
 
 ### Review-slog toolkit adoption
@@ -706,6 +729,41 @@ the implemented session and external-link evidence.
   garbage collection remain undecided. The append-only catalog is their fixed
   constraint; mark/sweep rather than reference counting is nonbinding
   exploration guidance only.
+
+### File and media interpretation
+
+The proposed common architecture is described for owner review in
+[file and media layer](proposals/file-and-media-layer.md). The following choices
+remain unresolved and bind no implementation:
+
+- **Isolation substrate.** Choose a dedicated local worker, the existing runner
+  sandbox, or another mechanism that proves the proposed containment contract.
+  Leaning: a daemon-supervised local worker using accepted platform sandbox
+  primitives, because reads must work without a session runner. Blocks the
+  isolation and inspection slice.
+- **First file formats.** Select the initial adapter inventory. Leaning: UTF-8
+  text, JSON, CSV, PDF, PNG, JPEG, WebP, GIF, WAV, MP3, FLAC, and Ogg/Opus;
+  defer office containers, SVG, video, and archives. Blocks adapter slices, not
+  registry work.
+- **Parser dependency budget.** Decide whether isolated native decoders are
+  admissible. Leaning: pure Rust first, with native libraries approved per
+  adapter only when coverage requires them and executable isolation exists.
+- **OCR and transcription.** Choose explicit inference providers, local readers,
+  or absence. Leaning: exclude both because they add selection, credentials,
+  cost, privacy, and nondeterministic replay beyond file reading.
+- **Provider-native general files.** Decide which model adapters may receive
+  them. Leaning: require an exact per-adapter type inventory and never treat a
+  generic provider file surface as accepting unknown bytes.
+- **Encrypted-file credentials.** Decide whether a future credential reference
+  may supply a password. Leaning: keep `EncryptedOrLocked` terminal in version
+  one; secrets must not enter tool arguments or results.
+- **File-media turn budgets.** Set cumulative typed-read request and source-work
+  ceilings after first-adapter benchmarks while preserving every per-request and
+  per-call hard ceiling. Blocks production enablement, not interface work.
+- **File classification cache.** Decide whether validated classifications need a
+  cache beyond immutable tool results. Leaning: omit it until measurement proves
+  a need because it adds invalidation and reader-retirement law without
+  improving correctness.
 
 ## Program substrate and evaluations
 
