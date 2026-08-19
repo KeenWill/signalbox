@@ -387,26 +387,26 @@ type, and its exact materialized length and checked wire projection must fit the
 normalized bound, before publication or commit. A different emitted type or an
 oversized normalized result returns
 `ProcessorFailed { reason_code: undeclared_worker_outcome }`, discards staged
-output, and commits no reference. The sum of
-the checked worst-case wire projections across every reference bound to one
-provider call, normalized or not, must fit the declared aggregate payload
-maximum. Admission first projects and reserves the complete encoded non-media
-baseline for the pinned provider call, including text, tool schemas, history,
-and all non-reference framing. It then accumulates every existing and newly
-admitted reference's checked worst-case wire projection against the remaining
-aggregate capacity. Thus the baseline plus all references, rather than the
-references alone, must fit the complete-request maximum. A baseline that already
-exceeds the maximum returns `TargetPayloadTooLarge { maximum_bytes }`, because
-the target request is full independently of any referenced source. A reference
-that is intrinsically above its per-reference materialized or wire maximum
-returns `SourceTooLarge` with that specific maximum. A reference that fits every
-intrinsic bound but would overflow aggregate capacity remaining after the
-baseline or earlier references instead returns
-`TargetPayloadTooLarge { maximum_bytes }`; sibling order never reclassifies the
-source itself as oversized. Either failure publishes, reserves, and commits
-nothing. An unsupported type returns typed modality-unsupported failure; an
-oversized target projection returns `SourceTooLarge` with the target-specific
-maximum. Neither path can publish, reserve, or commit a reference.
+output, and commits no reference. The sum of the checked worst-case wire
+projections across every reference bound to one provider call, normalized or
+not, must fit the declared aggregate payload maximum. Admission first projects
+and reserves the complete encoded non-media baseline for the pinned provider
+call, including text, tool schemas, history, and all non-reference framing. It
+then accumulates every existing and newly admitted reference's checked
+worst-case wire projection against the remaining aggregate capacity. Thus the
+baseline plus all references, rather than the references alone, must fit the
+complete-request maximum. A baseline that already exceeds the maximum returns
+`TargetPayloadTooLarge { maximum_bytes }`, because the target request is full
+independently of any referenced source. A reference that is intrinsically above
+its per-reference materialized or wire maximum returns `SourceTooLarge` with
+that specific maximum. A reference that fits every intrinsic bound but would
+overflow aggregate capacity remaining after the baseline or earlier references
+instead returns `TargetPayloadTooLarge { maximum_bytes }`; sibling order never
+reclassifies the source itself as oversized. Either failure publishes, reserves,
+and commits nothing. An unsupported type returns typed modality-unsupported
+failure; an oversized target projection returns `SourceTooLarge` with the
+target-specific maximum. Neither path can publish, reserve, or commit a
+reference.
 
 Registry construction's 786,432-byte body ceiling is only a declaration bound.
 Before committing a successful `file_inspect`, the tool loop prospectively
@@ -451,9 +451,9 @@ The broker checks every range against source length, the provider declaration,
 the common per-read maximum of 4,096 ranges and 1,073,741,824 cumulative source
 bytes, and cancellation before snapshot I/O. Exceeding the cumulative
 source-byte bound through rereads or overlap returns
-`ExpansionLimitExceeded { limit_kind }` naming the cumulative source-byte
-limit, because the exhaustion is a reader access-pattern violation rather than
-an intrinsic property of the source. An authenticated source length above an
+`ExpansionLimitExceeded { limit_kind }` naming the cumulative source-byte limit,
+because the exhaustion is a reader access-pattern violation rather than an
+intrinsic property of the source. An authenticated source length above an
 intrinsic source-size bound remains `SourceTooLarge { maximum_bytes }`.
 Exhausting the range-count bound is a property of the reader's request pattern,
 not of the source, so it returns `ExpansionLimitExceeded { limit_kind }` naming
@@ -582,25 +582,24 @@ provider-wire encodings to the continuation-capacity and aggregate provider-wire
 ledgers. If an already-pending input cannot fit, no sibling executes and the
 batch remains pending rather than creating an under-reserved continuation. Only
 after both ledgers include all already-pending steering does admission
-cumulatively reserve each sibling's
-complete maximum rendered result against both the continuation-capacity and
-aggregate provider-wire ledgers, so a text, structured, inspection, or non-file
-result is charged wire bytes exactly as a reference is. Existing tools use the
-finite durable-result and rendered-projection bound from their registered tool
-contract; a tool with no finite target projection cannot be admitted in the
-batch. File-media tools use the registry-bounded inspection projection, the
-selected text or structured view bound, or the rich-reference projection and
-media bounds below. A request that cannot obtain its cumulative reservation
-returns `TargetPayloadTooLarge { maximum_bytes }` and performs no external I/O.
-Because approval has already completed, the rejection commits a terminal
-`KnownFailed` tool attempt carrying the bounded `ToolExecutionResult` for that
-capacity error; it is never recorded as `ToolDenied`. The batch's continuation
-barrier can therefore close over execution-failure evidence while no partial
-result or worker state commits. Reservations for admitted siblings remain
-charged until their completion transactions consume the actual result and
-release unused capacity, so independently fitting siblings can never overfill
-the combined continuation call. Steering accepted while the batch executes uses
-the same
+cumulatively reserve each sibling's complete maximum rendered result against
+both the continuation-capacity and aggregate provider-wire ledgers, so a text,
+structured, inspection, or non-file result is charged wire bytes exactly as a
+reference is. Existing tools use the finite durable-result and
+rendered-projection bound from their registered tool contract; a tool with no
+finite target projection cannot be admitted in the batch. File-media tools use
+the registry-bounded inspection projection, the selected text or structured view
+bound, or the rich-reference projection and media bounds below. A request that
+cannot obtain its cumulative reservation returns
+`TargetPayloadTooLarge { maximum_bytes }` and performs no external I/O. Because
+approval has already completed, the rejection commits a terminal `KnownFailed`
+tool attempt carrying the bounded `ToolExecutionResult` for that capacity error;
+it is never recorded as `ToolDenied`. The batch's continuation barrier can
+therefore close over execution-failure evidence while no partial result or
+worker state commits. Reservations for admitted siblings remain charged until
+their completion transactions consume the actual result and release unused
+capacity, so independently fitting siblings can never overfill the combined
+continuation call. Steering accepted while the batch executes uses the same
 pinned-target continuation-capacity and aggregate provider-wire ledgers. Before
 a steering input becomes pending, a short transaction projects both its complete
 rendered bytes after the already reserved sibling results and its checked
@@ -904,8 +903,8 @@ One shared suite proves every provider and isolation implementation:
   second-digest access;
 - path-based CLI fixtures prove seeks, positioned reads, mappings, and rereads
   are charged before delivery and cannot exceed the declared cumulative source
-  limit, and cumulative reread exhaustion has the same
-  `ExpansionLimitExceeded` classification as the shared broker;
+  limit, and cumulative reread exhaustion has the same `ExpansionLimitExceeded`
+  classification as the shared broker;
 - text/JSON boundaries remain valid, and expansion/pixel/sample limits stop at
   the named value;
 - binary presentation can reach its declared ceiling without entering the
