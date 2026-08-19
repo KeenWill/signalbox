@@ -10,7 +10,7 @@
 
 use std::{collections::HashMap, error::Error, fmt, time::Duration};
 
-use signalbox_domain::{ModelCallId, SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId};
+use signalbox_domain::{SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId};
 use tokio::time::Instant;
 
 /// How long a turn's durable evidence may stand still before the turn is
@@ -36,19 +36,30 @@ impl StaleActiveTurnBound {
         Self(STALE_ACTIVE_TURN_BOUND)
     }
 
-    /// Accepts a shorter bound and rejects zero or anything above the ceiling.
+    /// Accepts a shorter whole-second bound, rejecting anything else.
     ///
     /// A deployment may make the watchdog react sooner. Raising the bound is
     /// refused here rather than in a caller, because the ceiling is what makes
-    /// the maximum wedge duration a property of the binary.
+    /// the maximum wedge duration a property of the binary. Sub-second
+    /// precision is refused rather than truncated: nothing could act on it —
+    /// staleness is decided from evidence sampled once per scan interval — and
+    /// admitting it would make the audited bound disagree with the bound in
+    /// force.
     pub fn try_lowered(bound: Duration) -> Result<Self, TurnLivenessBoundError> {
         if bound.is_zero() {
             Err(TurnLivenessBoundError::Zero)
         } else if bound > STALE_ACTIVE_TURN_BOUND {
             Err(TurnLivenessBoundError::AboveCeiling)
+        } else if bound.subsec_nanos() != 0 {
+            Err(TurnLivenessBoundError::Subsecond)
         } else {
             Ok(Self(bound))
         }
+    }
+
+    /// Returns the validated bound in whole seconds, losing nothing.
+    pub const fn as_secs(self) -> u64 {
+        self.0.as_secs()
     }
 
     /// Returns the validated duration.
@@ -80,6 +91,8 @@ pub enum TurnLivenessBoundError {
     Zero,
     /// The proposal exceeds the hard safety ceiling, which only lowers.
     AboveCeiling,
+    /// The proposal carries precision finer than a whole second.
+    Subsecond,
 }
 
 impl fmt::Display for TurnLivenessBoundError {
@@ -87,6 +100,7 @@ impl fmt::Display for TurnLivenessBoundError {
         let reason = match self {
             Self::Zero => "must be nonzero",
             Self::AboveCeiling => "cannot exceed the compiled staleness ceiling",
+            Self::Subsecond => "must be a whole number of seconds",
         };
         write!(formatter, "turn-liveness staleness bound {reason}")
     }
@@ -97,17 +111,26 @@ impl Error for TurnLivenessBoundError {}
 /// The durable evidence whose change proves a turn is still progressing.
 ///
 /// The lifecycle tables carry no activity timestamp, so "the latest model call
-/// and the latest transcript entry are both older than the bound" is decided
-/// by observing this evidence unchanged across the bound rather than by
-/// reading a stored clock. Counts move when either sequence is appended to,
-/// and the attempt identity moves when orchestration takes a fresh tenure, so
-/// any progress at all changes the value.
+/// and the latest transcript entry are both older than the bound" is decided by
+/// observing this evidence unchanged across the bound rather than by reading a
+/// stored clock.
+///
+/// Both members are chosen so that reading them costs the same whatever a
+/// session's history weighs: the attempt is a column of the lifecycle row
+/// already being read, and the newest transcript entry is one backward index
+/// lookup on that table's `(session, entry)` primary key. Aggregates over a
+/// session's history would have made a once-a-minute pass cost more the longer
+/// a session lived, which is the opposite of what a watchdog may do.
+///
+/// The transcript frontier is what detects progress, because a model call that
+/// leaves nothing in the transcript cannot leave a turn quiescent either: while
+/// the call is outstanding the turn is not a candidate at all, so it has already
+/// left the ledger, and the next complete scan restarts its bound. The attempt
+/// identity covers the remaining case of a fresh tenure over an unchanged
+/// transcript.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TurnLivenessEvidence {
     current_attempt: TurnAttemptId,
-    model_call_count: u64,
-    latest_model_call: Option<ModelCallId>,
-    transcript_entry_count: u64,
     latest_transcript_entry: Option<SemanticTranscriptEntryId>,
 }
 
@@ -115,16 +138,10 @@ impl TurnLivenessEvidence {
     /// Records one complete observation of a session's progress evidence.
     pub const fn new(
         current_attempt: TurnAttemptId,
-        model_call_count: u64,
-        latest_model_call: Option<ModelCallId>,
-        transcript_entry_count: u64,
         latest_transcript_entry: Option<SemanticTranscriptEntryId>,
     ) -> Self {
         Self {
             current_attempt,
-            model_call_count,
-            latest_model_call,
-            transcript_entry_count,
             latest_transcript_entry,
         }
     }
@@ -132,21 +149,6 @@ impl TurnLivenessEvidence {
     /// Returns the attempt holding the turn's physical tenure.
     pub const fn current_attempt(self) -> TurnAttemptId {
         self.current_attempt
-    }
-
-    /// Returns how many model calls the session has ever authorized.
-    pub const fn model_call_count(self) -> u64 {
-        self.model_call_count
-    }
-
-    /// Returns the session's newest model-call identity, if any exists.
-    pub const fn latest_model_call(self) -> Option<ModelCallId> {
-        self.latest_model_call
-    }
-
-    /// Returns how many semantic transcript entries the session holds.
-    pub const fn transcript_entry_count(self) -> u64 {
-        self.transcript_entry_count
     }
 
     /// Returns the session's newest transcript-entry identity, if any exists.
@@ -282,7 +284,7 @@ mod tests {
         StaleActiveTurnBound, StaleTurnCandidate, TurnLivenessBoundError, TurnLivenessEvidence,
         TurnLivenessLedger, TurnLivenessScanInterval,
     };
-    use signalbox_domain::{ModelCallId, SessionId, TurnAttemptId, TurnId};
+    use signalbox_domain::{SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId};
     use std::time::Duration;
     use tokio::time::Instant;
 
@@ -300,18 +302,17 @@ mod tests {
         TurnAttemptId::from_uuid(uuid::Uuid::from_u128(0xa7_0001))
     }
 
-    fn evidence(model_call_count: u64) -> TurnLivenessEvidence {
+    fn evidence(frontier: u128) -> TurnLivenessEvidence {
         TurnLivenessEvidence::new(
             attempt(),
-            model_call_count,
-            Some(ModelCallId::from_uuid(uuid::Uuid::from_u128(0xca11_0001))),
-            2,
-            None,
+            Some(SemanticTranscriptEntryId::from_uuid(uuid::Uuid::from_u128(
+                0xe0_0000 + frontier,
+            ))),
         )
     }
 
-    fn candidate(model_call_count: u64) -> StaleTurnCandidate {
-        StaleTurnCandidate::new(session(), turn(1), evidence(model_call_count))
+    fn candidate(frontier: u128) -> StaleTurnCandidate {
+        StaleTurnCandidate::new(session(), turn(1), evidence(frontier))
     }
 
     fn other_candidate() -> StaleTurnCandidate {
@@ -325,16 +326,27 @@ mod tests {
     /// A deployment may react sooner than the compiled ceiling but never later.
     #[test]
     fn the_staleness_bound_lowers_and_never_raises() {
-        let lowered = StaleActiveTurnBound::try_lowered(Duration::from_secs(60));
+        let shorter = Duration::from_secs(60);
+        let lowered = StaleActiveTurnBound::try_lowered(shorter);
         let raised = StaleActiveTurnBound::try_lowered(Duration::from_secs(60 * 60));
         let zero = StaleActiveTurnBound::try_lowered(Duration::ZERO);
 
-        assert_eq!(
-            lowered.map(StaleActiveTurnBound::get),
-            Ok(Duration::from_secs(60))
-        );
+        assert_eq!(lowered.map(StaleActiveTurnBound::get), Ok(shorter));
         assert_eq!(raised, Err(TurnLivenessBoundError::AboveCeiling));
         assert_eq!(zero, Err(TurnLivenessBoundError::Zero));
+    }
+
+    /// A bound the audit record could not report exactly is refused outright,
+    /// so the reported bound and the bound in force can never disagree.
+    #[test]
+    fn a_subsecond_bound_is_refused_rather_than_truncated() {
+        let millis = StaleActiveTurnBound::try_lowered(Duration::from_millis(500));
+        let fractional = StaleActiveTurnBound::try_lowered(Duration::from_millis(1_500));
+        let whole = StaleActiveTurnBound::try_lowered(Duration::from_secs(1));
+
+        assert_eq!(millis, Err(TurnLivenessBoundError::Subsecond));
+        assert_eq!(fractional, Err(TurnLivenessBoundError::Subsecond));
+        assert_eq!(whole.map(StaleActiveTurnBound::as_secs), Ok(1));
     }
 
     /// The compiled constants are the production values this page states.

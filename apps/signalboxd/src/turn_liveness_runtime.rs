@@ -31,6 +31,19 @@ use uuid::Uuid;
 /// different defect from a turn abandoned by a dead process.
 const STALE_TURN_TERMINAL_CAUSE: &str = "turn_liveness_watchdog_stale";
 
+/// Why a candidate the scan reported was left alone.
+///
+/// Distinct from the terminal cause: a search for turns this pass ended must
+/// not also return turns it explicitly declined to end.
+const STALE_TURN_SUPERSEDED_CAUSE: &str = "turn_liveness_candidate_superseded";
+
+/// Why a terminalization's durable outcome is unknown.
+///
+/// The audit line the terminal cause promises can no longer be written truly —
+/// the commit may or may not have landed — so this reports the same identity
+/// under a cause an operator can tell apart from a committed terminalization.
+const STALE_TURN_AMBIGUOUS_CAUSE: &str = "turn_liveness_terminalization_ambiguous";
+
 /// Why one turn-liveness pass produced no decision.
 const PASS_FAILURE_CAUSE: &str = "turn_liveness_pass_failed";
 
@@ -200,16 +213,42 @@ async fn terminalize_stale_turn(
             cause_code = STALE_TURN_TERMINAL_CAUSE,
             session_id = %candidate.session().as_uuid(),
             turn_id = %candidate.turn().as_uuid(),
-            staleness_bound_seconds = staleness_bound.get().as_secs(),
+            staleness_bound_seconds = staleness_bound.as_secs(),
             "active turn terminalized as failed after its durable evidence stood still"
         ),
         Ok(StaleTurnOutcome::Superseded) => tracing::info!(
-            cause_code = STALE_TURN_TERMINAL_CAUSE,
+            cause_code = STALE_TURN_SUPERSEDED_CAUSE,
             session_id = %candidate.session().as_uuid(),
             turn_id = %candidate.turn().as_uuid(),
             "stale active turn changed under its locks and was left alone"
         ),
-        Err(error) => report_turn_liveness_failure(&error),
+        // An ambiguous commit is the one failure that may already have ended
+        // the turn. The next scan will not see it again either way, and the
+        // durable `TurnFailed` shape carries no cause, so this is the only
+        // chance to record which turn it was — reported without claiming the
+        // commit landed.
+        Err(
+            error @ TurnLivenessRepositoryError::TerminalizationDatabase {
+                commit_ambiguous: true,
+                ..
+            },
+        ) => tracing::warn!(
+            failure_class = ?error.operator_failure_class(),
+            cause_code = STALE_TURN_AMBIGUOUS_CAUSE,
+            detail_code = error.operator_failure_cause_code(),
+            session_id = %candidate.session().as_uuid(),
+            turn_id = %candidate.turn().as_uuid(),
+            staleness_bound_seconds = staleness_bound.as_secs(),
+            "stale active turn may or may not have terminalized; its commit was not acknowledged"
+        ),
+        Err(error) => tracing::warn!(
+            failure_class = ?error.operator_failure_class(),
+            cause_code = PASS_FAILURE_CAUSE,
+            detail_code = error.operator_failure_cause_code(),
+            session_id = %candidate.session().as_uuid(),
+            turn_id = %candidate.turn().as_uuid(),
+            "stale active turn was not terminalized"
+        ),
     }
 }
 
@@ -226,7 +265,8 @@ fn report_turn_liveness_failure(error: &TurnLivenessRepositoryError) {
 mod tests {
     use super::{
         PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, ROTATION_CEILING_CAUSE,
-        STALE_TURN_TERMINAL_CAUSE, TurnLivenessWake, next_turn_liveness_wake,
+        STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE,
+        TurnLivenessWake, next_turn_liveness_wake,
     };
     use signalbox_application::StaleActiveTurnBound;
     use std::time::Duration;
@@ -287,6 +327,25 @@ mod tests {
             ROTATION_CEILING_CAUSE,
             "turn_liveness_rotation_ceiling_reached"
         );
+        assert_eq!(
+            STALE_TURN_SUPERSEDED_CAUSE,
+            "turn_liveness_candidate_superseded"
+        );
+        assert_eq!(
+            STALE_TURN_AMBIGUOUS_CAUSE,
+            "turn_liveness_terminalization_ambiguous"
+        );
+        for cause in [
+            STALE_TURN_SUPERSEDED_CAUSE,
+            STALE_TURN_AMBIGUOUS_CAUSE,
+            PASS_FAILURE_CAUSE,
+            ROTATION_CEILING_CAUSE,
+        ] {
+            assert_ne!(
+                cause, STALE_TURN_TERMINAL_CAUSE,
+                "only a committed terminalization carries the terminal cause"
+            );
+        }
         assert_eq!(QUIESCENT_ROTATION_PAGE_CEILING, 4_096);
     }
 
@@ -294,10 +353,10 @@ mod tests {
     /// an operator reading the line sees what actually decided the turn.
     #[test]
     fn the_audited_bound_is_the_configured_one() {
-        let lowered =
-            StaleActiveTurnBound::try_lowered(Duration::from_secs(300)).expect("300s is below 30m");
+        let shortened = Duration::from_secs(300);
+        let lowered = StaleActiveTurnBound::try_lowered(shortened).expect("300s is below 30m");
 
-        assert_eq!(lowered.get().as_secs(), 300);
-        assert_eq!(StaleActiveTurnBound::hard_ceiling().get().as_secs(), 1_800);
+        assert_eq!(lowered.get(), shortened);
+        assert_eq!(StaleActiveTurnBound::hard_ceiling().as_secs(), 1_800);
     }
 }

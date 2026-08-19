@@ -8777,6 +8777,7 @@ pub struct StaleActiveTurnBound(/* private */);
 impl StaleActiveTurnBound {
     pub const fn hard_ceiling() -> Self;
     pub fn try_lowered(bound: Duration) -> Result<Self, TurnLivenessBoundError>;
+    pub const fn as_secs(self) -> u64;
     pub const fn get(self) -> Duration;
 }
 
@@ -8789,6 +8790,7 @@ impl TurnLivenessScanInterval {
 pub enum TurnLivenessBoundError {
     Zero,
     AboveCeiling,
+    Subsecond,
 }
 // impl Display + std::error::Error
 
@@ -8796,15 +8798,9 @@ pub struct TurnLivenessEvidence { /* private */ }
 impl TurnLivenessEvidence {
     pub const fn new(
         current_attempt: TurnAttemptId,
-        model_call_count: u64,
-        latest_model_call: Option<ModelCallId>,
-        transcript_entry_count: u64,
         latest_transcript_entry: Option<SemanticTranscriptEntryId>,
     ) -> Self;
     pub const fn current_attempt(self) -> TurnAttemptId;
-    pub const fn model_call_count(self) -> u64;
-    pub const fn latest_model_call(self) -> Option<ModelCallId>;
-    pub const fn transcript_entry_count(self) -> u64;
     pub const fn latest_transcript_entry(self) -> Option<SemanticTranscriptEntryId>;
 }
 

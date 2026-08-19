@@ -3,6 +3,7 @@
 use crate::*;
 
 use signalbox_application::{StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence};
+use signalbox_domain::SemanticTranscriptEntryId;
 use signalbox_persistence::turn_liveness::PostgresTurnLivenessRepository;
 
 struct WatchdogFixture {
@@ -146,8 +147,6 @@ async fn a_quiescent_active_turn_terminalizes_as_failed() -> Result<(), Box<dyn 
     );
     assert_eq!(candidate.session(), fixture.session);
     assert_eq!(candidate.turn(), fixture.turn);
-    assert_eq!(candidate.evidence().model_call_count(), 0);
-    assert_eq!(candidate.evidence().latest_model_call(), None);
 
     let outcome = repository
         .terminalize_stale_turn(
@@ -234,10 +233,9 @@ async fn a_changed_observation_is_superseded() -> Result<(), Box<dyn Error>> {
         observed.turn(),
         TurnLivenessEvidence::new(
             observed.evidence().current_attempt(),
-            observed.evidence().model_call_count() + 1,
-            observed.evidence().latest_model_call(),
-            observed.evidence().transcript_entry_count(),
-            observed.evidence().latest_transcript_entry(),
+            Some(SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                0x13_200,
+            ))),
         ),
     );
 
@@ -264,12 +262,12 @@ async fn a_changed_observation_is_superseded() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// The newest-identity columns are read with an ordered subquery because
-/// PostgreSQL defines no `max(uuid)`; a session whose earlier turn already
-/// completed is what proves they resolve to a real identity rather than null.
+/// The transcript frontier is read with an ordered subquery because PostgreSQL
+/// defines no `max(uuid)`; a session whose earlier turn already completed is
+/// what proves it resolves to a real identity rather than null.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn the_newest_identity_columns_resolve_over_a_worked_session() -> Result<(), Box<dyn Error>> {
+async fn the_transcript_frontier_resolves_over_a_worked_session() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x14_000).await?;
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
@@ -318,20 +316,8 @@ async fn the_newest_identity_columns_resolve_over_a_worked_session() -> Result<(
 
     assert_eq!(candidate.turn(), successor);
     assert!(
-        candidate.evidence().model_call_count() > 0,
-        "the completed first turn left model calls behind"
-    );
-    assert!(
-        candidate.evidence().latest_model_call().is_some(),
-        "the newest model-call subquery resolves an identity"
-    );
-    assert!(
-        candidate.evidence().transcript_entry_count() > 0,
-        "the completed first turn left transcript entries behind"
-    );
-    assert!(
         candidate.evidence().latest_transcript_entry().is_some(),
-        "the newest transcript-entry subquery resolves an identity"
+        "the completed first turn left entries behind for the frontier to resolve"
     );
 
     pool.close().await;

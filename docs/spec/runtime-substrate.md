@@ -1374,9 +1374,14 @@ that transition is what refused. The four classes:
   of a defect, kept distinct from corruption.
 
 The class states only how bad a failure is. The orthogonal sanitized cause code
-stating *what happened* — carried by the model-call bridge, reusing this page's
-`ProviderErrorKind` vocabulary verbatim for definitive provider errors — is
-owned by [model-call-execution](model-call-execution.md#operator-diagnostics).
+stating *what happened* is owned by whichever page owns the behavior that raises
+it: for provider and model-call failures — carried by the model-call bridge,
+reusing this page's `ProviderErrorKind` vocabulary verbatim for definitive
+provider errors — that owner is
+[model-call-execution](model-call-execution.md#operator-diagnostics), and the
+turn-liveness causes are owned by
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md). No page owns
+a cause code for behavior it does not describe.
 
 Concurrent staleness is not a class: a guarded write that matches zero rows is
 consumed inside adapters by reload-and-rederive

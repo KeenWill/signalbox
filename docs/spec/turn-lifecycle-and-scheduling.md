@@ -491,14 +491,23 @@ rather than condemning it.
 **Staleness.** No lifecycle table stores an activity timestamp, and this page
 introduces none: a stored clock would be one more thing to keep true. Staleness
 is decided by repeated observation instead. Each pass records, per candidate
-turn, its session's model-call count and newest model-call identity, its
-semantic-entry count and newest entry identity, and the turn's current attempt.
-A turn is due only once that evidence has been observed unchanged for at least
-the staleness bound. Any progress at all — a fresh call, a fresh entry, a fresh
+turn, its session's newest semantic-entry identity and the turn's current
+attempt. A turn is due only once that evidence has been observed unchanged for
+at least the staleness bound. Any progress at all — a fresh entry, a fresh
 attempt — restarts the bound, so a turn that resumed cannot be ended on the
-strength of its earlier silence. That ledger is process-local and carries no
-authority: losing it to a restart costs one more bound before a wedged turn is
-reached, which is the direction that cannot end live work.
+strength of its earlier silence. Both observations are chosen so that reading
+them costs the same whatever a session's history weighs: the attempt is a column
+of the lifecycle row already read, and the newest entry is one backward index
+lookup on that table's `(session, entry)` primary key. Aggregates over a
+session's history would have made a once-a-minute pass cost more the longer a
+session lived. Nothing is lost by leaving model calls out of the evidence: a
+call that leaves nothing in the transcript cannot leave a turn quiescent either,
+because while it is outstanding the turn is not a candidate at all and has
+already left the ledger. The staleness bound is also refused below whole-second
+precision, so the bound an audit line reports is exactly the bound in force.
+That ledger is process-local and carries no authority: losing it to a restart
+costs one more bound before a wedged turn is reached, which is the direction
+that cannot end live work.
 
 **Coverage.** One scan observes the whole quiescent population, so the bound is
 a property of the binary rather than of how many sessions happen to be
@@ -523,9 +532,12 @@ line reports; the ceiling stays the only maximum, enforced where the bound is
 built.
 
 **Terminalization.** A due turn ends through the same committed failed-turn
-transition startup recovery commits: the session and scheduler rows are locked,
-the complete candidate predicate is re-decided under those locks against rows no
-concurrent pass can be changing, and the ordinary
+transition startup recovery commits, taking the same lock in the same order: the
+session's `session_scheduler` row is locked `FOR UPDATE` and nothing else is,
+because that row is the one every pass touching a session takes first, and it is
+therefore what serializes this pass against activation, model-call execution,
+and the tool loop. The complete candidate predicate is re-decided under that
+lock against rows no concurrent pass can be changing, and the ordinary
 `prepare_active_turn_lost_failure` candidate is committed — Lost attempt end,
 `TurnFailed` semantic entry, terminal frontier, `terminal`/`failed` lifecycle
 row, and the `TurnFailed` outbox event. No terminal state, disposition, or
@@ -538,9 +550,15 @@ records its requeue obligation without this pass naming either.
 
 **Audit.** Terminalization emits a key-bearing operator log line carrying the
 cause code `turn_liveness_watchdog_stale` with the session, the turn, and the
-bound in force. The durable record is the ordinary `TurnFailed` shape, which has
-no cause column, so a watchdog-ended turn is not durably distinguishable from a
-restart-recovered one.
+bound in force. That cause is reserved for a committed terminalization, so a
+search keyed by it returns turns this pass ended and nothing else: a candidate
+left alone under the lock carries `turn_liveness_candidate_superseded` instead,
+and a commit the database never acknowledged carries
+`turn_liveness_terminalization_ambiguous` — the same identity and bound, under a
+cause that does not claim the turn ended, because that outcome is the one case
+where no later pass can report the turn again. The durable record is the
+ordinary `TurnFailed` shape, which has no cause column, so a watchdog-ended turn
+is not durably distinguishable from a restart-recovered one.
 
 ## Startup scan and recovery
 
@@ -1040,16 +1058,17 @@ Observability and the operator failure taxonomy are
 On SIGINT/SIGTERM the listener stops accepting requests, follow streams are
 closed, the dispatcher stops starting transactions, the scheduler stops
 admitting passes, and the turn-liveness pass stops scanning. Finite request
-handlers, the current dispatcher transaction, and in-flight scheduler passes
-share the bounded 30-second grace window to let authoritative transactions
-commit or abort. A clean exit closes the fenced pool, waits on the guard
-session's exclusive current-generation fence so even detached pool sessions have
-ended, removes only this daemon's identity-pinned and revalidated socket, and
-releases the advisory locks by closing its dedicated guard connection. Window
-expiry abandons remaining tasks, warns, and skips the unbounded pool drain;
-process exit releases its sessions. Why signal-driven shutdown is polish, not
-correctness: abrupt exit at any point is safe because durable rows plus the next
-guarded startup scan recover work and the durable outbox cursor redelivers an
+handlers, the current dispatcher transaction, in-flight scheduler passes, and an
+in-flight turn-liveness inventory read or terminalization share the bounded
+30-second grace window to let authoritative transactions commit or abort. A
+clean exit closes the fenced pool, waits on the guard session's exclusive
+current-generation fence so even detached pool sessions have ended, removes only
+this daemon's identity-pinned and revalidated socket, and releases the advisory
+locks by closing its dedicated guard connection. Window expiry abandons
+remaining tasks, warns, and skips the unbounded pool drain; process exit
+releases its sessions. Why signal-driven shutdown is polish, not correctness:
+abrupt exit at any point is safe because durable rows plus the next guarded
+startup scan recover work and the durable outbox cursor redelivers an
 uncommitted offer (INV-032, INV-034), so the grace window buys only latency.
 Repositories and services are cheap per-invocation clones over the shared pool;
 no shared locked service instance exists.

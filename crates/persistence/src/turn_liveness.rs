@@ -16,8 +16,8 @@ use signalbox_application::{
     TurnLivenessEvidence,
 };
 use signalbox_domain::{
-    AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, ModelCallId,
-    SemanticTranscriptEntryId, SessionId, TurnAttemptId,
+    AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, SemanticTranscriptEntryId,
+    SessionId, TurnAttemptId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -194,12 +194,13 @@ impl PostgresTurnLivenessRepository {
                     .map_err(TurnLivenessRepositoryError::terminalization)?;
                 Ok(StaleTurnOutcome::Superseded)
             }
-            Err(error) => {
-                if let Err(rollback_error) = transaction.rollback().await {
-                    return Err(TurnLivenessRepositoryError::terminalization(rollback_error));
-                }
-                Err(error)
-            }
+            // The originating failure is the one that classifies this outcome,
+            // and it may be corruption — which an operator must not read as a
+            // transient infrastructure fault merely because a rollback also
+            // failed. Nothing is rolled back explicitly here: dropping the
+            // transaction rolls it back, so there is no second failure to weigh
+            // against the first in the first place.
+            Err(error) => Err(error),
         }
     }
 }
@@ -263,25 +264,18 @@ impl QuiescentActiveTurnPage {
 /// wedge unowned. `stop_requested` and `ended` stay out, the first because an
 /// interrupt is in flight and the second because the attempt already closed.
 ///
-/// Newest identities are read with `ORDER BY … DESC LIMIT 1` rather than an
-/// aggregate: PostgreSQL defines no `max(uuid)`, verified against 18.4, the
-/// version the integration suite runs. The ordering is `uuid`'s native
-/// big-endian byte comparison, which for the UUIDv7 identities this schema
-/// mints is time order, and it can be answered from an index.
+/// The transcript frontier is read with `ORDER BY … DESC LIMIT 1` rather than an
+/// aggregate for two reasons. PostgreSQL defines no `max(uuid)`, verified
+/// against 18.4, the version the integration suite runs. And the ordering is
+/// `uuid`'s native big-endian byte comparison — time order for the UUIDv7
+/// identities this schema mints — over `semantic_transcript_entry`'s
+/// `(source_session_id, semantic_entry_id)` primary key, so it is one backward
+/// index lookup whatever a session's history weighs. Every observation this
+/// statement reports is bounded that way: the `LIMIT` caps returned rows, and
+/// nothing per row scans a history.
 const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
             active.turn_id,
             active.current_attempt_id,
-            (SELECT count(*)
-               FROM model_call AS counted
-              WHERE counted.session_id = active.session_id) AS model_call_count,
-            (SELECT newest.model_call_id
-               FROM model_call AS newest
-              WHERE newest.session_id = active.session_id
-              ORDER BY newest.model_call_id DESC
-              LIMIT 1) AS latest_model_call_id,
-            (SELECT count(*)
-               FROM semantic_transcript_entry AS counted
-              WHERE counted.source_session_id = active.session_id) AS transcript_entry_count,
             (SELECT newest.semantic_entry_id
                FROM semantic_transcript_entry AS newest
               WHERE newest.source_session_id = active.session_id
@@ -352,18 +346,12 @@ async fn read_quiescent_active_turns(
         let session: Uuid = row.try_get("session_id")?;
         let turn: Uuid = row.try_get("turn_id")?;
         let attempt: Uuid = row.try_get("current_attempt_id")?;
-        let model_call_count: i64 = row.try_get("model_call_count")?;
-        let latest_model_call: Option<Uuid> = row.try_get("latest_model_call_id")?;
-        let transcript_entry_count: i64 = row.try_get("transcript_entry_count")?;
         let latest_transcript_entry: Option<Uuid> = row.try_get("latest_transcript_entry_id")?;
         candidates.push(StaleTurnCandidate::new(
             session_id_from_uuid(session),
             turn_id_from_uuid(turn),
             TurnLivenessEvidence::new(
                 TurnAttemptId::from_uuid(attempt),
-                model_call_count.unsigned_abs(),
-                latest_model_call.map(ModelCallId::from_uuid),
-                transcript_entry_count.unsigned_abs(),
                 latest_transcript_entry.map(SemanticTranscriptEntryId::from_uuid),
             ),
         ));
@@ -390,11 +378,22 @@ async fn terminalize_in_transaction(
     let active_turn: Option<Uuid> = locks
         .try_get(2)
         .map_err(TurnLivenessRepositoryError::terminalization)?;
-    if !session_exists
-        || scheduler_session.is_none()
-        || active_turn != Some(turn_id_to_uuid(candidate.turn()))
-    {
+    // A session that is gone, or whose active turn is no longer this one, is an
+    // ordinary concurrent departure. A session that exists without its
+    // scheduler row is not: the two are one-to-one and neither is deleted, so
+    // the same lock result is corruption in startup recovery and is corruption
+    // here. Reporting it as supersession would retry the wedged turn every
+    // scan and log the inconsistency as an informational race.
+    if !session_exists || active_turn != Some(turn_id_to_uuid(candidate.turn())) {
         return Ok(StaleTurnOutcome::Superseded);
+    }
+    if scheduler_session.is_none() {
+        return Err(
+            StartupScanRepositoryError::from(StartupScanCorruption::Missing(
+                "session scheduler row",
+            ))
+            .into(),
+        );
     }
     // The scan ran without the scheduler lock, so the whole predicate is
     // re-decided here against rows no concurrent pass can now be changing.
@@ -478,9 +477,6 @@ mod tests {
             TurnId::from_uuid(Uuid::from_u128(0xa_0000 + session)),
             TurnLivenessEvidence::new(
                 TurnAttemptId::from_uuid(Uuid::from_u128(0xb_0000 + session)),
-                0,
-                None,
-                0,
                 None,
             ),
         )
