@@ -52,6 +52,14 @@ jobs:
               "$BASE_SHA...$HEAD_SHA" > "$changed_paths"
             while IFS= read -r -d '' path; do
               case "$path" in
+                # Binding process/specification prose and generated indexes
+                # run the complete bar even though they are Markdown.
+                AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
+                  | docs/domain-spine.md | docs/invariants.md \
+                  | docs/scenarios.md | docs/style.md)
+                  docs_only=false
+                  break
+                  ;;
                 docs/* | *.md)
                   ;;
                 *)
