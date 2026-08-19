@@ -96,6 +96,7 @@ const SPENT_FRONTIER_NEWER_EVENT_ID: u128 = 0x58_901;
 const SPENT_FRONTIER_STOP_COMMAND_ID: u128 = 0x58_902;
 const CROSS_TARGET_SPEND_PROGRESS_EVENT_ID: u128 = 0x58_910;
 const CROSS_TARGET_SPEND_STOP_COMMAND_ID: u128 = 0x58_911;
+const CROSS_TARGET_SPEND_NEIGHBOUR_EVENT_ID: u128 = 0x58_912;
 const PARKED_TARGET_CUTOFF_COMMAND_ID: u128 = 0x58_801;
 const NONMATCHING_PROGRESS_EVENT_ID: u128 = 0x58_600;
 const SIBLING_COUNT_FIRST_STOP_COMMAND_ID: u128 = 0x58_700;
@@ -1993,14 +1994,28 @@ async fn a_spend_on_another_target_does_not_order_this_target_progress()
     )
     .await?;
     // Progress on the stalled pull request, recorded before the neighbour's
-    // events and therefore at a lower cursor position than they take.
+    // fact and therefore at a lower cursor position than it takes.
     commit_lifecycle(
         &fixture,
         observation(context(SECOND_HEAD)?)?,
         conflict_event(CROSS_TARGET_SPEND_PROGRESS_EVENT_ID, SECOND_HEAD)?,
     )
     .await?;
-    evaluate_neighbour_conflict(&fixture).await?;
+    // The neighbour's fact, at the higher cursor position. Committed and left
+    // unevaluated: what this test needs from it is that it is durable and that
+    // the lineage records a spend on it.
+    let neighbour = same_repository_context(SameRepositoryContextFacts {
+        number: TOP_PULL_REQUEST_NUMBER,
+        head: THIRD_HEAD,
+        base_branch: BASE_BRANCH,
+        head_branch: TOP_AGENT_BRANCH,
+    })?;
+    commit_lifecycle(
+        &fixture,
+        mergeable_observation(vec![context(SECOND_HEAD)?, neighbour.clone()], Vec::new())?,
+        conflict_event_for(CROSS_TARGET_SPEND_NEIGHBOUR_EVENT_ID, neighbour)?,
+    )
+    .await?;
     // A spend this lineage took on the neighbour, which the ordering arm must
     // not weigh against progress on the pull request it stalled on. Written
     // directly because the machinery only ever spends facts about the stalled
@@ -2013,7 +2028,7 @@ async fn a_spend_on_another_target_does_not_order_this_target_progress()
            FROM repo_watch_dispatch_obligation
           WHERE settled_kind IS NULL",
     )
-    .bind(Uuid::from_u128(CROSS_TARGET_CONFLICT_EVENT_ID))
+    .bind(Uuid::from_u128(CROSS_TARGET_SPEND_NEIGHBOUR_EVENT_ID))
     .execute(&fixture.pool)
     .await?;
 
