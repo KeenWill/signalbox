@@ -2138,7 +2138,7 @@ async fn closing_the_stalled_pull_request_settles_a_parked_obligation() -> Resul
 /// state the pull request had already left.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn a_head_that_moved_during_the_last_attempt_refuses_the_park() -> Result<(), Box<dyn Error>>
+async fn a_head_that_moved_during_the_last_attempt_releases_the_park() -> Result<(), Box<dyn Error>>
 {
     let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
     let second =

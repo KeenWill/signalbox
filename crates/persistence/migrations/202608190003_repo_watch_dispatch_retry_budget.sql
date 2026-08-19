@@ -160,77 +160,20 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     parked_attempts bigint;
-    stalled_event_id uuid;
+    progress_event_id uuid;
 BEGIN
-    SELECT obligation.latest_event_id
-      INTO stalled_event_id
-      FROM repo_watch_dispatch_obligation AS obligation
-     WHERE obligation.obligation_id = subject_obligation_id
-       AND obligation.settled_kind IS NULL
-       AND obligation.parked_at IS NULL
-       AND obligation.failed_attempts >= repo_watch_dispatch_attempt_budget()
-       FOR UPDATE;
-
-    IF NOT FOUND THEN
-        RETURN;
-    END IF;
-
-    -- The pull request may have moved while the exhausting attempt ran, under
-    -- an event that reached its evaluation before there was a park to release.
-    -- Nothing restates that fact afterwards, so the durable record is read here
-    -- rather than waited for. Progress means the same thing as it does to a
-    -- release -- a head other than the stalled one, or review activity -- and
-    -- is spent the same way, so one fact cannot hold a lineage out of parking
-    -- indefinitely.
-    IF EXISTS (
-        SELECT 1
-          FROM repo_watch_event AS stalled
-          JOIN repo_watch_event AS later
-            ON later.repository = stalled.repository
-           AND later.pull_request_number = stalled.pull_request_number
-         WHERE stalled.event_id = stalled_event_id
-           AND stalled.target_kind = 'pull_request'
-           AND later.target_kind = 'pull_request'
-           AND (later.cursor_generation, later.event_ordinal)
-                > (stalled.cursor_generation, stalled.event_ordinal)
-           AND (
-                later.head_sha IS DISTINCT FROM stalled.head_sha
-                OR later.event_kind IN (
-                    'review_submitted', 'thread_opened', 'thread_resolved'
-                )
-           )
-           AND NOT EXISTS (
-                SELECT 1
-                  FROM repo_watch_dispatch_obligation_park AS spent
-                  JOIN repo_watch_dispatch_obligation AS spent_on
-                    ON spent_on.obligation_id = spent.obligation_id
-                  JOIN repo_watch_dispatch_obligation AS subject
-                    ON subject.obligation_id = subject_obligation_id
-                 WHERE spent.release_event_id = later.event_id
-                   AND spent_on.rule_id = subject.rule_id
-                   AND spent_on.rule_version = subject.rule_version
-                   AND spent_on.singleton_scope = subject.singleton_scope
-                   AND spent_on.singleton_repository
-                        IS NOT DISTINCT FROM subject.singleton_repository
-                   AND spent_on.singleton_pull_request_number
-                        IS NOT DISTINCT FROM subject.singleton_pull_request_number
-                   AND spent_on.singleton_stack_root_pull_request_number
-                        IS NOT DISTINCT FROM
-                            subject.singleton_stack_root_pull_request_number
-           )
-    ) THEN
-        UPDATE repo_watch_dispatch_obligation
-           SET failed_attempts = 0,
-               last_failed_attempt_at = NULL
-         WHERE obligation_id = subject_obligation_id;
-        RETURN;
-    END IF;
-
     UPDATE repo_watch_dispatch_obligation
        SET parked_at = clock_timestamp(),
            parked_state_event_id = latest_event_id
      WHERE obligation_id = subject_obligation_id
+       AND settled_kind IS NULL
+       AND parked_at IS NULL
+       AND failed_attempts >= repo_watch_dispatch_attempt_budget()
     RETURNING failed_attempts INTO parked_attempts;
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
 
     PERFORM repo_watch_record_dispatch_obligation_park_transition(
         subject_obligation_id,
@@ -240,6 +183,58 @@ BEGIN
         NULL::uuid,
         NULL::text
     );
+
+    -- The pull request may have moved while the exhausting attempt ran, under
+    -- an event that reached its evaluation before there was a park to release.
+    -- Nothing restates that fact afterwards, so it is read from the durable
+    -- record here. Parking first and releasing from that fact, rather than
+    -- refusing to park, is what spends it: the lineage keeps its budget, and
+    -- the same fact cannot buy a second one at the next exhaustion.
+    SELECT later.event_id
+      INTO progress_event_id
+      FROM repo_watch_dispatch_obligation AS obligation
+      JOIN repo_watch_event AS parked_state
+        ON parked_state.event_id = obligation.parked_state_event_id
+      JOIN repo_watch_event AS later
+        ON later.repository = parked_state.repository
+       AND later.pull_request_number = parked_state.pull_request_number
+     WHERE obligation.obligation_id = subject_obligation_id
+       AND parked_state.target_kind = 'pull_request'
+       AND later.target_kind = 'pull_request'
+       AND (later.cursor_generation, later.event_ordinal)
+            > (parked_state.cursor_generation, parked_state.event_ordinal)
+       AND (
+            later.head_sha IS DISTINCT FROM parked_state.head_sha
+            OR later.event_kind IN (
+                'review_submitted', 'thread_opened', 'thread_resolved'
+            )
+       )
+       AND NOT EXISTS (
+            SELECT 1
+              FROM repo_watch_dispatch_obligation_park AS spent
+              JOIN repo_watch_dispatch_obligation AS spent_on
+                ON spent_on.obligation_id = spent.obligation_id
+             WHERE spent.release_event_id = later.event_id
+               AND spent_on.rule_id = obligation.rule_id
+               AND spent_on.rule_version = obligation.rule_version
+               AND spent_on.singleton_scope = obligation.singleton_scope
+               AND spent_on.singleton_repository
+                    IS NOT DISTINCT FROM obligation.singleton_repository
+               AND spent_on.singleton_pull_request_number
+                    IS NOT DISTINCT FROM obligation.singleton_pull_request_number
+               AND spent_on.singleton_stack_root_pull_request_number
+                    IS NOT DISTINCT FROM
+                        obligation.singleton_stack_root_pull_request_number
+       )
+     ORDER BY later.cursor_generation DESC, later.event_ordinal DESC
+     LIMIT 1;
+
+    IF progress_event_id IS NOT NULL THEN
+        PERFORM repo_watch_release_dispatch_obligation_park_for_progress(
+            subject_obligation_id,
+            progress_event_id
+        );
+    END IF;
 END;
 $$;
 
@@ -757,7 +752,12 @@ SELECT obligation.obligation_id,
 
 CREATE VIEW repo_watch_parked_dispatch_obligation AS
 SELECT obligation.obligation_id,
+       -- The repository keying the obligation, which a collapsed singleton lets
+       -- a match in another repository change, and the one the lineage actually
+       -- stalled in. Reporting only the first beside the stalled pull request
+       -- and head would name a target that does not exist.
        obligation.repository,
+       parked_state.repository AS stalled_repository,
        obligation.rule_id,
        obligation.rule_version,
        obligation.singleton_scope,

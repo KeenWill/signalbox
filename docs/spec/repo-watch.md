@@ -758,13 +758,15 @@ a recorded reopen instead. Dispatch admission rechecks the latest durable
 lifecycle under the repository lock. A terminal cutoff settles every outstanding
 obligation for that pull request immediately, without waiting for singleton or
 cooldown readiness, and reaches a parked obligation through the target it
-stalled on as well as through its latest-event projection, since parked work
-cannot dispatch the close and would otherwise hold its singleton forever; the
-admission recheck is the race-closing backstop. Either path settles stale
-nonterminal work as `target_closed` without creating a session. Cutoff
-processing settles after it has stopped the goals it commissioned, so it takes
-session rows before obligation rows and cannot close a lock cycle against a
-dispatch session terminating into the same obligation. A rule that matches the
+stalled on as well as through its latest-event projection, since a collapsed
+singleton lets that projection follow another pull request; an obligation
+stalled on the cutoff event itself is preserved either way, because it owes the
+close automation and an operator release is what lets it run; the admission
+recheck is the race-closing backstop. Either path settles stale nonterminal work
+as `target_closed` without creating a session. Cutoff processing settles after
+it has stopped the goals it commissioned, so it takes session rows before
+obligation rows and cannot close a lock cycle against a dispatch session
+terminating into the same obligation. A rule that matches the
 `PullRequestClosed` or `PullRequestMerged` event itself remains
 dispatch-eligible, and a non-converged termination of that dispatch still owes
 its requeue while its own cutoff remains the latest one; the terminal event is
