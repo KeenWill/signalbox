@@ -2773,11 +2773,14 @@ mod tests {
         );
     }
 
-    /// Ambiguity resolves toward escalation so a parked request keeps its
-    /// human approval path instead of dying to a delegate denial.
+    /// Ambiguity resolves toward escalation rather than a delegate denial;
+    /// lifecycle authority then chooses attended waiting or headless release.
     #[test]
     fn the_judge_system_prompt_prefers_escalation_over_denial_in_doubt() {
-        assert!(APPROVAL_JUDGE_SYSTEM_PROMPT.contains("keeps its human approval path"));
+        assert!(
+            APPROVAL_JUDGE_SYSTEM_PROMPT
+                .contains("When in doubt between deny and escalate_to_human, choose escalation")
+        );
     }
 
     /// A human-reserved action escalates before the deny rule can reach it,
