@@ -710,21 +710,26 @@ bounds are compiled into the daemon and may only be lowered, never raised.
 operator calls `repo_watch_release_parked_dispatch_obligation` with their
 identity, which restores the whole budget: an operator asking for another
 attempt is asking for the allowance a lineage that never failed would have.
-Otherwise the pull request must produce a fact that is new about it — an event
-carrying a head other than the one the obligation stalled on, or review
-activity. Matching events that are neither, such as a recomputed mergeable state
-or a label change, join the obligation's latest-state projection without
-restoring anything, so churn against an unchanged pull request buys no further
-attempts. Event content identity already refuses a replay of the same fact, so
-the same event never reaches that test twice. Every park and every release
-appends a journal row naming the count at the transition and, for a release, its
-operator or the event that caused it; both releases are schema-owned, so the
-journal's vocabulary is spelled only where the constraint closing it lives.
-Readiness in `repo_watch_outstanding_dispatch_obligation` excludes a parked
-obligation and, independently, one whose count has reached the budget, so no
-ordering of parking against that read reports an exhausted obligation as ready.
-It does not model the delay between attempts, which the dispatch loader applies
-against bounds no projection can see.
+Otherwise the pull request the obligation stalled on must produce a fact that is
+new about it — an event carrying a head other than the one it stalled on, or
+review activity against it. Rule, repository, and stack singletons collapse many
+pull requests onto one obligation, so the fact must name that same pull request:
+a neighbour's head differs from the stalled one almost always, and would
+otherwise restore the budget on every unrelated match. A branch target carries
+no head and no review activity at all, so an obligation stalled on one is
+released only by an operator. Matching events that are neither, such as a
+recomputed mergeable state or a label change, join the obligation's latest-state
+projection without restoring anything, so churn against an unchanged pull
+request buys no further attempts. Event content identity already refuses a
+replay of the same fact, so the same event never reaches that test twice. Every
+park and every release appends a journal row naming the count at the transition
+and, for a release, its operator or the event that caused it; both releases are
+schema-owned, so the journal's vocabulary is spelled only where the constraint
+closing it lives. Readiness in `repo_watch_outstanding_dispatch_obligation`
+excludes a parked obligation and, independently, one whose count has reached the
+budget, so no ordering of parking against that read reports an exhausted
+obligation as ready. It does not model the delay between attempts, which the
+dispatch loader applies against bounds no projection can see.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies

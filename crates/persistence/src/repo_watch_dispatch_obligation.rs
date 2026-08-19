@@ -340,11 +340,14 @@ pub(crate) async fn record_dispatch_obligation(
     rule_version: RepoWatchRuleVersion,
     singleton: &StoredSingletonKey,
 ) -> Result<(), RepoWatchDispatchRepositoryError> {
-    // A parked lineage is released by a fact that is new about the pull
-    // request, not by a fact that merely arrives: the head this obligation
-    // already carries moving on, or review activity against it. Anything else
-    // joins the obligation without restoring its budget, so label churn or a
-    // recomputed mergeable state cannot buy further attempts.
+    // A parked lineage is released by a fact that is new about the pull request
+    // it stalled on, not by a fact that merely arrives: the head that
+    // obligation already carries moving on, or review activity against it.
+    // Rule, repository, and stack singletons collapse many targets onto one
+    // obligation, so the fact has to name the same pull request before it
+    // counts as progress on it. Anything else joins the obligation without
+    // restoring its budget, so neither label churn on the stalled pull request
+    // nor ordinary traffic on its neighbours can buy further attempts.
     let active = sqlx::query(crate::lock_inventory::REPO_WATCH_ACTIVE_DISPATCH_OBLIGATION)
         .bind(rule_id.as_str())
         .bind(stored_rule_version(rule_version)?)

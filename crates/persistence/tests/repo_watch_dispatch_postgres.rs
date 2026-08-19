@@ -89,6 +89,9 @@ const TERMINAL_RULE_MERGED_EVENT_ID: u128 = 0x54_100;
 const STARTUP_DRAIN_CUTOFF_EVENT_ID: u128 = 0x57_100;
 const STARTUP_DRAIN_STOP_COMMAND_ID: u128 = 0x57_110;
 const PARK_FIRST_STOP_COMMAND_ID: u128 = 0x58_100;
+const CROSS_TARGET_OPENED_EVENT_ID: u128 = 0x58_500;
+const CROSS_TARGET_CONFLICT_EVENT_ID: u128 = 0x58_501;
+const REPOSITORY_SCOPED_RULE: &str = "merge-forward-per-repository";
 const BATCH_DELAY_FIRST_STOP_COMMAND_ID: u128 = 0x58_400;
 const BATCH_DELAY_SECOND_STOP_COMMAND_ID: u128 = 0x58_401;
 const PARK_RELEASING_EVENT_ID: u128 = 0x58_200;
@@ -278,6 +281,20 @@ fn conflict_event(value: u128, head: &str) -> Result<RepoWatchEvent, Box<dyn Err
     )?)
 }
 
+fn conflict_event_for(
+    value: u128,
+    context: PullRequestEventContext,
+) -> Result<RepoWatchEvent, Box<dyn Error>> {
+    Ok(RepoWatchEvent::try_pull_request(
+        RepoWatchEventId::from_uuid(Uuid::from_u128(value)),
+        repository()?,
+        context,
+        RepoWatchEventKindV1::MergeableStateChanged {
+            current: MergeableState::Conflicting,
+        },
+    )?)
+}
+
 fn identified_event(event: RepoWatchEvent) -> RepoWatchEventOccurrenceV1 {
     let mut identity = [0_u8; 32];
     identity[..16].copy_from_slice(event.id().as_uuid().as_bytes());
@@ -415,6 +432,25 @@ fn eager_merge_forward_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
             template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
         }],
         RepoWatchSingletonScope::PullRequest,
+        Duration::ZERO,
+    )?)
+}
+
+/// One conflict rule whose singleton collapses every pull request in the
+/// repository onto a single obligation.
+fn repository_scoped_conflict_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
+    Ok(RepoWatchRule::try_new(
+        RepoWatchRuleId::try_new(REPOSITORY_SCOPED_RULE.to_owned())?,
+        RepoWatchRuleVersion::V1,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
+            mergeable_state: vec![MergeableState::Conflicting],
+            ..RepoWatchMatcherV1Input::default()
+        }),
+        vec![RepoWatchRuleActionV1::DispatchSession {
+            template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
+        }],
+        RepoWatchSingletonScope::Repository,
         Duration::ZERO,
     )?)
 }
@@ -1348,6 +1384,87 @@ async fn park_dispatch_obligation(
     )
 }
 
+/// Opens a second pull request in the watched repository and matches the rule
+/// against a conflict on it, leaving both pull requests durably open.
+async fn evaluate_neighbour_conflict(
+    fixture: &DispatchFixture,
+) -> Result<RepoWatchRuleEvaluationOutcome, Box<dyn Error>> {
+    let neighbour = same_repository_context(SameRepositoryContextFacts {
+        number: TOP_PULL_REQUEST_NUMBER,
+        head: SECOND_HEAD,
+        base_branch: BASE_BRANCH,
+        head_branch: TOP_AGENT_BRANCH,
+    })?;
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let cursor = event_store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    event_store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(cursor.generation()),
+                RepoWatchCursorCandidate::new(mergeable_observation(
+                    vec![context(FIRST_HEAD)?, neighbour.clone()],
+                    Vec::new(),
+                )?),
+                vec![
+                    identified_event(opened_event_for(
+                        CROSS_TARGET_OPENED_EVENT_ID,
+                        neighbour.clone(),
+                    )?),
+                    identified_event(conflict_event_for(
+                        CROSS_TARGET_CONFLICT_EVENT_ID,
+                        neighbour,
+                    )?),
+                ],
+            ),
+        )
+        .await?;
+    let observation = mergeable_observation(vec![context(FIRST_HEAD)?], Vec::new())?;
+    let opened = fixture
+        .store
+        .load_next_event(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the neighbour's opened event is unevaluated");
+    let opened_outcome =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                opened,
+                &fixture.rule,
+                &observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+    assert_eq!(opened_outcome, RepoWatchRuleEvaluationOutcome::NotMatched);
+    let conflicting = fixture
+        .store
+        .load_next_event(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the neighbour's conflict remains unevaluated");
+    Ok(
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                conflicting,
+                &fixture.rule,
+                &observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?,
+    )
+}
+
 async fn load_next_obligation(
     fixture: &DispatchFixture,
 ) -> Result<Option<RepoWatchDispatchObligation>, Box<dyn Error>> {
@@ -1913,6 +2030,35 @@ async fn a_new_head_releases_a_parked_obligation() -> Result<(), Box<dyn Error>>
             .map(|transition| transition.release_reason.clone()),
         Some(Some(String::from("pull_request_progress")))
     );
+    Ok(())
+}
+
+/// Rule, repository, and stack singletons collapse many pull requests onto one
+/// obligation. Comparing heads alone would then let ordinary traffic on any
+/// neighbour restore the budget of the one pull request that keeps failing,
+/// because a neighbour's head almost never matches the stalled one.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn another_pull_requests_progress_leaves_a_parked_obligation_parked()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(repository_scoped_conflict_rule()?).await?;
+    park_dispatch_obligation(&fixture, PARK_FIRST_STOP_COMMAND_ID).await?;
+
+    let neighbour = evaluate_neighbour_conflict(&fixture).await?;
+
+    let parked: ParkedObligationVisibility = sqlx::query_as(
+        "SELECT obligation_id, failed_attempts, head_sha
+           FROM repo_watch_parked_dispatch_obligation",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(neighbour, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(
+        parked.failed_attempts,
+        dispatch_attempt_budget(&fixture.pool).await?
+    );
+    assert_eq!(parked.head_sha.as_deref(), Some(FIRST_HEAD));
+    assert!(load_next_obligation(&fixture).await?.is_none());
     Ok(())
 }
 

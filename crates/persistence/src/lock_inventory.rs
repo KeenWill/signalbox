@@ -41,9 +41,16 @@ pub(crate) const REPO_WATCH_ACTIVE_DISPATCH_OBLIGATION: &str = "SELECT obligatio
                 obligation.failed_attempts,
                 obligation.parked_at IS NOT NULL AS parked,
                 (
-                    parked_state.head_sha IS DISTINCT FROM incoming.head_sha
-                    OR incoming.event_kind IN (
-                        'review_submitted', 'thread_opened', 'thread_resolved'
+                    parked_state.target_kind = 'pull_request'
+                    AND incoming.target_kind = 'pull_request'
+                    AND incoming.repository = parked_state.repository
+                    AND incoming.pull_request_number
+                         = parked_state.pull_request_number
+                    AND (
+                        parked_state.head_sha IS DISTINCT FROM incoming.head_sha
+                        OR incoming.event_kind IN (
+                            'review_submitted', 'thread_opened', 'thread_resolved'
+                        )
                     )
                 ) AS releases_park
            FROM repo_watch_dispatch_obligation AS obligation
