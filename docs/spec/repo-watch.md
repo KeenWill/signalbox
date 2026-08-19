@@ -704,16 +704,23 @@ projection alongside its count, pull request, and the head it stalled on. That
 stalled state is held still for as long as the obligation is parked: a collapsed
 singleton advances its latest-event projection on any match, including one from
 another pull request, and the release condition is decided against the state the
-lineage stalled on rather than against whatever matched last. Parking is refused
-outright when the pull request has already moved past that state: the exhausting
-attempt may have run while a new head arrived under an event no rule matched,
-and since nothing restates that head afterwards the count is reset instead. The
-delay is measured from the release of the whole batch, not from the first of its
-actions to fail: a batch holds its singleton until every action is terminal, so
-a clock started at the first termination would run out while the batch still
-occupied the slot. The attempt budget is a schema constant, so parking, the
-readiness projection, and the dispatch loader cannot disagree about it; the two
-delay bounds are compiled into the daemon and may only be lowered, never raised.
+lineage stalled on rather than against whatever matched last. A lineage whose
+pull request has already moved past that state parks all the same, and is then
+released from that park at once: the parking stamp and its journal transition
+are written, the same progress release that any event would take appends a
+second transition, and the count comes back. The exhausting attempt may have run
+while a new head or review activity arrived, reaching its evaluation before
+there was a park to release, and nothing restates that fact afterwards, so it is
+read from the durable record at parking rather than waited for. Going through
+the park rather than refusing it is what records the fact as spent, so it buys
+one budget and not another at every later exhaustion, and the pair is what an
+operator reads in the journal. The delay is measured from the release of the
+whole batch, not from the first of its actions to fail: a batch holds its
+singleton until every action is terminal, so a clock started at the first
+termination would run out while the batch still occupied the slot. The attempt
+budget is a schema constant, so parking, the readiness projection, and the
+dispatch loader cannot disagree about it; the two delay bounds are compiled into
+the daemon and may only be lowered, never raised.
 
 **Implemented behavior.** Two things return a parked obligation to dispatch. An
 operator calls `repo_watch_release_parked_dispatch_obligation` with their
@@ -738,9 +745,13 @@ activity at all, so an obligation stalled on one is released only by an
 operator. Matching events that are neither, such as a recomputed mergeable state
 or a label change, join the obligation's latest-state projection without
 restoring anything, so churn against an unchanged pull request buys no further
-attempts. Event content identity already refuses a replay of the same fact, so
-the same event never reaches that test twice. Every park and every release
-appends a journal row naming the count at the transition and, for a release, its
+attempts. Content identity keeps a restated observation from recording a second
+durable event, but it does not bound how often one durable event reaches this
+test: an event is tested once per active rule, and both evaluation paths run the
+test before checking whether that rule's evaluation of it was already recorded.
+The spent-event journal is what makes those repeated tests safe, and is a
+required guard rather than an optimization. Every park and every release appends
+a journal row naming the count at the transition and, for a release, its
 operator or the event that caused it; both releases are schema-owned, so the
 journal's vocabulary is spelled only where the constraint closing it lives.
 Readiness in `repo_watch_outstanding_dispatch_obligation` excludes a parked
