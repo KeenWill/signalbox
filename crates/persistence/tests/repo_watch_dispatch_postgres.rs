@@ -4,8 +4,9 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-use std::{error::Error, num::NonZeroU64, time::Duration};
+use std::{collections::HashSet, error::Error, num::NonZeroU64, time::Duration};
 
+use rust_decimal::Decimal;
 use signalbox_application::{
     RepoWatchBranchHead, RepoWatchDispatchService, RepoWatchDispatchTransaction,
     RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
@@ -1074,10 +1075,21 @@ async fn dispatch_fixture() -> Result<DispatchFixture, Box<dyn Error>> {
 }
 
 async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Box<dyn Error>> {
+    dispatch_fixture_for_with_lease(rule, None).await
+}
+
+async fn dispatch_fixture_for_with_lease(
+    rule: RepoWatchRule,
+    dispatch_start_lease: Option<Duration>,
+) -> Result<DispatchFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let repository = repository()?;
     let event_store = PostgresRepoWatchStore::new(pool.clone());
     let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
+    let dispatch_store = match dispatch_start_lease {
+        Some(lease) => dispatch_store.with_dispatch_start_lease(lease),
+        None => dispatch_store,
+    };
     let initial_observation = observation(context(INITIAL_HEAD)?)?;
     let initial = RepoWatchCursorCandidate::new(initial_observation);
     let first_generation = generation(
@@ -2543,6 +2555,96 @@ async fn terminal_cutoff_preserves_an_obligation_for_its_own_event() -> Result<(
     assert!(cutoff_processed);
     assert_eq!(obligation_count, 1);
     assert_eq!(settled_kind, None);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv069_dispatch_admission_records_bounded_durable_start_leases()
+-> Result<(), Box<dyn Error>> {
+    let fixture =
+        dispatch_fixture_for_with_lease(rule()?, Some(Duration::from_secs(10 * 60))).await?;
+    let loaded = fixture
+        .store
+        .load_unstarted_dispatch_sessions(&fixture.repository)
+        .await?;
+    let loaded = loaded.into_iter().collect::<HashSet<_>>();
+    let expected = fixture.sessions.iter().copied().collect::<HashSet<_>>();
+    let lease_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_start_lease")
+            .fetch_one(&fixture.pool)
+            .await?;
+    let longest_lease_seconds: Decimal = sqlx::query_scalar(
+        "SELECT max(extract(epoch FROM (expires_at - leased_at)))
+           FROM repo_watch_dispatch_start_lease",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(loaded, expected);
+    assert_eq!(lease_count, i64::try_from(fixture.sessions.len())?);
+    assert!(longest_lease_seconds > Decimal::ZERO);
+    assert!(longest_lease_seconds <= Decimal::from(5 * 60));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv069_expiry_retires_releases_and_rearms_the_dispatch() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        one_action_rule(Duration::ZERO)?,
+        Some(Duration::from_millis(1)),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let stop_command = DurableCommandId::from_uuid(Uuid::from_u128(0x5d_000));
+
+    assert!(
+        fixture
+            .store
+            .process_next_expired_start_lease(&fixture.repository, || stop_command)
+            .await?
+    );
+    assert!(
+        !fixture
+            .store
+            .process_next_expired_start_lease(&fixture.repository, || stop_command)
+            .await?
+    );
+    let expiration_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_start_lease_expiration")
+            .fetch_one(&fixture.pool)
+            .await?;
+    let current_goal_kind: String = sqlx::query_scalar(
+        "SELECT event_kind
+           FROM goal_event
+          WHERE session_id = $1
+          ORDER BY event_ordinal DESC
+          LIMIT 1",
+    )
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let obligation = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?;
+
+    assert_eq!(expiration_count, 1);
+    assert_eq!(current_goal_kind, "user_stopped");
+    assert_eq!(release_count(&fixture).await?, 1);
+    assert_eq!(outstanding_obligation_count(&fixture.pool).await?, 1);
+    assert_eq!(
+        obligation
+            .as_ref()
+            .expect("expiry re-arms the dispatch obligation")
+            .latest_event(),
+        &fixture.event
+    );
     Ok(())
 }
 
