@@ -223,11 +223,21 @@ BEGIN
                 'review_submitted', 'thread_opened', 'thread_resolved'
             )
        )
-       -- At or below the greatest fact this lineage has already spent, not
-       -- merely equal to one. Several facts can follow the stalled state, this
-       -- selection takes the newest, and the older ones stay unevaluated by
-       -- rules that lag; without an ordering comparison one of those could
-       -- release a later park after a newer fact had already been spent on it.
+       -- Already spent by this lineage, by identity anywhere in it, or by
+       -- order within the pull request this fact is about. Several facts can
+       -- follow one stalled state, this selection takes the newest, and the
+       -- older ones stay unevaluated by rules that lag; without the ordering
+       -- arm one of those could release a later park after a newer fact had
+       -- already been spent on it.
+       --
+       -- The ordering arm is confined to one pull request because
+       -- (cursor_generation, event_ordinal) numbers a single repository's
+       -- stream: repo_watch_cursor is keyed by (repository, generation), so
+       -- tuples from two repositories are incomparable, and a rule-scoped
+       -- lineage spans them. Comparing across would let a repository that had
+       -- reached a high generation hold a lineage parked on a repository whose
+       -- own numbering is lower. Identity still spans the whole lineage, since
+       -- an event identifier means the same thing everywhere.
        AND NOT EXISTS (
             SELECT 1
               FROM repo_watch_dispatch_obligation_park AS spent
@@ -235,8 +245,18 @@ BEGIN
                 ON spent_on.obligation_id = spent.obligation_id
               JOIN repo_watch_event AS spent_event
                 ON spent_event.event_id = spent.release_event_id
-             WHERE (spent_event.cursor_generation, spent_event.event_ordinal)
-                    >= (later.cursor_generation, later.event_ordinal)
+             WHERE (
+                    spent_event.event_id = later.event_id
+                    OR (
+                        spent_event.repository = later.repository
+                        AND spent_event.pull_request_number
+                             = later.pull_request_number
+                        AND (
+                            spent_event.cursor_generation,
+                            spent_event.event_ordinal
+                        ) >= (later.cursor_generation, later.event_ordinal)
+                    )
+               )
                AND spent_on.rule_id = obligation.rule_id
                AND spent_on.rule_version = obligation.rule_version
                AND spent_on.singleton_scope = obligation.singleton_scope
@@ -398,9 +418,13 @@ BEGIN
            -- requeue opens a successor: a lineage that parked, dispatched, and
            -- exhausted itself again would otherwise take a second full budget
            -- from a fact it had already spent.
-           -- At or below the greatest fact this lineage has already spent.
-           -- Equality alone would let a rule that lags behind its siblings
-           -- release a later park with a fact older than one already spent.
+           -- Already spent by this lineage: by identity anywhere in it, or by
+           -- order within the pull request this fact is about. Identity alone
+           -- would let a rule lagging behind its siblings release a later park
+           -- with a fact older than one already spent; ordering across
+           -- repositories would be meaningless, because
+           -- (cursor_generation, event_ordinal) numbers one repository's
+           -- stream and a rule-scoped lineage spans several.
            AND NOT EXISTS (
                 SELECT 1
                   FROM repo_watch_dispatch_obligation_park AS spent
@@ -408,8 +432,21 @@ BEGIN
                     ON spent_on.obligation_id = spent.obligation_id
                   JOIN repo_watch_event AS spent_event
                     ON spent_event.event_id = spent.release_event_id
-                 WHERE (spent_event.cursor_generation, spent_event.event_ordinal)
-                        >= (incoming.cursor_generation, incoming.event_ordinal)
+                 WHERE (
+                        spent_event.event_id = incoming.event_id
+                        OR (
+                            spent_event.repository = incoming.repository
+                            AND spent_event.pull_request_number
+                                 = incoming.pull_request_number
+                            AND (
+                                spent_event.cursor_generation,
+                                spent_event.event_ordinal
+                            ) >= (
+                                incoming.cursor_generation,
+                                incoming.event_ordinal
+                            )
+                        )
+                   )
                    AND spent_on.rule_id = obligation.rule_id
                    AND spent_on.rule_version = obligation.rule_version
                    AND spent_on.singleton_scope = obligation.singleton_scope

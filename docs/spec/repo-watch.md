@@ -732,35 +732,39 @@ review activity against it. Whether the rule that parked the obligation also
 matches that fact is beside the point, and every event is tested against every
 park as it is evaluated: a rule watching one narrow signal would otherwise stay
 parked on an obsolete head however far the pull request moved. Progress must
-also follow the state the lineage stalled on, and must follow every fact that
-lineage has already spent, counted across the successor obligations it opens as
-it settles and requeues: several facts can follow one stalled state, parking
-spends the newest of them, and the older ones stay unevaluated by any rule
-running behind its siblings. A single repository event is evaluated once per
-active rule, so without that ordering an older event replayed by a lagging rule,
-or a newer one seen again after a second park, would hand back a budget the pull
-request never earned. Rule, repository, and stack singletons collapse many pull
-requests onto one obligation, so the fact must name that same pull request: a
-neighbour's head differs from the stalled one almost always, and would otherwise
-restore the budget on every unrelated match. A branch target carries no head and
-no review activity at all, so an obligation stalled on one is released only by
-an operator. Matching events that are neither, such as a recomputed mergeable
-state or a label change, join the obligation's latest-state projection without
-restoring anything, so churn against an unchanged pull request buys no further
-attempts. Content identity keeps a restated observation from recording a second
-durable event, but it does not bound how often one durable event reaches this
-test: an event is tested once per active rule, and both evaluation paths run the
-test before checking whether that rule's evaluation of it was already recorded.
-The spent-event journal is what makes those repeated tests safe, and is a
-required guard rather than an optimization. Every park and every release appends
-a journal row naming the count at the transition and, for a release, its
-operator or the event that caused it; both releases are schema-owned, so the
-journal's vocabulary is spelled only where the constraint closing it lives.
-Readiness in `repo_watch_outstanding_dispatch_obligation` excludes a parked
-obligation and, independently, one whose count has reached the budget, so no
-ordering of parking against that read reports an exhausted obligation as ready.
-It does not model the delay between attempts, which the dispatch loader applies
-against bounds no projection can see.
+also follow the state the lineage stalled on, and must follow every fact about
+that same pull request which the lineage has already spent, counted across the
+successor obligations it opens as it settles and requeues: several facts can
+follow one stalled state, parking spends the newest of them, and the older ones
+stay unevaluated by any rule running behind its siblings. That ordering holds
+only within one pull request, because event position numbers a single
+repository's stream and a rule-scoped lineage spans repositories; a fact already
+spent anywhere in the lineage is refused by identity regardless. A single
+repository event is evaluated once per active rule, so without that ordering an
+older event replayed by a lagging rule, or a newer one seen again after a second
+park, would hand back a budget the pull request never earned. Rule, repository,
+and stack singletons collapse many pull requests onto one obligation, so the
+fact must name that same pull request: a neighbour's head differs from the
+stalled one almost always, and would otherwise restore the budget on every
+unrelated match. A branch target carries no head and no review activity at all,
+so an obligation stalled on one is released only by an operator. Matching events
+that are neither, such as a recomputed mergeable state or a label change, join
+the obligation's latest-state projection without restoring anything, so churn
+against an unchanged pull request buys no further attempts. Content identity
+keeps a restated observation from recording a second durable event, but it does
+not bound how often one durable event reaches this test: an event is tested once
+per active rule, and both evaluation paths run the test before checking whether
+that rule's evaluation of it was already recorded. The spent-event journal is
+what makes those repeated tests safe, and is a required guard rather than an
+optimization. Every park and every release appends a journal row naming the
+count at the transition and, for a release, its operator or the event that
+caused it; both releases are schema-owned, so the journal's vocabulary is
+spelled only where the constraint closing it lives. Readiness in
+`repo_watch_outstanding_dispatch_obligation` excludes a parked obligation and,
+independently, one whose count has reached the budget, so no ordering of parking
+against that read reports an exhausted obligation as ready. It does not model
+the delay between attempts, which the dispatch loader applies against bounds no
+projection can see.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies

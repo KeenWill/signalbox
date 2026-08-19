@@ -94,6 +94,8 @@ const PARKED_TARGET_CUTOFF_EVENT_ID: u128 = 0x58_800;
 const SPENT_FRONTIER_OLDER_EVENT_ID: u128 = 0x58_900;
 const SPENT_FRONTIER_NEWER_EVENT_ID: u128 = 0x58_901;
 const SPENT_FRONTIER_STOP_COMMAND_ID: u128 = 0x58_902;
+const CROSS_TARGET_SPEND_PROGRESS_EVENT_ID: u128 = 0x58_910;
+const CROSS_TARGET_SPEND_STOP_COMMAND_ID: u128 = 0x58_911;
 const PARKED_TARGET_CUTOFF_COMMAND_ID: u128 = 0x58_801;
 const NONMATCHING_PROGRESS_EVENT_ID: u128 = 0x58_600;
 const SIBLING_COUNT_FIRST_STOP_COMMAND_ID: u128 = 0x58_700;
@@ -1971,6 +1973,72 @@ async fn a_failed_attempt_waits_out_its_delay_before_redispatch() -> Result<(), 
         undelayed.map(|obligation| obligation.failed_attempts()),
         Some(1)
     );
+    Ok(())
+}
+
+/// The spend ordering numbers one repository's event stream, so it can only
+/// order facts about the same target. A collapsed singleton spends facts about
+/// whichever pull request it stalled on at the time, and comparing those across
+/// targets would let a target that had reached a higher cursor position hold a
+/// lineage parked on one whose own numbering is lower.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_spend_on_another_target_does_not_order_this_target_progress()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(repository_scoped_conflict_rule()?).await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        CROSS_TARGET_SPEND_STOP_COMMAND_ID,
+    )
+    .await?;
+    // Progress on the stalled pull request, recorded before the neighbour's
+    // events and therefore at a lower cursor position than they take.
+    commit_lifecycle(
+        &fixture,
+        observation(context(SECOND_HEAD)?)?,
+        conflict_event(CROSS_TARGET_SPEND_PROGRESS_EVENT_ID, SECOND_HEAD)?,
+    )
+    .await?;
+    evaluate_neighbour_conflict(&fixture).await?;
+    // A spend this lineage took on the neighbour, which the ordering arm must
+    // not weigh against progress on the pull request it stalled on. Written
+    // directly because the machinery only ever spends facts about the stalled
+    // target, which is the asymmetry under test.
+    sqlx::query(
+        "INSERT INTO repo_watch_dispatch_obligation_park
+            (obligation_id, transition_ordinal, transition_kind, failed_attempts,
+             release_reason, release_event_id)
+         SELECT obligation_id, 1, 'released', 6, 'pull_request_progress', $1
+           FROM repo_watch_dispatch_obligation
+          WHERE settled_kind IS NULL",
+    )
+    .bind(Uuid::from_u128(CROSS_TARGET_CONFLICT_EVENT_ID))
+    .execute(&fixture.pool)
+    .await?;
+
+    exhaust_and_park(&fixture).await?;
+
+    let latest_release: Option<Uuid> = sqlx::query_scalar(
+        "SELECT release_event_id
+           FROM repo_watch_dispatch_obligation_park
+          WHERE release_event_id IS NOT NULL
+          ORDER BY transition_ordinal DESC
+          LIMIT 1",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        latest_release,
+        Some(Uuid::from_u128(CROSS_TARGET_SPEND_PROGRESS_EVENT_ID))
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM repo_watch_parked_dispatch_obligation")
+            .fetch_one(&fixture.pool)
+            .await?,
+        0
+    );
+    assert_eq!(outstanding_failed_attempts(&fixture.pool).await?, 0);
     Ok(())
 }
 
