@@ -567,27 +567,31 @@ batch-admission transaction visits every request in stable request order,
 including siblings for tools outside this file-media layer. It starts from the
 pinned target and current frontier, reserves mandatory continuation-call framing
 and output capacity once for the batch, and cumulatively reserves each sibling's
-complete maximum rendered result. Existing tools use the finite durable-result
-and rendered-projection bound from their registered tool contract; a tool with
-no finite target projection cannot be admitted in the batch. File-media tools
-use the registry-bounded inspection projection, the selected text or structured
-view bound, or the rich-reference projection and media bounds below. A request
-that cannot obtain its cumulative reservation returns
-`TargetPayloadTooLarge { maximum_bytes }`, performs no external I/O, and commits
-no result or continuation state. Reservations for admitted siblings remain
-charged until their completion transactions consume the actual result and
-release unused capacity, so independently fitting siblings can never overfill
-the combined continuation call. Steering accepted while the batch executes uses
-the same pinned-target continuation-capacity and aggregate provider-wire
-ledgers. Before a steering input becomes pending, a short transaction projects
-both its complete rendered bytes after the already reserved sibling results and
-its checked complete provider-wire encoding after the reserved non-media
-baseline and references, then atomically consumes remaining capacity from both
-ledgers. Steering that cannot obtain both reservations is not accepted into this
-batch and remains eligible for a later turn; it can never be appended as
-unreserved pending input. Its reservations remain charged through continuation
-creation or terminal batch failure. Automatic compaction, arrival time, and
-completion order are not admission mechanisms.
+complete maximum rendered result against both the continuation-capacity and
+aggregate provider-wire ledgers, so a text, structured, inspection, or non-file
+result is charged wire bytes exactly as a reference is. Existing tools use the
+finite durable-result and rendered-projection bound from their registered tool
+contract; a tool with no finite target projection cannot be admitted in the
+batch. File-media tools use the registry-bounded inspection projection, the
+selected text or structured view bound, or the rich-reference projection and
+media bounds below. A request that cannot obtain its cumulative reservation
+returns `TargetPayloadTooLarge { maximum_bytes }` and performs no external I/O;
+the rejection itself commits as that request's bounded denial evidence, so the
+batch's continuation barrier can close over it, while no partial result or
+worker state commits. Reservations for admitted siblings remain charged until
+their completion transactions consume the actual result and release unused
+capacity, so independently fitting siblings can never overfill the combined
+continuation call. Steering accepted while the batch executes uses the same
+pinned-target continuation-capacity and aggregate provider-wire ledgers. Before
+a steering input becomes pending, a short transaction projects both its complete
+rendered bytes after the already reserved sibling results and its checked
+complete provider-wire encoding after the reserved non-media baseline and
+references, then atomically consumes remaining capacity from both ledgers.
+Steering that cannot obtain both reservations is not accepted into this batch
+and remains eligible for a later turn; it can never be appended as unreserved
+pending input. Its reservations remain charged through continuation creation or
+terminal batch failure. Automatic compaction, arrival time, and completion order
+are not admission mechanisms.
 
 Pagination uses a common opaque authenticated cursor of at most 1,024 bytes. The
 cursor is only a random token for bounded process-local state; it does not embed
@@ -799,13 +803,14 @@ does not delete the blob or reject an already-durable attachment. A corrected
 use can reference the same digest. This avoids store I/O in accepted-input
 transactions and keeps metadata correction out of blob identity.
 
-Processor failure is operator failure, not malformed evidence unless a complete
-authenticated failure frame arrived before exit. Telemetry follows the owning
-identity-and-commands contract exactly: it may use only daemon-minted aggregate
-identifiers plus the closed tool-name and error-classification tokens. It never
-records a blob digest, reader identity, bytes, extracted text, filename,
-declared type, parser message, stderr, path, credential, or content-derived
-identifier.
+Processor failure is operator failure, never malformed content evidence: a
+failure frame that arrived before an unsuccessful exit is discarded with the
+rest of the staged output, exactly as the clean-exit acceptance rule requires.
+Telemetry follows the owning identity-and-commands contract exactly: it may use
+only daemon-minted aggregate identifiers plus the closed tool-name and
+error-classification tokens. It never records a blob digest, reader identity,
+bytes, extracted text, filename, declared type, parser message, stderr, path,
+credential, or content-derived identifier.
 
 ## Existing blob wire and trust boundary
 
