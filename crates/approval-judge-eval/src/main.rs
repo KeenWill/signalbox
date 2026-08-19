@@ -23,8 +23,9 @@ const OFFLINE_PROVIDER_MODEL: &str = "offline-recorded-approval-judge";
 // Tunable effective ceiling: recorded judge decisions are short, so this bounds
 // accidental output growth without representing a provider or safety limit.
 const OFFLINE_MAX_OUTPUT_TOKENS: u32 = 256;
-// Tunable effective ceiling: the synthetic corpus needs only a small context, so
-// this bounds offline runtime allocation without representing a safety limit.
+// Arbitrary constructor parameter: the offline replay path never reads the
+// context window, so this satisfies the model definition without enforcing
+// any bound.
 const OFFLINE_CONTEXT_WINDOW_TOKENS: u32 = 4_096;
 
 #[derive(Deserialize)]
@@ -52,7 +53,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let corpus = load_corpus(corpus_path)?;
-    let response_bytes = fs::read(responses_path)?;
+    let response_bytes = fs::read(&responses_path).map_err(|source| {
+        io::Error::new(
+            source.kind(),
+            format!("could not read offline responses {responses_path}: {source}"),
+        )
+    })?;
     let responses: OfflineResponseFile = serde_json::from_slice(&response_bytes)?;
     validate_responses(&corpus, &responses)?;
 

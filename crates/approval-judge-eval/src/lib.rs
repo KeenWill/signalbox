@@ -120,6 +120,9 @@ pub fn decode_corpus(bytes: &[u8]) -> Result<ApprovalJudgeCorpus, CorpusLoadErro
     }
     let mut case_ids = HashSet::with_capacity(corpus.cases.len());
     for case in &corpus.cases {
+        if case.id.trim().is_empty() {
+            return Err(CorpusLoadError::BlankCaseId);
+        }
         if !case_ids.insert(case.id.as_str()) {
             return Err(CorpusLoadError::DuplicateCaseId {
                 id: case.id.clone(),
@@ -158,6 +161,8 @@ pub enum CorpusLoadError {
         /// Repeated case identity.
         id: String,
     },
+    /// A case id is empty or whitespace-only and carries no stable identity.
+    BlankCaseId,
     /// A case does not identify the source of its expected label.
     MissingLabelProvenance {
         /// Case without meaningful label provenance.
@@ -184,6 +189,10 @@ impl fmt::Display for CorpusLoadError {
             Self::DuplicateCaseId { id } => {
                 write!(formatter, "corpus case id {id} appears more than once")
             }
+            Self::BlankCaseId => write!(
+                formatter,
+                "corpus contains a case whose id is empty or whitespace-only"
+            ),
             Self::MissingLabelProvenance { id } => {
                 write!(formatter, "corpus case {id} has no label provenance")
             }
@@ -199,6 +208,7 @@ impl Error for CorpusLoadError {
             Self::UnsupportedFormatVersion { .. }
             | Self::EmptyCorpus
             | Self::DuplicateCaseId { .. }
+            | Self::BlankCaseId
             | Self::MissingLabelProvenance { .. } => None,
         }
     }
@@ -220,6 +230,9 @@ pub async fn score_corpus(
     }
     let mut case_ids = HashSet::with_capacity(corpus.cases.len());
     for case in &corpus.cases {
+        if case.id.trim().is_empty() {
+            return Err(ScoreError::BlankCaseId);
+        }
         if !case_ids.insert(case.id.as_str()) {
             return Err(ScoreError::DuplicateCaseId {
                 id: case.id.clone(),
@@ -398,6 +411,8 @@ pub enum ScoreError {
         /// Repeated case identity.
         id: String,
     },
+    /// A case id is empty or whitespace-only and carries no stable identity.
+    BlankCaseId,
     /// A case does not identify the source of its expected label.
     MissingLabelProvenance {
         /// Case without meaningful label provenance.
@@ -417,7 +432,7 @@ impl ScoreError {
     #[must_use]
     pub fn case_id(&self) -> Option<&str> {
         match self {
-            Self::UnsupportedFormatVersion { .. } | Self::EmptyCorpus => None,
+            Self::UnsupportedFormatVersion { .. } | Self::EmptyCorpus | Self::BlankCaseId => None,
             Self::DuplicateCaseId { id } | Self::MissingLabelProvenance { id } => Some(id),
             Self::Case { case_id, .. } => Some(case_id),
         }
@@ -435,6 +450,10 @@ impl fmt::Display for ScoreError {
             Self::DuplicateCaseId { id } => {
                 write!(formatter, "corpus case id {id} appears more than once")
             }
+            Self::BlankCaseId => write!(
+                formatter,
+                "corpus contains a case whose id is empty or whitespace-only"
+            ),
             Self::MissingLabelProvenance { id } => {
                 write!(formatter, "corpus case {id} has no label provenance")
             }
@@ -452,6 +471,7 @@ impl Error for ScoreError {
             Self::UnsupportedFormatVersion { .. }
             | Self::EmptyCorpus
             | Self::DuplicateCaseId { .. }
+            | Self::BlankCaseId
             | Self::MissingLabelProvenance { .. } => None,
             Self::Case { source, .. } => Some(source.as_ref()),
         }
@@ -506,6 +526,19 @@ mod tests {
         let error = decode_corpus(&encoded).expect_err("a duplicate case id is rejected");
 
         expect![["corpus case id synthetic-read-source-file appears more than once"]]
+            .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn blank_corpus_case_ids_fail_closed() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        corpus.cases[0].id = "   ".to_string();
+        let encoded = serde_json::to_vec(&corpus).expect("the blank-id fixture serializes");
+
+        let error = decode_corpus(&encoded).expect_err("a blank case id is rejected");
+
+        expect![["corpus contains a case whose id is empty or whitespace-only"]]
             .assert_eq(&error.to_string());
     }
 
