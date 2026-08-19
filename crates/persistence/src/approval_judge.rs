@@ -40,9 +40,9 @@ use crate::{
 ///
 /// Delegation may only narrow authority, so a judge cannot decide scope
 /// without seeing what authority the session was granted. Every field is
-/// session-supplied text that untrusted sources may have influenced, so each
-/// one is carried as its exact admitted domain value and is never treated as
-/// instruction by its consumers.
+/// session or repository-watch state that untrusted sources may have
+/// influenced, so each one is carried as its exact admitted domain value and
+/// is never treated as instruction by its consumers.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SessionAuthorityContext {
     goal: Option<GoalStatement>,

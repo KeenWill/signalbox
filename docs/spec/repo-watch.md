@@ -43,7 +43,9 @@ workflow-run branch symmetry below are verified against PR #891
 (`agent/webhook-event-mapping`). Webhook drain liveness and stall reporting are
 verified against PR #896 (`agent/webhook-projection-drain`). Webhook preemption
 of slow complete reconciliation is verified against this PR
-(`agent/webhook-projection-preemption-review`).
+(`agent/webhook-projection-preemption-review`). The approval-judge dispatch
+fence and unattended escalation release described below are verified against
+this PR (`agent/headless-approval-escalation`).
 
 ## Configuration and credential boundary
 
@@ -608,6 +610,15 @@ reads for it. What this requires of the durable goal rules — a goal turn whose
 accepted input carries the command that accepted it, and which therefore does
 not restate its statement — is stated in [goal mode](goal-mode.md).
 
+**Implemented behavior.** The dispatch action is also the immutable authority
+source for an approval judge invoked by that session. A pull-request dispatch
+supplies its repository, pull-request number, exact head commit, head repository
+and branch, and base branch; a branch dispatch supplies its repository and
+branch. These values are read from the append-only dispatch event and action,
+not inferred from the synthesized goal or refreshed provider state. The tool
+approval contract governs their quoted rendering and the judge's decision use in
+[tool loop](tool-loop.md#approval-policy-and-decision-sources).
+
 **Committed unimplemented functionality.** No present session-creation or
 input-submission surface identifies repository watch as a purpose-specific actor
 or creation cause. Version one therefore uses the current user-initiated,
@@ -684,6 +695,16 @@ ownership across the gap between a completed goal turn and its durably queued
 continuation. Goal blocking, achievement, or user stop rechecks release after
 pursuit ends. The append-only dispatch records identify the sessions responsible
 for the PR; no mutable assignment flag replaces them.
+
+**Implemented behavior.** A completed approval-judge escalation in a dispatched
+session is an execution-failure terminal transition, not an attended approval
+wait. It fails the active turn, blocks the commissioned goal, and therefore
+enters the same latest-state obligation and singleton-release path described
+above. Once release commits, the obligation becomes eligible under the ordinary
+cooldown and can create a fresh dispatch; the ended session does not remain
+load-bearing occupancy. `repo_watch_headless_approval_escalation_audit` joins
+the append-only escalation cause and rationale to its dispatch release and
+replacement obligation, including whether and when that obligation settled.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies

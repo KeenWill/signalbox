@@ -131,6 +131,10 @@ const SIBLING_STOP_COMMAND_ID: u128 = 0x5b_200;
 const SIBLING_GOAL_INPUT_ID: u128 = 0x5b_300;
 const SIBLING_GOAL_TURN_ID: u128 = 0x5b_400;
 const UNKNOWN_DELIVERED_REQUEST_ID: u128 = 0x5c_000;
+const TEMPLATE_MODEL_SELECTION_ID: u128 = 901;
+const APPROVAL_JUDGE_PROVIDER_ID: u128 = 902;
+const FIXTURE_CREDENTIAL_REFERENCE: &str = "fixture-credential";
+const CLOSED_RESULT_ID_OFFSET: u128 = 0x2_000_000;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -550,7 +554,7 @@ impl RepoWatchTemplateResolver for TemplateResolver {
             ),
             SessionConfigurationDefaults::complete(
                 ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(
-                    901,
+                    TEMPLATE_MODEL_SELECTION_ID,
                 ))),
                 DangerousToolAutoApproval::Disabled,
                 Some(
@@ -596,6 +600,17 @@ struct HeldSlotVisibility {
     blockers: Vec<String>,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct HeadlessEscalationVisibility {
+    lifecycle_state: String,
+    terminal_disposition: Option<String>,
+    goal_event_kind: String,
+    blocked_reason: Option<String>,
+    rationale: String,
+    dispatch_released: bool,
+    replacement_owed: bool,
+}
+
 impl RepoWatchDispatchTransaction for ObligationTransaction {
     type Error = RepoWatchDispatchRepositoryError;
 
@@ -618,19 +633,21 @@ impl RepoWatchDispatchTransaction for ObligationTransaction {
 fn credential_pin() -> SessionCredentialPin {
     SessionCredentialPin::try_new(vec![SessionModelCredential::new(
         "fixture-family",
-        "fixture-credential",
+        FIXTURE_CREDENTIAL_REFERENCE,
     )])
     .expect("fixture credential pin is valid")
 }
 
 fn model_credential_reference() -> ModelCallCredentialReference {
-    ModelCallCredentialReference::new("fixture-credential")
+    ModelCallCredentialReference::new(FIXTURE_CREDENTIAL_REFERENCE)
 }
 
 fn model_targets() -> ModelTargetCatalog {
     ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
-        DirectModelSelection::from_uuid(Uuid::from_u128(901)),
-        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(902))),
+        DirectModelSelection::from_uuid(Uuid::from_u128(TEMPLATE_MODEL_SELECTION_ID)),
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+            APPROVAL_JUDGE_PROVIDER_ID,
+        ))),
     )])
     .expect("one fixture target forms a catalog")
 }
@@ -1302,7 +1319,9 @@ async fn checkpoint_dispatched_delegated_approval(
                 session,
                 turn,
                 ModelCallId::from_uuid(Uuid::from_u128(seed + 9)),
-                Some(DirectModelSelection::from_uuid(Uuid::from_u128(901))),
+                Some(DirectModelSelection::from_uuid(Uuid::from_u128(
+                    TEMPLATE_MODEL_SELECTION_ID,
+                ))),
             )
             .await?,
     );
@@ -1732,11 +1751,10 @@ async fn stale_stopped_dispatch_requeues_and_redispatches_after_release()
     Ok(())
 }
 
-/// INV-REPO-WATCH-HEADLESS-APPROVAL-ESCALATION-REARMS: a completed judge
-/// escalation in a repository-watch-created session cannot retain the
-/// singleton as unattended active work. Its normal failed-turn/blocked-goal
-/// closeout releases the dispatch, leaves an auditable escalation record, and
-/// makes the same event eligible for a fresh dispatch.
+/// INV-069: a completed judge escalation in a repository-watch-created session
+/// cannot retain the singleton as unattended active work. Its normal
+/// failed-turn/blocked-goal closeout releases the dispatch, leaves an auditable
+/// escalation record, and makes the same event eligible for a fresh dispatch.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn headless_approval_escalation_releases_rearms_and_redispatches()
@@ -1766,27 +1784,19 @@ async fn headless_approval_escalation_releases_rearms_and_redispatches()
             ),
             |closed_request| {
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
-                    closed_request.as_uuid().as_u128() + 0x2_000_000,
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
                 ))
             },
         )
         .await?;
-    let audit: (
-        String,
-        Option<String>,
-        String,
-        Option<String>,
-        String,
-        bool,
-        bool,
-    ) = sqlx::query_as(
-        "SELECT lifecycle.state_kind,
-                    lifecycle.terminal_disposition_kind,
-                    latest_goal.event_kind,
+    let audit: HeadlessEscalationVisibility = sqlx::query_as(
+        "SELECT lifecycle.state_kind AS lifecycle_state,
+                    lifecycle.terminal_disposition_kind AS terminal_disposition,
+                    latest_goal.event_kind AS goal_event_kind,
                     latest_goal.blocked_reason,
                     audit.rationale,
-                    audit.released_at IS NOT NULL,
-                    audit.obligation_id IS NOT NULL
+                    audit.released_at IS NOT NULL AS dispatch_released,
+                    audit.obligation_id IS NOT NULL AS replacement_owed
                FROM repo_watch_headless_approval_escalation_audit AS audit
                JOIN turn_lifecycle AS lifecycle
                  ON lifecycle.session_id = audit.session_id
@@ -1834,13 +1844,13 @@ async fn headless_approval_escalation_releases_rearms_and_redispatches()
         outcome,
         CompleteApprovalJudgeOutcome::HeadlessEscalationReleased
     );
-    assert_eq!(audit.0, "terminal");
-    assert_eq!(audit.1.as_deref(), Some("failed"));
-    assert_eq!(audit.2, "blocked");
-    assert_eq!(audit.3.as_deref(), Some("execution_failure"));
-    assert_eq!(audit.4, rationale.as_str());
-    assert!(audit.5);
-    assert!(audit.6);
+    assert_eq!(audit.lifecycle_state, "terminal");
+    assert_eq!(audit.terminal_disposition.as_deref(), Some("failed"));
+    assert_eq!(audit.goal_event_kind, "blocked");
+    assert_eq!(audit.blocked_reason.as_deref(), Some("execution_failure"));
+    assert_eq!(audit.rationale, rationale.as_str());
+    assert!(audit.dispatch_released);
+    assert!(audit.replacement_owed);
     assert_ne!(successor_sessions[0], fixture.session(0));
     assert_eq!(prepared.request().id(), request);
     assert_eq!(turn, prepared.request().turn());

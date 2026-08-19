@@ -2,19 +2,25 @@
 
 use crate::*;
 
+const FAILURE_ENTRY_ID_OFFSET: u128 = 0x1_000;
+const TERMINAL_FRONTIER_ID_OFFSET: u128 = 0x1_001;
+const CLOSED_RESULT_ID_OFFSET: u128 = 0x2_000_000;
+
 fn approval_judge_completion_identities(
     fresh_seed: u128,
     attempt_seed: u128,
 ) -> ApprovalJudgeCompletionIdentities {
     ApprovalJudgeCompletionIdentities::new(
         TurnAttemptId::from_uuid(Uuid::from_u128(attempt_seed)),
-        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(fresh_seed + 0x1_000)),
-        ContextFrontierId::from_uuid(Uuid::from_u128(fresh_seed + 0x1_001)),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(fresh_seed + FAILURE_ENTRY_ID_OFFSET)),
+        ContextFrontierId::from_uuid(Uuid::from_u128(fresh_seed + TERMINAL_FRONTIER_ID_OFFSET)),
     )
 }
 
 fn approval_judge_closed_result_entry(request: ToolRequestId) -> SemanticTranscriptEntryId {
-    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(request.as_uuid().as_u128() + 0x2_000_000))
+    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+        request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+    ))
 }
 
 #[tokio::test(flavor = "multi_thread")]

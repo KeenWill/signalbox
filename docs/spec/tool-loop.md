@@ -22,6 +22,10 @@ The `AlwaysConfirm` interaction with an explicitly configured approval posture â
 `Delegated` admitted, `Auto` refused â€” is verified through this PR
 (`agent/approval-posture-alwaysconfirm`).
 
+The immutable repository-watch authority supplied to a dispatched approval judge
+and the unattended-escalation terminal path are verified against this PR
+(`agent/headless-approval-escalation`).
+
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
 
@@ -213,19 +217,42 @@ in model-call history with its selection, resolved provider target, credential
 reference, state, disposition, and reported token usage. Its closed result is
 `Approve`, `Deny`, or `EscalateToHuman`, always with rationale.
 
-The judge may approve or deny only a request frozen as `Delegated`. An
-`EscalateToHuman` result stores the completed call but no approval decision and
-leaves the same request parked. A `KnownFailed`, `Refused`, `Cancelled`, or
-`Ambiguous` terminal judge call likewise retains that park while immediately
-admitting a user decision, so a terminal judge failure cannot strand the
-approval wait. A request frozen as `Human` admits only that escalation result
-from a delegate; a delegate approval or denial is rejected by both domain
-reconstruction and relational provenance constraints (INV-049). Thus delegation
-can narrow authority but never widen it. A completed approve or deny atomically
-records the decision and advances the same proposal-ordered batch transition
-used by a user decision. Each explicit user or delegate decision emits one
-ordered `ToolApprovalDecided` event carrying the decision, decider kind and
-identity, and delegate rationale when present.
+For a repository-watch-created session, preparation also reads the immutable
+dispatch authority linked to that session. Pull-request authority contains the
+dispatch identity, watched repository, pull-request number, exact head commit,
+head repository and branch, and base branch; branch authority contains the
+dispatch identity, repository, and branch. The judge receives this structured
+authority beside the commissioned goal, template, and frozen system prompt.
+Every session-derived field is separately delimited and quoted as untrusted
+evidence, and the judge prompt treats it as scope to compare with the proposed
+request rather than as instruction. The context comes from the append-only
+dispatch action and triggering event, not from mutable provider state or text
+reconstructed from the goal.
+
+The judge may approve or deny only a request frozen as `Delegated`. In a session
+without repository-watch dispatch authority, an `EscalateToHuman` result stores
+the completed call but no approval decision and leaves the same request parked.
+A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous` terminal judge call
+likewise retains that attended park while immediately admitting a user decision,
+so a terminal judge failure cannot prevent that decision. In a
+repository-watch-created session, no user attends the approval wait. A completed
+`EscalateToHuman` therefore closes every unresolved request in the active batch
+as `ToolClosed`, appends `TurnFailed`, terminalizes the turn with the completed
+judge escalation as its typed cause, and blocks the commissioned goal for
+execution failure. The same transaction records an append-only audit row linking
+the judge call and rationale, request, dispatch action, terminal attempt,
+failure entry, and terminal frontier. The blocked goal then participates in the
+ordinary repository-watch release and re-arm rules instead of leaving the active
+turn parked.
+
+A request frozen as `Human` admits only an escalation result from a delegate; a
+delegate approval or denial is rejected by both domain reconstruction and
+relational provenance constraints (INV-049). Thus delegation can narrow
+authority but never widen it. A completed approve or deny atomically records the
+decision and advances the same proposal-ordered batch transition used by a user
+decision. Each explicit user or delegate decision emits one ordered
+`ToolApprovalDecided` event carrying the decision, decider kind and identity,
+and delegate rationale when present.
 
 The consume-and-proceed transaction locks the owning session, validates that the
 request is the turn's earliest undecided request, records the command and
