@@ -111,15 +111,14 @@ generation the decision was formed under rather than restating it, so it too
 resolves to nothing. That escalates rather than committing a decision formed
 under authority no longer in force. Escalating means the attended park, except
 for a turn [repository watch](repo-watch.md) sends down its unattended terminal
-path — one judged under dispatch authority, unsteered, and whose dispatch either
-has not yet released or released before this authority ended, which is the
-resumed work of a batch an earlier escalation already released — and which fails
-the turn without blocking the generation that has already closed. A dispatch
-that released while the authority still stood is the other case, and it parks:
-standing authority on a released batch means an operator resumed the work by
-hand. A judge that read no statement decided without one, so a generation
-attached since withdraws nothing and leaves that decision alone: the comparison
-pins withdrawal, not novelty.
+path — one judged under dispatch authority, unsteered, and either the dispatched
+work itself or work whose authority has since ended — and which fails the turn
+without blocking the generation that has already closed. Work an operator
+resumed after an earlier escalation is the other case, and it parks while its
+authority stands, because the exemption stated below means only a person could
+have resumed it. A judge that read no statement decided without one, so a
+generation attached since withdraws nothing and leaves that decision alone: the
+comparison pins withdrawal, not novelty.
 
 **Implemented behavior.** The commit-time resolution is not the reading
 resolution. Reading binds a recorded generation exactly, so a supersession while

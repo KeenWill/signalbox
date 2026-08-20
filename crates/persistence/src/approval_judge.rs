@@ -720,10 +720,13 @@ impl PostgresApprovalJudgeRepository {
 /// promises no redispatch either: `repo_watch_owe_dispatch_requeue` records the
 /// replacement obligation only while the rule remains active and, for a
 /// pull-request target, while a later close or merge has not made the work
-/// stale. It states that no automatic resumption is coming, which is true of
-/// this block alone among execution-failure blocks and is why it names the
-/// repair itself — the repair is the whole of what an operator is promised.
-const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. Repository watch redispatches the work under a fresh dispatch once its batch ends, unless its rule has been deactivated or the pull request has closed or merged since; no automatic resumption is scheduled for this block either way. Resume this goal only to continue this session by hand: once its dispatch has released, a further escalation waits for you instead of failing the turn again.";
+/// stale — and the requeue it does record counts as a failed attempt, so the
+/// attempt that spends the lineage's budget parks the obligation in the same
+/// transaction rather than redispatching. It states that no automatic
+/// resumption is coming, which is true of this block alone among
+/// execution-failure blocks and is why it names the repair itself — the repair
+/// is the whole of what an operator is promised.
+const HEADLESS_ESCALATION_GOAL_NEED: &str = "A delegated tool approval escalated with no attending user, so this goal turn was failed. Repository watch redispatches the work under a fresh dispatch once its batch ends, unless its rule has been deactivated, the pull request has closed or merged since, or this attempt spent the lineage's retry budget and parked it for an operator or new pull-request activity; no automatic resumption is scheduled for this block either way. Resume this goal only to continue this session by hand: a further escalation on work you resumed waits for you instead of failing the turn again.";
 
 /// The generation a repository-watch dispatch commissions in the session it
 /// creates, which is the only generation its authority describes.
@@ -749,36 +752,31 @@ const DISPATCH_COMMISSIONED_GENERATION: GoalGeneration = GoalGeneration::new(Non
 /// reclassifying the steer into a queued successor would start fresh work in a
 /// session whose dispatch is being released for redispatch.
 ///
-/// A released dispatch whose goal authority still stands is the third. The
-/// unattended path exists to free the singleton and owe a replacement, and
-/// `repo_watch_release_completed_dispatch_batches_for_turn` owes that
-/// replacement only on the release that this escalation causes; a batch already
-/// released spends nothing further. A park there costs repository watch nothing
-/// either, because the batch that turn once held is no longer its occupancy.
+/// Work this session has already escalated once is the third. An unattended
+/// escalation fails its turn and blocks the goal, and [`goal mode`] exempts
+/// that block from automatic resumption, so nothing but a person puts such a
+/// session back into flight: a second escalation in a session that already has
+/// an escalation row is therefore work an operator resumed, and it waits for
+/// them. That holds whether or not the batch has released — a sibling action
+/// still pursuing keeps the release row absent while the resumption is just as
+/// attended — which is why the release row decides nothing here.
 ///
-/// The authority is what says a person is still behind the work. A batch
-/// cannot release while this turn is active — `goal_turn_is_queue_order_relevant`
-/// holds any non-queued turn runtime-relevant whatever its goal recorded, so
-/// the release predicate's live-turn clause excludes the action — which leaves
-/// one way to reach a released batch here: an earlier escalation terminalized
-/// its turn and released, and an operator resumed the goal. Standing authority
-/// is that operator, so the escalation waits for them. Withdrawn authority
-/// means the goal ended again while this judge was in flight, leaving stale
-/// work, so it is terminalized instead of parking for a user who will never
-/// come — and terminalizing it owes no second redispatch, because the release
-/// row already spent the requeue.
+/// Standing authority is the last word on it. Withdrawn authority means the
+/// goal ended while this judge was in flight, so nobody is behind the work
+/// after all and it is terminalized rather than parked for a user who will
+/// never come. A turn no escalation preceded is the dispatched work itself,
+/// including one an ordinary execution failure had automatically resumed, and
+/// stays unattended.
+///
+/// [`goal mode`]: ../../../docs/spec/goal-mode.md
 async fn unattended_escalation_applies(
     connection: &mut PgConnection,
     prepared: &PreparedApprovalJudge,
     authority_stands: bool,
 ) -> Result<bool, ApprovalJudgeRepositoryError> {
-    let Some(dispatch) = prepared
-        .session_context
-        .dispatch()
-        .map(ApprovalJudgeDispatchAuthority::dispatch)
-    else {
+    if prepared.session_context.dispatch().is_none() {
         return Ok(false);
-    };
+    }
     if turn_awaits_pending_steering(
         connection,
         prepared.request.session(),
@@ -788,15 +786,15 @@ async fn unattended_escalation_applies(
     {
         return Ok(false);
     }
-    let released: bool = sqlx::query_scalar(
+    let escalated_before: bool = sqlx::query_scalar(
         "SELECT EXISTS (
-            SELECT 1 FROM repo_watch_dispatch_release WHERE dispatch_id = $1
+            SELECT 1 FROM repo_watch_headless_approval_escalation WHERE session_id = $1
         )",
     )
-    .bind(dispatch.as_uuid())
+    .bind(session_id_to_uuid(prepared.request.session()))
     .fetch_one(&mut *connection)
     .await?;
-    Ok(!(released && authority_stands))
+    Ok(!(escalated_before && authority_stands))
 }
 
 /// Whether a `pending_steering` accepted input still names this turn.
