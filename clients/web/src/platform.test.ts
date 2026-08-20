@@ -1,0 +1,22 @@
+import { describe, expect, it } from 'vitest'
+import { SCENARIO_TIMELINE_WINDOW_ITEMS, ScenarioTransport } from './platform'
+
+describe('ScenarioTransport', () => {
+  it('bounds a six-figure timeline request', async () => {
+    const transport = new ScenarioTransport('large-timeline')
+    const window = await transport.readTimeline({ limit: 100_000 })
+
+    expect(window.totalCount).toBe(transport.scenario.timelineTotal)
+    expect(window.items).toHaveLength(SCENARIO_TIMELINE_WINDOW_ITEMS)
+    expect(window.nextCursor).toBe(window.items.at(-1)?.cursor)
+  })
+
+  it('uses stable logical cursors for adjacent windows', async () => {
+    const transport = new ScenarioTransport('large-table')
+    const first = await transport.readFleet({ limit: 2 })
+    const second = await transport.readFleet({ after: first.nextCursor, limit: 2 })
+
+    expect(first.items.map((row) => row.cursor)).toEqual(['fleet:0', 'fleet:1'])
+    expect(second.items.map((row) => row.cursor)).toEqual(['fleet:2', 'fleet:3'])
+  })
+})
