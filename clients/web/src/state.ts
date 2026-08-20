@@ -1,0 +1,108 @@
+import { configureStore, createSlice, type Middleware } from '@reduxjs/toolkit'
+import { useDispatch, useSelector } from 'react-redux'
+
+export type LayoutMode = 'focus' | 'workbench'
+export type DensityMode = 'compact' | 'comfortable'
+export type DetailMode = 'full' | 'condensed' | 'results'
+export type ThemeMode = 'light' | 'dark'
+export type Overlay = 'palette' | 'help' | 'navigation' | null
+
+export interface VisibleRange {
+  start: number
+  end: number
+}
+
+interface AppState {
+  layout: LayoutMode
+  density: DensityMode
+  detail: DetailMode
+  theme: ThemeMode
+  overlay: Overlay
+  selectedTimeline: string | null
+  transcriptRange: VisibleRange
+  tableRange: VisibleRange
+  activitySequence: number
+}
+
+const initialState: AppState = {
+  layout: 'workbench',
+  density: 'compact',
+  detail: 'condensed',
+  theme: 'dark',
+  overlay: null,
+  selectedTimeline: null,
+  transcriptRange: { start: 0, end: 0 },
+  tableRange: { start: 0, end: 0 },
+  activitySequence: 0,
+}
+
+// Tunable effective ceiling: diagnostics retain a concise Redux activity tail for local triage.
+const RECENT_REDUX_ACTIONS = 18
+// Tunable effective ceiling: Redux DevTools keeps a practical local interaction history.
+const REDUX_DEVTOOLS_ACTIONS = 24
+
+const appSlice = createSlice({
+  name: 'app',
+  initialState,
+  reducers: {
+    layoutSet(state, action: { payload: LayoutMode }) {
+      state.layout = action.payload
+      state.activitySequence += 1
+    },
+    densitySet(state, action: { payload: DensityMode }) {
+      state.density = action.payload
+      state.activitySequence += 1
+    },
+    detailSet(state, action: { payload: DetailMode }) {
+      state.detail = action.payload
+      state.activitySequence += 1
+    },
+    themeSet(state, action: { payload: ThemeMode }) {
+      state.theme = action.payload
+      state.activitySequence += 1
+    },
+    overlaySet(state, action: { payload: Overlay }) {
+      state.overlay = action.payload
+      state.activitySequence += 1
+    },
+    timelineSelected(state, action: { payload: string | null }) {
+      state.selectedTimeline = action.payload
+      state.activitySequence += 1
+    },
+    transcriptRangeSet(state, action: { payload: VisibleRange }) {
+      state.transcriptRange = action.payload
+    },
+    tableRangeSet(state, action: { payload: VisibleRange }) {
+      state.tableRange = action.payload
+    },
+  },
+})
+
+const actionTrace: string[] = []
+const telemetryActionTypes = new Set<string>([
+  appSlice.actions.transcriptRangeSet.type,
+  appSlice.actions.tableRangeSet.type,
+])
+const traceMiddleware: Middleware = () => (next) => (action) => {
+  if (typeof action === 'object' && action !== null && 'type' in action) {
+    const actionType = String(action.type)
+    if (telemetryActionTypes.has(actionType)) return next(action)
+    actionTrace.push(actionType)
+    if (actionTrace.length > RECENT_REDUX_ACTIONS) actionTrace.shift()
+  }
+  return next(action)
+}
+
+export const store = configureStore({
+  reducer: { app: appSlice.reducer },
+  middleware: (getDefaultMiddleware) => getDefaultMiddleware().concat(traceMiddleware),
+  devTools: { maxAge: REDUX_DEVTOOLS_ACTIONS, trace: false },
+})
+
+export const actions = appSlice.actions
+export type RootState = ReturnType<typeof store.getState>
+export type AppDispatch = typeof store.dispatch
+export const selectApp = (state: RootState) => state.app
+export const getRecentActions = (): readonly string[] => actionTrace
+export const useAppDispatch = useDispatch.withTypes<AppDispatch>()
+export const useAppSelector = useSelector.withTypes<RootState>()

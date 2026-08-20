@@ -201,6 +201,10 @@ impl CreateSessionRepository {
 
         match inspect_registry(&mut transaction, command_id).await? {
             Some(CommandKind::CreateSession) => {
+                if commissioned_dispatch_claims(&mut transaction, command_id).await? {
+                    transaction.rollback().await?;
+                    return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
+                }
                 let recorded = load_from_connection(&mut transaction, command_id)
                     .await?
                     .ok_or(CreateSessionCorruption::Inconsistent(
@@ -253,12 +257,16 @@ impl CreateSessionRepository {
         if !claimed {
             let outcome = match inspect_registry(&mut transaction, command_id).await? {
                 Some(CommandKind::CreateSession) => {
-                    let recorded = load_from_connection(&mut transaction, command_id)
-                        .await?
-                        .ok_or(CreateSessionCorruption::Inconsistent(
-                            "winner claim disappeared",
-                        ))?;
-                    existing_outcome(&prepared, &recorded)
+                    if commissioned_dispatch_claims(&mut transaction, command_id).await? {
+                        CreateSessionHandlingOutcome::ConflictingReuse { command_id }
+                    } else {
+                        let recorded = load_from_connection(&mut transaction, command_id)
+                            .await?
+                            .ok_or(CreateSessionCorruption::Inconsistent(
+                                "winner claim disappeared",
+                            ))?;
+                        existing_outcome(&prepared, &recorded)
+                    }
                 }
                 Some(
                     CommandKind::CreateSessionFromImportedFrontier
@@ -308,6 +316,13 @@ impl CreateSessionRepository {
         match inspect_registry(&mut connection, command_id).await? {
             None => Ok(None),
             Some(CommandKind::CreateSession) => {
+                // A claim a committed commissioned dispatch also holds names
+                // the commission wire operation, not an ordinary creation, so
+                // every ordinary-create replay probe refuses it the same way
+                // it refuses any other command kind.
+                if commissioned_dispatch_claims(&mut connection, command_id).await? {
+                    return Err(CreateSessionRepositoryError::DifferentCommandKind { command_id });
+                }
                 load_from_connection(&mut connection, command_id).await
             }
             Some(
@@ -360,13 +375,52 @@ fn existing_outcome(
     }
 }
 
+/// Reports whether a committed commissioned dispatch claims this identity.
+///
+/// The ordinary create-session wire operation and the commission wire
+/// operation carry different intent, so an ordinary create retried against a
+/// commission's command identity must refuse rather than replay the created
+/// session as its own.
+async fn commissioned_dispatch_claims(
+    connection: &mut PgConnection,
+    command_id: DurableCommandId,
+) -> Result<bool, CreateSessionRepositoryError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM commissioned_dispatch WHERE create_command_id = $1
+        )",
+    )
+    .bind(durable_command_id_to_uuid(command_id))
+    .fetch_one(connection)
+    .await?)
+}
+
 pub(crate) async fn insert_fresh_prepared(
     connection: &mut PgConnection,
     prepared: PreparedCreateSession,
     credential_pin: &crate::SessionCredentialPin,
 ) -> Result<(), CreateSessionRepositoryError> {
     let command_id = prepared.command().command_id();
-    let claimed = sqlx::query(
+    if !claim_create_session_command(connection, command_id).await? {
+        return Err(CreateSessionCorruption::Inconsistent(
+            "fresh repository-watch command identity collided",
+        )
+        .into());
+    }
+    insert_prepared(connection, prepared, credential_pin).await
+}
+
+/// Claims one create-session command identity, reporting whether this
+/// transaction won it.
+///
+/// A `false` return means another committed claim holds the identity; the
+/// caller decides whether that is a replay, a conflicting reuse, or
+/// corruption.
+pub(crate) async fn claim_create_session_command(
+    connection: &mut PgConnection,
+    command_id: DurableCommandId,
+) -> Result<bool, CreateSessionRepositoryError> {
+    Ok(sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
          VALUES ($1, $2, $3, transaction_timestamp())
@@ -378,17 +432,10 @@ pub(crate) async fn insert_fresh_prepared(
     .execute(&mut *connection)
     .await?
     .rows_affected()
-        == 1;
-    if !claimed {
-        return Err(CreateSessionCorruption::Inconsistent(
-            "fresh repository-watch command identity collided",
-        )
-        .into());
-    }
-    insert_prepared(connection, prepared, credential_pin).await
+        == 1)
 }
 
-async fn insert_prepared(
+pub(crate) async fn insert_prepared(
     connection: &mut PgConnection,
     prepared: PreparedCreateSession,
     credential_pin: &crate::SessionCredentialPin,
