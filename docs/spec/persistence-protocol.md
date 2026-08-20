@@ -185,11 +185,12 @@ search path and evaluates check constraints while copying table data, so an
 unpinned body that names another user function unqualified resolves in normal
 operation and fails only during restore; `202608200001` retrofits the pin onto
 the check-reachable set the earlier migrations create, and the
-`search_path_postgres` catalogue test reads the reachable set from the live
-catalogue and fails on any unpinned member, so a future migration cannot
-reintroduce the gap. Why: a backup that cannot restore is a silent failure that
-surfaces only during recovery, so restorability is part of the schema's contract
-rather than an operational afterthought.
+`search_path_postgres` catalogue test (INV-070) derives the reachable set from
+the dependency catalogue — including functions reached only through a
+user-defined operator — and fails on any unpinned member or on empty discovery,
+so a future migration cannot reintroduce the gap. Why: a backup that cannot
+restore is a silent failure that surfaces only during recovery, so restorability
+is part of the schema's contract rather than an operational afterthought.
 
 Prefix reservation across concurrent stacks: the bottom pull request of any
 stack that will add migrations declares a reserved prefix block — a date plus a

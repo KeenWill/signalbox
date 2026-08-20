@@ -106,6 +106,9 @@ const RESTORE_REACHABLE_FUNCTIONS: &str = "
      ORDER BY proname
 ";
 
+/// INV-070: every function reachable from a check constraint or index during
+/// `pg_restore` carries the canonical pinned search path — the
+/// migration-selected schema, then `pg_catalog`, then `pg_temp`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn every_restore_reachable_function_pins_its_search_path() -> Result<(), Box<dyn Error>> {
