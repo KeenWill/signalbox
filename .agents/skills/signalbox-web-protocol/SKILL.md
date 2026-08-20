@@ -49,8 +49,8 @@ validation.
 
 Separate the historical plane from the live plane.
 
-- Historical reads expose stable logical addresses, bounded windows, and typed
-  detail.
+- Historical reads follow the owning implemented browser contract's addressing,
+  window bounds, and detail representations; this skill adds none.
 - Live subscribe/follow begins with a coherent current projection and durable
   cursor, then sends ordered durable updates above it. It relays ephemeral
   drafts only when an owning implemented contract defines their identity,
@@ -60,8 +60,8 @@ Separate the historical plane from the live plane.
   `resync_required`, and resumes from a fresh snapshot; it never drops durable
   events or substitutes backpressure.
 - Lag produces resynchronization, not partial best-effort continuation.
-- Client presentation choices never become server `full`, `condensed`, or
-  `results` modes.
+- Client presentation choices become server projection or query semantics only
+  when the owning implemented browser contract defines them.
 
 ## Mutations
 

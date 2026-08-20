@@ -75,7 +75,8 @@ On failure retain:
 - relevant network evidence;
 - bounded, allowlisted Signalbox diagnostic dump when the active slice provides
   one; and
-- recent bounded Redux actions.
+- bounded state-transition evidence for the selected client stack, such as
+  recent bounded Redux actions when that stack selects Redux.
 
 Retain diagnostics and failure artifacts only in protected CI or test contexts.
 Before retaining any artifact, sanitize cookies, authorization headers,

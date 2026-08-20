@@ -41,7 +41,9 @@ A virtual DOM list alone does not satisfy the law.
 - Greedily load bounded histories under a generous configured budget.
 - Cancel or stop eager loading and continue incrementally when conditions or
   policy change.
-- Do not expose presentation modes as server query semantics.
+- Follow the [protocol skill](../signalbox-web-protocol/SKILL.md) and the owning
+  implemented browser contract for whether presentation modes are server query
+  semantics; do not choose that boundary here.
 - Prefetch near the visible region when evidence supports it; do not prefetch
   the lifetime corpus.
 

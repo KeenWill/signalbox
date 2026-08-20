@@ -19,8 +19,10 @@ An application action is one registered command with:
 - default bindings; and
 - optional menu, button, or palette presentation.
 
-Buttons, menus, TanStack Hotkeys, and the command palette invoke that command.
-Do not put business behavior in a component-local key handler.
+Buttons, menus, the selected stack's keymap integration, and the command palette
+invoke that command. TanStack Hotkeys provides the keymap integration only when
+the implementing specification selects it. Do not put business behavior in a
+component-local key handler.
 
 ## Modes and scopes
 
