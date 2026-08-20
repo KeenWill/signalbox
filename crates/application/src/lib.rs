@@ -27,6 +27,7 @@ mod tool_dispatch_gate;
 mod tool_execution_test_support;
 mod tool_loop;
 mod tool_loop_ports;
+mod turn_liveness;
 mod update_session_placement;
 
 pub use approval_judge::{
@@ -171,6 +172,10 @@ pub use tool_loop_ports::{
     DecideToolRequestTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
     RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
     ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+};
+pub use turn_liveness::{
+    StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessBoundError,
+    TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
 };
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,

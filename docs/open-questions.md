@@ -102,6 +102,50 @@ specification diff. Accepted cross-component and wire contracts live in the
   provider request-status API — with its polling posture and evidence classes —
   as the resolution path; the full analysis is in git history. Later scope.
   (S02)
+- **Operator control of scheduling and liveness cadence.** The scheduler's sweep
+  interval, per-session scan gating, fairness between contending sessions, and
+  the turn-liveness staleness bound and scan interval are all compiled constants
+  today
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)), and
+  almost none of them has anywhere to validate a supplied value. Only the
+  turn-liveness staleness bound has a lowering constructor that enforces its
+  compiled ceiling; the sweep interval's constructor refuses a zero or
+  unrepresentable duration and no more, so it fixes no maximum; and the scan
+  interval, per-session scan gating, and fairness expose no constructor at all.
+  The enforcement points for a configuration surface would therefore have to be
+  built rather than merely called. Undecided with them: whether signalboxd
+  should carry such settings at all; whether they arrive as one operational
+  surface or one constant at a time; and, for each, whether its compiled value
+  is a ceiling that may only be lowered or an ordinary default that may move
+  either way — settled so far only for the staleness bound. Leaning: one
+  surface, introduced when a deployment needs a value the compiled one cannot
+  serve, rather than pre-emptively. Later scope. (S01, S02)
+- **Terminalizing a turn that holds pending steering.** Every steering row bound
+  to a turn must be closed before that turn terminalizes, and the interrupt and
+  model-call terminal paths satisfy that by reclassifying the steering into a
+  queued successor origin
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)). The
+  failed-turn transition that startup recovery and the liveness watchdog share
+  performs no such reclassification and refuses outright, so a turn that wedges
+  and is then steered can be observed and reported but not ended — the one wedge
+  a user is actively trying to reach. Whether that transition should gain the
+  reclassification, and whether both its callers want it, is undecided: the
+  change is to a transition two components depend on, and startup recovery
+  reaching the same refusal has meant corrupt durable state rather than an
+  ordinary shape. Leaning: give the transition the reclassification the other
+  terminal paths already perform, since the constraint forcing it is a lifecycle
+  rule rather than a property of how the turn ended. Later scope. (S02, S07)
+- **Durable terminal cause for a failed turn.** The turn-liveness watchdog and
+  startup recovery commit the identical failed-turn transition
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)),
+  which is what keeps every terminal trigger firing for both, but the
+  `TurnFailed` shape carries no cause column — so the two are distinguishable
+  only in the operator log, and only while it is retained. Whether a terminal
+  turn should carry a stored cause, and whether that vocabulary is shared with
+  the operator cause codes or separate from them, is undecided; adding one is a
+  migration on a table several transitions write. Leaning: a cause belongs in
+  the rows, because an operator reconstructing why a session stopped should not
+  depend on log retention. Later scope. (S02, S07)
 - **Direct interrupt-only reconciliation from a running attempt.**
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) adds
   direct reconciliation only for fatal mismatch at a closed aggregate boundary;
