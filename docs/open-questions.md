@@ -48,10 +48,14 @@ specification diff. Accepted cross-component and wire contracts live in the
 
 Whether execution-approval judging should replace its direct recommendation with
 separate risk and brief-alignment grades remains undecided. Any such change must
-define the grade contract, trusted outcome derivation and safety ceilings, input
-evidence, durable audit shape, operator presentation, evaluation method, and
-shadow-to-live promotion path in an owner-accepted specification and
-implementing stack. The following related questions also require owner rulings:
+define the grade contract, trusted outcome derivation, remaining input evidence,
+durable audit shape, operator presentation, evaluation method, and shadow-to-live
+promotion path in an owner-accepted specification and implementing stack. Safety
+ceilings remain owned by [Additional high-risk
+guardrails](#tool-safety), while parent-supplied task and
+authority evidence remains owned by [Turn-origin instructions in the
+approval-judge request](#tool-safety).
+The following related questions also require owner rulings:
 
 - **Corpus governance.** Approval corpora follow the identity, admitted storage
   forms, digest, and cross-storage reproducibility contract owned by
@@ -76,7 +80,9 @@ implementing stack. The following related questions also require owner rulings:
   whole-population promotion claims.
 
 - **Shadow budget.** The graded shadow sampling fraction, provider-cost ceiling,
-  concurrency, and retention duration for production shadow traffic remain open.
+  and concurrency for production shadow traffic remain open. Retention and
+  deletion of observations admitted to the approval corpus remain owned by
+  Corpus governance above.
 
 - **Configuration actor audit.** Whether source-control and deployment audit are
   sufficient provenance for threshold changes, or Signalbox needs an
