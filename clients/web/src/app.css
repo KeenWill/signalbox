@@ -119,9 +119,6 @@ kbd {
   grid-template-columns: minmax(0, 1000px);
   justify-content: center;
 }
-.layout-focus .navigation-pane {
-  display: none;
-}
 .navigation-pane,
 .diagnostics {
   background: var(--surface-1);
@@ -764,4 +761,8 @@ kbd {
     top: 4vh;
     max-height: 92vh;
   }
+}
+
+.layout-focus .navigation-pane {
+  display: none;
 }

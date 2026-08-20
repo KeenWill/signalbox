@@ -36,19 +36,21 @@ export function ScenarioNavigation({ activeId }: { activeId: string }) {
         <strong>Signalbox</strong>
         <small>Scenario studio</small>
       </div>
-      <form className="scenario-search" onSubmit={(event) => event.preventDefault()} role="search">
-        <Search aria-hidden="true" />
-        <form.Field name="query">
-          {(field) => (
-            <input
-              aria-label="Filter scenarios"
-              placeholder="Filter scenarios"
-              value={field.state.value}
-              onChange={(event) => field.handleChange(event.target.value)}
-            />
-          )}
-        </form.Field>
-      </form>
+      <search>
+        <form className="scenario-search" onSubmit={(event) => event.preventDefault()}>
+          <Search aria-hidden="true" />
+          <form.Field name="query">
+            {(field) => (
+              <input
+                aria-label="Filter scenarios"
+                placeholder="Filter scenarios"
+                value={field.state.value}
+                onChange={(event) => field.handleChange(event.target.value)}
+              />
+            )}
+          </form.Field>
+        </form>
+      </search>
       <form.Subscribe selector={(state) => state.values.query}>
         {(query) => <ScenarioResults query={query} activeId={activeId} />}
       </form.Subscribe>

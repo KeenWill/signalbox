@@ -159,7 +159,7 @@ export function OverlaySurfaces({
 export function Toolbar({ context }: { context: CommandContext }) {
   const app = useAppSelector(selectApp)
   return (
-    <div className="toolbar" aria-label="Workspace controls">
+    <div className="toolbar" role="toolbar" aria-label="Workspace controls">
       <IconCommand
         id="navigation.open"
         context={context}
@@ -168,7 +168,7 @@ export function Toolbar({ context }: { context: CommandContext }) {
       >
         <Menu />
       </IconCommand>
-      <div className="segmented" aria-label="Transcript detail">
+      <fieldset className="segmented" aria-label="Transcript detail">
         {(['full', 'condensed', 'results'] as const).map((detail) => (
           <button
             type="button"
@@ -179,7 +179,7 @@ export function Toolbar({ context }: { context: CommandContext }) {
             {detail}
           </button>
         ))}
-      </div>
+      </fieldset>
       <IconCommand
         id="density.toggle"
         context={context}
@@ -281,6 +281,7 @@ export function Diagnostics({
       <h3>Recent Redux actions</h3>
       <ol>
         {snapshot.recentActions.slice(-VISIBLE_DIAGNOSTIC_ACTIONS).map((action, index) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: Actions may repeat, so their bounded log position disambiguates them.
           <li key={`${action}-${index}`}>{action}</li>
         ))}
       </ol>

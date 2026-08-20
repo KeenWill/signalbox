@@ -53,14 +53,18 @@ export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount:
           {totalCount.toLocaleString()} logical · {rows.length} loaded
         </span>
       </header>
+      {/* biome-ignore lint/a11y/useSemanticElements: The virtualized table needs a scrollable ARIA table container. */}
       <div className="data-table" role="table" aria-label="Fleet obligations">
+        {/* biome-ignore lint/a11y: Rows in this read-only virtualized ARIA table are not interactive controls. */}
         <div className="table-header" role="row">
           {table.getHeaderGroups()[0]?.headers.map((header) => (
+            // biome-ignore lint/a11y: Virtualized ARIA column headers do not receive independent focus.
             <div role="columnheader" key={header.id}>
               {flexRender(header.column.columnDef.header, header.getContext())}
             </div>
           ))}
         </div>
+        {/* biome-ignore lint/a11y/useSemanticElements: A native row group cannot own this scrollable virtual stage. */}
         <div
           ref={parentRef}
           className="virtual-scroll table-scroll"
@@ -74,6 +78,7 @@ export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount:
               const row = tableRows[virtualRow.index]
               if (!row) return null
               return (
+                // biome-ignore lint/a11y: Virtualized ARIA rows are selected through the containing table, not focused.
                 <div
                   className="table-row"
                   role="row"
@@ -85,6 +90,7 @@ export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount:
                   }}
                 >
                   {row.getVisibleCells().map((cell) => (
+                    // biome-ignore lint/a11y/useSemanticElements: Virtualized ARIA cells cannot be native table cells here.
                     <div role="cell" key={cell.id}>
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </div>

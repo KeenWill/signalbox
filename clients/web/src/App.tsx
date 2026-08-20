@@ -90,22 +90,35 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
 
-  const snapshot: DiagnosticSnapshot = {
-    scenario: transport.scenario.id,
-    connection: transport.scenario.connection,
-    loadedTimeline: timeline?.items.length ?? 0,
-    logicalTimeline: timeline?.totalCount ?? 0,
-    loadedFleet: fleet?.items.length ?? 0,
-    logicalFleet: fleet?.totalCount ?? 0,
-    transcriptRange: app.transcriptRange,
-    tableRange: app.tableRange,
-    queryStates: queryClient
-      .getQueryCache()
-      .getAll()
-      .slice(-DIAGNOSTIC_QUERY_STATES)
-      .map((query) => `${query.queryHash}: ${query.state.status}`),
-    recentActions: getRecentActions(),
-  }
+  const snapshot = useMemo<DiagnosticSnapshot>(
+    () => ({
+      scenario: transport.scenario.id,
+      connection: transport.scenario.connection,
+      loadedTimeline: timeline?.items.length ?? 0,
+      logicalTimeline: timeline?.totalCount ?? 0,
+      loadedFleet: fleet?.items.length ?? 0,
+      logicalFleet: fleet?.totalCount ?? 0,
+      transcriptRange: app.transcriptRange,
+      tableRange: app.tableRange,
+      queryStates: queryClient
+        .getQueryCache()
+        .getAll()
+        .slice(-DIAGNOSTIC_QUERY_STATES)
+        .map((query) => `${query.queryHash}: ${query.state.status}`),
+      recentActions: getRecentActions(),
+    }),
+    [
+      app.tableRange,
+      app.transcriptRange,
+      fleet?.items.length,
+      fleet?.totalCount,
+      queryClient,
+      timeline?.items.length,
+      timeline?.totalCount,
+      transport.scenario.connection,
+      transport.scenario.id,
+    ],
+  )
   useEffect(() => {
     window.__SIGNALBOX_DIAGNOSTICS__ = () => snapshot
     return () => {

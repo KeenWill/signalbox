@@ -123,6 +123,7 @@ export function Transcript({ items }: { items: TimelineItem[] }) {
             if (!item) return null
             const Renderer = renderers[item.kind]
             return (
+              // biome-ignore lint/a11y: Focus stays on the aria-activedescendant listbox; pointer selection is supplemental.
               <div
                 id={item.id}
                 key={item.id}

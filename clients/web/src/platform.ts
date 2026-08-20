@@ -55,7 +55,7 @@ export interface SignalboxTransport {
   readFleet(request: WindowRequest): Promise<CursorWindow<FleetRow>>
 }
 
-export const scenarios: readonly ScenarioDefinition[] = [
+export const scenarios = [
   {
     id: 'streaming',
     title: 'Streaming session',
@@ -120,7 +120,7 @@ export const scenarios: readonly ScenarioDefinition[] = [
     timelineTotal: 200,
     tableTotal: 200,
   },
-] as const
+] as const satisfies readonly [ScenarioDefinition, ...ScenarioDefinition[]]
 
 // Hard safety ceiling: scenario reads cannot allocate an entire logical timeline.
 export const SCENARIO_TIMELINE_WINDOW_ITEMS = 360
@@ -161,7 +161,7 @@ export class ScenarioTransport implements SignalboxTransport {
   readonly scenario: ScenarioDefinition
 
   constructor(id: ScenarioId) {
-    this.scenario = scenarios.find((scenario) => scenario.id === id) ?? scenarios[0]!
+    this.scenario = scenarios.find((scenario) => scenario.id === id) ?? scenarios[0]
   }
 
   async readTimeline(request: WindowRequest): Promise<CursorWindow<TimelineItem>> {
