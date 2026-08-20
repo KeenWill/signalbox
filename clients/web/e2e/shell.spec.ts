@@ -291,9 +291,7 @@ test('changing scenarios resets timeline selection', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
 
-  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
-  await timeline.focus()
-  await timeline.press('End')
+  await page.locator(`#${streamingFixture.secondLoadedItemId}`).click()
   await page.getByRole('link', { name: /Approval required/ }).click()
   await expect(page).toHaveURL(/\/scenario\/approval$/)
   await expect(page.getByRole('option', { selected: true })).toHaveAttribute(
