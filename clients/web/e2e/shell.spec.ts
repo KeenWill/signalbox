@@ -26,6 +26,7 @@ const largeFleetFixture = {
 } as const
 
 const streamingFixture = {
+  firstLoadedItemId: 'event-0',
   lastLoadedItemId: 'event-239',
 } as const
 
@@ -165,6 +166,26 @@ test('standard listbox keys select the announced timeline item', async ({ page }
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('keeps the active timeline option mounted after wheel-range scrolling', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+
+  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await expect(timeline).toHaveAttribute(
+    'aria-activedescendant',
+    streamingFixture.firstLoadedItemId,
+  )
+  await timeline.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  await expect(page.locator(`#${streamingFixture.firstLoadedItemId}`)).toBeAttached()
+  await expect(timeline).toHaveAttribute(
+    'aria-activedescendant',
+    streamingFixture.firstLoadedItemId,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('results detail preserves an eligible selected record', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
@@ -193,6 +214,20 @@ test('changing scenarios resets timeline selection', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('marks only the active scenario link as the current page', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+
+  await expect(page.getByRole('link', { name: /Streaming session/ })).toHaveAttribute(
+    'aria-current',
+    'page',
+  )
+  await expect(page.getByRole('link', { name: /Approval required/ })).not.toHaveAttribute(
+    'aria-current',
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('scenario selection closes mobile navigation', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.setViewportSize({ width: 390, height: 844 })
@@ -203,6 +238,16 @@ test('scenario selection closes mobile navigation', async ({ page }) => {
   await navigation.getByRole('link', { name: /Approval required/ }).click()
   await expect(navigation).toBeHidden()
   await expect(page).toHaveURL(/\/scenario\/approval$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('keeps the fleet surface reachable on a short mobile viewport', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 667, height: 320 })
+  await page.goto('/scenario/responsive')
+
+  await expect(page.getByRole('heading', { name: 'Fleet obligations' })).toBeVisible()
+  await expect(page.getByRole('rowgroup')).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

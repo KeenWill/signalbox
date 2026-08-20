@@ -742,7 +742,7 @@ kbd {
     display: inline-grid;
   }
   .primary-stack {
-    grid-template-rows: minmax(260px, 1.3fr) minmax(180px, 0.7fr);
+    grid-template-rows: minmax(0, 1.3fr) minmax(0, 0.7fr);
   }
   .section-header {
     padding: 0 0.55rem;

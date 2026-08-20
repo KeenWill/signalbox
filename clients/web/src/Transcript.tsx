@@ -1,4 +1,4 @@
-import { useVirtualizer } from '@tanstack/react-virtual'
+import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual'
 import { AlertTriangle, Bot, CheckCircle2, CircleDot, TerminalSquare } from 'lucide-react'
 import { useEffect, useMemo, useRef } from 'react'
 import { type CommandContext, invokeCommand } from './commands'
@@ -83,9 +83,20 @@ export function Transcript({ items, context }: { items: TimelineItem[]; context:
     estimateSize: () => (density === 'compact' ? 62 : 78),
     overscan: TRANSCRIPT_OVERSCAN_ROWS,
     getItemKey: (index) => visibleItems[index]?.id ?? index,
+    rangeExtractor: (range) => {
+      const indexes = defaultRangeExtractor(range)
+      if (selected < 0 || indexes.includes(selected)) return indexes
+      return [...indexes, selected].sort((left, right) => left - right)
+    },
   })
   const virtualItems = virtualizer.getVirtualItems()
-  const range: [number, number] = [virtualItems[0]?.index ?? 0, virtualItems.at(-1)?.index ?? 0]
+  const range: [number, number] = [
+    Math.max((virtualizer.range?.startIndex ?? 0) - TRANSCRIPT_OVERSCAN_ROWS, 0),
+    Math.min(
+      (virtualizer.range?.endIndex ?? 0) + TRANSCRIPT_OVERSCAN_ROWS,
+      Math.max(visibleItems.length - 1, 0),
+    ),
+  ]
 
   useEffect(() => {
     dispatch(actions.transcriptRangeSet(range))

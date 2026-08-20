@@ -26,6 +26,7 @@ function ScenarioResults({
           to="/scenario/$scenarioId"
           params={{ scenarioId: scenario.id }}
           className={activeId === scenario.id ? 'scenario-link active' : 'scenario-link'}
+          aria-current={activeId === scenario.id ? 'page' : undefined}
           onClick={onSelect}
         >
           <span>{scenario.title}</span>
