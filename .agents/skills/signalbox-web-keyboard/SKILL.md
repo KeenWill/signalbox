@@ -1,6 +1,7 @@
-______________________________________________________________________
-
-## name: signalbox-web-keyboard description: Add Signalbox commands, modal Vim-inspired navigation, focus behavior, hotkeys, and command-palette integration without bypassing accessibility or text editing.
+---
+name: signalbox-web-keyboard
+description: Add Signalbox commands, modal Vim-inspired navigation, focus behavior, hotkeys, and command-palette integration without bypassing accessibility or text editing.
+---
 
 # Signalbox web keyboard interaction
 

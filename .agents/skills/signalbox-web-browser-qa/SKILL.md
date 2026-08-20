@@ -1,6 +1,7 @@
-______________________________________________________________________
-
-## name: signalbox-web-browser-qa description: Verify Signalbox web changes with deterministic scenarios, Playwright, accessibility-first locators, structured diagnostics, screenshots, and failure traces.
+---
+name: signalbox-web-browser-qa
+description: Verify Signalbox web changes with deterministic scenarios, Playwright, accessibility-first locators, structured diagnostics, screenshots, and failure traces.
+---
 
 # Signalbox web browser QA
 
@@ -27,8 +28,8 @@ Prefer scenarios such as:
 ## Playwright workflow
 
 1. Open the narrowest deterministic scenario reproducing the behavior.
-2. Inspect semantic roles, names, text, focus, console, page errors, network,
-   and the Signalbox diagnostic summary.
+2. Inspect semantic roles, names, text, focus, console, page errors, and network.
+   Inspect bounded diagnostics only when the active slice implements them.
 3. Reproduce with user-facing locators before using test IDs.
 4. Make the smallest owning-layer correction.
 5. Run the focused test, then the relevant scenario group.
@@ -43,7 +44,9 @@ classes or DOM depth.
 
 ## Diagnostics
 
-The development client exposes bounded, read-only summaries for:
+This bootstrap assumes no diagnostic endpoint. When an implementing slice adds
+one through its owning contract, the development client may expose bounded,
+read-only summaries for:
 
 - transport and synchronization phase;
 - selected session and durable cursor;
@@ -53,8 +56,10 @@ The development client exposes bounded, read-only summaries for:
 - TanStack Query state; and
 - active scenario and fixture parameters.
 
-A diagnostic endpoint returns summaries rather than arbitrary mutable internals
-or complete large content.
+Any diagnostic interface and retained dump uses an allowlisted, redacted schema.
+It excludes user content, command payloads, credentials, tokens, provider
+drafts, and sensitive identifiers rather than exposing arbitrary internals or
+complete large content.
 
 ## Failure artifacts
 
@@ -65,11 +70,14 @@ On failure retain:
 - console messages and page errors;
 - accessibility/semantic snapshot where useful;
 - relevant network evidence;
-- bounded Signalbox diagnostic dump; and
+- bounded, allowlisted Signalbox diagnostic dump when the active slice provides
+  one; and
 - recent bounded Redux actions.
 
-CI messages link to or name these artifacts rather than reporting only a missing
-selector.
+Retain diagnostics and failure artifacts only in protected CI or test contexts.
+Before retention, test either production exclusion or access protection. CI
+messages link to or name permitted artifacts rather than reporting only a
+missing selector.
 
 ## Visual authority
 

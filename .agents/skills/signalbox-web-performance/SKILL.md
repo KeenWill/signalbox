@@ -1,6 +1,7 @@
-______________________________________________________________________
-
-## name: signalbox-web-performance description: Design and verify bounded Signalbox web behavior for huge transcripts, tables, artifacts, streaming updates, memory, network windows, and virtualized rendering.
+---
+name: signalbox-web-performance
+description: Design and verify bounded Signalbox web behavior for huge transcripts, tables, artifacts, streaming updates, memory, network windows, and virtualized rendering.
+---
 
 # Signalbox web performance
 
@@ -55,9 +56,9 @@ A virtual DOM list alone does not satisfy the law.
 
 - Virtualize transcript, table, source-line, and large structured views.
 - Bound syntax parsing and highlighting to visible or requested regions.
-- Use byte ranges and browser-native streaming for large media.
-- Use previews or thumbnails before full-size image decode.
-- Keep exact original download independent from preview rendering.
+- Follow the active owning contract for media rendering. Do not introduce byte
+  delivery, previews, thumbnails, original-download behavior, or media decoding
+  before an implementing stack decides and implements them.
 
 ## Proof
 

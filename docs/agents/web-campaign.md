@@ -27,19 +27,19 @@ bounded Goal-mode tracks rather than one open-ended run.
 ## Dependency shape
 
 ```text
-#989 client platform ───────────────────────────────┐
-                                                   │
-#990 HTTP contract ──┬─ #991 session projection ───┤
-                     ├─ #992 monitor/repo watch ───┤
-                     ├─ #993 blobs/derivations ────┤
-                     └─ #995 secondary reads ──────┤
-                              │                    │
-#991 timeline addresses ──────┴─ #994 search/usage│
-                                                   ▼
-                                             #996 integration
-                                                   │
-                                                   ▼
-                                             #997 dogfood
+#989 client platform ───────────────────────────────────────┐
+                                                          │
+#990 HTTP contract ──┬─ #991 session projection ───────────┤
+                     ├─ #992 monitor/repo watch ───────────┤
+                     ├─ #993 blobs/derivations ────────────┤
+                     └─ #995 imports/reviews/runners ──────┤
+                              │                           │
+#991 timeline addresses ──────┴─ #994 search/usage ────────┤
+                                                          ▼
+                                                    #996 integration
+                                                          │
+                                                          ▼
+                                                    #997 dogfood
 ```
 
 Tracks use separate worktrees and branches. The coordinator owns shared
@@ -54,8 +54,13 @@ A progress checkpoint states:
 1. the active track and current stack head;
 2. what has been verified with commands or browser artifacts;
 3. the next bounded slice;
-4. any semantic, dependency, or external blocker; and
-5. the review-wave history for pull requests being finished.
+4. any semantic, dependency, or external blocker;
+5. each pull request's accepted and declined finding counts in review-wave
+   order; and
+6. completed post-delivery alignment review with the approving user.
+
+Select the next milestone only after the review-wave counts and post-delivery
+alignment review are recorded.
 
 UI-facing checkpoints include scenario URLs and review screenshots. Large-data
 checkpoints also report mounted-row counts, retained records or memory trends,
@@ -72,20 +77,19 @@ Failure artifacts include:
 - a Playwright trace and screenshot;
 - browser console messages and page errors;
 - the relevant bounded Redux action trace;
-- the Signalbox diagnostic summary; and
+- the allowlisted, redacted Signalbox diagnostic summary when the active slice
+  provides one; and
 - network/request evidence when transport is involved.
 
-The agent-facing diagnostic interface is read-only, bounded, and absent from
-ordinary production builds unless deliberately enabled.
+This map assumes no diagnostic interface. Any implementing slice that adds one
+defines its allowlisted and redacted schema, protected retention, and production
+exclusion or access-protection tests in the owning change.
 
 ## Operator surface
 
-Issue #992 owns the product questions currently answered by personal dogfood
-queries. The production application must expose explicit daemon facts for
-repository ingestion, webhook projection, held and queued dispatch work, PR
-convergence, sessions acting on each PR, blocked goals, judge outcomes, and
-last-observed/actioned/dispatched/settled events. It must not preserve direct
-SQL or inference shortcuts as product semantics.
+Issue #992 carries the operator-surface questions. Any resulting product or
+daemon-facts requirement belongs to the implementing stack's owning living
+specification; this planning map adds none.
 
 ## Review boundary
 

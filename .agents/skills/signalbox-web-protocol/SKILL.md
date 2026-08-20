@@ -1,11 +1,17 @@
-______________________________________________________________________
-
-## name: signalbox-web-protocol description: Preserve Signalbox authority, synchronization, command identity, typed boundaries, and fail-closed semantics when adding browser HTTP contracts and client projections.
+---
+name: signalbox-web-protocol
+description: Preserve Signalbox authority, synchronization, command identity, typed boundaries, and fail-closed semantics when adding browser HTTP contracts and client projections.
+---
 
 # Signalbox web protocol
 
 Use this skill for HTTP endpoints, DTOs, decoders, synchronization reducers,
 commands, read models, stream handling, retries, and recovery.
+
+This bootstrap does not decide open browser transport, client language, wire,
+or cross-component questions. Each implementing stack records foundation-weight
+choices in its owning living specification and ordinary choices in its
+pull-request description before this guidance applies.
 
 ## Separate representations
 
@@ -19,16 +25,19 @@ Keep these types distinct:
 - React view models.
 
 Do not export storage rows or process-wire frames merely because they already
-serialize. Rust owns the web DTO and generates or mechanically checks the
-TypeScript contract and runtime decoder.
+serialize. The implementing stack's owning specification decides browser DTO
+ownership, client language, contract generation or checking, and runtime
+validation.
 
 ## Authority
 
 - Durable Signalbox state is authoritative.
 - Historical windows and current/live projections are read models over that
   authority.
-- Provider text deltas are ephemeral presentation only.
-- A fresh authoritative live snapshot replaces transient client overlays.
+- Provider text deltas and transient overlays remain absent until an owning
+  implemented contract defines them.
+- When that contract exists, its replacement rules govern transient client
+  overlays.
 - Unknown variants and contradictory correlations fail closed.
 - Generic UI fallback may preserve evidence for a known valid generic record; it
   must not reinterpret an unknown protocol variant as a familiar one.
@@ -40,7 +49,9 @@ Separate the historical plane from the live plane.
 - Historical reads expose stable logical addresses, bounded windows, and typed
   detail.
 - Live subscribe/follow begins with a coherent current projection and durable
-  cursor, then sends ordered durable updates above it plus ephemeral drafts.
+  cursor, then sends ordered durable updates above it. It relays ephemeral
+  drafts only when an owning implemented contract defines their identity,
+  sequencing, replacement, backpressure, and redaction.
 - Lag produces resynchronization, not partial best-effort continuation.
 - Client presentation choices never become server `full`, `condensed`, or
   `results` modes.
@@ -59,13 +70,12 @@ Preserve Signalbox command identity and typed ambiguity handling.
 
 ## HTTP boundary
 
-- Same-origin assets and API; no permissive CORS.
-- No Signalbox authentication in the first trusted-network deployment shape.
-- Deployment proxies and TLS are external and unnamed by the protocol.
-- Mutations use JSON and validate browser origin/authority where supplied.
-- Responses and streams have explicit item/byte bounds and cancellation.
-- Use normal HTTP range semantics for immutable blob bytes rather than wrapping
-  large binary ranges in JSON.
+- Follow only the boundary and security semantics in the active implementing
+  stack's owning specification. This bootstrap does not choose transport,
+  origin policy, authentication, authorization, TLS or proxy placement,
+  mutation encoding, browser validation, streaming, or blob delivery.
+- Preserve the explicit item and byte bounds, cancellation, command identity,
+  and authority rules that the implemented contract defines.
 
 ## Review
 

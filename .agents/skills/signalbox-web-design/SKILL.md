@@ -1,6 +1,7 @@
-______________________________________________________________________
-
-## name: signalbox-web-design description: Design and implement Signalbox web surfaces as dense, professional, keyboard-first expert-workstation interfaces with responsive focus and workbench layouts.
+---
+name: signalbox-web-design
+description: Design and implement Signalbox web surfaces as dense, professional, keyboard-first expert-workstation interfaces with responsive focus and workbench layouts.
+---
 
 # Signalbox web design
 
@@ -76,8 +77,9 @@ Use shadcn/Radix as accessible primitives, not as a mandate to retain demo-page
 styling. Compose domain components for Signalbox concepts such as turn, tool,
 approval, model call, goal, runner, PR convergence, and artifact capability.
 
-Known domain content gets a typed renderer. Unknown content gets a safe, useful,
-inspectable fallback.
+Known domain content gets a typed renderer. Only a validated generic record gets
+a safe, useful, inspectable fallback. Reject or quarantine unknown
+discriminators and contradictory correlations rather than reinterpreting them.
 
 ## Visual proof
 

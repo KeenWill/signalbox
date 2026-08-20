@@ -4,14 +4,20 @@ This file governs all work under `clients/web/`. The repository-wide `AGENTS.md`
 remains authoritative. Read GitHub issue #988, the active child issue, and the
 relevant skills under `.agents/skills/` before changing this client.
 
+This bootstrap does not decide open browser transport, client language, wire, or
+cross-component questions. The implementing stack records foundation-weight
+choices in its owning living specification and ordinary choices in its
+pull-request description before implementation.
+
 ## Architecture
 
 - React renders projections; it does not own transport, protocol recovery, or
   synchronization authority.
 - Keep transport, decoding, synchronization, state projection, and presentation
   as distinct modules with distinct types.
-- Rust owns the browser contract. Consume generated or mechanically checked
-  TypeScript types and runtime decoders; do not hand-maintain a second protocol.
+- The implementing stack's owning specification decides the browser contract,
+  client language, and validation approach. Consume that implemented contract;
+  do not hand-maintain a second protocol.
 - Components never open network connections directly. They invoke typed client
   services or commands and subscribe through selectors.
 - Use Redux Toolkit for explicit control/application transitions and bounded
@@ -36,8 +42,9 @@ relevant skills under `.agents/skills/` before changing this client.
 - Load small histories greedily only through the explicit client resource
   policy. Cancellation or changing network conditions must fall back to the same
   incremental model without changing semantics.
-- Batch ephemeral provider display updates. Never drop, reorder, or debounce
-  durable Signalbox events.
+- When an owning implemented contract exposes ephemeral display updates, follow
+  its batching and replacement policy. Never drop, reorder, or debounce durable
+  Signalbox events.
 - Keep Redux DevTools and custom traces bounded and redact or summarize large
   content.
 
@@ -59,8 +66,9 @@ relevant skills under `.agents/skills/` before changing this client.
 - Use semantic native elements and Radix/shadcn primitives. Accessible names,
   focus order, keyboard behavior, and visible focus are implementation
   requirements, not polish.
-- Unknown typed content remains visible through a safe generic renderer instead
-  of disappearing or crashing.
+- Only validated generic records remain visible through a safe generic renderer.
+  Reject or quarantine unknown discriminators and contradictory correlations
+  instead of rendering them as generic content.
 
 ## Browser and agent evidence
 
@@ -70,8 +78,9 @@ identifiers only where semantics cannot identify one exact object.
 
 Capture pinned Chromium screenshots for visual changes. Major responsive paths
 also require mobile evidence. Assert no unexpected console message or page
-error. Failure traces must include the bounded Signalbox diagnostic snapshot and
-recent application actions where relevant.
+error. When the active slice implements bounded diagnostics, failure traces
+include its allowlisted, redacted snapshot and recent permitted application
+actions where relevant.
 
 Visual review checks hierarchy, density, alignment, typography, information
 priority, interaction states, light/dark behavior, and responsive composition;
