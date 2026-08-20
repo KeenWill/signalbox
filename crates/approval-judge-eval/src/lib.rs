@@ -410,6 +410,12 @@ fn eval_case(case: &ApprovalJudgeCase) -> ApprovalJudgeEvalCase {
         goal: case.request.commissioned_goal.clone(),
         template: case.request.session_template.clone(),
         system_prompt: case.request.frozen_system_prompt.clone(),
+        // This corpus carries no repository-watch fence: `request_fingerprint`
+        // binds a fixed set of request fields, and adding one would change
+        // every recorded response's identity. Its cases therefore state their
+        // grant in goal and prompt text, and a case whose verdict turns on a
+        // fence belongs in the replay corpus that can express one.
+        dispatch: None,
     }
 }
 

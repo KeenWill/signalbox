@@ -45,7 +45,11 @@ workflow-run branch symmetry below are verified against PR #891
 (`agent/webhook-event-mapping`). Webhook drain liveness and stall reporting are
 verified against PR #896 (`agent/webhook-projection-drain`). Webhook preemption
 of slow complete reconciliation is verified against this PR
-(`agent/webhook-projection-preemption-review`).
+(`agent/webhook-projection-preemption-review`). The approval-judge dispatch
+fence and unattended escalation release described below are verified against
+this PR (`agent/headless-approval-escalation`). The operator-commissioned
+dispatch fence and its unattended-escalation coverage are verified against this
+PR (`agent/commissioned-dispatch-fence`).
 
 ## Configuration and credential boundary
 
@@ -603,12 +607,49 @@ that [AGENTS.md](../../AGENTS.md) states.
 accepted input belongs to the submit command that delivered the tagged context,
 and that same input is recorded as the commissioned generation's first goal
 turn, so one dispatched event queues one turn and runs its template once. Every
-later turn in that session is an ordinary goal continuation scheduled from it,
-and the generation is readable from the turn doing the dispatched work, so a
+later turn of that generation is an ordinary goal continuation scheduled from
+it, and the generation is readable from the turn doing the dispatched work, so a
 supersession while that turn is parked cannot broaden the authority a consumer
 reads for it. What this requires of the durable goal rules — a goal turn whose
 accepted input carries the command that accepted it, and which therefore does
 not restate its statement — is stated in [goal mode](goal-mode.md).
+
+**Implemented behavior.** The dispatch action is also the immutable authority
+source for an approval judge invoked by the generation that dispatch
+commissioned. A pull-request dispatch supplies its repository, pull-request
+number, exact head commit, head repository and branch, and base branch; a branch
+dispatch supplies its repository and branch. These values are read from the
+append-only dispatch event and action, not inferred from the synthesized goal or
+refreshed provider state. A judged turn recorded in any other generation of that
+session — an unrelated successor goal the session later accepted — resolves no
+dispatch authority at all, as does a turn no generation recorded: the dispatch
+described neither, and judging them against its repository, head, and base
+values would both apply a fence to work it never named and route their
+escalations down the unattended path below rather than to the user whose goal it
+is. The tool approval contract governs their quoted rendering and the judge's
+decision use in [tool loop](tool-loop.md#approval-policy-and-decision-sources).
+
+**Implemented behavior.** An operator-commissioned dispatch supplies the same
+immutable authority for a session no rule dispatched. The `commission_session`
+process request — its framing is owned by
+[process protocol](process-protocol.md), its identity and durable-command
+mechanics by [identity and commands](identity-and-commands.md) — commits, in one
+durable transaction, a session created from a daemon-held template, the
+append-only `commissioned_dispatch` fence row naming that session, the caller's
+context as the session's first accepted input through the existing
+`StartWhenNoActiveTurn` path, and the goal commissioned from the caller's
+statement, which adopts that input's reserved turn as the generation's own first
+turn. The fence carries exactly the dispatch-fence shapes above: a pull-request
+fence names the repository, pull-request number, exact head commit, head
+repository and branch, and base branch; a branch fence names the repository and
+branch. The approval judge resolves either append-only source under the same
+generation-one binding, renders both through one authority rendering, and
+refuses a session recording both as corruption. The commission's durable command
+identity binds its template, fence, statement, and the digest of its initial
+content: an equal retry replays the committed session and fence — resolved from
+the durable record before any template resolution, so replay survives template
+configuration drift — and the same identity naming different intent, an ordinary
+session creation included, is refused as conflicting reuse in both directions.
 
 **Committed unimplemented functionality.** No present session-creation or
 input-submission surface identifies repository watch as a purpose-specific actor
@@ -765,6 +806,73 @@ independently, one whose count has reached the budget, so no ordering of parking
 against that read reports an exhausted obligation as ready. It does not model
 the delay between attempts, which the dispatch loader applies against bounds no
 projection can see.
+
+**Implemented behavior.** A completed approval-judge escalation judged under
+dispatch authority, which the rule above binds to the generation that dispatch
+commissioned, is an execution-failure terminal transition rather than an
+attended approval wait. An escalation in any other generation of the same
+session resolves no such authority and stays the attended wait. It fails the
+active turn and blocks the commissioned goal while that goal's authority still
+stands — a generation stopped, achieved, or superseded during the provider
+round-trip is not blocked, because the authority the block would record has
+already ended — and therefore enters the same latest-state obligation and
+singleton-release path described above. Once release commits, the replacement
+obligation — where the requeue rules above still owe one, which a deactivated
+rule or a later close or merge withdraws — becomes eligible under the ordinary
+cooldown, the failed-attempt delay above, and the attempt budget that parks a
+lineage which keeps failing, and can then create a fresh dispatch; the ended
+session does not remain load-bearing occupancy either way. That requeue is a
+counted attempt like any other, so a dispatched lineage whose work keeps
+escalating parks on that budget rather than redispatching without end. Two turns
+are not terminalized this way, and each parks for a user exactly as it would in
+a session no dispatch created. A turn a steer still names is attended by
+definition, so its escalation parks for the user who steered, leaving the turn
+active and its batch held; terminalizing it would strand that steer against the
+rule that no turn becomes terminal while pending steering names it, and
+reclassifying the steer into a queued successor would start fresh work in a
+session whose dispatch is being released for redispatch. A turn in a session
+that has already recorded an escalation parks too, and for a reason that reads
+off the record rather than off the batch: an unattended escalation fails its
+turn and blocks the goal, [goal mode](goal-mode.md) exempts that block from
+automatic resumption, so only a person can put such a session back into flight.
+A second escalation there is therefore work an operator resumed, whether or not
+the batch has released — a sibling action still pursuing keeps the release
+absent while the resumption is just as attended — and it waits for them.
+Standing authority is the last word on it: a goal that ended while this judge
+was in flight leaves stale work, so its escalation is terminalized rather than
+parked for a user who will never come, and terminalizing it owes no second
+redispatch that the requeue rules above would not already withhold. A turn no
+escalation preceded is the dispatched work itself, including one an ordinary
+execution failure had automatically resumed, and takes the unattended path. The
+block the escalation writes claims no release — a batch a sibling action still
+pursues releases only when that sibling ends — and states that no automatic
+resumption is scheduled, which [goal mode](goal-mode.md) admits as its one
+exception and which is why that need text names the operator repair itself.
+Whether the batch released is likewise a fact about the batch: it is recorded in
+the release row and the escalation audit view, not reported as this completion's
+own effect, because a sibling settling later would otherwise change the answer
+an identical replay receives. `repo_watch_headless_approval_escalation_audit`
+joins the append-only escalation cause and rationale to its dispatch release and
+replacement obligation, including whether and when that obligation settled. The
+terminal attempt, failure transcript entry, and terminal frontier it recorded
+are all durable evidence of that transition, so a replayed completion offering
+any other one of them is reported as a mismatched replay rather than answered
+with the recorded outcome — the same treatment a differing recommendation,
+rationale, usage, or continuation attempt already receives.
+
+**Implemented behavior.** The unattended escalation terminalization above
+equally covers a session an operator-commissioned dispatch created. With the
+commissioned fence resolved, a completed escalate-to-human judged in the
+commissioned generation fails the turn, blocks the goal while its authority
+still stands, and records its audit row in
+`commissioned_dispatch_headless_approval_escalation`, read with the judge
+rationale through `commissioned_dispatch_headless_approval_escalation_audit`.
+Both exclusions and the standing-authority rule apply unchanged, and a prior
+escalation in either audit family marks the session operator-resumed. A
+commissioned dispatch holds no batch, obligation, or singleton, so the
+completion releases nothing and owes no requeue, and the block's need text
+promises no redispatch: whoever commissioned the session decides whether to
+dispatch the work again.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies

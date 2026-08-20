@@ -102,6 +102,50 @@ specification diff. Accepted cross-component and wire contracts live in the
   provider request-status API — with its polling posture and evidence classes —
   as the resolution path; the full analysis is in git history. Later scope.
   (S02)
+- **Operator control of scheduling and liveness cadence.** The scheduler's sweep
+  interval, per-session scan gating, fairness between contending sessions, and
+  the turn-liveness staleness bound and scan interval are all compiled constants
+  today
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)), and
+  almost none of them has anywhere to validate a supplied value. Only the
+  turn-liveness staleness bound has a lowering constructor that enforces its
+  compiled ceiling; the sweep interval's constructor refuses a zero or
+  unrepresentable duration and no more, so it fixes no maximum; and the scan
+  interval, per-session scan gating, and fairness expose no constructor at all.
+  The enforcement points for a configuration surface would therefore have to be
+  built rather than merely called. Undecided with them: whether signalboxd
+  should carry such settings at all; whether they arrive as one operational
+  surface or one constant at a time; and, for each, whether its compiled value
+  is a ceiling that may only be lowered or an ordinary default that may move
+  either way — settled so far only for the staleness bound. Leaning: one
+  surface, introduced when a deployment needs a value the compiled one cannot
+  serve, rather than pre-emptively. Later scope. (S01, S02)
+- **Terminalizing a turn that holds pending steering.** Every steering row bound
+  to a turn must be closed before that turn terminalizes, and the interrupt and
+  model-call terminal paths satisfy that by reclassifying the steering into a
+  queued successor origin
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)). The
+  failed-turn transition that startup recovery and the liveness watchdog share
+  performs no such reclassification and refuses outright, so a turn that wedges
+  and is then steered can be observed and reported but not ended — the one wedge
+  a user is actively trying to reach. Whether that transition should gain the
+  reclassification, and whether both its callers want it, is undecided: the
+  change is to a transition two components depend on, and startup recovery
+  reaching the same refusal has meant corrupt durable state rather than an
+  ordinary shape. Leaning: give the transition the reclassification the other
+  terminal paths already perform, since the constraint forcing it is a lifecycle
+  rule rather than a property of how the turn ended. Later scope. (S02, S07)
+- **Durable terminal cause for a failed turn.** The turn-liveness watchdog and
+  startup recovery commit the identical failed-turn transition
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)),
+  which is what keeps every terminal trigger firing for both, but the
+  `TurnFailed` shape carries no cause column — so the two are distinguishable
+  only in the operator log, and only while it is retained. Whether a terminal
+  turn should carry a stored cause, and whether that vocabulary is shared with
+  the operator cause codes or separate from them, is undecided; adding one is a
+  migration on a table several transitions write. Leaning: a cause belongs in
+  the rows, because an operator reconstructing why a session stopped should not
+  depend on log retention. Later scope. (S02, S07)
 - **Direct interrupt-only reconciliation from a running attempt.**
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) adds
   direct reconciliation only for fatal mismatch at a closed aggregate boundary;
@@ -638,10 +682,11 @@ questions below remain open.
   by [process-protocol](spec/process-protocol.md). Remote access still requires
   decisions for client identity, authentication, authorization, revocation, and
   credential delivery. (S01, S24)
-- **Browser transport.** Technology remains open and blocks the web client;
-  snapshot and durable-update semantics are defined by
-  [process-protocol](spec/process-protocol.md), while transient model-update
-  streaming remains open below. (S02, S24)
+- **Browser transport.** Settled for the web client: the same-origin browser
+  transport merged in PR #1000 and is owned by
+  [configuration-and-credentials](spec/configuration-and-credentials.md). It no
+  longer blocks the web client; transient model-update streaming remains open
+  below. (S02, S24)
 - **Remote runner transport and reconnect.** The dedicated local socket,
   framing, heartbeat, reconnect inventory, and transaction orchestration are
   owned by [runner protocol and placement](spec/runner-protocol.md). Remote
@@ -694,8 +739,9 @@ questions below remain open.
   is a TUI, web app, or native app remains unselected. (S01, S02, S10, S24)
 - **Apple client code organization.** Defer until the protocol and the first
   native slice are known. (S01, S24)
-- **Web client technology (Rust/Wasm or TypeScript).** No leaning until the
-  browser protocol and product slice are measured. (S01, S02, S24)
+- **Web client technology.** Settled: the web campaign uses React and TypeScript
+  with TanStack, Redux Toolkit, and Radix. This owner-approved platform choice
+  is no longer open. (S01, S02, S24)
 - **Client approval presentation.** The terminal baseline now surfaces the
   pending request through the transcript's awaiting-turn and tool-use lines and
   collects decisions through `approve`/`deny`
