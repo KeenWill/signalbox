@@ -23,8 +23,9 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
     InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService,
-    StartupScanService, UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, StaleActiveTurnBound,
+    StartEligibleTurnService, StartupScanService, TurnLivenessScanInterval,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -63,6 +64,7 @@ use signalboxd::{
     RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
     SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
     TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    TurnLivenessRuntime,
     model_adapter::ConfiguredModelRuntime,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
@@ -625,6 +627,7 @@ enum RuntimeTaskExit {
     Runner(Result<(), RunnerProtocolRuntimeError>),
     RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
     WebHttp(Result<(), WebHttpRuntimeError>),
+    TurnLiveness,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -666,6 +669,7 @@ enum RuntimeTaskDefect {
     RunnerCompletedBeforeShutdown,
     RepositoryWatchCompletedBeforeShutdown,
     WebHttpCompletedBeforeShutdown,
+    TurnLivenessCompletedBeforeShutdown,
     TaskCancelled,
     TaskPanicked,
     TaskJoinFailed,
@@ -682,6 +686,7 @@ impl RuntimeTaskDefect {
                 "repository_watch_completed_before_shutdown"
             }
             Self::WebHttpCompletedBeforeShutdown => "web_http_completed_before_shutdown",
+            Self::TurnLivenessCompletedBeforeShutdown => "turn_liveness_completed_before_shutdown",
             Self::TaskCancelled => "runtime_task_cancelled",
             Self::TaskPanicked => "runtime_task_panicked",
             Self::TaskJoinFailed => "runtime_task_join_failed",
@@ -977,7 +982,8 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::Process(Ok(())))
         | Ok(RuntimeTaskExit::Runner(Ok(())))
         | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
-        | Ok(RuntimeTaskExit::WebHttp(Ok(()))) => RuntimeTaskCompletion::Clean,
+        | Ok(RuntimeTaskExit::WebHttp(Ok(())))
+        | Ok(RuntimeTaskExit::TurnLiveness) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
             RuntimeTaskCompletion::Failed
@@ -1733,6 +1739,11 @@ async fn run_hub(
         ),
         execution,
     );
+    let turn_liveness_runtime = TurnLivenessRuntime::new(
+        scheduler_pool.clone(),
+        StaleActiveTurnBound::hard_ceiling(),
+        TurnLivenessScanInterval::baseline(),
+    );
     let pass = GoalAwareEligibilityPass::new(
         activated_pass,
         PostgresGoalPassDisposition::new(
@@ -1760,6 +1771,7 @@ async fn run_hub(
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
     let (web_http_shutdown, web_http_shutdown_receiver) = watch::channel(false);
+    let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Scheduler(
@@ -1788,6 +1800,12 @@ async fn run_hub(
             )
         });
     }
+    runtime_tasks.spawn(async move {
+        turn_liveness_runtime
+            .run(turn_liveness_shutdown_receiver)
+            .await;
+        RuntimeTaskExit::TurnLiveness
+    });
     tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
 
     let mut outcome = {
@@ -1845,6 +1863,12 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
+                    Some(Ok(RuntimeTaskExit::TurnLiveness)) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::TurnLivenessCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
                     Some(Ok(RuntimeTaskExit::Scheduler(_))) => {
                         report_runtime_task_defect(
                             RuntimeTaskDefect::SchedulerCompletedBeforeShutdown,
@@ -1873,6 +1897,7 @@ async fn run_hub(
             let _ = runner_shutdown.send(true);
             let _ = repository_watch_shutdown.send(true);
             let _ = web_http_shutdown.send(true);
+            let _ = turn_liveness_shutdown.send(true);
             let (drain, components_clean) = drain_runtime_tasks(
                 &mut runtime_tasks,
                 guard_loss.as_mut(),

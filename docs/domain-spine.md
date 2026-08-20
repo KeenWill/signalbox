@@ -8816,6 +8816,68 @@ pub trait ToolExecutionTransaction {
 }
 ```
 
+## application: turn_liveness
+
+```rust
+pub struct StaleActiveTurnBound(/* private */);
+impl StaleActiveTurnBound {
+    pub const fn hard_ceiling() -> Self;
+    pub fn try_lowered(bound: Duration) -> Result<Self, TurnLivenessBoundError>;
+    pub const fn as_secs(self) -> u64;
+    pub const fn get(self) -> Duration;
+}
+
+pub struct TurnLivenessScanInterval(/* private */);
+impl TurnLivenessScanInterval {
+    pub const fn baseline() -> Self;
+    pub const fn get(self) -> Duration;
+}
+
+pub enum TurnLivenessBoundError {
+    Zero,
+    AboveCeiling,
+    Subsecond,
+}
+// impl Display + std::error::Error
+
+pub struct TurnLivenessEvidence { /* private */ }
+impl TurnLivenessEvidence {
+    pub const fn new(current_attempt: TurnAttemptId, outbox_frontier: Option<u64>) -> Self;
+    pub const fn current_attempt(self) -> TurnAttemptId;
+    pub const fn outbox_frontier(self) -> Option<u64>;
+}
+
+pub struct StaleTurnCandidate { /* private */ }
+impl StaleTurnCandidate {
+    pub const fn new(
+        session: SessionId,
+        turn: TurnId,
+        evidence: TurnLivenessEvidence,
+    ) -> Self;
+    pub const fn session(self) -> SessionId;
+    pub const fn turn(self) -> TurnId;
+    pub const fn evidence(self) -> TurnLivenessEvidence;
+}
+
+pub enum StaleTurnOutcome {
+    Terminalized,
+    Superseded,
+    BlockedByPendingSteering,
+}
+
+pub struct TurnLivenessLedger { /* private */ }
+impl TurnLivenessLedger {
+    pub fn new(bound: StaleActiveTurnBound) -> Self;
+    pub const fn bound(&self) -> StaleActiveTurnBound;
+    pub fn watched_turn_count(&self) -> usize;
+    pub fn reconcile(
+        &mut self,
+        quiescent: &[StaleTurnCandidate],
+        now: Instant,
+    ) -> Box<[StaleTurnCandidate]>;
+}
+```
+
 ## domain: runner
 
 ```rust
@@ -10941,4 +11003,5 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
-| **signalbox-application total**                    | **281 (+6 free fn)**             |
+| application: turn_liveness                         | 7                                |
+| **signalbox-application total**                    | **288 (+6 free fn)**             |
