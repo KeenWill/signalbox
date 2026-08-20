@@ -4,6 +4,7 @@
 //! depending inward on `signalbox-domain`.
 
 mod approval_judge;
+mod commissioned_dispatch;
 mod conversation_import;
 mod create_session;
 mod create_session_from_imported_frontier;
@@ -33,7 +34,13 @@ mod update_session_placement;
 pub use approval_judge::{
     ApprovalJudgeAuthorization, ApprovalJudgeBranchAuthority, ApprovalJudgeBranchAuthorityInput,
     ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
-    ApprovalJudgePullRequestAuthority, ApprovalJudgePullRequestAuthorityInput,
+    ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority,
+    ApprovalJudgePullRequestAuthorityInput,
+};
+pub use commissioned_dispatch::{
+    CommissionDispatchPreparationError, CommissionDispatchRequest, CommissionedDispatchFence,
+    CommissionedDispatchIdGenerator, PreparedCommissionedDispatch,
+    UuidV7CommissionedDispatchIdGenerator,
 };
 pub use conversation_import::{
     ImportConversationError, ImportConversationOutcome, ImportConversationReport,

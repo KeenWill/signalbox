@@ -1,12 +1,37 @@
 //! Authorization boundary for one dedicated approval-judge provider call.
 
 use signalbox_domain::{
-    BranchName, CommitSha, ContextFrontierId, DirectModelSelection, ModelCallId, PullRequestNumber,
-    RepoWatchDispatchId, RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    ToolRequest, TurnAttemptId,
+    BranchName, CommissionedDispatchId, CommitSha, ContextFrontierId, DirectModelSelection,
+    ModelCallId, PullRequestNumber, RepoWatchDispatchId, RepositorySlug, ResolvedProviderTarget,
+    SemanticTranscriptEntryId, ToolRequest, TurnAttemptId,
 };
 
-/// Immutable repository-watch authority carried into a dispatched judge call.
+/// The append-only dispatch record that supplied one immutable fence.
+///
+/// The judge consumes both sources through one authority rendering — the fence
+/// semantics are identical — while the unattended-escalation closeout audits
+/// each source in its own record family, which is why the provenance is typed
+/// rather than collapsed into one identity space.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApprovalJudgeDispatchProvenance {
+    /// A repository-watch rule dispatched the session.
+    RepoWatch(RepoWatchDispatchId),
+    /// An operator commissioned the session directly.
+    Commissioned(CommissionedDispatchId),
+}
+
+impl ApprovalJudgeDispatchProvenance {
+    /// Returns the underlying append-only record identity.
+    #[must_use]
+    pub const fn into_uuid(self) -> uuid::Uuid {
+        match self {
+            Self::RepoWatch(dispatch) => dispatch.into_uuid(),
+            Self::Commissioned(dispatch) => dispatch.into_uuid(),
+        }
+    }
+}
+
+/// Immutable dispatch authority carried into a dispatched judge call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ApprovalJudgeDispatchAuthority {
     /// Exact pull-request fence the dispatch was commissioned with.
@@ -16,9 +41,9 @@ pub enum ApprovalJudgeDispatchAuthority {
 }
 
 impl ApprovalJudgeDispatchAuthority {
-    /// Returns the append-only dispatch identity that supplied this authority.
+    /// Returns the append-only dispatch record that supplied this authority.
     #[must_use]
-    pub const fn dispatch(&self) -> RepoWatchDispatchId {
+    pub const fn dispatch(&self) -> ApprovalJudgeDispatchProvenance {
         match self {
             Self::PullRequest(authority) => authority.dispatch(),
             Self::Branch(authority) => authority.dispatch(),
@@ -29,8 +54,8 @@ impl ApprovalJudgeDispatchAuthority {
 /// Labeled inputs for one immutable pull-request dispatch fence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalJudgePullRequestAuthorityInput {
-    /// Append-only dispatch that commissioned the session.
-    pub dispatch: RepoWatchDispatchId,
+    /// Append-only dispatch record that commissioned the session.
+    pub dispatch: ApprovalJudgeDispatchProvenance,
     /// Repository whose pull request commissioned the session.
     pub repository: RepositorySlug,
     /// Pull-request number within the repository.
@@ -58,9 +83,9 @@ impl ApprovalJudgePullRequestAuthority {
         Self { input }
     }
 
-    /// Returns the append-only dispatch identity.
+    /// Returns the append-only dispatch record identity.
     #[must_use]
-    pub const fn dispatch(&self) -> RepoWatchDispatchId {
+    pub const fn dispatch(&self) -> ApprovalJudgeDispatchProvenance {
         self.input.dispatch
     }
 
@@ -104,8 +129,8 @@ impl ApprovalJudgePullRequestAuthority {
 /// Labeled inputs for one immutable branch dispatch fence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovalJudgeBranchAuthorityInput {
-    /// Append-only dispatch that commissioned the session.
-    pub dispatch: RepoWatchDispatchId,
+    /// Append-only dispatch record that commissioned the session.
+    pub dispatch: ApprovalJudgeDispatchProvenance,
     /// Repository whose branch commissioned the session.
     pub repository: RepositorySlug,
     /// Authorized branch.
@@ -125,9 +150,9 @@ impl ApprovalJudgeBranchAuthority {
         Self { input }
     }
 
-    /// Returns the append-only dispatch identity.
+    /// Returns the append-only dispatch record identity.
     #[must_use]
-    pub const fn dispatch(&self) -> RepoWatchDispatchId {
+    pub const fn dispatch(&self) -> ApprovalJudgeDispatchProvenance {
         self.input.dispatch
     }
 
