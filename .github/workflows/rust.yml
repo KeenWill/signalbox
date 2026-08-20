@@ -542,7 +542,7 @@ jobs:
       # `--run-ignored only` is `-- --ignored`, `--no-fail-fast` is unchanged,
       # and the archive fixes the package and feature selection at build time.
       # nextest runs each test in its own process rather than on a shared
-      # thread pool; eight concurrent tests is the cap. One per-test retry
+      # thread pool; sixteen concurrent tests is the cap. One per-test retry
       # absorbs a transient container-start failure without rerunning a whole
       # shard, while a repeat failure still fails the gate.
       - name: Run the ${{ matrix.suite }} partition
@@ -559,7 +559,7 @@ jobs:
           --run-ignored only
           --no-fail-fast
           --retries 1
-          --test-threads 8
+          --test-threads 16
           -E "$FILTER"
 
   # Preserve the existing required-check name while the suites build once and
