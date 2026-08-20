@@ -5768,6 +5768,52 @@ impl WorkspaceRecord {
 ## application: approval_judge
 
 ```rust
+pub enum ApprovalJudgeDispatchAuthority {
+    PullRequest(ApprovalJudgePullRequestAuthority),
+    Branch(ApprovalJudgeBranchAuthority),
+}
+impl ApprovalJudgeDispatchAuthority {
+    // accessor: dispatch()
+}
+
+pub struct ApprovalJudgePullRequestAuthorityInput {
+    pub dispatch: RepoWatchDispatchId,
+    pub repository: RepositorySlug,
+    pub pull_request: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub head_repository: RepositorySlug,
+    pub head_branch: BranchName,
+    pub base_branch: BranchName,
+}
+
+pub struct ApprovalJudgePullRequestAuthority { /* private */ }
+impl ApprovalJudgePullRequestAuthority {
+    pub const fn new(input: ApprovalJudgePullRequestAuthorityInput) -> Self;
+    // accessors: dispatch(), repository(), pull_request(), head_sha(), head_repository(), head_branch(), base_branch()
+}
+
+pub struct ApprovalJudgeBranchAuthorityInput {
+    pub dispatch: RepoWatchDispatchId,
+    pub repository: RepositorySlug,
+    pub branch: BranchName,
+}
+
+pub struct ApprovalJudgeBranchAuthority { /* private */ }
+impl ApprovalJudgeBranchAuthority {
+    pub const fn new(input: ApprovalJudgeBranchAuthorityInput) -> Self;
+    // accessors: dispatch(), repository(), branch()
+}
+
+pub struct ApprovalJudgeCompletionIdentities { /* private */ }
+impl ApprovalJudgeCompletionIdentities {
+    pub const fn new(
+        continuation_attempt: TurnAttemptId,
+        failure_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self;
+    // accessors: continuation_attempt(), failure_entry(), terminal_frontier()
+}
+
 pub trait ApprovalJudgeAuthorization {
     fn request(&self) -> &ToolRequest;
     fn call(&self) -> ModelCallId;
@@ -10933,7 +10979,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | **signalbox-domain total**                         | **805 (+12 free fn)**            |
-| application: approval_judge                        | 1 (incl. 1 trait)                |
+| application: approval_judge                        | 7 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
 | application: create_session                        | 8 (incl. 2 traits)               |
 | application: update_session_placement              | 4 (incl. 1 trait)                |
@@ -10958,4 +11004,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
 | application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **282 (+6 free fn)**             |
+| **signalbox-application total**                    | **288 (+6 free fn)**             |

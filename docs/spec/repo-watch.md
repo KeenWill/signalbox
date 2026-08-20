@@ -29,8 +29,10 @@ completion generations are verified against PR #541
 (`fix/check-run-updated-at`). Eager merge-forward dispatch is verified against
 PR #886 (`agent/eager-merge-forward`). Requeue after non-converged dispatch
 termination is verified against PR #894
-(`agent/dispatch-requeue-on-invalidation`). Safe rule revision admission and
-configuration diagnostics are verified against PR #863
+(`agent/dispatch-requeue-on-invalidation`). The dispatch attempt budget, the
+delay between attempts, the parked state, and both ways out of it are verified
+against PR #980 (`agent/dispatch-retry-budget`). Safe rule revision admission
+and configuration diagnostics are verified against PR #863
 (`agent/repo-watch-rule-robustness`). The source-independent event occurrence
 identity, its durable frontier, the commit-time coalescing of a restated
 occurrence, and the storage migration are verified against PR #870
@@ -43,7 +45,9 @@ workflow-run branch symmetry below are verified against PR #891
 (`agent/webhook-event-mapping`). Webhook drain liveness and stall reporting are
 verified against PR #896 (`agent/webhook-projection-drain`). Webhook preemption
 of slow complete reconciliation is verified against this PR
-(`agent/webhook-projection-preemption-review`).
+(`agent/webhook-projection-preemption-review`). The approval-judge dispatch
+fence and unattended escalation release described below are verified against
+this PR (`agent/headless-approval-escalation`).
 
 ## Configuration and credential boundary
 
@@ -601,12 +605,27 @@ that [AGENTS.md](../../AGENTS.md) states.
 accepted input belongs to the submit command that delivered the tagged context,
 and that same input is recorded as the commissioned generation's first goal
 turn, so one dispatched event queues one turn and runs its template once. Every
-later turn in that session is an ordinary goal continuation scheduled from it,
-and the generation is readable from the turn doing the dispatched work, so a
+later turn of that generation is an ordinary goal continuation scheduled from
+it, and the generation is readable from the turn doing the dispatched work, so a
 supersession while that turn is parked cannot broaden the authority a consumer
 reads for it. What this requires of the durable goal rules — a goal turn whose
 accepted input carries the command that accepted it, and which therefore does
 not restate its statement — is stated in [goal mode](goal-mode.md).
+
+**Implemented behavior.** The dispatch action is also the immutable authority
+source for an approval judge invoked by the generation that dispatch
+commissioned. A pull-request dispatch supplies its repository, pull-request
+number, exact head commit, head repository and branch, and base branch; a branch
+dispatch supplies its repository and branch. These values are read from the
+append-only dispatch event and action, not inferred from the synthesized goal or
+refreshed provider state. A judged turn recorded in any other generation of that
+session — an unrelated successor goal the session later accepted — resolves no
+dispatch authority at all, as does a turn no generation recorded: the dispatch
+described neither, and judging them against its repository, head, and base
+values would both apply a fence to work it never named and route their
+escalations down the unattended path below rather than to the user whose goal it
+is. The tool approval contract governs their quoted rendering and the judge's
+decision use in [tool loop](tool-loop.md#approval-policy-and-decision-sources).
 
 **Committed unimplemented functionality.** No present session-creation or
 input-submission surface identifies repository watch as a purpose-specific actor
@@ -685,6 +704,138 @@ continuation. Goal blocking, achievement, or user stop rechecks release after
 pursuit ends. The append-only dispatch records identify the sessions responsible
 for the PR; no mutable assignment flag replaces them.
 
+**Implemented behavior.** Each obligation lineage carries a durable count of
+consecutive dispatches that ended without meeting it. Any requeue increments the
+count on the successor it owes, whatever ended the dispatch; the count records
+which batch it already includes, so the second and later actions of one batch
+add nothing, because one batch is one attempt however many of its sessions
+terminate. That record is also what makes a release taken while a sibling is
+still running survive that sibling's own termination. A dispatch that converges
+owes no successor and leaves the lineage no count at all. Redispatching a
+counted lineage waits out a delay that starts at ten minutes after the first
+failed attempt and doubles per further consecutive failure to a one-hour
+ceiling. Six consecutive failed attempts park the obligation in the transaction
+that counts the exhausting attempt: it is excluded from dispatch, stamped with
+the time it parked, and readable in the `repo_watch_parked_dispatch_obligation`
+projection alongside its count, pull request, and the head it stalled on. That
+stalled state is held still for as long as the obligation is parked: a collapsed
+singleton advances its latest-event projection on any match, including one from
+another pull request, and the release condition is decided against the state the
+lineage stalled on rather than against whatever matched last. A lineage whose
+pull request has already moved past that state parks all the same, and is then
+released from that park at once: the parking stamp and its journal transition
+are written, the same progress release that any event would take appends a
+second transition, and the count comes back. The exhausting attempt may have run
+while a new head or review activity arrived, reaching its evaluation before
+there was a park to release, and nothing restates that fact afterwards, so it is
+read from the durable record at parking rather than waited for. Going through
+the park rather than refusing it is what records the fact as spent, so it buys
+one budget and not another at every later exhaustion, and the pair is what an
+operator reads in the journal. The delay is measured from the release of the
+whole batch, not from the first of its actions to fail: a batch holds its
+singleton until every action is terminal, so a clock started at the first
+termination would run out while the batch still occupied the slot. The attempt
+budget is a schema constant, so parking, the readiness projection, and the
+dispatch loader cannot disagree about it; the two delay bounds are compiled into
+the daemon and may only be lowered, never raised.
+
+**Implemented behavior.** Two things return a parked obligation to dispatch. An
+operator calls `repo_watch_release_parked_dispatch_obligation` with their
+identity, which restores the whole budget: an operator asking for another
+attempt is asking for the allowance a lineage that never failed would have.
+Otherwise the pull request the obligation stalled on must produce a fact that is
+new about it — an event carrying a head other than the one it stalled on, or
+review activity against it. Whether the rule that parked the obligation also
+matches that fact is beside the point, and every event is tested against every
+park as it is evaluated: a rule watching one narrow signal would otherwise stay
+parked on an obsolete head however far the pull request moved. Progress must
+also follow the state the lineage stalled on, and must follow every fact about
+that same pull request which the lineage has already spent, counted across the
+successor obligations it opens as it settles and requeues: several facts can
+follow one stalled state, parking spends the newest of them, and the older ones
+stay unevaluated by any rule running behind its siblings. That ordering holds
+only within one pull request, because event position numbers a single
+repository's stream and a rule-scoped lineage spans repositories; a fact already
+spent anywhere in the lineage is refused by identity regardless. A single
+repository event is evaluated once per active rule, so without that ordering an
+older event replayed by a lagging rule, or a newer one seen again after a second
+park, would hand back a budget the pull request never earned. Rule, repository,
+and stack singletons collapse many pull requests onto one obligation, so the
+fact must name that same pull request: a neighbour's head differs from the
+stalled one almost always, and would otherwise restore the budget on every
+unrelated match. A branch target carries no head and no review activity at all,
+so an obligation stalled on one is released only by an operator. Matching events
+that are neither, such as a recomputed mergeable state or a label change, join
+the obligation's latest-state projection without restoring anything, so churn
+against an unchanged pull request buys no further attempts. Content identity
+keeps a restated observation from recording a second durable event, but it does
+not bound how often one durable event reaches this test: an event is tested once
+per active rule, and both evaluation paths run the test before checking whether
+that rule's evaluation of it was already recorded. The spent-event journal is
+what makes those repeated tests safe, and is a required guard rather than an
+optimization. Every park and every release appends a journal row naming the
+count at the transition and, for a release, its operator or the event that
+caused it; both releases are schema-owned, so the journal's vocabulary is
+spelled only where the constraint closing it lives. Readiness in
+`repo_watch_outstanding_dispatch_obligation` excludes a parked obligation and,
+independently, one whose count has reached the budget, so no ordering of parking
+against that read reports an exhausted obligation as ready. It does not model
+the delay between attempts, which the dispatch loader applies against bounds no
+projection can see.
+
+**Implemented behavior.** A completed approval-judge escalation judged under
+dispatch authority, which the rule above binds to the generation that dispatch
+commissioned, is an execution-failure terminal transition rather than an
+attended approval wait. An escalation in any other generation of the same
+session resolves no such authority and stays the attended wait. It fails the
+active turn and blocks the commissioned goal while that goal's authority still
+stands — a generation stopped, achieved, or superseded during the provider
+round-trip is not blocked, because the authority the block would record has
+already ended — and therefore enters the same latest-state obligation and
+singleton-release path described above. Once release commits, the replacement
+obligation — where the requeue rules above still owe one, which a deactivated
+rule or a later close or merge withdraws — becomes eligible under the ordinary
+cooldown, the failed-attempt delay above, and the attempt budget that parks a
+lineage which keeps failing, and can then create a fresh dispatch; the ended
+session does not remain load-bearing occupancy either way. That requeue is a
+counted attempt like any other, so a dispatched lineage whose work keeps
+escalating parks on that budget rather than redispatching without end. Two turns
+are not terminalized this way, and each parks for a user exactly as it would in
+a session no dispatch created. A turn a steer still names is attended by
+definition, so its escalation parks for the user who steered, leaving the turn
+active and its batch held; terminalizing it would strand that steer against the
+rule that no turn becomes terminal while pending steering names it, and
+reclassifying the steer into a queued successor would start fresh work in a
+session whose dispatch is being released for redispatch. A turn in a session
+that has already recorded an escalation parks too, and for a reason that reads
+off the record rather than off the batch: an unattended escalation fails its
+turn and blocks the goal, [goal mode](goal-mode.md) exempts that block from
+automatic resumption, so only a person can put such a session back into flight.
+A second escalation there is therefore work an operator resumed, whether or not
+the batch has released — a sibling action still pursuing keeps the release
+absent while the resumption is just as attended — and it waits for them.
+Standing authority is the last word on it: a goal that ended while this judge
+was in flight leaves stale work, so its escalation is terminalized rather than
+parked for a user who will never come, and terminalizing it owes no second
+redispatch that the requeue rules above would not already withhold. A turn no
+escalation preceded is the dispatched work itself, including one an ordinary
+execution failure had automatically resumed, and takes the unattended path. The
+block the escalation writes claims no release — a batch a sibling action still
+pursues releases only when that sibling ends — and states that no automatic
+resumption is scheduled, which [goal mode](goal-mode.md) admits as its one
+exception and which is why that need text names the operator repair itself.
+Whether the batch released is likewise a fact about the batch: it is recorded in
+the release row and the escalation audit view, not reported as this completion's
+own effect, because a sibling settling later would otherwise change the answer
+an identical replay receives. `repo_watch_headless_approval_escalation_audit`
+joins the append-only escalation cause and rationale to its dispatch release and
+replacement obligation, including whether and when that obligation settled. The
+terminal attempt, failure transcript entry, and terminal frontier it recorded
+are all durable evidence of that transition, so a replayed completion offering
+any other one of them is reported as a mismatched replay rather than answered
+with the recorded outcome — the same treatment a differing recommendation,
+rationale, usage, or continuation attempt already receives.
+
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies
 the ordinary parent-only stop to each generation-one goal it commissioned for
@@ -693,16 +844,25 @@ or an unrelated session. A later open event makes an earlier unprocessed cutoff
 a recorded reopen instead. Dispatch admission rechecks the latest durable
 lifecycle under the repository lock. A terminal cutoff settles every outstanding
 obligation for that pull request immediately, without waiting for singleton or
-cooldown readiness; the admission recheck is the race-closing backstop. Either
-path settles stale nonterminal work as `target_closed` without creating a
-session. A rule that matches the `PullRequestClosed` or `PullRequestMerged`
-event itself remains dispatch-eligible, and a non-converged termination of that
-dispatch still owes its requeue while its own cutoff remains the latest one; the
-terminal event is the cutoff fact, not work made stale by that fact. Corruption
-in one commissioned goal rolls back that goal's stop to a savepoint but does not
-roll back the cutoff: the terminal event remains durably dispositioned, healthy
-commissioned goals are stopped, and later cutoffs remain eligible for
-processing.
+cooldown readiness, and reaches a parked obligation through the target it
+stalled on as well as through its latest-event projection, since a collapsed
+singleton lets that projection follow another pull request; an obligation
+stalled on the cutoff event itself is preserved whatever has matched since,
+because it owes the close automation and an operator release is what lets it
+run; the admission recheck is the race-closing backstop. Either path settles
+stale nonterminal work as `target_closed` without creating a session. Cutoff
+processing settles after it has stopped the goals it commissioned, so it takes
+session rows before obligation rows and cannot close a lock cycle against a
+dispatch session terminating into the same obligation, and it takes those
+obligation rows in the order the progress-release scan takes them, which runs
+outside the repository lock. A rule that matches the `PullRequestClosed` or
+`PullRequestMerged` event itself remains dispatch-eligible, and a non-converged
+termination of that dispatch still owes its requeue while its own cutoff remains
+the latest one; the terminal event is the cutoff fact, not work made stale by
+that fact. Corruption in one commissioned goal rolls back that goal's stop to a
+savepoint but does not roll back the cutoff: the terminal event remains durably
+dispositioned, healthy commissioned goals are stopped, and later cutoffs remain
+eligible for processing.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
@@ -713,10 +873,11 @@ release clause independently; and names every failing clause in `blockers`.
 `repo_watch_outstanding_dispatch_obligation` projection. Each row identifies the
 repository, rule, singleton and pull request or stack root, first and latest
 matched events, collapsed count and timestamps, any occupying dispatch and its
-sessions, cooldown eligibility, and present readiness. Rule deactivation settles
-an obligation without dispatch rather than leaving permanently owed work for
-semantics that are no longer configured; terminal-target settlement likewise
-records why the obligation no longer remains owed.
+sessions, cooldown eligibility, present readiness, failed-attempt count, and
+parking stamp. Rule deactivation settles an obligation without dispatch rather
+than leaving permanently owed work for semantics that are no longer configured;
+terminal-target settlement likewise records why the obligation no longer remains
+owed.
 
 **Implemented behavior.** A newly configured rule activates immediately after
 the repository's current durable event tail, before its task polls, and consumes

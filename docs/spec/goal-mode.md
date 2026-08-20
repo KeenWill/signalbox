@@ -13,7 +13,11 @@ generation was verified through PR #578 (`agent/commission-binding`). Resolving
 that authority again when a consumer commits is verified against this PR
 (`agent/judge-completion-recheck`). Repository-watch-composed stops are verified
 against this PR (`agent/daemon-ops-overnight`). This bottom specification diff
-owns both stack slices. Identity and durable-command mechanics remain owned by
+owns both stack slices. Bounded automatic resumption of execution-failure blocks
+is verified against this PR (`agent/goal-blocked-autoresume`), and its one
+exemption — the block an unattended repository-watch approval escalation appends
+— against this PR (`agent/headless-approval-escalation`). Identity and
+durable-command mechanics remain owned by
 [identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
 by [tool loop](tool-loop.md), and framing by
@@ -104,10 +108,17 @@ read. Equal statements commit the decision. A statement that resolved before and
 resolves to nothing now belongs to a generation that closed, whether it was
 stopped, achieved, or replaced by a supersession — a replacement closes the
 generation the decision was formed under rather than restating it, so it too
-resolves to nothing. That escalates to a human rather than committing a decision
-formed under authority no longer in force. A judge that read no statement
-decided without one, so a generation attached since withdraws nothing and leaves
-that decision alone: the comparison pins withdrawal, not novelty.
+resolves to nothing. That escalates rather than committing a decision formed
+under authority no longer in force. Escalating means the attended park, except
+for a turn [repository watch](repo-watch.md) sends down its unattended terminal
+path — one judged under dispatch authority, unsteered, and either the dispatched
+work itself or work whose authority has since ended — and which fails the turn
+without blocking the generation that has already closed. Work an operator
+resumed after an earlier escalation is the other case, and it parks while its
+authority stands, because the exemption stated below means only a person could
+have resumed it. A judge that read no statement decided without one, so a
+generation attached since withdraws nothing and leaves that decision alone: the
+comparison pins withdrawal, not novelty.
 
 **Implemented behavior.** The commit-time resolution is not the reading
 resolution. Reading binds a recorded generation exactly, so a supersession while
@@ -172,16 +183,80 @@ instead of classifying valid durable state as corrupt.
 
 **Implemented behavior.** A failed goal turn is not retried; in the same
 scheduler disposition path the daemon appends `blocked` with reason
-`execution_failure`, need text describing the execution repair required, and the
-exact failed-turn provenance. That scheduler-turn provenance is single-use and
-durably requires the current goal turn to have an unsuccessful terminal
-disposition. A delayed replay of an already-recorded failure returns that
-blocked transition without appending a second event, including after resume. An
-unrecorded failure from an older turn returns `NotCurrentGoalTurn` once resume
-has made a successor turn current, so it cannot block the resumed pursuit.
-Continuation stops on blocked, achieved, user-stopped, and a superseded
-generation; supersession's successor is pursuing and therefore independently
-eligible to continue.
+`execution_failure`, need text stating either the scheduled automatic resumption
+or the operator repair required, and the exact failed-turn provenance. That
+scheduler-turn provenance is single-use and durably requires the current goal
+turn to have an unsuccessful terminal disposition. A delayed replay of an
+already-recorded failure returns that blocked transition without appending a
+second event, including after resume. An unrecorded failure from an older turn
+returns `NotCurrentGoalTurn` once resume has made a successor turn current, so
+it cannot block the resumed pursuit. Continuation stops on blocked, achieved,
+user-stopped, and a superseded generation; supersession's successor is pursuing
+and therefore independently eligible to continue.
+
+**Implemented behavior.** An execution-failure block owes its own bounded
+automatic resumption. The daemon derives from the goal event history how many
+consecutive automatic resumptions the current run has already spent: the run is
+the trailing alternation of execution-failure blocks and the resumptions that
+answered them, and every other event ends it. Below a budget of five consecutive
+attempts, the appended need text states that automatic resumption is scheduled
+and names the operator repair for a goal still blocked once resumption ends, and
+exactly one resume follows after a backoff of two minutes doubled per attempt
+already spent, to a thirty-minute maximum. At the budget the goal stays blocked,
+and its need text states that automatic resumption is exhausted and states the
+operator repair. All three bounds are fixed in source and no configuration reads
+them: an automatic resumption spends provider budget on a session no operator
+asked about, so its cadence and its end are product decisions rather than
+deployment ones. Every need text an execution-failure block carries names the
+operator repair, because an armed attempt can also fail to resume by being
+durably rejected, by losing its process, or by never reaching the database, and
+in each case that text is what an operator reads. Resumption does not bypass
+execution-failure blocking or make a failure a silent retry — the block is
+appended first, and every attempt is an ordinary recorded `resumed` event.
+
+**Implemented behavior.** An automatic resumption's durable command identity is
+derived from the session and the exact blocked event it answers rather than
+minted. A repeated attempt is therefore an exact command replay rather than a
+second resume, and the recorded `resumed` event is self-identifying: a resume
+carrying any other identity is an operator's, ends the run, and restarts the
+budget. Each attempt carries the blocked event it answers into the command, and
+that expectation is checked against the lineage under the same session lock the
+resume would append within: an automatic resume applies to exactly that blocked
+event or to nothing, and an unmet expectation appends nothing and leaves the
+derived identity unspent. A goal since resumed, stopped, superseded, or blocked
+for another reason is therefore left alone even when it moved between the
+attempt's read and its lock. The model-selectable reasons are never
+automatically resumed: each names a condition no retry can clear, and only
+execution-failure blocking arms an attempt.
+
+**Implemented behavior.** An attempt that reaches no durable answer is owed
+another, because nothing else re-reads a blocked goal: an attempt whose database
+call fails retries up to three times at the base backoff, reusing its derived
+identity so a retry that follows a lost acknowledgement replays rather than
+resumes twice. Blocking whose own commit acknowledgement is lost is reconciled
+the same way — the daemon reads the lineage back and arms the execution-failure
+block it finds, since the need text it was appending expects resumption whether
+or not the acknowledgement arrived. That read is retried under the same bound,
+because the event ordinal it recovers is the one thing the lost acknowledgement
+did not report and the derived identity is a function of it, and it runs off the
+scheduler pass, which returns its ambiguity without waiting. Arming a block
+another pass already armed is harmless for the same reason a retry is: both
+derive one identity, and the second attempt replays it.
+
+**Implemented behavior.** One execution-failure block is exempt from automatic
+resumption: the block an unattended repository-watch approval escalation appends
+in the transaction that fails its turn, described by
+[repository watch](repo-watch.md). It arms no attempt, and its need text states
+that and names the operator repair directly instead. The work that block ended
+is already owed a retry, and a different one — repository watch redispatches it
+under a fresh dispatch while its rule and target remain eligible — so resuming
+this goal would re-run an escalating turn against a request no user is
+attending, beside that redispatch, until the budget ran out. Where that
+redispatch is withheld, because the rule was deactivated or the pull request
+closed or merged, the work is not wanted at all, and an automatic resumption
+would be the only thing still pursuing it. Every other execution-failure block
+owes the bounded resumption above, including one appended for a session
+repository watch created.
 
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The
@@ -307,5 +382,8 @@ re-entering completion.
 
 ## Open edges
 
-**Deferred or undecided work.** No goal-mode open question is recorded by this
-version-one contract.
+**Deferred or undecided work.** Re-arming a pending automatic resumption across
+a daemon restart, and separating consecutive execution failures from ones
+distant in the same pursuit, are recorded under
+[goal mode](../open-questions.md#goal-mode). No other goal-mode open question is
+recorded by this version-one contract.
