@@ -22,6 +22,8 @@
   --danger: #f28383;
   --focus: #90c8ff;
   --row-block: 62px;
+  /* Derived readability floor: 48px panel header + 30px table header + one 34px row. */
+  --fleet-readable-block: 112px;
 }
 
 :root[data-theme="light"] {
@@ -112,6 +114,7 @@ kbd {
 .app-shell {
   display: grid;
   grid-template-columns: 224px minmax(420px, 1fr) 248px;
+  grid-template-rows: minmax(0, 1fr);
   height: 100dvh;
   background: var(--canvas);
 }
@@ -184,7 +187,7 @@ kbd {
 .primary-stack {
   display: grid;
   min-height: 0;
-  grid-template-rows: minmax(0, 1.35fr) minmax(0, 0.65fr);
+  grid-template-rows: minmax(0, 1.35fr) minmax(var(--fleet-readable-block), 0.65fr);
 }
 .layout-focus .primary-stack {
   grid-template-rows: minmax(0, 1fr);
@@ -742,7 +745,7 @@ kbd {
     display: inline-grid;
   }
   .primary-stack {
-    grid-template-rows: minmax(0, 1.3fr) minmax(0, 0.7fr);
+    grid-template-rows: minmax(0, 1.3fr) minmax(var(--fleet-readable-block), 0.7fr);
   }
   .section-header {
     padding: 0 0.55rem;

@@ -1,4 +1,4 @@
-import { expect, type Page, test } from '@playwright/test'
+import { expect, type Page, type TestInfo, test } from '@playwright/test'
 
 interface BrowserProblems {
   consoleErrors: string[]
@@ -46,6 +46,13 @@ const watchBrowser = (page: Page): BrowserProblems => {
   })
   page.on('pageerror', (error) => problems.pageErrors.push(error.message))
   return problems
+}
+
+const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
+  test.skip(
+    testInfo.project.name !== 'chromium' || process.platform !== 'linux',
+    'Chromium on Linux owns pixel evidence',
+  )
 }
 
 test.afterEach(async ({ page }, testInfo) => {
@@ -411,7 +418,9 @@ test('keeps the fleet surface reachable on a short mobile viewport', async ({ pa
   await page.goto('/scenario/responsive')
 
   await expect(page.getByRole('heading', { name: 'Fleet obligations' })).toBeVisible()
-  await expect(page.getByRole('rowgroup')).toBeVisible()
+  await expect(page.getByTestId(cachedScenarioFixture.firstFleetRowTestId)).toBeInViewport({
+    ratio: 1,
+  })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -421,7 +430,9 @@ test('keeps the fleet surface reachable on a short wide viewport', async ({ page
   await page.goto('/scenario/responsive')
 
   await expect(page.getByRole('heading', { name: 'Fleet obligations' })).toBeVisible()
-  await expect(page.getByRole('rowgroup')).toBeVisible()
+  await expect(page.getByTestId(cachedScenarioFixture.firstFleetRowTestId)).toBeInViewport({
+    ratio: 1,
+  })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -457,7 +468,7 @@ test('the command palette opens keyboard help without closing it', async ({ page
 })
 
 test('captures the pinned dark workbench', async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== 'chromium', 'Chromium owns pixel evidence')
+  skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)
   await page.goto('/scenario/approval')
   await expect(page.getByRole('heading', { name: 'Bounded timeline' })).toBeVisible()
@@ -466,7 +477,7 @@ test('captures the pinned dark workbench', async ({ page }, testInfo) => {
 })
 
 test('captures the pinned light focus layout', async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== 'chromium', 'Chromium owns pixel evidence')
+  skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)
   await page.goto('/scenario/huge-source')
   await page.getByRole('button', { name: 'Switch to focus layout' }).click()
@@ -477,7 +488,7 @@ test('captures the pinned light focus layout', async ({ page }, testInfo) => {
 })
 
 test('captures the pinned narrow responsive shell', async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== 'chromium', 'Chromium owns pixel evidence')
+  skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/scenario/responsive')

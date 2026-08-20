@@ -4,6 +4,10 @@ import { Link } from '@tanstack/react-router'
 import { Search } from 'lucide-react'
 import { scenarios } from './platform'
 
+// Tunable effective ceiling: batch keystrokes to bound repeated catalog filtering
+// while keeping the scenario results perceptually responsive.
+const SCENARIO_SEARCH_DEBOUNCE_MS = 120
+
 function ScenarioResults({
   query,
   activeId,
@@ -13,7 +17,7 @@ function ScenarioResults({
   activeId: string
   onSelect?: () => void
 }) {
-  const [debouncedQuery] = useDebouncedValue(query, { wait: 120 })
+  const [debouncedQuery] = useDebouncedValue(query, { wait: SCENARIO_SEARCH_DEBOUNCE_MS })
   const normalized = debouncedQuery.trim().toLowerCase()
   const visible = scenarios.filter((scenario) =>
     `${scenario.title} ${scenario.description}`.toLowerCase().includes(normalized),
