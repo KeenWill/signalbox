@@ -184,7 +184,7 @@ kbd {
 .primary-stack {
   display: grid;
   min-height: 0;
-  grid-template-rows: minmax(280px, 1.35fr) minmax(210px, 0.65fr);
+  grid-template-rows: minmax(0, 1.35fr) minmax(0, 0.65fr);
 }
 .layout-focus .primary-stack {
   grid-template-rows: minmax(0, 1fr);

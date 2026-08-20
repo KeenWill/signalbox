@@ -415,6 +415,16 @@ test('keeps the fleet surface reachable on a short mobile viewport', async ({ pa
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('keeps the fleet surface reachable on a short wide viewport', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 800, height: 320 })
+  await page.goto('/scenario/responsive')
+
+  await expect(page.getByRole('heading', { name: 'Fleet obligations' })).toBeVisible()
+  await expect(page.getByRole('rowgroup')).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('Mod+K opens the registered command palette', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')

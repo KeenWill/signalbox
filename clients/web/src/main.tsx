@@ -30,8 +30,11 @@ const scenarioRoute = createRoute({
   component: () => <Workspace scenarioId={scenarioRoute.useParams().scenarioId} />,
 })
 const router = createRouter({ routeTree: rootRoute.addChildren([indexRoute, scenarioRoute]) })
+// Tunable effective ceiling: retain recently visited scenario projections without growing the
+// development cache for the lifetime of the page.
+const QUERY_CACHE_GC_TIME_MS = 5 * 60_000
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { retry: false, gcTime: 5 * 60_000 } },
+  defaultOptions: { queries: { retry: false, gcTime: QUERY_CACHE_GC_TIME_MS } },
 })
 
 declare module '@tanstack/react-router' {

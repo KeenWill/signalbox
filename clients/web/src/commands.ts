@@ -47,7 +47,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
   {
     id: 'palette.open',
     title: 'Open command palette',
-    description: 'Search every available application command.',
+    description: 'Browse every available application command.',
     category: 'Surface',
     bindings: [{ label: 'Mod+K', registration: { kind: 'hotkey', hotkey: 'Mod+K' } }],
     available: always,

@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test'
 
-// CI and local Chromium builds rasterize text differently; observed drift is 2.2%.
+// Tunable effective ceiling: absorb cross-host text rasterization drift (observed at 2.2%) while
+// preserving sensitivity to geometry and content regressions.
 const CROSS_HOST_TEXT_RASTERIZATION_TOLERANCE = 0.035
 
 export default defineConfig({
