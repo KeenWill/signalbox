@@ -19,6 +19,10 @@ const largeFleetFixture = {
   mountedRowsCeiling: 50,
 } as const
 
+const streamingFixture = {
+  lastLoadedItemId: 'event-239',
+} as const
+
 const watchBrowser = (page: Page): BrowserProblems => {
   const problems: BrowserProblems = { consoleErrors: [], pageErrors: [] }
   page.on('console', (message) => {
@@ -112,6 +116,58 @@ test('modal timeline navigation selects stable loaded items', async ({ page }) =
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('standard listbox keys select the announced timeline item', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+
+  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await timeline.focus()
+  await timeline.press('ArrowDown')
+  await expect(page.getByRole('option', { selected: true })).toHaveAttribute('id', 'event-1')
+  await timeline.press('End')
+  await expect(page.getByRole('option', { selected: true })).toHaveAttribute(
+    'id',
+    streamingFixture.lastLoadedItemId,
+  )
+  await timeline.press('Home')
+  await expect(page.getByRole('option', { selected: true })).toHaveAttribute('id', 'event-0')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('results detail preserves an eligible selected record', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+
+  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await timeline.focus()
+  await timeline.press('End')
+  await page.getByRole('button', { name: 'results' }).click()
+  await expect(page.getByRole('option', { selected: true })).toHaveAttribute(
+    'id',
+    streamingFixture.lastLoadedItemId,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('changing scenarios resets timeline selection and closes mobile navigation', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/scenario/streaming')
+
+  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await timeline.focus()
+  await timeline.press('End')
+  await page.getByRole('button', { name: 'Open scenarios' }).click()
+  const navigation = page.getByRole('dialog', { name: 'Development scenarios' })
+  await navigation.getByRole('link', { name: /Approval required/ }).click()
+  await expect(navigation).toBeHidden()
+  await expect(page).toHaveURL(/\/scenario\/approval$/)
+  await expect(page.getByRole('option', { selected: true })).toHaveAttribute('id', 'event-0')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('Mod+K and Escape open and close the registered command palette', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
@@ -121,6 +177,17 @@ test('Mod+K and Escape open and close the registered command palette', async ({ 
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('the command palette opens keyboard help without closing it', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await page.getByRole('option', { name: /Open keyboard help/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

@@ -118,6 +118,7 @@ kbd {
 .app-shell.layout-focus {
   grid-template-columns: minmax(0, 1000px);
   justify-content: center;
+  background: var(--surface-2);
 }
 .navigation-pane,
 .diagnostics {
@@ -235,6 +236,10 @@ kbd {
   width: 13px;
   color: var(--text-muted);
 }
+.scenario-search:focus-within {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
 .scenario-search input {
   width: 100%;
   min-width: 0;
@@ -343,6 +348,9 @@ kbd {
 }
 .transcript-panel {
   border-bottom: 1px solid var(--border);
+}
+.layout-focus .transcript-panel {
+  border-bottom: 0;
 }
 .section-header {
   display: flex;
@@ -519,7 +527,7 @@ kbd {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: currentColor;
+  background: currentcolor;
   content: "";
 }
 .status-active,

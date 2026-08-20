@@ -1,6 +1,7 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { AlertTriangle, Bot, CheckCircle2, CircleDot, TerminalSquare } from 'lucide-react'
 import { useEffect, useMemo, useRef } from 'react'
+import { type CommandContext, invokeCommand } from './commands'
 import type { TimelineItem, TimelineKind } from './platform'
 import type { DetailMode } from './state'
 import { actions, useAppDispatch, useAppSelector } from './state'
@@ -66,14 +67,16 @@ export const visibleTimeline = (items: TimelineItem[], detail: DetailMode): Time
   return items.filter((item) => ['origin', 'result', 'unknown'].includes(item.kind))
 }
 
-export function Transcript({ items }: { items: TimelineItem[] }) {
+export function Transcript({ items, context }: { items: TimelineItem[]; context: CommandContext }) {
   'use no memo'
   const dispatch = useAppDispatch()
   const detail = useAppSelector((state) => state.app.detail)
   const density = useAppSelector((state) => state.app.density)
-  const selected = useAppSelector((state) => state.app.selectedTimeline)
+  const selectedId = useAppSelector((state) => state.app.selectedTimeline)
   const parentRef = useRef<HTMLDivElement>(null)
   const visibleItems = useMemo(() => visibleTimeline(items, detail), [detail, items])
+  const firstVisibleId = visibleItems[0]?.id ?? null
+  const selected = visibleItems.findIndex((item) => item.id === selectedId)
   const virtualizer = useVirtualizer({
     count: visibleItems.length,
     getScrollElement: () => parentRef.current,
@@ -89,14 +92,31 @@ export function Transcript({ items }: { items: TimelineItem[] }) {
   }, [dispatch, range[0], range[1]])
 
   useEffect(() => {
-    if (selected < visibleItems.length) virtualizer.scrollToIndex(selected, { align: 'auto' })
-  }, [selected, virtualizer, visibleItems.length])
+    if (selected >= 0) virtualizer.scrollToIndex(selected, { align: 'auto' })
+  }, [selected, virtualizer])
 
   useEffect(() => {
-    if (selected >= visibleItems.length && visibleItems.length > 0) {
-      dispatch(actions.timelineSelected(visibleItems.length - 1))
+    if (selected < 0 && visibleItems.length > 0) {
+      dispatch(actions.timelineSelected(firstVisibleId))
     }
-  }, [dispatch, selected, visibleItems.length])
+  }, [dispatch, firstVisibleId, selected, visibleItems.length])
+
+  const handleListboxKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const command = {
+      ArrowDown: 'selection.next',
+      ArrowUp: 'selection.previous',
+      Home: 'selection.first',
+      End: 'selection.last',
+    }[event.key] as
+      | 'selection.next'
+      | 'selection.previous'
+      | 'selection.first'
+      | 'selection.last'
+      | undefined
+    if (!command) return
+    event.preventDefault()
+    invokeCommand(command, context)
+  }
 
   return (
     <section className="transcript-panel" aria-labelledby="timeline-heading">
@@ -112,8 +132,9 @@ export function Transcript({ items }: { items: TimelineItem[] }) {
         className="virtual-scroll transcript-scroll"
         role="listbox"
         aria-label="Session timeline"
-        aria-activedescendant={visibleItems[selected]?.id}
+        aria-activedescendant={selected >= 0 ? (selectedId ?? undefined) : undefined}
         tabIndex={0}
+        onKeyDown={handleListboxKeyDown}
         data-mounted-rows={virtualItems.length}
         data-total-loaded={visibleItems.length}
       >
@@ -128,13 +149,13 @@ export function Transcript({ items }: { items: TimelineItem[] }) {
                 id={item.id}
                 key={item.id}
                 role="option"
-                aria-selected={selected === virtualRow.index}
+                aria-selected={selectedId === item.id}
                 className={`timeline-row kind-${item.kind}`}
                 data-testid={`timeline-${item.id}`}
                 ref={virtualizer.measureElement}
                 data-index={virtualRow.index}
                 style={{ transform: `translateY(${virtualRow.start}px)` }}
-                onClick={() => dispatch(actions.timelineSelected(virtualRow.index))}
+                onClick={() => dispatch(actions.timelineSelected(item.id))}
               >
                 <span className="turn-rail">T{item.turn}</span>
                 <div className="timeline-content">

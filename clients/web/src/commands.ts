@@ -20,7 +20,7 @@ export type CommandId =
 export interface CommandContext {
   dispatch: AppDispatch
   getState: () => RootState
-  timelineCount: number
+  timelineIds: readonly string[]
   focusTimeline: () => void
 }
 
@@ -80,11 +80,13 @@ export const commandRegistry: readonly CommandDefinition[] = [
     title: 'Select next timeline item',
     description: 'Move the timeline selection toward the latest item.',
     category: 'Navigate',
-    bindings: ['j'],
-    available: (context) => context.timelineCount > 0,
+    bindings: ['j', 'ArrowDown'],
+    available: (context) => context.timelineIds.length > 0,
     run: (context) => {
       const current = context.getState().app.selectedTimeline
-      context.dispatch(actions.timelineSelected(Math.min(current + 1, context.timelineCount - 1)))
+      const currentIndex = Math.max(context.timelineIds.indexOf(current ?? ''), 0)
+      const nextIndex = Math.min(currentIndex + 1, context.timelineIds.length - 1)
+      context.dispatch(actions.timelineSelected(context.timelineIds[nextIndex] ?? null))
     },
   },
   {
@@ -92,11 +94,13 @@ export const commandRegistry: readonly CommandDefinition[] = [
     title: 'Select previous timeline item',
     description: 'Move the timeline selection toward the first item.',
     category: 'Navigate',
-    bindings: ['k'],
-    available: (context) => context.timelineCount > 0,
+    bindings: ['k', 'ArrowUp'],
+    available: (context) => context.timelineIds.length > 0,
     run: (context) => {
       const current = context.getState().app.selectedTimeline
-      context.dispatch(actions.timelineSelected(Math.max(current - 1, 0)))
+      const currentIndex = Math.max(context.timelineIds.indexOf(current ?? ''), 0)
+      const previousIndex = Math.max(currentIndex - 1, 0)
+      context.dispatch(actions.timelineSelected(context.timelineIds[previousIndex] ?? null))
     },
   },
   {
@@ -104,18 +108,19 @@ export const commandRegistry: readonly CommandDefinition[] = [
     title: 'Select first loaded item',
     description: 'Move to the earliest item in the loaded cursor window.',
     category: 'Navigate',
-    bindings: ['g g'],
-    available: (context) => context.timelineCount > 0,
-    run: (context) => context.dispatch(actions.timelineSelected(0)),
+    bindings: ['g g', 'Home'],
+    available: (context) => context.timelineIds.length > 0,
+    run: (context) => context.dispatch(actions.timelineSelected(context.timelineIds[0] ?? null)),
   },
   {
     id: 'selection.last',
     title: 'Select latest loaded item',
     description: 'Move to the latest item in the loaded cursor window.',
     category: 'Navigate',
-    bindings: ['G'],
-    available: (context) => context.timelineCount > 0,
-    run: (context) => context.dispatch(actions.timelineSelected(context.timelineCount - 1)),
+    bindings: ['G', 'End'],
+    available: (context) => context.timelineIds.length > 0,
+    run: (context) =>
+      context.dispatch(actions.timelineSelected(context.timelineIds.at(-1) ?? null)),
   },
   {
     id: 'layout.toggle',

@@ -1,5 +1,5 @@
 import { useHotkey, useHotkeySequence } from '@tanstack/react-hotkeys'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { useEffect, useMemo } from 'react'
 import { type CommandContext, type CommandId, invokeCommand } from './commands'
 import { FleetTable } from './FleetTable'
@@ -28,9 +28,6 @@ declare global {
   }
 }
 
-// Hard safety ceiling: the debug endpoint never walks the full Query cache.
-const DIAGNOSTIC_QUERY_STATES = 8
-
 function useCommandHotkeys(context: CommandContext) {
   const run = (id: CommandId) => invokeCommand(id, context)
   useHotkey('Mod+K', () => run('palette.open'))
@@ -50,7 +47,6 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
     ? (scenarioId as ScenarioId)
     : 'streaming'
   const transport = useMemo(() => new ScenarioTransport(knownId), [knownId])
-  const queryClient = useQueryClient()
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const timelineQuery = useQuery({
@@ -65,25 +61,33 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
   })
   const timeline = timelineQuery.data
   const fleet = fleetQuery.data
-  const visibleCount = visibleTimeline(timeline?.items ?? [], app.detail).length
+  const timelineIds = useMemo(
+    () => visibleTimeline(timeline?.items ?? [], app.detail).map((item) => item.id),
+    [app.detail, timeline?.items],
+  )
+  const firstTimelineId = timelineIds[0] ?? null
+  const initialSelection = useMemo(
+    () => ({ scenario: knownId, item: firstTimelineId }),
+    [firstTimelineId, knownId],
+  )
   const commandContext = useMemo<CommandContext>(
     () => ({
       dispatch,
       getState: store.getState,
-      timelineCount: visibleCount,
+      timelineIds,
       focusTimeline: () => {
         const active = document.activeElement
         if (active instanceof HTMLElement) active.blur()
         document.querySelector<HTMLElement>('[aria-label="Session timeline"]')?.focus()
       },
     }),
-    [dispatch, visibleCount],
+    [dispatch, timelineIds],
   )
   useCommandHotkeys(commandContext)
 
   useEffect(() => {
-    dispatch(actions.timelineSelected(0))
-  }, [dispatch])
+    dispatch(actions.timelineSelected(initialSelection.item))
+  }, [dispatch, initialSelection])
 
   useEffect(() => {
     document.documentElement.dataset.theme = app.theme
@@ -100,11 +104,11 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       logicalFleet: fleet?.totalCount ?? 0,
       transcriptRange: app.transcriptRange,
       tableRange: app.tableRange,
-      queryStates: queryClient
-        .getQueryCache()
-        .getAll()
-        .slice(-DIAGNOSTIC_QUERY_STATES)
-        .map((query) => `${query.queryHash}: ${query.state.status}`),
+      // Hard safety ceiling: diagnostics expose only the two active bounded queries.
+      queryStates: [
+        `timeline: ${timelineQuery.status}/${timelineQuery.fetchStatus}`,
+        `fleet: ${fleetQuery.status}/${fleetQuery.fetchStatus}`,
+      ],
       recentActions: getRecentActions(),
     }),
     [
@@ -112,9 +116,12 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       app.transcriptRange,
       fleet?.items.length,
       fleet?.totalCount,
-      queryClient,
+      fleetQuery.fetchStatus,
+      fleetQuery.status,
       timeline?.items.length,
       timeline?.totalCount,
+      timelineQuery.fetchStatus,
+      timelineQuery.status,
       transport.scenario.connection,
       transport.scenario.id,
     ],
@@ -160,7 +167,7 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
           <Toolbar context={commandContext} />
         </header>
         <div className="primary-stack">
-          <Transcript items={timeline.items} />
+          <Transcript items={timeline.items} context={commandContext} />
           {app.layout === 'workbench' && (
             <FleetTable rows={fleet.items} totalCount={fleet.totalCount} />
           )}

@@ -13,7 +13,7 @@ interface AppState {
   detail: DetailMode
   theme: ThemeMode
   overlay: Overlay
-  selectedTimeline: number
+  selectedTimeline: string | null
   transcriptRange: [number, number]
   tableRange: [number, number]
   activitySequence: number
@@ -25,7 +25,7 @@ const initialState: AppState = {
   detail: 'condensed',
   theme: 'dark',
   overlay: null,
-  selectedTimeline: 0,
+  selectedTimeline: null,
   transcriptRange: [0, 0],
   tableRange: [0, 0],
   activitySequence: 0,
@@ -60,8 +60,8 @@ const appSlice = createSlice({
       state.overlay = action.payload
       state.activitySequence += 1
     },
-    timelineSelected(state, action: { payload: number }) {
-      state.selectedTimeline = Math.max(0, action.payload)
+    timelineSelected(state, action: { payload: string | null }) {
+      state.selectedTimeline = action.payload
       state.activitySequence += 1
     },
     transcriptRangeSet(state, action: { payload: [number, number] }) {

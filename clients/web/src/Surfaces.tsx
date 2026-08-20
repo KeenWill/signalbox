@@ -110,8 +110,8 @@ export function OverlaySurfaces({
               role="option"
               aria-selected="false"
               onClick={() => {
-                invokeCommand(command.id, context)
                 close()
+                invokeCommand(command.id, context)
               }}
             >
               <span>
@@ -150,7 +150,7 @@ export function OverlaySurfaces({
         description="Deterministic projections exercise the real client shell."
         onClose={close}
       >
-        <ScenarioNavigation activeId={activeId} />
+        <ScenarioNavigation activeId={activeId} onSelect={close} />
       </DialogFrame>
     </>
   )

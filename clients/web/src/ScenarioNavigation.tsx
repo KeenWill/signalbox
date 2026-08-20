@@ -4,7 +4,15 @@ import { Link } from '@tanstack/react-router'
 import { Search } from 'lucide-react'
 import { scenarios } from './platform'
 
-function ScenarioResults({ query, activeId }: { query: string; activeId: string }) {
+function ScenarioResults({
+  query,
+  activeId,
+  onSelect,
+}: {
+  query: string
+  activeId: string
+  onSelect?: () => void
+}) {
   const [debouncedQuery] = useDebouncedValue(query, { wait: 120 })
   const normalized = debouncedQuery.trim().toLowerCase()
   const visible = scenarios.filter((scenario) =>
@@ -18,6 +26,7 @@ function ScenarioResults({ query, activeId }: { query: string; activeId: string 
           to="/scenario/$scenarioId"
           params={{ scenarioId: scenario.id }}
           className={activeId === scenario.id ? 'scenario-link active' : 'scenario-link'}
+          onClick={onSelect}
         >
           <span>{scenario.title}</span>
           <small>{scenario.description}</small>
@@ -27,7 +36,13 @@ function ScenarioResults({ query, activeId }: { query: string; activeId: string 
   )
 }
 
-export function ScenarioNavigation({ activeId }: { activeId: string }) {
+export function ScenarioNavigation({
+  activeId,
+  onSelect,
+}: {
+  activeId: string
+  onSelect?: () => void
+}) {
   const form = useForm({ defaultValues: { query: '' } })
   return (
     <div className="scenario-navigation">
@@ -52,7 +67,7 @@ export function ScenarioNavigation({ activeId }: { activeId: string }) {
         </form>
       </search>
       <form.Subscribe selector={(state) => state.values.query}>
-        {(query) => <ScenarioResults query={query} activeId={activeId} />}
+        {(query) => <ScenarioResults query={query} activeId={activeId} onSelect={onSelect} />}
       </form.Subscribe>
     </div>
   )

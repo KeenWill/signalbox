@@ -127,6 +127,11 @@ export const SCENARIO_TIMELINE_WINDOW_ITEMS = 360
 // Hard safety ceiling: scenario reads cannot allocate an entire logical fleet table.
 export const SCENARIO_FLEET_WINDOW_ITEMS = 480
 
+const normalizedLimit = (limit: number, maximum: number): number => {
+  if (!Number.isFinite(limit)) return 1
+  return Math.min(Math.max(Math.trunc(limit), 1), maximum)
+}
+
 const parseCursor = (cursor: string | undefined, prefix: string): number => {
   if (!cursor?.startsWith(`${prefix}:`)) return 0
   const parsed = Number(cursor.slice(prefix.length + 1))
@@ -166,7 +171,7 @@ export class ScenarioTransport implements SignalboxTransport {
 
   async readTimeline(request: WindowRequest): Promise<CursorWindow<TimelineItem>> {
     const start = parseCursor(request.after, 'timeline')
-    const count = Math.min(Math.max(request.limit, 1), SCENARIO_TIMELINE_WINDOW_ITEMS)
+    const count = normalizedLimit(request.limit, SCENARIO_TIMELINE_WINDOW_ITEMS)
     const end = Math.min(start + count, this.scenario.timelineTotal)
     const items = Array.from({ length: end - start }, (_, offset) => {
       const index = start + offset
@@ -191,7 +196,7 @@ export class ScenarioTransport implements SignalboxTransport {
 
   async readFleet(request: WindowRequest): Promise<CursorWindow<FleetRow>> {
     const start = parseCursor(request.after, 'fleet')
-    const count = Math.min(Math.max(request.limit, 1), SCENARIO_FLEET_WINDOW_ITEMS)
+    const count = normalizedLimit(request.limit, SCENARIO_FLEET_WINDOW_ITEMS)
     const end = Math.min(start + count, this.scenario.tableTotal)
     const states: FleetRow['state'][] = ['active', 'queued', 'blocked', 'settled']
     const items = Array.from({ length: end - start }, (_, offset) => {
