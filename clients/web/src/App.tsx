@@ -1,7 +1,12 @@
-import { useHotkey, useHotkeySequence } from '@tanstack/react-hotkeys'
+import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useMemo } from 'react'
-import { type CommandContext, type CommandId, invokeCommand } from './commands'
+import {
+  type CommandContext,
+  globalHotkeyBindings,
+  globalHotkeySequenceBindings,
+  invokeCommand,
+} from './commands'
 import { FleetTable } from './FleetTable'
 import {
   SCENARIO_FLEET_WINDOW_ITEMS,
@@ -29,17 +34,18 @@ declare global {
 }
 
 function useCommandHotkeys(context: CommandContext) {
-  const run = (id: CommandId) => invokeCommand(id, context)
-  useHotkey('Mod+K', () => run('palette.open'))
-  useHotkey({ key: '/', shift: true }, () => run('help.open'))
-  useHotkey('J', () => run('selection.next'))
-  useHotkey('K', () => run('selection.previous'))
-  useHotkey('Shift+G', () => run('selection.last'))
-  useHotkey('Shift+W', () => run('layout.toggle'))
-  useHotkey('Shift+D', () => run('density.toggle'))
-  useHotkey('Shift+T', () => run('theme.toggle'))
-  useHotkey('Escape', () => run('surface.escape'))
-  useHotkeySequence(['G', 'G'], () => run('selection.first'))
+  useHotkeys(
+    globalHotkeyBindings.map((binding) => ({
+      hotkey: binding.hotkey,
+      callback: () => invokeCommand(binding.commandId, context),
+    })),
+  )
+  useHotkeySequences(
+    globalHotkeySequenceBindings.map((binding) => ({
+      sequence: binding.sequence,
+      callback: () => invokeCommand(binding.commandId, context),
+    })),
+  )
 }
 
 export function Workspace({ scenarioId }: { scenarioId: string }) {
@@ -104,7 +110,7 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       logicalFleet: fleet?.totalCount ?? 0,
       transcriptRange: app.transcriptRange,
       tableRange: app.tableRange,
-      // Hard safety ceiling: diagnostics expose only the two active bounded queries.
+      // Bounded diagnostic view: the workspace owns exactly two active scenario queries.
       queryStates: [
         `timeline: ${timelineQuery.status}/${timelineQuery.fetchStatus}`,
         `fleet: ${fleetQuery.status}/${fleetQuery.fetchStatus}`,

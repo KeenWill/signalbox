@@ -36,11 +36,12 @@ export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount:
     getItemKey: (index) => tableRows[index]?.original.id ?? index,
   })
   const virtualRows = virtualizer.getVirtualItems()
-  const range: [number, number] = [virtualRows[0]?.index ?? 0, virtualRows.at(-1)?.index ?? 0]
+  const rangeStart = virtualRows[0]?.index ?? 0
+  const rangeEnd = virtualRows.at(-1)?.index ?? 0
 
   useEffect(() => {
-    dispatch(actions.tableRangeSet(range))
-  }, [dispatch, range[0], range[1]])
+    dispatch(actions.tableRangeSet({ start: rangeStart, end: rangeEnd }))
+  }, [dispatch, rangeEnd, rangeStart])
 
   return (
     <section className="table-panel" aria-labelledby="fleet-heading">
@@ -69,11 +70,14 @@ export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount:
             </div>
           ))}
         </div>
-        {/* biome-ignore lint/a11y/useSemanticElements: A native row group cannot own this scrollable virtual stage. */}
+        {/* biome-ignore lint/a11y: A native row group cannot own this keyboard-reachable virtual scroll stage. */}
         <div
           ref={parentRef}
           className="virtual-scroll table-scroll"
           role="rowgroup"
+          aria-label="Fleet rows"
+          // biome-ignore lint/a11y/noNoninteractiveTabindex: The scroll viewport needs keyboard focus to reveal virtual rows.
+          tabIndex={0}
           data-mounted-rows={virtualRows.length}
           data-total-loaded={rows.length}
           data-logical-total={totalCount}

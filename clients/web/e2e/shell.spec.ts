@@ -27,6 +27,7 @@ const largeFleetFixture = {
 
 const streamingFixture = {
   firstLoadedItemId: 'event-0',
+  secondLoadedItemId: 'event-1',
   lastLoadedItemId: 'event-239',
 } as const
 
@@ -111,6 +112,18 @@ test('exposes logical positions for virtualized fleet rows', async ({ page }) =>
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('makes the fleet scroll viewport keyboard reachable', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto(largeFleetFixture.path)
+
+  const rows = page.getByRole('rowgroup', { name: 'Fleet rows' })
+  await rows.focus()
+  await expect(rows).toBeFocused()
+  await rows.press('End')
+  expect(await rows.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('leaves modal navigation inactive while text input owns editing', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
@@ -119,7 +132,10 @@ test('leaves modal navigation inactive while text input owns editing', async ({ 
   await filter.fill('stream')
   await filter.press('j')
   await expect(filter).toHaveValue('streamj')
-  await expect(page.getByRole('option', { selected: true })).toHaveAttribute('id', 'event-0')
+  await expect(page.getByRole('option', { selected: true })).toHaveAttribute(
+    'id',
+    streamingFixture.firstLoadedItemId,
+  )
 
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -135,34 +151,89 @@ test('Escape returns focus from text editing to the owning timeline', async ({ p
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('modal timeline navigation selects stable loaded items', async ({ page }) => {
+test('modal j selects the next loaded timeline item', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
 
   await page.getByRole('listbox', { name: 'Session timeline' }).focus()
   await page.keyboard.press('j')
-  await expect(page.getByRole('option', { selected: true })).toHaveAttribute('id', 'event-1')
-  await page.keyboard.press('g')
-  await page.keyboard.press('g')
-  await expect(page.getByRole('option', { selected: true })).toHaveAttribute('id', 'event-0')
+  await expect(page.getByRole('option', { selected: true })).toHaveAttribute(
+    'id',
+    streamingFixture.secondLoadedItemId,
+  )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('standard listbox keys select the announced timeline item', async ({ page }) => {
+test('modal g g selects the first loaded timeline item', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+
+  await page.locator(`#${streamingFixture.secondLoadedItemId}`).click()
+  await page.getByRole('listbox', { name: 'Session timeline' }).focus()
+  await page.keyboard.press('g')
+  await page.keyboard.press('g')
+  await expect(page.getByRole('option', { selected: true })).toHaveAttribute(
+    'id',
+    streamingFixture.firstLoadedItemId,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('ArrowDown selects the next announced timeline item', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
 
   const timeline = page.getByRole('listbox', { name: 'Session timeline' })
   await timeline.focus()
   await timeline.press('ArrowDown')
-  await expect(page.getByRole('option', { selected: true })).toHaveAttribute('id', 'event-1')
+  await expect(page.getByRole('option', { selected: true })).toHaveAttribute(
+    'id',
+    streamingFixture.secondLoadedItemId,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('ArrowUp selects the previous announced timeline item', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+
+  await page.locator(`#${streamingFixture.secondLoadedItemId}`).click()
+  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await timeline.focus()
+  await timeline.press('ArrowUp')
+  await expect(page.getByRole('option', { selected: true })).toHaveAttribute(
+    'id',
+    streamingFixture.firstLoadedItemId,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('End selects the final loaded timeline item', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+
+  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await timeline.focus()
   await timeline.press('End')
   await expect(page.getByRole('option', { selected: true })).toHaveAttribute(
     'id',
     streamingFixture.lastLoadedItemId,
   )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('Home selects the first loaded timeline item', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+
+  await page.locator(`#${streamingFixture.secondLoadedItemId}`).click()
+  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await timeline.focus()
   await timeline.press('Home')
-  await expect(page.getByRole('option', { selected: true })).toHaveAttribute('id', 'event-0')
+  await expect(page.getByRole('option', { selected: true })).toHaveAttribute(
+    'id',
+    streamingFixture.firstLoadedItemId,
+  )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -183,6 +254,21 @@ test('keeps the active timeline option mounted after wheel-range scrolling', asy
     'aria-activedescendant',
     streamingFixture.firstLoadedItemId,
   )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('keeps virtual-range telemetry out of recent user actions', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+
+  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await timeline.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  const diagnostics = await page.evaluate(() => window.__SIGNALBOX_DIAGNOSTICS__?.())
+  expect(diagnostics?.recentActions).toContain('app/timelineSelected')
+  expect(diagnostics?.recentActions).not.toContain('app/transcriptRangeSet')
+  expect(diagnostics?.recentActions).not.toContain('app/tableRangeSet')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -210,7 +296,10 @@ test('changing scenarios resets timeline selection', async ({ page }) => {
   await timeline.press('End')
   await page.getByRole('link', { name: /Approval required/ }).click()
   await expect(page).toHaveURL(/\/scenario\/approval$/)
-  await expect(page.getByRole('option', { selected: true })).toHaveAttribute('id', 'event-0')
+  await expect(page.getByRole('option', { selected: true })).toHaveAttribute(
+    'id',
+    streamingFixture.firstLoadedItemId,
+  )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

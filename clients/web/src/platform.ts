@@ -122,9 +122,9 @@ export const scenarios = [
   },
 ] as const satisfies readonly [ScenarioDefinition, ...ScenarioDefinition[]]
 
-// Hard safety ceiling: scenario reads cannot allocate an entire logical timeline.
+// Tunable effective ceiling: each development scenario loads one bounded timeline window.
 export const SCENARIO_TIMELINE_WINDOW_ITEMS = 360
-// Hard safety ceiling: scenario reads cannot allocate an entire logical fleet table.
+// Tunable effective ceiling: each development scenario loads one bounded fleet window.
 export const SCENARIO_FLEET_WINDOW_ITEMS = 480
 
 const normalizedLimit = (limit: number, maximum: number): number => {

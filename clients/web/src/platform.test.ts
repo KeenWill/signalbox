@@ -47,7 +47,7 @@ describe('ScenarioTransport', () => {
     expect(window.items).toHaveLength(1)
   })
 
-  it('clamps fleet limits to the hard maximum boundary', async () => {
+  it('clamps fleet limits to the configured window ceiling', async () => {
     const transport = new ScenarioTransport('large-table')
     const window = await transport.readFleet({ limit: SCENARIO_FLEET_WINDOW_ITEMS + 1 })
 

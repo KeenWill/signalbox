@@ -1,3 +1,4 @@
+import type { HotkeySequence, RegisterableHotkey } from '@tanstack/react-hotkeys'
 import type { AppDispatch, RootState } from './state'
 import { actions } from './state'
 
@@ -24,12 +25,19 @@ export interface CommandContext {
   focusTimeline: () => void
 }
 
+export interface CommandBinding {
+  label: string
+  registration?:
+    | { kind: 'hotkey'; hotkey: RegisterableHotkey }
+    | { kind: 'sequence'; sequence: HotkeySequence }
+}
+
 export interface CommandDefinition {
   id: CommandId
   title: string
   description: string
   category: 'Navigate' | 'View' | 'Surface'
-  bindings: readonly string[]
+  bindings: readonly CommandBinding[]
   available: (context: CommandContext) => boolean
   run: (context: CommandContext) => void
 }
@@ -41,7 +49,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
     title: 'Open command palette',
     description: 'Search every available application command.',
     category: 'Surface',
-    bindings: ['Mod+K'],
+    bindings: [{ label: 'Mod+K', registration: { kind: 'hotkey', hotkey: 'Mod+K' } }],
     available: always,
     run: (context) => context.dispatch(actions.overlaySet('palette')),
   },
@@ -50,7 +58,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
     title: 'Open keyboard help',
     description: 'Review modal navigation and command bindings.',
     category: 'Surface',
-    bindings: ['?'],
+    bindings: [{ label: '?', registration: { kind: 'hotkey', hotkey: { key: '/', shift: true } } }],
     available: always,
     run: (context) => context.dispatch(actions.overlaySet('help')),
   },
@@ -68,7 +76,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
     title: 'Unwind current surface',
     description: 'Close the nearest overlay or leave editing and return to the timeline.',
     category: 'Surface',
-    bindings: ['Escape'],
+    bindings: [{ label: 'Escape', registration: { kind: 'hotkey', hotkey: 'Escape' } }],
     available: always,
     run: (context) => {
       if (context.getState().app.overlay !== null) context.dispatch(actions.overlaySet(null))
@@ -80,7 +88,10 @@ export const commandRegistry: readonly CommandDefinition[] = [
     title: 'Select next timeline item',
     description: 'Move the timeline selection toward the latest item.',
     category: 'Navigate',
-    bindings: ['j', 'ArrowDown'],
+    bindings: [
+      { label: 'j', registration: { kind: 'hotkey', hotkey: 'J' } },
+      { label: 'ArrowDown' },
+    ],
     available: (context) => context.timelineIds.length > 0,
     run: (context) => {
       const current = context.getState().app.selectedTimeline
@@ -94,7 +105,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
     title: 'Select previous timeline item',
     description: 'Move the timeline selection toward the first item.',
     category: 'Navigate',
-    bindings: ['k', 'ArrowUp'],
+    bindings: [{ label: 'k', registration: { kind: 'hotkey', hotkey: 'K' } }, { label: 'ArrowUp' }],
     available: (context) => context.timelineIds.length > 0,
     run: (context) => {
       const current = context.getState().app.selectedTimeline
@@ -108,7 +119,10 @@ export const commandRegistry: readonly CommandDefinition[] = [
     title: 'Select first loaded item',
     description: 'Move to the earliest item in the loaded cursor window.',
     category: 'Navigate',
-    bindings: ['g g', 'Home'],
+    bindings: [
+      { label: 'g g', registration: { kind: 'sequence', sequence: ['G', 'G'] } },
+      { label: 'Home' },
+    ],
     available: (context) => context.timelineIds.length > 0,
     run: (context) => context.dispatch(actions.timelineSelected(context.timelineIds[0] ?? null)),
   },
@@ -117,7 +131,10 @@ export const commandRegistry: readonly CommandDefinition[] = [
     title: 'Select latest loaded item',
     description: 'Move to the latest item in the loaded cursor window.',
     category: 'Navigate',
-    bindings: ['G', 'End'],
+    bindings: [
+      { label: 'G', registration: { kind: 'hotkey', hotkey: 'Shift+G' } },
+      { label: 'End' },
+    ],
     available: (context) => context.timelineIds.length > 0,
     run: (context) =>
       context.dispatch(actions.timelineSelected(context.timelineIds.at(-1) ?? null)),
@@ -127,7 +144,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
     title: 'Toggle focus/workbench layout',
     description: 'Switch between a quiet transcript and the full operator workspace.',
     category: 'View',
-    bindings: ['Shift+W'],
+    bindings: [{ label: 'Shift+W', registration: { kind: 'hotkey', hotkey: 'Shift+W' } }],
     available: always,
     run: (context) => {
       const current = context.getState().app.layout
@@ -139,7 +156,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
     title: 'Toggle visual density',
     description: 'Switch compact and comfortable spacing independently of detail.',
     category: 'View',
-    bindings: ['Shift+D'],
+    bindings: [{ label: 'Shift+D', registration: { kind: 'hotkey', hotkey: 'Shift+D' } }],
     available: always,
     run: (context) => {
       const current = context.getState().app.density
@@ -151,7 +168,7 @@ export const commandRegistry: readonly CommandDefinition[] = [
     title: 'Toggle light/dark theme',
     description: 'Switch the CSS-variable theme.',
     category: 'View',
-    bindings: ['Shift+T'],
+    bindings: [{ label: 'Shift+T', registration: { kind: 'hotkey', hotkey: 'Shift+T' } }],
     available: always,
     run: (context) => {
       const current = context.getState().app.theme
@@ -186,6 +203,22 @@ export const commandRegistry: readonly CommandDefinition[] = [
     run: (context) => context.dispatch(actions.detailSet('results')),
   },
 ]
+
+export const globalHotkeyBindings = commandRegistry.flatMap((command) =>
+  command.bindings.flatMap((binding) =>
+    binding.registration?.kind === 'hotkey'
+      ? [{ commandId: command.id, hotkey: binding.registration.hotkey }]
+      : [],
+  ),
+)
+
+export const globalHotkeySequenceBindings = commandRegistry.flatMap((command) =>
+  command.bindings.flatMap((binding) =>
+    binding.registration?.kind === 'sequence'
+      ? [{ commandId: command.id, sequence: binding.registration.sequence }]
+      : [],
+  ),
+)
 
 export const commandById = (id: CommandId): CommandDefinition => {
   const command = commandRegistry.find((candidate) => candidate.id === id)

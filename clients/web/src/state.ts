@@ -7,6 +7,11 @@ export type DetailMode = 'full' | 'condensed' | 'results'
 export type ThemeMode = 'light' | 'dark'
 export type Overlay = 'palette' | 'help' | 'navigation' | null
 
+export interface VisibleRange {
+  start: number
+  end: number
+}
+
 interface AppState {
   layout: LayoutMode
   density: DensityMode
@@ -14,8 +19,8 @@ interface AppState {
   theme: ThemeMode
   overlay: Overlay
   selectedTimeline: string | null
-  transcriptRange: [number, number]
-  tableRange: [number, number]
+  transcriptRange: VisibleRange
+  tableRange: VisibleRange
   activitySequence: number
 }
 
@@ -26,14 +31,14 @@ const initialState: AppState = {
   theme: 'dark',
   overlay: null,
   selectedTimeline: null,
-  transcriptRange: [0, 0],
-  tableRange: [0, 0],
+  transcriptRange: { start: 0, end: 0 },
+  tableRange: { start: 0, end: 0 },
   activitySequence: 0,
 }
 
-// Hard safety ceiling: diagnostics retain only enough Redux activity for local triage.
+// Tunable effective ceiling: diagnostics retain a concise Redux activity tail for local triage.
 const RECENT_REDUX_ACTIONS = 18
-// Hard safety ceiling: Redux DevTools cannot retain an unbounded interaction history.
+// Tunable effective ceiling: Redux DevTools keeps a practical local interaction history.
 const REDUX_DEVTOOLS_ACTIONS = 24
 
 const appSlice = createSlice({
@@ -64,19 +69,25 @@ const appSlice = createSlice({
       state.selectedTimeline = action.payload
       state.activitySequence += 1
     },
-    transcriptRangeSet(state, action: { payload: [number, number] }) {
+    transcriptRangeSet(state, action: { payload: VisibleRange }) {
       state.transcriptRange = action.payload
     },
-    tableRangeSet(state, action: { payload: [number, number] }) {
+    tableRangeSet(state, action: { payload: VisibleRange }) {
       state.tableRange = action.payload
     },
   },
 })
 
 const actionTrace: string[] = []
+const telemetryActionTypes = new Set<string>([
+  appSlice.actions.transcriptRangeSet.type,
+  appSlice.actions.tableRangeSet.type,
+])
 const traceMiddleware: Middleware = () => (next) => (action) => {
   if (typeof action === 'object' && action !== null && 'type' in action) {
-    actionTrace.push(String(action.type))
+    const actionType = String(action.type)
+    if (telemetryActionTypes.has(actionType)) return next(action)
+    actionTrace.push(actionType)
     if (actionTrace.length > RECENT_REDUX_ACTIONS) actionTrace.shift()
   }
   return next(action)

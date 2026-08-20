@@ -90,17 +90,15 @@ export function Transcript({ items, context }: { items: TimelineItem[]; context:
     },
   })
   const virtualItems = virtualizer.getVirtualItems()
-  const range: [number, number] = [
-    Math.max((virtualizer.range?.startIndex ?? 0) - TRANSCRIPT_OVERSCAN_ROWS, 0),
-    Math.min(
-      (virtualizer.range?.endIndex ?? 0) + TRANSCRIPT_OVERSCAN_ROWS,
-      Math.max(visibleItems.length - 1, 0),
-    ),
-  ]
+  const rangeStart = Math.max((virtualizer.range?.startIndex ?? 0) - TRANSCRIPT_OVERSCAN_ROWS, 0)
+  const rangeEnd = Math.min(
+    (virtualizer.range?.endIndex ?? 0) + TRANSCRIPT_OVERSCAN_ROWS,
+    Math.max(visibleItems.length - 1, 0),
+  )
 
   useEffect(() => {
-    dispatch(actions.transcriptRangeSet(range))
-  }, [dispatch, range[0], range[1]])
+    dispatch(actions.transcriptRangeSet({ start: rangeStart, end: rangeEnd }))
+  }, [dispatch, rangeEnd, rangeStart])
 
   useEffect(() => {
     if (selected >= 0) virtualizer.scrollToIndex(selected, { align: 'auto' })

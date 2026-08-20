@@ -4,7 +4,7 @@ import { Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react
 import { type CommandContext, type CommandId, commandRegistry, invokeCommand } from './commands'
 import type { ScenarioDefinition } from './platform'
 import { ScenarioNavigation } from './ScenarioNavigation'
-import { selectApp, useAppSelector } from './state'
+import { selectApp, useAppSelector, type VisibleRange } from './state'
 
 export function IconCommand({
   id,
@@ -116,7 +116,7 @@ export function OverlaySurfaces({
                 <strong>{command.title}</strong>
                 <small>{command.description}</small>
               </span>
-              <kbd>{command.bindings[0] ?? '—'}</kbd>
+              <kbd>{command.bindings[0]?.label ?? '—'}</kbd>
             </button>
           ))}
         </div>
@@ -135,7 +135,7 @@ export function OverlaySurfaces({
                 <dt>{command.title}</dt>
                 <dd>
                   {command.bindings.map((binding) => (
-                    <kbd key={binding}>{binding}</kbd>
+                    <kbd key={binding.label}>{binding.label}</kbd>
                   ))}
                 </dd>
               </div>
@@ -213,13 +213,13 @@ export interface DiagnosticSnapshot {
   logicalTimeline: number
   loadedFleet: number
   logicalFleet: number
-  transcriptRange: [number, number]
-  tableRange: [number, number]
+  transcriptRange: VisibleRange
+  tableRange: VisibleRange
   queryStates: string[]
   recentActions: readonly string[]
 }
 
-// Hard safety ceiling: the inspector shows only the most recent useful action tail.
+// Tunable effective ceiling: the inspector shows a concise recent action tail.
 const VISIBLE_DIAGNOSTIC_ACTIONS = 8
 
 export function Diagnostics({
@@ -265,11 +265,15 @@ export function Diagnostics({
         </div>
         <div>
           <dt>Virtual timeline</dt>
-          <dd>{app.transcriptRange.join('–')}</dd>
+          <dd>
+            {app.transcriptRange.start}–{app.transcriptRange.end}
+          </dd>
         </div>
         <div>
           <dt>Virtual table</dt>
-          <dd>{app.tableRange.join('–')}</dd>
+          <dd>
+            {app.tableRange.start}–{app.tableRange.end}
+          </dd>
         </div>
         <div>
           <dt>Query cache</dt>
