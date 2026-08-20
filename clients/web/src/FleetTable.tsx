@@ -1,4 +1,4 @@
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table'
+import { type ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useMemo, useRef } from 'react'
 import type { FleetRow } from './platform'
@@ -10,16 +10,21 @@ const TABLE_OVERSCAN_ROWS = 8
 export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount: number }) {
   'use no memo'
   const dispatch = useAppDispatch()
-  const columns = useMemo<ColumnDef<FleetRow>[]>(() => [
-    { accessorKey: 'repository', header: 'Repository / worktree' },
-    {
-      accessorKey: 'state',
-      header: 'State',
-      cell: ({ getValue }) => <span className={`status status-${String(getValue())}`}>{String(getValue())}</span>,
-    },
-    { accessorKey: 'purpose', header: 'Current purpose' },
-    { accessorKey: 'age', header: 'Age' },
-  ], [])
+  const columns = useMemo<ColumnDef<FleetRow>[]>(
+    () => [
+      { accessorKey: 'repository', header: 'Repository / worktree' },
+      {
+        accessorKey: 'state',
+        header: 'State',
+        cell: ({ getValue }) => (
+          <span className={`status status-${String(getValue())}`}>{String(getValue())}</span>
+        ),
+      },
+      { accessorKey: 'purpose', header: 'Current purpose' },
+      { accessorKey: 'age', header: 'Age' },
+    ],
+    [],
+  )
   const table = useReactTable({ data: rows, columns, getCoreRowModel: getCoreRowModel() })
   const tableRows = table.getRowModel().rows
   const parentRef = useRef<HTMLDivElement>(null)
@@ -40,8 +45,13 @@ export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount:
   return (
     <section className="table-panel" aria-labelledby="fleet-heading">
       <header className="section-header table-heading">
-        <div><span className="eyebrow">Operator view</span><h2 id="fleet-heading">Fleet obligations</h2></div>
-        <span className="window-count">{totalCount.toLocaleString()} logical · {rows.length} loaded</span>
+        <div>
+          <span className="eyebrow">Operator view</span>
+          <h2 id="fleet-heading">Fleet obligations</h2>
+        </div>
+        <span className="window-count">
+          {totalCount.toLocaleString()} logical · {rows.length} loaded
+        </span>
       </header>
       <div className="data-table" role="table" aria-label="Fleet obligations">
         <div className="table-header" role="row">
@@ -69,10 +79,15 @@ export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount:
                   role="row"
                   key={row.original.id}
                   data-testid={`fleet-${row.original.id}`}
-                  style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)` }}
+                  style={{
+                    height: virtualRow.size,
+                    transform: `translateY(${virtualRow.start}px)`,
+                  }}
                 >
                   {row.getVisibleCells().map((cell) => (
-                    <div role="cell" key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</div>
+                    <div role="cell" key={cell.id}>
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </div>
                   ))}
                 </div>
               )

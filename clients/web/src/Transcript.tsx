@@ -1,9 +1,9 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { AlertTriangle, Bot, CheckCircle2, CircleDot, TerminalSquare } from 'lucide-react'
 import { useEffect, useMemo, useRef } from 'react'
-import { actions, useAppDispatch, useAppSelector } from './state'
-import type { DetailMode } from './state'
 import type { TimelineItem, TimelineKind } from './platform'
+import type { DetailMode } from './state'
+import { actions, useAppDispatch, useAppSelector } from './state'
 
 // Tunable effective ceiling: a small overscan prevents scroll gaps without mounting the window.
 const TRANSCRIPT_OVERSCAN_ROWS = 7
@@ -17,25 +17,37 @@ const renderers: Record<TimelineKind, (props: RendererProps) => React.JSX.Elemen
   origin: ({ item }) => (
     <>
       <Bot aria-hidden="true" />
-      <div><strong>{item.label}</strong><p>{item.body}</p></div>
+      <div>
+        <strong>{item.label}</strong>
+        <p>{item.body}</p>
+      </div>
     </>
   ),
   progress: ({ item }) => (
     <>
       <CircleDot aria-hidden="true" />
-      <div><strong>{item.label}</strong><p>{item.body}</p></div>
+      <div>
+        <strong>{item.label}</strong>
+        <p>{item.body}</p>
+      </div>
     </>
   ),
   tool: ({ item, condensed }) => (
     <>
       <TerminalSquare aria-hidden="true" />
-      <div><strong>{item.label}</strong><p>{condensed ? item.body.split(' with ')[0] : item.body}</p></div>
+      <div>
+        <strong>{item.label}</strong>
+        <p>{condensed ? item.body.split(' with ')[0] : item.body}</p>
+      </div>
     </>
   ),
   result: ({ item }) => (
     <>
       <CheckCircle2 aria-hidden="true" />
-      <div><strong>{item.label}</strong><p>{item.body}</p></div>
+      <div>
+        <strong>{item.label}</strong>
+        <p>{item.body}</p>
+      </div>
     </>
   ),
   unknown: ({ item }) => (
@@ -70,10 +82,7 @@ export function Transcript({ items }: { items: TimelineItem[] }) {
     getItemKey: (index) => visibleItems[index]?.id ?? index,
   })
   const virtualItems = virtualizer.getVirtualItems()
-  const range: [number, number] = [
-    virtualItems[0]?.index ?? 0,
-    virtualItems.at(-1)?.index ?? 0,
-  ]
+  const range: [number, number] = [virtualItems[0]?.index ?? 0, virtualItems.at(-1)?.index ?? 0]
 
   useEffect(() => {
     dispatch(actions.transcriptRangeSet(range))

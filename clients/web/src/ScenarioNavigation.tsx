@@ -31,7 +31,11 @@ export function ScenarioNavigation({ activeId }: { activeId: string }) {
   const form = useForm({ defaultValues: { query: '' } })
   return (
     <div className="scenario-navigation">
-      <div className="brand"><span className="brand-mark">SB</span><strong>Signalbox</strong><small>Scenario studio</small></div>
+      <div className="brand">
+        <span className="brand-mark">SB</span>
+        <strong>Signalbox</strong>
+        <small>Scenario studio</small>
+      </div>
       <form className="scenario-search" onSubmit={(event) => event.preventDefault()} role="search">
         <Search aria-hidden="true" />
         <form.Field name="query">

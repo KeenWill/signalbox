@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, type Page, test } from '@playwright/test'
 
 interface BrowserProblems {
   consoleErrors: string[]
@@ -39,7 +39,7 @@ test.afterEach(async ({ page }, testInfo) => {
 })
 
 const platformModifier = (page: Page) =>
-  page.evaluate(() => /Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Meta' : 'Control')
+  page.evaluate(() => (/Mac|iPhone|iPad/.test(navigator.userAgent) ? 'Meta' : 'Control'))
 
 test('keeps a six-figure timeline bounded', async ({ page }) => {
   const problems = watchBrowser(page)
@@ -49,7 +49,9 @@ test('keeps a six-figure timeline bounded', async ({ page }) => {
   await expect(timeline).toBeVisible()
   const timelineMounted = Number(await timeline.getAttribute('data-mounted-rows'))
   expect(timelineMounted).toBeLessThan(largeTimelineFixture.mountedRowsCeiling)
-  expect(await timeline.getAttribute('data-total-loaded')).toBe(String(largeTimelineFixture.loadedItems))
+  expect(await timeline.getAttribute('data-total-loaded')).toBe(
+    String(largeTimelineFixture.loadedItems),
+  )
   const diagnostics = await page.evaluate(() => window.__SIGNALBOX_DIAGNOSTICS__?.())
   expect(diagnostics?.logicalTimeline).toBe(largeTimelineFixture.logicalItems)
   expect(diagnostics?.loadedTimeline).toBe(largeTimelineFixture.loadedItems)
@@ -61,7 +63,9 @@ test('keeps a million-row fleet table bounded', async ({ page }) => {
   await page.goto(largeFleetFixture.path)
   const rows = page.getByRole('rowgroup')
   await expect(rows).toBeVisible()
-  expect(Number(await rows.getAttribute('data-mounted-rows'))).toBeLessThan(largeFleetFixture.mountedRowsCeiling)
+  expect(Number(await rows.getAttribute('data-mounted-rows'))).toBeLessThan(
+    largeFleetFixture.mountedRowsCeiling,
+  )
   expect(await rows.getAttribute('data-total-loaded')).toBe(String(largeFleetFixture.loadedRows))
   expect(await rows.getAttribute('data-logical-total')).toBe(String(largeFleetFixture.logicalRows))
 
