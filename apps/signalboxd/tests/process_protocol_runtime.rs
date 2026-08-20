@@ -69,8 +69,8 @@ use signalbox_persistence::{
 };
 use signalbox_process_protocol::{
     BlobChunk, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame,
-    ClientRequest, CommandId, ConversationImportFormat, ConversationImportSource,
-    ConversationOriginFilter, ConversationSummary, CurrentModelCallState,
+    ClientRequest, CommandId, CommissionedSessionFence, ConversationImportFormat,
+    ConversationImportSource, ConversationOriginFilter, ConversationSummary, CurrentModelCallState,
     DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail, FastMode,
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
     ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
@@ -1298,6 +1298,86 @@ async fn read_goal_messages(
             return Ok(messages);
         }
     }
+}
+
+/// One commission request atomically creates a template session under a
+/// recorded authority fence with its goal and first input; the same command
+/// identity replays to the committed session, and the same identity naming a
+/// different fence is a conflicting reuse.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let commission_command = command()?;
+    let statement = String::from("Address the review findings on pull request 41.");
+    let fence = CommissionedSessionFence::PullRequest {
+        repository: String::from("sample-user/sample-repository"),
+        pull_request: CanonicalU64::new(41),
+        head_sha: String::from("1111111111111111111111111111111111111111"),
+        head_repository: String::from("sample-user/sample-repository"),
+        head_branch: String::from("agent/sample-feature"),
+        base_branch: String::from("main"),
+    };
+    let request = ClientRequest::CommissionSession {
+        command_id: commission_command,
+        template_name: String::from("merge-forward"),
+        fence: fence.clone(),
+        statement: statement.clone(),
+        content: InputContent::new(String::from("Respond to the open review threads.")),
+    };
+
+    connection.request(2, request.clone()).await?;
+    let commissioned = response_within(&mut connection).await?.message().clone();
+    let ServerMessage::SessionCommissioned {
+        session_id,
+        dispatch_id,
+    } = commissioned
+    else {
+        panic!("unexpected commission response: {commissioned:?}");
+    };
+
+    connection.request(3, request).await?;
+    let replayed = response_within(&mut connection).await?.message().clone();
+    assert_eq!(
+        replayed,
+        ServerMessage::SessionCommissioned {
+            session_id,
+            dispatch_id,
+        }
+    );
+
+    connection
+        .request(
+            4,
+            ClientRequest::CommissionSession {
+                command_id: commission_command,
+                template_name: String::from("merge-forward"),
+                fence: CommissionedSessionFence::Branch {
+                    repository: String::from("sample-user/sample-repository"),
+                    branch: String::from("main"),
+                },
+                statement: statement.clone(),
+                content: InputContent::new(String::from("Respond to the open review threads.")),
+            },
+        )
+        .await?;
+    let conflicting = response_within(&mut connection).await?.message().clone();
+    let ServerMessage::Error { code, .. } = conflicting else {
+        panic!("a conflicting commission reuse must be refused: {conflicting:?}");
+    };
+    assert_eq!(code, ErrorCode::ConflictingReuse);
+
+    let history = read_goal_messages(&mut connection, 5, session_id).await?;
+    assert_eq!(
+        history.first(),
+        Some(&ServerMessage::GoalHistoryStart {
+            session_id,
+            current_generation: CanonicalU64::new(1),
+            current_statement: statement,
+        })
+    );
+    Ok(())
 }
 
 /// INV-048: process goal commands preserve immutable supersession lineage and
