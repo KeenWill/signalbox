@@ -1,7 +1,6 @@
----
-name: signalbox-web-browser-qa
-description: Verify Signalbox web changes with deterministic scenarios, Playwright, accessibility-first locators, structured diagnostics, screenshots, and failure traces.
----
+______________________________________________________________________
+
+## name: signalbox-web-browser-qa description: Verify Signalbox web changes with deterministic scenarios, Playwright, accessibility-first locators, structured diagnostics, screenshots, and failure traces.
 
 # Signalbox web browser QA
 
@@ -28,8 +27,8 @@ Prefer scenarios such as:
 ## Playwright workflow
 
 1. Open the narrowest deterministic scenario reproducing the behavior.
-2. Inspect semantic roles, names, text, focus, console, page errors, network, and
-   the Signalbox diagnostic summary.
+2. Inspect semantic roles, names, text, focus, console, page errors, network,
+   and the Signalbox diagnostic summary.
 3. Reproduce with user-facing locators before using test IDs.
 4. Make the smallest owning-layer correction.
 5. Run the focused test, then the relevant scenario group.

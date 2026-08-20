@@ -1,8 +1,8 @@
 # Signalbox web campaign
 
 > **Non-authoritative planning scratchpad — do not review for consistency.**
-> This file decides nothing and is not a statement of record. Owner direction
-> and the campaign outcome live in GitHub issue #988 and its child issues.
+> This file decides nothing and is not a statement of record. The approved
+> direction and campaign outcome live in GitHub issue #988 and its child issues.
 > Cross-crate, persistence, and wire behavior belongs in the implementing
 > stack's owning living specification. This file exists only to make launch
 > order, collisions, and evidence expectations easy for coordinating agents.
@@ -12,17 +12,17 @@ bounded Goal-mode tracks rather than one open-ended run.
 
 ## Track map
 
-| Track | Issue | Starts when | Primary ownership |
-| --- | --- | --- | --- |
-| Client platform | #989 | immediately | `clients/web/**`, web CI and evidence |
-| HTTP contract | #990 | immediately | browser transport and generated DTOs |
-| Session projection | #991 | #990 contract slice exists | session windows, detail, live follow |
-| Fleet and repo watch | #992 | immediately where current stacks permit | monitor and operator read models |
-| Blobs and derivations | #993 | #990 plus blob stack seams | range delivery, capabilities, previews |
-| Search and usage | #994 | stable timeline addressing exists | lexical search and accounting reads |
-| Imports, reviews, runners | #995 | #990 plus owning server stacks | bounded discovery and inspection |
-| Product integration | #996 | parent slices are usable | routes, workflows, production adapters |
-| Dogfood and hardening | #997 | #996 is integrated | profiling, real deployment, final proof |
+| Track                     | Issue | Starts when                             | Primary ownership                       |
+| ------------------------- | ----- | --------------------------------------- | --------------------------------------- |
+| Client platform           | #989  | immediately                             | `clients/web/**`, web CI and evidence   |
+| HTTP contract             | #990  | immediately                             | browser transport and generated DTOs    |
+| Session projection        | #991  | #990 contract slice exists              | session windows, detail, live follow    |
+| Fleet and repo watch      | #992  | immediately where current stacks permit | monitor and operator read models        |
+| Blobs and derivations     | #993  | #990 plus blob stack seams              | range delivery, capabilities, previews  |
+| Search and usage          | #994  | stable timeline addressing exists       | lexical search and accounting reads     |
+| Imports, reviews, runners | #995  | #990 plus owning server stacks          | bounded discovery and inspection        |
+| Product integration       | #996  | parent slices are usable                | routes, workflows, production adapters  |
+| Dogfood and hardening     | #997  | #996 is integrated                      | profiling, real deployment, final proof |
 
 ## Dependency shape
 
@@ -84,12 +84,12 @@ Issue #992 owns the product questions currently answered by personal dogfood
 queries. The production application must expose explicit daemon facts for
 repository ingestion, webhook projection, held and queued dispatch work, PR
 convergence, sessions acting on each PR, blocked goals, judge outcomes, and
-last-observed/actioned/dispatched/settled events. It must not preserve direct SQL
-or inference shortcuts as product semantics.
+last-observed/actioned/dispatched/settled events. It must not preserve direct
+SQL or inference shortcuts as product semantics.
 
 ## Review boundary
 
 This planning file is not a wire contract, persistence contract, API schema, or
 visual specification. Review it only for a usable dependency map and faithful
-links to the owner-approved issues. Exact behavior is reviewed with the code
-that implements it.
+links to the approved issues. Exact behavior is reviewed with the code that
+implements it.

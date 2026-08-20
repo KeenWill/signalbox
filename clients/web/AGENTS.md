@@ -1,9 +1,8 @@
 # Signalbox web agent guidance
 
-This file governs all work under `clients/web/`. The repository-wide
-`AGENTS.md` remains authoritative. Read GitHub issue #988, the active child
-issue, and the relevant skills under `.agents/skills/` before changing this
-client.
+This file governs all work under `clients/web/`. The repository-wide `AGENTS.md`
+remains authoritative. Read GitHub issue #988, the active child issue, and the
+relevant skills under `.agents/skills/` before changing this client.
 
 ## Architecture
 
@@ -35,8 +34,8 @@ client.
 - Consume server windows and stable logical cursors. Never use array offsets as
   durable history addresses.
 - Load small histories greedily only through the explicit client resource
-  policy. Cancellation or changing network conditions must fall back to the
-  same incremental model without changing semantics.
+  policy. Cancellation or changing network conditions must fall back to the same
+  incremental model without changing semantics.
 - Batch ephemeral provider display updates. Never drop, reorder, or debounce
   durable Signalbox events.
 - Keep Redux DevTools and custom traces bounded and redact or summarize large
@@ -49,8 +48,8 @@ client.
   excessive rounding, decorative gradients, and wasted space.
 - Conversation remains the primary surface. Focus mode can become quiet;
   workbench mode may expose dense live tables and inspectors.
-- Turns organize data but do not force expanded content into a large nested
-  box. Use gutter, rail, typography, and compact boundaries.
+- Turns organize data but do not force expanded content into a large nested box.
+  Use gutter, rail, typography, and compact boundaries.
 - `full`, `condensed`, and `results` are client presentation modes. Individual
   turns and items expand independently.
 - Every important action belongs to the central command registry. Menus,
@@ -71,8 +70,8 @@ identifiers only where semantics cannot identify one exact object.
 
 Capture pinned Chromium screenshots for visual changes. Major responsive paths
 also require mobile evidence. Assert no unexpected console message or page
-error. Failure traces must include the bounded Signalbox diagnostic snapshot
-and recent application actions where relevant.
+error. Failure traces must include the bounded Signalbox diagnostic snapshot and
+recent application actions where relevant.
 
 Visual review checks hierarchy, density, alignment, typography, information
 priority, interaction states, light/dark behavior, and responsive composition;
@@ -80,7 +79,7 @@ it does not accept a screen merely because all controls are present.
 
 ## Dependencies
 
-Issue #988 records the owner-approved initial React, Vite, TanStack, Redux,
+Issue #988 records the approved initial React, Vite, TanStack, Redux,
 shadcn/Radix, Tailwind, Lucide, and Playwright stack. Explain focused dependency
 choices in the pull-request description. Ask before adding another large or
 architecturally constraining dependency.

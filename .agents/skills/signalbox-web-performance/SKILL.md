@@ -1,7 +1,6 @@
----
-name: signalbox-web-performance
-description: Design and verify bounded Signalbox web behavior for huge transcripts, tables, artifacts, streaming updates, memory, network windows, and virtualized rendering.
----
+______________________________________________________________________
+
+## name: signalbox-web-performance description: Design and verify bounded Signalbox web behavior for huge transcripts, tables, artifacts, streaming updates, memory, network windows, and virtualized rendering.
 
 # Signalbox web performance
 

@@ -1,7 +1,6 @@
----
-name: signalbox-web-design
-description: Design and implement Signalbox web surfaces as dense, professional, keyboard-first expert-workstation interfaces with responsive focus and workbench layouts.
----
+______________________________________________________________________
+
+## name: signalbox-web-design description: Design and implement Signalbox web surfaces as dense, professional, keyboard-first expert-workstation interfaces with responsive focus and workbench layouts.
 
 # Signalbox web design
 
@@ -67,8 +66,9 @@ Treat turns as information groups, not permanent visual boxes.
 
 Prefer one dense virtualized table over a grid of summary cards when rows answer
 the operator's question. Use compact status markers, aligned numbers, short
-identities, exact hover/detail affordances, and keyboard selection. Keep sorting,
-filtering, and visible columns discoverable without consuming excessive space.
+identities, exact hover/detail affordances, and keyboard selection. Keep
+sorting, filtering, and visible columns discoverable without consuming excessive
+space.
 
 ## Components
 

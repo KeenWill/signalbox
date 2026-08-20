@@ -1,7 +1,6 @@
----
-name: signalbox-web-keyboard
-description: Add Signalbox commands, modal Vim-inspired navigation, focus behavior, hotkeys, and command-palette integration without bypassing accessibility or text editing.
----
+______________________________________________________________________
+
+## name: signalbox-web-keyboard description: Add Signalbox commands, modal Vim-inspired navigation, focus behavior, hotkeys, and command-palette integration without bypassing accessibility or text editing.
 
 # Signalbox web keyboard interaction
 
@@ -57,7 +56,8 @@ permit later remapping even when the first UI ships fixed defaults.
 - Every navigable surface has one clear focus entry and selected item.
 - Selection and DOM focus are related deliberately, not accidentally.
 - Virtualized items restore focus or selection by stable domain identity.
-- Opening an inspector, sheet, dialog, or route records a sensible return target.
+- Opening an inspector, sheet, dialog, or route records a sensible return
+  target.
 - Focus remains visible in compact and dark layouts.
 - Pointer and touch operation update the same command/selection state.
 

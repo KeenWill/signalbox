@@ -1,7 +1,6 @@
----
-name: signalbox-web-protocol
-description: Preserve Signalbox authority, synchronization, command identity, typed boundaries, and fail-closed semantics when adding browser HTTP contracts and client projections.
----
+______________________________________________________________________
+
+## name: signalbox-web-protocol description: Preserve Signalbox authority, synchronization, command identity, typed boundaries, and fail-closed semantics when adding browser HTTP contracts and client projections.
 
 # Signalbox web protocol
 
@@ -71,6 +70,6 @@ Preserve Signalbox command identity and typed ambiguity handling.
 ## Review
 
 Block changes that invent server facts, weaken command replay, conflate durable
-and ephemeral state, expose secrets or private storage detail, silently truncate,
-or require unbounded client materialization. Exact new semantics belong in the
-implementing stack's owning living specification.
+and ephemeral state, expose secrets or private storage detail, silently
+truncate, or require unbounded client materialization. Exact new semantics
+belong in the implementing stack's owning living specification.
