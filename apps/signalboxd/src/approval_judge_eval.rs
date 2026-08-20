@@ -9,8 +9,8 @@
 use std::{error::Error, fmt, num::NonZeroU64};
 
 use signalbox_application::{
-    ApprovalJudgeAuthorization, ApprovalJudgeDispatchAuthority, ApprovalJudgePullRequestAuthority,
-    ApprovalJudgePullRequestAuthorityInput,
+    ApprovalJudgeAuthorization, ApprovalJudgeDispatchAuthority, ApprovalJudgeDispatchProvenance,
+    ApprovalJudgePullRequestAuthority, ApprovalJudgePullRequestAuthorityInput,
 };
 use signalbox_domain::{
     BranchName, CommitSha, DelegateApprovalRecommendation, DirectModelSelection, GoalStatement,
@@ -281,8 +281,9 @@ fn eval_session_context(
     // has a durable dispatch behind it to name.
     let mut identity_material = case.name.as_bytes().to_vec();
     identity_material.extend_from_slice(b"\0dispatch");
-    let dispatch =
-        RepoWatchDispatchId::from_uuid(production_shaped_uuid(fnv1a_128(&identity_material)));
+    let dispatch = ApprovalJudgeDispatchProvenance::RepoWatch(RepoWatchDispatchId::from_uuid(
+        production_shaped_uuid(fnv1a_128(&identity_material)),
+    ));
     let input = ApprovalJudgePullRequestAuthorityInput {
         dispatch,
         repository: admitted(

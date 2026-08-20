@@ -1252,7 +1252,7 @@ fn render_dispatch_authority(authority: &ApprovalJudgeDispatchAuthority) -> Stri
     match authority {
         ApprovalJudgeDispatchAuthority::PullRequest(authority) => serde_json::json!({
             "type": "pull_request",
-            "dispatch_id": authority.dispatch().as_uuid().to_string(),
+            "dispatch_id": authority.dispatch().into_uuid().to_string(),
             "repository": authority.repository().as_str(),
             "pull_request": authority.pull_request().get(),
             "head_sha": authority.head_sha().as_str(),
@@ -1263,7 +1263,7 @@ fn render_dispatch_authority(authority: &ApprovalJudgeDispatchAuthority) -> Stri
         .to_string(),
         ApprovalJudgeDispatchAuthority::Branch(authority) => serde_json::json!({
             "type": "branch",
-            "dispatch_id": authority.dispatch().as_uuid().to_string(),
+            "dispatch_id": authority.dispatch().into_uuid().to_string(),
             "repository": authority.repository().as_str(),
             "branch": authority.branch().as_str(),
         })
@@ -2470,9 +2470,11 @@ mod tests {
         const FIXTURE_DISPATCH_ID: u128 = 4;
         let fixture =
             ApprovalJudgePullRequestAuthority::new(ApprovalJudgePullRequestAuthorityInput {
-                dispatch: signalbox_domain::RepoWatchDispatchId::from_uuid(Uuid::from_u128(
-                    FIXTURE_DISPATCH_ID,
-                )),
+                dispatch: signalbox_application::ApprovalJudgeDispatchProvenance::RepoWatch(
+                    signalbox_domain::RepoWatchDispatchId::from_uuid(Uuid::from_u128(
+                        FIXTURE_DISPATCH_ID,
+                    )),
+                ),
                 repository: repository_slug("namespace/repo"),
                 pull_request: signalbox_domain::PullRequestNumber::new(std::num::NonZeroU64::MIN),
                 head_sha: signalbox_domain::CommitSha::try_new(String::from(
@@ -2507,9 +2509,11 @@ mod tests {
     fn branch_dispatch_authority_reaches_the_judge_as_structured_evidence() {
         const FIXTURE_DISPATCH_ID: u128 = 5;
         let fixture = ApprovalJudgeBranchAuthority::new(ApprovalJudgeBranchAuthorityInput {
-            dispatch: signalbox_domain::RepoWatchDispatchId::from_uuid(Uuid::from_u128(
-                FIXTURE_DISPATCH_ID,
-            )),
+            dispatch: signalbox_application::ApprovalJudgeDispatchProvenance::RepoWatch(
+                signalbox_domain::RepoWatchDispatchId::from_uuid(Uuid::from_u128(
+                    FIXTURE_DISPATCH_ID,
+                )),
+            ),
             repository: repository_slug("namespace/repo"),
             branch: branch_name("main"),
         });

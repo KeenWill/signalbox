@@ -8,19 +8,21 @@ use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use signalbox_application::{
     ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
-    ApprovalJudgePullRequestAuthority, AuthorizeModelCallOutcome, ModelCallCredentialReference,
+    ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority, AuthorizeModelCallOutcome,
+    CommissionDispatchRequest, CommissionedDispatchFence, ModelCallCredentialReference,
     RepoWatchBranchHead, RepoWatchDispatchService, RepoWatchDispatchTransaction,
     RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
     RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
     RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
     RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome, StartEligibleTurnService,
-    UuidV7RepoWatchDispatchIdGenerator, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7CommissionedDispatchIdGenerator, UuidV7RepoWatchDispatchIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
     AcceptedInputId, ActiveTurnPhase, AssistantResponsePart, BranchName,
-    CancelledModelCallTurnIdentities, CheckConclusion, CommitSha, ContextFrontierId,
-    DangerousToolAutoApproval, DelegateApprovalRecommendation, DeliveryRequest,
+    CancelledModelCallTurnIdentities, CheckConclusion, CommissionedDispatchId, CommitSha,
+    ContextFrontierId, DangerousToolAutoApproval, DelegateApprovalRecommendation, DeliveryRequest,
     DescendantTerminationScope, DirectModelSelection, DurableCommandId,
     FailedModelCallTurnIdentities, GitHubObjectId, GoalCommandResult, GoalModelProvenance,
     GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction,
@@ -46,6 +48,7 @@ use signalbox_persistence::{
         ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, CompleteApprovalJudgeOutcome,
         PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
     },
+    commissioned_dispatch::{CommissionDispatchOutcome, PostgresCommissionedDispatchStore},
     disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
@@ -1321,10 +1324,28 @@ async fn checkpoint_dispatched_delegated_approval_for(
     ),
     Box<dyn Error>,
 > {
-    let session = fixture.session(0);
+    checkpoint_delegated_approval_at(&fixture.pool, fixture.session(0), seed, proposals).await
+}
+
+/// Parks the given session's already-queued first turn on a delegated
+/// approval, however the session was dispatched.
+async fn checkpoint_delegated_approval_at(
+    pool: &PgPool,
+    session: SessionId,
+    seed: u128,
+    proposals: &[(&str, &str)],
+) -> Result<
+    (
+        PostgresModelCallRepository,
+        PreparedApprovalJudge,
+        TurnId,
+        Vec<ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
     let mut activation = StartEligibleTurnService::new(
         UuidV7StartEligibleTurnIdGenerator,
-        StartEligibleTurnRepository::new(fixture.pool.clone()),
+        StartEligibleTurnRepository::new(pool.clone()),
     );
     let StartEligibleTurnOutcome::Activated(activated) = activation.execute(session).await? else {
         panic!("the dispatched work turn activates")
@@ -1333,7 +1354,7 @@ async fn checkpoint_dispatched_delegated_approval_for(
     drop(activated);
 
     let repository = PostgresModelCallRepository::new(
-        fixture.pool.clone(),
+        pool.clone(),
         model_targets(),
         model_credential_reference(),
     );
@@ -2271,7 +2292,10 @@ async fn headless_approval_escalation_releases_rearms_and_redispatches()
         evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?,
     );
 
-    assert_eq!(authority.dispatch(), fixture.dispatch_id);
+    assert_eq!(
+        authority.dispatch(),
+        ApprovalJudgeDispatchProvenance::RepoWatch(fixture.dispatch_id)
+    );
     assert_eq!(authority.repository(), &fixture.repository);
     assert_eq!(authority.pull_request(), expected_context.number());
     assert_eq!(authority.head_sha(), expected_context.head_sha());
@@ -5817,5 +5841,309 @@ async fn rule_deactivation_settles_its_outstanding_dispatch_obligation()
 
     assert_eq!(outstanding, 0);
     assert_eq!(settlement, "deactivated");
+    Ok(())
+}
+
+// --- Operator-commissioned dispatch: fence consumption and escalation ---
+
+const COMMISSION_COMMAND_ID: u128 = 0x60_100;
+const COMMISSION_TEMPLATE: &str = "review-response";
+const COMMISSION_STATEMENT: &str =
+    "Address the review findings on pull request 41 and push fixes to its head branch.";
+const COMMISSION_CONTEXT: &str = "Respond to the open review threads.";
+
+struct CommissionedFixture {
+    _container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    store: PostgresCommissionedDispatchStore,
+    dispatch_id: CommissionedDispatchId,
+    session: SessionId,
+}
+
+fn commissioned_fence() -> Result<CommissionedDispatchFence, Box<dyn Error>> {
+    Ok(CommissionedDispatchFence::PullRequest {
+        repository: repository()?,
+        pull_request: PullRequestNumber::new(BOTTOM_PULL_REQUEST_NUMBER.try_into()?),
+        head_sha: CommitSha::try_new(FIRST_HEAD.to_owned())?,
+        head_repository: RepositorySlug::try_new(HEAD_REPOSITORY.to_owned())?,
+        head_branch: BranchName::try_new(HEAD_BRANCH.to_owned())?,
+        base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+    })
+}
+
+fn commission_request_with_fence(
+    command: u128,
+    fence: CommissionedDispatchFence,
+) -> Result<CommissionDispatchRequest, Box<dyn Error>> {
+    Ok(CommissionDispatchRequest::try_new(
+        DurableCommandId::from_uuid(Uuid::from_u128(command)),
+        SessionTemplateName::try_new(COMMISSION_TEMPLATE.to_owned())?,
+        fence,
+        GoalStatement::try_new(COMMISSION_STATEMENT.to_owned())?,
+        UserContent::try_text(COMMISSION_CONTEXT.to_owned())
+            .expect("the fixture context is admitted"),
+    )?)
+}
+
+/// The exact template shape the dispatch fixtures resolve, under the
+/// commissioned template name.
+fn commissioned_template() -> (SessionTemplateProvenance, SessionConfigurationDefaults) {
+    (
+        SessionTemplateProvenance::new(
+            SessionTemplateName::try_new(COMMISSION_TEMPLATE.to_owned())
+                .expect("the fixture template name is admitted"),
+            SessionTemplateContentDigest::from_bytes([7; 32]),
+        ),
+        SessionConfigurationDefaults::complete(
+            ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(
+                TEMPLATE_MODEL_SELECTION_ID,
+            ))),
+            DangerousToolAutoApproval::Disabled,
+            Some(
+                SessionSystemPrompt::try_new("Respond to review findings.".to_owned())
+                    .expect("the fixture prompt is admitted"),
+            ),
+        ),
+    )
+}
+
+async fn commissioned_fixture() -> Result<CommissionedFixture, Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let store = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
+    let (provenance, defaults) = commissioned_template();
+    let prepared = commission_request_with_fence(COMMISSION_COMMAND_ID, commissioned_fence()?)?
+        .prepare(
+            &mut UuidV7CommissionedDispatchIdGenerator,
+            provenance,
+            defaults,
+        )?;
+    let CommissionDispatchOutcome::Dispatched { dispatch, session } =
+        store.commission(prepared, |_| None).await?
+    else {
+        panic!("the fixture commission dispatches fresh")
+    };
+    Ok(CommissionedFixture {
+        _container: container,
+        pool,
+        store,
+        dispatch_id: dispatch,
+        session,
+    })
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct CommissionedEscalationVisibility {
+    lifecycle_state: String,
+    terminal_disposition: Option<String>,
+    goal_event_kind: String,
+    blocked_reason: Option<String>,
+    need: Option<String>,
+    rationale: String,
+}
+
+/// A commissioned session's first turn is judged under the exact fence its
+/// commission recorded, through the same authority loading a repository-watch
+/// dispatch feeds, and an unattended escalation terminalizes the turn with a
+/// commissioned audit row instead of pooling forever in the approval wait.
+/// The exact replay is stable and a mismatched replay identity is refused.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_commissioned_escalation_terminalizes_under_its_recorded_fence()
+-> Result<(), Box<dyn Error>> {
+    let fixture = commissioned_fixture().await?;
+    let seed = 0x61_240;
+    let (model_repository, prepared, turn, requests) = checkpoint_delegated_approval_at(
+        &fixture.pool,
+        fixture.session,
+        seed,
+        &[("exec", r#"{"cmd":"git fetch origin main"}"#)],
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let authority = prepared_pull_request_authority(&prepared);
+    assert_eq!(
+        authority.dispatch(),
+        ApprovalJudgeDispatchProvenance::Commissioned(fixture.dispatch_id)
+    );
+    assert_eq!(authority.repository(), &repository()?);
+    assert_eq!(authority.pull_request().get(), BOTTOM_PULL_REQUEST_NUMBER);
+    assert_eq!(authority.head_sha().as_str(), FIRST_HEAD);
+    assert_eq!(authority.head_repository().as_str(), HEAD_REPOSITORY);
+    assert_eq!(authority.head_branch().as_str(), HEAD_BRANCH);
+    assert_eq!(authority.base_branch().as_str(), BASE_BRANCH);
+
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable commissioned fence",
+    ))?;
+    let identities = ApprovalJudgeCompletionIdentities::new(
+        TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+    );
+    let closed_result = |closed_request: ToolRequestId| {
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+            closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+        ))
+    };
+
+    let outcome = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            identities,
+            closed_result,
+        )
+        .await?;
+    assert_eq!(
+        outcome,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+
+    let audit: CommissionedEscalationVisibility = sqlx::query_as(
+        "SELECT lifecycle.state_kind AS lifecycle_state,
+                lifecycle.terminal_disposition_kind AS terminal_disposition,
+                latest_goal.event_kind AS goal_event_kind,
+                latest_goal.blocked_reason,
+                latest_goal.need,
+                audit.rationale
+           FROM commissioned_dispatch_headless_approval_escalation_audit AS audit
+           JOIN turn_lifecycle AS lifecycle
+             ON lifecycle.session_id = audit.session_id
+            AND lifecycle.turn_id = audit.turn_id
+           JOIN LATERAL (
+                SELECT event_kind, blocked_reason, need
+                  FROM goal_event
+                 WHERE session_id = audit.session_id
+                 ORDER BY event_ordinal DESC
+                 LIMIT 1
+           ) AS latest_goal ON true
+          WHERE audit.model_call_id = $1",
+    )
+    .bind(prepared.call().as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(audit.lifecycle_state, "terminal");
+    assert_eq!(audit.terminal_disposition.as_deref(), Some("failed"));
+    assert_eq!(audit.goal_event_kind, "blocked");
+    assert_eq!(audit.blocked_reason.as_deref(), Some("execution_failure"));
+    assert!(
+        audit
+            .need
+            .as_deref()
+            .is_some_and(|need| need.contains("commissioned directly")),
+        "the commissioned block names its own repair, not a repository-watch redispatch"
+    );
+    assert_eq!(audit.rationale, rationale.as_str());
+    let audited_dispatch: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM commissioned_dispatch_headless_approval_escalation
+             WHERE dispatch_id = $1 AND session_id = $2
+        )",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .bind(fixture.session.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(audited_dispatch);
+
+    let replay = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            identities,
+            closed_result,
+        )
+        .await?;
+    assert_eq!(
+        replay,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    let mismatched = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 30)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            closed_result,
+        )
+        .await;
+    assert!(matches!(
+        mismatched,
+        Err(ApprovalJudgeRepositoryError::Corruption(
+            ApprovalJudgeCorruption::Inconsistent("completed judge replay")
+        ))
+    ));
+    assert_eq!(prepared.request().id(), *request);
+    assert_eq!(turn, prepared.request().turn());
+    Ok(())
+}
+
+/// One commission commits one session, one queued goal-adopted turn, and one
+/// fence row; the same command identity replays to the committed session, and
+/// the same identity naming a different fence is a conflicting reuse.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box<dyn Error>> {
+    let fixture = commissioned_fixture().await?;
+
+    let commissioned_turn: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM goal_turn WHERE session_id = $1 AND goal_generation = 1
+        )",
+    )
+    .bind(fixture.session.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(
+        commissioned_turn,
+        "the commission adopts its reserved turn as the goal's first turn"
+    );
+
+    let (provenance, defaults) = commissioned_template();
+    let replay = commission_request_with_fence(COMMISSION_COMMAND_ID, commissioned_fence()?)?
+        .prepare(
+            &mut UuidV7CommissionedDispatchIdGenerator,
+            provenance,
+            defaults,
+        )?;
+    assert_eq!(
+        fixture.store.commission(replay, |_| None).await?,
+        CommissionDispatchOutcome::Replayed {
+            dispatch: fixture.dispatch_id,
+            session: fixture.session,
+        }
+    );
+
+    let (provenance, defaults) = commissioned_template();
+    let conflicting = commission_request_with_fence(
+        COMMISSION_COMMAND_ID,
+        CommissionedDispatchFence::Branch {
+            repository: repository()?,
+            branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+        },
+    )?
+    .prepare(
+        &mut UuidV7CommissionedDispatchIdGenerator,
+        provenance,
+        defaults,
+    )?;
+    assert_eq!(
+        fixture.store.commission(conflicting, |_| None).await?,
+        CommissionDispatchOutcome::ConflictingReuse
+    );
     Ok(())
 }
