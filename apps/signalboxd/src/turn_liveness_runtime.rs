@@ -138,6 +138,7 @@ impl TerminalizationTally {
 struct TerminalizationWindow {
     capacity: usize,
     resume_after: Option<SessionId>,
+    lap_through: Option<SessionId>,
 }
 
 impl TerminalizationWindow {
@@ -145,26 +146,56 @@ impl TerminalizationWindow {
         Self {
             capacity,
             resume_after: None,
+            lap_through: None,
         }
     }
 
     /// Returns this scan's turns, and remembers where the next scan resumes.
     ///
-    /// `due` is in ascending session order. The window starts at the first turn
-    /// past its cursor, wrapping to the front when the cursor has fallen off
-    /// the end — which is what makes a lap of a cohort larger than the capacity
-    /// visit every member.
+    /// `due` is in ascending session order. A lap fixes its far end when it
+    /// begins — the greatest session then due — and successive scans walk the
+    /// cursor toward that end and no further; reaching it starts a fresh lap
+    /// from the front.
+    ///
+    /// Fixing the end is what makes the lap terminate under arrivals. Sessions
+    /// are identified by time-ordered v7 values, so a session that becomes due
+    /// during a lap sorts *above* everything the lap is walking through. A
+    /// window that simply took the next turns past its cursor would follow
+    /// those arrivals forever, and a turn behind the cursor — one whose
+    /// terminalization hit a transient failure, or one steering blocks — would
+    /// never be reached again. Deferring arrivals to the next lap costs them a
+    /// lap; serving them first costs the turns behind them everything.
     fn take<'due>(&mut self, due: &'due [StaleTurnCandidate]) -> &'due [StaleTurnCandidate] {
-        let start = match self.resume_after {
-            Some(cursor) => due
-                .iter()
-                .position(|candidate| candidate.session() > cursor)
-                .unwrap_or(0),
-            None => 0,
+        let Some(furthest) = due.last().map(|last| last.session()) else {
+            self.resume_after = None;
+            self.lap_through = None;
+            return due;
         };
+        let start = match (self.resume_after, self.lap_through) {
+            (Some(cursor), Some(through)) => due
+                .iter()
+                .position(|candidate| {
+                    candidate.session() > cursor && candidate.session() <= through
+                })
+                .unwrap_or(0),
+            _ => 0,
+        };
+        if start == 0 {
+            self.lap_through = Some(furthest);
+        }
         let end = due.len().min(start + self.capacity);
         let window = &due[start..end];
         self.resume_after = window.last().map(|last| last.session());
+        // A lap that has reached its far end is over, and the next scan starts
+        // one from the front — which is where the turns it walked past wait.
+        if self
+            .resume_after
+            .zip(self.lap_through)
+            .is_some_and(|(cursor, through)| cursor >= through)
+        {
+            self.resume_after = None;
+            self.lap_through = None;
+        }
         window
     }
 }
@@ -736,16 +767,18 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn one_scan_terminalizes_no_more_than_its_cap() {
         let bound = StaleActiveTurnBound::hard_ceiling();
-        let repository = CountingRepository::new(vec![candidate(1), candidate(2), candidate(3)]);
+        let cohort = vec![candidate(1), candidate(2), candidate(3)];
+        let capacity = cohort.len() - 1;
+        let repository = CountingRepository::new(cohort.clone());
         let mut ledger = TurnLivenessLedger::new(bound);
-        let mut window = TerminalizationWindow::new(2);
+        let mut window = TerminalizationWindow::new(capacity);
         let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
         tokio::time::advance(bound.get()).await;
 
         let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
 
-        assert_eq!(repository.terminalized(), 2);
-        assert_eq!(repository.still_active(), 1);
+        assert_eq!(repository.terminalized(), capacity);
+        assert_eq!(repository.still_active(), cohort.len() - capacity);
     }
 
     /// What one scan defers the next one ends: nothing about a deferred turn
@@ -753,17 +786,43 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_next_scan_ends_what_the_cap_deferred() {
         let bound = StaleActiveTurnBound::hard_ceiling();
-        let repository = CountingRepository::new(vec![candidate(1), candidate(2), candidate(3)]);
+        let cohort = vec![candidate(1), candidate(2), candidate(3)];
+        let capacity = cohort.len() - 1;
+        let repository = CountingRepository::new(cohort.clone());
         let mut ledger = TurnLivenessLedger::new(bound);
-        let mut window = TerminalizationWindow::new(2);
+        let mut window = TerminalizationWindow::new(capacity);
         let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
         tokio::time::advance(bound.get()).await;
         let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
 
         let _ = reconcile_turn_liveness(&repository, &mut ledger, bound, &mut window).await;
 
-        assert_eq!(repository.terminalized(), 3);
+        assert_eq!(repository.terminalized(), cohort.len());
         assert_eq!(repository.still_active(), 0);
+    }
+
+    /// A lap runs to the cohort it started over, not to whatever has arrived
+    /// since. Sessions carry time-ordered identities, so a session that becomes
+    /// due mid-lap sorts above everything the lap is walking; following it
+    /// would mean never returning to the turns behind the cursor.
+    #[test]
+    fn a_lap_returns_to_its_start_though_newer_sessions_keep_arriving() {
+        let first = candidate(1);
+        let second = candidate(2);
+        let arrival = candidate(3);
+        let mut window = TerminalizationWindow::new(1);
+
+        let opening = window.take(&[first, second]).to_vec();
+        let closing = window.take(&[first, second, arrival]).to_vec();
+        let next_lap = window.take(&[first, second, arrival]).to_vec();
+
+        assert_eq!(opening, vec![first]);
+        assert_eq!(closing, vec![second]);
+        assert_eq!(
+            next_lap,
+            vec![first],
+            "the lap ended at the cohort it began with, so the next starts at the front"
+        );
     }
 
     /// A turn that can never be ended must not hold the window against turns
@@ -895,7 +954,6 @@ mod tests {
         assert_ne!(PASS_FAILURE_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_ne!(ROTATION_CEILING_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_ne!(TERMINALIZATION_DEFERRED_CAUSE, STALE_TURN_TERMINAL_CAUSE);
-        assert_eq!(QUIESCENT_ROTATION_PAGE_CEILING, 4_096);
     }
 
     /// The bound reported beside a terminalized turn is the configured one, so

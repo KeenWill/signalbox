@@ -387,25 +387,38 @@ async fn read_quiescent_active_turns(
         let session: Uuid = row.try_get("session_id")?;
         let turn: Uuid = row.try_get("turn_id")?;
         let attempt: Uuid = row.try_get("current_attempt_id")?;
-        let outbox_frontier: Option<Decimal> = row.try_get("outbox_frontier")?;
+        let stored_frontier: Option<Decimal> = row.try_get("outbox_frontier")?;
+        let frontier = match stored_frontier {
+            // No turn-progress event yet is an ordinary shape, and stays an
+            // observation: two scans that both see none saw no progress.
+            None => None,
+            Some(sequence) => match decode_outbox_frontier(sequence) {
+                Some(frontier) => Some(frontier),
+                // A frontier this pass cannot read is not evidence of silence.
+                // Dropping the row keeps the turn out of the inventory
+                // entirely, so no bound accrues against it — where reporting it
+                // as absent would compare equal to the next unreadable
+                // observation and end the turn on evidence never understood.
+                None => continue,
+            },
+        };
         candidates.push(StaleTurnCandidate::new(
             session_id_from_uuid(session),
             turn_id_from_uuid(turn),
-            TurnLivenessEvidence::new(
-                TurnAttemptId::from_uuid(attempt),
-                outbox_frontier.and_then(decode_outbox_frontier),
-            ),
+            TurnLivenessEvidence::new(TurnAttemptId::from_uuid(attempt), frontier),
         ));
     }
     Ok(candidates.into_boxed_slice())
 }
 
-/// Reads one outbox sequence as the token the ledger compares.
+/// Reads one outbox sequence as the token the ledger compares, or nothing if
+/// the stored value is not one.
 ///
-/// A row outside `u64` cannot exist — the column is constrained to that range —
-/// and if one did, treating the frontier as absent is the direction that
-/// restarts a bound rather than ending a live turn on evidence this pass could
-/// not read.
+/// `outbox_event_sequence_positive_u64` constrains the column to `1..=u64::MAX`,
+/// so failing is unreachable. It is reported rather than defaulted because the
+/// ledger compares whole observations for equality: a value that read as absent
+/// would compare equal to the next one that did, and the turn would come due on
+/// evidence this pass never understood. The caller drops such a row instead.
 fn decode_outbox_frontier(sequence: Decimal) -> Option<u64> {
     if sequence.fract().is_zero() {
         u64::try_from(sequence).ok()
