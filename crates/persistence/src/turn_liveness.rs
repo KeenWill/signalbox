@@ -38,6 +38,21 @@ use crate::submit_input::load_scheduling_projection;
 /// bound holds whatever the population is.
 const QUIESCENT_INVENTORY_PAGE_SIZE: i64 = 256;
 
+/// How long one terminalization waits for the session's scheduler row.
+///
+/// The attempt takes that row `FOR UPDATE`, and the transactions holding it —
+/// activation, submission, startup recovery — are short. A wait longer than
+/// this means the session is busy, which is itself evidence against the turn
+/// being wedged, so failing fast costs nothing: the turn stays due and its lap
+/// reaches it again. What an unbounded wait would cost is the whole serial
+/// phase, which one stuck transaction could hold for as long as it lived.
+///
+/// The value is what keeps the phase inside its interval in the worst case: a
+/// windowful of attempts that all wait the full bound is sixteen seconds, the
+/// same budget a windowful of committing transactions is estimated at.
+// numeric-bound: tunable - bounds one terminalization's wait for the scheduler row
+const TERMINALIZATION_LOCK_WAIT: &str = "250ms";
+
 /// Infrastructure or integrity failure while supervising turn liveness.
 ///
 /// The two database arms are separate because they mean different things to an
@@ -49,6 +64,8 @@ const QUIESCENT_INVENTORY_PAGE_SIZE: i64 = 256;
 pub enum TurnLivenessRepositoryError {
     /// Reading the quiescent active-turn inventory failed.
     Inventory(sqlx::Error),
+    /// The session's scheduler row stayed locked past the attempt's wait.
+    TerminalizationLockUnavailable(sqlx::Error),
     /// A database operation on the terminalization path failed.
     TerminalizationDatabase {
         /// Whether the failure leaves the commit's outcome unknown.
@@ -62,7 +79,15 @@ pub enum TurnLivenessRepositoryError {
 
 impl TurnLivenessRepositoryError {
     /// Classifies an unambiguous driver failure on the terminalization path.
+    ///
+    /// A refused lock is separated here rather than at each call site: it is
+    /// the one failure on this path that means only "someone else is working
+    /// on this session", and an operator reading it as a fault would be reading
+    /// ordinary contention as a defect.
     fn terminalization(error: sqlx::Error) -> Self {
+        if lock_wait_expired(&error) {
+            return Self::TerminalizationLockUnavailable(error);
+        }
         Self::TerminalizationDatabase {
             commit_ambiguous: false,
             source: error,
@@ -79,6 +104,12 @@ impl fmt::Display for TurnLivenessRepositoryError {
                     "quiescent active-turn inventory failed: {source}"
                 )
             }
+            Self::TerminalizationLockUnavailable(source) => {
+                write!(
+                    formatter,
+                    "stale-turn terminalization could not lock the session scheduler row: {source}"
+                )
+            }
             Self::TerminalizationDatabase { source, .. } => {
                 write!(formatter, "stale-turn terminalization failed: {source}")
             }
@@ -90,7 +121,9 @@ impl fmt::Display for TurnLivenessRepositoryError {
 impl Error for TurnLivenessRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Inventory(source) | Self::TerminalizationDatabase { source, .. } => Some(source),
+            Self::Inventory(source)
+            | Self::TerminalizationLockUnavailable(source)
+            | Self::TerminalizationDatabase { source, .. } => Some(source),
             Self::Terminalization(source) => Some(source),
         }
     }
@@ -100,6 +133,9 @@ impl ClassifyOperatorFailure for TurnLivenessRepositoryError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
             Self::Inventory(_) => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            Self::TerminalizationLockUnavailable(_) => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
             Self::TerminalizationDatabase {
@@ -114,6 +150,9 @@ impl ClassifyOperatorFailure for TurnLivenessRepositoryError {
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
             Self::Inventory(_) => "turn_liveness_inventory_failed",
+            Self::TerminalizationLockUnavailable(_) => {
+                "turn_liveness_terminalization_lock_unavailable"
+            }
             Self::TerminalizationDatabase { .. } => "turn_liveness_terminalization_failed",
             Self::Terminalization(source) => source.operator_failure_cause_code(),
         }
@@ -173,6 +212,16 @@ impl PostgresTurnLivenessRepository {
         let mut transaction = self
             .pool
             .begin()
+            .await
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        // Bounded before anything is read or written, so the only statement it
+        // can interrupt is the one waiting for the scheduler row. A bound that
+        // could fire later — over the whole statement, or over the future —
+        // might interrupt the commit instead, and this pass would then not know
+        // whether the turn ended.
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(TERMINALIZATION_LOCK_WAIT)
+            .execute(&mut *transaction)
             .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
         let outcome = terminalize_in_transaction(&mut transaction, candidate, identities).await;
@@ -466,6 +515,15 @@ async fn read_quiescent_active_turns(
 /// ledger compares whole observations for equality: a value that read as absent
 /// would compare equal to the next one that did, and the turn would come due on
 /// evidence this pass never understood. The caller drops such a row instead.
+/// Whether the database refused a lock rather than failing at one.
+///
+/// `55P03` is `lock_not_available`, which is what `lock_timeout` raises: the
+/// row was held past the wait, and nothing was read or written.
+fn lock_wait_expired(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(database)
+        if database.code().as_deref() == Some("55P03"))
+}
+
 fn decode_outbox_frontier(sequence: Decimal) -> Option<u64> {
     if sequence.fract().is_zero() {
         u64::try_from(sequence).ok()

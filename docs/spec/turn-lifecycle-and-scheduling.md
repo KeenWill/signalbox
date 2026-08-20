@@ -558,12 +558,14 @@ present population. A rotation that cannot be drained — an unreadable page, or
 one that fails to converge within its page ceiling — ends the scan with no
 decision and the ledger unchanged, rather than deciding on a partial population.
 
-Draining costs one statement per page and one more to prove the rotation ended:
-`⌈population ÷ 256⌉ + 1` reads, run one after another, each answered from an
-index. That is one read for an idle deployment and two for a hundred
-simultaneously quiescent turns; only a population at the page ceiling reaches
-4,097, and a rotation that large decides nothing anyway. Those reads are left
-whole rather than capped per scan because the ledger is fed complete
+Draining costs one statement per page, plus one more only when the population is
+an exact multiple of the page size — an underfilled page ends the rotation where
+it stands, so no probe is needed for it. Both cases come to
+`⌊population ÷ 256⌋ + 1` reads, run one after another, each answered from an
+index. That is one read for an idle deployment, one for a hundred simultaneously
+quiescent turns, two for three hundred; only a population at the page ceiling
+reaches 4,097, and a rotation that large decides nothing anyway. Those reads are
+left whole rather than capped per scan because the ledger is fed complete
 populations: a scan stopping partway would have to report the turns it never
 reached as having left the quiescent shape. A scan whose reads outlast the
 interval delays the next scan rather than overlapping it, so the pass degrades
@@ -589,17 +591,20 @@ a scan per windowful to work through, and a turn's wait is the sum of two laps
 rather than one: a turn becoming due while a lap runs is not among its members,
 so it waits for that lap's remaining members to drain and then for its own place
 in the lap that opens next. The bound is therefore
-`⌈remaining ÷ 64⌉ + ⌈position ÷ 64⌉` scan intervals, which at its worst — a turn
-arriving as a full lap opens and then taking the last place in the next one — is
-`⌈previous ÷ 64⌉ + ⌈own ÷ 64⌉`. Only a turn already due when its lap opens waits
-the single `⌈position ÷ 64⌉`. A cohort at the inventory's capacity would take
-over eleven days per lap to work through, so a turn arriving into one waits two.
-That is accepted rather than overlooked: the alternative is a scan that runs
-until its cohort is drained, which delays the next observation of *every*
-session, including the ones whose turns are working. A watchdog may be slow to
-finish; it may not stop watching. What deferral does not cost is the turn: one
-left alone had nothing change, so it is observed unchanged and comes due again
-on a later scan, waiting rather than being forgotten.
+`⌈remaining ÷ 64⌉ + ⌈position ÷ 64⌉` scan intervals, counting from the scan that
+found it due. At its worst — a turn arriving into a full lap and then taking the
+last place in the next one — that is `⌈previous ÷ 64⌉ − 1 + ⌈own ÷ 64⌉`, one
+term less than the two laps' own lengths: a turn becoming due while a lap runs
+became due after that lap had already opened, so at least one of its scans is
+behind it. Only a turn already due when its lap opens waits the single
+`⌈position ÷ 64⌉`. A cohort at the inventory's capacity would take over eleven
+days per lap to work through, so a turn arriving into one waits two. That is
+accepted rather than overlooked: the alternative is a scan that runs until its
+cohort is drained, which delays the next observation of *every* session,
+including the ones whose turns are working. A watchdog may be slow to finish; it
+may not stop watching. What deferral does not cost is the turn: one left alone
+had nothing change, so it is observed unchanged and comes due again on a later
+scan, waiting rather than being forgotten.
 
 **Constants.** The staleness bound is a hard safety ceiling of 30 minutes and
 the scan interval is one minute; both are compiled in. The bound the pass runs
