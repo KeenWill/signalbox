@@ -174,15 +174,15 @@ new forward migration; never edit, replace, or renumber the recorded migration
 file.
 
 Every function reachable from a table constraint or index expression pins its
-search path (`SET search_path = public, pg_catalog, pg_temp`) in its
-definition. `pg_restore` replays a logical backup under an empty search path
-and evaluates check constraints while copying table data, so an unpinned
-plpgsql body that names another user function unqualified resolves during
-normal operation but fails mid-restore; `202608200001` retrofits the pin onto
-the check-reachable set after exactly that failure blocked the first restore
-rehearsal against a live backup. Why: a backup that cannot restore is a silent
-failure that surfaces only during recovery, so restorability is part of the
-schema's contract rather than an operational afterthought.
+search path (`SET search_path = public, pg_catalog, pg_temp`) in its definition.
+`pg_restore` replays a logical backup under an empty search path and evaluates
+check constraints while copying table data, so an unpinned plpgsql body that
+names another user function unqualified resolves during normal operation but
+fails mid-restore; `202608200001` retrofits the pin onto the check-reachable set
+after exactly that failure blocked the first restore rehearsal against a live
+backup. Why: a backup that cannot restore is a silent failure that surfaces only
+during recovery, so restorability is part of the schema's contract rather than
+an operational afterthought.
 
 Prefix reservation across concurrent stacks: the bottom pull request of any
 stack that will add migrations declares a reserved prefix block — a date plus a
@@ -1128,7 +1128,7 @@ Two standing constraints (recorded beside the code):
    `turn_lifecycle` rows. Why: one session-scoped lock serializes activation,
    recovery, and acceptance against each other so guarded predicates race on
    rows, not on process memory (INV-009, INV-010).
-1. No production path may take `FOR UPDATE` (the strongest mode) on the session
+2. No production path may take `FOR UPDATE` (the strongest mode) on the session
    row. Why: submit orders session-then-pointer while defaults replacement holds
    the pointer and requests FK `KEY SHARE` on the session row; `FOR UPDATE`
    conflicts with `KEY SHARE` and closes that cycle into a 40P01 deadlock, while

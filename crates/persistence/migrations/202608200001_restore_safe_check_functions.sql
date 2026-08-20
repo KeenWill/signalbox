@@ -7,9 +7,11 @@
 -- a live backup stopped at tool_request's data copy because
 -- canonical_tool_json calls canonical_tool_json_number unqualified. Later
 -- function sets (202607310102) already carry the pin; this retrofits every
--- function the current schema reaches from a check constraint, plus that one
+-- check-reachable function this repository's migrations create, plus that one
 -- transitive callee, so the set stays restore-safe regardless of how any one
--- body evolves.
+-- body evolves. Validators installed outside these migrations on a deployment
+-- are that deployment's to pin the same way; referencing them here would fail
+-- every freshly migrated database.
 
 ALTER FUNCTION canonical_tool_json(text)
     SET search_path = public, pg_catalog, pg_temp;
@@ -24,12 +26,6 @@ ALTER FUNCTION configured_git_remote_url_is_valid(text)
     SET search_path = public, pg_catalog, pg_temp;
 
 ALTER FUNCTION repo_watch_branch_is_valid(text)
-    SET search_path = public, pg_catalog, pg_temp;
-
-ALTER FUNCTION repo_watch_convergence_check_names_are_valid(text[])
-    SET search_path = public, pg_catalog, pg_temp;
-
-ALTER FUNCTION repo_watch_convergence_threads_are_valid(text[])
     SET search_path = public, pg_catalog, pg_temp;
 
 ALTER FUNCTION repo_watch_labels_are_valid(text[])
