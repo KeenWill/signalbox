@@ -1,11 +1,16 @@
-//! Hub-side serial registration and lifecycle runtime for the local runner wire.
+//! Hub-side registration, lifecycle, and lease-operation runtime for the local runner wire.
 
 use std::{error::Error, fmt, future::Future, io, pin::Pin, sync::Arc, time::Duration};
 
 use rustix::process::geteuid;
+use signalbox_application::{
+    RunnerLeaseClaimRequest, RunnerLeaseClaimService, RunnerLeaseResultRequest,
+    RunnerLeaseResultService,
+};
 use signalbox_domain::{
     CredentialProfileName, CredentialProfilePolicy, RunnerAuthenticationId, RunnerCapabilityClass,
     RunnerCatalog, RunnerDomainError, RunnerEnrollmentId, RunnerEnrollmentRequestId, RunnerId,
+    RunnerLease,
 };
 use signalbox_persistence::runner_protocol::{
     AppliedRunnerConnectionTransition, IssuedRunnerEnrollmentIdentities,
@@ -17,10 +22,10 @@ use signalbox_persistence::runner_protocol::{
 };
 use signalbox_runner_wire::{
     Advertise, AvailableCorrelation, CanonicalUuid, DIGEST_VERSION, Enroll, Enrolled, Frame,
-    FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase, MAX_FRAME_BYTES, Message,
-    PositiveU64, ReconnectDirectives, Registered, Rejected, RejectionCode, ReplacementPending,
-    Resume, Resumed, Shutdown, ShutdownReason, WorkspaceFailureCorrelation, advertisement_digest,
-    decode_line, encode_line,
+    FrameError, Heartbeat, HeartbeatAck, HeartbeatWorkspacePhase, LeaseClaim, LeaseCorrelation,
+    MAX_FRAME_BYTES, Message, PositiveU64, ReconnectDirectives, Registered, Rejected,
+    RejectionCode, ReplacementPending, ResultFrame, Resume, Resumed, Shutdown, ShutdownReason,
+    WorkspaceFailureCorrelation, advertisement_digest, decode_line, encode_line,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -37,6 +42,7 @@ use crate::{
     runner_connection_broker::{
         RunnerConnectionAddress, RunnerConnectionBroker, RunnerConnectionBrokerError,
     },
+    runner_dispatch_wire::{RunnerDispatchWireAdapter, RunnerDispatchWireError},
 };
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -49,6 +55,78 @@ const REGISTRATION_ONLY_CREDENTIAL_PROFILE: &str = "github-runner";
 /// Boxed future returned by the injected durable registration service.
 pub type RunnerRegistrationFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, RunnerRegistrationFailure>> + Send + 'a>>;
+
+/// Boxed future returned by the injected durable lease-operation service.
+pub type RunnerLeaseOperationFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, RunnerLeaseOperationFailure>> + Send + 'a>>;
+
+/// Closed durable failure classification for one lease claim or result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunnerLeaseOperationFailure {
+    code: RejectionCode,
+    cause: RunnerRegistrationFailureCause,
+}
+
+impl RunnerLeaseOperationFailure {
+    /// Constructs one classified durable-operation failure.
+    pub const fn new(code: RejectionCode, cause: RunnerRegistrationFailureCause) -> Self {
+        Self { code, cause }
+    }
+
+    fn into_registration_failure(
+        self,
+        offending_kind: RunnerInboundFrameKind,
+        correlation: AvailableCorrelation,
+    ) -> RunnerRegistrationFailure {
+        RunnerRegistrationFailure::from_durable_cause(
+            offending_kind,
+            correlation,
+            self.code,
+            self.cause,
+        )
+    }
+}
+
+/// Durable-before-ack lease operation boundary consumed by an established connection.
+pub trait RunnerLeaseOperationService: Clone + Send + Sync + 'static {
+    /// Commits one exact offered lease claim.
+    fn claim(
+        &self,
+        request: RunnerLeaseClaimRequest,
+    ) -> RunnerLeaseOperationFuture<'_, RunnerLease>;
+
+    /// Commits one exact claimed lease and terminal attempt observation.
+    fn record_result(
+        &self,
+        request: RunnerLeaseResultRequest,
+    ) -> RunnerLeaseOperationFuture<'_, RunnerLease>;
+}
+
+/// Fail-closed lease operation service retained by registration-only test composition.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnavailableRunnerLeaseOperationService;
+
+impl RunnerLeaseOperationService for UnavailableRunnerLeaseOperationService {
+    fn claim(
+        &self,
+        _request: RunnerLeaseClaimRequest,
+    ) -> RunnerLeaseOperationFuture<'_, RunnerLease> {
+        Box::pin(std::future::ready(Err(RunnerLeaseOperationFailure::new(
+            RejectionCode::Unavailable,
+            RunnerRegistrationFailureCause::Policy,
+        ))))
+    }
+
+    fn record_result(
+        &self,
+        _request: RunnerLeaseResultRequest,
+    ) -> RunnerLeaseOperationFuture<'_, RunnerLease> {
+        Box::pin(std::future::ready(Err(RunnerLeaseOperationFailure::new(
+            RejectionCode::Unavailable,
+            RunnerRegistrationFailureCause::Policy,
+        ))))
+    }
+}
 
 /// One closed successful response to a pristine runner enrollment request.
 #[derive(Clone, Debug)]
@@ -749,6 +827,35 @@ impl RunnerRegistrationService for PostgresRunnerRegistrationService {
     }
 }
 
+impl RunnerLeaseOperationService for RunnerProtocolStore {
+    fn claim(
+        &self,
+        request: RunnerLeaseClaimRequest,
+    ) -> RunnerLeaseOperationFuture<'_, RunnerLease> {
+        let store = self.clone();
+        Box::pin(async move {
+            RunnerLeaseClaimService::new(store)
+                .execute(request)
+                .await
+                .map_err(runner_lease_operation_failure)
+        })
+    }
+
+    fn record_result(
+        &self,
+        request: RunnerLeaseResultRequest,
+    ) -> RunnerLeaseOperationFuture<'_, RunnerLease> {
+        let store = self.clone();
+        Box::pin(async move {
+            RunnerLeaseResultService::new(store)
+                .execute(request)
+                .await
+                .map(|completion| completion.into_parts().0)
+                .map_err(runner_lease_operation_failure)
+        })
+    }
+}
+
 fn positive_epoch(epoch: RunnerConnectionEpoch) -> Result<PositiveU64, RunnerRegistrationFailure> {
     PositiveU64::try_new(epoch.get()).map_err(|_| {
         RunnerRegistrationFailure::new(
@@ -776,7 +883,39 @@ fn store_failure(
     correlation: AvailableCorrelation,
     error: RunnerProtocolStoreError,
 ) -> RunnerRegistrationFailure {
-    let (code, cause) = match &error {
+    let failure = runner_store_failure_classification(&error);
+    if failure.cause.operator_actionable() {
+        tracing::error!(
+            error = %error,
+            frame_kind = offending_kind.as_str(),
+            cause = ?failure.cause,
+            "durable runner registration failed"
+        );
+    }
+    RunnerRegistrationFailure::from_durable_cause(
+        offending_kind,
+        correlation,
+        failure.code,
+        failure.cause,
+    )
+}
+
+fn runner_lease_operation_failure(error: RunnerProtocolStoreError) -> RunnerLeaseOperationFailure {
+    let failure = runner_store_failure_classification(&error);
+    if failure.cause.operator_actionable() {
+        tracing::error!(
+            error = %error,
+            cause = ?failure.cause,
+            "durable runner lease operation failed"
+        );
+    }
+    failure
+}
+
+fn runner_store_failure_classification(
+    error: &RunnerProtocolStoreError,
+) -> RunnerLeaseOperationFailure {
+    let (code, cause) = match error {
         RunnerProtocolStoreError::EnrollmentRequest(
             RunnerEnrollmentRequestFailure::ActiveEnrollmentExists { .. }
             | RunnerEnrollmentRequestFailure::PendingEnrollmentExists { .. }
@@ -826,15 +965,7 @@ fn store_failure(
             RunnerRegistrationFailureCause::Corruption,
         ),
     };
-    if cause.operator_actionable() {
-        tracing::error!(
-            error = %error,
-            frame_kind = offending_kind.as_str(),
-            ?cause,
-            "durable runner registration failed"
-        );
-    }
-    RunnerRegistrationFailure::from_durable_cause(offending_kind, correlation, code, cause)
+    RunnerLeaseOperationFailure::new(code, cause)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1043,9 +1174,10 @@ impl Error for RunnerRegistrationFailure {}
 
 /// Dedicated local runner listener and its durable registration service.
 #[derive(Debug)]
-pub struct RunnerProtocolRuntime<S> {
+pub struct RunnerProtocolRuntime<S, O = UnavailableRunnerLeaseOperationService> {
     listener: Option<LocalProcessListener>,
     service: Option<S>,
+    operations: Option<O>,
     broker: RunnerConnectionBroker,
 }
 
@@ -1088,7 +1220,7 @@ impl Drop for RunnerListenerGuard {
     }
 }
 
-impl<S> Drop for RunnerProtocolRuntime<S> {
+impl<S, O> Drop for RunnerProtocolRuntime<S, O> {
     fn drop(&mut self) {
         if let Some(listener) = self.listener.take()
             && let Err(error) = listener.cleanup()
@@ -1101,7 +1233,7 @@ impl<S> Drop for RunnerProtocolRuntime<S> {
     }
 }
 
-impl<S> RunnerProtocolRuntime<S>
+impl<S> RunnerProtocolRuntime<S, UnavailableRunnerLeaseOperationService>
 where
     S: RunnerRegistrationService,
 {
@@ -1110,7 +1242,30 @@ where
         Self {
             listener: Some(listener),
             service: Some(service),
+            operations: Some(UnavailableRunnerLeaseOperationService),
             broker: RunnerConnectionBroker::new(),
+        }
+    }
+}
+
+impl<S, O> RunnerProtocolRuntime<S, O>
+where
+    S: RunnerRegistrationService,
+    O: RunnerLeaseOperationService,
+{
+    /// Installs the durable claim and result boundary used by established connections.
+    pub fn with_lease_operation_service<Replacement>(
+        mut self,
+        operations: Replacement,
+    ) -> RunnerProtocolRuntime<S, Replacement>
+    where
+        Replacement: RunnerLeaseOperationService,
+    {
+        RunnerProtocolRuntime {
+            listener: self.listener.take(),
+            service: self.service.take(),
+            operations: Some(operations),
+            broker: self.broker.clone(),
         }
     }
 
@@ -1133,9 +1288,19 @@ where
             .service
             .take()
             .ok_or(RunnerProtocolRuntimeError::OwnershipUnavailable)?;
+        let operations = self
+            .operations
+            .take()
+            .ok_or(RunnerProtocolRuntimeError::OwnershipUnavailable)?;
         let listener = RunnerListenerGuard::new(listener);
-        let outcome =
-            run_connections(listener.listener()?, service, self.broker.clone(), shutdown).await;
+        let outcome = run_connections(
+            listener.listener()?,
+            service,
+            operations,
+            self.broker.clone(),
+            shutdown,
+        )
+        .await;
         let cleanup = listener.cleanup();
         match (outcome, cleanup) {
             (Ok(()), Ok(())) => Ok(()),
@@ -1152,14 +1317,16 @@ where
     }
 }
 
-async fn run_connections<S>(
+async fn run_connections<S, O>(
     listener: &LocalProcessListener,
     service: S,
+    operations: O,
     broker: RunnerConnectionBroker,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), RunnerProtocolRuntimeError>
 where
     S: RunnerRegistrationService,
+    O: RunnerLeaseOperationService,
 {
     let mut connections = JoinSet::new();
     let (connection_shutdown_sender, connection_shutdown) = watch::channel(*shutdown.borrow());
@@ -1207,9 +1374,10 @@ where
                     tracing::warn!(error = %error, "runner peer failed same-user admission");
                     continue;
                 }
-                connections.spawn(serve_connection_with_broker(
+                connections.spawn(serve_connection_with_operations_and_broker(
                     stream,
                     service.clone(),
+                    operations.clone(),
                     broker.clone(),
                     connection_shutdown.clone(),
                 ));
@@ -1344,9 +1512,17 @@ async fn serve_connection<S>(
 where
     S: RunnerRegistrationService,
 {
-    serve_connection_with_broker(stream, service, RunnerConnectionBroker::new(), shutdown).await
+    serve_connection_with_operations_and_broker(
+        stream,
+        service,
+        UnavailableRunnerLeaseOperationService,
+        RunnerConnectionBroker::new(),
+        shutdown,
+    )
+    .await
 }
 
+#[cfg(test)]
 async fn serve_connection_with_broker<S>(
     stream: UnixStream,
     service: S,
@@ -1356,9 +1532,10 @@ async fn serve_connection_with_broker<S>(
 where
     S: RunnerRegistrationService,
 {
-    serve_connection_with_handshake_timeout_and_broker(
+    serve_connection_with_handshake_timeout_operations_and_broker(
         stream,
         service,
+        UnavailableRunnerLeaseOperationService,
         broker,
         shutdown,
         HANDSHAKE_TIMEOUT,
@@ -1376,9 +1553,10 @@ async fn serve_connection_with_handshake_timeout<S>(
 where
     S: RunnerRegistrationService,
 {
-    serve_connection_with_handshake_timeout_and_broker(
+    serve_connection_with_handshake_timeout_operations_and_broker(
         stream,
         service,
+        UnavailableRunnerLeaseOperationService,
         RunnerConnectionBroker::new(),
         shutdown,
         handshake_timeout,
@@ -1386,15 +1564,39 @@ where
     .await
 }
 
-async fn serve_connection_with_handshake_timeout_and_broker<S>(
+async fn serve_connection_with_operations_and_broker<S, O>(
     stream: UnixStream,
     service: S,
+    operations: O,
+    broker: RunnerConnectionBroker,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), RunnerProtocolRuntimeError>
+where
+    S: RunnerRegistrationService,
+    O: RunnerLeaseOperationService,
+{
+    serve_connection_with_handshake_timeout_operations_and_broker(
+        stream,
+        service,
+        operations,
+        broker,
+        shutdown,
+        HANDSHAKE_TIMEOUT,
+    )
+    .await
+}
+
+async fn serve_connection_with_handshake_timeout_operations_and_broker<S, O>(
+    stream: UnixStream,
+    service: S,
+    operations: O,
     broker: RunnerConnectionBroker,
     mut shutdown: watch::Receiver<bool>,
     handshake_timeout: Duration,
 ) -> Result<(), RunnerProtocolRuntimeError>
 where
     S: RunnerRegistrationService,
+    O: RunnerLeaseOperationService,
 {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -1609,6 +1811,93 @@ where
                             return Ok(());
                         }
                     }
+                    Message::LeaseClaim(claim) => {
+                        if !lease_correlation_matches_connection(&claim.correlation, context) {
+                            terminalize_protocol_rejection(
+                                &service,
+                                context,
+                                &mut writer,
+                                RunnerInboundFrameKind::LeaseClaim,
+                                context.epoch,
+                                RunnerRegistrationFailure::new(
+                                    RunnerInboundFrameKind::LeaseClaim,
+                                    AvailableCorrelation::Lease(claim.correlation),
+                                    RejectionCode::CorrelationMismatch,
+                                ),
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                        if !transition_or_reject_not_current(
+                            &service,
+                            context,
+                            &mut writer,
+                            RunnerInboundFrameKind::LeaseClaim,
+                            context.epoch,
+                            RunnerConnectionTransition::Observe,
+                        ).await? {
+                            return Ok(());
+                        }
+                        match admit_lease_claim(&operations, claim).await? {
+                            Ok((acknowledgement, dispatch)) => {
+                                write_message(&mut writer, acknowledgement).await?;
+                                write_message(&mut writer, dispatch).await?;
+                            }
+                            Err(failure) => {
+                                terminalize_operation_rejection(
+                                    &service,
+                                    context,
+                                    &mut writer,
+                                    RunnerInboundFrameKind::LeaseClaim,
+                                    failure,
+                                ).await?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Message::Result(result) => {
+                        if !lease_correlation_matches_connection(&result.correlation, context) {
+                            terminalize_protocol_rejection(
+                                &service,
+                                context,
+                                &mut writer,
+                                RunnerInboundFrameKind::Result,
+                                context.epoch,
+                                RunnerRegistrationFailure::new(
+                                    RunnerInboundFrameKind::Result,
+                                    AvailableCorrelation::Lease(result.correlation),
+                                    RejectionCode::CorrelationMismatch,
+                                ),
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                        if !transition_or_reject_not_current(
+                            &service,
+                            context,
+                            &mut writer,
+                            RunnerInboundFrameKind::Result,
+                            context.epoch,
+                            RunnerConnectionTransition::Observe,
+                        ).await? {
+                            return Ok(());
+                        }
+                        match admit_lease_result(&operations, result).await? {
+                            Ok(acknowledgement) => {
+                                write_message(&mut writer, acknowledgement).await?;
+                            }
+                            Err(failure) => {
+                                terminalize_operation_rejection(
+                                    &service,
+                                    context,
+                                    &mut writer,
+                                    RunnerInboundFrameKind::Result,
+                                    failure,
+                                ).await?;
+                                return Ok(());
+                            }
+                        }
+                    }
                     Message::Shutdown(order) => {
                         if order.reason != ShutdownReason::RunnerShutdown {
                             terminalize_protocol_rejection(
@@ -1720,6 +2009,79 @@ where
     outcome
 }
 
+async fn admit_lease_claim<O>(
+    operations: &O,
+    claim: LeaseClaim,
+) -> Result<Result<(Message, Message), RunnerRegistrationFailure>, RunnerProtocolRuntimeError>
+where
+    O: RunnerLeaseOperationService,
+{
+    let correlation = AvailableCorrelation::Lease(claim.correlation.clone());
+    let request = match RunnerDispatchWireAdapter::claim_request(claim) {
+        Ok(request) => request,
+        Err(_) => {
+            return Ok(Err(RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::LeaseClaim,
+                correlation,
+                RejectionCode::CorrelationMismatch,
+            )));
+        }
+    };
+    let claimed = match operations.claim(request).await {
+        Ok(claimed) => claimed,
+        Err(failure) => {
+            return Ok(Err(failure.into_registration_failure(
+                RunnerInboundFrameKind::LeaseClaim,
+                correlation,
+            )));
+        }
+    };
+    Ok(Ok((
+        RunnerDispatchWireAdapter::lease_claimed(&claimed)
+            .map_err(RunnerProtocolRuntimeError::DispatchWire)?,
+        RunnerDispatchWireAdapter::dispatch(&claimed)
+            .map_err(RunnerProtocolRuntimeError::DispatchWire)?,
+    )))
+}
+
+async fn admit_lease_result<O>(
+    operations: &O,
+    result: ResultFrame,
+) -> Result<Result<Message, RunnerRegistrationFailure>, RunnerProtocolRuntimeError>
+where
+    O: RunnerLeaseOperationService,
+{
+    let correlation = AvailableCorrelation::Lease(result.correlation.clone());
+    let request = match RunnerDispatchWireAdapter::result_request(result) {
+        Ok(request) => request,
+        Err(_) => {
+            return Ok(Err(RunnerRegistrationFailure::new(
+                RunnerInboundFrameKind::Result,
+                correlation,
+                RejectionCode::CorrelationMismatch,
+            )));
+        }
+    };
+    let completed = match operations.record_result(request).await {
+        Ok(completed) => completed,
+        Err(failure) => {
+            return Ok(Err(failure.into_registration_failure(
+                RunnerInboundFrameKind::Result,
+                correlation,
+            )));
+        }
+    };
+    Ok(Ok(RunnerDispatchWireAdapter::result_recorded(&completed)
+        .map_err(RunnerProtocolRuntimeError::DispatchWire)?))
+}
+
+fn lease_correlation_matches_connection(
+    correlation: &LeaseCorrelation,
+    context: ConnectionContext,
+) -> bool {
+    correlation.runner_id == context.runner
+}
+
 #[derive(Clone, Copy)]
 struct ConnectionContext {
     enrollment: CanonicalUuid,
@@ -1759,7 +2121,9 @@ const fn connection_failure_transition(
         | RunnerProtocolRuntimeError::HeartbeatSequenceExhausted => {
             Some(RunnerConnectionTransition::ProtocolFailure)
         }
-        RunnerProtocolRuntimeError::Broker(_) => Some(RunnerConnectionTransition::TransportClosed),
+        RunnerProtocolRuntimeError::Broker(_) | RunnerProtocolRuntimeError::DispatchWire(_) => {
+            Some(RunnerConnectionTransition::TransportClosed)
+        }
         RunnerProtocolRuntimeError::Accept(_)
         | RunnerProtocolRuntimeError::Cleanup(_)
         | RunnerProtocolRuntimeError::ConnectionTask(_)
@@ -1893,6 +2257,32 @@ where
         offending_kind,
         evidence_epoch,
         RunnerConnectionTransition::ProtocolFailure,
+    )
+    .await?
+    {
+        write_rejected(writer, failure).await?;
+    }
+    Ok(())
+}
+
+async fn terminalize_operation_rejection<S>(
+    service: &S,
+    context: ConnectionContext,
+    writer: &mut OwnedWriteHalf,
+    offending_kind: RunnerInboundFrameKind,
+    failure: RunnerRegistrationFailure,
+) -> Result<(), RunnerProtocolRuntimeError>
+where
+    S: RunnerRegistrationService,
+{
+    let transition = rejection_terminal_transition(failure.cause());
+    if transition_or_reject_not_current(
+        service,
+        context,
+        writer,
+        offending_kind,
+        context.epoch,
+        transition,
     )
     .await?
     {
@@ -2191,6 +2581,7 @@ pub enum RunnerProtocolRuntimeError {
     HandshakeTimeout,
     OwnershipUnavailable,
     Broker(RunnerConnectionBrokerError),
+    DispatchWire(RunnerDispatchWireError),
     HeartbeatSequenceExhausted,
     ConnectionTask(JoinError),
     ConnectionDrainTimeout {
@@ -2215,6 +2606,7 @@ impl fmt::Display for RunnerProtocolRuntimeError {
                 formatter.write_str("runner runtime ownership was unavailable")
             }
             Self::Broker(_) => formatter.write_str("runner connection broker failed"),
+            Self::DispatchWire(_) => formatter.write_str("runner lease wire projection failed"),
             Self::HeartbeatSequenceExhausted => {
                 formatter.write_str("runner heartbeat sequence exhausted")
             }
@@ -2235,6 +2627,7 @@ impl Error for RunnerProtocolRuntimeError {
             Self::Decode(error) | Self::Encode(error) => Some(error),
             Self::Lifecycle(error) => Some(error),
             Self::Broker(error) => Some(error),
+            Self::DispatchWire(error) => Some(error),
             Self::ConnectionTask(error) => Some(error),
             Self::ConnectionDrainTimeout {
                 initiating: Some(error),
@@ -2259,11 +2652,19 @@ mod tests {
     use rust_decimal::Decimal;
     use signalbox_domain::{
         CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
-        RunnerLostBeforePin, RunnerSandboxProfile, RunnerSelector, RunnerToolPermissionOverrides,
-        RunnerWorkingDirectory, SessionConfigurationDefaults, SessionCreationCause,
-        SessionCreationProvenance, SessionId, SessionRunnerPlacement,
-        SessionRunnerPlacementRequest, SessionRunnerPlacementState, TranscriptAncestry,
-        WorkingDirectorySelection, WorkspaceRequirement,
+        NormalizedToolArguments, RunnerAdvertisement, RunnerAuthenticationId,
+        RunnerCapabilityClass, RunnerCatalog, RunnerEnrollment, RunnerEnrollmentId,
+        RunnerGeneration, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseReconstitutionInput,
+        RunnerLeaseRetryPreparation, RunnerLeaseState, RunnerLostBeforePin, RunnerRepositoryEntry,
+        RunnerSandboxProfile, RunnerSelector, RunnerToolDeclaration, RunnerToolEffectClass,
+        RunnerToolModelDefinition, RunnerToolPermissionOverrides, RunnerWorkingDirectory,
+        SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
+        SessionRunnerPlacement, SessionRunnerPlacementRequest, SessionRunnerPlacementState,
+        ToolAdmissibleLoci, ToolAttemptDispatchCorrelation,
+        ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId, ToolDispatchGeneration,
+        ToolName, ToolPermissionDefault, ToolRequestId, ToolResultContent, ToolResultText,
+        TranscriptAncestry, TurnAttemptId, TurnId, ValidatedRunnerRegistration,
+        WorkingDirectorySelection, WorkspaceCapability, WorkspaceRequirement,
     };
     use signalbox_persistence::{
         create_session::CreateSessionRepository,
@@ -2429,6 +2830,285 @@ mod tests {
             issuing_turn_attempt_id: arbitrary_identity,
             tool_dispatch_generation: first,
         }
+    }
+
+    fn runner_operation_tool() -> ToolName {
+        ToolName::try_new("git_fetch".to_owned()).expect("the fixture tool name is valid")
+    }
+
+    fn runner_operation_class() -> RunnerCapabilityClass {
+        RunnerCapabilityClass::try_new("linux.workspace".to_owned())
+            .expect("the fixture capability class is valid")
+    }
+
+    fn runner_operation_arguments_value() -> serde_json::Value {
+        serde_json::json!({"remote": "origin"})
+    }
+
+    fn runner_operation_arguments() -> NormalizedToolArguments {
+        NormalizedToolArguments::try_from_provider_text(
+            runner_operation_arguments_value().to_string(),
+        )
+        .expect("the fixture arguments are canonical")
+    }
+
+    fn runner_operation_registration() -> ValidatedRunnerRegistration {
+        let declaration = RunnerToolDeclaration::new(
+            runner_operation_tool(),
+            RunnerToolModelDefinition::try_new(
+                "Fetch one configured remote".to_owned(),
+                r#"{"type":"object"}"#.to_owned(),
+            )
+            .expect("the fixture model definition is valid"),
+            ToolPermissionDefault::Auto,
+            RunnerToolEffectClass::Pure,
+            ToolAdmissibleLoci::RunnerOnly {
+                selector: RunnerSelector::CapabilityClass(runner_operation_class()),
+            },
+        );
+        let catalog = RunnerCatalog::try_new(
+            [runner_operation_class()],
+            [declaration],
+            [],
+            Vec::<WorkspaceCapability>::new(),
+            [RunnerSandboxProfile::Ambient],
+        )
+        .expect("the fixture runner catalog is internally consistent");
+        RunnerEnrollment::new(
+            RunnerEnrollmentId::from_uuid(identity(1).into_uuid()),
+            RunnerId::from_uuid(identity(1).into_uuid()),
+            RunnerAuthenticationId::from_uuid(identity(1).into_uuid()),
+            [runner_operation_class()],
+        )
+        .register(
+            RunnerAdvertisement::new(
+                [runner_operation_class()],
+                [runner_operation_tool()],
+                [],
+                [],
+                [RunnerSandboxProfile::Ambient],
+                Vec::<RunnerRepositoryEntry>::new(),
+            ),
+            &catalog,
+        )
+        .expect("the fixture advertisement is admitted")
+    }
+
+    fn runner_operation_correlation() -> RunnerLeaseCorrelation {
+        RunnerLeaseCorrelation {
+            lease: RunnerLeaseId::from_uuid(identity(1).into_uuid()),
+            runner: RunnerId::from_uuid(identity(1).into_uuid()),
+            registration_revision: RunnerGeneration::one(),
+            placement_revision: RunnerGeneration::one(),
+            working_directory: RunnerWorkingDirectory::try_new(
+                RUNNER_SESSION_WORKING_DIRECTORY.to_owned(),
+            )
+            .expect("the fixture working directory is valid"),
+            sandbox: RunnerSandboxProfile::Ambient,
+            tool: runner_operation_tool(),
+            dispatch: ToolAttemptDispatchCorrelation::reconstitute(
+                ToolAttemptDispatchCorrelationReconstitutionInput {
+                    session: SessionId::from_uuid(identity(1).into_uuid()),
+                    turn: TurnId::from_uuid(identity(1).into_uuid()),
+                    issuing_attempt: TurnAttemptId::from_uuid(identity(1).into_uuid()),
+                    request: ToolRequestId::from_uuid(identity(1).into_uuid()),
+                    attempt: ToolAttemptId::from_uuid(identity(1).into_uuid()),
+                    generation: ToolDispatchGeneration::first(),
+                },
+            ),
+            generation: RunnerGeneration::one(),
+        }
+    }
+
+    fn runner_operation_lease(state: RunnerLeaseState) -> RunnerLease {
+        let registration = runner_operation_registration();
+        let correlation = runner_operation_correlation();
+        let arguments = runner_operation_arguments();
+        RunnerLease::reconstitute(
+            RunnerLeaseReconstitutionInput {
+                lease: correlation.lease,
+                dispatch: correlation.dispatch,
+                runner: correlation.runner,
+                registration_revision: correlation.registration_revision,
+                placement_revision: correlation.placement_revision,
+                working_directory: correlation.working_directory.clone(),
+                sandbox: correlation.sandbox,
+                tool: correlation.tool.clone(),
+                arguments: arguments.clone(),
+                effect: RunnerToolEffectClass::Pure,
+                credential_authorization: None,
+                generation: correlation.generation,
+                state,
+                recorded_correlation: correlation,
+                recorded_session: SessionId::from_uuid(identity(1).into_uuid()),
+                recorded_effect: RunnerToolEffectClass::Pure,
+                recorded_arguments: arguments,
+                recorded_credential_authorization: None,
+                recorded_state: state,
+                retry_preparation: RunnerLeaseRetryPreparation::Available,
+            },
+            &registration,
+        )
+        .expect("the fixture lease is self-consistent")
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingLeaseOperationService {
+        claims: Arc<std::sync::Mutex<Vec<RunnerLeaseClaimRequest>>>,
+        results: Arc<std::sync::Mutex<Vec<RunnerLeaseResultRequest>>>,
+    }
+
+    impl RunnerLeaseOperationService for RecordingLeaseOperationService {
+        fn claim(
+            &self,
+            request: RunnerLeaseClaimRequest,
+        ) -> RunnerLeaseOperationFuture<'_, RunnerLease> {
+            self.claims
+                .lock()
+                .expect("the fixture claim recorder is available")
+                .push(request);
+            Box::pin(std::future::ready(Ok(runner_operation_lease(
+                RunnerLeaseState::Claimed,
+            ))))
+        }
+
+        fn record_result(
+            &self,
+            request: RunnerLeaseResultRequest,
+        ) -> RunnerLeaseOperationFuture<'_, RunnerLease> {
+            self.results
+                .lock()
+                .expect("the fixture result recorder is available")
+                .push(request);
+            Box::pin(std::future::ready(Ok(runner_operation_lease(
+                RunnerLeaseState::Completed,
+            ))))
+        }
+    }
+
+    #[tokio::test]
+    async fn s16_inv043_claim_commit_precedes_exact_acknowledgement_and_dispatch_projection() {
+        let operations = RecordingLeaseOperationService::default();
+        let wire_correlation = canonical_lease_correlation();
+
+        let (acknowledgement, dispatch) = admit_lease_claim(
+            &operations,
+            LeaseClaim {
+                correlation: wire_correlation.clone(),
+            },
+        )
+        .await
+        .expect("the committed claim projects")
+        .expect("the fixture transaction admits the claim");
+        let recorded = operations
+            .claims
+            .lock()
+            .expect("the fixture claim recorder is available")
+            .pop()
+            .expect("one claim reached the transaction");
+
+        assert_eq!(
+            recorded,
+            RunnerLeaseClaimRequest::new(runner_operation_correlation())
+        );
+        assert_eq!(
+            acknowledgement,
+            Message::LeaseClaimed(signalbox_runner_wire::LeaseClaimed {
+                correlation: wire_correlation.clone(),
+            })
+        );
+        assert_eq!(
+            dispatch,
+            Message::Dispatch(signalbox_runner_wire::Dispatch {
+                correlation: wire_correlation,
+                normalized_arguments: runner_operation_arguments_value(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn s12_inv043_result_commit_precedes_exact_recorded_acknowledgement() {
+        let operations = RecordingLeaseOperationService::default();
+        let wire_correlation = canonical_lease_correlation();
+        let result_text = String::from("fetched");
+
+        let acknowledgement = admit_lease_result(
+            &operations,
+            ResultFrame {
+                correlation: wire_correlation.clone(),
+                result: signalbox_runner_wire::TerminalResult::Success {
+                    text: result_text.clone(),
+                },
+            },
+        )
+        .await
+        .expect("the committed result projects")
+        .expect("the fixture transaction admits the result");
+        let recorded = operations
+            .results
+            .lock()
+            .expect("the fixture result recorder is available")
+            .pop()
+            .expect("one result reached the transaction");
+
+        assert_eq!(
+            recorded,
+            RunnerLeaseResultRequest::new(
+                runner_operation_correlation(),
+                signalbox_domain::ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(result_text)
+                            .expect("the fixture result text is bounded"),
+                    ),
+                },
+            )
+        );
+        assert_eq!(
+            acknowledgement,
+            Message::ResultRecorded(signalbox_runner_wire::ResultRecorded {
+                correlation: wire_correlation,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn s16_inv043_unavailable_claim_transaction_emits_no_capability_frames() {
+        let rejection = admit_lease_claim(
+            &UnavailableRunnerLeaseOperationService,
+            LeaseClaim {
+                correlation: canonical_lease_correlation(),
+            },
+        )
+        .await
+        .expect("the unavailable disposition is representable")
+        .expect_err("an unavailable transaction cannot emit acknowledgement or dispatch");
+
+        assert_eq!(rejection.code, RejectionCode::Unavailable);
+        assert_eq!(rejection.cause, RunnerRegistrationFailureCause::Policy);
+    }
+
+    #[test]
+    fn s16_inv043_lease_frames_are_bound_to_the_established_runner_identity() {
+        let matching_context = ConnectionContext {
+            enrollment: identity(2),
+            runner: identity(1),
+            epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
+        };
+        let foreign_context = ConnectionContext {
+            enrollment: identity(2),
+            runner: identity(3),
+            epoch: PositiveU64::try_new(1).expect("the fixture epoch is positive"),
+        };
+        let correlation = canonical_lease_correlation();
+
+        assert!(lease_correlation_matches_connection(
+            &correlation,
+            matching_context
+        ));
+        assert!(!lease_correlation_matches_connection(
+            &correlation,
+            foreign_context
+        ));
     }
 
     #[track_caller]

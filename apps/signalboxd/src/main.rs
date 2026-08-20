@@ -794,6 +794,7 @@ fn runner_runtime_failure_class(error: &RunnerProtocolRuntimeError) -> OperatorF
         | RunnerProtocolRuntimeError::HandshakeTimeout
         | RunnerProtocolRuntimeError::OwnershipUnavailable
         | RunnerProtocolRuntimeError::Broker(_)
+        | RunnerProtocolRuntimeError::DispatchWire(_)
         | RunnerProtocolRuntimeError::HeartbeatSequenceExhausted
         | RunnerProtocolRuntimeError::ConnectionTask(_) => OperatorFailureClass::CallerOrHubBug,
     }
@@ -1411,7 +1412,8 @@ async fn run_hub(
         None => None,
     };
     let runner_protocol_store = runner_service.protocol_store();
-    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
+    let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service)
+        .with_lease_operation_service(runner_protocol_store.clone());
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
         scheduler_pool.clone(),
@@ -1447,9 +1449,9 @@ async fn run_hub(
             model_configuration.clone(),
         ),
     );
-    // The connection runtime has no execution role, so it reaches the same
-    // fatal recovery signal through this handle rather than ending an
-    // undecidable durable outcome at the client response.
+    // The connection runtime reaches the same fatal recovery signal through
+    // this handle rather than ending an undecidable durable outcome at the
+    // client response.
     let process_runtime = process_runtime.with_recovery_reporter(execution.recovery_reporter());
     let activated_pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
