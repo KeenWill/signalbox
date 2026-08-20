@@ -32,8 +32,9 @@ A virtual DOM list alone does not satisfy the law.
 
 ## Data loading
 
-- Use stable keyset or logical timeline addresses, not offset pagination for
-  mutable/unbounded data.
+- Follow the owning implemented contract's addressing model. Use stable keyset
+  or logical timeline addresses when that contract exposes them; do not impose
+  a new pagination surface from this skill.
 - Use server-provided size facts only when the owning implemented contract
   exposes them. Always measure and bound the records and bytes the client
   actually receives.

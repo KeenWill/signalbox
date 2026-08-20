@@ -1,12 +1,13 @@
 ---
 name: signalbox-web-protocol
-description: Preserve Signalbox authority, synchronization, command identity, typed boundaries, and fail-closed semantics when adding browser HTTP contracts and client projections.
+description: Preserve Signalbox authority, synchronization, command identity, typed boundaries, and fail-closed semantics when adding browser contracts and client projections.
 ---
 
 # Signalbox web protocol
 
-Use this skill for HTTP endpoints, DTOs, decoders, synchronization reducers,
-commands, read models, stream handling, retries, and recovery.
+Use this skill for browser endpoints and transports, DTOs, decoders,
+synchronization reducers, commands, read models, stream handling, retries, and
+recovery.
 
 This bootstrap does not decide open browser transport, client language, wire,
 or cross-component questions. Each implementing stack records foundation-weight
@@ -52,9 +53,10 @@ Separate the historical plane from the live plane.
   cursor, then sends ordered durable updates above it. It relays ephemeral
   drafts only when an owning implemented contract defines their identity,
   sequencing, replacement, backpressure, and redaction.
-- A full follower queue applies contract-defined backpressure or stops
-  incremental delivery and resynchronizes from the durable cursor; it never
-  drops durable events.
+- A full follower queue follows its owning implemented contract. The current
+  `follow_session` contract stops incremental delivery, reports
+  `resync_required`, and resumes from a fresh snapshot; it never drops durable
+  events or substitutes backpressure.
 - Lag produces resynchronization, not partial best-effort continuation.
 - Client presentation choices never become server `full`, `condensed`, or
   `results` modes.

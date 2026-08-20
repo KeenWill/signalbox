@@ -15,7 +15,7 @@ bounded Goal-mode tracks rather than one open-ended run.
 | Track                     | Issue | Starts when                             | Primary ownership                       |
 | ------------------------- | ----- | --------------------------------------- | --------------------------------------- |
 | Client platform           | #989  | immediately                             | `clients/web/**`, web CI and evidence   |
-| HTTP contract             | #990  | immediately                             | browser transport and generated DTOs    |
+| HTTP contract             | #990  | immediately                             | browser contract and DTO surface        |
 | Session projection        | #991  | #990 contract slice exists              | session windows, detail, live follow    |
 | Fleet and repo watch      | #992  | immediately where current stacks permit | monitor and operator read models        |
 | Blobs and derivations     | #993  | #990 plus blob stack seams              | range delivery, capabilities, previews  |
@@ -41,40 +41,28 @@ bounded Goal-mode tracks rather than one open-ended run.
                                                     #997 dogfood
 ```
 
-Tracks use separate worktrees and branches. The coordinator owns shared
-composition roots, generated indexes, dependency order, merge-forward, dogfood,
-and the final integration view. A track does not edit another track's owned
-surface merely to unblock itself.
+Track execution and shared-coordinator ownership follow
+[Goal mode's execution rules](goal-mode.md#executing). This map records only
+campaign-specific track surfaces and dependency collisions.
 
 ## Checkpoints
 
-A progress checkpoint states:
-
-1. the active track and current stack head;
-2. what has been verified with commands or browser artifacts;
-3. the next bounded slice;
-4. any semantic, dependency, or external blocker;
-5. each pull request's accepted and declined finding counts in review-wave
-   order.
-
-A milestone-closing checkpoint also records that every milestone pull request is
-finished and merged by the approving user and that post-delivery alignment
-review is complete. Select the next milestone only in target-model priority
-order and after any accepted blocking decision governing that selection, the
-review-wave counts, and the alignment review are recorded. Stop an
-decision-gated track, report the precise decision needed, and continue other
-unblocked tracks.
-
-UI-facing checkpoints include scenario URLs and review screenshots. Large-data
-checkpoints also report mounted-row counts, retained records or memory trends,
-request/window sizes, and the bound being proved.
+Progress checkpoints follow
+[Goal mode's execution rules](goal-mode.md#executing); this map adds only the
+active campaign track and current stack head. Milestone completion, finalized
+review-wave histories, and post-delivery alignment follow
+[Goal mode's finishing rules](goal-mode.md#finishing). Next-milestone selection
+follows the [target-model priority order](../target-model.md#priority-order) and
+accepted blocking decisions.
 
 ## Evidence baseline
 
 The
 [signalbox-web-browser-qa skill](../../.agents/skills/signalbox-web-browser-qa/SKILL.md)
 owns browser scenarios, coverage, target browsers, diagnostics, and retained
-failure artifacts. This planning map adds no evidence contract.
+failure artifacts. The
+[signalbox-web-performance skill](../../.agents/skills/signalbox-web-performance/SKILL.md)
+owns scale proof. This planning map adds no evidence contract.
 
 ## Operator surface
 

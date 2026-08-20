@@ -50,7 +50,9 @@ read-only summaries for:
 
 - transport and synchronization phase;
 - selected session and durable cursor;
-- pending commands, approvals, and provider drafts;
+- pending commands and approvals;
+- provider drafts only when an implemented relay contract also authorizes their
+  diagnostic representation and redaction;
 - recent Redux actions and state diffs;
 - loaded pages/windows and virtual ranges;
 - TanStack Query state; and

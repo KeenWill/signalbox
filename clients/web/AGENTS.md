@@ -11,8 +11,6 @@ pull-request description before implementation.
 
 ## Architecture
 
-- React renders projections; it does not own transport, protocol recovery, or
-  synchronization authority.
 - Keep transport, decoding, synchronization, state projection, and presentation
   as distinct modules with distinct types.
 - The implementing stack's owning specification decides the browser contract,
@@ -20,15 +18,13 @@ pull-request description before implementation.
   do not hand-maintain a second protocol.
 - Components never open network connections directly. They invoke typed client
   services or commands and subscribe through selectors.
-- Use Redux Toolkit for explicit control/application transitions and bounded
-  diagnostic traces. Do not place an unbounded transcript or artifact corpus in
-  one Redux tree.
-- Use TanStack Query for ordinary request/response state. Dedicated session and
-  fleet synchronization machines own live streams and resynchronization.
-- A deterministic scenario adapter and the production adapter selected by the
-  owning contract implement the same transport-neutral client seam. Scenarios
-  must exercise real reducers, decoders, commands, selectors, and renderers
-  rather than duplicate fake UI logic.
+- When the owning specification selects the JavaScript stack recorded in issue
+  #988:
+  - React renders projections; it does not own transport, protocol recovery, or
+    synchronization authority.
+  - Redux Toolkit owns explicit control and application transitions.
+  - TanStack Query owns ordinary request/response state. Dedicated session and
+    fleet synchronization machines own live streams and resynchronization.
 
 ## Resource behavior
 
@@ -56,10 +52,11 @@ that skill rather than restating its evidence contract here.
 
 ## Dependencies
 
-Issue #988 records the approved initial React, Vite, TanStack, Redux,
-shadcn/Radix, Tailwind, Lucide, and Playwright stack. Explain focused dependency
-choices in the pull-request description. Ask before adding another large or
-architecturally constraining dependency.
+If the implementing specification selects the JavaScript client, issue #988
+records its initial React, Vite, TanStack, Redux, shadcn/Radix, Tailwind,
+Lucide, and Playwright stack. Otherwise follow the selected client-language
+stack. Explain focused dependency choices in the pull-request description. Ask
+before adding another large or architecturally constraining dependency.
 
 ## Review
 

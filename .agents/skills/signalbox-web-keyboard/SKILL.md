@@ -36,6 +36,11 @@ content. `Escape` unwinds the closest transient or editing context first, then
 returns focus to the owning surface. It must not unpredictably jump across the
 application.
 
+Yield `Enter`, `Space`, and other native activation keys when a native button,
+link, or interactive control has focus. When that control invokes a registered
+command, its native activation is the single execution path; the application
+keymap must not dispatch it a second time.
+
 ## Navigation grammar
 
 Prefer familiar Vim-inspired concepts where they fit:
