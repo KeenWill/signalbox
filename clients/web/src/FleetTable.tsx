@@ -54,9 +54,14 @@ export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount:
         </span>
       </header>
       {/* biome-ignore lint/a11y/useSemanticElements: The virtualized table needs a scrollable ARIA table container. */}
-      <div className="data-table" role="table" aria-label="Fleet obligations">
+      <div
+        className="data-table"
+        role="table"
+        aria-label="Fleet obligations"
+        aria-rowcount={totalCount + 1}
+      >
         {/* biome-ignore lint/a11y: Rows in this read-only virtualized ARIA table are not interactive controls. */}
-        <div className="table-header" role="row">
+        <div className="table-header" role="row" aria-rowindex={1}>
           {table.getHeaderGroups()[0]?.headers.map((header) => (
             // biome-ignore lint/a11y: Virtualized ARIA column headers do not receive independent focus.
             <div role="columnheader" key={header.id}>
@@ -82,6 +87,7 @@ export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount:
                 <div
                   className="table-row"
                   role="row"
+                  aria-rowindex={virtualRow.index + 2}
                   key={row.original.id}
                   data-testid={`fleet-${row.original.id}`}
                   style={{

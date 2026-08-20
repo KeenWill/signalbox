@@ -102,13 +102,11 @@ export function OverlaySurfaces({
         description="One registry powers buttons, menus, hotkeys, and this palette."
         onClose={close}
       >
-        <div className="command-list" role="listbox" aria-label="Available commands">
+        <div className="command-list">
           {availableCommands.map((command) => (
             <button
               key={command.id}
               type="button"
-              role="option"
-              aria-selected="false"
               onClick={() => {
                 close()
                 invokeCommand(command.id, context)

@@ -17,6 +17,9 @@ const largeFleetFixture = {
   logicalRows: 1_000_000,
   loadedRows: 480,
   mountedRowsCeiling: 50,
+  ariaRowCount: '1000001',
+  firstRowTestId: 'fleet-obligation-0',
+  firstRowIndex: '2',
 } as const
 
 const streamingFixture = {
@@ -37,7 +40,7 @@ test.afterEach(async ({ page }, testInfo) => {
     .evaluate(() => window.__SIGNALBOX_DIAGNOSTICS__?.())
     .catch(() => undefined)
   await testInfo.attach('signalbox-diagnostics', {
-    body: JSON.stringify(diagnostics, null, 2),
+    body: JSON.stringify(diagnostics ?? null, null, 2),
     contentType: 'application/json',
   })
 })
@@ -76,6 +79,21 @@ test('keeps a million-row fleet table bounded', async ({ page }) => {
   const diagnostics = await page.evaluate(() => window.__SIGNALBOX_DIAGNOSTICS__?.())
   expect(diagnostics?.logicalFleet).toBe(largeFleetFixture.logicalRows)
   expect(diagnostics?.loadedFleet).toBe(largeFleetFixture.loadedRows)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('exposes logical positions for virtualized fleet rows', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto(largeFleetFixture.path)
+
+  await expect(page.getByRole('table', { name: 'Fleet obligations' })).toHaveAttribute(
+    'aria-rowcount',
+    largeFleetFixture.ariaRowCount,
+  )
+  await expect(page.getByTestId(largeFleetFixture.firstRowTestId)).toHaveAttribute(
+    'aria-rowindex',
+    largeFleetFixture.firstRowIndex,
+  )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -149,22 +167,29 @@ test('results detail preserves an eligible selected record', async ({ page }) =>
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('changing scenarios resets timeline selection and closes mobile navigation', async ({
-  page,
-}) => {
+test('changing scenarios resets timeline selection', async ({ page }) => {
   const problems = watchBrowser(page)
-  await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/scenario/streaming')
 
   const timeline = page.getByRole('listbox', { name: 'Session timeline' })
   await timeline.focus()
   await timeline.press('End')
+  await page.getByRole('link', { name: /Approval required/ }).click()
+  await expect(page).toHaveURL(/\/scenario\/approval$/)
+  await expect(page.getByRole('option', { selected: true })).toHaveAttribute('id', 'event-0')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('scenario selection closes mobile navigation', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/scenario/streaming')
+
   await page.getByRole('button', { name: 'Open scenarios' }).click()
   const navigation = page.getByRole('dialog', { name: 'Development scenarios' })
   await navigation.getByRole('link', { name: /Approval required/ }).click()
   await expect(navigation).toBeHidden()
   await expect(page).toHaveURL(/\/scenario\/approval$/)
-  await expect(page.getByRole('option', { selected: true })).toHaveAttribute('id', 'event-0')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -186,7 +211,7 @@ test('the command palette opens keyboard help without closing it', async ({ page
 
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
-  await page.getByRole('option', { name: /Open keyboard help/ }).click()
+  await page.getByRole('button', { name: /Open keyboard help/ }).click()
   await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
