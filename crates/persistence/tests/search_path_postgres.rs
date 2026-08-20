@@ -106,6 +106,15 @@ const RESTORE_REACHABLE_FUNCTIONS: &str = "
      ORDER BY proname
 ";
 
+/// Names of covered functions that lack the canonical pin.
+fn unpinned_names(covered: &[(String, bool)]) -> Vec<&str> {
+    covered
+        .iter()
+        .filter(|(_, pinned)| !pinned)
+        .map(|(name, _)| name.as_str())
+        .collect()
+}
+
 /// INV-070: every function reachable from a check constraint or index during
 /// `pg_restore` carries the canonical pinned search path — the
 /// migration-selected schema, then `pg_catalog`, then `pg_temp`.
@@ -140,11 +149,7 @@ async fn every_restore_reachable_function_pins_its_search_path() -> Result<(), B
         "restore-reachability discovery found no functions, which means the \
          discovery query broke: the schema's check constraints reach functions"
     );
-    let unpinned: Vec<&str> = covered
-        .iter()
-        .filter(|(_, pinned)| !pinned)
-        .map(|(name, _)| name.as_str())
-        .collect();
+    let unpinned = unpinned_names(&covered);
     assert!(
         unpinned.is_empty(),
         "restore-reachable functions without the canonical search path pin: {unpinned:?}"

@@ -171,11 +171,19 @@ pool, because no earlier schema can have admitted one. Why: checksummed
 forward-only files make every schema change a reviewed, immutable artifact, so a
 deployed database's history is never silently edited.
 
-A migration becomes immutable as soon as its version is recorded in the target
-database's `_sqlx_migrations` table, regardless of whether the migration's
-branch or pull request has merged. Correct an already-recorded migration with a
-new forward migration; never edit, replace, or renumber the recorded migration
-file.
+A migration becomes immutable as soon as its version is recorded in the
+`_sqlx_migrations` table of any database whose history must remain continuous:
+every deployed database, and every recording once the migration's pull request
+merges. Correct an already-recorded migration with a new forward migration;
+never edit, replace, or renumber the recorded migration file. The sole exception
+is a pre-merge recording by a rehearsal installation when the recorded form
+cannot merge — a form that fails validation on fresh databases has no correct
+forward continuation, so the file is corrected before merge and the rehearsal
+installation's ledger row is corrected at its next deployment as a documented
+step, never silently. Why: the rule exists so no database's history is silently
+edited, and a documented rehearsal-ledger correction preserves that while a
+frozen unmergeable file would instead freeze a defect into every future
+installation.
 
 Every function reachable from a table constraint or index expression pins its
 search path in its catalogue definition, rendered through `current_schema` so
