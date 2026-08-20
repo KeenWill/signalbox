@@ -1,6 +1,6 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
-import { useQuery } from '@tanstack/react-query'
-import { useEffect, useMemo } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useMemo, useSyncExternalStore } from 'react'
 import {
   type CommandContext,
   globalHotkeyBindings,
@@ -53,6 +53,12 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
     ? (scenarioId as ScenarioId)
     : 'streaming'
   const transport = useMemo(() => new ScenarioTransport(knownId), [knownId])
+  const queryClient = useQueryClient()
+  const queryCache = queryClient.getQueryCache()
+  const queryCacheSize = useSyncExternalStore(
+    (onStoreChange) => queryCache.subscribe(onStoreChange),
+    () => queryCache.getAll().length,
+  )
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const timelineQuery = useQuery({
@@ -115,6 +121,7 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
         `timeline: ${timelineQuery.status}/${timelineQuery.fetchStatus}`,
         `fleet: ${fleetQuery.status}/${fleetQuery.fetchStatus}`,
       ],
+      queryCacheSize,
       recentActions: getRecentActions(),
     }),
     [
@@ -124,6 +131,7 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       fleet?.totalCount,
       fleetQuery.fetchStatus,
       fleetQuery.status,
+      queryCacheSize,
       timeline?.items.length,
       timeline?.totalCount,
       timelineQuery.fetchStatus,
@@ -173,9 +181,9 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
           <Toolbar context={commandContext} />
         </header>
         <div className="primary-stack">
-          <Transcript key={knownId} items={timeline.items} context={commandContext} />
+          <Transcript key={`timeline-${knownId}`} items={timeline.items} context={commandContext} />
           {app.layout === 'workbench' && (
-            <FleetTable rows={fleet.items} totalCount={fleet.totalCount} />
+            <FleetTable key={`fleet-${knownId}`} rows={fleet.items} totalCount={fleet.totalCount} />
           )}
         </div>
       </main>

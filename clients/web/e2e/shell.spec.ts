@@ -31,6 +31,14 @@ const streamingFixture = {
   lastLoadedItemId: 'event-239',
 } as const
 
+const cachedScenarioFixture = {
+  streamingFleetSummary: '180 logical · 180 loaded',
+  approvalFleetSummary: '240 logical · 240 loaded',
+  firstFleetRowTestId: 'fleet-obligation-0',
+  initialQueryCacheSummary: '2 bounded entries',
+  retainedQueryCacheSummary: '4 bounded entries',
+} as const
+
 const watchBrowser = (page: Page): BrowserProblems => {
   const problems: BrowserProblems = { consoleErrors: [], pageErrors: [] }
   page.on('console', (message) => {
@@ -321,6 +329,55 @@ test('changing to a cached scenario resets timeline scrolling', async ({ page })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('changing to a cached scenario resets fleet scrolling', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+
+  await page.getByRole('link', { name: /Approval required/ }).click()
+  await expect(
+    page.getByText(cachedScenarioFixture.approvalFleetSummary, { exact: true }),
+  ).toBeVisible()
+  await expect(
+    page.getByText(cachedScenarioFixture.streamingFleetSummary, { exact: true }),
+  ).toBeHidden()
+  await page.getByRole('link', { name: /Streaming session/ }).click()
+  await expect(
+    page.getByText(cachedScenarioFixture.streamingFleetSummary, { exact: true }),
+  ).toBeVisible()
+  await expect(
+    page.getByText(cachedScenarioFixture.approvalFleetSummary, { exact: true }),
+  ).toBeHidden()
+  const streamingFleet = page.getByRole('rowgroup', { name: 'Fleet rows' })
+  await streamingFleet.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  expect(await streamingFleet.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+
+  await page.getByRole('link', { name: /Approval required/ }).click()
+  await expect(
+    page.getByText(cachedScenarioFixture.approvalFleetSummary, { exact: true }),
+  ).toBeVisible()
+  await expect(
+    page.getByText(cachedScenarioFixture.streamingFleetSummary, { exact: true }),
+  ).toBeHidden()
+  const approvalFleet = page.getByRole('rowgroup', { name: 'Fleet rows' })
+  await expect(page).toHaveURL(/\/scenario\/approval$/)
+  await expect(page.getByTestId(cachedScenarioFixture.firstFleetRowTestId)).toBeInViewport()
+  expect(await approvalFleet.evaluate((element) => element.scrollTop)).toBe(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('reports retained scenario queries in the query cache', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+
+  const diagnostics = page.getByRole('complementary', { name: 'Diagnostics' })
+  await expect(diagnostics.getByText(cachedScenarioFixture.initialQueryCacheSummary)).toBeVisible()
+  await page.getByRole('link', { name: /Approval required/ }).click()
+  await expect(diagnostics.getByText(cachedScenarioFixture.retainedQueryCacheSummary)).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('marks only the active scenario link as the current page', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
@@ -358,13 +415,21 @@ test('keeps the fleet surface reachable on a short mobile viewport', async ({ pa
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('Mod+K and Escape open and close the registered command palette', async ({ page }) => {
+test('Mod+K opens the registered command palette', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
 
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('Escape closes the command palette', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
   await page.keyboard.press('Escape')
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeHidden()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })

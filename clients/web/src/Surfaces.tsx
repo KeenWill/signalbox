@@ -216,6 +216,7 @@ export interface DiagnosticSnapshot {
   transcriptRange: VisibleRange
   tableRange: VisibleRange
   queryStates: string[]
+  queryCacheSize: number
   recentActions: readonly string[]
 }
 
@@ -277,7 +278,7 @@ export function Diagnostics({
         </div>
         <div>
           <dt>Query cache</dt>
-          <dd>{snapshot.queryStates.length} bounded entries</dd>
+          <dd>{snapshot.queryCacheSize} bounded entries</dd>
         </div>
       </dl>
       <h3>Recent Redux actions</h3>
