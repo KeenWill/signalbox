@@ -73,7 +73,9 @@ handling.
   identity and semantic payload after ambiguity.
 - Retry a contractually identity-free mutation only as its owning contract
   prescribes; never invent a command identity for it.
-- Do not convert HTTP status alone into durable command truth.
+- Treat an HTTP status as durable command truth only when the owning implemented
+  mutation contract defines that status as an acknowledgement emitted after the
+  durable commit.
 - Do not optimistically insert authoritative transcript entries. Local pending
   commands remain distinct until acknowledged and observed durably.
 - Validate the identity, correlation, and successor-version fields that the

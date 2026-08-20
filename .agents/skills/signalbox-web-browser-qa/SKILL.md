@@ -1,6 +1,6 @@
 ---
 name: signalbox-web-browser-qa
-description: Verify Signalbox web changes with deterministic scenarios, Playwright, accessibility-first locators, structured diagnostics, screenshots, and failure traces.
+description: Verify Signalbox web changes with deterministic scenarios, the selected browser-test stack, accessibility-first locators, structured diagnostics, screenshots, and failure traces.
 ---
 
 # Signalbox web browser QA
@@ -25,7 +25,7 @@ Prefer scenarios such as:
 - huge images, source, logs, JSON, CSV, PDF, audio/video, and unknown files; and
 - desktop, workbench, focus, dark, and phone layouts.
 
-## Playwright workflow
+## Browser-test workflow
 
 1. Open the narrowest deterministic scenario reproducing the behavior.
 2. Inspect semantic roles, names, text, focus, console, page errors, and network.
@@ -33,7 +33,8 @@ Prefer scenarios such as:
 3. Reproduce with user-facing locators before using test IDs.
 4. Make the smallest owning-layer correction.
 5. Run the focused test, then the relevant scenario group.
-6. Capture trace and screenshots for failures or meaningful visual changes.
+6. Capture the selected runner's trace when available and screenshots for
+   failures or meaningful visual changes.
 
 ## Locators
 
@@ -66,9 +67,10 @@ large content.
 
 ## Failure artifacts
 
-On failure retain:
+On failure retain the artifacts supported by the selected browser-test stack:
 
-- Playwright trace;
+- browser-runner trace, such as a Playwright trace when the implementing
+  specification selects Playwright;
 - screenshot;
 - console messages and page errors;
 - accessibility/semantic snapshot where useful;
