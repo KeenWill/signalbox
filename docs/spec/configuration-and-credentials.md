@@ -188,11 +188,15 @@ decoder against the Rust-produced fixture.
 The transport foundation admits ordinary JSON bodies only through a 65,536-byte
 buffering ceiling. Browser mutation routes use `POST`, require
 `application/json`, and, when the browser supplies `Origin`, require its HTTP(S)
-host and effective port to equal the request `Host` authority. A missing origin
-is admitted for non-browser and same-origin clients as the issue contract
-requires; an invalid, opaque, missing-authority, or cross-origin pair receives a
-structured transport error. Application errors occupy a separate error kind and
-are not inferred from HTTP status alone.
+host and effective port to equal the request `Host` authority. Because the
+listener is plain HTTP, a `Host` without an explicit port has effective port 80;
+the daemon never derives that port from the supplied origin. A missing origin is
+admitted for non-browser and same-origin clients as the issue contract requires;
+an invalid, opaque, missing-authority, or cross-origin pair receives a
+structured transport error. Only crossing the buffering ceiling produces
+`413 Payload Too Large`; another failure while reading the request body produces
+a distinct `400 Bad Request` transport error. Application errors occupy a
+separate error kind and are not inferred from HTTP status alone.
 
 Incremental responses are `application/x-ndjson`: each item is serialized only
 when the response body polls it, carries one trailing newline, and is at most

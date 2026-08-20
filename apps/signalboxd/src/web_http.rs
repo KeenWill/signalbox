@@ -6,6 +6,7 @@
 
 use std::{
     env,
+    error::Error as StdError,
     ffi::OsString,
     fmt, io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -44,6 +45,7 @@ pub const DEFAULT_WEB_BIND_ADDRESS: SocketAddr =
 
 const JSON_CONTENT_TYPE: &str = "application/json";
 const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
+const HTTP_DEFAULT_PORT: u16 = 80;
 
 /// Deployment-owned browser listener and production assets configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -304,12 +306,20 @@ where
 {
     let bytes = to_bytes(request.into_body(), MAX_JSON_BODY_BYTES)
         .await
-        .map_err(|_| {
-            transport_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "json_body_too_large",
-                "JSON request body exceeds the contract limit",
-            )
+        .map_err(|error| {
+            if error_chain_contains_length_limit(&error) {
+                transport_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "json_body_too_large",
+                    "JSON request body exceeds the contract limit",
+                )
+            } else {
+                transport_error(
+                    StatusCode::BAD_REQUEST,
+                    "json_body_read_failed",
+                    "JSON request body could not be read",
+                )
+            }
         })?;
     serde_json::from_slice(&bytes).map_err(|_| {
         transport_error(
@@ -318,6 +328,17 @@ where
             "request body is not the expected JSON value",
         )
     })
+}
+
+fn error_chain_contains_length_limit(error: &axum::Error) -> bool {
+    let mut current: Option<&(dyn StdError + 'static)> = Some(error);
+    while let Some(error) = current {
+        if error.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        current = error.source();
+    }
+    false
 }
 
 /// Encodes an incrementally polled stream as fetch-compatible NDJSON.
@@ -342,13 +363,51 @@ fn encode_ndjson_item<T>(item: T) -> Result<Bytes, io::Error>
 where
     T: Serialize,
 {
-    let mut encoded = serde_json::to_vec(&item)
-        .map_err(|_| io::Error::other("NDJSON item could not be encoded"))?;
-    if encoded.len() > MAX_NDJSON_ITEM_BYTES {
-        return Err(io::Error::other("NDJSON item exceeds the contract limit"));
+    let mut writer = NdjsonItemWriter::new();
+    if serde_json::to_writer(&mut writer, &item).is_err() {
+        let message = if writer.limit_exceeded {
+            "NDJSON item exceeds the contract limit"
+        } else {
+            "NDJSON item could not be encoded"
+        };
+        return Err(io::Error::other(message));
     }
+    let mut encoded = writer.encoded;
     encoded.push(b'\n');
     Ok(Bytes::from(encoded))
+}
+
+struct NdjsonItemWriter {
+    encoded: Vec<u8>,
+    limit_exceeded: bool,
+}
+
+impl NdjsonItemWriter {
+    fn new() -> Self {
+        Self {
+            encoded: Vec::with_capacity(MAX_NDJSON_ITEM_BYTES + 1),
+            limit_exceeded: false,
+        }
+    }
+}
+
+impl io::Write for NdjsonItemWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let Some(new_length) = self.encoded.len().checked_add(buffer.len()) else {
+            self.limit_exceeded = true;
+            return Err(io::Error::other("NDJSON item exceeds the contract limit"));
+        };
+        if new_length > MAX_NDJSON_ITEM_BYTES {
+            self.limit_exceeded = true;
+            return Err(io::Error::other("NDJSON item exceeds the contract limit"));
+        }
+        self.encoded.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 async fn validate_json_mutation(request: Request, next: Next) -> Response {
@@ -406,13 +465,11 @@ fn validate_supplied_origin(headers: &HeaderMap) -> Result<(), OriginValidationE
         .and_then(|host| host.to_str().ok())
         .and_then(|host| host.parse::<axum::http::uri::Authority>().ok());
     let matching = origin.zip(authority).is_some_and(|(origin, authority)| {
-        let authority_port = authority
-            .port_u16()
-            .or_else(|| origin.port_or_known_default());
+        let authority_port = authority.port_u16().unwrap_or(HTTP_DEFAULT_PORT);
         origin
             .host_str()
             .is_some_and(|host| host.eq_ignore_ascii_case(authority.host()))
-            && origin.port_or_known_default() == authority_port
+            && origin.port_or_known_default() == Some(authority_port)
     });
     if matching {
         Ok(())
@@ -446,10 +503,16 @@ async fn static_assets_not_configured() -> Response {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, net::SocketAddr, path::PathBuf, time::Duration};
+    use std::{
+        ffi::OsString,
+        io::{self, Write as _},
+        net::SocketAddr,
+        path::PathBuf,
+        time::Duration,
+    };
 
     use axum::{
-        body::Body,
+        body::{Body, Bytes},
         http::{Request, StatusCode, header},
     };
     use http_body_util::BodyExt as _;
@@ -673,6 +736,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mutation_with_implicit_host_port_rejects_cross_port_origin() {
+        let request = Request::post("/api/test/mutate")
+            .header(header::HOST, "signalbox.test")
+            .header(header::ORIGIN, "http://signalbox.test:8080")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&example()).expect("the fixture serializes"),
+            ))
+            .expect("the request is valid");
+        let response = deterministic_test_router()
+            .oneshot(request)
+            .await
+            .expect("the deterministic router responds");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn mutation_with_implicit_host_port_rejects_https_default_port() {
+        let request = Request::post("/api/test/mutate")
+            .header(header::HOST, "signalbox.test")
+            .header(header::ORIGIN, "https://signalbox.test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&example()).expect("the fixture serializes"),
+            ))
+            .expect("the request is valid");
+        let response = deterministic_test_router()
+            .oneshot(request)
+            .await
+            .expect("the deterministic router responds");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn mutation_over_json_limit_is_rejected_before_decode() {
         let request = Request::post("/api/test/mutate")
             .header(header::HOST, "signalbox.test")
@@ -685,6 +784,28 @@ mod tests {
             .expect("the deterministic router responds");
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn mutation_with_body_read_failure_is_bad_request() {
+        let failing_body = futures_util::stream::once(async {
+            Err::<Bytes, io::Error>(io::Error::other("fixture body read failure"))
+        });
+        let request = Request::post("/api/test/mutate")
+            .header(header::HOST, "signalbox.test")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from_stream(failing_body))
+            .expect("the request is valid");
+        let response = deterministic_test_router()
+            .oneshot(request)
+            .await
+            .expect("the deterministic router responds");
+        let status = response.status();
+        let body: serde_json::Value =
+            serde_json::from_slice(&response_body(response).await).expect("the rejection is JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "json_body_read_failed");
     }
 
     #[tokio::test]
@@ -795,6 +916,22 @@ mod tests {
             .expect("the oversized item produces a terminal frame result");
 
         assert!(frame.is_err());
+    }
+
+    #[test]
+    fn ndjson_writer_refuses_overflow_without_appending_it() {
+        let mut writer = super::NdjsonItemWriter::new();
+        writer
+            .write_all(&vec![b'x'; MAX_NDJSON_ITEM_BYTES])
+            .expect("the exact item ceiling fits");
+        let length_at_ceiling = writer.encoded.len();
+        let error = writer
+            .write_all(b"x")
+            .expect_err("the next byte crosses the item ceiling");
+
+        assert_eq!(length_at_ceiling, MAX_NDJSON_ITEM_BYTES);
+        assert_eq!(writer.encoded.len(), length_at_ceiling);
+        assert_eq!(error.to_string(), "NDJSON item exceeds the contract limit");
     }
 
     fn stream_from_receiver<T>(
