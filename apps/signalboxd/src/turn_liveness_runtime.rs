@@ -6,7 +6,7 @@
 //! scheduler pass, because the sessions it exists to reach are exactly the
 //! ones no pass is scheduled for.
 
-use std::future::Future;
+use std::{collections::VecDeque, future::Future};
 
 use signalbox_application::{
     ClassifyOperatorFailure, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
@@ -127,74 +127,61 @@ impl TerminalizationTally {
 
 /// The capped, rotating window of due turns one scan terminalizes.
 ///
-/// The cap alone is not fair. Due turns arrive in session order, and a turn can
-/// be due forever without ever ending — one holding pending steering is
-/// refused by every scan — so a cap taken from the front of that order would
-/// hand the same undrainable turns the whole window on every scan, and a turn
-/// behind them would wait for a slot that never comes. The window therefore
-/// resumes past the last turn it attempted, so each scan starts where the last
-/// left off and every due turn is attempted within one lap of the cohort,
-/// whatever any of them does when attempted.
+/// The cap alone is not fair. A turn can be due forever without ever ending —
+/// one holding pending steering is refused by every scan — so a window taken
+/// from the front of the due order would hand those turns every slot on every
+/// scan, and a turn behind them would wait for one that never comes.
+///
+/// The window therefore works in laps, and a lap is a *membership* fixed when
+/// it opens: the sessions due at that moment, in order. Successive scans take
+/// the next `capacity` of them that are still due, and the lap ends when its
+/// members are exhausted, whereupon the next scan opens a fresh lap over
+/// whatever is due then. Every turn due when a lap opens is attempted within
+/// `⌈members ÷ capacity⌉` scans of it, and nothing about the turns arriving
+/// meanwhile can change that.
+///
+/// Two narrower versions of this window failed to keep that guarantee, both by
+/// deciding membership from what was due at each scan rather than at the lap's
+/// opening. Following the due order alone let arrivals, which carry
+/// time-ordered session identities and so sort last, be served forever ahead of
+/// the turns behind the cursor. Bounding the lap by the greatest session it
+/// opened with fixed that but not its converse: a session that already existed
+/// below the bound and became due mid-lap still joined, pushing the lap's own
+/// members back. A membership has neither failure because it is not a
+/// predicate over what is due — it is a list.
+///
+/// A member that stops being due before its slot comes is skipped rather than
+/// waited for, since it is no longer this pass's business.
 struct TerminalizationWindow {
     capacity: usize,
-    resume_after: Option<SessionId>,
-    lap_through: Option<SessionId>,
+    lap: VecDeque<SessionId>,
 }
 
 impl TerminalizationWindow {
-    const fn new(capacity: usize) -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            resume_after: None,
-            lap_through: None,
+            lap: VecDeque::new(),
         }
     }
 
-    /// Returns this scan's turns, and remembers where the next scan resumes.
+    /// Returns this scan's turns, consuming that many members of the lap.
     ///
-    /// `due` is in ascending session order. A lap fixes its far end when it
-    /// begins — the greatest session then due — and successive scans walk the
-    /// cursor toward that end and no further; reaching it starts a fresh lap
-    /// from the front.
-    ///
-    /// Fixing the end is what makes the lap terminate under arrivals. Sessions
-    /// are identified by time-ordered v7 values, so a session that becomes due
-    /// during a lap sorts *above* everything the lap is walking through. A
-    /// window that simply took the next turns past its cursor would follow
-    /// those arrivals forever, and a turn behind the cursor — one whose
-    /// terminalization hit a transient failure, or one steering blocks — would
-    /// never be reached again. Deferring arrivals to the next lap costs them a
-    /// lap; serving them first costs the turns behind them everything.
-    fn take<'due>(&mut self, due: &'due [StaleTurnCandidate]) -> &'due [StaleTurnCandidate] {
-        let Some(furthest) = due.last().map(|last| last.session()) else {
-            self.resume_after = None;
-            self.lap_through = None;
-            return due;
-        };
-        let start = match (self.resume_after, self.lap_through) {
-            (Some(cursor), Some(through)) => due
-                .iter()
-                .position(|candidate| {
-                    candidate.session() > cursor && candidate.session() <= through
-                })
-                .unwrap_or(0),
-            _ => 0,
-        };
-        if start == 0 {
-            self.lap_through = Some(furthest);
+    /// `due` is in ascending session order and holds one turn per session, so a
+    /// member is found by binary search rather than by scanning a cohort that
+    /// may be very large.
+    fn take(&mut self, due: &[StaleTurnCandidate]) -> Vec<StaleTurnCandidate> {
+        if self.lap.is_empty() {
+            self.lap = due.iter().map(|candidate| candidate.session()).collect();
         }
-        let end = due.len().min(start + self.capacity);
-        let window = &due[start..end];
-        self.resume_after = window.last().map(|last| last.session());
-        // A lap that has reached its far end is over, and the next scan starts
-        // one from the front — which is where the turns it walked past wait.
-        if self
-            .resume_after
-            .zip(self.lap_through)
-            .is_some_and(|(cursor, through)| cursor >= through)
-        {
-            self.resume_after = None;
-            self.lap_through = None;
+        let mut window = Vec::with_capacity(self.capacity.min(self.lap.len()));
+        while window.len() < self.capacity {
+            let Some(member) = self.lap.pop_front() else {
+                break;
+            };
+            if let Ok(found) = due.binary_search_by_key(&member, |candidate| candidate.session()) {
+                window.push(due[found]);
+            }
         }
         window
     }
@@ -364,7 +351,7 @@ where
     let due = ledger.reconcile(&quiescent, Instant::now());
     let attempted = window.take(&due);
     let mut tally = TerminalizationTally::default();
-    for candidate in attempted {
+    for candidate in &attempted {
         tally.record(terminalize_stale_turn(repository, *candidate, staleness_bound).await);
     }
     // A cohort larger than the window takes a scan per windowful to attempt in
@@ -801,28 +788,66 @@ mod tests {
         assert_eq!(repository.still_active(), 0);
     }
 
-    /// A lap runs to the cohort it started over, not to whatever has arrived
-    /// since. Sessions carry time-ordered identities, so a session that becomes
-    /// due mid-lap sorts above everything the lap is walking; following it
-    /// would mean never returning to the turns behind the cursor.
+    /// A lap serves the members it opened with. Sessions carry time-ordered
+    /// identities, so one becoming due mid-lap sorts above everything the lap
+    /// holds; serving it first would mean never returning to the rest.
     #[test]
-    fn a_lap_returns_to_its_start_though_newer_sessions_keep_arriving() {
+    fn a_lap_serves_its_own_members_though_newer_sessions_keep_arriving() {
         let first = candidate(1);
         let second = candidate(2);
         let arrival = candidate(3);
         let mut window = TerminalizationWindow::new(1);
 
-        let opening = window.take(&[first, second]).to_vec();
-        let closing = window.take(&[first, second, arrival]).to_vec();
-        let next_lap = window.take(&[first, second, arrival]).to_vec();
+        let opening = window.take(&[first, second]);
+        let closing = window.take(&[first, second, arrival]);
+        let next_lap = window.take(&[first, second, arrival]);
 
         assert_eq!(opening, vec![first]);
         assert_eq!(closing, vec![second]);
         assert_eq!(
             next_lap,
             vec![first],
-            "the lap ended at the cohort it began with, so the next starts at the front"
+            "the lap's members were exhausted, so the next lap opens over what is due now"
         );
+    }
+
+    /// A session that already existed and becomes due mid-lap waits for the
+    /// next one, however far below the lap's members it sorts. Otherwise a busy
+    /// band of older sessions could push a lap's own members back indefinitely.
+    #[test]
+    fn a_session_becoming_due_mid_lap_waits_for_the_next_one() {
+        let opener = candidate(2);
+        let tail = candidate(4);
+        let older = candidate(1);
+        let between = candidate(3);
+        let mut window = TerminalizationWindow::new(1);
+
+        let opening = window.take(&[opener, tail]);
+        let closing = window.take(&[older, opener, between, tail]);
+        let next_lap = window.take(&[older, opener, between, tail]);
+
+        assert_eq!(opening, vec![opener]);
+        assert_eq!(
+            closing,
+            vec![tail],
+            "the lap's second member is served before sessions that joined after it opened"
+        );
+        assert_eq!(next_lap, vec![older]);
+    }
+
+    /// A member that stops being due before its slot comes is skipped, not
+    /// waited for: the scan spends its window on turns that are still due.
+    #[test]
+    fn a_member_that_stopped_being_due_is_skipped() {
+        let departed = candidate(1);
+        let remains = candidate(2);
+        let mut window = TerminalizationWindow::new(1);
+
+        let opening = window.take(&[departed, remains]);
+        let closing = window.take(&[remains]);
+
+        assert_eq!(opening, vec![departed]);
+        assert_eq!(closing, vec![remains]);
     }
 
     /// A turn that can never be ended must not hold the window against turns

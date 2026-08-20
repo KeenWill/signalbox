@@ -560,27 +560,30 @@ decision and the ledger unchanged, rather than deciding on a partial population.
 
 Terminalizing what a scan found due is bounded the same way. Those transactions
 run one at a time and the next scan waits for the last of them, so a scan ends
-at most sixty-four turns and leaves any remainder. That window rotates: it
-resumes past the turn it last attempted rather than starting again at the lowest
-session, because a turn can be due forever without ending — one holding pending
-steering is refused by every scan — and a window taken from the front would hand
-those turns every slot on every scan while the turns behind them waited for one
-that never came.
+at most sixty-four turns and leaves any remainder. That window works in laps,
+and a lap is a membership fixed when it opens — the turns due at that moment.
+Later scans serve the next of those members that are still due, and the lap ends
+when they are exhausted, whereupon the next scan opens a fresh lap over whatever
+is due then. Fixing membership rather than taking whatever is due at each scan
+is what makes the lap finish: a turn can be due forever without ending, one
+holding pending steering is refused by every scan, and turns that become due
+while a lap runs would otherwise be served ahead of the members waiting behind
+them.
 
 What that costs is stated exactly, because it is the one number here that
 depends on population. The staleness bound governs when a turn becomes *due*,
 and that remains independent of how many turns are quiescent: every turn is
-observed on every scan. Ending them is not. A cohort of more than one window
-takes a scan per windowful to attempt in full, so the delay between a turn
-becoming due and being attempted is up to `⌈cohort ÷ 64⌉ − 1` scan intervals —
-one extra minute per 64 turns already due ahead of it. A cohort at the
-inventory's capacity would take over eleven days to work through. That is
-accepted rather than overlooked: the alternative is a scan that runs until its
-cohort is drained, which delays the next observation of *every* session,
-including the ones whose turns are working. A watchdog may be slow to finish; it
-may not stop watching. What deferral does not cost is the turn: one left alone
-had nothing change, so it is observed unchanged and comes due again on a later
-scan, waiting rather than being forgotten.
+observed on every scan. Ending them is not. A lap of more than one window takes
+a scan per windowful to work through, so the delay between a turn becoming due
+and being attempted is up to `⌈members ÷ 64⌉` scan intervals of the lap that
+holds it — one extra minute per 64 turns that opened the lap ahead of it. A
+cohort at the inventory's capacity would take over eleven days to work through.
+That is accepted rather than overlooked: the alternative is a scan that runs
+until its cohort is drained, which delays the next observation of *every*
+session, including the ones whose turns are working. A watchdog may be slow to
+finish; it may not stop watching. What deferral does not cost is the turn: one
+left alone had nothing change, so it is observed unchanged and comes due again
+on a later scan, waiting rather than being forgotten.
 
 **Constants.** The staleness bound is a hard safety ceiling of 30 minutes and
 the scan interval is one minute; both are compiled in. The bound the pass runs

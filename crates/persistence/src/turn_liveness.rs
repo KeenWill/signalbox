@@ -154,10 +154,10 @@ impl PostgresTurnLivenessRepository {
             .acquire()
             .await
             .map_err(TurnLivenessRepositoryError::Inventory)?;
-        let candidates = read_quiescent_active_turns(&mut connection, None, after)
+        let fetched = read_quiescent_active_turns(&mut connection, None, after)
             .await
             .map_err(TurnLivenessRepositoryError::Inventory)?;
-        Ok(QuiescentActiveTurnPage::new(candidates))
+        Ok(QuiescentActiveTurnPage::new(fetched))
     }
 
     /// Terminalizes one observed-stale turn as failed under the session locks.
@@ -224,14 +224,18 @@ impl QuiescentActiveTurnPage {
     /// admits one active turn per session, and the statement resumes strictly
     /// past the cursor — so a rotation driven by these cursors advances on
     /// every page and terminates.
-    fn new(candidates: Box<[StaleTurnCandidate]>) -> Self {
+    ///
+    /// Both are decided from the rows the statement returned rather than from
+    /// the candidates kept, because a row this pass cannot read is dropped
+    /// without being answered for. Counting kept candidates would let one such
+    /// row make a full page look like the end of the rotation, stopping every
+    /// scan at the same row and leaving everything behind it unobserved.
+    fn new(fetched: FetchedPage) -> Self {
         let filled =
-            i64::try_from(candidates.len()).unwrap_or(i64::MAX) >= QUIESCENT_INVENTORY_PAGE_SIZE;
-        let resume_after = filled
-            .then(|| candidates.last().map(|last| last.session()))
-            .flatten();
+            i64::try_from(fetched.rows).unwrap_or(i64::MAX) >= QUIESCENT_INVENTORY_PAGE_SIZE;
+        let resume_after = filled.then_some(fetched.furthest_session).flatten();
         Self {
-            candidates,
+            candidates: fetched.candidates,
             resume_after,
         }
     }
@@ -371,20 +375,37 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
 /// The same statement serves the periodic scan and the locked revalidation, so
 /// it returns the driver's error unclassified: the scan reports an inventory
 /// failure and the revalidation a terminalization failure.
+/// One statement's result: the candidates it yielded, and what it returned.
+///
+/// The two are not the same count. A row whose evidence this pass cannot read
+/// is dropped, and pagination is answered from what the statement returned so
+/// that dropping one changes which turns are watched and nothing else.
+struct FetchedPage {
+    candidates: Box<[StaleTurnCandidate]>,
+    rows: usize,
+    furthest_session: Option<SessionId>,
+}
+
 async fn read_quiescent_active_turns(
     connection: &mut PgConnection,
     session: Option<SessionId>,
     after: Option<SessionId>,
-) -> Result<Box<[StaleTurnCandidate]>, sqlx::Error> {
+) -> Result<FetchedPage, sqlx::Error> {
     let rows = sqlx::query(QUIESCENT_ACTIVE_TURNS)
         .bind(session.map(session_id_to_uuid))
         .bind(after.map(session_id_to_uuid))
         .bind(QUIESCENT_INVENTORY_PAGE_SIZE)
         .fetch_all(connection)
         .await?;
-    let mut candidates = Vec::with_capacity(rows.len());
+    let fetched_rows = rows.len();
+    let mut furthest_session = None;
+    let mut candidates = Vec::with_capacity(fetched_rows);
     for row in rows {
         let session: Uuid = row.try_get("session_id")?;
+        // Recorded before any decision to drop the row: the statement orders by
+        // session, so the last one it returned is where the next page resumes
+        // whether or not this pass could read it.
+        furthest_session = Some(session_id_from_uuid(session));
         let turn: Uuid = row.try_get("turn_id")?;
         let attempt: Uuid = row.try_get("current_attempt_id")?;
         let stored_frontier: Option<Decimal> = row.try_get("outbox_frontier")?;
@@ -408,7 +429,11 @@ async fn read_quiescent_active_turns(
             TurnLivenessEvidence::new(TurnAttemptId::from_uuid(attempt), frontier),
         ));
     }
-    Ok(candidates.into_boxed_slice())
+    Ok(FetchedPage {
+        candidates: candidates.into_boxed_slice(),
+        rows: fetched_rows,
+        furthest_session,
+    })
 }
 
 /// Reads one outbox sequence as the token the ledger compares, or nothing if
@@ -468,7 +493,7 @@ async fn terminalize_in_transaction(
     let locked = read_quiescent_active_turns(connection, Some(candidate.session()), None)
         .await
         .map_err(TurnLivenessRepositoryError::terminalization)?;
-    if locked.first().copied() != Some(candidate) {
+    if locked.candidates.first().copied() != Some(candidate) {
         return Ok(StaleTurnOutcome::Superseded);
     }
 
@@ -542,7 +567,7 @@ async fn terminalize_in_transaction(
 
 #[cfg(test)]
 mod tests {
-    use super::{QUIESCENT_INVENTORY_PAGE_SIZE, QuiescentActiveTurnPage};
+    use super::{FetchedPage, QUIESCENT_INVENTORY_PAGE_SIZE, QuiescentActiveTurnPage};
     use signalbox_application::{StaleTurnCandidate, TurnLivenessEvidence};
     use signalbox_domain::{SessionId, TurnAttemptId, TurnId};
     use sqlx::types::Uuid;
@@ -558,12 +583,19 @@ mod tests {
         )
     }
 
-    fn page(rows: usize) -> QuiescentActiveTurnPage {
-        QuiescentActiveTurnPage::new(
-            (1..=rows)
+    fn fetched(rows: usize, kept: usize) -> FetchedPage {
+        FetchedPage {
+            candidates: (1..=kept)
                 .map(|session| candidate(session as u128))
                 .collect(),
-        )
+            rows,
+            furthest_session: (rows > 0)
+                .then(|| SessionId::from_uuid(Uuid::from_u128(rows as u128))),
+        }
+    }
+
+    fn page(rows: usize) -> QuiescentActiveTurnPage {
+        QuiescentActiveTurnPage::new(fetched(rows, rows))
     }
 
     /// A page that did not fill is the end of the rotation, so a scan that
@@ -589,6 +621,22 @@ mod tests {
             full.resume_after(),
             Some(candidate(rows as u128).session()),
             "the cursor is the greatest session this page returned"
+        );
+    }
+
+    /// Dropping a row this pass cannot read changes which turns are watched and
+    /// nothing else: the page is still full, and still resumes past the last
+    /// session the statement returned rather than the last one kept.
+    #[test]
+    fn a_dropped_row_does_not_end_the_rotation() {
+        let rows = usize::try_from(QUIESCENT_INVENTORY_PAGE_SIZE).expect("the page size is small");
+        let short_one = QuiescentActiveTurnPage::new(fetched(rows, rows - 1));
+
+        assert_eq!(short_one.candidates().len(), rows - 1);
+        assert_eq!(
+            short_one.resume_after(),
+            Some(candidate(rows as u128).session()),
+            "the cursor comes from the rows returned, not the candidates kept"
         );
     }
 }
