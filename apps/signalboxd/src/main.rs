@@ -63,7 +63,11 @@ use signalboxd::{
     RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
     SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
     TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
-    model_adapter::ConfiguredModelRuntime, usage_limits::UsageLimitedModelCallProvider,
+    model_adapter::ConfiguredModelRuntime,
+    usage_limits::UsageLimitedModelCallProvider,
+    web_http::{
+        WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError,
+    },
 };
 use tracing_subscriber::prelude::*;
 
@@ -436,6 +440,7 @@ enum SanitizedStartupCause<'a> {
     Database(&'a FencedHubDatabaseError),
     Tools(&'a DaemonToolsConstructionError),
     Socket(&'a LocalSocketError),
+    WebHttpConfiguration(&'a WebHttpConfigurationError),
     Static(&'static str),
 }
 
@@ -449,6 +454,7 @@ impl fmt::Display for SanitizedStartupCause<'_> {
             Self::Database(error) => error.fmt(formatter),
             Self::Tools(error) => error.fmt(formatter),
             Self::Socket(error) => error.fmt(formatter),
+            Self::WebHttpConfiguration(error) => error.fmt(formatter),
             Self::Static(cause) => formatter.write_str(cause),
         }
     }
@@ -618,6 +624,7 @@ enum RuntimeTaskExit {
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
     RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
+    WebHttp(Result<(), WebHttpRuntimeError>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -658,6 +665,7 @@ enum RuntimeTaskDefect {
     ProcessCompletedBeforeShutdown,
     RunnerCompletedBeforeShutdown,
     RepositoryWatchCompletedBeforeShutdown,
+    WebHttpCompletedBeforeShutdown,
     TaskCancelled,
     TaskPanicked,
     TaskJoinFailed,
@@ -673,6 +681,7 @@ impl RuntimeTaskDefect {
             Self::RepositoryWatchCompletedBeforeShutdown => {
                 "repository_watch_completed_before_shutdown"
             }
+            Self::WebHttpCompletedBeforeShutdown => "web_http_completed_before_shutdown",
             Self::TaskCancelled => "runtime_task_cancelled",
             Self::TaskPanicked => "runtime_task_panicked",
             Self::TaskJoinFailed => "runtime_task_join_failed",
@@ -930,6 +939,15 @@ fn report_repository_watch_runtime_defect(error: &RepositoryWatchRuntimeError) {
     );
 }
 
+fn report_web_http_runtime_failure(error: &WebHttpRuntimeError) {
+    tracing::error!(
+        phase = ?RuntimePhase::Runtime,
+        failure_class = ?OperatorFailureClass::Infrastructure { commit_ambiguous: false },
+        cause = %error,
+        "browser HTTP runtime failed"
+    );
+}
+
 /// Records an unexpected top-level task state using closed evidence only.
 ///
 /// The cause names the task-control condition without formatting `JoinError`,
@@ -958,7 +976,8 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
         | Ok(RuntimeTaskExit::Process(Ok(())))
         | Ok(RuntimeTaskExit::Runner(Ok(())))
-        | Ok(RuntimeTaskExit::RepositoryWatch(Ok(()))) => RuntimeTaskCompletion::Clean,
+        | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
+        | Ok(RuntimeTaskExit::WebHttp(Ok(()))) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
             RuntimeTaskCompletion::Failed
@@ -970,6 +989,10 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         Ok(RuntimeTaskExit::RepositoryWatch(Err(error))) => {
             report_repository_watch_runtime_defect(&error);
             RuntimeTaskCompletion::Defect
+        }
+        Ok(RuntimeTaskExit::WebHttp(Err(error))) => {
+            report_web_http_runtime_failure(&error);
+            RuntimeTaskCompletion::Failed
         }
         Err(error) => {
             report_runtime_task_defect(joined_task_defect(&error));
@@ -1102,6 +1125,12 @@ async fn run_hub(
         erase_startup_cause(
             RuntimePhase::Configuration,
             SanitizedStartupCause::Configuration(&error),
+        )
+    })?;
+    let web_configuration = WebHttpConfiguration::from_environment().map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::WebHttpConfiguration(&error),
         )
     })?;
     let prometheus_runtime = initialize_prometheus(telemetry_configuration).await;
@@ -1537,6 +1566,21 @@ async fn run_hub(
             return Err(failure);
         }
     };
+    let web_http_runtime = match WebHttpRuntime::bind(web_configuration).await {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::SocketBinding,
+                SanitizedStartupCause::Static("web_http_listener_bind_failed"),
+            );
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Err(failure);
+        }
+    };
     tracing::info!(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
@@ -1715,6 +1759,7 @@ async fn run_hub(
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
+    let (web_http_shutdown, web_http_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Scheduler(
@@ -1730,6 +1775,9 @@ async fn run_hub(
     });
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Runner(runner_runtime.run(runner_shutdown_receiver).await)
+    });
+    runtime_tasks.spawn(async move {
+        RuntimeTaskExit::WebHttp(web_http_runtime.run(web_http_shutdown_receiver).await)
     });
     if let Some(repository_watch_runtime) = repository_watch_runtime {
         runtime_tasks.spawn(async move {
@@ -1787,6 +1835,16 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
+                    Some(Ok(RuntimeTaskExit::WebHttp(Err(error)))) => {
+                        report_web_http_runtime_failure(&error);
+                        RuntimeStopCause::RuntimeFailed
+                    }
+                    Some(Ok(RuntimeTaskExit::WebHttp(Ok(())))) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::WebHttpCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
                     Some(Ok(RuntimeTaskExit::Scheduler(_))) => {
                         report_runtime_task_defect(
                             RuntimeTaskDefect::SchedulerCompletedBeforeShutdown,
@@ -1814,6 +1872,7 @@ async fn run_hub(
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
             let _ = repository_watch_shutdown.send(true);
+            let _ = web_http_shutdown.send(true);
             let (drain, components_clean) = drain_runtime_tasks(
                 &mut runtime_tasks,
                 guard_loss.as_mut(),

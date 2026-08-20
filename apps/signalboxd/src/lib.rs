@@ -62,6 +62,7 @@ mod session_template_configuration;
 mod single_hub;
 mod telemetry;
 pub mod usage_limits;
+pub mod web_http;
 
 pub use blob_storage_configuration::{
     BlobStorageClass, BlobStorageConfiguration, BlobStorageConfigurationError,
