@@ -47,7 +47,9 @@ verified against PR #896 (`agent/webhook-projection-drain`). Webhook preemption
 of slow complete reconciliation is verified against this PR
 (`agent/webhook-projection-preemption-review`). The approval-judge dispatch
 fence and unattended escalation release described below are verified against
-this PR (`agent/headless-approval-escalation`).
+this PR (`agent/headless-approval-escalation`). The operator-commissioned
+dispatch fence and its unattended-escalation coverage are verified against this
+PR (`agent/commissioned-dispatch-fence`).
 
 ## Configuration and credential boundary
 
@@ -627,6 +629,28 @@ escalations down the unattended path below rather than to the user whose goal it
 is. The tool approval contract governs their quoted rendering and the judge's
 decision use in [tool loop](tool-loop.md#approval-policy-and-decision-sources).
 
+**Implemented behavior.** An operator-commissioned dispatch supplies the same
+immutable authority for a session no rule dispatched. The `commission_session`
+process request — its framing is owned by
+[process protocol](process-protocol.md), its identity and durable-command
+mechanics by [identity and commands](identity-and-commands.md) — commits, in one
+durable transaction, a session created from a daemon-held template, the
+append-only `commissioned_dispatch` fence row naming that session, the caller's
+context as the session's first accepted input through the existing
+`StartWhenNoActiveTurn` path, and the goal commissioned from the caller's
+statement, which adopts that input's reserved turn as the generation's own first
+turn. The fence carries exactly the dispatch-fence shapes above: a pull-request
+fence names the repository, pull-request number, exact head commit, head
+repository and branch, and base branch; a branch fence names the repository and
+branch. The approval judge resolves either append-only source under the same
+generation-one binding, renders both through one authority rendering, and
+refuses a session recording both as corruption. The commission's durable command
+identity binds its template, fence, statement, and the digest of its initial
+content: an equal retry replays the committed session and fence — resolved from
+the durable record before any template resolution, so replay survives template
+configuration drift — and the same identity naming different intent, an ordinary
+session creation included, is refused as conflicting reuse in both directions.
+
 **Committed unimplemented functionality.** No present session-creation or
 input-submission surface identifies repository watch as a purpose-specific actor
 or creation cause. Version one therefore uses the current user-initiated,
@@ -835,6 +859,20 @@ are all durable evidence of that transition, so a replayed completion offering
 any other one of them is reported as a mismatched replay rather than answered
 with the recorded outcome — the same treatment a differing recommendation,
 rationale, usage, or continuation attempt already receives.
+
+**Implemented behavior.** The unattended escalation terminalization above
+equally covers a session an operator-commissioned dispatch created. With the
+commissioned fence resolved, a completed escalate-to-human judged in the
+commissioned generation fails the turn, blocks the goal while its authority
+still stands, and records its audit row in
+`commissioned_dispatch_headless_approval_escalation`, read with the judge
+rationale through `commissioned_dispatch_headless_approval_escalation_audit`.
+Both exclusions and the standing-authority rule apply unchanged, and a prior
+escalation in either audit family marks the session operator-resumed. A
+commissioned dispatch holds no batch, obligation, or singleton, so the
+completion releases nothing and owes no requeue, and the block's need text
+promises no redispatch: whoever commissioned the session decides whether to
+dispatch the work again.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies
