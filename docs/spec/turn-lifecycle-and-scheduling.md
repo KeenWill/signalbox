@@ -634,23 +634,46 @@ acquisition of the pair would deadlock against every path that takes them in
 that order and must not be introduced here or anywhere else. Holding the
 scheduler row serializes this pass against the other transactions that take it,
 which include turn activation and startup recovery directly, and submit input
-once it reaches the scheduler row behind the session row. The complete candidate
-predicate is re-decided under that lock against rows no concurrent pass can be
-changing, and the ordinary `prepare_active_turn_lost_failure` candidate is
-committed — Lost attempt end, `TurnFailed` semantic entry, terminal frontier,
-`terminal`/`failed` lifecycle row, and the `TurnFailed` outbox event. No
-terminal state, disposition, or direct row edit is introduced for this pass. A
-revalidation that no longer matches the observation, and a preparation the
-domain refuses, both leave the turn untouched for a later pass. Steering pending
-on the turn is the one refusal with a name of its own: every steering row bound
-to a turn must be closed before it terminalizes — the
-`turn_lifecycle_pending_steering_closed` constraint enforces it — and this
-transition closes none, so the pass reports the turn by identity under
-`turn_liveness_steering_blocks_terminalization` each time its lap reaches it,
-rather than ending it. That is once per lap and not once per scan: the turn
-occupies a slot in every lap it is due for, and reporting it more often would
-mean attempting a terminalization already known to be refused, at the cost of
-slots the turns beside it are waiting for. Such a turn stays wedged; a
+once it reaches the scheduler row behind the session row.
+
+An attempt waits under two budgets, because it asks two different questions of
+two different rows. Reaching a pooled connection and then the scheduler row is
+bounded at 250 milliseconds: the transactions holding that row are short, so a
+longer wait means the session is busy, which is itself evidence against the turn
+being wedged — the attempt reports contention rather than a fault, and the lap
+reaches the turn again. Everything after the row is held is bounded at one
+second instead, because appending to the outbox takes a row every writer in the
+daemon holds until it commits; a few hundred milliseconds there is ordinary
+traffic, and refusing on it would make the pass fail whenever the daemon was
+busy. What that second buys is that one indefinite holder of that row cannot
+stall the phase, which an unbounded wait would allow — the same stall the first
+budget exists to prevent, one statement later. A wait refused after the row is
+held is an ordinary failed attempt, never contention on this session.
+
+Neither budget can leave a commit's outcome unknown, which is what rules out
+bounding the attempt by a statement timeout or by cancelling its future instead.
+A lock wait refused during the commit — this schema defers foreign-key checks,
+so one can be — is a server-side error, and a server-side error at commit is a
+rollback: verified against PostgreSQL 18.4, where a deferred check tripping the
+budget leaves nothing committed. The pass therefore learns that the turn did not
+end, rather than learning nothing.
+
+The complete candidate predicate is re-decided under that lock against rows no
+concurrent pass can be changing, and the ordinary
+`prepare_active_turn_lost_failure` candidate is committed — Lost attempt end,
+`TurnFailed` semantic entry, terminal frontier, `terminal`/`failed` lifecycle
+row, and the `TurnFailed` outbox event. No terminal state, disposition, or
+direct row edit is introduced for this pass. A revalidation that no longer
+matches the observation, and a preparation the domain refuses, both leave the
+turn untouched for a later pass. Steering pending on the turn is the one refusal
+with a name of its own: every steering row bound to a turn must be closed before
+it terminalizes — the `turn_lifecycle_pending_steering_closed` constraint
+enforces it — and this transition closes none, so the pass reports the turn by
+identity under `turn_liveness_steering_blocks_terminalization` each time its lap
+reaches it, rather than ending it. That is once per lap and not once per scan:
+the turn occupies a slot in every lap it is due for, and reporting it more often
+would mean attempting a terminalization already known to be refused, at the cost
+of slots the turns beside it are waiting for. Such a turn stays wedged; a
 terminalization that also reclassifies its steering into a queued successor is
 an [open question](../open-questions.md#turn-lifecycle). Because the turn ends
 through the ordinary lifecycle write, every trigger watching a turn reach

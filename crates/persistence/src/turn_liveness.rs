@@ -64,14 +64,24 @@ const TERMINALIZATION_LOCK_WAIT: &str = "250ms";
 // numeric-bound: tunable - bounds one terminalization's wait for a pooled connection
 const TERMINALIZATION_ACQUIRE_WAIT: Duration = Duration::from_millis(250);
 
-/// Restores an unbounded lock wait once the scheduler row is held.
+/// How long the rest of the attempt waits for any lock, once the row is held.
 ///
-/// The bound exists to stop this pass queueing behind a busy session, and that
-/// question is settled the moment the row is acquired. Leaving it in force
-/// would apply it to the write phase, where the outbox's shared sequence row is
-/// taken for a moment by every writer — turning ordinary traffic into a refusal
-/// after this transaction had already begun writing.
-const TERMINALIZATION_LOCK_WAIT_RELEASED: &str = "0";
+/// The write phase needs its own budget rather than the acquisition one or none
+/// at all. Not the acquisition budget: appending to the outbox takes the shared
+/// `outbox_sequence_state` row, which every writer in the daemon holds from its
+/// first append until it commits, so a wait of a few hundred milliseconds there
+/// is ordinary traffic rather than a stall, and refusing on it would make the
+/// pass fail whenever the daemon was busy. And not `0`, which is what this
+/// previously reset to: an unbounded wait lets one indefinite holder of that
+/// row stall the whole reconciliation loop, which is the failure the
+/// acquisition budget exists to prevent, reintroduced one statement later.
+///
+/// A second is two orders of magnitude above a brief hold and still detects a
+/// stalled holder within one interval. Tripping it costs a retry rather than a
+/// turn: the attempt has written nothing durable, the transaction rolls back,
+/// and the lap reaches the turn again.
+// numeric-bound: tunable - bounds the write phase's wait for any contended row
+const TERMINALIZATION_WRITE_LOCK_WAIT: &str = "1s";
 
 /// Infrastructure or integrity failure while supervising turn liveness.
 ///
@@ -566,10 +576,14 @@ async fn terminalize_in_transaction(
         .fetch_one(&mut *connection)
         .await
         .map_err(TurnLivenessRepositoryError::terminalization_lock)?;
-    // The row is held, so the bound has done its work. Everything after this
-    // waits as any other writer does.
+    // The acquisition budget has done its work: the row is held, and the
+    // question of whether this session is busy is settled. The write phase
+    // takes over with a budget of its own — wide enough that the outbox's
+    // shared sequence row, which every writer holds until it commits, is not
+    // mistaken for a stall, and finite so that one indefinite holder of it
+    // cannot stall this loop.
     sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-        .bind(TERMINALIZATION_LOCK_WAIT_RELEASED)
+        .bind(TERMINALIZATION_WRITE_LOCK_WAIT)
         .execute(&mut *connection)
         .await
         .map_err(TurnLivenessRepositoryError::terminalization)?;
@@ -678,7 +692,11 @@ async fn terminalize_in_transaction(
 
 #[cfg(test)]
 mod tests {
-    use super::{FetchedPage, QUIESCENT_INVENTORY_PAGE_SIZE, QuiescentActiveTurnPage};
+    use super::{
+        ClassifyOperatorFailure, FetchedPage, QUIESCENT_INVENTORY_PAGE_SIZE,
+        QuiescentActiveTurnPage, TERMINALIZATION_LOCK_WAIT, TERMINALIZATION_WRITE_LOCK_WAIT,
+        TurnLivenessRepositoryError,
+    };
     use signalbox_application::{StaleTurnCandidate, TurnLivenessEvidence};
     use signalbox_domain::{SessionId, TurnAttemptId, TurnId};
     use sqlx::types::Uuid;
@@ -719,6 +737,34 @@ mod tests {
         assert_eq!(short.resume_after(), None);
         assert_eq!(short.candidates().len(), 3);
         assert_eq!(empty.resume_after(), None);
+    }
+
+    /// An attempt bounds two different waits, on two different rows, for two
+    /// different questions — so the budgets are not the same number.
+    #[test]
+    fn an_attempt_carries_two_lock_budgets() {
+        assert_eq!(TERMINALIZATION_LOCK_WAIT, "250ms");
+        assert_eq!(TERMINALIZATION_WRITE_LOCK_WAIT, "1s");
+        assert_ne!(TERMINALIZATION_LOCK_WAIT, TERMINALIZATION_WRITE_LOCK_WAIT);
+    }
+
+    /// Only the statement taking the scheduler row reports contention, so a
+    /// failure raised anywhere else is an ordinary one whatever it carries.
+    #[test]
+    fn a_failure_away_from_the_lock_site_is_an_ordinary_one() {
+        let failure = TurnLivenessRepositoryError::terminalization(sqlx::Error::PoolTimedOut);
+
+        assert!(matches!(
+            failure,
+            TurnLivenessRepositoryError::TerminalizationDatabase {
+                commit_ambiguous: false,
+                ..
+            }
+        ));
+        assert_eq!(
+            failure.operator_failure_cause_code(),
+            "turn_liveness_terminalization_failed"
+        );
     }
 
     /// A full page may have rows behind it, so it carries the cursor the next
