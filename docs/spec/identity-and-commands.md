@@ -35,7 +35,9 @@ context-compaction command lifecycle was verified through PR #314
 boundary and path-scoped placement command family were verified through PR #400
 (`agent/scoped-visibility-wiring`). The runner recovery command families are the
 foundation proposal at the bottom of their implementing stack and become
-verified only with those child pull requests.
+verified only with those child pull requests. The commissioned-session command
+construction boundary is verified against this PR
+(`agent/commissioned-dispatch-fence`).
 
 ## Identity model
 
@@ -93,14 +95,14 @@ records (INV-001, INV-004).
 The nil and max UUIDs are rejected as `DurableCommandId` values at two
 boundaries: checked command/request construction (`try_new` on
 `CreateSessionRequest`, `CreateSessionFromImportedFrontierRequest`,
-`ReplaceSessionDefaultsRequest`, `ReplaceSessionMetadataRequest`, and
-`SubmitInputRequest` and `UpdateSessionPlacementRequest` in
-`crates/application`, plus `DecideToolRequest` in `crates/domain`) and
-persistence decoding (`durable_command_id_from_uuid` in
-`crates/persistence/src/mapping.rs`). Rejection occurs before a canonical
-command can reach a transaction and claims no identifier. Why: sentinel-like
-values are common accidental defaults and would otherwise become permanent
-user-global claims.
+`ReplaceSessionDefaultsRequest`, `ReplaceSessionMetadataRequest`,
+`CommissionDispatchRequest`, and `SubmitInputRequest` and
+`UpdateSessionPlacementRequest` in `crates/application`, plus
+`DecideToolRequest` in `crates/domain`) and persistence decoding
+(`durable_command_id_from_uuid` in `crates/persistence/src/mapping.rs`).
+Rejection occurs before a canonical command can reach a transaction and claims
+no identifier. Why: sentinel-like values are common accidental defaults and
+would otherwise become permanent user-global claims.
 
 ## Generation and minting boundary
 

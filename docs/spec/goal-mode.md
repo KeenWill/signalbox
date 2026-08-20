@@ -15,12 +15,13 @@ that authority again when a consumer commits is verified against this PR
 against this PR (`agent/daemon-ops-overnight`). This bottom specification diff
 owns both stack slices. Bounded automatic resumption of execution-failure blocks
 is verified against this PR (`agent/goal-blocked-autoresume`), and its one
-exemption — the block an unattended repository-watch approval escalation appends
-— against this PR (`agent/headless-approval-escalation`). Identity and
-durable-command mechanics remain owned by
-[identity and commands](identity-and-commands.md), turn execution by
-[turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
-by [tool loop](tool-loop.md), and framing by
+exemption — the block an unattended dispatch approval escalation appends —
+against this PR (`agent/headless-approval-escalation`); that exemption's
+extension to operator-commissioned dispatch is verified against this PR
+(`agent/commissioned-dispatch-fence`). Identity and durable-command mechanics
+remain owned by [identity and commands](identity-and-commands.md), turn
+execution by [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md),
+tool dispatch by [tool loop](tool-loop.md), and framing by
 [process protocol](process-protocol.md). INV-048 is the lifecycle enforcement
 family indexed by [the invariant test index](../invariants.md).
 
@@ -244,19 +245,24 @@ another pass already armed is harmless for the same reason a retry is: both
 derive one identity, and the second attempt replays it.
 
 **Implemented behavior.** One execution-failure block is exempt from automatic
-resumption: the block an unattended repository-watch approval escalation appends
-in the transaction that fails its turn, described by
-[repository watch](repo-watch.md). It arms no attempt, and its need text states
-that and names the operator repair directly instead. The work that block ended
-is already owed a retry, and a different one — repository watch redispatches it
-under a fresh dispatch while its rule and target remain eligible — so resuming
-this goal would re-run an escalating turn against a request no user is
-attending, beside that redispatch, until the budget ran out. Where that
-redispatch is withheld, because the rule was deactivated or the pull request
-closed or merged, the work is not wanted at all, and an automatic resumption
-would be the only thing still pursuing it. Every other execution-failure block
-owes the bounded resumption above, including one appended for a session
-repository watch created.
+resumption: the block an unattended dispatch approval escalation appends in the
+transaction that fails its turn, described by [repository watch](repo-watch.md),
+whether the fence the judge consumed came from a repository-watch dispatch or
+from an operator-commissioned one. It arms no attempt, and its need text states
+that and names the operator repair directly instead. For a repository-watch
+dispatch the work that block ended is already owed a retry, and a different one
+— repository watch redispatches it under a fresh dispatch while its rule and
+target remain eligible — so resuming this goal would re-run an escalating turn
+against a request no user is attending, beside that redispatch, until the budget
+ran out. Where that redispatch is withheld, because the rule was deactivated or
+the pull request closed or merged, the work is not wanted at all, and an
+automatic resumption would be the only thing still pursuing it. An
+operator-commissioned dispatch is owed no redispatch at all — whoever
+commissioned the session decides whether to dispatch the work again — and its
+need text promises none, so resuming its block automatically would pursue work
+nobody re-dispatched. Every other execution-failure block owes the bounded
+resumption above, including one appended for a session repository watch created
+or an operator commissioned.
 
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The
