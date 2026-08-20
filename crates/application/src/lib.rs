@@ -29,7 +29,11 @@ mod tool_loop;
 mod tool_loop_ports;
 mod update_session_placement;
 
-pub use approval_judge::ApprovalJudgeAuthorization;
+pub use approval_judge::{
+    ApprovalJudgeAuthorization, ApprovalJudgeBranchAuthority, ApprovalJudgeBranchAuthorityInput,
+    ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
+    ApprovalJudgePullRequestAuthority, ApprovalJudgePullRequestAuthorityInput,
+};
 pub use conversation_import::{
     ImportConversationError, ImportConversationOutcome, ImportConversationReport,
     ImportConversationService, ImportedConversationConversionReport, ImportedConversationConverter,

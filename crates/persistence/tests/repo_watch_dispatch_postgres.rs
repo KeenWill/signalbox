@@ -7,33 +7,50 @@
 use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use signalbox_application::{
+    ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
+    ApprovalJudgePullRequestAuthority, AuthorizeModelCallOutcome, ModelCallCredentialReference,
     RepoWatchBranchHead, RepoWatchDispatchService, RepoWatchDispatchTransaction,
     RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
     RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
     RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
-    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
+    RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome, StartEligibleTurnService,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
-    AcceptedInputId, BranchName, CheckConclusion, CommitSha, DangerousToolAutoApproval,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId, GitHubObjectId,
-    GoalCommandResult, GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance,
-    GoalState, GoalStatement, GoalUserAction, GoalUserCommand, MergeableState,
-    ModelSelectionRequest, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
-    PullRequestNumber, PullRequestTitle, RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent,
-    RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
-    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule,
-    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleVersion,
-    RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt, RepositorySlug,
+    AcceptedInputId, ActiveTurnPhase, AssistantResponsePart, BranchName,
+    CancelledModelCallTurnIdentities, CheckConclusion, CommitSha, ContextFrontierId,
+    DangerousToolAutoApproval, DelegateApprovalRecommendation, DeliveryRequest,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    FailedModelCallTurnIdentities, GitHubObjectId, GoalCommandResult, GoalModelProvenance,
+    GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction,
+    GoalUserCommand, InitialToolApproval, MergeableState, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionRequest,
+    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments, ProviderModelIdentity,
+    ProviderReportedTokenUsage, PullRequestBody, PullRequestEventContext,
+    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchActionV1,
+    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
+    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
+    RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId,
+    RepoWatchRuleIdentityField, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepoWatchWorkflowRunAttempt, RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
-    SessionTemplateName, SessionTemplateProvenance, ToolRequestId, TurnId, UserContent,
+    SessionTemplateName, SessionTemplateProvenance, SubmitInput, ToolCallProposal,
+    ToolDecisionRationale, ToolName, ToolRequestId, ToolResponsePartIdentity,
+    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnAttemptId, TurnId, UserContent,
     WorkflowName,
 };
 use signalbox_persistence::{
-    SessionCredentialPin, SessionModelCredential, disposable_test_container_labels,
+    SessionCredentialPin, SessionModelCredential,
+    approval_judge::{
+        ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, CompleteApprovalJudgeOutcome,
+        PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
+    },
+    disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
+    model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
         RepoWatchCursorCandidate, RepoWatchCursorGeneration,
@@ -42,6 +59,8 @@ use signalbox_persistence::{
     repo_watch_dispatch_obligation::{
         RepoWatchDispatchObligation, RepoWatchDispatchRetryPolicy, RepoWatchObligationParkRelease,
     },
+    start_eligible_turn::StartEligibleTurnRepository,
+    submit_input::SubmitInputRepository,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -138,6 +157,25 @@ const SIBLING_STOP_COMMAND_ID: u128 = 0x5b_200;
 const SIBLING_GOAL_INPUT_ID: u128 = 0x5b_300;
 const SIBLING_GOAL_TURN_ID: u128 = 0x5b_400;
 const UNKNOWN_DELIVERED_REQUEST_ID: u128 = 0x5c_000;
+const SUCCESSOR_JUDGE_SUPERSEDE_COMMAND_ID: u128 = 0x5d_000;
+const SUCCESSOR_JUDGE_INPUT_ID: u128 = 0x5d_100;
+const SUCCESSOR_JUDGE_TURN_ID: u128 = 0x5d_200;
+const STEERED_DISPATCH_COMMAND_ID: u128 = 0x5d_300;
+const STEERED_DISPATCH_INPUT_ID: u128 = 0x5d_400;
+const RESUMED_DISPATCH_COMMAND_ID: u128 = 0x5d_500;
+const RESUMED_DISPATCH_INPUT_ID: u128 = 0x5d_600;
+const RESUMED_DISPATCH_TURN_ID: u128 = 0x5d_700;
+const STALE_DISPATCH_RESUME_COMMAND_ID: u128 = 0x5d_800;
+const STALE_DISPATCH_INPUT_ID: u128 = 0x5d_900;
+const STALE_DISPATCH_TURN_ID: u128 = 0x5d_a00;
+const STALE_DISPATCH_STOP_COMMAND_ID: u128 = 0x5d_b00;
+const HELD_BATCH_RESUME_COMMAND_ID: u128 = 0x5d_c00;
+const HELD_BATCH_RESUME_INPUT_ID: u128 = 0x5d_d00;
+const HELD_BATCH_RESUME_TURN_ID: u128 = 0x5d_e00;
+const TEMPLATE_MODEL_SELECTION_ID: u128 = 901;
+const APPROVAL_JUDGE_PROVIDER_ID: u128 = 902;
+const FIXTURE_CREDENTIAL_REFERENCE: &str = "fixture-credential";
+const CLOSED_RESULT_ID_OFFSET: u128 = 0x2_000_000;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -590,7 +628,7 @@ impl RepoWatchTemplateResolver for TemplateResolver {
             ),
             SessionConfigurationDefaults::complete(
                 ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(
-                    901,
+                    TEMPLATE_MODEL_SELECTION_ID,
                 ))),
                 DangerousToolAutoApproval::Disabled,
                 Some(
@@ -651,6 +689,17 @@ struct HeldSlotVisibility {
     blockers: Vec<String>,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct HeadlessEscalationVisibility {
+    lifecycle_state: String,
+    terminal_disposition: Option<String>,
+    goal_event_kind: String,
+    blocked_reason: Option<String>,
+    rationale: String,
+    dispatch_released: bool,
+    replacement_owed: bool,
+}
+
 impl RepoWatchDispatchTransaction for ObligationTransaction {
     type Error = RepoWatchDispatchRepositoryError;
 
@@ -673,9 +722,43 @@ impl RepoWatchDispatchTransaction for ObligationTransaction {
 fn credential_pin() -> SessionCredentialPin {
     SessionCredentialPin::try_new(vec![SessionModelCredential::new(
         "fixture-family",
-        "fixture-credential",
+        FIXTURE_CREDENTIAL_REFERENCE,
     )])
     .expect("fixture credential pin is valid")
+}
+
+fn model_credential_reference() -> ModelCallCredentialReference {
+    ModelCallCredentialReference::new(FIXTURE_CREDENTIAL_REFERENCE)
+}
+
+fn model_targets() -> ModelTargetCatalog {
+    ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(TEMPLATE_MODEL_SELECTION_ID)),
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
+            APPROVAL_JUDGE_PROVIDER_ID,
+        ))),
+    )])
+    .expect("one fixture target forms a catalog")
+}
+
+#[track_caller]
+fn ready_approval_judge(outcome: PrepareApprovalJudgeOutcome) -> PreparedApprovalJudge {
+    let PrepareApprovalJudgeOutcome::Ready(prepared) = outcome else {
+        panic!("the delegated fixture prepares a fresh judge call")
+    };
+    *prepared
+}
+
+#[track_caller]
+fn prepared_pull_request_authority(
+    prepared: &PreparedApprovalJudge,
+) -> &ApprovalJudgePullRequestAuthority {
+    let Some(ApprovalJudgeDispatchAuthority::PullRequest(authority)) =
+        prepared.session_context().dispatch()
+    else {
+        panic!("the dispatched pull-request session carries its immutable fence")
+    };
+    authority
 }
 
 fn dispatch_context() -> UserContent {
@@ -1203,6 +1286,178 @@ async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Bo
         dispatch_id,
         sessions,
     })
+}
+
+async fn checkpoint_dispatched_delegated_approval(
+    fixture: &DispatchFixture,
+    seed: u128,
+) -> Result<
+    (
+        PostgresModelCallRepository,
+        PreparedApprovalJudge,
+        TurnId,
+        Vec<ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
+    checkpoint_dispatched_delegated_approval_for(
+        fixture,
+        seed,
+        &[("exec", r#"{"cmd":"git fetch origin main"}"#)],
+    )
+    .await
+}
+
+async fn checkpoint_dispatched_delegated_approval_for(
+    fixture: &DispatchFixture,
+    seed: u128,
+    proposals: &[(&str, &str)],
+) -> Result<
+    (
+        PostgresModelCallRepository,
+        PreparedApprovalJudge,
+        TurnId,
+        Vec<ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
+    let session = fixture.session(0);
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(fixture.pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) = activation.execute(session).await? else {
+        panic!("the dispatched work turn activates")
+    };
+    let turn = activated.turn();
+    drop(activated);
+
+    let repository = PostgresModelCallRepository::new(
+        fixture.pool.clone(),
+        model_targets(),
+        model_credential_reference(),
+    );
+    let call = ModelCallId::from_uuid(Uuid::from_u128(seed));
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed) = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 1)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 2)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 3)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 4)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 5)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the dispatched turn checkpoints its initial model call")
+    };
+    assert_eq!(checkpointed, call);
+    let PrepareInitialModelCallOutcome::Ready { .. } = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 20)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 23)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 24)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 25)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the checkpointed initial model call reloads ready")
+    };
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        repository.authorize_send(session, call).await?
+    else {
+        panic!("the initial model call authorizes")
+    };
+    let requests = proposals
+        .iter()
+        .enumerate()
+        .map(|(ordinal, _)| {
+            ToolRequestId::from_uuid(Uuid::from_u128(
+                seed + 6 + u128::try_from(ordinal).expect("fixture ordinal fits u128"),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let response = ToolUsingAssistantResponse::try_from_parts(
+        proposals
+            .iter()
+            .map(|(name, arguments)| {
+                AssistantResponsePart::ToolCall(ToolCallProposal::new(
+                    ToolName::try_new(String::from(*name))
+                        .expect("the fixture tool name is admitted"),
+                    NormalizedToolArguments::try_from_provider_text(String::from(*arguments))
+                        .expect("the fixture arguments are admitted"),
+                ))
+            })
+            .collect(),
+    )
+    .expect("the proposals form a tool-using response");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    let ModelCallTerminalOutcome::ToolRound(round) = repository
+        .apply_terminal_observation(
+            session,
+            observation,
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                requests
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, request)| {
+                        ToolResponsePartIdentity::tool_call(
+                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                                seed + 100
+                                    + u128::try_from(ordinal).expect("fixture ordinal fits u128"),
+                            )),
+                            *request,
+                            InitialToolApproval::Delegated,
+                        )
+                    })
+                    .collect(),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 8)),
+                None,
+            )),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?
+    else {
+        panic!("the model call reaches a delegated tool round")
+    };
+    assert_eq!(
+        round.next_phase(),
+        &ActiveTurnPhase::AwaitingApproval {
+            request: requests[0],
+        }
+    );
+    let approval_repository = repository.approval_judge_repository();
+    let prepared = ready_approval_judge(
+        approval_repository
+            .prepare(
+                session,
+                turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 9)),
+                Some(DirectModelSelection::from_uuid(Uuid::from_u128(
+                    TEMPLATE_MODEL_SELECTION_ID,
+                ))),
+            )
+            .await?,
+    );
+    Ok((repository, prepared, turn, requests))
 }
 
 async fn evaluate_second_conflict(
@@ -1933,6 +2188,875 @@ async fn stale_stopped_dispatch_requeues_and_redispatches_after_release()
         evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?,
     );
     assert_ne!(successor_sessions[0], fixture.session(0));
+    Ok(())
+}
+
+/// INV-069: a completed judge escalation in a repository-watch-created session
+/// cannot retain the singleton as unattended active work. Its normal
+/// failed-turn/blocked-goal closeout releases the dispatch, leaves an auditable
+/// escalation record, and makes the same event eligible for a fresh dispatch.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn headless_approval_escalation_releases_rearms_and_redispatches()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_240;
+    let (model_repository, prepared, turn, requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let authority = prepared_pull_request_authority(&prepared);
+    let expected_context = context(FIRST_HEAD)?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable dispatch fence",
+    ))?;
+
+    let outcome = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let audit: HeadlessEscalationVisibility = sqlx::query_as(
+        "SELECT lifecycle.state_kind AS lifecycle_state,
+                    lifecycle.terminal_disposition_kind AS terminal_disposition,
+                    latest_goal.event_kind AS goal_event_kind,
+                    latest_goal.blocked_reason,
+                    audit.rationale,
+                    audit.released_at IS NOT NULL AS dispatch_released,
+                    audit.obligation_id IS NOT NULL AS replacement_owed
+               FROM repo_watch_headless_approval_escalation_audit AS audit
+               JOIN turn_lifecycle AS lifecycle
+                 ON lifecycle.session_id = audit.session_id
+                AND lifecycle.turn_id = audit.turn_id
+               JOIN LATERAL (
+                    SELECT event_kind, blocked_reason
+                      FROM goal_event
+                     WHERE session_id = audit.session_id
+                     ORDER BY event_ordinal DESC
+                     LIMIT 1
+               ) AS latest_goal ON true
+              WHERE audit.model_call_id = $1",
+    )
+    .bind(prepared.call().as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    // The requeue an escalation owes is a counted failed attempt, so under the
+    // production policy it waits out that delay before redispatching; this
+    // reads it through the immediate policy, because what is under test is the
+    // release and the replacement it opens rather than the delay's own bounds.
+    let obligation = load_next_obligation(&fixture)
+        .await?
+        .expect("the headless escalation obligation is ready after release");
+    let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let (_successor_dispatch, successor_sessions) = dispatched(
+        evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?,
+    );
+
+    assert_eq!(authority.dispatch(), fixture.dispatch_id);
+    assert_eq!(authority.repository(), &fixture.repository);
+    assert_eq!(authority.pull_request(), expected_context.number());
+    assert_eq!(authority.head_sha(), expected_context.head_sha());
+    assert_eq!(
+        authority.head_repository(),
+        expected_context.head_repository()
+    );
+    assert_eq!(authority.head_branch(), expected_context.head_branch());
+    assert_eq!(authority.base_branch(), expected_context.base_branch());
+    assert_eq!(
+        outcome,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(audit.lifecycle_state, "terminal");
+    assert_eq!(audit.terminal_disposition.as_deref(), Some("failed"));
+    assert_eq!(audit.goal_event_kind, "blocked");
+    assert_eq!(audit.blocked_reason.as_deref(), Some("execution_failure"));
+    assert_eq!(audit.rationale, rationale.as_str());
+    assert!(audit.dispatch_released);
+    assert!(audit.replacement_owed);
+    assert_ne!(successor_sessions[0], fixture.session(0));
+    assert_eq!(prepared.request().id(), *request);
+    assert_eq!(turn, prepared.request().turn());
+    Ok(())
+}
+
+/// INV-069: the dispatch fence describes the generation the dispatch
+/// commissioned and nothing else. A session that goes on to accept an unrelated
+/// successor goal judges that goal's requests without the fence, so its
+/// escalation parks for the user whose goal it is instead of taking the
+/// headless path that fails the turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_successor_generation_is_judged_without_the_dispatch_fence() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    let successor_turn = TurnId::from_uuid(Uuid::from_u128(SUCCESSOR_JUDGE_TURN_ID));
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(
+                        SUCCESSOR_JUDGE_SUPERSEDE_COMMAND_ID,
+                    )),
+                    session,
+                    GoalUserAction::Supersede(GoalStatement::try_new(String::from(
+                        "an unrelated successor goal this session accepted",
+                    ))?),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(SUCCESSOR_JUDGE_INPUT_ID)),
+                    successor_turn,
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+
+    let (_repository, prepared, judged_turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, 0x50_280).await?;
+
+    assert_eq!(
+        judged_turn, successor_turn,
+        "supersession retires the dispatched turn, so the successor's turn is the eligible one"
+    );
+    assert!(
+        prepared.session_context().dispatch().is_none(),
+        "the dispatch authority describes only the generation it commissioned"
+    );
+    Ok(())
+}
+
+/// A headless escalation terminalizes its turn under three fresh identities.
+/// Replaying the completion with any other one is a structurally different call
+/// rather than the same one twice, so it is reported instead of replayed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_headless_escalation_replay_binds_every_terminal_identity() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_2a0;
+    let (model_repository, prepared, _turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable dispatch fence",
+    ))?;
+    let identities = ApprovalJudgeCompletionIdentities::new(
+        TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+    );
+    let complete = async |identities| {
+        approval_repository
+            .complete(
+                &prepared,
+                DelegateApprovalRecommendation::EscalateToHuman,
+                rationale.clone(),
+                ProviderReportedTokenUsage::unreported(),
+                identities,
+                |closed_request| {
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                        closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                    ))
+                },
+            )
+            .await
+    };
+    let escalated = complete(identities).await?;
+
+    let other_failure_entry = complete(ApprovalJudgeCompletionIdentities::new(
+        identities.continuation_attempt(),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+        identities.terminal_frontier(),
+    ))
+    .await
+    .expect_err("a replay naming another failure entry is not the same completion");
+    let other_terminal_frontier = complete(ApprovalJudgeCompletionIdentities::new(
+        identities.continuation_attempt(),
+        identities.failure_entry(),
+        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
+    ))
+    .await
+    .expect_err("a replay naming another terminal frontier is not the same completion");
+    let other_attempt = complete(ApprovalJudgeCompletionIdentities::new(
+        TurnAttemptId::from_uuid(Uuid::from_u128(seed + 30)),
+        identities.failure_entry(),
+        identities.terminal_frontier(),
+    ))
+    .await
+    .expect_err("a replay naming another terminal attempt is not the same completion");
+    let replayed = complete(identities).await?;
+
+    assert_eq!(
+        escalated,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(release_count(&fixture).await?, 1);
+    assert_mismatched_replay(other_failure_entry);
+    assert_mismatched_replay(other_terminal_frontier);
+    assert_mismatched_replay(other_attempt);
+    assert_eq!(
+        replayed, escalated,
+        "the completion still replays under the identities it committed"
+    );
+    Ok(())
+}
+
+/// Fails naming the error a mismatched headless replay produced, so an
+/// unrelated failure is not read as the replay refusal under test.
+#[track_caller]
+fn assert_mismatched_replay(error: ApprovalJudgeRepositoryError) {
+    let ApprovalJudgeRepositoryError::Corruption(ApprovalJudgeCorruption::Inconsistent(
+        "completed judge replay",
+    )) = error
+    else {
+        panic!("a mismatched headless replay is reported as one: {error:?}")
+    };
+}
+
+/// A denial decided earlier in the same delegated batch remains a denial when
+/// a later request escalates and terminalizes the unattended turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn headless_escalation_preserves_an_earlier_delegate_denial() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_260;
+    let (model_repository, first, turn, requests) = checkpoint_dispatched_delegated_approval_for(
+        &fixture,
+        seed,
+        &[("exec", "{}"), ("workspace", "{}")],
+    )
+    .await?;
+    let [denied_request, escalated_request] = requests.as_slice() else {
+        panic!("the fixture has two delegated requests")
+    };
+    let repository = model_repository.approval_judge_repository();
+    repository.authorize(&first).await?;
+    let denied = repository
+        .complete(
+            &first,
+            DelegateApprovalRecommendation::Deny,
+            ToolDecisionRationale::try_new(String::from("the first request is denied"))?,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 30)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let second = ready_approval_judge(
+        repository
+            .prepare(
+                fixture.session(0),
+                turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 40)),
+                None,
+            )
+            .await?,
+    );
+    repository.authorize(&second).await?;
+    let escalated = repository
+        .complete(
+            &second,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            ToolDecisionRationale::try_new(String::from("the second request needs a human"))?,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 41)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 42)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 43)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let result_kinds: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT tool_result_request_id, payload_kind
+           FROM semantic_transcript_entry
+          WHERE tool_result_request_id IN ($1, $2)
+          ORDER BY tool_result_request_id",
+    )
+    .bind(denied_request.as_uuid())
+    .bind(escalated_request.as_uuid())
+    .fetch_all(&fixture.pool)
+    .await?;
+
+    assert_eq!(denied, CompleteApprovalJudgeOutcome::Decided);
+    assert_eq!(
+        escalated,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(release_count(&fixture).await?, 1);
+    assert_eq!(
+        result_kinds,
+        vec![
+            (*denied_request.as_uuid(), String::from("tool_denied")),
+            (
+                *escalated_request.as_uuid(),
+                String::from("tool_closed_by_turn_end"),
+            ),
+        ]
+    );
+    Ok(())
+}
+
+/// A steer accepted while the dispatched turn awaits its judge is a user
+/// attending the session, and terminalizing that turn would strand the steer
+/// against `turn_lifecycle_pending_steering_closed`. The escalation parks for
+/// that user instead, leaving the turn active and the dispatch owned.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_steered_dispatched_turn_escalates_to_its_user() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_2c0;
+    let (model_repository, prepared, turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    SubmitInputRepository::new(fixture.pool.clone())
+        .handle_with_candidates(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(STEERED_DISPATCH_COMMAND_ID)),
+                fixture.session(0),
+                UserContent::try_text(String::from("narrow the change to the failing test"))
+                    .expect("the fixture steering content is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(STEERED_DISPATCH_INPUT_ID)),
+            None,
+            CancelledModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 60)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 61)),
+            ),
+            |_| panic!("the steer's source turn is still active"),
+            |_| panic!("the steer cancels no tool request without a terminal observation"),
+        )
+        .await?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+
+    let outcome = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            ToolDecisionRationale::try_new(String::from(
+                "the provider requests authority beyond the immutable dispatch fence",
+            ))?,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let lifecycle: String = sqlx::query_scalar(
+        "SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1 AND session_id = $2",
+    )
+    .bind(turn.as_uuid())
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let escalations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_headless_approval_escalation WHERE session_id = $1",
+    )
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
+    assert_eq!(lifecycle, "active");
+    assert_eq!(escalations, 0);
+    assert_eq!(release_count(&fixture).await?, 0);
+    Ok(())
+}
+
+/// Once the dispatch has released, the unattended path has nothing left to do:
+/// it cannot free a singleton this session no longer holds, and
+/// `repo_watch_owe_dispatch_requeue` owes no second replacement. Work an
+/// operator resumed by hand from that state therefore escalates to that
+/// operator instead of failing another turn under a promise nothing keeps.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_released_dispatch_escalates_resumed_work_to_its_operator() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_2e0;
+    let (model_repository, prepared, _turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable dispatch fence",
+    ))?;
+    let unattended = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let released = release_count(&fixture).await?;
+
+    // The operator takes the blocked goal back by hand. The resumed turn is
+    // still the generation the dispatch commissioned, so it still resolves the
+    // dispatch authority — the released batch, not the missing authority, is
+    // what sends its escalation to a user.
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(RESUMED_DISPATCH_COMMAND_ID)),
+                    fixture.session(0),
+                    GoalUserAction::Resume(None),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(RESUMED_DISPATCH_INPUT_ID)),
+                    TurnId::from_uuid(Uuid::from_u128(RESUMED_DISPATCH_TURN_ID)),
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+    let (resumed_repository, resumed_prepared, resumed_turn, _resumed_requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, 0x50_300).await?;
+    let resumed_approvals = resumed_repository.approval_judge_repository();
+    resumed_approvals.authorize(&resumed_prepared).await?;
+
+    let outcome = resumed_approvals
+        .complete(
+            &resumed_prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(0x50_300 + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x50_300 + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x50_300 + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET + 1,
+                ))
+            },
+        )
+        .await?;
+    let lifecycle: String = sqlx::query_scalar(
+        "SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1 AND session_id = $2",
+    )
+    .bind(resumed_turn.as_uuid())
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let escalations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_headless_approval_escalation WHERE session_id = $1",
+    )
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(
+        unattended,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(released, 1);
+    assert_eq!(
+        resumed_turn,
+        TurnId::from_uuid(Uuid::from_u128(RESUMED_DISPATCH_TURN_ID))
+    );
+    assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
+    assert_eq!(lifecycle, "active");
+    assert_eq!(
+        escalations, 1,
+        "the resumed escalation records no second audit row"
+    );
+    assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+/// A sibling action still pursuing keeps the batch unreleased, so the release
+/// row cannot say whether a person is behind the work. The escalation record
+/// can: only an operator can resume a goal an unattended escalation blocked, so
+/// the resumed turn's own escalation parks for them even though nothing has
+/// released.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_resumption_before_release_escalates_to_its_operator() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let seed = 0x50_360;
+    let (model_repository, prepared, _turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable dispatch fence",
+    ))?;
+    let unattended = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let held = release_count(&fixture).await?;
+
+    let resumed_turn = TurnId::from_uuid(Uuid::from_u128(HELD_BATCH_RESUME_TURN_ID));
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(HELD_BATCH_RESUME_COMMAND_ID)),
+                    fixture.session(0),
+                    GoalUserAction::Resume(None),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(HELD_BATCH_RESUME_INPUT_ID)),
+                    resumed_turn,
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+    let (resumed_repository, resumed_prepared, judged_turn, _resumed_requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, 0x50_380).await?;
+    let resumed_approvals = resumed_repository.approval_judge_repository();
+    resumed_approvals.authorize(&resumed_prepared).await?;
+
+    let outcome = resumed_approvals
+        .complete(
+            &resumed_prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(0x50_380 + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x50_380 + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x50_380 + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET + 1,
+                ))
+            },
+        )
+        .await?;
+    let lifecycle: String = sqlx::query_scalar(
+        "SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1 AND session_id = $2",
+    )
+    .bind(judged_turn.as_uuid())
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let escalations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_headless_approval_escalation WHERE session_id = $1",
+    )
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(
+        unattended,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(
+        held, 0,
+        "the sibling action still pursues, so nothing released"
+    );
+    assert_eq!(judged_turn, resumed_turn);
+    assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
+    assert_eq!(lifecycle, "active");
+    assert_eq!(
+        escalations, 1,
+        "the resumed escalation records no second audit row"
+    );
+    assert_eq!(release_count(&fixture).await?, 0);
+    Ok(())
+}
+
+/// A released batch parks only while a person is still behind the work. The
+/// reachable stale case is the resumed one: an earlier escalation terminalized
+/// its turn and released the batch, an operator resumed the goal, and the goal
+/// then ended while the resumed turn's judge was in flight. That escalation is
+/// terminalized rather than parked for nobody, and with the authority already
+/// ended no execution-failure block is appended and no requeue is owed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_released_dispatch_terminalizes_work_whose_goal_ended() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let seed = 0x50_320;
+    let (model_repository, prepared, _turn, _requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let approval_repository = model_repository.approval_judge_repository();
+    approval_repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the provider requests authority beyond the immutable dispatch fence",
+    ))?;
+    let unattended = approval_repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let released = release_count(&fixture).await?;
+
+    let stale_turn = TurnId::from_uuid(Uuid::from_u128(STALE_DISPATCH_TURN_ID));
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(STALE_DISPATCH_RESUME_COMMAND_ID)),
+                    fixture.session(0),
+                    GoalUserAction::Resume(None),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(STALE_DISPATCH_INPUT_ID)),
+                    stale_turn,
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+    let (resumed_repository, resumed_prepared, resumed_turn, _resumed_requests) =
+        checkpoint_dispatched_delegated_approval(&fixture, 0x50_340).await?;
+    let resumed_approvals = resumed_repository.approval_judge_repository();
+    resumed_approvals.authorize(&resumed_prepared).await?;
+    // The goal ends while this judge is in flight, which is what makes the
+    // resumed work stale. The turn stays active until the completion below
+    // terminalizes it: an active turn is runtime-relevant whatever its goal
+    // recorded, so ending the goal releases nothing by itself.
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        STALE_DISPATCH_STOP_COMMAND_ID,
+    )
+    .await?;
+    let released_before_completion = release_count(&fixture).await?;
+
+    let outcome = resumed_approvals
+        .complete(
+            &resumed_prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(0x50_340 + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x50_340 + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x50_340 + 12)),
+            ),
+            |closed_request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    closed_request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET + 1,
+                ))
+            },
+        )
+        .await?;
+    let lifecycle: String = sqlx::query_scalar(
+        "SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1 AND session_id = $2",
+    )
+    .bind(resumed_turn.as_uuid())
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let latest_goal_event: String = sqlx::query_scalar(
+        "SELECT event_kind
+           FROM goal_event
+          WHERE session_id = $1
+          ORDER BY event_ordinal DESC
+          LIMIT 1",
+    )
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let escalations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_headless_approval_escalation WHERE session_id = $1",
+    )
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(
+        unattended,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(released, 1);
+    assert_eq!(resumed_turn, stale_turn);
+    assert_eq!(
+        released_before_completion, 1,
+        "ending the goal releases nothing further while the resumed turn is active"
+    );
+    assert_eq!(
+        outcome,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(lifecycle, "terminal");
+    assert_eq!(
+        latest_goal_event, "user_stopped",
+        "an ended generation records no execution-failure block"
+    );
+    assert_eq!(escalations, 2);
+    assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+/// Terminalizing one action in a multi-action dispatch does not claim release
+/// while its sibling remains pursuing, and exact replay reports the same
+/// durable effect — including after the batch releases, which is a fact about
+/// the batch and never about this completion.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn headless_escalation_waits_for_a_multi_action_dispatch_sibling()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let seed = 0x50_280;
+    let (model_repository, prepared, _, _) =
+        checkpoint_dispatched_delegated_approval(&fixture, seed).await?;
+    let repository = model_repository.approval_judge_repository();
+    repository.authorize(&prepared).await?;
+    let rationale = ToolDecisionRationale::try_new(String::from(
+        "the unattended request needs a human decision",
+    ))?;
+
+    let outcome = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale.clone(),
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+    let replay = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+
+    let pending_release = release_count(&fixture).await?;
+    // Stands in for the sibling action settling, which is the only way this
+    // batch releases and is not this completion's doing either way.
+    sqlx::query("INSERT INTO repo_watch_dispatch_release (dispatch_id) VALUES ($1)")
+        .bind(fixture.dispatch_id.as_uuid())
+        .execute(&fixture.pool)
+        .await?;
+    let replay_after_release = repository
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::EscalateToHuman,
+            ToolDecisionRationale::try_new(String::from(
+                "the unattended request needs a human decision",
+            ))?,
+            ProviderReportedTokenUsage::unreported(),
+            ApprovalJudgeCompletionIdentities::new(
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 10)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
+            ),
+            |request| {
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    request.as_uuid().as_u128() + CLOSED_RESULT_ID_OFFSET,
+                ))
+            },
+        )
+        .await?;
+
+    assert_eq!(
+        outcome,
+        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
+    );
+    assert_eq!(replay, outcome);
+    assert_eq!(replay_after_release, outcome);
+    assert_eq!(pending_release, 0);
+    assert_eq!(release_count(&fixture).await?, 1);
     Ok(())
 }
 

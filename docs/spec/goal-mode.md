@@ -14,7 +14,9 @@ that authority again when a consumer commits is verified against this PR
 (`agent/judge-completion-recheck`). Repository-watch-composed stops are verified
 against this PR (`agent/daemon-ops-overnight`). This bottom specification diff
 owns both stack slices. Bounded automatic resumption of execution-failure blocks
-is verified against this PR (`agent/goal-blocked-autoresume`). Identity and
+is verified against this PR (`agent/goal-blocked-autoresume`), and its one
+exemption — the block an unattended repository-watch approval escalation appends
+— against this PR (`agent/headless-approval-escalation`). Identity and
 durable-command mechanics remain owned by
 [identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
@@ -106,10 +108,17 @@ read. Equal statements commit the decision. A statement that resolved before and
 resolves to nothing now belongs to a generation that closed, whether it was
 stopped, achieved, or replaced by a supersession — a replacement closes the
 generation the decision was formed under rather than restating it, so it too
-resolves to nothing. That escalates to a human rather than committing a decision
-formed under authority no longer in force. A judge that read no statement
-decided without one, so a generation attached since withdraws nothing and leaves
-that decision alone: the comparison pins withdrawal, not novelty.
+resolves to nothing. That escalates rather than committing a decision formed
+under authority no longer in force. Escalating means the attended park, except
+for a turn [repository watch](repo-watch.md) sends down its unattended terminal
+path — one judged under dispatch authority, unsteered, and either the dispatched
+work itself or work whose authority has since ended — and which fails the turn
+without blocking the generation that has already closed. Work an operator
+resumed after an earlier escalation is the other case, and it parks while its
+authority stands, because the exemption stated below means only a person could
+have resumed it. A judge that read no statement decided without one, so a
+generation attached since withdraws nothing and leaves that decision alone: the
+comparison pins withdrawal, not novelty.
 
 **Implemented behavior.** The commit-time resolution is not the reading
 resolution. Reading binds a recorded generation exactly, so a supersession while
@@ -233,6 +242,21 @@ did not report and the derived identity is a function of it, and it runs off the
 scheduler pass, which returns its ambiguity without waiting. Arming a block
 another pass already armed is harmless for the same reason a retry is: both
 derive one identity, and the second attempt replays it.
+
+**Implemented behavior.** One execution-failure block is exempt from automatic
+resumption: the block an unattended repository-watch approval escalation appends
+in the transaction that fails its turn, described by
+[repository watch](repo-watch.md). It arms no attempt, and its need text states
+that and names the operator repair directly instead. The work that block ended
+is already owed a retry, and a different one — repository watch redispatches it
+under a fresh dispatch while its rule and target remain eligible — so resuming
+this goal would re-run an escalating turn against a request no user is
+attending, beside that redispatch, until the budget ran out. Where that
+redispatch is withheld, because the rule was deactivated or the pull request
+closed or merged, the work is not wanted at all, and an automatic resumption
+would be the only thing still pursuing it. Every other execution-failure block
+owes the bounded resumption above, including one appended for a session
+repository watch created.
 
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The
