@@ -22,19 +22,22 @@ re-verified through this PR (`agent/runner-lease-claim-transaction`). The atomic
 claimed-lease and physical-attempt result boundary is re-verified through this
 PR (`agent/runner-lease-result-transaction`). Immutable normalized dispatch
 arguments on every lease and its durable readback are re-verified through this
-PR (`agent/runner-lease-argument-binding`). The corrected reconstitution
-mismatch contract was re-verified through PR #322 (`agent/docs-discipline`;
-pinned and pinned-loss request mismatches). The placement loss-source, pre-pin
-replacement and abandonment state shapes, and append-only reconstitution-history
-contract are re-verified through this PR (`agent/runner-placement-loss-domain`).
-It owns logical runner enrollment, daemon-authoritative catalog validation,
-runner leases, the independent session-composition axes, session placement and
-affinity, credential-profile grants, and workspace requirements. The tool
-registry's common declarations remain owned by [tool loop](tool-loop.md);
-session transcript and frontier mechanics remain owned by
-[sessions and transcript](sessions-and-transcript.md); physical tool attempts
-remain owned by [tool loop](tool-loop.md). Invariant tags cite
-[the invariant test index](../invariants.md).
+PR (`agent/runner-lease-argument-binding`). Exact daemon projection of sealed
+lease facts into `lease_offer`, `lease_claimed`, `dispatch`, and
+`result_recorded`, plus fail-closed reconstitution of `lease_claim` and
+`result`, is re-verified through this PR (`agent/runner-dispatch-wire-adapter`).
+The corrected reconstitution mismatch contract was re-verified through PR #322
+(`agent/docs-discipline`; pinned and pinned-loss request mismatches). The
+placement loss-source, pre-pin replacement and abandonment state shapes, and
+append-only reconstitution-history contract are re-verified through this PR
+(`agent/runner-placement-loss-domain`). It owns logical runner enrollment,
+daemon-authoritative catalog validation, runner leases, the independent
+session-composition axes, session placement and affinity, credential-profile
+grants, and workspace requirements. The tool registry's common declarations
+remain owned by [tool loop](tool-loop.md); session transcript and frontier
+mechanics remain owned by [sessions and transcript](sessions-and-transcript.md);
+physical tool attempts remain owned by [tool loop](tool-loop.md). Invariant tags
+cite [the invariant test index](../invariants.md).
 
 The typed `ReplaceLostRunner`, `RunnerReplacementTarget`, and
 `AbandonLostRunner` domain command payloads are verified against this PR
