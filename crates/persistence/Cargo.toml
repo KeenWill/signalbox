@@ -85,11 +85,6 @@ path = "tests/imported_session_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]
-name = "session_timeline_postgres"
-path = "tests/session_timeline_postgres.rs"
-required-features = ["postgres-integration"]
-
-[[test]]
 name = "imported_conversation_e2e_postgres"
 path = "tests/imported_conversation_e2e_postgres.rs"
 required-features = ["postgres-integration"]

@@ -14,50 +14,15 @@ use signalbox_domain::{
     TranscriptAncestry,
 };
 use signalbox_persistence::{
-    create_session::CreateSessionRepository, disposable_postgres_server_args,
-    disposable_postgres_state_tmpfs, disposable_test_container_labels,
-    local_test_connection_options, migrate, session_timeline::SessionTimelineRepository,
+    create_session::CreateSessionRepository, session_timeline::SessionTimelineRepository,
 };
-use sqlx::{PgPool, postgres::PgPoolOptions};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
-const DATABASE_NAME: &str = "signalbox_session_timeline";
-const DATABASE_USER: &str = "signalbox";
-const DATABASE_PASSWORD: &str = "signalbox-test-only";
-
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    migrate(&pool).await?;
-    Ok((container, pool))
-}
+use super::{migrated_postgres, test_session_credential_pin};
 
 fn credential_pin() -> signalbox_persistence::SessionCredentialPin {
-    signalbox_persistence::SessionCredentialPin::try_new(vec![
-        signalbox_persistence::SessionModelCredential::new("test-family", "test-member"),
-    ])
-    .expect("fixture credential pin is valid")
+    test_session_credential_pin()
 }
 
 fn session(value: u128) -> SessionId {
@@ -86,7 +51,7 @@ async fn create_session(pool: &PgPool, identity: SessionId) -> Result<(), Box<dy
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn descriptor_and_windows_share_one_stable_creation_address() -> Result<(), Box<dyn Error>> {
-    let (container, pool) = migrated_postgres().await?;
+    let (container, pool, _database_url) = migrated_postgres().await?;
     let identity = session(0x991);
     create_session(&pool, identity).await?;
     let repository = SessionTimelineRepository::new(pool.clone());
