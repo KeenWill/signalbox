@@ -112,16 +112,17 @@ crate cannot mint an identity. `crates/application` enables the `v7` feature and
 defines one generator trait per orchestration slice, each with a production
 UUIDv7 implementation:
 
-| Generator                                            | Mints                                                                                                                        |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `UuidV7SessionIdGenerator`                           | `SessionId`                                                                                                                  |
-| `UuidV7ImportedConversationIdGenerator`              | `ImportedConversationId`, `ImportedTranscriptEntryId`                                                                        |
-| `UuidV7CreateSessionFromImportedFrontierIdGenerator` | `SessionId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                                                                |
-| `UuidV7SubmitInputIdGenerator`                       | `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                                                |
-| `UuidV7StartEligibleTurnIdGenerator`                 | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`                                                            |
-| `UuidV7StartupScanIdGenerator`                       | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                                         |
-| `UuidV7ModelCallExecutionIdGenerator`                | `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                          |
-| `UuidV7ToolLoopIdGenerator`                          | `ToolRequestId`, `ToolAttemptId`, `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`, `TurnId` |
+| Generator                                            | Mints                                                                                                                                    |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `UuidV7SessionIdGenerator`                           | `SessionId`                                                                                                                              |
+| `UuidV7ImportedConversationIdGenerator`              | `ImportedConversationId`, `ImportedTranscriptEntryId`                                                                                    |
+| `UuidV7CreateSessionFromImportedFrontierIdGenerator` | `SessionId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                                                                            |
+| `UuidV7SubmitInputIdGenerator`                       | `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                                                            |
+| `UuidV7StartEligibleTurnIdGenerator`                 | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`                                                                        |
+| `UuidV7StartupScanIdGenerator`                       | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                                                     |
+| `UuidV7ModelCallExecutionIdGenerator`                | `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                                      |
+| `UuidV7ToolLoopIdGenerator`                          | `ToolRequestId`, `ToolAttemptId`, `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`, `TurnId`             |
+| `UuidV7CommissionedDispatchIdGenerator`              | `CommissionedDispatchId`, `DurableCommandId`, `SessionId`, `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId` |
 
 `ProviderTargetEvidenceId` exists as a domain type but has no production minting
 seam yet; its generator lands with its owning slice. `WorkspaceId`,

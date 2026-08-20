@@ -55,7 +55,7 @@ impl <Identity> {
 }
 ```
 
-The twenty-eight identities defined in `lib.rs`:
+The twenty-nine identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -5877,9 +5877,11 @@ impl CommissionDispatchRequest {
         template_provenance: SessionTemplateProvenance,
         resolved_defaults: SessionConfigurationDefaults,
     ) -> Result<PreparedCommissionedDispatch, CommissionDispatchPreparationError>;
-    // accessors: command_id(), template(), fence(), statement()
+    // accessors: command_id(), template(), fence(), statement(),
+    //            initial_content_digest()
 }
 
+// sealed: CommissionDispatchRequest::prepare
 pub struct PreparedCommissionedDispatch { /* private */ }
 impl PreparedCommissionedDispatch {
     pub fn into_parts(
@@ -5895,7 +5897,8 @@ impl PreparedCommissionedDispatch {
         ContextFrontierId,
         GoalUserCommand,
     );
-    // accessors: dispatch_id(), fence(), prepared_session(), goal(), session()
+    // accessors: dispatch_id(), fence(), prepared_session(), goal(), session(),
+    //            initial_content_digest()
 }
 
 pub enum CommissionDispatchPreparationError {

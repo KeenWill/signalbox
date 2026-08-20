@@ -1008,7 +1008,10 @@ request, or blob-upload transport request — `create_session`,
 - `session_commissioned` with the created `session_id` and the `dispatch_id` of
   the append-only recorded fence; an equal replay of the same command identity
   re-emits the committed receipt, and the same identity naming a different
-  template, fence, or statement is a conflicting reuse;
+  template, fence, statement, or initial content is a conflicting reuse. Replay
+  is resolved from the durable record before the live template catalog is
+  consulted, so a committed commission stays discoverable through the exact
+  retry even after configuration removed or renamed its template;
 - `session_placement_updated` with `session_id`, the positive successor
   `placement_version`, and the complete recorded `placement` object; the client
   accepts it only when the session and placement echo its request and the

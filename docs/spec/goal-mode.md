@@ -111,15 +111,16 @@ stopped, achieved, or replaced by a supersession — a replacement closes the
 generation the decision was formed under rather than restating it, so it too
 resolves to nothing. That escalates rather than committing a decision formed
 under authority no longer in force. Escalating means the attended park, except
-for a turn [repository watch](repo-watch.md) sends down its unattended terminal
-path — one judged under dispatch authority, unsteered, and either the dispatched
-work itself or work whose authority has since ended — and which fails the turn
-without blocking the generation that has already closed. Work an operator
-resumed after an earlier escalation is the other case, and it parks while its
-authority stands, because the exemption stated below means only a person could
-have resumed it. A judge that read no statement decided without one, so a
-generation attached since withdraws nothing and leaves that decision alone: the
-comparison pins withdrawal, not novelty.
+for a turn the unattended terminal path claims — one judged under dispatch
+authority recorded by [repository watch](repo-watch.md) or by an
+operator-commissioned dispatch (also specified there), unsteered, and either the
+dispatched work itself or work whose authority has since ended — and which fails
+the turn without blocking the generation that has already closed. Work an
+operator resumed after an earlier escalation is the other case, and it parks
+while its authority stands, because the exemption stated below means only a
+person could have resumed it. A judge that read no statement decided without
+one, so a generation attached since withdraws nothing and leaves that decision
+alone: the comparison pins withdrawal, not novelty.
 
 **Implemented behavior.** The commit-time resolution is not the reading
 resolution. Reading binds a recorded generation exactly, so a supersession while

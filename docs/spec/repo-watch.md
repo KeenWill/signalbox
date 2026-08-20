@@ -645,9 +645,11 @@ repository and branch, and base branch; a branch fence names the repository and
 branch. The approval judge resolves either append-only source under the same
 generation-one binding, renders both through one authority rendering, and
 refuses a session recording both as corruption. The commission's durable command
-identity binds its template, fence, and statement: an equal retry replays the
-committed session and fence, and the same identity naming a different template,
-fence, or statement is refused as conflicting reuse.
+identity binds its template, fence, statement, and the digest of its initial
+content: an equal retry replays the committed session and fence — resolved from
+the durable record before any template resolution, so replay survives template
+configuration drift — and the same identity naming different intent, an ordinary
+session creation included, is refused as conflicting reuse in both directions.
 
 **Committed unimplemented functionality.** No present session-creation or
 input-submission surface identifies repository watch as a purpose-specific actor
