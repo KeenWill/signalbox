@@ -25,6 +25,7 @@ mod session_creation_and_submit;
 mod session_plan;
 mod tool_round_lifecycle;
 mod turn_activation;
+mod turn_liveness;
 
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},

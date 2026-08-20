@@ -61,6 +61,7 @@ mod session_delegation;
 mod session_template_configuration;
 mod single_hub;
 mod telemetry;
+mod turn_liveness_runtime;
 pub mod usage_limits;
 
 pub use blob_storage_configuration::{
@@ -168,6 +169,7 @@ pub use telemetry::{
     TelemetryConfiguration, TelemetryConfigurationError, TelemetryConfigurationFailure,
     TelemetryExportFilter, TelemetryExportLayer, TelemetryMetrics,
 };
+pub use turn_liveness_runtime::TurnLivenessRuntime;
 
 /// Per-activation model execution constructed by the hub composition root.
 pub trait ActivatedTurnExecution {
