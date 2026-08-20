@@ -33,6 +33,9 @@ const router = createRouter({ routeTree: rootRoute.addChildren([indexRoute, scen
 // Tunable effective ceiling: retain recently visited scenario projections without growing the
 // development cache for the lifetime of the page.
 const QUERY_CACHE_GC_TIME_MS = 5 * 60_000
+// Tunable effective ceiling: defer long enough to avoid accidental hover while keeping
+// operator-facing explanations responsive.
+const TOOLTIP_DELAY_MS = 350
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false, gcTime: QUERY_CACHE_GC_TIME_MS } },
 })
@@ -51,7 +54,7 @@ createRoot(root).render(
     <Provider store={store}>
       <QueryClientProvider client={queryClient}>
         <HotkeysProvider>
-          <Tooltip.Provider delayDuration={350}>
+          <Tooltip.Provider delayDuration={TOOLTIP_DELAY_MS}>
             <RouterProvider router={router} />
           </Tooltip.Provider>
         </HotkeysProvider>

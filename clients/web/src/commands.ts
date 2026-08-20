@@ -2,22 +2,6 @@ import type { HotkeySequence, RegisterableHotkey } from '@tanstack/react-hotkeys
 import type { AppDispatch, RootState } from './state'
 import { actions } from './state'
 
-export type CommandId =
-  | 'palette.open'
-  | 'help.open'
-  | 'navigation.open'
-  | 'surface.escape'
-  | 'selection.next'
-  | 'selection.previous'
-  | 'selection.first'
-  | 'selection.last'
-  | 'layout.toggle'
-  | 'density.toggle'
-  | 'theme.toggle'
-  | 'detail.full'
-  | 'detail.condensed'
-  | 'detail.results'
-
 export interface CommandContext {
   dispatch: AppDispatch
   getState: () => RootState
@@ -32,8 +16,8 @@ export interface CommandBinding {
     | { kind: 'sequence'; sequence: HotkeySequence }
 }
 
-export interface CommandDefinition {
-  id: CommandId
+interface CommandDefinitionShape {
+  id: string
   title: string
   description: string
   category: 'Navigate' | 'View' | 'Surface'
@@ -43,7 +27,7 @@ export interface CommandDefinition {
 }
 
 const always = () => true
-export const commandRegistry: readonly CommandDefinition[] = [
+export const commandRegistry = [
   {
     id: 'palette.open',
     title: 'Open command palette',
@@ -202,23 +186,28 @@ export const commandRegistry: readonly CommandDefinition[] = [
     available: always,
     run: (context) => context.dispatch(actions.detailSet('results')),
   },
-]
+] as const satisfies readonly CommandDefinitionShape[]
 
-export const globalHotkeyBindings = commandRegistry.flatMap((command) =>
-  command.bindings.flatMap((binding) =>
+export type CommandDefinition = (typeof commandRegistry)[number]
+export type CommandId = CommandDefinition['id']
+
+export const globalHotkeyBindings = commandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
     binding.registration?.kind === 'hotkey'
       ? [{ commandId: command.id, hotkey: binding.registration.hotkey }]
       : [],
-  ),
-)
+  )
+})
 
-export const globalHotkeySequenceBindings = commandRegistry.flatMap((command) =>
-  command.bindings.flatMap((binding) =>
+export const globalHotkeySequenceBindings = commandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
     binding.registration?.kind === 'sequence'
       ? [{ commandId: command.id, sequence: binding.registration.sequence }]
       : [],
-  ),
-)
+  )
+})
 
 export const commandById = (id: CommandId): CommandDefinition => {
   const command = commandRegistry.find((candidate) => candidate.id === id)

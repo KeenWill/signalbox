@@ -77,4 +77,18 @@ describe('ScenarioTransport', () => {
     expect(window.nextCursor).toBeUndefined()
     expect(window.totalCount).toBe(transport.scenario.tableTotal)
   })
+
+  it('does not advance past an empty timeline cursor suffix', async () => {
+    const transport = new ScenarioTransport('streaming')
+    const window = await transport.readTimeline({ after: 'timeline:', limit: 1 })
+
+    expect(window.items[0]?.cursor).toBe('timeline:0')
+  })
+
+  it('does not advance past a whitespace fleet cursor suffix', async () => {
+    const transport = new ScenarioTransport('streaming')
+    const window = await transport.readFleet({ after: 'fleet: ', limit: 1 })
+
+    expect(window.items[0]?.cursor).toBe('fleet:0')
+  })
 })

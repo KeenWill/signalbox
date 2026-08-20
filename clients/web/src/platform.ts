@@ -1,23 +1,4 @@
-export type ScenarioId =
-  | 'streaming'
-  | 'approval'
-  | 'recovery'
-  | 'large-timeline'
-  | 'large-table'
-  | 'huge-source'
-  | 'blobs'
-  | 'responsive'
-
 export type TimelineKind = 'origin' | 'progress' | 'tool' | 'result' | 'unknown'
-
-export interface ScenarioDefinition {
-  id: ScenarioId
-  title: string
-  description: string
-  connection: 'connected' | 'recovering'
-  timelineTotal: number
-  tableTotal: number
-}
 
 export interface TimelineItem {
   id: string
@@ -29,11 +10,14 @@ export interface TimelineItem {
   elapsed: string
 }
 
+const FLEET_STATE_CYCLE = ['active', 'queued', 'blocked', 'settled'] as const
+export type FleetState = (typeof FLEET_STATE_CYCLE)[number]
+
 export interface FleetRow {
   id: string
   cursor: string
   repository: string
-  state: 'active' | 'queued' | 'blocked' | 'settled'
+  state: FleetState
   purpose: string
   age: string
 }
@@ -47,12 +31,6 @@ export interface CursorWindow<T> {
   items: T[]
   nextCursor?: string
   totalCount: number
-}
-
-export interface SignalboxTransport {
-  readonly scenario: ScenarioDefinition
-  readTimeline(request: WindowRequest): Promise<CursorWindow<TimelineItem>>
-  readFleet(request: WindowRequest): Promise<CursorWindow<FleetRow>>
 }
 
 export const scenarios = [
@@ -120,7 +98,16 @@ export const scenarios = [
     timelineTotal: 200,
     tableTotal: 200,
   },
-] as const satisfies readonly [ScenarioDefinition, ...ScenarioDefinition[]]
+] as const
+
+export type ScenarioDefinition = (typeof scenarios)[number]
+export type ScenarioId = ScenarioDefinition['id']
+
+export interface SignalboxTransport {
+  readonly scenario: ScenarioDefinition
+  readTimeline(request: WindowRequest): Promise<CursorWindow<TimelineItem>>
+  readFleet(request: WindowRequest): Promise<CursorWindow<FleetRow>>
+}
 
 // Tunable effective ceiling: each development scenario loads one bounded timeline window.
 export const SCENARIO_TIMELINE_WINDOW_ITEMS = 360
@@ -134,8 +121,16 @@ const normalizedLimit = (limit: number, maximum: number): number => {
 
 const parseCursor = (cursor: string | undefined, prefix: string): number => {
   if (!cursor?.startsWith(`${prefix}:`)) return 0
-  const parsed = Number(cursor.slice(prefix.length + 1))
+  const suffix = cursor.slice(prefix.length + 1)
+  if (!/^(0|[1-9]\d*)$/.test(suffix)) return 0
+  const parsed = Number(suffix)
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed + 1 : 0
+}
+
+const fleetStateAt = (index: number): FleetState => {
+  const state = FLEET_STATE_CYCLE[index % FLEET_STATE_CYCLE.length]
+  if (state === undefined) throw new Error('Fleet state cycle must remain non-empty')
+  return state
 }
 
 const timelineKind = (index: number): TimelineKind => {
@@ -212,14 +207,13 @@ export class ScenarioTransport implements SignalboxTransport {
     const start = Math.min(parseCursor(request.after, 'fleet'), this.scenario.tableTotal)
     const count = normalizedLimit(request.limit, SCENARIO_FLEET_WINDOW_ITEMS)
     const end = Math.min(start + count, this.scenario.tableTotal)
-    const states: FleetRow['state'][] = ['active', 'queued', 'blocked', 'settled']
     const items = Array.from({ length: end - start }, (_, offset) => {
       const index = start + offset
       return {
         id: `obligation-${index}`,
         cursor: `fleet:${index}`,
         repository: `signalbox/worktree-${String(index + 1).padStart(4, '0')}`,
-        state: states[index % states.length] ?? 'queued',
+        state: fleetStateAt(index),
         purpose: index % 3 === 0 ? 'Review convergence' : 'Milestone implementation',
         age: `${(index % 58) + 1}m`,
       }
