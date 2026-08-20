@@ -1,0 +1,49 @@
+{
+  "name": "@signalbox/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b && vite build",
+    "check": "tsc -b --pretty false",
+    "dev": "vite --host 127.0.0.1",
+    "lint": "biome ci .",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "vitest run",
+    "test:browser": "npm run build && playwright test",
+    "test:browser:update": "npm run build && playwright test --update-snapshots"
+  },
+  "engines": {
+    "node": ">=26"
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "1.1.23",
+    "@radix-ui/react-tooltip": "1.2.16",
+    "@reduxjs/toolkit": "2.12.0",
+    "@tanstack/react-form": "1.33.5",
+    "@tanstack/react-hotkeys": "0.10.0",
+    "@tanstack/react-pacer": "0.23.0",
+    "@tanstack/react-query": "5.101.4",
+    "@tanstack/react-router": "1.170.31",
+    "@tanstack/react-table": "8.21.3",
+    "@tanstack/react-virtual": "3.14.10",
+    "lucide-react": "1.33.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-redux": "9.3.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.9",
+    "@playwright/test": "1.62.1",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "26.2.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.1.0",
+    "oxc-transform-react": "0.145.0",
+    "tailwindcss": "4.3.3",
+    "typescript": "7.0.2",
+    "vite": "8.2.1",
+    "vitest": "4.1.11"
+  }
+}
