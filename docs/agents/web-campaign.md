@@ -32,8 +32,7 @@ bounded Goal-mode tracks rather than one open-ended run.
 #990 HTTP contract ──┬─ #991 session projection ───────────┤
                      ├─ #993 blobs/derivations ────────────┤
                      └─ #995 imports/reviews/runners ──────┤
-                              │                           │
-#991 timeline addresses ──────┴─ #994 search/usage ────────┤
+#991 timeline addresses ──────── #994 search/usage ─────────┤
 #992 monitor/repo watch ───────────────────────────────────┤
                                                           ▼
                                                     #996 integration

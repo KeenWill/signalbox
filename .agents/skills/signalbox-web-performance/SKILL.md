@@ -51,6 +51,9 @@ A virtual DOM list alone does not satisfy the law.
   this skill selects none of those semantics.
 - Never debounce or drop durable events.
 - Bound follower queues, pending decode work, Redux history, and debug traces.
+- When a follower queue reaches its bound, apply the owning contract's
+  backpressure policy or stop incremental delivery and resynchronize from the
+  durable cursor; never drop durable events.
 - Follow the owning contract's transient-state policy during resynchronization;
   do not invent provider-token replay.
 

@@ -40,41 +40,19 @@ restating its limits here.
 
 ## Interaction and presentation
 
-- Build a professional expert workstation: dense, precise, restrained, and
-  highly legible. Avoid marketing layouts, giant headings, gratuitous cards,
-  excessive rounding, decorative gradients, and wasted space.
-- Conversation remains the primary surface. Focus mode can become quiet;
-  workbench mode may expose dense live tables and inspectors.
-- Turns organize data but do not force expanded content into a large nested box.
-  Use gutter, rail, typography, and compact boundaries.
-- `full`, `condensed`, and `results` are client presentation modes. Individual
-  turns and items expand independently.
-- Every important action belongs to the central command registry. Menus,
-  buttons, hotkeys, and the command palette invoke the same command.
-- Modal/Vim-inspired navigation applies outside editing contexts. Text inputs,
-  editors, and the composer retain ordinary editing behavior.
-- Use semantic native elements and Radix/shadcn primitives. Accessible names,
-  focus order, keyboard behavior, and visible focus are implementation
-  requirements, not polish.
-- Only validated generic records remain visible through a safe generic renderer.
-  Reject or quarantine unknown discriminators and contradictory correlations
-  instead of rendering them as generic content.
+[The signalbox-web-design skill](../../.agents/skills/signalbox-web-design/SKILL.md)
+owns layout, visual character, responsive composition, transcript presentation,
+and component composition.
+[The signalbox-web-keyboard skill](../../.agents/skills/signalbox-web-keyboard/SKILL.md)
+owns commands, modal interaction, focus, keyboard behavior, and interaction
+accessibility.
 
 ## Browser and agent evidence
 
-Every substantial UI change includes or updates deterministic scenarios and
-Playwright coverage. Prefer role/name/user-facing locators; add stable domain
-identifiers only where semantics cannot identify one exact object.
-
-Capture pinned Chromium screenshots for visual changes. Major responsive paths
-also require mobile evidence. Assert no unexpected console message or page
-error. When the active slice implements bounded diagnostics, failure traces
-include its allowlisted, redacted snapshot and recent permitted application
-actions where relevant.
-
-Visual review checks hierarchy, density, alignment, typography, information
-priority, interaction states, light/dark behavior, and responsive composition;
-it does not accept a screen merely because all controls are present.
+[The signalbox-web-browser-qa skill](../../.agents/skills/signalbox-web-browser-qa/SKILL.md)
+owns deterministic browser scenarios, Playwright workflow and locators,
+screenshots, visual review, diagnostics, and retained failure evidence. Follow
+that skill rather than restating its evidence contract here.
 
 ## Dependencies
 
