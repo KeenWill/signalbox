@@ -46,11 +46,13 @@ A virtual DOM list alone does not satisfy the law.
 ## Streaming
 
 - Apply every durable event in order and deduplicate only by its authority.
-- Batch ephemeral provider display fragments, preferably around animation-frame
-  cadence.
+- When an implemented owning contract exposes ephemeral provider display
+  fragments, follow its batching, cadence, backpressure, and replacement policy;
+  this skill selects none of those semantics.
 - Never debounce or drop durable events.
 - Bound follower queues, pending decode work, Redux history, and debug traces.
-- Resync replaces transient state rather than replaying provider token history.
+- Follow the owning contract's transient-state policy during resynchronization;
+  do not invent provider-token replay.
 
 ## Large renderers
 

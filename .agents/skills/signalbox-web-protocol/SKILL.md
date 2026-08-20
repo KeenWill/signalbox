@@ -58,15 +58,19 @@ Separate the historical plane from the live plane.
 
 ## Mutations
 
-Preserve Signalbox command identity and typed ambiguity handling.
+Preserve the implemented contract's idempotency mechanism and typed ambiguity
+handling.
 
-- Generate or retain a durable command identity before network I/O.
-- An ambiguous mutation retries the exact identity and semantic payload.
+- For a mutation whose owning contract carries a durable command identity,
+  generate or retain that identity before network I/O and retry the exact
+  identity and semantic payload after ambiguity.
+- Retry a contractually identity-free mutation only as its owning contract
+  prescribes; never invent a command identity for it.
 - Do not convert HTTP status alone into durable command truth.
 - Do not optimistically insert authoritative transcript entries. Local pending
   commands remain distinct until acknowledged and observed durably.
-- Validate echoed identity, correlation, and successor versions before adopting
-  a receipt.
+- Validate the identity, correlation, and successor-version fields that the
+  owning contract provides before adopting a receipt.
 
 ## HTTP boundary
 

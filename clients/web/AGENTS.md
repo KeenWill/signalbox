@@ -25,28 +25,18 @@ pull-request description before implementation.
   one Redux tree.
 - Use TanStack Query for ordinary request/response state. Dedicated session and
   fleet synchronization machines own live streams and resynchronization.
-- A `ScenarioTransport` and production `HttpTransport` implement the same client
-  seam. Deterministic scenarios must exercise real reducers, decoders, commands,
-  selectors, and renderers rather than duplicate fake UI logic.
+- A deterministic scenario adapter and the production adapter selected by the
+  owning contract implement the same transport-neutral client seam. Scenarios
+  must exercise real reducers, decoders, commands, selectors, and renderers
+  rather than duplicate fake UI logic.
 
 ## Resource behavior
 
-- No UI operation may require materializing an unbounded collection in browser
-  memory.
-- Use TanStack Virtual for transcripts and large lists, and TanStack Table plus
-  Virtual for large tables, from the first implementation.
-- Virtualization does not excuse unbounded fetching, decoding, indexing, state
-  retention, syntax highlighting, or DevTools history.
-- Consume server windows and stable logical cursors. Never use array offsets as
-  durable history addresses.
-- Load small histories greedily only through the explicit client resource
-  policy. Cancellation or changing network conditions must fall back to the same
-  incremental model without changing semantics.
-- When an owning implemented contract exposes ephemeral display updates, follow
-  its batching and replacement policy. Never drop, reorder, or debounce durable
-  Signalbox events.
-- Keep Redux DevTools and custom traces bounded and redact or summarize large
-  content.
+The
+[signalbox-web-performance skill](../../.agents/skills/signalbox-web-performance/SKILL.md)
+owns browser resource ceilings, loading and windowing rules, virtualization,
+stream batching, and their proof obligations. Follow that skill rather than
+restating its limits here.
 
 ## Interaction and presentation
 
@@ -97,5 +87,7 @@ architecturally constraining dependency.
 
 Block on incorrect authority, fabricated server semantics, inaccessible
 interaction, unbounded work, missing deterministic evidence, or divergence from
-the generated contract. Do not require speculative handling of functionality
-that the active issue explicitly defers.
+the implemented browser contract. When the owning specification selects a
+generated contract, also block divergence from that generated artifact. Do not
+require speculative handling of functionality that the active issue explicitly
+defers.

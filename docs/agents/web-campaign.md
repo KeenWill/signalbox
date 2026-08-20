@@ -30,11 +30,11 @@ bounded Goal-mode tracks rather than one open-ended run.
 #989 client platform ───────────────────────────────────────┐
                                                           │
 #990 HTTP contract ──┬─ #991 session projection ───────────┤
-                     ├─ #992 monitor/repo watch ───────────┤
                      ├─ #993 blobs/derivations ────────────┤
                      └─ #995 imports/reviews/runners ──────┤
                               │                           │
 #991 timeline addresses ──────┴─ #994 search/usage ────────┤
+#992 monitor/repo watch ───────────────────────────────────┤
                                                           ▼
                                                     #996 integration
                                                           │
@@ -56,11 +56,15 @@ A progress checkpoint states:
 3. the next bounded slice;
 4. any semantic, dependency, or external blocker;
 5. each pull request's accepted and declined finding counts in review-wave
-   order; and
-6. completed post-delivery alignment review with the approving user.
+   order.
 
-Select the next milestone only after the review-wave counts and post-delivery
-alignment review are recorded.
+A milestone-closing checkpoint also records that every milestone pull request is
+finished and merged by the approving user and that post-delivery alignment
+review is complete. Select the next milestone only in target-model priority
+order and after any accepted blocking decision governing that selection, the
+review-wave counts, and the alignment review are recorded. Stop an
+decision-gated track, report the precise decision needed, and continue other
+unblocked tracks.
 
 UI-facing checkpoints include scenario URLs and review screenshots. Large-data
 checkpoints also report mounted-row counts, retained records or memory trends,

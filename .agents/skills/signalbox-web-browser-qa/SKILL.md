@@ -75,9 +75,12 @@ On failure retain:
 - recent bounded Redux actions.
 
 Retain diagnostics and failure artifacts only in protected CI or test contexts.
-Before retention, test either production exclusion or access protection. CI
-messages link to or name permitted artifacts rather than reporting only a
-missing selector.
+Before retaining any artifact, sanitize cookies, authorization headers,
+credentials, sensitive response bodies, and user content, or guarantee that the
+scenario uses only synthetic credentials and data approved for retention. Test
+that sanitization or synthetic-data guarantee together with either production
+exclusion or access protection. CI messages link to or name permitted artifacts
+rather than reporting only a missing selector.
 
 ## Visual authority
 
