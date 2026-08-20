@@ -6,7 +6,7 @@
 
 use std::{
     env,
-    error::Error as StdError,
+    error::Error,
     ffi::OsString,
     fmt, io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -143,6 +143,8 @@ impl fmt::Display for WebHttpConfigurationError {
     }
 }
 
+impl Error for WebHttpConfigurationError {}
+
 /// Closed browser runtime failure classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WebHttpRuntimeError {
@@ -160,6 +162,8 @@ impl fmt::Display for WebHttpRuntimeError {
         }
     }
 }
+
+impl Error for WebHttpRuntimeError {}
 
 /// Bound browser HTTP runtime.
 pub struct WebHttpRuntime {
@@ -331,7 +335,7 @@ where
 }
 
 fn error_chain_contains_length_limit(error: &axum::Error) -> bool {
-    let mut current: Option<&(dyn StdError + 'static)> = Some(error);
+    let mut current: Option<&(dyn Error + 'static)> = Some(error);
     while let Some(error) = current {
         if error.is::<http_body_util::LengthLimitError>() {
             return true;

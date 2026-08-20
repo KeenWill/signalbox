@@ -118,6 +118,14 @@ pub struct WebApiError {
     pub message: String,
 }
 
+impl fmt::Display for WebApiError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for WebApiError {}
+
 /// Error response envelope shared by ordinary JSON endpoints.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
