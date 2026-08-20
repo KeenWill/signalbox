@@ -411,27 +411,54 @@ mod tests {
             .to_owned()
     }
 
+    /// Recovers the dispatch-authority payload a rendered context carries.
+    ///
+    /// The block quotes every line, so the payload is read back by stripping
+    /// that quote rather than by re-rendering it, which would prove only that
+    /// two copies of the same code agree.
+    fn rendered_dispatch_authority(context: &str) -> serde_json::Value {
+        use crate::UNTRUSTED_CONTEXT_QUOTE;
+
+        let opening = "-----BEGIN UNTRUSTED SESSION CONTEXT: session_dispatch_authority-----\n";
+        let closing = "-----END UNTRUSTED SESSION CONTEXT: session_dispatch_authority-----";
+        let quoted = context
+            .split_once(opening)
+            .and_then(|(_, tail)| tail.split_once(closing))
+            .map(|(body, _)| body)
+            .expect("the rendered context carries a dispatch-authority block");
+        let payload: String = quoted
+            .lines()
+            .filter_map(|line| line.strip_prefix(UNTRUSTED_CONTEXT_QUOTE))
+            .collect();
+        serde_json::from_str(&payload).expect("the quoted dispatch authority is JSON")
+    }
+
     /// A case without a fence renders the field absent, which is the shape of a
-    /// session no dispatch created; a case with one renders the exact recorded
-    /// values, so a case whose verdict turns on the fence exercises it.
+    /// session no dispatch created; a case with one renders every recorded
+    /// value, so a case whose verdict turns on the fence exercises it.
     #[test]
     fn a_dispatch_fence_renders_only_for_the_case_that_carries_one() {
+        let fence = fence();
         let mut dispatched = case();
-        dispatched.dispatch = Some(fence());
+        dispatched.dispatch = Some(fence.clone());
 
         let plain = rendered_context(&case());
-        let fenced = rendered_context(&dispatched);
+        let authority = rendered_dispatch_authority(&rendered_context(&dispatched));
 
         assert!(plain.contains(
             "-----BEGIN UNTRUSTED SESSION CONTEXT: session_dispatch_authority-----\n(absent)\n"
         ));
-        assert!(fenced.contains("1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"));
-        assert!(fenced.contains("agent/sample-feature"));
-        assert!(fenced.contains("\"base_branch\":\"main\""));
+        assert_eq!(authority["type"], "pull_request");
+        assert_eq!(authority["repository"], fence.repository);
+        assert_eq!(authority["pull_request"], fence.pull_request);
+        assert_eq!(authority["head_sha"], fence.head_sha);
+        assert_eq!(authority["head_repository"], fence.head_repository);
+        assert_eq!(authority["head_branch"], fence.head_branch);
+        assert_eq!(authority["base_branch"], fence.base_branch);
         assert!(
-            !fenced.contains(
-                "(absent)\n-----END UNTRUSTED SESSION CONTEXT: session_dispatch_authority"
-            )
+            authority["dispatch_id"]
+                .as_str()
+                .is_some_and(|identity| !identity.is_empty())
         );
     }
 

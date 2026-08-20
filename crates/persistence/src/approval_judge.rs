@@ -1400,14 +1400,21 @@ async fn judged_turn_goal_generation(
     .bind(turn_id_to_uuid(turn))
     .fetch_optional(&mut *connection)
     .await?;
+    // A row with no positive generation is corruption, not an absent one: the
+    // column is checked positive where it is written, so zero cannot have been
+    // stored. Collapsing it into absence would hand the callers the answer they
+    // give a turn outside goal mode — no fence, and a lineage that resolves to
+    // no statement, which reads as authority nothing withdrew.
     Ok(recorded
         .map(|value| {
             positive_u64_from_numeric(value)
-                .map(NonZeroU64::new)
-                .map_err(|_| ApprovalJudgeCorruption::Inconsistent("judged turn goal generation"))
+                .ok()
+                .and_then(NonZeroU64::new)
+                .ok_or(ApprovalJudgeCorruption::Inconsistent(
+                    "judged turn goal generation",
+                ))
         })
         .transpose()?
-        .flatten()
         .map(GoalGeneration::new))
 }
 
