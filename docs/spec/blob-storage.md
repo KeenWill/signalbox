@@ -31,6 +31,10 @@ Bounded direct metadata and range reads, replica fallback classification,
 non-waiting process admission, and the terminal read commands are verified
 against this implementing change (`agent/blob-storage-read-wire`).
 
+Same-origin browser delivery, immutable derivation provenance, and lazy isolated
+image derivatives are verified against this implementing change
+(`agent/web-blob-delivery`).
+
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
 configuration and routing, the ingest and read lifecycle, the blob wire
@@ -391,6 +395,65 @@ digest spelling, never placement; catalog rows separately retain byte length,
 creation time, store name, and object key, while content parts retain their
 attachment metadata.
 
+## Browser delivery, views, and derivations
+
+A browser asks for a descriptor for one semantic use of a blob at
+`GET /api/blobs/{digest}/descriptor`, supplying that use's declared media type
+and optional display filename as query data. The response repeats the canonical
+digest and catalogued byte length and projects only server-admitted
+`available_views`. Each view names a closed capability kind, same-origin content
+URL, exact response media type, and canonical-decimal byte length. The browser
+selects renderers from the kind; it never derives a capability from the media
+type. Transcript DTOs carry descriptors and URLs, never embedded bytes, in
+accordance with the [web campaign laws](../agents/web-campaign.md).
+
+Every descriptor carries metadata and an ordinary-download view. The download
+response uses `attachment` disposition and keeps caller filename bytes in an RFC
+5987 value. PNG, JPEG, GIF, and WebP uses additionally receive a
+`browser_native` view at a representation-specific URL; no caller-controlled
+media type is copied into that URL. Thumbnail and preview views exist only after
+their exact output is present and carry their complete derivation record. The
+initial client renderer automatically loads the preview, then thumbnail, then
+browser-native view by capability order, and loads an original only after an
+explicit action. A descriptor without an admitted inline view receives a
+metadata-and-download fallback.
+
+Content and download responses stream from recorded replicas in bounded chunks.
+They send the selected representation media type, exact `Content-Length`,
+`Accept-Ranges: bytes`, `X-Content-Type-Options: nosniff`, an ETag equal to the
+quoted canonical digest, and
+`Cache-Control: public, max-age=31536000, immutable`. `If-None-Match` admits the
+matching strong or weak spelling and returns `304`; `If-Range` applies a range
+only for the matching strong ETag. Exactly one canonical closed, open-ended, or
+suffix byte range is admitted and returns `206` plus `Content-Range`; multiple,
+malformed, zero-suffix, and unsatisfied ranges return `416` plus
+`bytes */{length}`. `HEAD` returns the same status and headers without opening
+or sending blob bytes.
+
+A `BlobDerivation` is an immutable ordered relation from one through sixteen
+input digests to one through sixteen output digests. It records a stable
+lowercase-ASCII transformation name, positive version, bounded canonical JSON
+parameters, and exactly one producer class: deterministic with an implementation
+digest; executed with an execution UUID and implementation digest; or
+model-derived with the exact durable model-call identity. The deterministic
+cache key hashes a domain tag, ordered inputs, complete transformation
+definition, and implementation digest. PostgreSQL stores the root and ordered
+satellites append-only, rejects updates, deletes, truncation, and incomplete
+records, and foreign-keys model-derived provenance to the model call. A racing
+deterministic append reloads the one winning record.
+
+Image thumbnail (256-pixel edge) and preview (1,600-pixel edge) transforms are
+lazy deterministic producers. Repeated requests reuse the recorded key without
+executing the producer. A miss copies and re-verifies the source into a private
+temporary workspace and invokes the current daemon executable through the
+configured filesystem-confined supervisor with no network, a 120-second
+deadline, and at most two concurrent workers. The decoder accepts only the
+enabled GIF, JPEG, PNG, and WebP formats, limits either axis to 16,384 pixels,
+total pixels to 67,108,864, decoder allocation to 320 MiB, and the PNG output to
+16 MiB. The digest of the exact worker executable is the implementation
+provenance. Publication to the generated-artifact route and catalog registration
+precede the derivation append.
+
 ## Multipart user content
 
 `UserContent` becomes an ordered, nonempty sequence of parts, each either exact
@@ -505,13 +568,10 @@ supports are decided. The compatibility constraint is that attachment stubs and
 the generic read family remain sufficient to add such readers without
 re-deciding visibility.
 
-Content-interpreting processor isolation is committed unimplemented
-functionality: no present decoder, parser, or renderer surface exists. The
-compatibility constraint is that every future content-interpreting reader
-executes inside strong process isolation and treats input validation as
-best-effort defense in depth. The concrete sandbox mechanism is selected by that
-implementation without weakening this posture. Why: parser hardening is an
-unending surface — a malicious payload exploiting a decoder defect must be
+The image derivative worker above is the first content-interpreting processor.
+Every future content-interpreting reader likewise executes inside strong process
+isolation and treats input validation as defense in depth. Why: parser hardening
+is an unending surface — a malicious payload exploiting a decoder defect must be
 contained by isolation rather than entrusted to an ever-growing validator.
 
 ## Model-call preparation and modalities
@@ -592,7 +652,7 @@ new imports write only blob references.
 - A native network-filesystem store kind, replica-set routing, and replica
   retirement are recorded in
   [general-purpose artifacts](../open-questions.md#general-purpose-artifacts).
-- Remote client access to blob content rides the open remote-transport decisions
-  in
+- Remote deployment and authorization for the same-origin HTTP surface remain
+  with
   [protocols and persistence](../open-questions.md#protocols-and-persistence);
-  presigned or direct store access is inexpressible until they are decided.
+  this contract adds no presigned or direct-store access.

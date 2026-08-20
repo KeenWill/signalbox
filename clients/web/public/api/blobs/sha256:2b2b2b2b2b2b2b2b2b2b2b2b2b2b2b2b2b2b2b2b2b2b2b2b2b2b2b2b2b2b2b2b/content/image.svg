@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" role="img" aria-label="Synthetic orbital map preview">
+  <defs>
+    <radialGradient id="space" cx="70%" cy="30%" r="80%">
+      <stop offset="0" stop-color="#173e61"/>
+      <stop offset="1" stop-color="#090d13"/>
+    </radialGradient>
+  </defs>
+  <rect width="960" height="540" fill="url(#space)"/>
+  <g fill="none" stroke="#78b9ff" opacity=".55">
+    <ellipse cx="480" cy="270" rx="350" ry="130"/>
+    <ellipse cx="480" cy="270" rx="255" ry="92"/>
+    <ellipse cx="480" cy="270" rx="150" ry="54"/>
+  </g>
+  <circle cx="480" cy="270" r="34" fill="#f2bd66"/>
+  <circle cx="702" cy="195" r="13" fill="#78b9ff"/>
+  <circle cx="286" cy="337" r="9" fill="#6dd5a3"/>
+  <path d="M286 337 480 270 702 195" fill="none" stroke="#e7edf4" stroke-dasharray="4 7" opacity=".45"/>
+  <text x="32" y="48" fill="#e7edf4" font-family="monospace" font-size="18">DETERMINISTIC PREVIEW · 1600 PX</text>
+</svg>

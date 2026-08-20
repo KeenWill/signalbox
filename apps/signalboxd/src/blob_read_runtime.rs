@@ -128,6 +128,62 @@ pub(crate) async fn read_blob_chunk(
     }
 }
 
+/// Opens one published, catalog-verified replica and advances to an HTTP range.
+///
+/// The present main-branch store contract can either stream a whole object or
+/// reverify and retain only a small model-facing range. Browser delivery uses
+/// the streaming arm so a multi-gigabyte response never materializes in memory.
+pub(crate) async fn open_recorded_blob_range(
+    registry: &BlobStoreRegistry,
+    entry: &BlobCatalogEntry,
+    offset: u64,
+    length: NonZeroU64,
+) -> Result<signalbox_blob_store::BlobReader, BlobReadError> {
+    let expected = entry.expected();
+    if offset
+        .checked_add(length.get())
+        .is_none_or(|end| end > expected.byte_length())
+    {
+        return Err(BlobReadError::RangeOutOfBounds {
+            blob_length: expected.byte_length(),
+        });
+    }
+    let mut saw_missing = false;
+    let mut saw_unavailable = false;
+    for replica in entry.replicas() {
+        let Some(store) = registry.recorded_store(replica.store()) else {
+            return Err(BlobReadError::Integrity);
+        };
+        match store.open(replica.object_key()).await {
+            Ok(opened) if opened.byte_length() == expected.byte_length() => {
+                let mut reader = opened.into_reader();
+                let skipped =
+                    tokio::io::copy(&mut (&mut reader).take(offset), &mut tokio::io::sink())
+                        .await
+                        .map_err(|_| BlobReadError::Unavailable)?;
+                if skipped != offset {
+                    return Err(BlobReadError::Integrity);
+                }
+                return Ok(Box::new(reader.take(length.get())));
+            }
+            Ok(_) => return Err(BlobReadError::Corrupt),
+            Err(error) => match error.kind() {
+                BlobStoreFailureKind::NotFound => saw_missing = true,
+                BlobStoreFailureKind::VerificationFailed | BlobStoreFailureKind::Unavailable => {
+                    saw_unavailable = true;
+                }
+            },
+        }
+    }
+    if saw_unavailable {
+        Err(BlobReadError::Unavailable)
+    } else if saw_missing {
+        Err(BlobReadError::Missing)
+    } else {
+        Err(BlobReadError::Integrity)
+    }
+}
+
 fn map_catalog_error(error: BlobCatalogRepositoryError) -> BlobReadError {
     match error {
         BlobCatalogRepositoryError::Database(_)

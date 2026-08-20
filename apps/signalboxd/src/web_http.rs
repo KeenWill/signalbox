@@ -10,30 +10,43 @@ use std::{
     ffi::OsString,
     fmt, io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    num::NonZeroU64,
     path::PathBuf,
+    str::FromStr as _,
 };
 
 use axum::{
     Json, Router,
     body::{Body, Bytes, to_bytes},
-    extract::{DefaultBodyLimit, Request},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
-        header::{CONTENT_TYPE, HOST, ORIGIN},
+        header::{
+            ACCEPT_RANGES, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE,
+            CONTENT_TYPE, ETAG, HOST, IF_NONE_MATCH, IF_RANGE, ORIGIN, RANGE,
+            X_CONTENT_TYPE_OPTIONS,
+        },
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use futures_util::{Stream, StreamExt, stream};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use signalbox_domain::{BlobDerivation, BlobDerivationProducer, BlobDigest};
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
-    WebContractBootstrap, WebContractExample,
+    WebBlobAvailableView, WebBlobDerivation, WebBlobDerivationProducer, WebBlobDescriptor,
+    WebBlobViewKind, WebContractBootstrap, WebContractExample,
 };
-use tokio::{net::TcpListener, sync::watch};
+use tokio::{io::AsyncReadExt as _, net::TcpListener, sync::watch};
 use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
+
+use crate::{
+    WebBlobRuntime, WebImageDerivativeKind, blob_read_runtime::open_recorded_blob_range,
+    web_blob_runtime::WebBlobRuntimeError,
+};
 
 /// Optional deployment override for the browser listener.
 pub const WEB_BIND_ENVIRONMENT: &str = "SIGNALBOX_WEB_BIND";
@@ -46,6 +59,14 @@ pub const DEFAULT_WEB_BIND_ADDRESS: SocketAddr =
 const JSON_CONTENT_TYPE: &str = "application/json";
 const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
 const HTTP_DEFAULT_PORT: u16 = 80;
+const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+const MAX_DISPLAY_FILENAME_BYTES: usize = 1024;
+const BLOB_STREAM_CHUNK_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug)]
+struct WebHttpState {
+    blobs: Option<WebBlobRuntime>,
+}
 
 /// Deployment-owned browser listener and production assets configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -173,8 +194,11 @@ pub struct WebHttpRuntime {
 
 impl WebHttpRuntime {
     /// Binds the production same-origin router.
-    pub async fn bind(configuration: WebHttpConfiguration) -> Result<Self, WebHttpRuntimeError> {
-        let router = production_router(configuration.asset_root);
+    pub async fn bind(
+        configuration: WebHttpConfiguration,
+        blobs: Option<WebBlobRuntime>,
+    ) -> Result<Self, WebHttpRuntimeError> {
+        let router = production_router(configuration.asset_root, blobs);
         Self::bind_router(configuration.bind_address, router).await
     }
 
@@ -216,10 +240,20 @@ impl WebHttpRuntime {
 }
 
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
-pub fn production_router(asset_root: Option<PathBuf>) -> Router {
+pub fn production_router(asset_root: Option<PathBuf>, blobs: Option<WebBlobRuntime>) -> Router {
     let api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
-        .fallback(api_not_found);
+        .route("/blobs/{digest}/descriptor", get(blob_descriptor))
+        .route(
+            "/blobs/{digest}/content/{representation}",
+            get(blob_content).head(blob_content),
+        )
+        .route(
+            "/blobs/{digest}/download",
+            get(blob_download).head(blob_download),
+        )
+        .fallback(api_not_found)
+        .with_state(WebHttpState { blobs });
     let router = Router::new().nest("/api", api);
     match asset_root {
         Some(root) => router.fallback_service(
@@ -254,6 +288,496 @@ pub fn deterministic_test_router() -> Router {
 
 async fn contract_bootstrap() -> Json<WebContractBootstrap> {
     Json(WebContractBootstrap::current())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlobUseQuery {
+    media_type: String,
+    display_filename: Option<String>,
+}
+
+async fn blob_descriptor(
+    State(state): State<WebHttpState>,
+    Path(digest): Path<String>,
+    Query(use_metadata): Query<BlobUseQuery>,
+) -> Response {
+    let Some(runtime) = state.blobs else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "blob_storage_unavailable",
+            "blob storage is not configured",
+        );
+    };
+    let digest = match BlobDigest::from_str(&digest) {
+        Ok(digest) => digest,
+        Err(_) => {
+            return transport_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_blob_digest",
+                "blob digest is not canonical",
+            );
+        }
+    };
+    if !valid_blob_use(&use_metadata) {
+        return transport_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_blob_use",
+            "blob media type or display filename is invalid",
+        );
+    }
+    let entry = match runtime.entry(digest).await {
+        Ok(entry) => entry,
+        Err(error) => return runtime_error_response(error),
+    };
+    let query = blob_use_query(&use_metadata);
+    let download_url = format!("/api/blobs/{digest}/download?{query}");
+    let byte_length = entry.expected().byte_length().to_string();
+    let mut available_views = vec![WebBlobAvailableView {
+        kind: WebBlobViewKind::Download,
+        media_type: use_metadata.media_type.clone(),
+        byte_length: byte_length.clone(),
+        content_url: download_url,
+        derivations: Vec::new(),
+    }];
+    if let Some(representation) = image_representation(&use_metadata.media_type) {
+        available_views.push(WebBlobAvailableView {
+            kind: WebBlobViewKind::BrowserNative,
+            media_type: use_metadata.media_type.clone(),
+            byte_length: byte_length.clone(),
+            content_url: format!("/api/blobs/{digest}/content/{representation}"),
+            derivations: Vec::new(),
+        });
+        if runtime.supports_image_derivatives() {
+            append_image_derivative_view(
+                &runtime,
+                digest,
+                WebImageDerivativeKind::Thumbnail,
+                WebBlobViewKind::Thumbnail,
+                &mut available_views,
+            )
+            .await;
+            append_image_derivative_view(
+                &runtime,
+                digest,
+                WebImageDerivativeKind::Preview,
+                WebBlobViewKind::Preview,
+                &mut available_views,
+            )
+            .await;
+        }
+    }
+    Json(WebBlobDescriptor {
+        digest: digest.to_string(),
+        byte_length,
+        declared_media_type: use_metadata.media_type,
+        display_filename: use_metadata.display_filename.into_iter().collect(),
+        available_views,
+    })
+    .into_response()
+}
+
+async fn append_image_derivative_view(
+    runtime: &WebBlobRuntime,
+    input: BlobDigest,
+    kind: WebImageDerivativeKind,
+    view_kind: WebBlobViewKind,
+    views: &mut Vec<WebBlobAvailableView>,
+) {
+    let Ok(derivation) = runtime.derive_image(input, kind).await else {
+        return;
+    };
+    let Some(output) = derivation.outputs().first().copied() else {
+        return;
+    };
+    let Ok(entry) = runtime.entry(output).await else {
+        return;
+    };
+    let Some(provenance) = project_derivation(&derivation) else {
+        return;
+    };
+    views.push(WebBlobAvailableView {
+        kind: view_kind,
+        media_type: String::from("image/png"),
+        byte_length: entry.expected().byte_length().to_string(),
+        content_url: format!("/api/blobs/{output}/content/image-png"),
+        derivations: vec![provenance],
+    });
+}
+
+fn project_derivation(derivation: &BlobDerivation) -> Option<WebBlobDerivation> {
+    let producer = match derivation.producer() {
+        BlobDerivationProducer::Deterministic { implementation } => {
+            WebBlobDerivationProducer::Deterministic {
+                implementation_digest: implementation.to_string(),
+                cache_key: derivation.deterministic_key()?.digest().to_string(),
+            }
+        }
+        BlobDerivationProducer::Executed {
+            execution_id,
+            implementation,
+        } => WebBlobDerivationProducer::Executed {
+            execution_id: execution_id.to_string(),
+            implementation_digest: implementation.to_string(),
+        },
+        BlobDerivationProducer::ModelDerived { model_call } => {
+            WebBlobDerivationProducer::ModelDerived {
+                model_call_id: model_call.into_uuid().to_string(),
+            }
+        }
+    };
+    Some(WebBlobDerivation {
+        derivation_id: derivation.id().into_uuid().to_string(),
+        input_digests: derivation
+            .inputs()
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        transformation_name: derivation.transformation().name().as_str().to_owned(),
+        transformation_version: derivation.transformation().version().get(),
+        parameters_json: derivation.transformation().parameters_json().to_owned(),
+        producer,
+        output_digests: derivation
+            .outputs()
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+    })
+}
+
+fn valid_blob_use(value: &BlobUseQuery) -> bool {
+    !value.media_type.is_empty()
+        && value.media_type.len() <= 255
+        && value.media_type.parse::<mime::Mime>().is_ok()
+        && value.display_filename.as_ref().is_none_or(|filename| {
+            !filename.is_empty()
+                && filename.len() <= MAX_DISPLAY_FILENAME_BYTES
+                && !filename.chars().any(char::is_control)
+        })
+}
+
+fn blob_use_query(value: &BlobUseQuery) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("media_type", &value.media_type);
+    if let Some(filename) = &value.display_filename {
+        serializer.append_pair("display_filename", filename);
+    }
+    serializer.finish()
+}
+
+fn image_representation(media_type: &str) -> Option<&'static str> {
+    let media_type = media_type.parse::<mime::Mime>().ok()?;
+    match (media_type.type_().as_str(), media_type.subtype().as_str()) {
+        ("image", "png") => Some("image-png"),
+        ("image", "jpeg") => Some("image-jpeg"),
+        ("image", "gif") => Some("image-gif"),
+        ("image", "webp") => Some("image-webp"),
+        _ => None,
+    }
+}
+
+fn representation_media_type(representation: &str) -> Option<&'static str> {
+    match representation {
+        "image-png" => Some("image/png"),
+        "image-jpeg" => Some("image/jpeg"),
+        "image-gif" => Some("image/gif"),
+        "image-webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+async fn blob_content(
+    State(state): State<WebHttpState>,
+    Path((digest, representation)): Path<(String, String)>,
+    request: Request,
+) -> Response {
+    let Some(media_type) = representation_media_type(&representation) else {
+        return api_not_found().await;
+    };
+    serve_blob(state, digest, media_type, None, request).await
+}
+
+async fn blob_download(
+    State(state): State<WebHttpState>,
+    Path(digest): Path<String>,
+    Query(use_metadata): Query<BlobUseQuery>,
+    request: Request,
+) -> Response {
+    if !valid_blob_use(&use_metadata) {
+        return transport_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_blob_use",
+            "blob media type or display filename is invalid",
+        );
+    }
+    let filename = use_metadata
+        .display_filename
+        .as_deref()
+        .unwrap_or("download");
+    serve_blob(
+        state,
+        digest,
+        &use_metadata.media_type,
+        Some(content_disposition(filename)),
+        request,
+    )
+    .await
+}
+
+async fn serve_blob(
+    state: WebHttpState,
+    digest: String,
+    media_type: &str,
+    disposition: Option<String>,
+    request: Request,
+) -> Response {
+    let Some(runtime) = state.blobs else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "blob_storage_unavailable",
+            "blob storage is not configured",
+        );
+    };
+    let digest = match BlobDigest::from_str(&digest) {
+        Ok(digest) => digest,
+        Err(_) => {
+            return transport_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_blob_digest",
+                "blob digest is not canonical",
+            );
+        }
+    };
+    let entry = match runtime.entry(digest).await {
+        Ok(entry) => entry,
+        Err(error) => return runtime_error_response(error),
+    };
+    let etag = format!("\"{digest}\"");
+    if if_none_match(request.headers(), &etag) {
+        return not_modified_response(&etag);
+    }
+    let total = entry.expected().byte_length();
+    let requested_range = request
+        .headers()
+        .get(RANGE)
+        .filter(|_| if_range_matches(request.headers(), &etag));
+    let (offset, length, partial) = match requested_range {
+        Some(range) => match parse_byte_range(range, total) {
+            Ok(range) => range,
+            Err(()) => return range_not_satisfiable(total, &etag),
+        },
+        None => (0, total, false),
+    };
+    let content_type = match HeaderValue::from_str(media_type) {
+        Ok(value) => value,
+        Err(_) => {
+            return transport_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_blob_media_type",
+                "blob media type is not an HTTP field value",
+            );
+        }
+    };
+    let method = request.method().clone();
+    let body = if method == Method::HEAD {
+        Body::empty()
+    } else {
+        let Some(length) = NonZeroU64::new(length) else {
+            return range_not_satisfiable(total, &etag);
+        };
+        let reader =
+            match open_recorded_blob_range(runtime.registry(), &entry, offset, length).await {
+                Ok(reader) => reader,
+                Err(error) => return blob_read_error_response(error),
+            };
+        reader_body(reader, length.get())
+    };
+    let mut response = Response::new(body);
+    *response.status_mut() = if partial {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    response.headers_mut().insert(CONTENT_TYPE, content_type);
+    insert_static_blob_headers(response.headers_mut(), &etag, length);
+    if partial {
+        let end = offset + length - 1;
+        insert_header(
+            response.headers_mut(),
+            CONTENT_RANGE,
+            format!("bytes {offset}-{end}/{total}"),
+        );
+    }
+    if let Some(disposition) = disposition {
+        insert_header(response.headers_mut(), CONTENT_DISPOSITION, disposition);
+    }
+    response
+}
+
+fn reader_body(reader: signalbox_blob_store::BlobReader, length: u64) -> Body {
+    let source = stream::try_unfold((reader, length), |(mut reader, remaining)| async move {
+        if remaining == 0 {
+            return Ok(None);
+        }
+        let capacity = usize::try_from(remaining.min(BLOB_STREAM_CHUNK_BYTES as u64))
+            .map_err(|_| io::Error::other("blob response length is invalid"))?;
+        let mut buffer = vec![0_u8; capacity];
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return Err(io::Error::other(
+                "blob response ended before its declared length",
+            ));
+        }
+        buffer.truncate(read);
+        let read = u64::try_from(read).map_err(|_| io::Error::other("blob read is invalid"))?;
+        Ok(Some((Bytes::from(buffer), (reader, remaining - read))))
+    });
+    Body::from_stream(source)
+}
+
+fn parse_byte_range(value: &HeaderValue, total: u64) -> Result<(u64, u64, bool), ()> {
+    let value = value.to_str().map_err(|_| ())?;
+    let range = value.strip_prefix("bytes=").ok_or(())?;
+    if range.contains(',') {
+        return Err(());
+    }
+    let (start, end) = range.split_once('-').ok_or(())?;
+    if start.is_empty() {
+        let suffix = parse_canonical_u64(end)?.min(total);
+        if suffix == 0 {
+            return Err(());
+        }
+        return Ok((total - suffix, suffix, true));
+    }
+    let start = parse_canonical_u64(start)?;
+    if start >= total {
+        return Err(());
+    }
+    let end = if end.is_empty() {
+        total - 1
+    } else {
+        parse_canonical_u64(end)?.min(total - 1)
+    };
+    if end < start {
+        return Err(());
+    }
+    Ok((start, end - start + 1, true))
+}
+
+fn parse_canonical_u64(value: &str) -> Result<u64, ()> {
+    if value.is_empty() || (value.starts_with('0') && value.len() > 1) {
+        return Err(());
+    }
+    value.parse().map_err(|_| ())
+}
+
+fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|candidate| {
+                let candidate = candidate.trim();
+                candidate == "*" || candidate == etag || candidate.strip_prefix("W/") == Some(etag)
+            })
+        })
+}
+
+fn if_range_matches(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(IF_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .is_none_or(|value| value.trim() == etag)
+}
+
+fn not_modified_response(etag: &str) -> Response {
+    let mut response = StatusCode::NOT_MODIFIED.into_response();
+    insert_header(response.headers_mut(), ETAG, etag.to_owned());
+    response.headers_mut().insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static(IMMUTABLE_CACHE_CONTROL),
+    );
+    response
+}
+
+fn range_not_satisfiable(total: u64, etag: &str) -> Response {
+    let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+    insert_header(
+        response.headers_mut(),
+        CONTENT_RANGE,
+        format!("bytes */{total}"),
+    );
+    insert_header(response.headers_mut(), ETAG, etag.to_owned());
+    response
+}
+
+fn insert_static_blob_headers(headers: &mut HeaderMap, etag: &str, length: u64) {
+    headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    headers.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static(IMMUTABLE_CACHE_CONTROL),
+    );
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    insert_header(headers, ETAG, etag.to_owned());
+    insert_header(headers, CONTENT_LENGTH, length.to_string());
+}
+
+fn insert_header(headers: &mut HeaderMap, name: axum::http::HeaderName, value: String) {
+    if let Ok(value) = HeaderValue::from_str(&value) {
+        headers.insert(name, value);
+    }
+}
+
+fn content_disposition(filename: &str) -> String {
+    let mut encoded = String::new();
+    for byte in filename.bytes() {
+        if byte.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    format!("attachment; filename=\"download\"; filename*=UTF-8''{encoded}")
+}
+
+fn runtime_error_response(error: WebBlobRuntimeError) -> Response {
+    match error {
+        WebBlobRuntimeError::NotFound => application_error(
+            StatusCode::NOT_FOUND,
+            "blob_not_found",
+            "blob does not exist",
+        ),
+        WebBlobRuntimeError::Busy => application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "blob_derivation_busy",
+            "blob derivative capacity is busy",
+        ),
+        WebBlobRuntimeError::Corrupt
+        | WebBlobRuntimeError::Unavailable
+        | WebBlobRuntimeError::IsolationUnavailable
+        | WebBlobRuntimeError::ProducerFailed
+        | WebBlobRuntimeError::Integrity => application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "blob_unavailable",
+            "blob content is temporarily unavailable",
+        ),
+    }
+}
+
+fn blob_read_error_response(error: crate::blob_read_runtime::BlobReadError) -> Response {
+    use crate::blob_read_runtime::BlobReadError;
+    match error {
+        BlobReadError::NotFound => runtime_error_response(WebBlobRuntimeError::NotFound),
+        BlobReadError::RangeOutOfBounds { .. } => application_error(
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "blob_range_not_satisfiable",
+            "blob byte range is not satisfiable",
+        ),
+        BlobReadError::Missing
+        | BlobReadError::Corrupt
+        | BlobReadError::Unavailable
+        | BlobReadError::Integrity => runtime_error_response(WebBlobRuntimeError::Unavailable),
+    }
 }
 
 fn deterministic_example() -> WebContractExample {
@@ -483,9 +1007,22 @@ fn validate_supplied_origin(headers: &HeaderMap) -> Result<(), OriginValidationE
 }
 
 fn transport_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+    api_error(status, WebApiErrorKind::Transport, code, message)
+}
+
+fn application_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+    api_error(status, WebApiErrorKind::Application, code, message)
+}
+
+fn api_error(
+    status: StatusCode,
+    kind: WebApiErrorKind,
+    code: &'static str,
+    message: &'static str,
+) -> Response {
     let body = Json(WebApiErrorResponse {
         error: WebApiError {
-            kind: WebApiErrorKind::Transport,
+            kind,
             code: code.to_owned(),
             message: message.to_owned(),
         },
@@ -529,13 +1066,46 @@ mod tests {
 
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime,
-        deterministic_test_router, ndjson_response, production_router,
+        content_disposition, deterministic_test_router, ndjson_response, parse_byte_range,
+        production_router,
     };
 
     fn loopback_ephemeral() -> SocketAddr {
         "127.0.0.1:0"
             .parse()
             .expect("the test listener address is valid")
+    }
+
+    #[test]
+    fn http_byte_ranges_cover_closed_open_and_suffix_forms() {
+        let closed = parse_byte_range(&header::HeaderValue::from_static("bytes=2-5"), 10);
+        let open = parse_byte_range(&header::HeaderValue::from_static("bytes=7-"), 10);
+        let suffix = parse_byte_range(&header::HeaderValue::from_static("bytes=-4"), 10);
+
+        assert_eq!(closed, Ok((2, 4, true)));
+        assert_eq!(open, Ok((7, 3, true)));
+        assert_eq!(suffix, Ok((6, 4, true)));
+    }
+
+    #[test]
+    fn http_byte_ranges_reject_multiple_noncanonical_and_unsatisfied_forms() {
+        let multiple = parse_byte_range(&header::HeaderValue::from_static("bytes=0-1,4-5"), 10);
+        let noncanonical = parse_byte_range(&header::HeaderValue::from_static("bytes=01-2"), 10);
+        let unsatisfied = parse_byte_range(&header::HeaderValue::from_static("bytes=10-"), 10);
+
+        assert_eq!(multiple, Err(()));
+        assert_eq!(noncanonical, Err(()));
+        assert_eq!(unsatisfied, Err(()));
+    }
+
+    #[test]
+    fn download_disposition_keeps_filename_data_out_of_header_syntax() {
+        let disposition = content_disposition("report \"final\".csv");
+
+        assert_eq!(
+            disposition,
+            "attachment; filename=\"download\"; filename*=UTF-8''report%20%22final%22.csv"
+        );
     }
 
     fn example() -> WebContractExample {
@@ -598,10 +1168,10 @@ mod tests {
         let assets = tempfile::tempdir().expect("the static asset directory exists");
         std::fs::write(assets.path().join("index.html"), STATIC_INDEX)
             .expect("the static index exists");
-        let runtime = WebHttpRuntime::bind(WebHttpConfiguration::new(
-            loopback_ephemeral(),
-            Some(assets.path().to_path_buf()),
-        ))
+        let runtime = WebHttpRuntime::bind(
+            WebHttpConfiguration::new(loopback_ephemeral(), Some(assets.path().to_path_buf())),
+            None,
+        )
         .await
         .expect("the production test server binds");
         let address = runtime
@@ -820,7 +1390,7 @@ mod tests {
         let request = Request::get("/api/not-a-route")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(Some(assets.path().to_path_buf()))
+        let response = production_router(Some(assets.path().to_path_buf()), None)
             .oneshot(request)
             .await
             .expect("the production router responds");

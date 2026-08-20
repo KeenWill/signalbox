@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// Exact browser HTTP contract version served by this daemon build.
-pub const WEB_CONTRACT_VERSION: &str = "1";
+pub const WEB_CONTRACT_VERSION: &str = "2";
 /// Stable name of the browser HTTP contract family.
 pub const WEB_CONTRACT_NAME: &str = "signalbox.web-http";
 
@@ -40,6 +40,12 @@ pub struct WebContractCapabilities {
     pub same_origin_json_mutations: bool,
     /// Incremental response items use newline-delimited JSON.
     pub ndjson_streaming: bool,
+    /// Immutable same-origin blob descriptors and byte delivery are available.
+    pub immutable_blob_content: bool,
+    /// Blob-to-blob provenance reads are present on derivative views.
+    pub blob_derivations: bool,
+    /// The daemon can lazily produce isolated deterministic image derivatives.
+    pub image_derivatives: bool,
 }
 
 /// Effective hard limits clients must honor for this contract version.
@@ -77,6 +83,9 @@ impl WebContractBootstrap {
                 bounded_json: true,
                 same_origin_json_mutations: true,
                 ndjson_streaming: true,
+                immutable_blob_content: true,
+                blob_derivations: true,
+                image_derivatives: true,
             },
             limits: WebContractLimits {
                 max_json_body_bytes: MAX_JSON_BODY_BYTES as u32,
@@ -94,6 +103,69 @@ pub struct WebContractExample {
     pub request_id: String,
     /// Bounded example payload.
     pub message: String,
+}
+
+/// Closed browser renderer capability advertised by the daemon.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebBlobViewKind {
+    Download,
+    BrowserNative,
+    Thumbnail,
+    Preview,
+}
+
+/// Exact producer provenance projected without persistence representation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "class", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebBlobDerivationProducer {
+    Deterministic {
+        implementation_digest: String,
+        cache_key: String,
+    },
+    Executed {
+        execution_id: String,
+        implementation_digest: String,
+    },
+    ModelDerived {
+        model_call_id: String,
+    },
+}
+
+/// Immutable blob-to-blob relation attached to an available derivative view.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebBlobDerivation {
+    pub derivation_id: String,
+    pub input_digests: Vec<String>,
+    pub transformation_name: String,
+    pub transformation_version: u32,
+    pub parameters_json: String,
+    pub producer: WebBlobDerivationProducer,
+    pub output_digests: Vec<String>,
+}
+
+/// One server-admitted representation; clients select by `kind`, never MIME inference.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebBlobAvailableView {
+    pub kind: WebBlobViewKind,
+    pub media_type: String,
+    pub byte_length: String,
+    pub content_url: String,
+    pub derivations: Vec<WebBlobDerivation>,
+}
+
+/// Browser read projection for one semantic use of immutable bytes.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebBlobDescriptor {
+    pub digest: String,
+    pub byte_length: String,
+    pub declared_media_type: String,
+    #[schemars(length(max = 1))]
+    pub display_filename: Vec<String>,
+    pub available_views: Vec<WebBlobAvailableView>,
 }
 
 /// Layer that owns one browser API failure.
@@ -175,6 +247,7 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     let bootstrap_schema = canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value());
     let example_schema = canonical_schema(schemars::schema_for!(WebContractExample).to_value());
     let error_schema = canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value());
+    let blob_schema = canonical_schema(schemars::schema_for!(WebBlobDescriptor).to_value());
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -186,11 +259,21 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     Ok(vec![
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.mjs",
-            contents: runtime_module(&bootstrap_schema, &example_schema, &error_schema)?,
+            contents: runtime_module(
+                &bootstrap_schema,
+                &example_schema,
+                &error_schema,
+                &blob_schema,
+            )?,
         },
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.d.mts",
-            contents: declaration_module(&bootstrap_schema, &example_schema, &error_schema)?,
+            contents: declaration_module(
+                &bootstrap_schema,
+                &example_schema,
+                &error_schema,
+                &blob_schema,
+            )?,
         },
         GeneratedArtifact {
             path: "crates/web-contract/tests/fixtures/example.json",
@@ -211,11 +294,13 @@ fn runtime_module(
     bootstrap_schema: &Value,
     example_schema: &Value,
     error_schema: &Value,
+    blob_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
         "WebContractBootstrap": bootstrap_schema,
         "WebContractExample": example_schema,
         "WebApiErrorResponse": error_schema,
+        "WebBlobDescriptor": blob_schema,
     });
     schemas.sort_all_objects();
     let schemas = serde_json::to_string_pretty(&schemas)
@@ -341,6 +426,60 @@ export function decodeWebApiErrorResponse(value) {{
   assertSchema(schemas.WebApiErrorResponse, schemas.WebApiErrorResponse, value, "error_response");
   return value;
 }}
+
+function assertCanonicalU64(value, path) {{
+  if (!/^(0|[1-9][0-9]{{0,19}})$/.test(value) || BigInt(value) > 18446744073709551615n) {{
+    fail(path, "a canonical decimal u64 string");
+  }}
+}}
+
+function assertBlobDigest(value, path) {{
+  if (!/^sha256:[0-9a-f]{{64}}$/.test(value)) {{
+    fail(path, "a tagged lowercase SHA-256 digest");
+  }}
+}}
+
+function assertUuid(value, path) {{
+  if (!/^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$/.test(value)) {{
+    fail(path, "a canonical lowercase UUID");
+  }}
+}}
+
+function assertSameOriginBlobUrl(value, path) {{
+  const base = "http://signalbox.invalid";
+  const parsed = new URL(value, base);
+  if (parsed.origin !== base || !parsed.pathname.startsWith("/api/blobs/") || parsed.hash !== "") {{
+    fail(path, "a same-origin blob API path");
+  }}
+}}
+
+export function decodeWebBlobDescriptor(value) {{
+  assertSchema(schemas.WebBlobDescriptor, schemas.WebBlobDescriptor, value, "blob_descriptor");
+  assertBlobDigest(value.digest, "blob_descriptor.digest");
+  assertCanonicalU64(value.byte_length, "blob_descriptor.byte_length");
+  value.available_views.forEach((view, index) => {{
+    assertCanonicalU64(view.byte_length, `blob_descriptor.available_views[${{index}}].byte_length`);
+    assertSameOriginBlobUrl(view.content_url, `blob_descriptor.available_views[${{index}}].content_url`);
+    view.derivations.forEach((derivation, derivationIndex) => {{
+      const path = `blob_descriptor.available_views[${{index}}].derivations[${{derivationIndex}}]`;
+      assertUuid(derivation.derivation_id, `${{path}}.derivation_id`);
+      derivation.input_digests.forEach((digest, digestIndex) =>
+        assertBlobDigest(digest, `${{path}}.input_digests[${{digestIndex}}]`));
+      derivation.output_digests.forEach((digest, digestIndex) =>
+        assertBlobDigest(digest, `${{path}}.output_digests[${{digestIndex}}]`));
+      if (derivation.producer.class === "deterministic") {{
+        assertBlobDigest(derivation.producer.implementation_digest, `${{path}}.producer.implementation_digest`);
+        assertBlobDigest(derivation.producer.cache_key, `${{path}}.producer.cache_key`);
+      }} else if (derivation.producer.class === "executed") {{
+        assertUuid(derivation.producer.execution_id, `${{path}}.producer.execution_id`);
+        assertBlobDigest(derivation.producer.implementation_digest, `${{path}}.producer.implementation_digest`);
+      }} else {{
+        assertUuid(derivation.producer.model_call_id, `${{path}}.producer.model_call_id`);
+      }}
+    }});
+  }});
+  return value;
+}}
 "##,
         contract_name = WEB_CONTRACT_NAME,
         contract_version = WEB_CONTRACT_VERSION,
@@ -351,11 +490,13 @@ fn declaration_module(
     bootstrap_schema: &Value,
     example_schema: &Value,
     error_schema: &Value,
+    blob_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
     let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
     let example = typescript_type(example_schema, example_schema, &mut definitions)?;
     let error = typescript_type(error_schema, error_schema, &mut definitions)?;
+    let blob = typescript_type(blob_schema, blob_schema, &mut definitions)?;
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",
     );
@@ -367,8 +508,9 @@ fn declaration_module(
     ));
     output.push_str(&format!("export type WebContractExample = {example};\n\n"));
     output.push_str(&format!("export type WebApiErrorResponse = {error};\n\n"));
+    output.push_str(&format!("export type WebBlobDescriptor = {blob};\n\n"));
     output.push_str(
-        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\n",
+        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebBlobDescriptor(value: unknown): WebBlobDescriptor;\n",
     );
     Ok(output)
 }

@@ -8,6 +8,7 @@ import {
   invokeCommand,
 } from './commands'
 import { FleetTable } from './FleetTable'
+import { ArtifactWorkbench } from './features/artifacts/ArtifactRenderer'
 import {
   SCENARIO_FLEET_WINDOW_ITEMS,
   SCENARIO_TIMELINE_WINDOW_ITEMS,
@@ -181,7 +182,15 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
           <Toolbar context={commandContext} />
         </header>
         <div className="primary-stack">
-          <Transcript key={`timeline-${knownId}`} items={timeline.items} context={commandContext} />
+          {knownId === 'blobs' ? (
+            <ArtifactWorkbench />
+          ) : (
+            <Transcript
+              key={`timeline-${knownId}`}
+              items={timeline.items}
+              context={commandContext}
+            />
+          )}
           {app.layout === 'workbench' && (
             <FleetTable key={`fleet-${knownId}`} rows={fleet.items} totalCount={fleet.totalCount} />
           )}

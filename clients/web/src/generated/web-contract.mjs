@@ -59,14 +59,217 @@ const schemas = {
     "title": "WebApiErrorResponse",
     "type": "object"
   },
+  "WebBlobDescriptor": {
+    "$defs": {
+      "WebBlobAvailableView": {
+        "additionalProperties": false,
+        "description": "One server-admitted representation; clients select by `kind`, never MIME inference.",
+        "properties": {
+          "byte_length": {
+            "type": "string"
+          },
+          "content_url": {
+            "type": "string"
+          },
+          "derivations": {
+            "items": {
+              "$ref": "#/$defs/WebBlobDerivation"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebBlobViewKind"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "media_type",
+          "byte_length",
+          "content_url",
+          "derivations"
+        ],
+        "type": "object"
+      },
+      "WebBlobDerivation": {
+        "additionalProperties": false,
+        "description": "Immutable blob-to-blob relation attached to an available derivative view.",
+        "properties": {
+          "derivation_id": {
+            "type": "string"
+          },
+          "input_digests": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "output_digests": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "parameters_json": {
+            "type": "string"
+          },
+          "producer": {
+            "$ref": "#/$defs/WebBlobDerivationProducer"
+          },
+          "transformation_name": {
+            "type": "string"
+          },
+          "transformation_version": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "derivation_id",
+          "input_digests",
+          "transformation_name",
+          "transformation_version",
+          "parameters_json",
+          "producer",
+          "output_digests"
+        ],
+        "type": "object"
+      },
+      "WebBlobDerivationProducer": {
+        "description": "Exact producer provenance projected without persistence representation.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cache_key": {
+                "type": "string"
+              },
+              "class": {
+                "const": "deterministic",
+                "type": "string"
+              },
+              "implementation_digest": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "class",
+              "implementation_digest",
+              "cache_key"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "class": {
+                "const": "executed",
+                "type": "string"
+              },
+              "execution_id": {
+                "type": "string"
+              },
+              "implementation_digest": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "class",
+              "execution_id",
+              "implementation_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "class": {
+                "const": "model_derived",
+                "type": "string"
+              },
+              "model_call_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "class",
+              "model_call_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebBlobViewKind": {
+        "description": "Closed browser renderer capability advertised by the daemon.",
+        "enum": [
+          "download",
+          "browser_native",
+          "thumbnail",
+          "preview"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Browser read projection for one semantic use of immutable bytes.",
+    "properties": {
+      "available_views": {
+        "items": {
+          "$ref": "#/$defs/WebBlobAvailableView"
+        },
+        "type": "array"
+      },
+      "byte_length": {
+        "type": "string"
+      },
+      "declared_media_type": {
+        "type": "string"
+      },
+      "digest": {
+        "type": "string"
+      },
+      "display_filename": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 1,
+        "type": "array"
+      }
+    },
+    "required": [
+      "digest",
+      "byte_length",
+      "declared_media_type",
+      "display_filename",
+      "available_views"
+    ],
+    "title": "WebBlobDescriptor",
+    "type": "object"
+  },
   "WebContractBootstrap": {
     "$defs": {
       "WebContractCapabilities": {
         "additionalProperties": false,
         "description": "Transport capabilities present in the exact contract version.",
         "properties": {
+          "blob_derivations": {
+            "description": "Blob-to-blob provenance reads are present on derivative views.",
+            "type": "boolean"
+          },
           "bounded_json": {
             "description": "Ordinary bounded JSON responses are available under `/api/`.",
+            "type": "boolean"
+          },
+          "image_derivatives": {
+            "description": "The daemon can lazily produce isolated deterministic image derivatives.",
+            "type": "boolean"
+          },
+          "immutable_blob_content": {
+            "description": "Immutable same-origin blob descriptors and byte delivery are available.",
             "type": "boolean"
           },
           "ndjson_streaming": {
@@ -81,7 +284,10 @@ const schemas = {
         "required": [
           "bounded_json",
           "same_origin_json_mutations",
-          "ndjson_streaming"
+          "ndjson_streaming",
+          "immutable_blob_content",
+          "blob_derivations",
+          "image_derivatives"
         ],
         "type": "object"
       },
@@ -276,7 +482,7 @@ function assertSchema(root, schema, value, path) {
 
 export function decodeWebContractBootstrap(value) {
   assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "bootstrap");
-  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "1") {
+  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "2") {
     throw new TypeError("bootstrap carries an incompatible web contract");
   }
   return value;
@@ -289,5 +495,59 @@ export function decodeWebContractExample(value) {
 
 export function decodeWebApiErrorResponse(value) {
   assertSchema(schemas.WebApiErrorResponse, schemas.WebApiErrorResponse, value, "error_response");
+  return value;
+}
+
+function assertCanonicalU64(value, path) {
+  if (!/^(0|[1-9][0-9]{0,19})$/.test(value) || BigInt(value) > 18446744073709551615n) {
+    fail(path, "a canonical decimal u64 string");
+  }
+}
+
+function assertBlobDigest(value, path) {
+  if (!/^sha256:[0-9a-f]{64}$/.test(value)) {
+    fail(path, "a tagged lowercase SHA-256 digest");
+  }
+}
+
+function assertUuid(value, path) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) {
+    fail(path, "a canonical lowercase UUID");
+  }
+}
+
+function assertSameOriginBlobUrl(value, path) {
+  const base = "http://signalbox.invalid";
+  const parsed = new URL(value, base);
+  if (parsed.origin !== base || !parsed.pathname.startsWith("/api/blobs/") || parsed.hash !== "") {
+    fail(path, "a same-origin blob API path");
+  }
+}
+
+export function decodeWebBlobDescriptor(value) {
+  assertSchema(schemas.WebBlobDescriptor, schemas.WebBlobDescriptor, value, "blob_descriptor");
+  assertBlobDigest(value.digest, "blob_descriptor.digest");
+  assertCanonicalU64(value.byte_length, "blob_descriptor.byte_length");
+  value.available_views.forEach((view, index) => {
+    assertCanonicalU64(view.byte_length, `blob_descriptor.available_views[${index}].byte_length`);
+    assertSameOriginBlobUrl(view.content_url, `blob_descriptor.available_views[${index}].content_url`);
+    view.derivations.forEach((derivation, derivationIndex) => {
+      const path = `blob_descriptor.available_views[${index}].derivations[${derivationIndex}]`;
+      assertUuid(derivation.derivation_id, `${path}.derivation_id`);
+      derivation.input_digests.forEach((digest, digestIndex) =>
+        assertBlobDigest(digest, `${path}.input_digests[${digestIndex}]`));
+      derivation.output_digests.forEach((digest, digestIndex) =>
+        assertBlobDigest(digest, `${path}.output_digests[${digestIndex}]`));
+      if (derivation.producer.class === "deterministic") {
+        assertBlobDigest(derivation.producer.implementation_digest, `${path}.producer.implementation_digest`);
+        assertBlobDigest(derivation.producer.cache_key, `${path}.producer.cache_key`);
+      } else if (derivation.producer.class === "executed") {
+        assertUuid(derivation.producer.execution_id, `${path}.producer.execution_id`);
+        assertBlobDigest(derivation.producer.implementation_digest, `${path}.producer.implementation_digest`);
+      } else {
+        assertUuid(derivation.producer.model_call_id, `${path}.producer.model_call_id`);
+      }
+    });
+  });
   return value;
 }

@@ -8,12 +8,17 @@
 
 use std::{error::Error, sync::Arc};
 
+use signalbox_application::BlobDerivationRecordOutcome;
 use signalbox_blob_store::{BlobObjectKey, BlobStoreName, ExpectedBlob, MAX_BLOB_STORES};
-use signalbox_domain::BlobDigest;
+use signalbox_domain::{
+    BlobDerivation, BlobDerivationId, BlobDerivationProducer, BlobDigest, BlobTransformation,
+    BlobTransformationName,
+};
 use signalbox_persistence::{
     blob::{
         BlobCatalogCorruption, BlobCatalogRepository, BlobReplicaRecord, BlobStoreBindingRecord,
     },
+    blob_derivation::BlobDerivationRepository,
     disposable_postgres_server_args, disposable_postgres_state_tmpfs,
     disposable_test_container_labels, local_test_connection_options, migrate,
 };
@@ -80,6 +85,25 @@ fn replica(expected: ExpectedBlob, store: &str) -> BlobReplicaRecord {
 
 fn binding(name: &str, namespace: u128) -> BlobStoreBindingRecord {
     BlobStoreBindingRecord::new(store(name), Uuid::from_u128(namespace))
+}
+
+fn thumbnail_derivation(input: BlobDigest, output: BlobDigest) -> BlobDerivation {
+    BlobDerivation::try_new(
+        BlobDerivationId::from_uuid(Uuid::from_u128(0x5a10_0700)),
+        [input],
+        BlobTransformation::try_new(
+            BlobTransformationName::try_new("image.thumbnail")
+                .expect("the fixture transformation name is valid"),
+            1,
+            &serde_json::json!({"edge_px": 256, "format": "image/png"}),
+        )
+        .expect("the fixture transformation is valid"),
+        BlobDerivationProducer::Deterministic {
+            implementation: BlobDigest::digest(b"thumbnail-worker-v1"),
+        },
+        [output],
+    )
+    .expect("the fixture derivation is valid")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -494,6 +518,64 @@ async fn recorded_store_bindings_use_bytewise_name_order() -> Result<(), Box<dyn
     let bindings = repository.recorded_store_bindings().await?;
 
     assert_eq!(bindings.as_ref(), &[punctuated, letters]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-070: one deterministic key has one immutable, complete derivation record.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv070_deterministic_blob_derivation_is_cached_and_immutable() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool) = migrated_postgres().await?;
+    let catalog = BlobCatalogRepository::new(pool.clone());
+    let repository = BlobDerivationRepository::new(pool.clone());
+    let input = expected_blob(CONTENT);
+    let output = expected_blob(OTHER_CONTENT);
+    let store_binding = binding(PRIMARY_STORE, PRIMARY_NAMESPACE);
+    catalog
+        .register_verified_replica(input, store_binding.clone(), replica(input, PRIMARY_STORE))
+        .await?;
+    catalog
+        .register_verified_replica(output, store_binding, replica(output, PRIMARY_STORE))
+        .await?;
+    let derivation = thumbnail_derivation(input.digest(), output.digest());
+    let key = derivation
+        .deterministic_key()
+        .expect("the fixture producer is deterministic");
+
+    let recorded = repository.record(derivation.clone()).await?;
+    let replay = repository.record(derivation.clone()).await?;
+    let loaded = repository.find_deterministic(key).await?;
+    let mutation = sqlx::query("UPDATE blob_derivation SET transformation_version = 2")
+        .execute(&pool)
+        .await;
+    let extra_output = sqlx::query(
+        "INSERT INTO blob_derivation_output (derivation_id, output_ordinal, digest)
+         VALUES ($1, 1, $2)",
+    )
+    .bind(derivation.id().into_uuid())
+    .bind(output.digest().as_bytes().as_slice())
+    .execute(&pool)
+    .await;
+    let truncation = sqlx::query("TRUNCATE blob_derivation CASCADE")
+        .execute(&pool)
+        .await;
+
+    assert_eq!(
+        recorded,
+        BlobDerivationRecordOutcome::Recorded(derivation.clone())
+    );
+    assert_eq!(
+        replay,
+        BlobDerivationRecordOutcome::Existing(derivation.clone())
+    );
+    assert_eq!(loaded, Some(derivation));
+    assert!(mutation.is_err());
+    assert!(extra_output.is_err());
+    assert!(truncation.is_err());
 
     pool.close().await;
     drop(container);
