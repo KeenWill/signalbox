@@ -661,11 +661,12 @@ mod tests {
         let mount = super::disposable_postgres_state_tmpfs();
 
         assert_eq!(mount.mount_type(), MountType::Tmpfs);
-        assert_eq!(mount.target(), Some(super::POSTGRES_STATE_DIRECTORY));
+        // The literal contract, not the implementation's constants: the mount
+        // must cover the postgres image's state directory and stay inside the
+        // documented 512 MiB bound, and a constant drifting away from either
+        // value has to fail here.
+        assert_eq!(mount.target(), Some("/var/lib/postgresql"));
         let options = mount.tmpfs_options().expect("the tmpfs mount is bounded");
-        assert_eq!(
-            options.size_bytes,
-            Some(super::DISPOSABLE_POSTGRES_STATE_CEILING_BYTES)
-        );
+        assert_eq!(options.size_bytes, Some(512 * 1024 * 1024));
     }
 }
