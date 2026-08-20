@@ -6,6 +6,10 @@ and migration were verified against this PR (`agent/program-substrate-journal`).
 The immutable blob-derivation family and migration inventory are verified
 against this PR (`agent/web-blob-delivery`).
 
+The restore-safety search-path pin on check-reachable functions, and the
+catalogue test holding it, were verified against this PR
+(`agent/restore-safe-check-functions`).
+
 The delegate denial-reason storage — the superseded decision-shape constraint
 and its byte-precise checks — was verified against this PR
 (`agent/judge-denial-reason`).
@@ -155,7 +159,7 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — ninety-one files, `202607180001` through
+`crates/persistence/migrations/` — ninety-two files, `202607180001` through
 `202608210200` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
@@ -170,11 +174,34 @@ pool, because no earlier schema can have admitted one. Why: checksummed
 forward-only files make every schema change a reviewed, immutable artifact, so a
 deployed database's history is never silently edited.
 
-A migration becomes immutable as soon as its version is recorded in the target
-database's `_sqlx_migrations` table, regardless of whether the migration's
-branch or pull request has merged. Correct an already-recorded migration with a
-new forward migration; never edit, replace, or renumber the recorded migration
-file.
+A migration becomes immutable as soon as its version is recorded in the
+`_sqlx_migrations` table of any database whose history must remain continuous:
+every deployed database, and every recording once the migration's pull request
+merges. Correct an already-recorded migration with a new forward migration;
+never edit, replace, or renumber the recorded migration file. The sole exception
+is a pre-merge recording by a rehearsal installation when the recorded form
+cannot merge — a form that fails validation on fresh databases has no correct
+forward continuation, so the file is corrected before merge and the rehearsal
+installation's ledger row is corrected at its next deployment as a documented
+step, never silently. Why: the rule exists so no database's history is silently
+edited, and a documented rehearsal-ledger correction preserves that while a
+frozen unmergeable file would instead freeze a defect into every future
+installation.
+
+Every function reachable from a table constraint or index expression pins its
+search path in its catalogue definition, rendered through `current_schema` so
+installations whose migrations run outside the default schema keep the
+`202607310102` pattern. `pg_restore` replays a logical backup under an empty
+search path and evaluates check constraints while copying table data, so an
+unpinned body that names another user function unqualified resolves in normal
+operation and fails only during restore; `202608200001` retrofits the pin onto
+the check-reachable set the earlier migrations create, and the
+`search_path_postgres` catalogue test (INV-070) derives the reachable set from
+the dependency catalogue — including functions reached only through a
+user-defined operator — and fails on any unpinned member or on empty discovery,
+so a future migration cannot reintroduce the gap. Why: a backup that cannot
+restore is a silent failure that surfaces only during recovery, so restorability
+is part of the schema's contract rather than an operational afterthought.
 
 Prefix reservation across concurrent stacks: the bottom pull request of any
 stack that will add migrations declares a reserved prefix block — a date plus a
