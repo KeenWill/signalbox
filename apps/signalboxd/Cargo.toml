@@ -128,7 +128,10 @@ signalbox-blob-store-filesystem = { path = "../../crates/blob-store-filesystem",
 # The composed daemon tests read drain dispositions through persistence's
 # test-support surface; carrying the feature here keeps a plain
 # `cargo test -p signalboxd` compiling without an explicit feature flag.
+# `postgres-integration` likewise: the tests start their throwaway PostgreSQL
+# containers through persistence's shared RAM-backed provisioning helpers.
 signalbox-persistence = { path = "../../crates/persistence", features = [
+    "postgres-integration",
     "test-support",
 ] }
 expect-test = "1.5.1"

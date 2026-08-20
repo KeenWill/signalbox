@@ -50,6 +50,7 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     review_orchestration::{
@@ -99,7 +100,8 @@ async fn migrated_postgres_with_max_connections(
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
-        .with_fsync_enabled()
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -123,7 +125,8 @@ async fn migrated_postgres_in_configured_schema()
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
-        .with_fsync_enabled()
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -169,14 +172,17 @@ async fn migrated_postgres_counting_statements()
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
-        .with_fsync_enabled()
+        // A later `with_cmd` replaces the whole command, so the statement
+        // counter's settings extend the shared ephemeral-durability arguments
+        // rather than following them in a second call.
+        .with_cmd(disposable_postgres_server_args().into_iter().chain([
+            "-c",
+            "shared_preload_libraries=pg_stat_statements",
+            "-c",
+            "pg_stat_statements.track=all",
+        ]))
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
-        .with_cmd(vec![
-            String::from("-c"),
-            String::from("shared_preload_libraries=pg_stat_statements"),
-            String::from("-c"),
-            String::from("pg_stat_statements.track=all"),
-        ])
         .with_labels(disposable_test_container_labels())
         .start()
         .await?;
