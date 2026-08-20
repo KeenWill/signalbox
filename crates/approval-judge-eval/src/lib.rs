@@ -176,6 +176,12 @@ pub(crate) fn validate_corpus(corpus: &ApprovalJudgeCorpus) -> Result<(), Corpus
     }
     let mut case_ids = HashSet::with_capacity(corpus.cases.len());
     for case in &corpus.cases {
+        if let Some(field) = nul_case_field(case) {
+            return Err(CorpusLoadError::NulCaseString {
+                id: case.id.clone(),
+                field,
+            });
+        }
         if case.id.trim().is_empty() {
             return Err(CorpusLoadError::BlankCaseId);
         }
@@ -191,6 +197,41 @@ pub(crate) fn validate_corpus(corpus: &ApprovalJudgeCorpus) -> Result<(), Corpus
         }
     }
     Ok(())
+}
+
+fn nul_case_field(case: &ApprovalJudgeCase) -> Option<&'static str> {
+    if case.id.contains('\0') {
+        Some("id")
+    } else if case.request.tool.contains('\0') {
+        Some("tool")
+    } else if case.request.arguments.contains('\0') {
+        Some("arguments")
+    } else if case
+        .request
+        .commissioned_goal
+        .as_deref()
+        .is_some_and(|value| value.contains('\0'))
+    {
+        Some("commissioned_goal")
+    } else if case
+        .request
+        .session_template
+        .as_deref()
+        .is_some_and(|value| value.contains('\0'))
+    {
+        Some("session_template")
+    } else if case
+        .request
+        .frozen_system_prompt
+        .as_deref()
+        .is_some_and(|value| value.contains('\0'))
+    {
+        Some("frozen_system_prompt")
+    } else if case.label_provenance.contains('\0') {
+        Some("label_provenance")
+    } else {
+        None
+    }
 }
 
 /// A corpus file could not be read or admitted.
@@ -226,6 +267,13 @@ pub enum CorpusLoadError {
     },
     /// A case id is empty or whitespace-only and carries no stable identity.
     BlankCaseId,
+    /// A case string contains U+0000, which PostgreSQL JSONB cannot preserve.
+    NulCaseString {
+        /// Case carrying the unsupported string.
+        id: String,
+        /// Case field containing U+0000.
+        field: &'static str,
+    },
     /// A case does not identify the source of its expected label.
     MissingLabelProvenance {
         /// Case without meaningful label provenance.
@@ -261,6 +309,10 @@ impl fmt::Display for CorpusLoadError {
                 formatter,
                 "corpus contains a case whose id is empty or whitespace-only"
             ),
+            Self::NulCaseString { id, field } => write!(
+                formatter,
+                "corpus case {id:?} field {field} contains unsupported U+0000"
+            ),
             Self::MissingLabelProvenance { id } => {
                 write!(formatter, "corpus case {id} has no label provenance")
             }
@@ -278,6 +330,7 @@ impl Error for CorpusLoadError {
             | Self::EmptyCorpus
             | Self::DuplicateCaseId { .. }
             | Self::BlankCaseId
+            | Self::NulCaseString { .. }
             | Self::MissingLabelProvenance { .. } => None,
         }
     }
@@ -299,6 +352,12 @@ pub async fn score_corpus(
     }
     let mut case_ids = HashSet::with_capacity(corpus.cases.len());
     for case in &corpus.cases {
+        if let Some(field) = nul_case_field(case) {
+            return Err(ScoreError::NulCaseString {
+                id: case.id.clone(),
+                field,
+            });
+        }
         if case.id.trim().is_empty() {
             return Err(ScoreError::BlankCaseId);
         }
@@ -482,6 +541,13 @@ pub enum ScoreError {
     },
     /// A case id is empty or whitespace-only and carries no stable identity.
     BlankCaseId,
+    /// A case string contains U+0000, which no admitted store can preserve.
+    NulCaseString {
+        /// Case carrying the unsupported string.
+        id: String,
+        /// Case field containing U+0000.
+        field: &'static str,
+    },
     /// A case does not identify the source of its expected label.
     MissingLabelProvenance {
         /// Case without meaningful label provenance.
@@ -502,7 +568,9 @@ impl ScoreError {
     pub fn case_id(&self) -> Option<&str> {
         match self {
             Self::UnsupportedFormatVersion { .. } | Self::EmptyCorpus | Self::BlankCaseId => None,
-            Self::DuplicateCaseId { id } | Self::MissingLabelProvenance { id } => Some(id),
+            Self::DuplicateCaseId { id }
+            | Self::NulCaseString { id, .. }
+            | Self::MissingLabelProvenance { id } => Some(id),
             Self::Case { case_id, .. } => Some(case_id),
         }
     }
@@ -523,6 +591,10 @@ impl fmt::Display for ScoreError {
                 formatter,
                 "corpus contains a case whose id is empty or whitespace-only"
             ),
+            Self::NulCaseString { id, field } => write!(
+                formatter,
+                "corpus case {id:?} field {field} contains unsupported U+0000"
+            ),
             Self::MissingLabelProvenance { id } => {
                 write!(formatter, "corpus case {id} has no label provenance")
             }
@@ -541,6 +613,7 @@ impl Error for ScoreError {
             | Self::EmptyCorpus
             | Self::DuplicateCaseId { .. }
             | Self::BlankCaseId
+            | Self::NulCaseString { .. }
             | Self::MissingLabelProvenance { .. } => None,
             Self::Case { source, .. } => Some(source.as_ref()),
         }
@@ -656,6 +729,20 @@ mod tests {
 
         expect![["corpus contains a case whose id is empty or whitespace-only"]]
             .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn nul_bearing_case_strings_fail_shared_corpus_admission() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        corpus.cases[0].label_provenance = String::from("fixture provenance\0suffix");
+        let encoded = serde_json::to_vec(&corpus).expect("the NUL-bearing fixture serializes");
+
+        let error = decode_corpus(&encoded)
+            .expect_err("a case string that JSONB cannot preserve is rejected");
+
+        assert!(error.to_string().contains("label_provenance"));
+        assert!(error.to_string().contains("U+0000"));
     }
 
     #[tokio::test]

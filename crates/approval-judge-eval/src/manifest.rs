@@ -325,7 +325,8 @@ fn validate_bounded_text(
     value: &str,
     maximum_bytes: usize,
 ) -> Result<(), ManifestError> {
-    if value.is_empty() || value.len() > maximum_bytes || value.chars().any(char::is_control) {
+    if value.trim().is_empty() || value.len() > maximum_bytes || value.chars().any(char::is_control)
+    {
         return Err(ManifestError::InvalidIdentity(field));
     }
     Ok(())
@@ -739,13 +740,39 @@ mod tests {
     fn manifest_integrity_rejects_blank_case_ids_during_decoding() {
         let mut manifest: serde_json::Value =
             serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
-        manifest["integrity"]["cases"][0]["id"] = serde_json::Value::String(String::from(" \t "));
+        manifest["integrity"]["cases"][0]["id"] = serde_json::Value::String(String::from("   "));
         let encoded = serde_json::to_vec(&manifest).expect("the modified manifest serializes");
 
         let error = decode_manifest(&encoded)
             .expect_err("a blank integrity case identity is rejected during decoding");
 
         assert!(error.to_string().contains("case id"));
+    }
+
+    #[test]
+    fn manifest_rejects_whitespace_only_name_during_decoding() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        manifest["name"] = serde_json::Value::String(String::from("   "));
+        let encoded = serde_json::to_vec(&manifest).expect("the modified manifest serializes");
+
+        let error = decode_manifest(&encoded)
+            .expect_err("a whitespace-only manifest name is rejected during decoding");
+
+        assert!(error.to_string().contains("name"));
+    }
+
+    #[test]
+    fn manifest_rejects_whitespace_only_version_during_decoding() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        manifest["version"] = serde_json::Value::String(String::from("   "));
+        let encoded = serde_json::to_vec(&manifest).expect("the modified manifest serializes");
+
+        let error = decode_manifest(&encoded)
+            .expect_err("a whitespace-only manifest version is rejected during decoding");
+
+        assert!(error.to_string().contains("version"));
     }
 
     #[test]

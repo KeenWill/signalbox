@@ -104,8 +104,11 @@ JSON Canonicalization Scheme section 3.2.2.3) and ordered by case identifier
 bytewise. Corpus numbers are exactly finite IEEE 754 binary64 values;
 registration rejects NaN, infinities, and values outside that domain. RFC 8785's
 ECMAScript serialization governs decimal versus exponent notation and renders
-negative zero as `0`; its string escaping rules govern all JSON strings. The
-versioned preimage below pins that algorithm for corpus format version one. The
+negative zero as `0`; its string escaping rules govern all JSON strings. Shared
+corpus admission rejects U+0000 in every case string because PostgreSQL JSONB
+cannot preserve it, keeping repository, disk, and database storage forms
+aligned. The versioned preimage below pins that algorithm for corpus format
+version one. The
 exact digest preimage is the UTF-8 bytes `signalbox-eval-corpus-v1` followed by
 one zero byte, the case count as an unsigned 64-bit big-endian integer, and
 then, for each case in that order, its canonical-JSON byte length as an unsigned

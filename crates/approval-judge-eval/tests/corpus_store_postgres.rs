@@ -138,6 +138,30 @@ async fn blob_source_constraint_requires_byte_length() -> Result<(), Box<dyn Err
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn corpus_registration_requires_positive_case_count() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let corpus_digest = [0_u8; 32];
+    let replay_digest = [0_u8; 32];
+
+    sqlx::query(
+        "INSERT INTO evaluation_corpus (
+            corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
+            source_kind
+         ) VALUES ('zero-case-count', 'v1', 1, $1, $2, 0, 'database_native')",
+    )
+    .bind(corpus_digest.as_slice())
+    .bind(replay_digest.as_slice())
+    .execute(&pool)
+    .await
+    .expect_err("a durable registration without cases is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn stored_case_decode_error_retains_serde_context() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let disk = DiskCorpusStore::open(seed_manifest_path())?;
@@ -382,7 +406,7 @@ async fn insert_blob_registration(
         "INSERT INTO evaluation_corpus (
             corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
             source_kind, source_blob_digest, source_blob_byte_length
-         ) VALUES ('constraint-fixture', $1, 1, $2, $3, 0, 'blob_reference', $4, $5::numeric)",
+         ) VALUES ('constraint-fixture', $1, 1, $2, $3, 1, 'blob_reference', $4, $5::numeric)",
     )
     .bind(corpus_version)
     .bind(corpus_digest.as_slice())

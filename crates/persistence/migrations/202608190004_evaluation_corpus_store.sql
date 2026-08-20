@@ -27,8 +27,8 @@ CREATE TABLE evaluation_corpus (
         CHECK (octet_length(corpus_digest) = 32),
     CONSTRAINT evaluation_corpus_replay_digest_sha256
         CHECK (octet_length(replay_digest) = 32),
-    CONSTRAINT evaluation_corpus_case_count_nonnegative
-        CHECK (case_count >= 0),
+    CONSTRAINT evaluation_corpus_case_count_positive
+        CHECK (case_count > 0),
     CONSTRAINT evaluation_corpus_source_kind_closed
         CHECK (source_kind IN ('repository', 'database_native', 'blob_reference')),
     CONSTRAINT evaluation_corpus_source_shape
