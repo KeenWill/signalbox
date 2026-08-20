@@ -164,9 +164,9 @@ impl Error for GenerateWebContractError {}
 /// Returns a closed build-time error when serde cannot encode a generated value
 /// or a DTO schema grows beyond the generator's focused supported shapes.
 pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContractError> {
-    let bootstrap_schema = schemars::schema_for!(WebContractBootstrap).to_value();
-    let example_schema = schemars::schema_for!(WebContractExample).to_value();
-    let error_schema = schemars::schema_for!(WebApiErrorResponse).to_value();
+    let bootstrap_schema = canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value());
+    let example_schema = canonical_schema(schemars::schema_for!(WebContractExample).to_value());
+    let error_schema = canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value());
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -191,16 +191,25 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     ])
 }
 
+fn canonical_schema(mut schema: Value) -> Value {
+    // Schemars' default feature set preserves declaration order, while its
+    // focused no-default build uses sorted maps. Workspace feature unification
+    // must not change checked-in artifacts.
+    schema.sort_all_objects();
+    schema
+}
+
 fn runtime_module(
     bootstrap_schema: &Value,
     example_schema: &Value,
     error_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
-    let schemas = json!({
+    let mut schemas = json!({
         "WebContractBootstrap": bootstrap_schema,
         "WebContractExample": example_schema,
         "WebApiErrorResponse": error_schema,
     });
+    schemas.sort_all_objects();
     let schemas = serde_json::to_string_pretty(&schemas)
         .map_err(|_| GenerateWebContractError::Serialization)?;
     Ok(format!(
