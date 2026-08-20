@@ -8574,6 +8574,48 @@ where
         )
         .await;
     };
+    let store = PostgresCommissionedDispatchStore::new(
+        services.pool.clone(),
+        services.model_configuration.session_credential_pin(),
+    );
+    // Replay is resolved from the durable record before the live template
+    // catalog is consulted: a committed commission whose response was lost
+    // must stay discoverable through a retry of the exact command even after
+    // configuration removed or renamed the template it was commissioned from.
+    match store.load(request.command_id()).await {
+        Ok(Some(recorded)) => {
+            return if recorded.matches(&request) {
+                write_message(
+                    writer,
+                    version,
+                    request_id,
+                    ServerMessage::SessionCommissioned {
+                        session_id: wire_uuid(recorded.session().into_uuid()),
+                        dispatch_id: wire_uuid(recorded.dispatch().into_uuid()),
+                    },
+                )
+                .await
+            } else {
+                write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+                )
+                .await
+            };
+        }
+        Ok(None) => {}
+        Err(_) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(None, InternalDiagnostic::CommissionedDispatchCorruption),
+            )
+            .await;
+        }
+    }
     let Some(template) = services.template_configuration.resolve(request.template()) else {
         return write_error(
             writer,
@@ -8599,10 +8641,6 @@ where
         )
         .await;
     };
-    let store = PostgresCommissionedDispatchStore::new(
-        services.pool.clone(),
-        services.model_configuration.session_credential_pin(),
-    );
     let outcome = store
         .commission(prepared, |alias| {
             services.model_configuration.resolve_alias(alias)

@@ -10,7 +10,9 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
-use signalbox_application::{CommissionedDispatchFence, PreparedCommissionedDispatch};
+use signalbox_application::{
+    CommissionDispatchRequest, CommissionedDispatchFence, PreparedCommissionedDispatch,
+};
 use signalbox_domain::{
     CommissionedDispatchId, DurableCommandId, FrozenAliasDefinition, ModelAlias, SessionId,
 };
@@ -118,16 +120,33 @@ impl PostgresCommissionedDispatchStore {
         }
     }
 
+    /// Loads the committed commission a create-command identity names, if any.
+    ///
+    /// This is the replay lookup the daemon runs before resolving the live
+    /// template catalog; it needs nothing but the durable record, so an
+    /// ambiguous first commit stays discoverable through the required retry
+    /// path even after template configuration drifts.
+    pub async fn load(
+        &self,
+        command: DurableCommandId,
+    ) -> Result<Option<RecordedCommissionedDispatch>, CommissionedDispatchRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        Ok(load_recorded_commission(&mut connection, command)
+            .await?
+            .map(|inner| RecordedCommissionedDispatch { inner }))
+    }
+
     /// Commits the complete commission, replaying an already-committed equal one.
     ///
     /// Replay equality binds the create-command identity to the recorded
-    /// template, fence, and commissioned statement. A command identity claimed
-    /// by anything other than a committed commission — another command kind, or
-    /// an ordinary session creation with no fence row — is a conflicting reuse
-    /// rather than corruption, because the caller's identity names intent this
-    /// store never recorded. The alias resolver serves the initial input's
-    /// frozen model configuration exactly as it does for a repository-watch
-    /// dispatch.
+    /// template, fence, commissioned statement, and the digest of the initial
+    /// content. A command identity claimed by anything other than a committed
+    /// commission — another command kind, or an ordinary session creation with
+    /// no fence row — is a conflicting reuse rather than corruption, because
+    /// the caller's identity names intent this store never recorded; a claim
+    /// lost to a concurrent commit re-reads the winner and answers the same
+    /// way. The alias resolver serves the initial input's frozen model
+    /// configuration exactly as it does for a repository-watch dispatch.
     pub async fn commission<SelectDefinition>(
         &self,
         prepared: PreparedCommissionedDispatch,
@@ -146,49 +165,21 @@ impl PostgresCommissionedDispatchStore {
         )?;
         let template_name = provenance.name().as_str().to_owned();
         let template_digest = provenance.content_digest().as_bytes().to_vec();
+        let statement = statement_text(&prepared)
+            .ok_or(CommissionedDispatchRepositoryError::Corruption(
+                "commissioned goal action is not an attachment",
+            ))?
+            .to_owned();
+        let content_digest = prepared.initial_content_digest();
         if let Some(recorded) = load_recorded_commission(&mut transaction, command_id).await? {
             transaction.rollback().await?;
-            let statement = statement_text(&prepared).ok_or(
-                CommissionedDispatchRepositoryError::Corruption(
-                    "commissioned goal action is not an attachment",
-                ),
-            )?;
-            let equal = recorded.template_name == template_name
-                && recorded.fence_matches(prepared.fence())
-                && recorded.statement.as_deref() == Some(statement);
-            return Ok(if equal {
-                CommissionDispatchOutcome::Replayed {
-                    dispatch: recorded.dispatch,
-                    session: recorded.session,
-                }
-            } else {
-                CommissionDispatchOutcome::ConflictingReuse
-            });
-        }
-        let claimed_elsewhere: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM durable_command WHERE command_id = $1)",
-        )
-        .bind(command_id.as_uuid())
-        .fetch_one(&mut *transaction)
-        .await?;
-        if claimed_elsewhere {
-            // Re-read the fence row before answering: an equal commission that
-            // committed between the two reads above is a replay, not a reuse.
-            let recorded = load_recorded_commission(&mut transaction, command_id).await?;
-            transaction.rollback().await?;
-            return Ok(match recorded {
-                Some(recorded)
-                    if recorded.template_name == template_name
-                        && recorded.fence_matches(prepared.fence())
-                        && recorded.statement.as_deref() == statement_text(&prepared) =>
-                {
-                    CommissionDispatchOutcome::Replayed {
-                        dispatch: recorded.dispatch,
-                        session: recorded.session,
-                    }
-                }
-                _ => CommissionDispatchOutcome::ConflictingReuse,
-            });
+            return Ok(replay_or_conflict(
+                &recorded,
+                &template_name,
+                prepared.fence(),
+                &statement,
+                &content_digest,
+            ));
         }
         let (
             dispatch_id,
@@ -212,7 +203,29 @@ impl PostgresCommissionedDispatchStore {
                 "commissioned goal targets another session",
             ));
         }
-        crate::create_session::insert_fresh_prepared(
+        if !crate::create_session::claim_create_session_command(&mut transaction, command_id)
+            .await
+            .map_err(CommissionedDispatchRepositoryError::SessionCreation)?
+        {
+            // Lost the claim to a concurrent commit. Re-read the winner under
+            // a fresh statement snapshot: an equal committed commission is a
+            // replay; anything else the identity names — an unequal
+            // commission, an ordinary session creation, another command kind —
+            // is a conflicting reuse, never corruption.
+            let recorded = load_recorded_commission(&mut transaction, command_id).await?;
+            transaction.rollback().await?;
+            return Ok(match recorded {
+                Some(recorded) => replay_or_conflict(
+                    &recorded,
+                    &template_name,
+                    &fence,
+                    &statement,
+                    &content_digest,
+                ),
+                None => CommissionDispatchOutcome::ConflictingReuse,
+            });
+        }
+        crate::create_session::insert_prepared(
             &mut transaction,
             prepared_session,
             &self.credential_pin,
@@ -226,6 +239,7 @@ impl PostgresCommissionedDispatchStore {
             command_id,
             &template_name,
             &template_digest,
+            &content_digest,
             &fence,
         )
         .await?;
@@ -268,7 +282,73 @@ fn statement_text(prepared: &PreparedCommissionedDispatch) -> Option<&str> {
     }
 }
 
+/// Answers replay for an equal committed commission, reuse for anything else.
+fn replay_or_conflict(
+    recorded: &RecordedCommission,
+    template_name: &str,
+    fence: &CommissionedDispatchFence,
+    statement: &str,
+    content_digest: &[u8; 32],
+) -> CommissionDispatchOutcome {
+    let equal = recorded.template_name == template_name
+        && recorded.fence_matches(fence)
+        && recorded.statement.as_deref() == Some(statement)
+        && recorded.initial_content_digest == content_digest;
+    if equal {
+        CommissionDispatchOutcome::Replayed {
+            dispatch: recorded.dispatch,
+            session: recorded.session,
+        }
+    } else {
+        CommissionDispatchOutcome::ConflictingReuse
+    }
+}
+
+/// One committed commission, loadable by its create-command identity alone.
+///
+/// The daemon consults this before resolving the live template catalog, so a
+/// retry of a committed commission replays even after configuration removed or
+/// renamed the template it was commissioned from.
+#[derive(Debug)]
+pub struct RecordedCommissionedDispatch {
+    inner: RecordedCommission,
+}
+
+impl RecordedCommissionedDispatch {
+    /// Returns the recorded append-only dispatch identity.
+    #[must_use]
+    pub const fn dispatch(&self) -> CommissionedDispatchId {
+        self.inner.dispatch
+    }
+
+    /// Returns the previously created session.
+    #[must_use]
+    pub const fn session(&self) -> SessionId {
+        self.inner.session
+    }
+
+    /// Reports whether this record is the request's exact committed equal.
+    ///
+    /// The comparison is the same replay equality `commission` enforces:
+    /// template name, fence, commissioned statement, and the digest of the
+    /// initial content.
+    #[must_use]
+    pub fn matches(&self, request: &CommissionDispatchRequest) -> bool {
+        matches!(
+            replay_or_conflict(
+                &self.inner,
+                request.template().as_str(),
+                request.fence(),
+                request.statement().as_str(),
+                &request.initial_content_digest(),
+            ),
+            CommissionDispatchOutcome::Replayed { .. }
+        )
+    }
+}
+
 /// The committed facts one replayed commission is compared against.
+#[derive(Debug)]
 struct RecordedCommission {
     dispatch: CommissionedDispatchId,
     session: SessionId,
@@ -282,6 +362,7 @@ struct RecordedCommission {
     base_branch: Option<String>,
     branch: Option<String>,
     statement: Option<String>,
+    initial_content_digest: Vec<u8>,
 }
 
 impl RecordedCommission {
@@ -320,7 +401,8 @@ async fn load_recorded_commission(
         "SELECT dispatch.dispatch_id, dispatch.session_id, dispatch.template_name,
                 dispatch.target_kind, dispatch.repository, dispatch.pull_request_number,
                 dispatch.head_sha, dispatch.head_repository, dispatch.head_branch,
-                dispatch.base_branch, dispatch.branch, commissioned.statement
+                dispatch.base_branch, dispatch.branch, dispatch.initial_content_digest,
+                commissioned.statement
            FROM commissioned_dispatch AS dispatch
            LEFT JOIN goal_event AS commissioned
              ON commissioned.session_id = dispatch.session_id
@@ -347,9 +429,11 @@ async fn load_recorded_commission(
         base_branch: row.try_get("base_branch")?,
         branch: row.try_get("branch")?,
         statement: row.try_get("statement")?,
+        initial_content_digest: row.try_get("initial_content_digest")?,
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_commissioned_dispatch(
     connection: &mut sqlx::PgConnection,
     dispatch: CommissionedDispatchId,
@@ -357,6 +441,7 @@ async fn insert_commissioned_dispatch(
     create_command: DurableCommandId,
     template_name: &str,
     template_digest: &[u8],
+    initial_content_digest: &[u8; 32],
     fence: &CommissionedDispatchFence,
 ) -> Result<(), CommissionedDispatchRepositoryError> {
     let (
@@ -400,16 +485,17 @@ async fn insert_commissioned_dispatch(
     sqlx::query(
         "INSERT INTO commissioned_dispatch
             (dispatch_id, session_id, create_command_id, template_name,
-             template_content_digest, target_kind, repository,
-             pull_request_number, head_sha, head_repository, head_branch,
-             base_branch, branch)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+             template_content_digest, initial_content_digest, target_kind,
+             repository, pull_request_number, head_sha, head_repository,
+             head_branch, base_branch, branch)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
     )
     .bind(dispatch.as_uuid())
     .bind(session_id_to_uuid(session))
     .bind(create_command.as_uuid())
     .bind(template_name)
     .bind(template_digest)
+    .bind(initial_content_digest.as_slice())
     .bind(target_kind)
     .bind(repository)
     .bind(pull_request_number)

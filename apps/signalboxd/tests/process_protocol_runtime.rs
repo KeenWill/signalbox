@@ -673,6 +673,24 @@ impl RunningRuntime {
         &mut self,
         configuration: &str,
     ) -> Result<usize, Box<dyn Error>> {
+        let model_configuration = HubModelConfiguration::parse(configuration)?;
+        let template_configuration = session_template_configuration(&model_configuration)?;
+        self.restart_with_templates(configuration, template_configuration)
+            .await
+    }
+
+    /// Restarts over the same database with every session template removed
+    /// from configuration, as a template rename or deletion would leave it.
+    async fn restart_without_templates(&mut self) -> Result<usize, Box<dyn Error>> {
+        self.restart_with_templates(MODEL_CONFIGURATION, SessionTemplateConfiguration::default())
+            .await
+    }
+
+    async fn restart_with_templates(
+        &mut self,
+        configuration: &str,
+        template_configuration: SessionTemplateConfiguration,
+    ) -> Result<usize, Box<dyn Error>> {
         self.shutdown.send(true)?;
         timeout(Duration::from_secs(10), &mut self.runtime_task).await???;
 
@@ -686,7 +704,6 @@ impl RunningRuntime {
         let sweep = PostgresEligibilitySweep::new(self.pool.clone());
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
         let model_configuration = HubModelConfiguration::parse(configuration)?;
-        let template_configuration = session_template_configuration(&model_configuration)?;
         let mut runtime = ProcessRuntime::new_with_templates(
             listener,
             self.pool.clone(),
@@ -1307,7 +1324,7 @@ async fn read_goal_messages(
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(), Box<dyn Error>> {
-    let runtime = RunningRuntime::start().await?;
+    let mut runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
     let commission_command = command()?;
     let statement = String::from("Address the review findings on pull request 41.");
@@ -1337,7 +1354,7 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
         panic!("unexpected commission response: {commissioned:?}");
     };
 
-    connection.request(3, request).await?;
+    connection.request(3, request.clone()).await?;
     let replayed = response_within(&mut connection).await?.message().clone();
     assert_eq!(
         replayed,
@@ -1374,9 +1391,45 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
         Some(&ServerMessage::GoalHistoryStart {
             session_id,
             current_generation: CanonicalU64::new(1),
-            current_statement: statement,
+            current_statement: statement.clone(),
         })
     );
+
+    // Template-configuration drift: restart over the same database with every
+    // template removed. The committed commission stays discoverable through
+    // the exact retry, because replay is resolved from the durable record
+    // before the live template catalog is consulted.
+    runtime.restart_without_templates().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection.request(6, request).await?;
+    let drift_replayed = response_within(&mut connection).await?.message().clone();
+    assert_eq!(
+        drift_replayed,
+        ServerMessage::SessionCommissioned {
+            session_id,
+            dispatch_id,
+        }
+    );
+
+    // A fresh commission naming the removed template is still refused: only
+    // replay of committed work survives configuration drift.
+    connection
+        .request(
+            7,
+            ClientRequest::CommissionSession {
+                command_id: command()?,
+                template_name: String::from("merge-forward"),
+                fence,
+                statement,
+                content: InputContent::new(String::from("Respond to the open review threads.")),
+            },
+        )
+        .await?;
+    let refused = response_within(&mut connection).await?.message().clone();
+    let ServerMessage::Error { code, .. } = refused else {
+        panic!("a fresh commission under a removed template must refuse: {refused:?}");
+    };
+    assert_eq!(code, ErrorCode::InvalidRequest);
     Ok(())
 }
 

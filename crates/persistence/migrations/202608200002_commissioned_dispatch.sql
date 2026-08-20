@@ -12,6 +12,7 @@ CREATE TABLE commissioned_dispatch (
     create_command_id uuid NOT NULL UNIQUE,
     template_name text NOT NULL,
     template_content_digest bytea NOT NULL,
+    initial_content_digest bytea NOT NULL,
     target_kind text NOT NULL,
     repository text NOT NULL,
     pull_request_number numeric(20, 0),
@@ -33,6 +34,7 @@ CREATE TABLE commissioned_dispatch (
         ON DELETE RESTRICT,
     CHECK (octet_length(template_name) BETWEEN 1 AND 128),
     CHECK (octet_length(template_content_digest) = 32),
+    CHECK (octet_length(initial_content_digest) = 32),
     CHECK (target_kind IN ('pull_request', 'branch')),
     CHECK (repo_watch_repository_is_valid(repository)),
     CHECK (

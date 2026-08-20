@@ -3884,6 +3884,9 @@ impl ClientRequest {
         if let Self::CreateSessionFromTemplate { template_name, .. } = self {
             validate_session_template_name(template_name)?;
         }
+        if let Self::CommissionSession { template_name, .. } = self {
+            validate_session_template_name(template_name)?;
+        }
         if let Self::CompleteReviewPass {
             turn_id,
             output_frontier_id,
@@ -13312,6 +13315,25 @@ mod tests {
         assert_eq!(
             ClientFrame::try_new_for_version(ProtocolVersion::One, request(11)?, empty_statement),
             Err(FrameValidationError::GoalShape)
+        );
+
+        let uppercase_template = ClientRequest::CommissionSession {
+            command_id: command(12)?,
+            template_name: String::from("Review-Response"),
+            fence: CommissionedSessionFence::Branch {
+                repository: String::from("sample-user/sample-repository"),
+                branch: String::from("main"),
+            },
+            statement: String::from("Address the findings."),
+            content: InputContent::new(String::from("Respond.")),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::One,
+                request(13)?,
+                uppercase_template
+            ),
+            Err(FrameValidationError::TemplateShape)
         );
         Ok(())
     }

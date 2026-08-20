@@ -165,6 +165,12 @@ impl CommissionDispatchRequest {
         &self.statement
     }
 
+    /// Returns the digest binding this request's initial content to replay.
+    #[must_use]
+    pub fn initial_content_digest(&self) -> [u8; 32] {
+        initial_content_digest(&self.context)
+    }
+
     /// Prepares the complete composite the durable transaction commits.
     ///
     /// The composition is the repository-watch dispatch action's, minus the
@@ -226,6 +232,16 @@ impl CommissionDispatchRequest {
     }
 }
 
+/// Digests one exact initial content for commission replay equality.
+///
+/// The digest is SHA-256 over the exact text bytes the durable input records,
+/// so a retried request whose content differs from the committed commission is
+/// distinguishable without persisting the content twice.
+fn initial_content_digest(content: &UserContent) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(content.text().as_str().as_bytes()).into()
+}
+
 /// One commissioned dispatch whose session creation has been domain-prepared.
 ///
 /// The turn reserved here is the only one the commissioned session receives.
@@ -268,6 +284,12 @@ impl PreparedCommissionedDispatch {
     #[must_use]
     pub const fn goal(&self) -> &GoalUserCommand {
         &self.goal
+    }
+
+    /// Returns the digest binding the composed initial content to replay.
+    #[must_use]
+    pub fn initial_content_digest(&self) -> [u8; 32] {
+        initial_content_digest(self.initial_input.content())
     }
 
     /// Returns the created session's identity.
@@ -387,37 +409,46 @@ mod tests {
         .expect("the fixture command identity is admitted")
     }
 
+    #[track_caller]
+    fn refused_sentinel(sentinel: uuid::Uuid) -> InvalidDurableCommandId {
+        CommissionDispatchRequest::try_new(
+            DurableCommandId::from_uuid(sentinel),
+            template_name("review-response"),
+            fence(),
+            GoalStatement::try_new(String::from("Address the findings."))
+                .expect("the fixture statement is admitted"),
+            UserContent::try_text(String::from("Respond."))
+                .expect("the fixture context is admitted"),
+        )
+        .expect_err("a sentinel command identity is refused")
+    }
+
     #[test]
     fn sentinel_command_identities_are_rejected() {
-        for (sentinel, expected) in [
-            (uuid::Uuid::nil(), InvalidDurableCommandId::Nil),
-            (uuid::Uuid::max(), InvalidDurableCommandId::Max),
-        ] {
-            let refused = CommissionDispatchRequest::try_new(
-                DurableCommandId::from_uuid(sentinel),
-                template_name("review-response"),
-                fence(),
-                GoalStatement::try_new(String::from("Address the findings."))
-                    .expect("the fixture statement is admitted"),
-                UserContent::try_text(String::from("Respond."))
-                    .expect("the fixture context is admitted"),
-            );
-            assert_eq!(refused.unwrap_err(), expected);
-        }
+        assert_eq!(
+            refused_sentinel(uuid::Uuid::nil()),
+            InvalidDurableCommandId::Nil
+        );
+        assert_eq!(
+            refused_sentinel(uuid::Uuid::max()),
+            InvalidDurableCommandId::Max
+        );
     }
 
     #[test]
     fn preparation_binds_the_command_and_adopts_one_reserved_turn() {
         let mut ids = UuidV7CommissionedDispatchIdGenerator;
 
-        let prepared = request(7)
+        let request = request(7);
+        let commanded = request.command_id();
+        let prepared = request
             .prepare(&mut ids, template_provenance("review-response"), defaults())
             .expect("the fixture request prepares");
 
         let session = prepared.session();
         assert_eq!(
             prepared.prepared_session().command().command_id(),
-            DurableCommandId::from_uuid(uuid::Uuid::from_u128(7))
+            commanded
         );
         let (_, _, _, initial_input, _, _, _, _, goal) = prepared.into_parts();
         assert_eq!(initial_input.session(), session);

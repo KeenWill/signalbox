@@ -22,8 +22,8 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, ActiveTurnPhase, AssistantResponsePart, BranchName,
     CancelledModelCallTurnIdentities, CheckConclusion, CommissionedDispatchId, CommitSha,
-    ContextFrontierId, DangerousToolAutoApproval, DelegateApprovalRecommendation, DeliveryRequest,
-    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    ContextFrontierId, CreateSession, DangerousToolAutoApproval, DelegateApprovalRecommendation,
+    DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
     FailedModelCallTurnIdentities, GitHubObjectId, GoalCommandResult, GoalModelProvenance,
     GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction,
     GoalUserCommand, InitialToolApproval, MergeableState, ModelCallId, ModelCallTerminalIdentities,
@@ -36,10 +36,11 @@ use signalbox_domain::{
     RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId,
     RepoWatchRuleIdentityField, RepoWatchRuleVersion, RepoWatchSingletonScope,
     RepoWatchWorkflowRunAttempt, RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
-    SessionTemplateName, SessionTemplateProvenance, SubmitInput, ToolCallProposal,
-    ToolDecisionRationale, ToolName, ToolRequestId, ToolResponsePartIdentity,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnAttemptId, TurnId, UserContent,
+    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
+    SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, SubmitInput, ToolCallProposal, ToolDecisionRationale, ToolName,
+    ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
     WorkflowName,
 };
 use signalbox_persistence::{
@@ -49,6 +50,7 @@ use signalbox_persistence::{
         PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
     },
     commissioned_dispatch::{CommissionDispatchOutcome, PostgresCommissionedDispatchStore},
+    create_session::{CreateSessionHandlingOutcome, CreateSessionRepository},
     disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
@@ -5885,6 +5887,19 @@ fn commission_request_with_fence(
     )?)
 }
 
+fn commission_request_with_content(
+    command: u128,
+    content: &str,
+) -> Result<CommissionDispatchRequest, Box<dyn Error>> {
+    Ok(CommissionDispatchRequest::try_new(
+        DurableCommandId::from_uuid(Uuid::from_u128(command)),
+        SessionTemplateName::try_new(COMMISSION_TEMPLATE.to_owned())?,
+        commissioned_fence()?,
+        GoalStatement::try_new(COMMISSION_STATEMENT.to_owned())?,
+        UserContent::try_text(content.to_owned()).expect("the fixture context is admitted"),
+    )?)
+}
+
 /// The exact template shape the dispatch fixtures resolve, under the
 /// commissioned template name.
 fn commissioned_template() -> (SessionTemplateProvenance, SessionConfigurationDefaults) {
@@ -6145,6 +6160,70 @@ async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box
         fixture.store.commission(conflicting, |_| None).await?,
         CommissionDispatchOutcome::ConflictingReuse
     );
+
+    // The committed commission is loadable by its command identity alone, and
+    // that record answers the daemon's pre-template replay equality — so a
+    // retry of the exact request replays even if configuration later removed
+    // or renamed the template it was commissioned from.
+    let recorded = fixture
+        .store
+        .load(DurableCommandId::from_uuid(Uuid::from_u128(
+            COMMISSION_COMMAND_ID,
+        )))
+        .await?
+        .expect("the committed commission is loadable by its command identity");
+    assert_eq!(recorded.dispatch(), fixture.dispatch_id);
+    assert_eq!(recorded.session(), fixture.session);
+    assert!(recorded.matches(&commission_request_with_fence(
+        COMMISSION_COMMAND_ID,
+        commissioned_fence()?
+    )?));
+    assert!(!recorded.matches(&commission_request_with_fence(
+        COMMISSION_COMMAND_ID,
+        CommissionedDispatchFence::Branch {
+            repository: repository()?,
+            branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+        },
+    )?));
+
+    // A retry that changes only the initial content names different intent:
+    // the recorded digest refuses it instead of silently replaying a session
+    // whose first input was something else.
+    let changed_content =
+        commission_request_with_content(COMMISSION_COMMAND_ID, "Different context entirely.")?;
+    assert!(!recorded.matches(&changed_content));
+    let (provenance, defaults) = commissioned_template();
+    let changed = changed_content.prepare(
+        &mut UuidV7CommissionedDispatchIdGenerator,
+        provenance,
+        defaults,
+    )?;
+    assert_eq!(
+        fixture.store.commission(changed, |_| None).await?,
+        CommissionDispatchOutcome::ConflictingReuse
+    );
+
+    // An ordinary template creation retried against the commission's command
+    // identity is a different wire operation: it must refuse rather than adopt
+    // the commissioned session as its own replay.
+    let (provenance, defaults) = commissioned_template();
+    let ordinary = CreateSession::new_from_template(
+        DurableCommandId::from_uuid(Uuid::from_u128(COMMISSION_COMMAND_ID)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::UserInitiated,
+            TranscriptAncestry::None,
+        ),
+        provenance,
+        defaults,
+    )
+    .prepare(SessionId::from_uuid(Uuid::from_u128(0x60_300)))
+    .expect("the fixture creation command prepares");
+    let ordinary_outcome = CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
+        .handle(ordinary)
+        .await?;
+    let CreateSessionHandlingOutcome::ConflictingReuse { .. } = ordinary_outcome else {
+        panic!("ordinary creation must refuse a commission's command identity");
+    };
 
     // A command identity already claimed by another kind entirely is the same
     // refusal, not a fail-closed corruption.
