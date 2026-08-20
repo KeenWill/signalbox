@@ -34,8 +34,9 @@ A virtual DOM list alone does not satisfy the law.
 
 - Use stable keyset or logical timeline addresses, not offset pagination for
   mutable/unbounded data.
-- Let the server provide size facts; let the client choose an explicit loading
-  policy.
+- Use server-provided size facts only when the owning implemented contract
+  exposes them. Always measure and bound the records and bytes the client
+  actually receives.
 - Greedily load bounded histories under a generous configured budget.
 - Cancel or stop eager loading and continue incrementally when conditions or
   policy change.
@@ -45,17 +46,12 @@ A virtual DOM list alone does not satisfy the law.
 
 ## Streaming
 
-- Apply every durable event in order and deduplicate only by its authority.
-- When an implemented owning contract exposes ephemeral provider display
-  fragments, follow its batching, cadence, backpressure, and replacement policy;
-  this skill selects none of those semantics.
-- Never debounce or drop durable events.
+The [protocol skill](../signalbox-web-protocol/SKILL.md) owns durable ordering,
+deduplication authority, transient replacement, backpressure, and
+resynchronization semantics.
+
 - Bound follower queues, pending decode work, Redux history, and debug traces.
-- When a follower queue reaches its bound, apply the owning contract's
-  backpressure policy or stop incremental delivery and resynchronize from the
-  durable cursor; never drop durable events.
-- Follow the owning contract's transient-state policy during resynchronization;
-  do not invent provider-token replay.
+- Prove the queue bound under the protocol-defined overflow behavior.
 
 ## Large renderers
 

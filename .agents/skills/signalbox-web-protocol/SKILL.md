@@ -52,6 +52,9 @@ Separate the historical plane from the live plane.
   cursor, then sends ordered durable updates above it. It relays ephemeral
   drafts only when an owning implemented contract defines their identity,
   sequencing, replacement, backpressure, and redaction.
+- A full follower queue applies contract-defined backpressure or stops
+  incremental delivery and resynchronizes from the durable cursor; it never
+  drops durable events.
 - Lag produces resynchronization, not partial best-effort continuation.
 - Client presentation choices never become server `full`, `condensed`, or
   `results` modes.

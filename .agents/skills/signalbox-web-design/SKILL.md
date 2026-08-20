@@ -65,11 +65,12 @@ Treat turns as information groups, not permanent visual boxes.
 
 ## Tables and live activity
 
-Prefer one dense virtualized table over a grid of summary cards when rows answer
-the operator's question. Use compact status markers, aligned numbers, short
-identities, exact hover/detail affordances, and keyboard selection. Keep
-sorting, filtering, and visible columns discoverable without consuming excessive
-space.
+Prefer one dense table over a grid of summary cards when rows answer the
+operator's question. Use compact status markers, aligned numbers, short
+identities, exact hover/detail affordances, and keyboard selection. Keep sorting,
+filtering, and visible columns discoverable without consuming excessive space.
+Follow the [performance
+skill](../signalbox-web-performance/SKILL.md) for virtualization requirements.
 
 ## Components
 
@@ -77,18 +78,15 @@ Use shadcn/Radix as accessible primitives, not as a mandate to retain demo-page
 styling. Compose domain components for Signalbox concepts such as turn, tool,
 approval, model call, goal, runner, PR convergence, and artifact capability.
 
-Known domain content gets a typed renderer. Only a validated generic record gets
-a safe, useful, inspectable fallback. Reject or quarantine unknown
-discriminators and contradictory correlations rather than reinterpreting them.
+Known domain content gets a typed renderer. Follow the [protocol
+skill](../signalbox-web-protocol/SKILL.md) for record validity and generic
+fallback eligibility; give a record it admits as generic a safe, useful,
+inspectable presentation.
 
-## Visual proof
+## Visual criteria
 
-For a meaningful screen change:
-
-1. render deterministic light and dark scenarios;
-2. capture the pinned desktop viewport;
-3. capture the relevant phone or narrow viewport;
-4. inspect hierarchy, alignment, wrapping, clipping, focus, hover, and selected
-   states;
-5. compare dense and focus modes where both exist; and
-6. fix visual defects before treating functional completeness as done.
+For a meaningful screen change, inspect hierarchy, alignment, wrapping,
+clipping, focus, hover, and selected states; compare dense and focus modes where
+both exist; and fix visual defects before treating functional completeness as
+done. The [browser-QA skill](../signalbox-web-browser-qa/SKILL.md) owns scenario,
+viewport, screenshot, and browser-evidence requirements.

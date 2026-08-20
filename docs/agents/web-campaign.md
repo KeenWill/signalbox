@@ -71,22 +71,10 @@ request/window sizes, and the bound being proved.
 
 ## Evidence baseline
 
-Every substantial screen has deterministic scenarios and Playwright coverage.
-The pinned Chromium environment is the visual authority. Major workflows also
-run functionally and accessibly in current Firefox and WebKit.
-
-Failure artifacts include:
-
-- a Playwright trace and screenshot;
-- browser console messages and page errors;
-- the relevant bounded Redux action trace;
-- the allowlisted, redacted Signalbox diagnostic summary when the active slice
-  provides one; and
-- network/request evidence when transport is involved.
-
-This map assumes no diagnostic interface. Any implementing slice that adds one
-defines its allowlisted and redacted schema, protected retention, and production
-exclusion or access-protection tests in the owning change.
+The
+[signalbox-web-browser-qa skill](../../.agents/skills/signalbox-web-browser-qa/SKILL.md)
+owns browser scenarios, coverage, target browsers, diagnostics, and retained
+failure artifacts. This planning map adds no evidence contract.
 
 ## Operator surface
 
