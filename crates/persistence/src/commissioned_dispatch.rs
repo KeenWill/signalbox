@@ -136,6 +136,27 @@ impl PostgresCommissionedDispatchStore {
             .map(|inner| RecordedCommissionedDispatch { inner }))
     }
 
+    /// Reports whether the durable-command registry holds this identity.
+    ///
+    /// The daemon consults this only on the unknown-template path, where
+    /// `load` has already ruled out a committed commission: a registered
+    /// identity then belongs to another command kind or an ordinary session
+    /// creation, and the refusal must name that conflicting reuse rather
+    /// than the template's `invalid_request`, which claims no command.
+    pub async fn identity_claimed(
+        &self,
+        command: DurableCommandId,
+    ) -> Result<bool, CommissionedDispatchRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        let claimed = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM durable_command WHERE command_id = $1)",
+        )
+        .bind(crate::mapping::durable_command_id_to_uuid(command))
+        .fetch_one(&mut *connection)
+        .await?;
+        Ok(claimed)
+    }
+
     /// Commits the complete commission, replaying an already-committed equal one.
     ///
     /// Replay equality binds the create-command identity to the recorded

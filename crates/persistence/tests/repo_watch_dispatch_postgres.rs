@@ -6268,5 +6268,23 @@ async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box
         fixture.store.commission(reused, |_| None).await?,
         CommissionDispatchOutcome::ConflictingReuse
     );
+
+    // The registry read the daemon runs on the unknown-template path sees the
+    // same claim, so a foreign identity refuses as conflicting reuse even
+    // when no template resolves; an unseen identity claims nothing.
+    assert!(
+        fixture
+            .store
+            .identity_claimed(DurableCommandId::from_uuid(Uuid::from_u128(
+                foreign_command
+            )))
+            .await?
+    );
+    assert!(
+        !fixture
+            .store
+            .identity_claimed(DurableCommandId::from_uuid(Uuid::from_u128(0x60_201)))
+            .await?
+    );
     Ok(())
 }

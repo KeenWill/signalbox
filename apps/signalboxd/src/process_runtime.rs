@@ -8624,13 +8624,22 @@ where
         }
     }
     let Some(template) = services.template_configuration.resolve(request.template()) else {
-        return write_error(
-            writer,
-            version,
-            request_id,
-            ProtocolError::without_detail(ErrorCode::InvalidRequest),
-        )
-        .await;
+        // The identity outranks the template. `load` above found no committed
+        // commission, so a registry claim on this identity names a conflicting
+        // reuse — another command kind, or an ordinary session creation — and
+        // `invalid_request` stays reserved for identities that claim nothing.
+        let refusal = match store.identity_claimed(request.command_id()).await {
+            Ok(true) => ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            Ok(false) => ProtocolError::without_detail(ErrorCode::InvalidRequest),
+            Err(error) => match commission_failure_ambiguity(&error) {
+                Some(commit_ambiguous) => ProtocolError::mutation_unavailable(commit_ambiguous),
+                None => internal_protocol_error(
+                    None,
+                    InternalDiagnostic::CommissionedDispatchCorruption,
+                ),
+            },
+        };
+        return write_error(writer, version, request_id, refusal).await;
     };
     let mut ids = UuidV7CommissionedDispatchIdGenerator;
     let Ok(prepared) = request.prepare(
