@@ -53,4 +53,28 @@ describe('ScenarioTransport', () => {
 
     expect(window.items).toHaveLength(SCENARIO_FLEET_WINDOW_ITEMS)
   })
+
+  it('returns an empty timeline window for a cursor beyond the scenario', async () => {
+    const transport = new ScenarioTransport('streaming')
+    const window = await transport.readTimeline({
+      after: `timeline:${transport.scenario.timelineTotal}`,
+      limit: 1,
+    })
+
+    expect(window.items).toEqual([])
+    expect(window.nextCursor).toBeUndefined()
+    expect(window.totalCount).toBe(transport.scenario.timelineTotal)
+  })
+
+  it('returns an empty fleet window for a cursor beyond the scenario', async () => {
+    const transport = new ScenarioTransport('streaming')
+    const window = await transport.readFleet({
+      after: `fleet:${transport.scenario.tableTotal}`,
+      limit: 1,
+    })
+
+    expect(window.items).toEqual([])
+    expect(window.nextCursor).toBeUndefined()
+    expect(window.totalCount).toBe(transport.scenario.tableTotal)
+  })
 })

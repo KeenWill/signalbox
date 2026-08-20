@@ -10,6 +10,9 @@ const largeTimelineFixture = {
   logicalItems: 100_000,
   loadedItems: 360,
   mountedRowsCeiling: 50,
+  firstItemTestId: 'timeline-event-0',
+  firstItemPosition: '1',
+  setSize: '360',
 } as const
 
 const largeFleetFixture = {
@@ -62,6 +65,16 @@ test('keeps a six-figure timeline bounded', async ({ page }) => {
   const diagnostics = await page.evaluate(() => window.__SIGNALBOX_DIAGNOSTICS__?.())
   expect(diagnostics?.logicalTimeline).toBe(largeTimelineFixture.logicalItems)
   expect(diagnostics?.loadedTimeline).toBe(largeTimelineFixture.loadedItems)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('exposes logical positions for virtualized timeline options', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto(largeTimelineFixture.path)
+
+  const firstItem = page.getByTestId(largeTimelineFixture.firstItemTestId)
+  await expect(firstItem).toHaveAttribute('aria-posinset', largeTimelineFixture.firstItemPosition)
+  await expect(firstItem).toHaveAttribute('aria-setsize', largeTimelineFixture.setSize)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

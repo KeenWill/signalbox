@@ -150,6 +150,8 @@ export function Transcript({ items, context }: { items: TimelineItem[]; context:
                 key={item.id}
                 role="option"
                 aria-selected={selectedId === item.id}
+                aria-posinset={virtualRow.index + 1}
+                aria-setsize={visibleItems.length}
                 className={`timeline-row kind-${item.kind}`}
                 data-testid={`timeline-${item.id}`}
                 ref={virtualizer.measureElement}

@@ -170,7 +170,7 @@ export class ScenarioTransport implements SignalboxTransport {
   }
 
   async readTimeline(request: WindowRequest): Promise<CursorWindow<TimelineItem>> {
-    const start = parseCursor(request.after, 'timeline')
+    const start = Math.min(parseCursor(request.after, 'timeline'), this.scenario.timelineTotal)
     const count = normalizedLimit(request.limit, SCENARIO_TIMELINE_WINDOW_ITEMS)
     const end = Math.min(start + count, this.scenario.timelineTotal)
     const items = Array.from({ length: end - start }, (_, offset) => {
@@ -195,7 +195,7 @@ export class ScenarioTransport implements SignalboxTransport {
   }
 
   async readFleet(request: WindowRequest): Promise<CursorWindow<FleetRow>> {
-    const start = parseCursor(request.after, 'fleet')
+    const start = Math.min(parseCursor(request.after, 'fleet'), this.scenario.tableTotal)
     const count = normalizedLimit(request.limit, SCENARIO_FLEET_WINDOW_ITEMS)
     const end = Math.min(start + count, this.scenario.tableTotal)
     const states: FleetRow['state'][] = ['active', 'queued', 'blocked', 'settled']
