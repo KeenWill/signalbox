@@ -10,14 +10,15 @@
   // The cargo manager's default file pattern ((^|/)Cargo\.toml$) already
   // covers the root manifest and every workspace member under crates/ and
   // apps/, so no path configuration is needed for full workspace coverage.
-  // The npm manager's default file pattern ((^|/)package\.json$) already covers
-  // both npm manifests in the tree: tooling/codex-cli and
-  // crates/model-runtime-claude-cli. Neither is a Node project — each exists
-  // solely to pin one wrapped CLI executable to an exact version, and each pin
-  // bump is proven against the real CLI by that adapter's own compatibility
-  // smoke (.github/workflows/codex-smoke.yml and
-  // .github/workflows/claude-smoke.yml). See the Codex CLI and Claude Code CLI
-  // provider adapter sections of docs/spec/runtime-substrate.md.
+  // The npm manager's default file pattern ((^|/)package\.json$) covers every
+  // npm manifest in the tree. Two of them are not Node projects: each of
+  // tooling/codex-cli and crates/model-runtime-claude-cli exists solely to pin
+  // one wrapped CLI executable to an exact version, and each pin bump is
+  // proven against the real CLI by that adapter's own compatibility smoke
+  // (.github/workflows/codex-smoke.yml and .github/workflows/claude-smoke.yml).
+  // See the Codex CLI and Claude Code CLI provider adapter sections of
+  // docs/spec/runtime-substrate.md. The third, clients/web, is a real Node
+  // project with a real dependency tree; its cooldown rules are below.
   "packageRules": [
     {
       "matchManagers": ["cargo"],
@@ -42,20 +43,40 @@
       "platformAutomerge": true,
     },
     {
-      // Deliberately carries no minimum-release-age gate and no automerge, on
-      // both counts unlike the cargo policy above. The wrapped CLI releases
-      // far too often for calendar age to mean anything, and what makes a bump
-      // safe is evidence, not waiting: the adapter build mechanically derives
-      // its supported-version constant from the exact manifest pin, and the
-      // automatic pull-request compatibility smoke
-      // (.github/workflows/codex-smoke.yml) installs and proves that pin against
-      // the real CLI. Neither gate validates the recorded offline event-shape
-      // fixtures; docs/open-questions.md tracks that residual coverage gap.
-      // The evidence remains human-reviewed, so the pull request must never
-      // merge itself.
+      // Baseline for every npm manifest: exact pins, human-reviewed merges.
+      // For the two CLI-pin manifests this is deliberately the whole policy —
+      // no minimum-release-age gate, unlike the cargo policy above. The
+      // wrapped CLI releases far too often for calendar age to mean anything,
+      // and what makes a pin bump safe is evidence, not waiting: the adapter
+      // build mechanically derives its supported-version constant from the
+      // exact manifest pin, and the automatic pull-request compatibility smoke
+      // (.github/workflows/codex-smoke.yml) installs and proves that pin
+      // against the real CLI. Neither gate validates the recorded offline
+      // event-shape fixtures; docs/open-questions.md tracks that residual
+      // coverage gap. The evidence remains human-reviewed, so the pull request
+      // must never merge itself.
       "matchManagers": ["npm"],
       "rangeStrategy": "pin",
       "automerge": false,
+    },
+    {
+      // The web client is a real dependency tree, not an evidence-gated CLI
+      // pin, so unlike the manifests above it gets the same supply-chain
+      // cooldown as cargo: a newly cut release waits out the window in which
+      // a compromised or broken version is typically caught and yanked before
+      // Renovate proposes it here.
+      "matchManagers": ["npm"],
+      "matchFileNames": ["clients/web/**"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "minimumReleaseAge": "7 days",
+      "minimumReleaseAgeBehaviour": "timestamp-required",
+    },
+    {
+      "matchManagers": ["npm"],
+      "matchFileNames": ["clients/web/**"],
+      "matchUpdateTypes": ["major"],
+      "minimumReleaseAge": "14 days",
+      "minimumReleaseAgeBehaviour": "timestamp-required",
     },
   ],
 }
