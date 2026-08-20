@@ -60,8 +60,9 @@ read-only summaries for:
 
 Any diagnostic interface and retained dump uses an allowlisted, redacted schema.
 It excludes user content, command payloads, credentials, tokens, provider
-drafts, and sensitive identifiers rather than exposing arbitrary internals or
-complete large content.
+drafts without the contract authorization and redaction required above, and
+sensitive identifiers rather than exposing arbitrary internals or complete
+large content.
 
 ## Failure artifacts
 

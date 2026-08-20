@@ -75,7 +75,9 @@ to discover the same action without knowing its shortcut.
 
 ## Tests
 
-Add deterministic Playwright coverage for:
+Require deterministic verification of the following behavior. The
+[browser-QA skill](../signalbox-web-browser-qa/SKILL.md) owns the browser
+scenarios and whether and how that verification uses Playwright:
 
 - command availability by scope;
 - sequences and conflict resolution;

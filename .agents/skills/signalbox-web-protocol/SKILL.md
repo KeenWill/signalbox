@@ -21,9 +21,11 @@ Keep these types distinct:
 - domain and application values;
 - persistence records and read projections;
 - process-protocol messages;
-- browser HTTP DTOs;
+- browser transport DTOs, such as HTTP DTOs only when the owning specification
+  selects HTTP;
 - client synchronization state; and
-- React view models.
+- presentation models, such as React view models only when the owning
+  specification selects React.
 
 Do not export storage rows or process-wire frames merely because they already
 serialize. The implementing stack's owning specification decides browser DTO
