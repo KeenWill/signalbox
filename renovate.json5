@@ -49,9 +49,10 @@
       // wrapped CLI releases far too often for calendar age to mean anything,
       // and what makes a pin bump safe is evidence, not waiting: the adapter
       // build mechanically derives its supported-version constant from the
-      // exact manifest pin, and the automatic pull-request compatibility smoke
-      // (.github/workflows/codex-smoke.yml) installs and proves that pin
-      // against the real CLI. Neither gate validates the recorded offline
+      // exact manifest pin, and the automatic pull-request compatibility
+      // smokes (.github/workflows/codex-smoke.yml and
+      // .github/workflows/claude-smoke.yml) install and prove those pins
+      // against the real CLIs. Neither gate validates the recorded offline
       // event-shape fixtures; docs/open-questions.md tracks that residual
       // coverage gap. The evidence remains human-reviewed, so the pull request
       // must never merge itself.
