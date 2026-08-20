@@ -5,13 +5,21 @@
 //! constraint or index can reach during restore must carry a pinned search
 //! path in its catalogue definition: an unpinned body that names another user
 //! function works in normal operation and fails only when the backup is
-//! needed. The assertion reads the reachable set from the live catalogue —
-//! direct references from check constraints and index expressions, plus one
-//! hop of body references from those functions — rather than restating an
-//! inventory, so a migration that adds an unpinned reachable function fails
-//! here instead of failing the next restore. One body-reference hop is a
-//! deliberate limit: deeper call chains have no mechanical catalogue
-//! representation, and the schema's current chains are one deep.
+//! needed. The assertion derives the reachable set from the dependency
+//! catalogue — the functions that check constraints and indexes record in
+//! `pg_depend`, the implementation functions of any operators they record,
+//! plus one hop of body references from those functions — rather than
+//! matching rendered definition text, so a function reached only through a
+//! user-defined operator is still found, and a migration that adds an
+//! unpinned reachable function fails here instead of failing the next
+//! restore. Each pin must carry the canonical value — the migration-selected
+//! schema, then `pg_catalog`, then `pg_temp` — because a pin that omits the
+//! working schema fails restore exactly like a missing pin. One
+//! body-reference hop is a deliberate limit: deeper call chains have no
+//! mechanical catalogue representation, and the schema's current chains are
+//! one deep. The test also fails when discovery returns nothing: the schema's
+//! check constraints do reach functions, so an empty set means the discovery
+//! query broke, not that nothing needs pinning.
 
 #![allow(
     clippy::expect_used,
@@ -37,28 +45,42 @@ const DATABASE_NAME: &str = "signalbox_search_path";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
-const UNPINNED_REACHABLE_FUNCTIONS: &str = "
-    WITH reachable AS (
+const RESTORE_REACHABLE_FUNCTIONS: &str = "
+    WITH restore_dependency AS (
+        SELECT d.refclassid, d.refobjid
+          FROM pg_depend AS d
+         WHERE (
+                d.classid = 'pg_constraint'::regclass
+                AND EXISTS (
+                    SELECT 1
+                      FROM pg_constraint AS c
+                     WHERE c.oid = d.objid
+                       AND c.contype = 'c'
+                )
+           )
+            OR (
+                d.classid = 'pg_class'::regclass
+                AND EXISTS (
+                    SELECT 1
+                      FROM pg_index AS i
+                     WHERE i.indexrelid = d.objid
+                )
+           )
+    ),
+    reachable AS (
         SELECT p.oid, p.proname, p.proconfig, p.prosrc, p.pronamespace
           FROM pg_proc AS p
          WHERE p.pronamespace =
                (SELECT oid FROM pg_namespace WHERE nspname = current_schema())
-           AND (
-                EXISTS (
-                    SELECT 1
-                      FROM pg_constraint AS c
-                     WHERE c.contype = 'c'
-                       AND pg_get_constraintdef(c.oid)
-                           ~ ('\\m' || p.proname || '\\M')
-                )
-                OR EXISTS (
-                    SELECT 1
-                      FROM pg_index AS i
-                      JOIN pg_class AS t ON t.oid = i.indrelid
-                     WHERE t.relnamespace = p.pronamespace
-                       AND pg_get_indexdef(i.indexrelid)
-                           ~ ('\\m' || p.proname || '\\M')
-                )
+           AND p.oid IN (
+                SELECT d.refobjid
+                  FROM restore_dependency AS d
+                 WHERE d.refclassid = 'pg_proc'::regclass
+                UNION
+                SELECT o.oprcode::oid
+                  FROM restore_dependency AS d
+                  JOIN pg_operator AS o ON o.oid = d.refobjid
+                 WHERE d.refclassid = 'pg_operator'::regclass
            )
     ),
     covered AS (
@@ -71,13 +93,16 @@ const UNPINNED_REACHABLE_FUNCTIONS: &str = "
            AND callee.oid <> caller.oid
            AND caller.prosrc ~ ('\\m' || callee.proname || '\\M')
     )
-    SELECT DISTINCT proname
+    SELECT proname,
+           EXISTS (
+               SELECT 1
+                 FROM unnest(coalesce(proconfig, ARRAY[]::text[])) AS cfg
+                WHERE cfg = format(
+                          'search_path=%I, pg_catalog, pg_temp',
+                          current_schema()
+                      )
+           ) AS pinned
       FROM covered
-     WHERE NOT EXISTS (
-            SELECT 1
-              FROM unnest(coalesce(proconfig, ARRAY[]::text[])) AS cfg
-             WHERE cfg LIKE 'search_path=%'
-       )
      ORDER BY proname
 ";
 
@@ -104,12 +129,22 @@ async fn every_restore_reachable_function_pins_its_search_path() -> Result<(), B
         .await?;
     migrate(&pool).await?;
 
-    let unpinned: Vec<String> = sqlx::query_scalar(UNPINNED_REACHABLE_FUNCTIONS)
+    let covered: Vec<(String, bool)> = sqlx::query_as(RESTORE_REACHABLE_FUNCTIONS)
         .fetch_all(&pool)
         .await?;
     assert!(
+        !covered.is_empty(),
+        "restore-reachability discovery found no functions, which means the \
+         discovery query broke: the schema's check constraints reach functions"
+    );
+    let unpinned: Vec<&str> = covered
+        .iter()
+        .filter(|(_, pinned)| !pinned)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert!(
         unpinned.is_empty(),
-        "restore-reachable functions without a pinned search path: {unpinned:?}"
+        "restore-reachable functions without the canonical search path pin: {unpinned:?}"
     );
     Ok(())
 }
