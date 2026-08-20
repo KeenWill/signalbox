@@ -50,7 +50,9 @@ use signalbox_persistence::{
         PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
     },
     commissioned_dispatch::{CommissionDispatchOutcome, PostgresCommissionedDispatchStore},
-    create_session::{CreateSessionHandlingOutcome, CreateSessionRepository},
+    create_session::{
+        CreateSessionHandlingOutcome, CreateSessionRepository, CreateSessionRepositoryError,
+    },
     disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
@@ -6218,11 +6220,22 @@ async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box
     )
     .prepare(SessionId::from_uuid(Uuid::from_u128(0x60_300)))
     .expect("the fixture creation command prepares");
-    let ordinary_outcome = CreateSessionRepository::new(fixture.pool.clone(), credential_pin())
-        .handle(ordinary)
-        .await?;
+    let ordinary_repository = CreateSessionRepository::new(fixture.pool.clone(), credential_pin());
+    let ordinary_outcome = ordinary_repository.handle(ordinary).await?;
     let CreateSessionHandlingOutcome::ConflictingReuse { .. } = ordinary_outcome else {
         panic!("ordinary creation must refuse a commission's command identity");
+    };
+
+    // The replay probe the daemon runs before handling refuses the same way:
+    // a commission-claimed identity reads as a different command kind, never
+    // as an equal ordinary creation.
+    let probe = ordinary_repository
+        .load(DurableCommandId::from_uuid(Uuid::from_u128(
+            COMMISSION_COMMAND_ID,
+        )))
+        .await;
+    let Err(CreateSessionRepositoryError::DifferentCommandKind { .. }) = probe else {
+        panic!("the ordinary replay probe must refuse a commission's command identity");
     };
 
     // A command identity already claimed by another kind entirely is the same

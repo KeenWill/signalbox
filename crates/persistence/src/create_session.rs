@@ -316,6 +316,13 @@ impl CreateSessionRepository {
         match inspect_registry(&mut connection, command_id).await? {
             None => Ok(None),
             Some(CommandKind::CreateSession) => {
+                // A claim a committed commissioned dispatch also holds names
+                // the commission wire operation, not an ordinary creation, so
+                // every ordinary-create replay probe refuses it the same way
+                // it refuses any other command kind.
+                if commissioned_dispatch_claims(&mut connection, command_id).await? {
+                    return Err(CreateSessionRepositoryError::DifferentCommandKind { command_id });
+                }
                 load_from_connection(&mut connection, command_id).await
             }
             Some(

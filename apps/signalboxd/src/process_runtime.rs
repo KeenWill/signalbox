@@ -8585,6 +8585,9 @@ where
     match store.load(request.command_id()).await {
         Ok(Some(recorded)) => {
             return if recorded.matches(&request) {
+                // A replay re-arms the queued turn's runnable hint too, so a
+                // retry recovers a hint the first response lost.
+                let _ = services.eligibility_nudge.nudge(recorded.session());
                 write_message(
                     writer,
                     version,
@@ -8606,14 +8609,18 @@ where
             };
         }
         Ok(None) => {}
-        Err(_) => {
-            return write_error(
-                writer,
-                version,
-                request_id,
-                internal_protocol_error(None, InternalDiagnostic::CommissionedDispatchCorruption),
-            )
-            .await;
+        Err(error) => {
+            // The lookup is a pre-mutation read: infrastructure failure is the
+            // contractually retryable unavailable, and only a durable shape
+            // that cannot reconstruct its domain value is corruption.
+            let error = match commission_failure_ambiguity(&error) {
+                Some(commit_ambiguous) => ProtocolError::mutation_unavailable(commit_ambiguous),
+                None => internal_protocol_error(
+                    None,
+                    InternalDiagnostic::CommissionedDispatchCorruption,
+                ),
+            };
+            return write_error(writer, version, request_id, error).await;
         }
     }
     let Some(template) = services.template_configuration.resolve(request.template()) else {
@@ -8651,6 +8658,10 @@ where
             CommissionDispatchOutcome::Dispatched { dispatch, session }
             | CommissionDispatchOutcome::Replayed { dispatch, session },
         ) => {
+            // The composite committed a queued turn; hint it runnable now
+            // rather than waiting for the periodic reconciliation sweep, as
+            // submit-input and repository-watch dispatch do post-commit.
+            let _ = services.eligibility_nudge.nudge(session);
             write_message(
                 writer,
                 version,
