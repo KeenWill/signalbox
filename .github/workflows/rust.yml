@@ -481,19 +481,18 @@ jobs:
   # build and run jobs share the same runner image and absolute work-path shape,
   # which keeps paths embedded in nextest archives valid across their pods.
   # Each test starts its own pinned PostgreSQL container through testcontainers,
-  # so four test processes can run without sharing database state.
+  # so concurrent test processes never share database state.
   #
   # The matrix is generated from `.github/postgres-integration-suites.toml`:
   # one runner per shard, so a suite declaring one shard costs one runner and
   # still travels the same archive-and-partition path a sharded suite does.
-  # Persistence, runner, and signalboxd are sharded according to their measured
-  # test-execution cost. Program-runtime and terminal-client remain whole
-  # because each finishes in about a minute.
+  # Persistence is sharded according to its measured test-execution cost; every
+  # other suite runs whole because it fits well inside the job timeout.
   #
-  # Runner cost, stated plainly: this asks for more runners than the matrix it
-  # replaces. The run matrix currently expands to twelve shards after the one
-  # shared build. The shards compile nothing and run for minutes; the build's
-  # single cache key replaces the old per-suite keys that evicted one another.
+  # The run matrix currently expands to seven shards after the one shared
+  # build.
+  # The shards compile nothing and run for minutes; the build's single cache
+  # key replaces the old per-suite keys that evicted one another.
   postgres-integration-run:
     name: >-
       postgres-integration
@@ -504,18 +503,15 @@ jobs:
     # workspace: their permission and atomicity contracts require local /tmp.
     env:
       TMPDIR: /tmp
-    # Measured against the shards rather than guessed. The former three
-    # persistence partitions were balanced but had grown to roughly 8m15s each;
-    # runner took about eight minutes whole, and signalboxd about five. The
-    # manifest splits those suites more finely without changing test selection.
+    # Measured against the shards rather than guessed. With database state in
+    # memory and sixteen tests per shard, the recombined shards run about two
+    # to nine minutes clean, persistence's three partitions being the longest.
     #
-    # Ten minutes did not leave room for the slow path. A shard whose tests
-    # actually fail runs about two minutes longer than a clean one (9.68m
-    # observed against a 7.4m median), so the cap sat within noise of exactly
-    # the runs whose results matter most — and a job the cap kills is reported
-    # as `cancelled`, which reads as an infrastructure problem and hides the
-    # test failure underneath it. Fifteen minutes is about twice the median,
-    # leaves the p90 at half the cap, and still bounds a genuinely hung job.
+    # A shard whose tests actually fail runs about two minutes longer than a
+    # clean one, and a job the cap kills is reported as `cancelled`, which
+    # reads as an infrastructure problem and hides the test failure underneath
+    # it. Fifteen minutes leaves the longest clean shard two-thirds of the cap
+    # and still bounds a genuinely hung job.
     timeout-minutes: 15
     strategy:
       fail-fast: false
