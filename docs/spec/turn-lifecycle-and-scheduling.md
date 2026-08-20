@@ -558,6 +558,17 @@ present population. A rotation that cannot be drained — an unreadable page, or
 one that fails to converge within its page ceiling — ends the scan with no
 decision and the ledger unchanged, rather than deciding on a partial population.
 
+Draining costs one statement per page and one more to prove the rotation ended:
+`⌈population ÷ 256⌉ + 1` reads, run one after another, each answered from an
+index. That is one read for an idle deployment and two for a hundred
+simultaneously quiescent turns; only a population at the page ceiling reaches
+4,097, and a rotation that large decides nothing anyway. Those reads are left
+whole rather than capped per scan because the ledger is fed complete
+populations: a scan stopping partway would have to report the turns it never
+reached as having left the quiescent shape. A scan whose reads outlast the
+interval delays the next scan rather than overlapping it, so the pass degrades
+to observing less often, never to two scans deciding at once.
+
 Terminalizing what a scan found due is bounded the same way. Those transactions
 run one at a time and the next scan waits for the last of them, so a scan ends
 at most sixty-four turns and leaves any remainder. That window works in laps,
@@ -574,10 +585,15 @@ What that costs is stated exactly, because it is the one number here that
 depends on population. The staleness bound governs when a turn becomes *due*,
 and that remains independent of how many turns are quiescent: every turn is
 observed on every scan. Ending them is not. A lap of more than one window takes
-a scan per windowful to work through, so the delay between a turn becoming due
-and being attempted is up to `⌈members ÷ 64⌉` scan intervals of the lap that
-holds it — one extra minute per 64 turns that opened the lap ahead of it. A
-cohort at the inventory's capacity would take over eleven days to work through.
+a scan per windowful to work through, and a turn's wait is the sum of two laps
+rather than one: a turn becoming due while a lap runs is not among its members,
+so it waits for that lap's remaining members to drain and then for its own place
+in the lap that opens next. The bound is therefore
+`⌈remaining ÷ 64⌉ + ⌈position ÷ 64⌉` scan intervals, which at its worst — a turn
+arriving as a full lap opens and then taking the last place in the next one — is
+`⌈previous ÷ 64⌉ + ⌈own ÷ 64⌉`. Only a turn already due when its lap opens waits
+the single `⌈position ÷ 64⌉`. A cohort at the inventory's capacity would take
+over eleven days per lap to work through, so a turn arriving into one waits two.
 That is accepted rather than overlooked: the alternative is a scan that runs
 until its cohort is drained, which delays the next observation of *every*
 session, including the ones whose turns are working. A watchdog may be slow to

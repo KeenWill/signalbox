@@ -339,6 +339,17 @@ async fn next_turn_liveness_wake(
 /// wakes instead would tie the time to reach a turn to the population size,
 /// and the staleness bound is a property of the binary, not of how many
 /// sessions happen to be quiescent.
+///
+/// That leaves the read phase uncapped where the terminalization phase is
+/// capped, which is deliberate rather than an oversight: the ledger is fed
+/// complete populations, so a read phase that stopped partway would report the
+/// turns it never reached as having left the quiescent shape and restart their
+/// bounds. The phases differ in cost as well as in kind — a page is one indexed
+/// statement, a terminalization is a locked transaction — and the count is
+/// `⌈population ÷ 256⌉ + 1`, which is one read for an idle deployment and
+/// reaches the ceiling only for a population that decides nothing anyway. A
+/// scan whose reads outlast the interval delays the next tick rather than
+/// overlapping it, so the pass degrades to observing less often.
 async fn reconcile_turn_liveness<Repository>(
     repository: &Repository,
     ledger: &mut TurnLivenessLedger,
