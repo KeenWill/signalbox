@@ -5,11 +5,15 @@ interface BrowserProblems {
   pageErrors: string[]
 }
 
+// Tunable effective ceiling: fewer than 50 mounted rows leaves ample overscan headroom while
+// still failing if either virtualized surface materializes its complete bounded window.
+const VIRTUALIZED_MOUNTED_ROWS_EXCLUSIVE_CEILING = 50
+
 const largeTimelineFixture = {
   path: '/scenario/large-timeline',
   logicalItems: 100_000,
   loadedItems: 360,
-  mountedRowsCeiling: 50,
+  mountedRowsCeiling: VIRTUALIZED_MOUNTED_ROWS_EXCLUSIVE_CEILING,
   firstItemTestId: 'timeline-event-0',
   firstItemPosition: '1',
   setSize: '360',
@@ -19,7 +23,7 @@ const largeFleetFixture = {
   path: '/scenario/large-table',
   logicalRows: 1_000_000,
   loadedRows: 480,
-  mountedRowsCeiling: 50,
+  mountedRowsCeiling: VIRTUALIZED_MOUNTED_ROWS_EXCLUSIVE_CEILING,
   ariaRowCount: '1000001',
   firstRowTestId: 'fleet-obligation-0',
   firstRowIndex: '2',

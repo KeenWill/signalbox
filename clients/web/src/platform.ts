@@ -114,9 +114,15 @@ export const SCENARIO_TIMELINE_WINDOW_ITEMS = 360
 // Tunable effective ceiling: each development scenario loads one bounded fleet window.
 export const SCENARIO_FLEET_WINDOW_ITEMS = 480
 
-const normalizedLimit = (limit: number, maximum: number): number => {
-  if (!Number.isFinite(limit)) return 1
-  return Math.min(Math.max(Math.trunc(limit), 1), maximum)
+const normalizedLimit = ({
+  requested,
+  maximum,
+}: {
+  requested: number
+  maximum: number
+}): number => {
+  if (!Number.isFinite(requested)) return 1
+  return Math.min(Math.max(Math.trunc(requested), 1), maximum)
 }
 
 const parseCursor = (cursor: string | undefined, prefix: string): number => {
@@ -180,7 +186,10 @@ export class ScenarioTransport implements SignalboxTransport {
 
   async readTimeline(request: WindowRequest): Promise<CursorWindow<TimelineItem>> {
     const start = Math.min(parseCursor(request.after, 'timeline'), this.scenario.timelineTotal)
-    const count = normalizedLimit(request.limit, SCENARIO_TIMELINE_WINDOW_ITEMS)
+    const count = normalizedLimit({
+      requested: request.limit,
+      maximum: SCENARIO_TIMELINE_WINDOW_ITEMS,
+    })
     const end = Math.min(start + count, this.scenario.timelineTotal)
     const items = Array.from({ length: end - start }, (_, offset) => {
       const index = start + offset
@@ -205,7 +214,10 @@ export class ScenarioTransport implements SignalboxTransport {
 
   async readFleet(request: WindowRequest): Promise<CursorWindow<FleetRow>> {
     const start = Math.min(parseCursor(request.after, 'fleet'), this.scenario.tableTotal)
-    const count = normalizedLimit(request.limit, SCENARIO_FLEET_WINDOW_ITEMS)
+    const count = normalizedLimit({
+      requested: request.limit,
+      maximum: SCENARIO_FLEET_WINDOW_ITEMS,
+    })
     const end = Math.min(start + count, this.scenario.tableTotal)
     const items = Array.from({ length: end - start }, (_, offset) => {
       const index = start + offset

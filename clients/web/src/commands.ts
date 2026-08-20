@@ -79,8 +79,9 @@ export const commandRegistry = [
     available: (context) => context.timelineIds.length > 0,
     run: (context) => {
       const current = context.getState().app.selectedTimeline
-      const currentIndex = Math.max(context.timelineIds.indexOf(current ?? ''), 0)
-      const nextIndex = Math.min(currentIndex + 1, context.timelineIds.length - 1)
+      const currentIndex = context.timelineIds.indexOf(current ?? '')
+      const nextIndex =
+        currentIndex < 0 ? 0 : Math.min(currentIndex + 1, context.timelineIds.length - 1)
       context.dispatch(actions.timelineSelected(context.timelineIds[nextIndex] ?? null))
     },
   },
