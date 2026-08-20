@@ -218,6 +218,11 @@ export interface DiagnosticSnapshot {
   queryStates: string[]
   queryCacheSize: number
   recentActions: readonly string[]
+  loadedImports?: number
+  logicalImports?: number
+  loadedImportEntries?: number
+  selectedImport?: string | null
+  selectedImportPosition?: number | null
 }
 
 // Tunable effective ceiling: the inspector shows a concise recent action tail.

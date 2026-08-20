@@ -16,4 +16,23 @@ describe('command registry', () => {
 
     expect(selectApp(store.getState()).selectedTimeline).toBe(timelineIds[0])
   })
+
+  it('selects the next immutable imported frontier through the command registry', () => {
+    const importEntryIds = ['import-entry-1', 'import-entry-2'] as const
+    let selectedImportEntry: (typeof importEntryIds)[number] = importEntryIds[0]
+
+    invokeCommand('imports.entry.next', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      importEntryIds,
+      selectedImportEntry,
+      selectImportEntry: (id) => {
+        selectedImportEntry = id as (typeof importEntryIds)[number]
+      },
+    })
+
+    expect(selectedImportEntry).toBe(importEntryIds[1])
+  })
 })

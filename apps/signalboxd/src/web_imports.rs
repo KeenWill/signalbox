@@ -1,0 +1,670 @@
+//! Production browser adapter for bounded imported-conversation discovery.
+
+use std::num::NonZeroU32;
+
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    middleware,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use signalbox_application::{
+    CreateSessionFromImportedFrontierOutcome, CreateSessionFromImportedFrontierRequest,
+    CreateSessionFromImportedFrontierService, UuidV7CreateSessionFromImportedFrontierIdGenerator,
+};
+use signalbox_domain::{
+    DirectModelSelection, DurableCommandId, ImportedConversationFormat, ImportedConversationId,
+    ImportedSessionRelationship, ImportedSourceAttestation, ImportedSpeaker,
+    ImportedTranscriptContent, ImportedTranscriptEntryId, ImportedTranscriptPosition, ModelAlias,
+    ModelSelectionRequest, SessionConfigurationDefaults,
+};
+use signalbox_persistence::{
+    conversation_import::{ImportedConversationRepository, ImportedConversationRepositoryError},
+    conversation_import_discovery::{
+        ImportedContinuationReference, ImportedConversationDescriptor,
+        ImportedConversationDiscoveryError, ImportedConversationDiscoveryRepository,
+        ImportedConversationDiscoveryRequestError, ImportedConversationPageRequest,
+        ImportedConversationSummary, ImportedEntryProjection, ImportedEntryWindow,
+        ImportedEntryWindowAnchor,
+    },
+    create_session_from_imported_frontier::{
+        ImportedSessionRepository, ImportedSessionRepositoryError,
+    },
+};
+use signalbox_web_contract::{
+    MAX_IMPORT_ENTRY_WINDOW_ITEMS, MAX_IMPORT_LIST_ITEMS, MAX_IMPORT_TEXT_PREVIEW_BYTES,
+    WebImportContinuationReference, WebImportContinuationRequest, WebImportContinuationResponse,
+    WebImportDescriptor, WebImportEntryWindow, WebImportEntryWindowRequest, WebImportFormat,
+    WebImportListPage, WebImportListRequest, WebImportSizeFacts, WebImportSourceEvidence,
+    WebImportSummary, WebImportTextCompleteness, WebImportTextEvidence, WebImportTimelineBounds,
+    WebImportWindowAnchor, WebImportedContentKind, WebImportedEntry,
+    WebImportedSessionRelationship, WebImportedSpeakerEvidence, WebModelSelection,
+};
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::{
+    HubModelConfiguration,
+    web_http::{application_error, decode_bounded_json, transport_error, validate_json_mutation},
+};
+
+// Tunable effective ceiling: ordinary catalog views ask for a dense first page below the hard cap.
+const DEFAULT_IMPORT_LIST_ITEMS: u32 = 50;
+// Tunable effective ceiling: default entry windows retain 25 neighbors on each side.
+const DEFAULT_IMPORT_WINDOW_RADIUS: u32 = 25;
+
+#[derive(Clone, Debug)]
+struct WebImportState {
+    pool: PgPool,
+    model_configuration: HubModelConfiguration,
+}
+
+pub(crate) fn router(pool: PgPool, model_configuration: HubModelConfiguration) -> Router {
+    let state = WebImportState {
+        pool,
+        model_configuration,
+    };
+    let mutation = Router::new()
+        .route("/{conversation}/continuations", post(continue_import))
+        .route_layer(middleware::from_fn(validate_json_mutation));
+    Router::new()
+        .route("/", get(list_imports))
+        .route("/{conversation}", get(read_descriptor))
+        .route("/{conversation}/entries", get(read_entry_window))
+        .merge(mutation)
+        .with_state(state)
+}
+
+async fn list_imports(
+    State(state): State<WebImportState>,
+    request: Result<Query<WebImportListRequest>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let Query(request) = match request {
+        Ok(request) => request,
+        Err(_) => return invalid_request("imports query is malformed"),
+    };
+    let limit = request.limit.unwrap_or(DEFAULT_IMPORT_LIST_ITEMS);
+    let Some(limit) = NonZeroU32::new(limit).filter(|limit| limit.get() <= MAX_IMPORT_LIST_ITEMS)
+    else {
+        return invalid_request("imports limit is outside the contract bound");
+    };
+    let after = match optional_uuid(request.after.as_deref()) {
+        Ok(after) => after.map(ImportedConversationId::from_uuid),
+        Err(message) => return invalid_request(message),
+    };
+    let query = ImportedConversationPageRequest {
+        after,
+        format: request.format.map(domain_format),
+        source_session_id: request.source_session_id.map(String::into_bytes),
+        limit,
+    };
+    match ImportedConversationDiscoveryRepository::new(state.pool)
+        .list(query)
+        .await
+    {
+        Ok(page) => Json(WebImportListPage {
+            items: page.items.into_iter().map(web_summary).collect(),
+            next_cursor: page.next_after.map(|cursor| cursor.into_uuid().to_string()),
+        })
+        .into_response(),
+        Err(error) => discovery_error(error),
+    }
+}
+
+async fn read_descriptor(
+    State(state): State<WebImportState>,
+    Path(conversation): Path<String>,
+) -> Response {
+    let conversation = match imported_conversation_id(&conversation) {
+        Ok(conversation) => conversation,
+        Err(message) => return invalid_request(message),
+    };
+    match ImportedConversationDiscoveryRepository::new(state.pool)
+        .descriptor(conversation)
+        .await
+    {
+        Ok(Some(descriptor)) => Json(web_descriptor(descriptor)).into_response(),
+        Ok(None) => import_not_found(),
+        Err(error) => discovery_error(error),
+    }
+}
+
+async fn read_entry_window(
+    State(state): State<WebImportState>,
+    Path(conversation): Path<String>,
+    request: Result<Query<WebImportEntryWindowRequest>, axum::extract::rejection::QueryRejection>,
+) -> Response {
+    let conversation = match imported_conversation_id(&conversation) {
+        Ok(conversation) => conversation,
+        Err(message) => return invalid_request(message),
+    };
+    let Query(request) = match request {
+        Ok(request) => request,
+        Err(_) => return invalid_request("imported entry-window query is malformed"),
+    };
+    let anchor = match web_window_anchor(request.anchor, request.position) {
+        Ok(anchor) => anchor,
+        Err(message) => return invalid_request(message),
+    };
+    let before = request.before.unwrap_or(DEFAULT_IMPORT_WINDOW_RADIUS);
+    let after = request.after.unwrap_or(DEFAULT_IMPORT_WINDOW_RADIUS);
+    let Some(projected_items) = before
+        .checked_add(after)
+        .and_then(|total| total.checked_add(1))
+    else {
+        return invalid_request("imported entry-window bound overflows");
+    };
+    if projected_items > MAX_IMPORT_ENTRY_WINDOW_ITEMS {
+        return invalid_request("imported entry window exceeds the contract bound");
+    }
+    let Some(maximum_items) = NonZeroU32::new(MAX_IMPORT_ENTRY_WINDOW_ITEMS) else {
+        return application_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid_import_contract",
+            "imported entry-window contract is invalid",
+        );
+    };
+    match ImportedConversationDiscoveryRepository::new(state.pool)
+        .entry_window(conversation, anchor, before, after, maximum_items)
+        .await
+    {
+        Ok(Some(window)) => Json(web_entry_window(window)).into_response(),
+        Ok(None) => import_not_found(),
+        Err(ImportedConversationDiscoveryError::Request(
+            ImportedConversationDiscoveryRequestError::PositionOutOfRange,
+        )) => invalid_request("imported entry-window position is outside the timeline"),
+        Err(error) => discovery_error(error),
+    }
+}
+
+async fn continue_import(
+    State(state): State<WebImportState>,
+    Path(conversation): Path<String>,
+    request: axum::extract::Request,
+) -> Response {
+    let conversation = match imported_conversation_id(&conversation) {
+        Ok(conversation) => conversation,
+        Err(message) => return invalid_request(message),
+    };
+    let request = match decode_bounded_json::<WebImportContinuationRequest>(request).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    let canonical = match canonical_continuation_request(conversation, request) {
+        Ok(request) => request,
+        Err(message) => return invalid_request(message),
+    };
+    execute_continuation(&state, canonical).await
+}
+
+struct CanonicalContinuationRequest {
+    command_id: DurableCommandId,
+    conversation: ImportedConversationId,
+    entry: ImportedTranscriptEntryId,
+    position: ImportedTranscriptPosition,
+    relationship: ImportedSessionRelationship,
+    web_relationship: WebImportedSessionRelationship,
+    model_selection: ModelSelectionRequest,
+    web_frontier: WebImportContinuationReference,
+}
+
+fn canonical_continuation_request(
+    path_conversation: ImportedConversationId,
+    request: WebImportContinuationRequest,
+) -> Result<CanonicalContinuationRequest, &'static str> {
+    let command_id = required_uuid(&request.command_id)
+        .map(DurableCommandId::from_uuid)
+        .map_err(|_| "continuation command identity is not a UUID")?;
+    let frontier_conversation =
+        imported_conversation_id(&request.frontier.imported_conversation_id)?;
+    if frontier_conversation != path_conversation {
+        return Err("continuation frontier belongs to another import");
+    }
+    let position = ImportedTranscriptPosition::try_from_u64(request.frontier.position)
+        .ok_or("continuation position must be positive")?;
+    let entry = required_uuid(&request.frontier.imported_entry_id)
+        .map(ImportedTranscriptEntryId::from_uuid)
+        .map_err(|_| "continuation imported-entry identity is not a UUID")?;
+    let model_selection = match request.initial_model_selection {
+        WebModelSelection::Direct { selection_id } => {
+            ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(
+                required_uuid(&selection_id)
+                    .map_err(|_| "direct model selection identity is not a UUID")?,
+            ))
+        }
+        WebModelSelection::Alias { alias_id } => {
+            ModelSelectionRequest::Alias(ModelAlias::from_uuid(
+                required_uuid(&alias_id).map_err(|_| "model alias identity is not a UUID")?,
+            ))
+        }
+    };
+    let relationship = domain_relationship(request.relationship);
+    Ok(CanonicalContinuationRequest {
+        command_id,
+        conversation: path_conversation,
+        entry,
+        position,
+        relationship,
+        web_relationship: request.relationship,
+        model_selection,
+        web_frontier: request.frontier,
+    })
+}
+
+async fn execute_continuation(
+    state: &WebImportState,
+    request: CanonicalContinuationRequest,
+) -> Response {
+    let repository = ImportedSessionRepository::new(
+        state.pool.clone(),
+        state.model_configuration.session_credential_pin(),
+    );
+    match repository.load(request.command_id).await {
+        Ok(Some(recorded)) => {
+            let command = recorded.command();
+            if command.imported_conversation() != request.conversation
+                || command.imported_frontier().through_entry() != request.entry
+                || command.imported_frontier().through_position() != request.position
+                || command.relationship() != request.relationship
+                || command.initial_configuration_defaults().model() != request.model_selection
+            {
+                return conflicting_reuse();
+            }
+            return continuation_response(request, recorded.applied_result().session().into_uuid());
+        }
+        Ok(None) => {}
+        Err(ImportedSessionRepositoryError::DifferentCommandKind { .. }) => {
+            return conflicting_reuse();
+        }
+        Err(error) => return imported_session_error(error),
+    }
+    let conversation = match ImportedConversationRepository::new(state.pool.clone())
+        .load(request.conversation)
+        .await
+    {
+        Ok(Some(conversation)) => conversation,
+        Ok(None) => return import_not_found(),
+        Err(error) => return imported_conversation_error(error),
+    };
+    let Some(frontier) = conversation
+        .frontiers()
+        .find(|frontier| frontier.through_position() == request.position)
+    else {
+        return invalid_request("selected imported frontier no longer resolves");
+    };
+    if frontier.through_entry() != request.entry {
+        return invalid_request("selected imported entry identity does not match its position");
+    }
+    if state
+        .model_configuration
+        .resolve_session_model(request.model_selection)
+        .is_err()
+    {
+        return invalid_request("initial model selection is not configured");
+    }
+    let application_request = match CreateSessionFromImportedFrontierRequest::try_new(
+        request.command_id,
+        frontier,
+        request.relationship,
+        SessionConfigurationDefaults::new(request.model_selection),
+    ) {
+        Ok(request) => request,
+        Err(_) => return invalid_request("continuation command identity is reserved"),
+    };
+    let mut service = CreateSessionFromImportedFrontierService::new(
+        UuidV7CreateSessionFromImportedFrontierIdGenerator,
+        repository,
+    );
+    match service.execute(application_request).await {
+        Ok(CreateSessionFromImportedFrontierOutcome::Applied(result)) => {
+            continuation_response(request, result.session().into_uuid())
+        }
+        Ok(CreateSessionFromImportedFrontierOutcome::ImportedConversationNotFound { .. }) => {
+            import_not_found()
+        }
+        Ok(CreateSessionFromImportedFrontierOutcome::ImportedFrontierNotFound { .. }) => {
+            invalid_request("selected imported frontier no longer resolves")
+        }
+        Ok(CreateSessionFromImportedFrontierOutcome::ConflictingReuse { .. }) => {
+            conflicting_reuse()
+        }
+        Err(error) => imported_session_error(error),
+    }
+}
+
+fn web_summary(summary: ImportedConversationSummary) -> WebImportSummary {
+    WebImportSummary {
+        imported_conversation_id: summary.conversation.into_uuid().to_string(),
+        display_title: summary.display_title.map(|title| title.into_string()),
+        format: web_format(summary.format),
+        source_session_id: summary.source_session_id,
+        entry_count: summary.entry_count,
+    }
+}
+
+fn web_descriptor(descriptor: ImportedConversationDescriptor) -> WebImportDescriptor {
+    WebImportDescriptor {
+        imported_conversation_id: descriptor.conversation.into_uuid().to_string(),
+        display_title: descriptor.display_title.map(|title| title.into_string()),
+        raw_record_count: descriptor.raw_record_count,
+        entry_count: descriptor.entry_count,
+        source: WebImportSourceEvidence {
+            format: web_format(descriptor.format),
+            source_digest_sha256: lowercase_hex(&descriptor.source_digest),
+            source_session_id: descriptor.source_session_id,
+        },
+        sizes: WebImportSizeFacts {
+            raw_source_bytes: descriptor.sizes.raw_source_bytes,
+            normalized_source_record_bytes: descriptor.sizes.normalized_source_record_bytes,
+            normalized_entry_bytes: descriptor.sizes.normalized_entry_bytes,
+        },
+        timeline: WebImportTimelineBounds {
+            first: web_frontier(descriptor.first),
+            latest: web_frontier(descriptor.latest),
+        },
+    }
+}
+
+fn web_entry_window(window: ImportedEntryWindow) -> WebImportEntryWindow {
+    WebImportEntryWindow {
+        anchor_position: window.anchor_position,
+        first_position: window.first_position,
+        last_position: window.last_position,
+        has_before: window.has_before,
+        has_after: window.has_after,
+        items: window.items.into_iter().map(web_entry).collect(),
+    }
+}
+
+fn web_entry(entry: ImportedEntryProjection) -> WebImportedEntry {
+    let (content_kind, text) = web_content(&entry.content);
+    WebImportedEntry {
+        frontier: web_frontier(entry.frontier),
+        raw_record_position: entry.raw_record_position,
+        record_entry_position: entry.record_entry_position,
+        source_speaker: match entry.source_speaker {
+            ImportedSourceAttestation::NotAttested => WebImportedSpeakerEvidence::NotAttested,
+            ImportedSourceAttestation::AttestedAbsent => WebImportedSpeakerEvidence::AttestedAbsent,
+            ImportedSourceAttestation::Attested(ImportedSpeaker::User) => {
+                WebImportedSpeakerEvidence::User
+            }
+            ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant) => {
+                WebImportedSpeakerEvidence::Assistant
+            }
+        },
+        content_kind,
+        text,
+    }
+}
+
+fn web_content(
+    content: &ImportedTranscriptContent,
+) -> (WebImportedContentKind, Option<WebImportTextEvidence>) {
+    match content {
+        ImportedTranscriptContent::SourceEvent { .. } => {
+            (WebImportedContentKind::SourceEvent, None)
+        }
+        ImportedTranscriptContent::SourceMessageBlock { .. } => {
+            (WebImportedContentKind::SourceMessageBlock, None)
+        }
+        ImportedTranscriptContent::Text(text) => (
+            WebImportedContentKind::Text,
+            Some(match text {
+                ImportedSourceAttestation::NotAttested => WebImportTextEvidence::NotAttested,
+                ImportedSourceAttestation::AttestedAbsent => WebImportTextEvidence::AttestedAbsent,
+                ImportedSourceAttestation::Attested(text) => {
+                    let (leading_text, completeness) = bounded_text(text.as_str());
+                    WebImportTextEvidence::Attested {
+                        leading_text,
+                        completeness,
+                    }
+                }
+            }),
+        ),
+        ImportedTranscriptContent::ToolCall { .. } => (WebImportedContentKind::ToolCall, None),
+        ImportedTranscriptContent::ToolResult { .. } => (WebImportedContentKind::ToolResult, None),
+        ImportedTranscriptContent::Thinking { .. } => (WebImportedContentKind::Thinking, None),
+        ImportedTranscriptContent::RedactedThinking { .. } => {
+            (WebImportedContentKind::RedactedThinking, None)
+        }
+        ImportedTranscriptContent::Document { .. } => (WebImportedContentKind::Document, None),
+        ImportedTranscriptContent::MessageContentAbsent(_) => {
+            (WebImportedContentKind::MessageContentAbsent, None)
+        }
+    }
+}
+
+fn bounded_text(text: &str) -> (String, WebImportTextCompleteness) {
+    if text.len() <= MAX_IMPORT_TEXT_PREVIEW_BYTES {
+        return (text.to_owned(), WebImportTextCompleteness::Complete);
+    }
+    let mut end = MAX_IMPORT_TEXT_PREVIEW_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_owned(), WebImportTextCompleteness::Truncated)
+}
+
+fn web_frontier(frontier: ImportedContinuationReference) -> WebImportContinuationReference {
+    WebImportContinuationReference {
+        imported_conversation_id: frontier.conversation.into_uuid().to_string(),
+        imported_entry_id: frontier.entry.into_uuid().to_string(),
+        position: frontier.position,
+    }
+}
+
+fn continuation_response(request: CanonicalContinuationRequest, session: Uuid) -> Response {
+    Json(WebImportContinuationResponse {
+        command_id: request.command_id.as_uuid().to_string(),
+        session_id: session.to_string(),
+        frontier: request.web_frontier,
+        relationship: request.web_relationship,
+    })
+    .into_response()
+}
+
+fn web_window_anchor(
+    anchor: Option<WebImportWindowAnchor>,
+    position: Option<u64>,
+) -> Result<ImportedEntryWindowAnchor, &'static str> {
+    match (anchor.unwrap_or(WebImportWindowAnchor::First), position) {
+        (WebImportWindowAnchor::First, None) => Ok(ImportedEntryWindowAnchor::First),
+        (WebImportWindowAnchor::Latest, None) => Ok(ImportedEntryWindowAnchor::Latest),
+        (WebImportWindowAnchor::Position, Some(position)) => {
+            Ok(ImportedEntryWindowAnchor::Position(position))
+        }
+        _ => Err("entry-window position is present exactly for the position anchor"),
+    }
+}
+
+fn domain_format(format: WebImportFormat) -> ImportedConversationFormat {
+    match format {
+        WebImportFormat::ClaudeCodeSessionJsonlV1 => {
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV1
+        }
+        WebImportFormat::ClaudeCodeSessionJsonlV2 => {
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV2
+        }
+        WebImportFormat::CodexRolloutJsonlV1 => ImportedConversationFormat::CodexRolloutJsonlV1,
+    }
+}
+
+fn web_format(format: ImportedConversationFormat) -> WebImportFormat {
+    match format {
+        ImportedConversationFormat::ClaudeCodeSessionJsonlV1 => {
+            WebImportFormat::ClaudeCodeSessionJsonlV1
+        }
+        ImportedConversationFormat::ClaudeCodeSessionJsonlV2 => {
+            WebImportFormat::ClaudeCodeSessionJsonlV2
+        }
+        ImportedConversationFormat::CodexRolloutJsonlV1 => WebImportFormat::CodexRolloutJsonlV1,
+    }
+}
+
+fn domain_relationship(
+    relationship: WebImportedSessionRelationship,
+) -> ImportedSessionRelationship {
+    match relationship {
+        WebImportedSessionRelationship::Resume => ImportedSessionRelationship::Resume,
+        WebImportedSessionRelationship::Fork => ImportedSessionRelationship::Fork,
+    }
+}
+
+fn lowercase_hex(bytes: &[u8]) -> String {
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn optional_uuid(value: Option<&str>) -> Result<Option<Uuid>, &'static str> {
+    value
+        .map(required_uuid)
+        .transpose()
+        .map_err(|_| "imports cursor is not an imported-conversation UUID")
+}
+
+fn required_uuid(value: &str) -> Result<Uuid, uuid::Error> {
+    Uuid::parse_str(value)
+}
+
+fn imported_conversation_id(value: &str) -> Result<ImportedConversationId, &'static str> {
+    required_uuid(value)
+        .map(ImportedConversationId::from_uuid)
+        .map_err(|_| "imported-conversation identity is not a UUID")
+}
+
+fn discovery_error(error: ImportedConversationDiscoveryError) -> Response {
+    match error {
+        ImportedConversationDiscoveryError::Database(_) => application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "imports_unavailable",
+            "imported-conversation discovery is temporarily unavailable",
+        ),
+        ImportedConversationDiscoveryError::Request(
+            ImportedConversationDiscoveryRequestError::PositionOutOfRange,
+        ) => invalid_request("imported entry-window position is outside the timeline"),
+        ImportedConversationDiscoveryError::Request(
+            ImportedConversationDiscoveryRequestError::WindowTooLarge,
+        ) => invalid_request("imported entry window exceeds the contract bound"),
+        ImportedConversationDiscoveryError::Corruption(_) => application_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "import_projection_corrupt",
+            "stored imported-conversation facts failed closed validation",
+        ),
+    }
+}
+
+fn imported_conversation_error(error: ImportedConversationRepositoryError) -> Response {
+    match error {
+        ImportedConversationRepositoryError::Database(_) => application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "imports_unavailable",
+            "imported conversation is temporarily unavailable",
+        ),
+        ImportedConversationRepositoryError::IdentityCollision(_)
+        | ImportedConversationRepositoryError::Corruption(_) => application_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "import_corrupt",
+            "stored imported conversation failed closed validation",
+        ),
+    }
+}
+
+fn imported_session_error(error: ImportedSessionRepositoryError) -> Response {
+    match error {
+        ImportedSessionRepositoryError::CommitAmbiguous(_) => application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "continuation_commit_ambiguous",
+            "continuation acknowledgement is ambiguous; retry the exact command",
+        ),
+        ImportedSessionRepositoryError::Database(_) => application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "continuation_unavailable",
+            "imported continuation is temporarily unavailable",
+        ),
+        ImportedSessionRepositoryError::DifferentCommandKind { .. } => conflicting_reuse(),
+        ImportedSessionRepositoryError::Preparation(_)
+        | ImportedSessionRepositoryError::IdentityCollision(_)
+        | ImportedSessionRepositoryError::Corruption(_) => application_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "continuation_corrupt",
+            "stored imported continuation failed closed validation",
+        ),
+    }
+}
+
+fn invalid_request(message: &'static str) -> Response {
+    transport_error(StatusCode::BAD_REQUEST, "invalid_import_request", message)
+}
+
+fn import_not_found() -> Response {
+    application_error(
+        StatusCode::NOT_FOUND,
+        "import_not_found",
+        "imported conversation does not exist",
+    )
+}
+
+fn conflicting_reuse() -> Response {
+    application_error(
+        StatusCode::CONFLICT,
+        "conflicting_command_reuse",
+        "durable command identity already names another payload",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn imported_text_preview_truncates_on_a_utf8_scalar_boundary() {
+        let expected = "€".repeat(MAX_IMPORT_TEXT_PREVIEW_BYTES / "€".len());
+        let source = "€".repeat(MAX_IMPORT_TEXT_PREVIEW_BYTES);
+
+        assert_eq!(
+            bounded_text(&source),
+            (expected, WebImportTextCompleteness::Truncated)
+        );
+    }
+
+    #[test]
+    fn imported_text_preview_marks_a_complete_value() {
+        let source = "complete imported text";
+
+        assert_eq!(
+            bounded_text(source),
+            (source.to_owned(), WebImportTextCompleteness::Complete)
+        );
+    }
+
+    #[test]
+    fn position_anchor_preserves_its_exact_position() {
+        assert_eq!(
+            web_window_anchor(Some(WebImportWindowAnchor::Position), Some(7)),
+            Ok(ImportedEntryWindowAnchor::Position(7))
+        );
+    }
+
+    #[test]
+    fn position_anchor_rejects_an_absent_position() {
+        assert_eq!(
+            web_window_anchor(Some(WebImportWindowAnchor::Position), None),
+            Err("entry-window position is present exactly for the position anchor")
+        );
+    }
+
+    #[test]
+    fn non_position_anchor_rejects_a_supplied_position() {
+        assert_eq!(
+            web_window_anchor(Some(WebImportWindowAnchor::Latest), Some(7)),
+            Err("entry-window position is present exactly for the position anchor")
+        );
+    }
+}

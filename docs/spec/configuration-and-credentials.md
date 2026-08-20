@@ -1,7 +1,9 @@
 # Configuration and credentials
 
 The browser HTTP listener, same-origin static assets, and generated contract
-bootstrap are verified against this PR (`agent/web-http-transport`).
+bootstrap are verified against this PR (`agent/web-http-transport`). The
+version-two imports capabilities and production adapter are verified against
+this PR (`agent/web-discovery-reads`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -170,13 +172,15 @@ daemon does not emit permissive CORS headers and adds no account, login,
 bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. Those
 deployment boundaries remain outside Signalbox.
 
-`GET /api/bootstrap` is the production browser API in this foundation slice. It
-returns the exact contract family `signalbox.web-http`, version `1`, the
-`bounded_json`, `same_origin_json_mutations`, and `ndjson_streaming`
+`GET /api/bootstrap` returns the exact contract family `signalbox.web-http`,
+version `2`, the `bounded_json`, `same_origin_json_mutations`,
+`ndjson_streaming`, `import_discovery`, and `imported_continuations`
 capabilities, and the effective 65,536-byte JSON-body and NDJSON-item hard
-ceilings. The generated browser decoder rejects an unknown field, wrong shape,
-different family, or different version rather than interpreting it as the local
-process protocol. No process-protocol frame is a browser DTO.
+ceilings. Version two adds the bounded import DTOs and routes owned by
+[conversation import](conversation-import.md#bounded-browser-discovery-and-continuation).
+The generated browser decoder rejects an unknown field, wrong shape, different
+family, or different version rather than interpreting it as the local process
+protocol. No process-protocol frame is a browser DTO.
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and

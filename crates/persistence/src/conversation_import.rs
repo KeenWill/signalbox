@@ -932,7 +932,7 @@ fn equivalent_snapshot(candidate: &ImportedConversation, existing: &ImportedConv
             })
 }
 
-fn encode_format(format: ImportedConversationFormat) -> (&'static str, i16) {
+pub(crate) fn encode_format(format: ImportedConversationFormat) -> (&'static str, i16) {
     match format {
         ImportedConversationFormat::ClaudeCodeSessionJsonlV1 => {
             (CLAUDE_CODE_FORMAT, CLAUDE_CODE_VERSION_ONE)
@@ -987,7 +987,7 @@ fn encode_source_speaker(speaker: &ImportedSourceAttestation<ImportedSpeaker>) -
     }
 }
 
-fn decode_source_speaker(
+pub(crate) fn decode_source_speaker(
     value: &str,
 ) -> Result<ImportedSourceAttestation<ImportedSpeaker>, ImportedConversationRepositoryError> {
     match value {

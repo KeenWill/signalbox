@@ -8,10 +8,10 @@ use std::{collections::BTreeMap, error::Error, fmt};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 /// Exact browser HTTP contract version served by this daemon build.
-pub const WEB_CONTRACT_VERSION: &str = "1";
+pub const WEB_CONTRACT_VERSION: &str = "2";
 /// Stable name of the browser HTTP contract family.
 pub const WEB_CONTRACT_NAME: &str = "signalbox.web-http";
 
@@ -40,6 +40,10 @@ pub struct WebContractCapabilities {
     pub same_origin_json_mutations: bool,
     /// Incremental response items use newline-delimited JSON.
     pub ndjson_streaming: bool,
+    /// Bounded imported-conversation discovery and entry windows are available.
+    pub import_discovery: bool,
+    /// Imported frontiers can seed a native session through an idempotent command.
+    pub imported_continuations: bool,
 }
 
 /// Effective hard limits clients must honor for this contract version.
@@ -77,6 +81,8 @@ impl WebContractBootstrap {
                 bounded_json: true,
                 same_origin_json_mutations: true,
                 ndjson_streaming: true,
+                import_discovery: true,
+                imported_continuations: true,
             },
             limits: WebContractLimits {
                 max_json_body_bytes: MAX_JSON_BODY_BYTES as u32,
@@ -94,6 +100,312 @@ pub struct WebContractExample {
     pub request_id: String,
     /// Bounded example payload.
     pub message: String,
+}
+
+/// Hard safety ceiling protecting one imports catalog response.
+pub const MAX_IMPORT_LIST_ITEMS: u32 = 100;
+/// Hard safety ceiling protecting one imported-entry window response.
+pub const MAX_IMPORT_ENTRY_WINDOW_ITEMS: u32 = 101;
+/// Hard safety ceiling protecting one imported text preview in UTF-8 bytes.
+pub const MAX_IMPORT_TEXT_PREVIEW_BYTES: usize = 512;
+
+/// Exact source format and converter interpretation for one import.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebImportFormat {
+    /// Claude Code JSONL interpreted by Signalbox converter version 1.
+    ClaudeCodeSessionJsonlV1,
+    /// Claude Code JSONL interpreted by Signalbox converter version 2.
+    ClaudeCodeSessionJsonlV2,
+    /// Codex rollout JSONL interpreted by Signalbox converter version 1.
+    CodexRolloutJsonlV1,
+}
+
+/// Bounded imports catalog request carried as query parameters.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebImportListRequest {
+    /// Exclusive imported-conversation UUID cursor.
+    pub after: Option<String>,
+    /// Requested page size; the server rejects values above its hard ceiling.
+    pub limit: Option<u32>,
+    /// Optional exact source/converter filter.
+    pub format: Option<WebImportFormat>,
+    /// Optional exact converter-attested source-session identifier.
+    pub source_session_id: Option<String>,
+}
+
+/// One bounded imports catalog row.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebImportSummary {
+    /// Immutable imported-conversation UUID.
+    pub imported_conversation_id: String,
+    /// Evidence-derived display title, when the source supplied one.
+    pub display_title: Option<String>,
+    /// Exact source format and converter interpretation.
+    pub format: WebImportFormat,
+    /// Exact converter-attested source-session identifier, when consistent.
+    pub source_session_id: Option<String>,
+    /// Number of normalized imported entries.
+    pub entry_count: u64,
+}
+
+/// One keyset page of imports.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebImportListPage {
+    /// Rows in stable UUID order.
+    pub items: Vec<WebImportSummary>,
+    /// Exclusive cursor for the next page, absent at the end.
+    pub next_cursor: Option<String>,
+}
+
+/// Source and converter evidence retained by one immutable import.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebImportSourceEvidence {
+    /// Exact source format and converter interpretation.
+    pub format: WebImportFormat,
+    /// SHA-256 digest of the exact ordered source records.
+    pub source_digest_sha256: String,
+    /// Exact converter-attested source-session identifier, when consistent.
+    pub source_session_id: Option<String>,
+}
+
+/// Byte facts projected from immutable stored import members.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebImportSizeFacts {
+    /// Sum of exact raw source-record occurrence bytes.
+    pub raw_source_bytes: u64,
+    /// Sum of normalized source-record encoding bytes.
+    pub normalized_source_record_bytes: u64,
+    /// Sum of normalized entry and source-metadata encoding bytes.
+    pub normalized_entry_bytes: u64,
+}
+
+/// One immutable imported frontier suitable for precise continuation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebImportContinuationReference {
+    /// Owning imported-conversation UUID.
+    pub imported_conversation_id: String,
+    /// Exact imported-entry UUID at the inclusive frontier.
+    pub imported_entry_id: String,
+    /// One-based immutable imported position.
+    pub position: u64,
+}
+
+/// First and latest immutable positions in an imported timeline.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebImportTimelineBounds {
+    /// First selectable frontier.
+    pub first: WebImportContinuationReference,
+    /// Latest selectable frontier.
+    pub latest: WebImportContinuationReference,
+}
+
+/// Complete bounded descriptor for one immutable import.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebImportDescriptor {
+    /// Immutable imported-conversation UUID.
+    pub imported_conversation_id: String,
+    /// Evidence-derived display title, when available.
+    pub display_title: Option<String>,
+    /// Number of exact raw source records.
+    pub raw_record_count: u64,
+    /// Number of normalized imported entries.
+    pub entry_count: u64,
+    /// Source and converter evidence, distinct from native execution evidence.
+    pub source: WebImportSourceEvidence,
+    /// Projected byte facts; no raw blob bytes are included.
+    pub sizes: WebImportSizeFacts,
+    /// Addressable first and latest imported frontiers.
+    pub timeline: WebImportTimelineBounds,
+}
+
+/// Logical anchor for an imported-entry window.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebImportWindowAnchor {
+    /// Anchor at imported position one.
+    First,
+    /// Anchor at the immutable latest position.
+    Latest,
+    /// Anchor at the supplied exact position.
+    Position,
+}
+
+/// Bounded imported-entry window request carried as query parameters.
+#[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebImportEntryWindowRequest {
+    /// Logical anchor; defaults to `first` when omitted.
+    pub anchor: Option<WebImportWindowAnchor>,
+    /// Required only for the `position` anchor.
+    pub position: Option<u64>,
+    /// Number of entries requested before the anchor.
+    pub before: Option<u32>,
+    /// Number of entries requested after the anchor.
+    pub after: Option<u32>,
+}
+
+/// Source-attested speaker evidence for one imported entry.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebImportedSpeakerEvidence {
+    /// The source omitted speaker evidence.
+    NotAttested,
+    /// The source explicitly attested no speaker.
+    AttestedAbsent,
+    /// The source attested a user-role speaker.
+    User,
+    /// The source attested an assistant-role speaker.
+    Assistant,
+}
+
+/// Closed normalized imported content kind.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebImportedContentKind {
+    /// Non-message source record.
+    SourceEvent,
+    /// Source-defined message block.
+    SourceMessageBlock,
+    /// Source text or explicit text absence.
+    Text,
+    /// Source tool call.
+    ToolCall,
+    /// Source tool result.
+    ToolResult,
+    /// Source-visible thinking.
+    Thinking,
+    /// Source redacted-thinking data.
+    RedactedThinking,
+    /// Source document descriptor.
+    Document,
+    /// Precisely classified absent message content.
+    MessageContentAbsent,
+}
+
+/// Completeness of a bounded attested-text preview.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebImportTextCompleteness {
+    /// The exact attested text fits the preview bound.
+    Complete,
+    /// Only the leading UTF-8 prefix fits the preview bound.
+    Truncated,
+}
+
+/// Bounded text evidence for an imported entry.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebImportTextEvidence {
+    /// The text member was omitted by the source.
+    NotAttested,
+    /// The source explicitly supplied no text.
+    AttestedAbsent,
+    /// The source supplied exact text, possibly represented by a bounded prefix.
+    Attested {
+        /// Exact leading text within the byte ceiling.
+        leading_text: String,
+        /// Whether the prefix is the complete text.
+        completeness: WebImportTextCompleteness,
+    },
+}
+
+/// One normalized imported entry in a bounded window.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebImportedEntry {
+    /// Exact immutable continuation frontier.
+    pub frontier: WebImportContinuationReference,
+    /// One-based physical source-record occurrence.
+    pub raw_record_position: u64,
+    /// One-based normalized entry position within that source record.
+    pub record_entry_position: u64,
+    /// Source speaker attestation, never native author evidence.
+    pub source_speaker: WebImportedSpeakerEvidence,
+    /// Source-neutral normalized content kind.
+    pub content_kind: WebImportedContentKind,
+    /// Bounded text evidence only for normalized text content.
+    pub text: Option<WebImportTextEvidence>,
+}
+
+/// One bounded imported-entry window.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebImportEntryWindow {
+    /// Resolved immutable anchor position.
+    pub anchor_position: u64,
+    /// First position returned.
+    pub first_position: u64,
+    /// Last position returned.
+    pub last_position: u64,
+    /// Whether earlier entries exist.
+    pub has_before: bool,
+    /// Whether later entries exist.
+    pub has_after: bool,
+    /// Entries in ascending immutable position order.
+    pub items: Vec<WebImportedEntry>,
+}
+
+/// Resume or fork relationship chosen for a new native session.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebImportedSessionRelationship {
+    /// Resume the selected imported history.
+    Resume,
+    /// Fork from the selected imported history.
+    Fork,
+}
+
+/// Initial model-selection request for a continued native session.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebModelSelection {
+    /// Exact direct model-selection UUID.
+    Direct {
+        /// Direct model-selection UUID.
+        selection_id: String,
+    },
+    /// Alias UUID resolved by the daemon at command admission.
+    Alias {
+        /// Model alias UUID.
+        alias_id: String,
+    },
+}
+
+/// Idempotent continuation command for one selected immutable frontier.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebImportContinuationRequest {
+    /// Durable command UUID minted before network I/O and retained for retry.
+    pub command_id: String,
+    /// Exact selected immutable imported frontier.
+    pub frontier: WebImportContinuationReference,
+    /// Resume or fork relationship.
+    pub relationship: WebImportedSessionRelationship,
+    /// Initial model selection; other settings use provider defaults.
+    pub initial_model_selection: WebModelSelection,
+}
+
+/// Durable applied result of an imported continuation command.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebImportContinuationResponse {
+    /// Replayed durable command UUID.
+    pub command_id: String,
+    /// Newly created or replayed native session UUID.
+    pub session_id: String,
+    /// Exact selected immutable imported frontier.
+    pub frontier: WebImportContinuationReference,
+    /// Recorded resume or fork relationship.
+    pub relationship: WebImportedSessionRelationship,
 }
 
 /// Layer that owns one browser API failure.
@@ -172,9 +484,7 @@ impl Error for GenerateWebContractError {}
 /// Returns a closed build-time error when serde cannot encode a generated value
 /// or a DTO schema grows beyond the generator's focused supported shapes.
 pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContractError> {
-    let bootstrap_schema = canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value());
-    let example_schema = canonical_schema(schemars::schema_for!(WebContractExample).to_value());
-    let error_schema = canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value());
+    let schemas = contract_schemas();
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -186,17 +496,82 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     Ok(vec![
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.mjs",
-            contents: runtime_module(&bootstrap_schema, &example_schema, &error_schema)?,
+            contents: runtime_module(&schemas)?,
         },
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.d.mts",
-            contents: declaration_module(&bootstrap_schema, &example_schema, &error_schema)?,
+            contents: declaration_module(&schemas)?,
         },
         GeneratedArtifact {
             path: "crates/web-contract/tests/fixtures/example.json",
             contents: example_json,
         },
     ])
+}
+
+struct ContractSchema {
+    name: &'static str,
+    decoder: &'static str,
+    schema: Value,
+}
+
+fn contract_schemas() -> Vec<ContractSchema> {
+    vec![
+        ContractSchema {
+            name: "WebContractBootstrap",
+            decoder: "decodeWebContractBootstrap",
+            schema: canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value()),
+        },
+        ContractSchema {
+            name: "WebContractExample",
+            decoder: "decodeWebContractExample",
+            schema: canonical_schema(schemars::schema_for!(WebContractExample).to_value()),
+        },
+        ContractSchema {
+            name: "WebApiErrorResponse",
+            decoder: "decodeWebApiErrorResponse",
+            schema: canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value()),
+        },
+        ContractSchema {
+            name: "WebImportListRequest",
+            decoder: "decodeWebImportListRequest",
+            schema: canonical_schema(schemars::schema_for!(WebImportListRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebImportListPage",
+            decoder: "decodeWebImportListPage",
+            schema: canonical_schema(schemars::schema_for!(WebImportListPage).to_value()),
+        },
+        ContractSchema {
+            name: "WebImportDescriptor",
+            decoder: "decodeWebImportDescriptor",
+            schema: canonical_schema(schemars::schema_for!(WebImportDescriptor).to_value()),
+        },
+        ContractSchema {
+            name: "WebImportEntryWindowRequest",
+            decoder: "decodeWebImportEntryWindowRequest",
+            schema: canonical_schema(schemars::schema_for!(WebImportEntryWindowRequest).to_value()),
+        },
+        ContractSchema {
+            name: "WebImportEntryWindow",
+            decoder: "decodeWebImportEntryWindow",
+            schema: canonical_schema(schemars::schema_for!(WebImportEntryWindow).to_value()),
+        },
+        ContractSchema {
+            name: "WebImportContinuationRequest",
+            decoder: "decodeWebImportContinuationRequest",
+            schema: canonical_schema(
+                schemars::schema_for!(WebImportContinuationRequest).to_value(),
+            ),
+        },
+        ContractSchema {
+            name: "WebImportContinuationResponse",
+            decoder: "decodeWebImportContinuationResponse",
+            schema: canonical_schema(
+                schemars::schema_for!(WebImportContinuationResponse).to_value(),
+            ),
+        },
+    ]
 }
 
 fn canonical_schema(mut schema: Value) -> Value {
@@ -207,24 +582,20 @@ fn canonical_schema(mut schema: Value) -> Value {
     schema
 }
 
-fn runtime_module(
-    bootstrap_schema: &Value,
-    example_schema: &Value,
-    error_schema: &Value,
-) -> Result<String, GenerateWebContractError> {
-    let mut schemas = json!({
-        "WebContractBootstrap": bootstrap_schema,
-        "WebContractExample": example_schema,
-        "WebApiErrorResponse": error_schema,
-    });
-    schemas.sort_all_objects();
-    let schemas = serde_json::to_string_pretty(&schemas)
+fn runtime_module(schemas: &[ContractSchema]) -> Result<String, GenerateWebContractError> {
+    let mut schema_values = serde_json::Map::new();
+    for schema in schemas {
+        schema_values.insert(schema.name.to_owned(), schema.schema.clone());
+    }
+    let mut schema_values = Value::Object(schema_values);
+    schema_values.sort_all_objects();
+    let schema_values = serde_json::to_string_pretty(&schema_values)
         .map_err(|_| GenerateWebContractError::Serialization)?;
-    Ok(format!(
+    let mut output = format!(
         r##"// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.
 // Do not edit by hand.
 
-const schemas = {schemas};
+const schemas = {schema_values};
 
 function fail(path, expected) {{
   throw new TypeError(`${{path}} must be ${{expected}}`);
@@ -259,8 +630,9 @@ function assertSchema(root, schema, value, path) {{
     }}
     return;
   }}
-  if (schema.oneOf !== undefined) {{
-    const accepted = schema.oneOf.some((candidate) => {{
+  const alternatives = schema.oneOf ?? schema.anyOf;
+  if (alternatives !== undefined) {{
+    const accepted = alternatives.some((candidate) => {{
       try {{
         assertSchema(root, candidate, value, path);
         return true;
@@ -270,6 +642,20 @@ function assertSchema(root, schema, value, path) {{
     }});
     if (!accepted) {{
       fail(path, "one recognized variant");
+    }}
+    return;
+  }}
+  if (Array.isArray(schema.type)) {{
+    const accepted = schema.type.some((candidate) => {{
+      try {{
+        assertSchema(root, {{ ...schema, type: candidate }}, value, path);
+        return true;
+      }} catch {{
+        return false;
+      }}
+    }});
+    if (!accepted) {{
+      fail(path, "one recognized type");
     }}
     return;
   }}
@@ -319,57 +705,64 @@ function assertSchema(root, schema, value, path) {{
     }}
     return;
   }}
+  if (schema.type === "null") {{
+    if (value !== null) {{
+      fail(path, "null");
+    }}
+    return;
+  }}
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
   }}
 }}
 
-export function decodeWebContractBootstrap(value) {{
-  assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "bootstrap");
-  if (value.contract.name !== {contract_name:?} || value.contract.version !== {contract_version:?}) {{
-    throw new TypeError("bootstrap carries an incompatible web contract");
-  }}
-  return value;
-}}
-
-export function decodeWebContractExample(value) {{
-  assertSchema(schemas.WebContractExample, schemas.WebContractExample, value, "example");
-  return value;
-}}
-
-export function decodeWebApiErrorResponse(value) {{
-  assertSchema(schemas.WebApiErrorResponse, schemas.WebApiErrorResponse, value, "error_response");
-  return value;
-}}
 "##,
-        contract_name = WEB_CONTRACT_NAME,
-        contract_version = WEB_CONTRACT_VERSION,
-    ))
+    );
+    for schema in schemas {
+        let path = schema.name.to_ascii_lowercase();
+        output.push_str(&format!(
+            "export function {decoder}(value) {{\n  assertSchema(schemas.{name}, schemas.{name}, value, {path:?});\n",
+            decoder = schema.decoder,
+            name = schema.name,
+        ));
+        if schema.name == "WebContractBootstrap" {
+            output.push_str(&format!(
+                "  if (value.contract.name !== {name:?} || value.contract.version !== {version:?}) {{\n    throw new TypeError(\"bootstrap carries an incompatible web contract\");\n  }}\n",
+                name = WEB_CONTRACT_NAME,
+                version = WEB_CONTRACT_VERSION,
+            ));
+        }
+        output.push_str("  return value;\n}\n\n");
+    }
+    output.truncate(output.trim_end_matches('\n').len());
+    output.push('\n');
+    Ok(output)
 }
 
-fn declaration_module(
-    bootstrap_schema: &Value,
-    example_schema: &Value,
-    error_schema: &Value,
-) -> Result<String, GenerateWebContractError> {
+fn declaration_module(schemas: &[ContractSchema]) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
-    let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
-    let example = typescript_type(example_schema, example_schema, &mut definitions)?;
-    let error = typescript_type(error_schema, error_schema, &mut definitions)?;
+    let mut roots = Vec::with_capacity(schemas.len());
+    for schema in schemas {
+        roots.push((
+            schema,
+            typescript_type(&schema.schema, &schema.schema, &mut definitions)?,
+        ));
+    }
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",
     );
     for (name, definition) in definitions {
-        output.push_str(&format!("type {name} = {definition};\n\n"));
+        output.push_str(&format!("export type {name} = {definition};\n\n"));
     }
-    output.push_str(&format!(
-        "export type WebContractBootstrap = {bootstrap};\n"
-    ));
-    output.push_str(&format!("export type WebContractExample = {example};\n\n"));
-    output.push_str(&format!("export type WebApiErrorResponse = {error};\n\n"));
-    output.push_str(
-        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\n",
-    );
+    for (schema, root) in &roots {
+        output.push_str(&format!("export type {} = {root};\n\n", schema.name));
+    }
+    for (schema, _) in roots {
+        output.push_str(&format!(
+            "export function {}(value: unknown): {};\n",
+            schema.decoder, schema.name
+        ));
+    }
     Ok(output)
 }
 
@@ -402,10 +795,25 @@ fn typescript_type(
     if let Some(value) = schema.get("const") {
         return Ok(value.to_string());
     }
-    if let Some(variants) = schema.get("oneOf").and_then(Value::as_array) {
+    if let Some(variants) = schema
+        .get("oneOf")
+        .or_else(|| schema.get("anyOf"))
+        .and_then(Value::as_array)
+    {
         return Ok(variants
             .iter()
             .map(|variant| typescript_type(root, variant, definitions))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" | "));
+    }
+    if let Some(kinds) = schema.get("type").and_then(Value::as_array) {
+        return Ok(kinds
+            .iter()
+            .map(|kind| {
+                let mut variant = schema.clone();
+                variant["type"] = kind.clone();
+                typescript_type(root, &variant, definitions)
+            })
             .collect::<Result<Vec<_>, _>>()?
             .join(" | "));
     }
@@ -423,6 +831,7 @@ fn typescript_type(
         Some("integer" | "number") => Ok("number".to_owned()),
         Some("boolean") => Ok("boolean".to_owned()),
         Some("string") => Ok("string".to_owned()),
+        Some("null") => Ok("null".to_owned()),
         _ => Err(GenerateWebContractError::UnsupportedSchema),
     }
 }
@@ -436,17 +845,15 @@ fn typescript_object(
         .get("properties")
         .and_then(Value::as_object)
         .ok_or(GenerateWebContractError::UnsupportedSchema)?;
-    let required = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let required = schema.get("required").and_then(Value::as_array);
     let mut output = String::from("{\n");
     for (name, property) in properties {
-        let optional = if required.iter().any(|required| required == name) {
-            ""
-        } else {
-            "?"
-        };
+        let optional =
+            if required.is_some_and(|required| required.iter().any(|required| required == name)) {
+                ""
+            } else {
+                "?"
+            };
         output.push_str(&format!(
             "  readonly {name}{optional}: {};\n",
             typescript_type(root, property, definitions)?

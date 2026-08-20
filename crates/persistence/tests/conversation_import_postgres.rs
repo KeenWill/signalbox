@@ -10,6 +10,7 @@ use std::{
     env,
     error::Error,
     fs,
+    num::NonZeroU32,
     path::{Path, PathBuf},
 };
 
@@ -34,6 +35,10 @@ use signalbox_persistence::{
     conversation_import::{
         ImportedConversationCorruption, ImportedConversationIdentityCollision,
         ImportedConversationRepository, ImportedConversationRepositoryError,
+    },
+    conversation_import_discovery::{
+        ImportedConversationDiscoveryRepository, ImportedConversationPageRequest,
+        ImportedEntryWindowAnchor,
     },
     disposable_postgres_server_args, disposable_postgres_state_tmpfs,
     disposable_test_container_labels, local_test_connection_options, migrate,
@@ -2327,5 +2332,147 @@ fn collect_transcripts(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), ()> 
             files.push(child);
         }
     }
+    Ok(())
+}
+
+fn jsonl_record_bytes(source: &str) -> usize {
+    source.lines().map(str::len).sum()
+}
+
+/// Issue #995: an exclusive UUID keyset remains bounded and duplicate-free
+/// when imports are committed on both sides of its cursor.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn imported_discovery_pages_stay_stable_under_concurrent_additions()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first_conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x100));
+    let second_conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x300));
+    let third_conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x500));
+    let behind_cursor = ImportedConversationId::from_uuid(Uuid::from_u128(0x200));
+    let ahead_of_cursor = ImportedConversationId::from_uuid(Uuid::from_u128(0x400));
+    let page_limit = NonZeroU32::new(2).ok_or("page fixture limit must be nonzero")?;
+    let mut importer = ImportConversationService::new(
+        FixedIds::new(&[0x100, 0x300, 0x500, 0x200, 0x400], 0x1000..0x1005),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    importer
+        .execute(br#"{"type":"user","message":{"content":"first"}}"#)
+        .await?;
+    importer
+        .execute(br#"{"type":"user","message":{"content":"second"}}"#)
+        .await?;
+    importer
+        .execute(br#"{"type":"user","message":{"content":"third"}}"#)
+        .await?;
+    let discovery = ImportedConversationDiscoveryRepository::new(pool.clone());
+    let first_page = discovery
+        .list(ImportedConversationPageRequest {
+            after: None,
+            format: None,
+            source_session_id: None,
+            limit: page_limit,
+        })
+        .await?;
+
+    assert_eq!(first_page.items.len(), page_limit.get() as usize);
+    assert_eq!(first_page.items[0].conversation, first_conversation);
+    assert_eq!(first_page.items[1].conversation, second_conversation);
+    assert_eq!(first_page.next_after, Some(second_conversation));
+
+    importer
+        .execute(br#"{"type":"user","message":{"content":"behind"}}"#)
+        .await?;
+    importer
+        .execute(br#"{"type":"user","message":{"content":"ahead"}}"#)
+        .await?;
+    let second_page = discovery
+        .list(ImportedConversationPageRequest {
+            after: first_page.next_after,
+            format: None,
+            source_session_id: None,
+            limit: page_limit,
+        })
+        .await?;
+
+    assert_eq!(second_page.items.len(), page_limit.get() as usize);
+    assert_eq!(second_page.items[0].conversation, ahead_of_cursor);
+    assert_eq!(second_page.items[1].conversation, third_conversation);
+    assert_ne!(second_page.items[0].conversation, behind_cursor);
+    assert_eq!(second_page.next_after, None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Issue #995: descriptors project size and source facts while an arbitrary
+/// entry read decodes only its requested immutable region.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn imported_discovery_describes_and_windows_without_complete_reconstitution()
+-> Result<(), Box<dyn Error>> {
+    const FIRST_TEXT: &str = "first imported observation";
+    const SECOND_TEXT: &str = "second imported observation";
+    const THIRD_TEXT: &str = "third imported observation";
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x900));
+    let source = format!(
+        "{{\"sessionId\":\"discovery-source\",\"type\":\"user\",\"message\":{{\"content\":\"{FIRST_TEXT}\"}}}}\n\
+         {{\"sessionId\":\"discovery-source\",\"type\":\"assistant\",\"message\":{{\"content\":\"{SECOND_TEXT}\"}}}}\n\
+         {{\"sessionId\":\"discovery-source\",\"type\":\"user\",\"message\":{{\"content\":\"{THIRD_TEXT}\"}}}}"
+    );
+    let mut importer = ImportConversationService::new(
+        FixedIds::new(&[0x900], 0x901..0x904),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    importer.execute(source.as_bytes()).await?;
+    let discovery = ImportedConversationDiscoveryRepository::new(pool.clone());
+    let descriptor = discovery
+        .descriptor(conversation)
+        .await?
+        .ok_or("descriptor fixture import must exist")?;
+
+    assert_eq!(descriptor.conversation, conversation);
+    assert_eq!(
+        descriptor.source_session_id.as_deref(),
+        Some("discovery-source")
+    );
+    assert_eq!(descriptor.raw_record_count, 3);
+    assert_eq!(descriptor.entry_count, 3);
+    assert_eq!(
+        descriptor.sizes.raw_source_bytes,
+        jsonl_record_bytes(&source) as u64
+    );
+    assert!(descriptor.sizes.normalized_source_record_bytes > 0);
+    assert!(descriptor.sizes.normalized_entry_bytes > 0);
+    assert_eq!(descriptor.first.position, 1);
+    assert_eq!(descriptor.latest.position, descriptor.entry_count);
+
+    let maximum_items = NonZeroU32::new(3).ok_or("window fixture bound must be nonzero")?;
+    let window = discovery
+        .entry_window(
+            conversation,
+            ImportedEntryWindowAnchor::Position(2),
+            1,
+            1,
+            maximum_items,
+        )
+        .await?
+        .ok_or("window fixture import must exist")?;
+
+    assert_eq!(window.items.len(), maximum_items.get() as usize);
+    assert_eq!(window.first_position, descriptor.first.position);
+    assert_eq!(window.anchor_position, 2);
+    assert_eq!(window.last_position, descriptor.latest.position);
+    assert_eq!(window.items[0].frontier, descriptor.first);
+    assert_eq!(window.items[2].frontier, descriptor.latest);
+    assert!(!window.has_before);
+    assert!(!window.has_after);
+
+    pool.close().await;
+    drop(container);
     Ok(())
 }

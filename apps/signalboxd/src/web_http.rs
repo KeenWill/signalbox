@@ -35,6 +35,8 @@ use tokio::{net::TcpListener, sync::watch};
 use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
 
+use crate::{HubModelConfiguration, web_imports};
+
 /// Optional deployment override for the browser listener.
 pub const WEB_BIND_ENVIRONMENT: &str = "SIGNALBOX_WEB_BIND";
 /// Optional production web-build root served outside `/api/`.
@@ -173,8 +175,12 @@ pub struct WebHttpRuntime {
 
 impl WebHttpRuntime {
     /// Binds the production same-origin router.
-    pub async fn bind(configuration: WebHttpConfiguration) -> Result<Self, WebHttpRuntimeError> {
-        let router = production_router(configuration.asset_root);
+    pub async fn bind(
+        configuration: WebHttpConfiguration,
+        pool: sqlx::PgPool,
+        model_configuration: HubModelConfiguration,
+    ) -> Result<Self, WebHttpRuntimeError> {
+        let router = production_router(configuration.asset_root, pool, model_configuration);
         Self::bind_router(configuration.bind_address, router).await
     }
 
@@ -216,10 +222,27 @@ impl WebHttpRuntime {
 }
 
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
-pub fn production_router(asset_root: Option<PathBuf>) -> Router {
+pub fn production_router(
+    asset_root: Option<PathBuf>,
+    pool: sqlx::PgPool,
+    model_configuration: HubModelConfiguration,
+) -> Router {
+    let api = Router::new()
+        .route("/bootstrap", get(contract_bootstrap))
+        .nest("/imports", web_imports::router(pool, model_configuration))
+        .fallback(api_not_found);
+    same_origin_router(asset_root, api)
+}
+
+#[cfg(test)]
+fn bootstrap_only_router(asset_root: Option<PathBuf>) -> Router {
     let api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
         .fallback(api_not_found);
+    same_origin_router(asset_root, api)
+}
+
+fn same_origin_router(asset_root: Option<PathBuf>, api: Router) -> Router {
     let router = Router::new().nest("/api", api);
     match asset_root {
         Some(root) => router.fallback_service(
@@ -414,7 +437,7 @@ impl io::Write for NdjsonItemWriter {
     }
 }
 
-async fn validate_json_mutation(request: Request, next: Next) -> Response {
+pub(crate) async fn validate_json_mutation(request: Request, next: Next) -> Response {
     if request.method() != Method::POST {
         return transport_error(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -482,10 +505,29 @@ fn validate_supplied_origin(headers: &HeaderMap) -> Result<(), OriginValidationE
     }
 }
 
-fn transport_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+pub(crate) fn transport_error(
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+) -> Response {
     let body = Json(WebApiErrorResponse {
         error: WebApiError {
             kind: WebApiErrorKind::Transport,
+            code: code.to_owned(),
+            message: message.to_owned(),
+        },
+    });
+    (status, body).into_response()
+}
+
+pub(crate) fn application_error(
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+) -> Response {
+    let body = Json(WebApiErrorResponse {
+        error: WebApiError {
+            kind: WebApiErrorKind::Application,
             code: code.to_owned(),
             message: message.to_owned(),
         },
@@ -529,7 +571,7 @@ mod tests {
 
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime,
-        deterministic_test_router, ndjson_response, production_router,
+        bootstrap_only_router, deterministic_test_router, ndjson_response,
     };
 
     fn loopback_ephemeral() -> SocketAddr {
@@ -598,10 +640,10 @@ mod tests {
         let assets = tempfile::tempdir().expect("the static asset directory exists");
         std::fs::write(assets.path().join("index.html"), STATIC_INDEX)
             .expect("the static index exists");
-        let runtime = WebHttpRuntime::bind(WebHttpConfiguration::new(
+        let runtime = WebHttpRuntime::bind_router(
             loopback_ephemeral(),
-            Some(assets.path().to_path_buf()),
-        ))
+            bootstrap_only_router(Some(assets.path().to_path_buf())),
+        )
         .await
         .expect("the production test server binds");
         let address = runtime
@@ -820,7 +862,7 @@ mod tests {
         let request = Request::get("/api/not-a-route")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(Some(assets.path().to_path_buf()))
+        let response = bootstrap_only_router(Some(assets.path().to_path_buf()))
             .oneshot(request)
             .await
             .expect("the production router responds");
