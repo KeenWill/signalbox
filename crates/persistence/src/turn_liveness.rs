@@ -284,14 +284,27 @@ impl QuiescentActiveTurnPage {
 /// on a session that had progressed.
 ///
 /// The excluded kinds are the ones that happen *to* a session while its active
-/// turn sits still: accepting queued input, changing session model settings,
-/// retiring a goal turn, creating a session, a runner state transition. Reading
-/// those as progress would let a user keep a wedged turn alive indefinitely by
-/// submitting input. Everything else is emitted by a transition of a turn, its
-/// model calls, its tool rounds, or its approvals, so it cannot advance while
-/// the turn does nothing. Naming what to exclude rather than what to include
-/// means a kind added later reads as progress until someone decides otherwise,
-/// which delays a terminalization rather than risking a live turn.
+/// turn sits still, traced to their writers rather than inferred from their
+/// names: session creation (`create_session`, and the imported-frontier
+/// variant), session-defaults replacement (`replace_session_defaults`), goal
+/// turn retirement (`goal`), runner state transitions (`runner_protocol`), and
+/// the pair a submission writes — model-settings resolution
+/// (`model_settings_resolution`) and input acceptance (`submit_input`, and goal
+/// dispatch). Reading any of them as progress would let a user keep a wedged
+/// turn alive indefinitely by submitting input, since one submission writes two
+/// of them.
+///
+/// Those last two have a second writer inside `model_execution`, which mints a
+/// successor turn from pending steering while the source turn terminalizes.
+/// Excluding them loses nothing there: that transaction is a terminal
+/// transition, so it appends the source turn's own terminal event too, and that
+/// kind is included.
+///
+/// Everything else is emitted by a transition of a turn, its model calls, its
+/// tool rounds, or its approvals, so it cannot advance while the turn does
+/// nothing. Naming what to exclude rather than what to include means a kind
+/// added later reads as progress until someone decides otherwise, which delays
+/// a terminalization rather than risking a live turn.
 ///
 /// It is read with `ORDER BY … DESC LIMIT 1` over
 /// `outbox_event_turn_progress_by_session`, whose partial predicate is this
@@ -308,6 +321,7 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
                 AND newest.event_kind NOT IN (
                     'session_created',
                     'session_model_settings_changed',
+                    'turn_model_settings_resolved',
                     'input_accepted',
                     'goal_turn_retired',
                     'runner_state_transition'

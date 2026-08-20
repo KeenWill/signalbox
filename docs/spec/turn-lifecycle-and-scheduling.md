@@ -511,16 +511,17 @@ silence.
 The frontier is the outbox's rather than the transcript's because the outbox
 assigns its sequence in commit order, and every session-scoped transition kind
 lands in that one table. It is scoped to turn progress rather than to the
-session because five of those kinds are things that happen *to* a session while
-its active turn sits still — accepting queued input, changing session model
-settings, retiring a goal turn, creating a session, a runner state transition —
-and reading those as progress would let a user hold a wedged turn open
-indefinitely by submitting input. What remains is emitted only by a transition
-of a turn, its model calls, its tool rounds, or its approvals, none of which can
-occur while the turn does nothing. The scope is written as those five exclusions
-rather than as a list of what counts, so a kind added later is read as progress
-until someone decides otherwise: counting an unrelated event delays
-terminalizing a wedge, where missing a real one would end a turn that was
+session because six of those kinds are things that happen *to* a session while
+its active turn sits still: one ordinary submission writes both the input
+acceptance and the turn's model-settings resolution, and replacing session
+defaults, retiring a goal turn, creating a session, and a runner state
+transition are the rest. Reading any of them as progress would let a user hold a
+wedged turn open indefinitely by submitting input. What remains is emitted only
+by a transition of a turn, its model calls, its tool rounds, or its approvals,
+none of which can occur while the turn does nothing. The scope is written as
+those six exclusions rather than as a list of what counts, so a kind added later
+is read as progress until someone decides otherwise: counting an unrelated event
+delays terminalizing a wedge, where missing a real one would end a turn that was
 working. An identity ordering would have been unsound here: a backward clock
 adjustment, or an earlier mint skewed into the future, lets a freshly appended
 identity sort below the recorded one, and a frontier that does not move reads as
@@ -577,10 +578,9 @@ inventory's capacity would take over eleven days to work through. That is
 accepted rather than overlooked: the alternative is a scan that runs until its
 cohort is drained, which delays the next observation of *every* session,
 including the ones whose turns are working. A watchdog may be slow to finish; it
-may not stop watching. Deferring costs one interval and nothing else: a turn
-left alone had nothing change, so the next scan observes the same evidence and
-finds it due again — where draining the whole cohort would delay that scan by
-however long the cohort took.
+may not stop watching. What deferral does not cost is the turn: one left alone
+had nothing change, so it is observed unchanged and comes due again on a later
+scan, waiting rather than being forgotten.
 
 **Constants.** The staleness bound is a hard safety ceiling of 30 minutes and
 the scan interval is one minute; both are compiled in. The bound the pass runs
