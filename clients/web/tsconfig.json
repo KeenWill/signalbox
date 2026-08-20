@@ -1,8 +1,9 @@
 {
+  // Evergreen browser floor: Safari 18.4+; raise to ES2026 when TypeScript supports that target and library.
   "compilerOptions": {
-    "target": "ES2022",
+    "target": "ES2025",
     "useDefineForClassFields": true,
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": ["ES2025", "DOM", "DOM.Iterable"],
     "allowJs": false,
     "skipLibCheck": true,
     "esModuleInterop": true,

@@ -7,13 +7,14 @@
     "build": "tsc -b && vite build",
     "check": "tsc -b --pretty false",
     "dev": "vite --host 127.0.0.1",
+    "lint": "biome ci .",
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest run",
     "test:browser": "npm run build && playwright test",
     "test:browser:update": "npm run build && playwright test --update-snapshots"
   },
   "engines": {
-    "node": ">=20.19.0"
+    "node": ">=26"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "1.1.23",
@@ -32,6 +33,7 @@
     "react-redux": "9.3.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.9",
     "@playwright/test": "1.62.1",
     "@tailwindcss/vite": "4.3.3",
     "@types/node": "26.2.0",
