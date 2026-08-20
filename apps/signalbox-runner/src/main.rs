@@ -10,6 +10,7 @@ use signalbox_runner::{
     RunnerConfigurationPath, RunnerConnection, RunnerConnectionError, RunnerStateError,
     RunnerStateRoot, ServeOutcome, SocketConnectError, connect_verified,
 };
+use signalbox_tools_exec::TokioProcessRunner;
 
 const CONFIGURATION_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_CONFIG_FILE";
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -47,6 +48,12 @@ async fn run(
         RunnerConfiguration::read(path.as_path()).map_err(RunnerDaemonError::Configuration)?;
     let mut state =
         RunnerStateRoot::open(configuration.runner_root()).map_err(RunnerDaemonError::State)?;
+    // Keep both pinned executable identities live across every connection epoch.
+    let _execution_programs = TokioProcessRunner::try_new_with_bubblewrap(
+        configuration.exec_supervisor_executable(),
+        configuration.bubblewrap_path(),
+    )
+    .map_err(|_| RunnerDaemonError::ExecutionPrograms)?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(RunnerDaemonError::Signal)?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
@@ -257,6 +264,7 @@ impl ReconnectBackoff {
 enum RunnerDaemonError {
     Argument(ArgumentError),
     Configuration(RunnerConfigurationError),
+    ExecutionPrograms,
     State(RunnerStateError),
     Socket(SocketConnectError),
     Connection(RunnerConnectionError),
@@ -270,6 +278,7 @@ impl fmt::Display for RunnerDaemonError {
         formatter.write_str(match self {
             Self::Argument(_) => "runner arguments are invalid",
             Self::Configuration(_) => "runner configuration is invalid",
+            Self::ExecutionPrograms => "runner execution programs are unavailable",
             Self::State(_) => "runner durable state is unavailable",
             Self::Socket(_) => "runner socket is unavailable",
             Self::Connection(_) => "runner connection failed",
@@ -289,7 +298,7 @@ impl Error for RunnerDaemonError {
             Self::Socket(error) => Some(error),
             Self::Connection(error) => Some(error),
             Self::Signal(error) => Some(error),
-            Self::ShutdownTimeout | Self::StaleConnectionRejected => None,
+            Self::ExecutionPrograms | Self::ShutdownTimeout | Self::StaleConnectionRejected => None,
         }
     }
 }

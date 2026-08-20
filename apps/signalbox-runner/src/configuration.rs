@@ -99,11 +99,12 @@ impl fmt::Display for ArgumentError {
 
 impl Error for ArgumentError {}
 
-/// Complete immutable startup configuration for the registration-only runtime.
+/// Complete immutable startup configuration for the runner runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerConfiguration {
     daemon_socket_path: PathBuf,
     runner_root: PathBuf,
+    exec_supervisor_executable: PathBuf,
     bubblewrap_path: PathBuf,
     read_only_paths: Vec<PathBuf>,
     allowed_network_hosts: Vec<AllowedNetworkHost>,
@@ -173,6 +174,9 @@ impl RunnerConfiguration {
         if !valid_absolute_path(&raw.runner_root) {
             return Err(RunnerConfigurationError::InvalidRunnerRoot);
         }
+        if !valid_absolute_path(&raw.exec_supervisor_executable) {
+            return Err(RunnerConfigurationError::InvalidExecSupervisor);
+        }
         if !valid_absolute_path(&raw.bubblewrap_path) {
             return Err(RunnerConfigurationError::InvalidBubblewrapPath);
         }
@@ -208,6 +212,7 @@ impl RunnerConfiguration {
         Ok(Self {
             daemon_socket_path: raw.daemon_socket_path,
             runner_root: raw.runner_root,
+            exec_supervisor_executable: raw.exec_supervisor_executable,
             bubblewrap_path: raw.bubblewrap_path,
             read_only_paths: raw.read_only_paths,
             allowed_network_hosts: raw.allowed_network_hosts,
@@ -224,6 +229,13 @@ impl RunnerConfiguration {
             .map_err(|_| RunnerConfigurationError::InvalidDaemonSocketPath)?;
         self.runner_root = canonicalize_without_final(&self.runner_root)
             .map_err(|_| RunnerConfigurationError::InvalidRunnerRoot)?;
+        self.exec_supervisor_executable = fs::canonicalize(&self.exec_supervisor_executable)
+            .map_err(|_| RunnerConfigurationError::InvalidExecSupervisor)?;
+        let supervisor = fs::metadata(&self.exec_supervisor_executable)
+            .map_err(|_| RunnerConfigurationError::InvalidExecSupervisor)?;
+        if !supervisor.is_file() || supervisor.permissions().mode() & 0o111 == 0 {
+            return Err(RunnerConfigurationError::InvalidExecSupervisor);
+        }
         self.bubblewrap_path = fs::canonicalize(&self.bubblewrap_path)
             .map_err(|_| RunnerConfigurationError::InvalidBubblewrapPath)?;
         let bubblewrap = fs::metadata(&self.bubblewrap_path)
@@ -272,6 +284,11 @@ impl RunnerConfiguration {
     /// Borrows the configured owner-private durable root.
     pub fn runner_root(&self) -> &Path {
         &self.runner_root
+    }
+
+    /// Borrows the configured separately packaged execution supervisor path.
+    pub fn exec_supervisor_executable(&self) -> &Path {
+        &self.exec_supervisor_executable
     }
 
     /// Borrows the configured absolute bubblewrap executable path.
@@ -496,6 +513,7 @@ struct RawConfiguration {
     version: u64,
     daemon_socket_path: PathBuf,
     runner_root: PathBuf,
+    exec_supervisor_executable: PathBuf,
     bubblewrap_path: PathBuf,
     read_only_paths: Vec<PathBuf>,
     allowed_network_hosts: Vec<AllowedNetworkHost>,
@@ -543,6 +561,8 @@ pub enum RunnerConfigurationError {
     InvalidDaemonSocketPath,
     /// The state root was not an absolute path with a final component.
     InvalidRunnerRoot,
+    /// The separately packaged execution supervisor was not an executable file.
+    InvalidExecSupervisor,
     /// The bubblewrap executable path was not absolute.
     InvalidBubblewrapPath,
     /// The read-only path inventory was empty, nonabsolute, or duplicated.
@@ -576,6 +596,9 @@ impl fmt::Display for RunnerConfigurationError {
                 formatter.write_str("runner daemon socket path is invalid")
             }
             Self::InvalidRunnerRoot => formatter.write_str("runner state root is invalid"),
+            Self::InvalidExecSupervisor => {
+                formatter.write_str("runner execution supervisor path is invalid")
+            }
             Self::InvalidBubblewrapPath => formatter.write_str("runner bubblewrap path is invalid"),
             Self::InvalidReadOnlyPaths => {
                 formatter.write_str("runner read-only path inventory is invalid")
@@ -606,6 +629,7 @@ impl Error for RunnerConfigurationError {
             | Self::UnsupportedVersion(_)
             | Self::InvalidDaemonSocketPath
             | Self::InvalidRunnerRoot
+            | Self::InvalidExecSupervisor
             | Self::InvalidBubblewrapPath
             | Self::InvalidReadOnlyPaths
             | Self::InvalidNetworkHosts
@@ -620,6 +644,7 @@ impl Error for RunnerConfigurationError {
 mod tests {
     use std::os::unix::fs::symlink;
 
+    use expect_test::expect;
     use tempfile::TempDir;
 
     use super::*;
@@ -629,6 +654,7 @@ mod tests {
 version = 1
 daemon_socket_path = "/run/user/1000/signalbox-runner.sock"
 runner_root = "/var/lib/signalbox-runner"
+exec_supervisor_executable = "/usr/local/bin/signalbox-exec-supervisor"
 bubblewrap_path = "/usr/bin/bwrap"
 read_only_paths = ["/usr"]
 allowed_network_hosts = []
@@ -836,11 +862,13 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
         fs::write(&bubblewrap, b"fixture").expect("the bubblewrap fixture exists");
         fs::set_permissions(&bubblewrap, fs::Permissions::from_mode(0o700))
             .expect("the bubblewrap fixture is executable");
+        let supervisor = std::env::current_exe().expect("the test executable path is available");
         let configuration_path = root.join("runner.toml");
         let document = format!(
             r#"version = 1
 daemon_socket_path = "{}"
 runner_root = "{}"
+exec_supervisor_executable = "{}"
 bubblewrap_path = "{}"
 read_only_paths = ["{}"]
 allowed_network_hosts = []
@@ -851,6 +879,7 @@ credentials = {{}}
 "#,
             root.join("runner.sock").display(),
             root.join("runner-state").display(),
+            supervisor.display(),
             bubblewrap.display(),
             read_only_alias.display(),
         );
@@ -863,20 +892,55 @@ credentials = {{}}
     }
 
     #[test]
-    fn configuration_read_rejects_a_nonexecutable_bubblewrap() {
+    fn configuration_read_returns_the_canonical_exec_supervisor_path() {
+        let parent = TempDir::new().expect("a temporary configuration root exists");
+        let root = fs::canonicalize(parent.path()).expect("the temporary root canonicalizes");
+        let supervisor = fs::canonicalize(
+            std::env::current_exe().expect("the test executable path is available"),
+        )
+        .expect("the supervisor fixture canonicalizes");
+        let supervisor_alias = root.join("signalbox-exec-supervisor-alias");
+        symlink(&supervisor, &supervisor_alias).expect("the supervisor fixture alias exists");
+        let configuration_path = root.join("runner.toml");
+        let document = EMPTY_CONFIGURATION
+            .replace(
+                "/run/user/1000/signalbox-runner.sock",
+                &root.join("runner.sock").display().to_string(),
+            )
+            .replace(
+                "/var/lib/signalbox-runner",
+                &root.join("runner-state").display().to_string(),
+            )
+            .replace(
+                "/usr/local/bin/signalbox-exec-supervisor",
+                &supervisor_alias.display().to_string(),
+            )
+            .replace("/usr/bin/bwrap", &supervisor.display().to_string());
+        fs::write(&configuration_path, document).expect("the runner configuration exists");
+
+        let configuration = RunnerConfiguration::read(&configuration_path)
+            .expect("the filesystem-backed runner configuration is valid");
+
+        assert_eq!(configuration.exec_supervisor_executable(), supervisor);
+    }
+
+    #[test]
+    fn configuration_read_rejects_a_nonexecutable_exec_supervisor() {
         let parent = TempDir::new().expect("a temporary configuration root exists");
         let root = fs::canonicalize(parent.path()).expect("the temporary root canonicalizes");
         let read_only = root.join("toolchain");
         fs::create_dir(&read_only).expect("the read-only fixture path exists");
-        let bubblewrap = root.join("bwrap");
-        fs::write(&bubblewrap, b"fixture").expect("the bubblewrap fixture exists");
-        fs::set_permissions(&bubblewrap, fs::Permissions::from_mode(0o600))
-            .expect("the bubblewrap fixture is not executable");
+        let supervisor = root.join("signalbox-exec-supervisor");
+        fs::write(&supervisor, b"fixture").expect("the supervisor fixture exists");
+        fs::set_permissions(&supervisor, fs::Permissions::from_mode(0o600))
+            .expect("the supervisor fixture is not executable");
+        let bubblewrap = std::env::current_exe().expect("the test executable path is available");
         let configuration_path = root.join("runner.toml");
         let document = format!(
             r#"version = 1
 daemon_socket_path = "{}"
 runner_root = "{}"
+exec_supervisor_executable = "{}"
 bubblewrap_path = "{}"
 read_only_paths = ["{}"]
 allowed_network_hosts = []
@@ -887,6 +951,46 @@ credentials = {{}}
 "#,
             root.join("runner.sock").display(),
             root.join("runner-state").display(),
+            supervisor.display(),
+            bubblewrap.display(),
+            read_only.display(),
+        );
+        fs::write(&configuration_path, document).expect("the runner configuration exists");
+
+        let error = RunnerConfiguration::read(&configuration_path)
+            .expect_err("a nonexecutable supervisor path fails closed");
+
+        expect![["runner execution supervisor path is invalid"]].assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn configuration_read_rejects_a_nonexecutable_bubblewrap() {
+        let parent = TempDir::new().expect("a temporary configuration root exists");
+        let root = fs::canonicalize(parent.path()).expect("the temporary root canonicalizes");
+        let read_only = root.join("toolchain");
+        fs::create_dir(&read_only).expect("the read-only fixture path exists");
+        let bubblewrap = root.join("bwrap");
+        fs::write(&bubblewrap, b"fixture").expect("the bubblewrap fixture exists");
+        fs::set_permissions(&bubblewrap, fs::Permissions::from_mode(0o600))
+            .expect("the bubblewrap fixture is not executable");
+        let supervisor = std::env::current_exe().expect("the test executable path is available");
+        let configuration_path = root.join("runner.toml");
+        let document = format!(
+            r#"version = 1
+daemon_socket_path = "{}"
+runner_root = "{}"
+exec_supervisor_executable = "{}"
+bubblewrap_path = "{}"
+read_only_paths = ["{}"]
+allowed_network_hosts = []
+git_author_name = "Signalbox Runner"
+git_author_email = "runner@example.invalid"
+repositories = {{}}
+credentials = {{}}
+"#,
+            root.join("runner.sock").display(),
+            root.join("runner-state").display(),
+            supervisor.display(),
             bubblewrap.display(),
             read_only.display(),
         );
@@ -895,7 +999,7 @@ credentials = {{}}
         let error = RunnerConfiguration::read(&configuration_path)
             .expect_err("a nonexecutable bubblewrap path fails closed");
 
-        assert_eq!(error.to_string(), "runner bubblewrap path is invalid");
+        expect![["runner bubblewrap path is invalid"]].assert_eq(&error.to_string());
     }
 
     #[test]
@@ -914,11 +1018,13 @@ credentials = {{}}
         fs::write(&bubblewrap, b"fixture").expect("the bubblewrap fixture exists");
         fs::set_permissions(&bubblewrap, fs::Permissions::from_mode(0o700))
             .expect("the bubblewrap fixture is executable");
+        let supervisor = std::env::current_exe().expect("the test executable path is available");
         let configuration_path = root.join("runner.toml");
         let document = format!(
             r#"version = 1
 daemon_socket_path = "{}"
 runner_root = "{}"
+exec_supervisor_executable = "{}"
 bubblewrap_path = "{}"
 read_only_paths = ["{}"]
 allowed_network_hosts = []
@@ -932,6 +1038,7 @@ injection_env = "GH_TOKEN"
 "#,
             root.join("runner.sock").display(),
             runner_root.display(),
+            supervisor.display(),
             bubblewrap.display(),
             read_only.display(),
             credential_alias.display(),
@@ -970,7 +1077,7 @@ injection_env = "GH_TOKEN"
     }
 
     #[test]
-    fn checked_in_example_parses_as_registration_only_configuration() {
+    fn checked_in_example_parses_as_runner_configuration() {
         RunnerConfiguration::parse(CHECKED_IN_EXAMPLE)
             .expect("the checked-in runner example is structurally valid");
     }
