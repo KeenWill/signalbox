@@ -16,7 +16,7 @@ use std::{
 use axum::{
     Json, Router,
     body::{Body, Bytes, to_bytes},
-    extract::{DefaultBodyLimit, Request},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
         header::{CONTENT_TYPE, HOST, ORIGIN},
@@ -26,11 +26,20 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::{Stream, StreamExt, stream};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use signalbox_application::{
+    SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress,
+    TimelineWindowAnchor, TimelineWindowLimits,
+};
+use signalbox_domain::SessionId;
+use signalbox_persistence::session_timeline::SessionTimelineRepository;
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
-    WebContractBootstrap, WebContractExample,
+    WebContractBootstrap, WebContractExample, WebSessionTimelineDescriptor,
+    WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
+    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
 };
+use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
 use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
@@ -173,8 +182,11 @@ pub struct WebHttpRuntime {
 
 impl WebHttpRuntime {
     /// Binds the production same-origin router.
-    pub async fn bind(configuration: WebHttpConfiguration) -> Result<Self, WebHttpRuntimeError> {
-        let router = production_router(configuration.asset_root);
+    pub async fn bind(
+        configuration: WebHttpConfiguration,
+        pool: PgPool,
+    ) -> Result<Self, WebHttpRuntimeError> {
+        let router = production_router(configuration.asset_root, Some(pool));
         Self::bind_router(configuration.bind_address, router).await
     }
 
@@ -216,9 +228,18 @@ impl WebHttpRuntime {
 }
 
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
-pub fn production_router(asset_root: Option<PathBuf>) -> Router {
+pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> Router {
+    let state = WebApiState {
+        timeline: pool.map(SessionTimelineRepository::new),
+    };
     let api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
+        .route("/sessions/{session_id}", get(session_descriptor))
+        .route(
+            "/sessions/{session_id}/timeline",
+            get(session_timeline_window),
+        )
+        .with_state(state)
         .fallback(api_not_found);
     let router = Router::new().nest("/api", api);
     match asset_root {
@@ -228,6 +249,257 @@ pub fn production_router(asset_root: Option<PathBuf>) -> Router {
                 .fallback(ServeFile::new(root.join("index.html"))),
         ),
         None => router.fallback(static_assets_not_configured),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WebApiState {
+    timeline: Option<SessionTimelineRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimelineWindowQuery {
+    anchor: String,
+    address: Option<String>,
+    max_items: u16,
+    max_bytes: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SessionTimelineRequestError {
+    InvalidSessionId,
+    InvalidAddress,
+    InvalidAnchor,
+    MissingBounds,
+}
+
+impl SessionTimelineRequestError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::InvalidSessionId => application_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_session_id",
+                "session id is not a UUID",
+            ),
+            Self::InvalidAddress => application_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_timeline_address",
+                "this anchor requires one positive decimal timeline address",
+            ),
+            Self::InvalidAnchor => application_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_timeline_anchor",
+                "timeline anchor and address do not form a recognized request",
+            ),
+            Self::MissingBounds => application_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "session_projection_failed",
+                "an existing session has no durable timeline bound",
+            ),
+        }
+    }
+}
+
+async fn session_descriptor(
+    State(state): State<WebApiState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let Some(repository) = state.timeline else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session_projection_unavailable",
+            "session projection is not configured",
+        );
+    };
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    match repository.read_descriptor(session).await {
+        Ok(Some(descriptor)) => match descriptor_dto(descriptor) {
+            Ok(descriptor) => Json(descriptor).into_response(),
+            Err(error) => error.into_response(),
+        },
+        Ok(None) => application_error(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            "the requested session does not exist",
+        ),
+        Err(_) => application_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_projection_failed",
+            "the durable session projection could not be read",
+        ),
+    }
+}
+
+async fn session_timeline_window(
+    State(state): State<WebApiState>,
+    Path(session_id): Path<String>,
+    Query(query): Query<TimelineWindowQuery>,
+) -> Response {
+    let Some(repository) = state.timeline else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session_projection_unavailable",
+            "session projection is not configured",
+        );
+    };
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    let anchor = match parse_window_anchor(&query.anchor, query.address.as_deref()) {
+        Ok(anchor) => anchor,
+        Err(error) => return error.into_response(),
+    };
+    let limits = match TimelineWindowLimits::new(query.max_items, query.max_bytes) {
+        Ok(limits) => limits,
+        Err(_) => {
+            return application_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_timeline_limits",
+                "timeline limits are outside the contract bounds",
+            );
+        }
+    };
+    match repository.read_window(session, anchor, limits).await {
+        Ok(Some(window)) => Json(window_dto(window)).into_response(),
+        Ok(None) => application_error(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            "the requested session does not exist",
+        ),
+        Err(_) => application_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_projection_failed",
+            "the durable session projection could not be read",
+        ),
+    }
+}
+
+fn parse_session_id(value: &str) -> Result<SessionId, SessionTimelineRequestError> {
+    uuid::Uuid::parse_str(value)
+        .map(SessionId::from_uuid)
+        .map_err(|_| SessionTimelineRequestError::InvalidSessionId)
+}
+
+fn parse_window_anchor(
+    anchor: &str,
+    address: Option<&str>,
+) -> Result<TimelineWindowAnchor, SessionTimelineRequestError> {
+    let parsed_address = || {
+        address
+            .and_then(|value| value.parse::<u64>().ok())
+            .and_then(std::num::NonZeroU64::new)
+            .map(TimelineAddress::new)
+            .ok_or(SessionTimelineRequestError::InvalidAddress)
+    };
+    match (anchor, address) {
+        ("first", None) => Ok(TimelineWindowAnchor::First),
+        ("latest", None) => Ok(TimelineWindowAnchor::Latest),
+        ("before", _) => parsed_address().map(TimelineWindowAnchor::Before),
+        ("after", _) => parsed_address().map(TimelineWindowAnchor::After),
+        ("around", _) => parsed_address().map(TimelineWindowAnchor::Around),
+        _ => Err(SessionTimelineRequestError::InvalidAnchor),
+    }
+}
+
+fn address_dto(address: TimelineAddress) -> WebTimelineAddress {
+    WebTimelineAddress {
+        event_sequence: address.sequence().get().to_string(),
+    }
+}
+
+fn descriptor_dto(
+    descriptor: SessionTimelineDescriptor,
+) -> Result<WebSessionTimelineDescriptor, SessionTimelineRequestError> {
+    let Some(first_address) = descriptor.bounds.first else {
+        return Err(SessionTimelineRequestError::MissingBounds);
+    };
+    let Some(latest_address) = descriptor.bounds.latest else {
+        return Err(SessionTimelineRequestError::MissingBounds);
+    };
+    Ok(WebSessionTimelineDescriptor {
+        session_id: descriptor.session.into_uuid().to_string(),
+        sizes: WebSessionTimelineSizeFacts {
+            item_count: descriptor.sizes.item_count.to_string(),
+            projected_text_bytes: descriptor.sizes.projected_text_bytes.to_string(),
+            projected_structured_bytes: descriptor.sizes.projected_structured_bytes.to_string(),
+            referenced_blob_count: descriptor.sizes.referenced_blob_count.to_string(),
+            referenced_blob_bytes: descriptor.sizes.referenced_blob_bytes.to_string(),
+        },
+        first_address: address_dto(first_address),
+        latest_address: address_dto(latest_address),
+        work: WebSessionWorkFacts {
+            active_turn_count: descriptor.work.active_turn_count.to_string(),
+            queued_turn_count: descriptor.work.queued_turn_count.to_string(),
+        },
+        observed_through: descriptor.observed_through.to_string(),
+    })
+}
+
+fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
+    let continuation_before = window
+        .has_more_before
+        .then(|| window.items.first().map(|item| address_dto(item.address)))
+        .flatten();
+    let continuation_after = window
+        .has_more_after
+        .then(|| window.items.last().map(|item| address_dto(item.address)))
+        .flatten();
+    WebSessionTimelineWindow {
+        session_id: window.session.into_uuid().to_string(),
+        items: window
+            .items
+            .into_iter()
+            .map(|item| WebSessionTimelineItem {
+                address: address_dto(item.address),
+                kind: event_kind_dto(item.kind),
+                projected_structured_bytes: item.projected_structured_bytes,
+            })
+            .collect(),
+        projected_structured_bytes: window.projected_structured_bytes,
+        continuation_before,
+        continuation_after,
+    }
+}
+
+fn event_kind_dto(kind: SessionTimelineEventKind) -> WebSessionTimelineEventKind {
+    match kind {
+        SessionTimelineEventKind::SessionCreated => WebSessionTimelineEventKind::SessionCreated,
+        SessionTimelineEventKind::SessionModelSettingsChanged => {
+            WebSessionTimelineEventKind::SessionModelSettingsChanged
+        }
+        SessionTimelineEventKind::TurnModelSettingsResolved => {
+            WebSessionTimelineEventKind::TurnModelSettingsResolved
+        }
+        SessionTimelineEventKind::InputAccepted => WebSessionTimelineEventKind::InputAccepted,
+        SessionTimelineEventKind::GoalTurnRetired => WebSessionTimelineEventKind::GoalTurnRetired,
+        SessionTimelineEventKind::TurnActivated => WebSessionTimelineEventKind::TurnActivated,
+        SessionTimelineEventKind::TurnFailed => WebSessionTimelineEventKind::TurnFailed,
+        SessionTimelineEventKind::ModelCallTransition => {
+            WebSessionTimelineEventKind::ModelCallTransition
+        }
+        SessionTimelineEventKind::ToolBatchTransition => {
+            WebSessionTimelineEventKind::ToolBatchTransition
+        }
+        SessionTimelineEventKind::ToolApprovalDecided => {
+            WebSessionTimelineEventKind::ToolApprovalDecided
+        }
+        SessionTimelineEventKind::ContextCompacted => WebSessionTimelineEventKind::ContextCompacted,
+        SessionTimelineEventKind::TurnCompleted => WebSessionTimelineEventKind::TurnCompleted,
+        SessionTimelineEventKind::TurnRefused => WebSessionTimelineEventKind::TurnRefused,
+        SessionTimelineEventKind::TurnCancelled => WebSessionTimelineEventKind::TurnCancelled,
+        SessionTimelineEventKind::TurnReconciliationRequired => {
+            WebSessionTimelineEventKind::TurnReconciliationRequired
+        }
+        SessionTimelineEventKind::RunnerStateTransition => {
+            WebSessionTimelineEventKind::RunnerStateTransition
+        }
+        SessionTimelineEventKind::DelegationUpdate => WebSessionTimelineEventKind::DelegationUpdate,
+        SessionTimelineEventKind::DelegationWake => WebSessionTimelineEventKind::DelegationWake,
     }
 }
 
@@ -493,6 +765,20 @@ fn transport_error(status: StatusCode, code: &'static str, message: &'static str
     (status, body).into_response()
 }
 
+fn application_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+    (
+        status,
+        Json(WebApiErrorResponse {
+            error: WebApiError {
+                kind: WebApiErrorKind::Application,
+                code: code.to_owned(),
+                message: message.to_owned(),
+            },
+        }),
+    )
+        .into_response()
+}
+
 async fn api_not_found() -> Response {
     transport_error(
         StatusCode::NOT_FOUND,
@@ -598,10 +884,10 @@ mod tests {
         let assets = tempfile::tempdir().expect("the static asset directory exists");
         std::fs::write(assets.path().join("index.html"), STATIC_INDEX)
             .expect("the static index exists");
-        let runtime = WebHttpRuntime::bind(WebHttpConfiguration::new(
+        let runtime = WebHttpRuntime::bind_router(
             loopback_ephemeral(),
-            Some(assets.path().to_path_buf()),
-        ))
+            production_router(Some(assets.path().to_path_buf()), None),
+        )
         .await
         .expect("the production test server binds");
         let address = runtime
@@ -820,7 +1106,7 @@ mod tests {
         let request = Request::get("/api/not-a-route")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(Some(assets.path().to_path_buf()))
+        let response = production_router(Some(assets.path().to_path_buf()), None)
             .oneshot(request)
             .await
             .expect("the production router responds");

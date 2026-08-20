@@ -1,7 +1,9 @@
 # Configuration and credentials
 
 The browser HTTP listener, same-origin static assets, and generated contract
-bootstrap are verified against this PR (`agent/web-http-transport`).
+bootstrap are verified against this PR (`agent/web-http-transport`). The
+composed bounded session descriptor and historical-window routes are verified
+against this PR (`agent/web-session-timeline`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -170,13 +172,16 @@ daemon does not emit permissive CORS headers and adds no account, login,
 bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. Those
 deployment boundaries remain outside Signalbox.
 
-`GET /api/bootstrap` is the production browser API in this foundation slice. It
-returns the exact contract family `signalbox.web-http`, version `1`, the
-`bounded_json`, `same_origin_json_mutations`, and `ndjson_streaming`
-capabilities, and the effective 65,536-byte JSON-body and NDJSON-item hard
+`GET /api/bootstrap` describes the production browser contract. It returns the
+exact contract family `signalbox.web-http`, version `1`, the `bounded_json`,
+`same_origin_json_mutations`, and `ndjson_streaming` capabilities, the
+`bounded_session_timeline` capability, the effective 65,536-byte JSON-body and
+NDJSON-item hard ceilings, and the 256-item and 65,536-projected-byte timeline
 ceilings. The generated browser decoder rejects an unknown field, wrong shape,
 different family, or different version rather than interpreting it as the local
-process protocol. No process-protocol frame is a browser DTO.
+process protocol. No process-protocol frame is a browser DTO. The descriptor and
+historical-window route shapes and semantics are owned by
+[Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline).
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and

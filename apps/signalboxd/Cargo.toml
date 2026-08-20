@@ -17,6 +17,7 @@ test-support = [
 axum = { version = "0.8.9", default-features = false, features = [
     "http1",
     "json",
+    "query",
     "tokio",
 ] }
 futures-util = { version = "0.3.34", default-features = false }
