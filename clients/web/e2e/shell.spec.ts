@@ -303,6 +303,26 @@ test('changing scenarios resets timeline selection', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('changing to a cached scenario resets timeline scrolling', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto('/scenario/streaming')
+
+  await page.getByRole('link', { name: /Approval required/ }).click()
+  await page.getByRole('link', { name: /Streaming session/ }).click()
+  const streamingTimeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await streamingTimeline.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  expect(await streamingTimeline.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+
+  await page.getByRole('link', { name: /Approval required/ }).click()
+  const approvalTimeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await expect(page).toHaveURL(/\/scenario\/approval$/)
+  await expect(page.locator(`#${streamingFixture.firstLoadedItemId}`)).toBeInViewport()
+  expect(await approvalTimeline.evaluate((element) => element.scrollTop)).toBe(0)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('marks only the active scenario link as the current page', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')

@@ -62,9 +62,17 @@ const renderers: Record<TimelineKind, (props: RendererProps) => React.JSX.Elemen
   ),
 }
 
+const visibleInResults: Record<TimelineKind, boolean> = {
+  origin: true,
+  progress: false,
+  tool: false,
+  result: true,
+  unknown: true,
+}
+
 export const visibleTimeline = (items: TimelineItem[], detail: DetailMode): TimelineItem[] => {
   if (detail !== 'results') return items
-  return items.filter((item) => ['origin', 'result', 'unknown'].includes(item.kind))
+  return items.filter((item) => visibleInResults[item.kind])
 }
 
 export function Transcript({ items, context }: { items: TimelineItem[]; context: CommandContext }) {

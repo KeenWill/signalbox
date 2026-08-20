@@ -146,19 +146,33 @@ const timelineKind = (index: number): TimelineKind => {
   return 'origin'
 }
 
-const timelineCopy = (kind: TimelineKind, index: number): [string, string] => {
+interface TimelineCopy {
+  label: string
+  body: string
+}
+
+const timelineCopy = (kind: TimelineKind, index: number): TimelineCopy => {
   const serial = String(index + 1).padStart(5, '0')
   switch (kind) {
     case 'origin':
-      return ['Operator', `Inspect the active obligation at logical position ${serial}.`]
+      return {
+        label: 'Operator',
+        body: `Inspect the active obligation at logical position ${serial}.`,
+      }
     case 'progress':
-      return ['Progress', `Projection advanced through durable event ${serial}.`]
+      return { label: 'Progress', body: `Projection advanced through durable event ${serial}.` }
     case 'tool':
-      return ['Tool call', `repository.status completed with bounded summary ${serial}.`]
+      return {
+        label: 'Tool call',
+        body: `repository.status completed with bounded summary ${serial}.`,
+      }
     case 'result':
-      return ['Durable result', `The requested operation settled at cursor timeline:${index}.`]
+      return {
+        label: 'Durable result',
+        body: `The requested operation settled at cursor timeline:${index}.`,
+      }
     case 'unknown':
-      return ['Unrecognized record', `kind=extension.preview; evidence=${serial}`]
+      return { label: 'Unrecognized record', body: `kind=extension.preview; evidence=${serial}` }
   }
 }
 
@@ -176,7 +190,7 @@ export class ScenarioTransport implements SignalboxTransport {
     const items = Array.from({ length: end - start }, (_, offset) => {
       const index = start + offset
       const kind = timelineKind(index)
-      const [label, body] = timelineCopy(kind, index)
+      const { label, body } = timelineCopy(kind, index)
       return {
         id: `event-${index}`,
         cursor: `timeline:${index}`,

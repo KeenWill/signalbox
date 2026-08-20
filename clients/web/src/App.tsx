@@ -173,7 +173,7 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
           <Toolbar context={commandContext} />
         </header>
         <div className="primary-stack">
-          <Transcript items={timeline.items} context={commandContext} />
+          <Transcript key={knownId} items={timeline.items} context={commandContext} />
           {app.layout === 'workbench' && (
             <FleetTable rows={fleet.items} totalCount={fleet.totalCount} />
           )}
