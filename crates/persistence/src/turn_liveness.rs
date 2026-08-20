@@ -9,7 +9,7 @@
 //! for a terminal turn — repository-watch dispatch release included — fires
 //! without this module naming any of them.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, time::Duration};
 
 use signalbox_application::{
     ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StaleTurnOutcome,
@@ -19,6 +19,7 @@ use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, SessionId, TurnAttemptId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Decimal, types::Uuid};
+use tokio::time::timeout;
 
 use crate::mapping::{
     session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
@@ -53,6 +54,25 @@ const QUIESCENT_INVENTORY_PAGE_SIZE: i64 = 256;
 // numeric-bound: tunable - bounds one terminalization's wait for the scheduler row
 const TERMINALIZATION_LOCK_WAIT: &str = "250ms";
 
+/// The same wait, applied to reaching a connection at all.
+///
+/// The shared pool's own acquisition timeout is thirty seconds, which a
+/// windowful of attempts would multiply into half an hour of a phase that is
+/// supposed to fit inside a one-minute interval. Cancelling an acquisition is
+/// safe in a way cancelling later work would not be: no transaction has begun,
+/// so there is nothing whose fate could be unknown.
+// numeric-bound: tunable - bounds one terminalization's wait for a pooled connection
+const TERMINALIZATION_ACQUIRE_WAIT: Duration = Duration::from_millis(250);
+
+/// Restores an unbounded lock wait once the scheduler row is held.
+///
+/// The bound exists to stop this pass queueing behind a busy session, and that
+/// question is settled the moment the row is acquired. Leaving it in force
+/// would apply it to the write phase, where the outbox's shared sequence row is
+/// taken for a moment by every writer — turning ordinary traffic into a refusal
+/// after this transaction had already begun writing.
+const TERMINALIZATION_LOCK_WAIT_RELEASED: &str = "0";
+
 /// Infrastructure or integrity failure while supervising turn liveness.
 ///
 /// The two database arms are separate because they mean different things to an
@@ -79,19 +99,24 @@ pub enum TurnLivenessRepositoryError {
 
 impl TurnLivenessRepositoryError {
     /// Classifies an unambiguous driver failure on the terminalization path.
-    ///
-    /// A refused lock is separated here rather than at each call site: it is
-    /// the one failure on this path that means only "someone else is working
-    /// on this session", and an operator reading it as a fault would be reading
-    /// ordinary contention as a defect.
     fn terminalization(error: sqlx::Error) -> Self {
-        if lock_wait_expired(&error) {
-            return Self::TerminalizationLockUnavailable(error);
-        }
         Self::TerminalizationDatabase {
             commit_ambiguous: false,
             source: error,
         }
+    }
+
+    /// Classifies a failure of the statement that takes the scheduler row.
+    ///
+    /// Only this site can report a refused lock, rather than any statement that
+    /// happens to raise the code: a refusal means "someone else is working on
+    /// this session", which is true of the row this statement waits for and of
+    /// nothing else the transaction goes on to touch.
+    fn terminalization_lock(error: sqlx::Error) -> Self {
+        if lock_wait_expired(&error) {
+            return Self::TerminalizationLockUnavailable(error);
+        }
+        Self::terminalization(error)
     }
 }
 
@@ -209,10 +234,9 @@ impl PostgresTurnLivenessRepository {
         candidate: StaleTurnCandidate,
         identities: AcceptedInputTurnFailureIdentities,
     ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
-        let mut transaction = self
-            .pool
-            .begin()
+        let mut transaction = timeout(TERMINALIZATION_ACQUIRE_WAIT, self.pool.begin())
             .await
+            .unwrap_or(Err(sqlx::Error::PoolTimedOut))
             .map_err(TurnLivenessRepositoryError::terminalization)?;
         // Bounded before anything is read or written, so the only statement it
         // can interrupt is the one waiting for the scheduler row. A bound that
@@ -540,6 +564,13 @@ async fn terminalize_in_transaction(
     let locks = sqlx::query(crate::lock_inventory::STARTUP_RECOVERY)
         .bind(session_id_to_uuid(candidate.session()))
         .fetch_one(&mut *connection)
+        .await
+        .map_err(TurnLivenessRepositoryError::terminalization_lock)?;
+    // The row is held, so the bound has done its work. Everything after this
+    // waits as any other writer does.
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(TERMINALIZATION_LOCK_WAIT_RELEASED)
+        .execute(&mut *connection)
         .await
         .map_err(TurnLivenessRepositoryError::terminalization)?;
     let session_exists: bool = locks

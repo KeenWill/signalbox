@@ -564,10 +564,13 @@ it stands, so no probe is needed for it. Both cases come to
 `⌊population ÷ 256⌋ + 1` reads, run one after another, each answered from an
 index. That is one read for an idle deployment, one for a hundred simultaneously
 quiescent turns, two for three hundred; only a population at the page ceiling
-reaches 4,097, and a rotation that large decides nothing anyway. Those reads are
-left whole rather than capped per scan because the ledger is fed complete
-populations: a scan stopping partway would have to report the turns it never
-reached as having left the quiescent shape. A scan whose reads outlast the
+reaches 4,097, and that population is the largest the pass decides on — its
+4,096 pages all fill, its probe comes back empty, and the ledger receives the
+whole of it. One turn more makes the probe carry a candidate, which is what
+proves the population past capacity and ends the scan with no decision. Those
+reads are left whole rather than capped per scan because the ledger is fed
+complete populations: a scan stopping partway would have to report the turns it
+never reached as having left the quiescent shape. A scan whose reads outlast the
 interval delays the next scan rather than overlapping it, so the pass degrades
 to observing less often, never to two scans deciding at once.
 
@@ -590,21 +593,23 @@ observed on every scan. Ending them is not. A lap of more than one window takes
 a scan per windowful to work through, and a turn's wait is the sum of two laps
 rather than one: a turn becoming due while a lap runs is not among its members,
 so it waits for that lap's remaining members to drain and then for its own place
-in the lap that opens next. The bound is therefore
-`⌈remaining ÷ 64⌉ + ⌈position ÷ 64⌉` scan intervals, counting from the scan that
-found it due. At its worst — a turn arriving into a full lap and then taking the
-last place in the next one — that is `⌈previous ÷ 64⌉ − 1 + ⌈own ÷ 64⌉`, one
-term less than the two laps' own lengths: a turn becoming due while a lap runs
-became due after that lap had already opened, so at least one of its scans is
-behind it. Only a turn already due when its lap opens waits the single
-`⌈position ÷ 64⌉`. A cohort at the inventory's capacity would take over eleven
-days per lap to work through, so a turn arriving into one waits two. That is
-accepted rather than overlooked: the alternative is a scan that runs until its
-cohort is drained, which delays the next observation of *every* session,
-including the ones whose turns are working. A watchdog may be slow to finish; it
-may not stop watching. What deferral does not cost is the turn: one left alone
-had nothing change, so it is observed unchanged and comes due again on a later
-scan, waiting rather than being forgotten.
+in the lap that opens next. The wait is therefore
+`⌈remaining ÷ 64⌉ + ⌈position ÷ 64⌉ − 1` scan intervals, counting from the scan
+that found it due: that scan serves a window of its own, so it is one of the two
+terms rather than an interval before them. A turn found while 63 members remain
+waits one interval — that scan drains the 63, and the next opens the lap holding
+it — and a turn already in the first window of its own lap waits none. At its
+worst, a turn arriving into a full lap and then taking the last place in the
+next, the wait is `⌈previous ÷ 64⌉ + ⌈own ÷ 64⌉ − 2`: a turn becoming due while
+a lap runs became due after that lap had already opened, so at least one of its
+scans is behind it before the count begins. A cohort at the inventory's capacity
+would take over eleven days per lap to work through, so a turn arriving into one
+waits two. That is accepted rather than overlooked: the alternative is a scan
+that runs until its cohort is drained, which delays the next observation of
+*every* session, including the ones whose turns are working. A watchdog may be
+slow to finish; it may not stop watching. What deferral does not cost is the
+turn: one left alone had nothing change, so it is observed unchanged and comes
+due again on a later scan, waiting rather than being forgotten.
 
 **Constants.** The staleness bound is a hard safety ceiling of 30 minutes and
 the scan interval is one minute; both are compiled in. The bound the pass runs

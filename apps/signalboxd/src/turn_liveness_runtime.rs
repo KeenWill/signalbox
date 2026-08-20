@@ -311,10 +311,13 @@ impl TurnLivenessRuntime {
 
     /// Scans until shutdown, terminalizing every turn observed boundedly stale.
     ///
-    /// A failed pass changes nothing and is retried at the next interval, so
-    /// no pass outcome ends this task: the durable rows the next pass reads
-    /// are the only state it carries. The cursor rotates across passes so a
-    /// quiescent population larger than one page is still covered in full.
+    /// A failed pass changes nothing and is retried at the next interval, so no
+    /// pass outcome ends this task. Each pass reads its whole rotation before
+    /// deciding, paging only within itself — nothing about that paging survives
+    /// a pass, and paging across passes is what the ledger's forgetting rule
+    /// forbids. What does survive is process-local and carries no authority:
+    /// the ledger of how long each turn has stood still, and the lap the
+    /// terminalization window is partway through.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
         let mut ticker = interval(self.scan_interval.get());
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);

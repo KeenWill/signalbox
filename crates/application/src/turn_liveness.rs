@@ -115,11 +115,20 @@ impl Error for TurnLivenessBoundError {}
 /// observing this evidence unchanged across the bound rather than by reading a
 /// stored clock.
 ///
-/// Progress is read from the session's outbox frontier: every durable
-/// transition a session makes — a model call changing state, a tool batch
-/// moving, a turn activating or completing — appends an outbox event, and each
-/// event carries a sequence assigned in commit order. The frontier therefore
-/// advances on exactly the transitions that mean the turn is not wedged.
+/// Progress is read from the session's *turn-progress* outbox frontier. A
+/// durable transition of a turn — a model call changing state, a tool batch
+/// moving, a turn activating or completing — appends an outbox event carrying a
+/// sequence assigned in commit order, and the greatest such sequence is this
+/// observation.
+///
+/// Not every outbox event counts, and a caller constructing this value must
+/// apply the same exclusion the adapter does. Accepting queued input, resolving
+/// a turn's model settings, replacing session defaults, retiring a goal turn,
+/// creating a session, and a runner state transition all advance a session's
+/// unfiltered frontier while its active turn does nothing — so an observation
+/// built from that frontier would let a user hold a wedged turn open
+/// indefinitely by submitting input. The adapter reads the filtered frontier
+/// from a partial index defined on exactly those exclusions.
 ///
 /// That sequence is what makes the comparison sound. It is minted by the
 /// outbox, not derived from a clock, so no adjustment of the system clock and
@@ -208,8 +217,9 @@ pub enum StaleTurnOutcome {
     ///
     /// Terminalizing a turn requires closing every steering input pending on
     /// it, and the failed-turn transition this pass reuses cannot do that. The
-    /// turn stays wedged, so this outcome exists to report it by identity every
-    /// scan rather than to let it pass as an ordinary race.
+    /// turn stays wedged, so this outcome exists to report it by identity
+    /// rather than let it pass as an ordinary race — once per lap of the
+    /// terminalization window, which for a large population is far apart.
     BlockedByPendingSteering,
 }
 
