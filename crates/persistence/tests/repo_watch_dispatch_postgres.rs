@@ -6145,5 +6145,34 @@ async fn a_replayed_commission_returns_its_committed_session() -> Result<(), Box
         fixture.store.commission(conflicting, |_| None).await?,
         CommissionDispatchOutcome::ConflictingReuse
     );
+
+    // A command identity already claimed by another kind entirely is the same
+    // refusal, not a fail-closed corruption.
+    let foreign_command = 0x60_200;
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(foreign_command)),
+                    fixture.session,
+                    GoalUserAction::Stop {
+                        descendant_scope: DescendantTerminationScope::ParentAlone,
+                    },
+                ),
+                None,
+                |_| None,
+            )
+            .await?,
+    );
+    let (provenance, defaults) = commissioned_template();
+    let reused = commission_request_with_fence(foreign_command, commissioned_fence()?)?.prepare(
+        &mut UuidV7CommissionedDispatchIdGenerator,
+        provenance,
+        defaults,
+    )?;
+    assert_eq!(
+        fixture.store.commission(reused, |_| None).await?,
+        CommissionDispatchOutcome::ConflictingReuse
+    );
     Ok(())
 }

@@ -121,9 +121,13 @@ impl PostgresCommissionedDispatchStore {
     /// Commits the complete commission, replaying an already-committed equal one.
     ///
     /// Replay equality binds the create-command identity to the recorded
-    /// template, fence, and commissioned statement. The alias resolver serves
-    /// the initial input's frozen model configuration exactly as it does for a
-    /// repository-watch dispatch.
+    /// template, fence, and commissioned statement. A command identity claimed
+    /// by anything other than a committed commission — another command kind, or
+    /// an ordinary session creation with no fence row — is a conflicting reuse
+    /// rather than corruption, because the caller's identity names intent this
+    /// store never recorded. The alias resolver serves the initial input's
+    /// frozen model configuration exactly as it does for a repository-watch
+    /// dispatch.
     pub async fn commission<SelectDefinition>(
         &self,
         prepared: PreparedCommissionedDispatch,
@@ -159,6 +163,31 @@ impl PostgresCommissionedDispatchStore {
                 }
             } else {
                 CommissionDispatchOutcome::ConflictingReuse
+            });
+        }
+        let claimed_elsewhere: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM durable_command WHERE command_id = $1)",
+        )
+        .bind(command_id.as_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if claimed_elsewhere {
+            // Re-read the fence row before answering: an equal commission that
+            // committed between the two reads above is a replay, not a reuse.
+            let recorded = load_recorded_commission(&mut transaction, command_id).await?;
+            transaction.rollback().await?;
+            return Ok(match recorded {
+                Some(recorded)
+                    if recorded.template_name == template_name
+                        && recorded.fence_matches(prepared.fence())
+                        && recorded.statement.as_deref() == statement_text(&prepared) =>
+                {
+                    CommissionDispatchOutcome::Replayed {
+                        dispatch: recorded.dispatch,
+                        session: recorded.session,
+                    }
+                }
+                _ => CommissionDispatchOutcome::ConflictingReuse,
             });
         }
         let (
