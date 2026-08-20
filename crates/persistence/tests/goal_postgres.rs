@@ -44,6 +44,7 @@ use signalbox_persistence::{
         PrepareContextCompactionRequest,
     },
     create_session::CreateSessionRepository,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
     disposable_test_container_labels,
     goal::{
         GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError, GoalTransitionOutcome,
@@ -89,7 +90,8 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
-        .with_fsync_enabled()
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
