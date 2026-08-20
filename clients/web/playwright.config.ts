@@ -1,11 +1,19 @@
 import { defineConfig, devices } from '@playwright/test'
 
+// CI and local Chromium builds rasterize text differently; observed drift is 2.2%.
+const CROSS_HOST_TEXT_RASTERIZATION_TOLERANCE = 0.035
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : 'list',
+  expect: {
+    toHaveScreenshot: {
+      maxDiffPixelRatio: CROSS_HOST_TEXT_RASTERIZATION_TOLERANCE,
+    },
+  },
   use: {
     baseURL: 'http://127.0.0.1:4173',
     trace: 'retain-on-failure',
