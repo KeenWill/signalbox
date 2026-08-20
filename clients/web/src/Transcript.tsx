@@ -11,7 +11,17 @@ const TRANSCRIPT_OVERSCAN_ROWS = 7
 
 interface RendererProps {
   item: TimelineItem
-  condensed: boolean
+  detail: DetailMode
+}
+
+const toolBody = (item: TimelineItem, detail: DetailMode): string => {
+  switch (detail) {
+    case 'full':
+      return item.body
+    case 'condensed':
+    case 'results':
+      return item.body.split(' with ')[0] ?? item.body
+  }
 }
 
 const renderers: Record<TimelineKind, (props: RendererProps) => React.JSX.Element> = {
@@ -33,12 +43,12 @@ const renderers: Record<TimelineKind, (props: RendererProps) => React.JSX.Elemen
       </div>
     </>
   ),
-  tool: ({ item, condensed }) => (
+  tool: ({ item, detail }) => (
     <>
       <TerminalSquare aria-hidden="true" />
       <div>
         <strong>{item.label}</strong>
-        <p>{condensed ? item.body.split(' with ')[0] : item.body}</p>
+        <p>{toolBody(item, detail)}</p>
       </div>
     </>
   ),
@@ -71,8 +81,13 @@ const visibleInResults: Record<TimelineKind, boolean> = {
 }
 
 export const visibleTimeline = (items: TimelineItem[], detail: DetailMode): TimelineItem[] => {
-  if (detail !== 'results') return items
-  return items.filter((item) => visibleInResults[item.kind])
+  switch (detail) {
+    case 'full':
+    case 'condensed':
+      return items
+    case 'results':
+      return items.filter((item) => visibleInResults[item.kind])
+  }
 }
 
 export function Transcript({ items, context }: { items: TimelineItem[]; context: CommandContext }) {
@@ -178,7 +193,7 @@ export function Transcript({ items, context }: { items: TimelineItem[]; context:
               >
                 <span className="turn-rail">T{item.turn}</span>
                 <div className="timeline-content">
-                  <Renderer item={item} condensed={detail !== 'full'} />
+                  <Renderer item={item} detail={detail} />
                 </div>
                 <span className="elapsed">{item.elapsed}</span>
               </div>

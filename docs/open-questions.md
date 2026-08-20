@@ -682,10 +682,11 @@ questions below remain open.
   by [process-protocol](spec/process-protocol.md). Remote access still requires
   decisions for client identity, authentication, authorization, revocation, and
   credential delivery. (S01, S24)
-- **Browser transport.** Technology remains open and blocks the web client;
-  snapshot and durable-update semantics are defined by
-  [process-protocol](spec/process-protocol.md), while transient model-update
-  streaming remains open below. (S02, S24)
+- **Browser transport.** Settled for the web client: the same-origin browser
+  transport merged in PR #1000 and is owned by
+  [configuration-and-credentials](spec/configuration-and-credentials.md). It no
+  longer blocks the web client; transient model-update streaming remains open
+  below. (S02, S24)
 - **Remote runner transport and reconnect.** The dedicated local socket,
   framing, heartbeat, reconnect inventory, and transaction orchestration are
   owned by [runner protocol and placement](spec/runner-protocol.md). Remote
@@ -738,8 +739,9 @@ questions below remain open.
   is a TUI, web app, or native app remains unselected. (S01, S02, S10, S24)
 - **Apple client code organization.** Defer until the protocol and the first
   native slice are known. (S01, S24)
-- **Web client technology (Rust/Wasm or TypeScript).** No leaning until the
-  browser protocol and product slice are measured. (S01, S02, S24)
+- **Web client technology.** Settled: the web campaign uses React and TypeScript
+  with TanStack, Redux Toolkit, and Radix. This owner-approved platform choice
+  is no longer open. (S01, S02, S24)
 - **Client approval presentation.** The terminal baseline now surfaces the
   pending request through the transcript's awaiting-turn and tool-use lines and
   collects decisions through `approve`/`deny`
