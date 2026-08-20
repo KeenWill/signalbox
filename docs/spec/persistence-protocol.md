@@ -3,6 +3,10 @@
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
 
+The restore-safety search-path pin on check-reachable functions, and the
+catalogue test holding it, were verified against this PR
+(`agent/restore-safe-check-functions`).
+
 The delegate denial-reason storage — the superseded decision-shape constraint
 and its byte-precise checks — was verified against this PR
 (`agent/judge-denial-reason`).
@@ -174,15 +178,18 @@ new forward migration; never edit, replace, or renumber the recorded migration
 file.
 
 Every function reachable from a table constraint or index expression pins its
-search path (`SET search_path = public, pg_catalog, pg_temp`) in its definition.
-`pg_restore` replays a logical backup under an empty search path and evaluates
-check constraints while copying table data, so an unpinned plpgsql body that
-names another user function unqualified resolves during normal operation but
-fails mid-restore; `202608200001` retrofits the pin onto the check-reachable set
-after exactly that failure blocked the first restore rehearsal against a live
-backup. Why: a backup that cannot restore is a silent failure that surfaces only
-during recovery, so restorability is part of the schema's contract rather than
-an operational afterthought.
+search path in its catalogue definition, rendered through `current_schema` so
+installations whose migrations run outside the default schema keep the
+`202607310102` pattern. `pg_restore` replays a logical backup under an empty
+search path and evaluates check constraints while copying table data, so an
+unpinned body that names another user function unqualified resolves in normal
+operation and fails only during restore; `202608200001` retrofits the pin onto
+the check-reachable set the earlier migrations create, and the
+`search_path_postgres` catalogue test reads the reachable set from the live
+catalogue and fails on any unpinned member, so a future migration cannot
+reintroduce the gap. Why: a backup that cannot restore is a silent failure that
+surfaces only during recovery, so restorability is part of the schema's contract
+rather than an operational afterthought.
 
 Prefix reservation across concurrent stacks: the bottom pull request of any
 stack that will add migrations declares a reserved prefix block — a date plus a

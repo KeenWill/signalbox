@@ -1,47 +1,39 @@
 -- Functions reachable from check constraints pin their search path.
 --
--- pg_restore replays a logical backup with an empty search_path and evaluates
--- check constraints while copying table data. A plpgsql body that names
--- another user function without schema qualification therefore resolves during
--- normal operation but fails mid-restore: the first restore rehearsal against
--- a live backup stopped at tool_request's data copy because
--- canonical_tool_json calls canonical_tool_json_number unqualified. Later
--- function sets (202607310102) already carry the pin; this retrofits every
--- check-reachable function this repository's migrations create, plus that one
--- transitive callee, so the set stays restore-safe regardless of how any one
--- body evolves. Validators installed outside these migrations on a deployment
--- are that deployment's to pin the same way; referencing them here would fail
--- every freshly migrated database.
-
-ALTER FUNCTION canonical_tool_json(text)
-    SET search_path = public, pg_catalog, pg_temp;
-
-ALTER FUNCTION canonical_tool_json_number(text)
-    SET search_path = public, pg_catalog, pg_temp;
-
-ALTER FUNCTION configured_git_remote_name_is_valid(text)
-    SET search_path = public, pg_catalog, pg_temp;
-
-ALTER FUNCTION configured_git_remote_url_is_valid(text)
-    SET search_path = public, pg_catalog, pg_temp;
-
-ALTER FUNCTION repo_watch_branch_is_valid(text)
-    SET search_path = public, pg_catalog, pg_temp;
-
-ALTER FUNCTION repo_watch_labels_are_valid(text[])
-    SET search_path = public, pg_catalog, pg_temp;
-
-ALTER FUNCTION repo_watch_login_is_valid(text)
-    SET search_path = public, pg_catalog, pg_temp;
-
-ALTER FUNCTION repo_watch_repository_is_valid(text)
-    SET search_path = public, pg_catalog, pg_temp;
-
-ALTER FUNCTION repo_watch_rule_id_is_valid(text)
-    SET search_path = public, pg_catalog, pg_temp;
-
-ALTER FUNCTION valid_tool_json(text)
-    SET search_path = public, pg_catalog, pg_temp;
-
-ALTER FUNCTION workspace_root_path_is_valid(text)
-    SET search_path = public, pg_catalog, pg_temp;
+-- pg_restore replays a logical backup with an empty search path and evaluates
+-- check constraints while copying table data, so a function body that names
+-- another user function without schema qualification resolves during normal
+-- operation but fails mid-restore, leaving the backup unrestorable exactly
+-- when it is needed. Later function sets (202607310102) already pin their
+-- search path at creation; this retrofits the pin onto every check-reachable
+-- function the earlier migrations create, plus the one transitive callee
+-- (canonical_tool_json names canonical_tool_json_number in its body), so a
+-- logical backup restores regardless of how any one body evolves. The pin
+-- names the migration-selected schema rather than a literal, preserving
+-- installations whose migrations run outside the default schema — the same
+-- reason 202607310102 renders its pins through current_schema.
+DO $$
+DECLARE
+    signature text;
+BEGIN
+    FOREACH signature IN ARRAY ARRAY[
+        'canonical_tool_json(text)',
+        'canonical_tool_json_number(text)',
+        'configured_git_remote_name_is_valid(text)',
+        'configured_git_remote_url_is_valid(text)',
+        'repo_watch_branch_is_valid(text)',
+        'repo_watch_labels_are_valid(text[])',
+        'repo_watch_login_is_valid(text)',
+        'repo_watch_repository_is_valid(text)',
+        'repo_watch_rule_id_is_valid(text)',
+        'valid_tool_json(text)',
+        'workspace_root_path_is_valid(text)'
+    ] LOOP
+        EXECUTE format(
+            'ALTER FUNCTION %s SET search_path TO %I, pg_catalog, pg_temp',
+            signature,
+            current_schema
+        );
+    END LOOP;
+END
+$$;
