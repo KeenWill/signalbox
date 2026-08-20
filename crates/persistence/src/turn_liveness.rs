@@ -41,7 +41,7 @@ const QUIESCENT_INVENTORY_PAGE_SIZE: i64 = 256;
 
 /// How long one terminalization waits for the session's scheduler row.
 ///
-/// The attempt takes that row `FOR UPDATE`, and the transactions holding it —
+/// The attempt takes that row under an exclusive row lock, and the transactions holding it —
 /// activation, submission, startup recovery — are short. A wait longer than
 /// this means the session is busy, which is itself evidence against the turn
 /// being wedged, so failing fast costs nothing: the turn stays due and its lap
