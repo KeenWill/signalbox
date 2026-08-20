@@ -11,9 +11,9 @@ accessibility checks, and autonomous debugging.
 ## Deterministic first
 
 Every substantial state has a stable development scenario. Scenarios generate
-large data rather than committing giant fixture files and run the real client
-reducers, decoders, selectors, commands, and renderers through a scenario
-transport.
+large data rather than committing giant fixture files and exercise the selected
+stack's real state-transition boundary, decoders, selectors, commands, and
+renderers through a scenario transport.
 
 Prefer scenarios such as:
 
@@ -52,11 +52,13 @@ read-only summaries for:
 - transport and synchronization phase;
 - selected session and durable cursor;
 - pending commands and approvals;
-- provider drafts only when an implemented relay contract also authorizes their
-  diagnostic representation and redaction;
-- recent Redux actions and state diffs;
+- provider drafts only when an implemented browser relay contract also
+  authorizes their diagnostic representation and redaction;
+- recent bounded state transitions, such as Redux actions and state diffs when
+  the selected stack uses Redux;
 - loaded pages/windows and virtual ranges;
-- TanStack Query state; and
+- request state when applicable, such as TanStack Query state when the selected
+  stack uses it; and
 - active scenario and fixture parameters.
 
 Any diagnostic interface and retained dump uses an allowlisted, redacted schema.

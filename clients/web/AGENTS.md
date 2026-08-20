@@ -46,7 +46,7 @@ accessibility.
 ## Browser and agent evidence
 
 [The signalbox-web-browser-qa skill](../../.agents/skills/signalbox-web-browser-qa/SKILL.md)
-owns deterministic browser scenarios, Playwright workflow and locators,
+owns deterministic browser scenarios, browser-test workflow and locators,
 screenshots, visual review, diagnostics, and retained failure evidence. Follow
 that skill rather than restating its evidence contract here.
 

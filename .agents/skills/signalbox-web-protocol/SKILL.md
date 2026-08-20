@@ -38,7 +38,7 @@ validation.
 - Historical windows and current/live projections are read models over that
   authority.
 - Provider text deltas and transient overlays remain absent until an owning
-  implemented contract defines them.
+  implemented browser relay contract defines them.
 - When that contract exists, its replacement rules govern transient client
   overlays.
 - Unknown variants and contradictory correlations fail closed.
@@ -53,8 +53,9 @@ Separate the historical plane from the live plane.
   window bounds, and detail representations; this skill adds none.
 - Live subscribe/follow begins with a coherent current projection and durable
   cursor, then sends ordered durable updates above it. It relays ephemeral
-  drafts only when an owning implemented contract defines their identity,
-  sequencing, replacement, backpressure, and redaction.
+  drafts only when an owning implemented browser relay contract defines their
+  identity, sequencing, replacement, backpressure, and redaction across that
+  boundary.
 - A full follower queue follows its owning implemented contract. The current
   `follow_session` contract stops incremental delivery, reports
   `resync_required`, and resumes from a fresh snapshot; it never drops durable
