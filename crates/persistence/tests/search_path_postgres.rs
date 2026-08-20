@@ -14,12 +14,13 @@
 //! unpinned reachable function fails here instead of failing the next
 //! restore. Each pin must carry the canonical value — the migration-selected
 //! schema, then `pg_catalog`, then `pg_temp` — because a pin that omits the
-//! working schema fails restore exactly like a missing pin. One
-//! body-reference hop is a deliberate limit: deeper call chains have no
-//! mechanical catalogue representation, and the schema's current chains are
-//! one deep. The test also fails when discovery returns nothing: the schema's
-//! check constraints do reach functions, so an empty set means the discovery
-//! query broke, not that nothing needs pinning.
+//! working schema fails restore exactly like a missing pin. Body references
+//! close transitively to a fixed point: `pg_depend` has no body-level
+//! representation, so the closure follows `prosrc` name references until no
+//! new function appears, and a chain of unqualified calls is followed to its
+//! end rather than one hop deep. The test also fails when discovery returns
+//! nothing: the schema's check constraints do reach functions, so an empty
+//! set means the discovery query broke, not that nothing needs pinning.
 
 #![allow(
     clippy::expect_used,
@@ -46,7 +47,7 @@ const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
 const RESTORE_REACHABLE_FUNCTIONS: &str = "
-    WITH restore_dependency AS (
+    WITH RECURSIVE restore_dependency AS (
         SELECT d.refclassid, d.refobjid
           FROM pg_depend AS d
          WHERE (
@@ -84,11 +85,12 @@ const RESTORE_REACHABLE_FUNCTIONS: &str = "
            )
     ),
     covered AS (
-        SELECT oid, proname, proconfig FROM reachable
+        SELECT oid, proname, proconfig, prosrc, pronamespace FROM reachable
         UNION
-        SELECT callee.oid, callee.proname, callee.proconfig
+        SELECT callee.oid, callee.proname, callee.proconfig, callee.prosrc,
+               callee.pronamespace
           FROM pg_proc AS callee
-          JOIN reachable AS caller
+          JOIN covered AS caller
             ON callee.pronamespace = caller.pronamespace
            AND callee.oid <> caller.oid
            AND caller.prosrc ~ ('\\m' || callee.proname || '\\M')
@@ -105,6 +107,19 @@ const RESTORE_REACHABLE_FUNCTIONS: &str = "
       FROM covered
      ORDER BY proname
 ";
+
+const SYNTHETIC_TRANSITIVE_CHAIN: [&str; 4] = [
+    "CREATE FUNCTION restore_probe_tail() RETURNS boolean
+        LANGUAGE sql IMMUTABLE AS 'SELECT true'",
+    "CREATE FUNCTION restore_probe_middle() RETURNS boolean
+        LANGUAGE sql IMMUTABLE AS 'SELECT restore_probe_tail()'",
+    "CREATE FUNCTION restore_probe_head(value text) RETURNS boolean
+        LANGUAGE sql IMMUTABLE AS 'SELECT restore_probe_middle()'",
+    "CREATE TABLE restore_probe (
+        value text,
+        CONSTRAINT restore_probe_reaches_functions CHECK (restore_probe_head(value))
+    )",
+];
 
 /// Names of covered functions that lack the canonical pin.
 fn unpinned_names(covered: &[(String, bool)]) -> Vec<&str> {
@@ -153,6 +168,60 @@ async fn every_restore_reachable_function_pins_its_search_path() -> Result<(), B
     assert!(
         unpinned.is_empty(),
         "restore-reachable functions without the canonical search path pin: {unpinned:?}"
+    );
+    Ok(())
+}
+
+/// INV-070: body-reference discovery closes transitively — a check constraint
+/// whose function calls through an intermediate body still surfaces the
+/// unpinned function at the end of the chain.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn transitive_body_references_close_to_a_fixed_point() -> Result<(), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(DATABASE_NAME)
+        .with_user(DATABASE_USER)
+        .with_password(DATABASE_PASSWORD)
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url =
+        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    migrate(&pool).await?;
+    sqlx::query(SYNTHETIC_TRANSITIVE_CHAIN[0])
+        .execute(&pool)
+        .await?;
+    sqlx::query(SYNTHETIC_TRANSITIVE_CHAIN[1])
+        .execute(&pool)
+        .await?;
+    sqlx::query(SYNTHETIC_TRANSITIVE_CHAIN[2])
+        .execute(&pool)
+        .await?;
+    sqlx::query(SYNTHETIC_TRANSITIVE_CHAIN[3])
+        .execute(&pool)
+        .await?;
+
+    let covered: Vec<(String, bool)> = sqlx::query_as(RESTORE_REACHABLE_FUNCTIONS)
+        .fetch_all(&pool)
+        .await?;
+    assert_eq!(
+        unpinned_names(&covered),
+        [
+            "restore_probe_head",
+            "restore_probe_middle",
+            "restore_probe_tail"
+        ],
+        "the probe chain must surface: head directly, middle one body hop deep, \
+         and tail two hops deep, which only a transitive closure reaches"
     );
     Ok(())
 }
