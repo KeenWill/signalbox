@@ -128,9 +128,10 @@ impl TerminalizationTally {
 /// The capped, rotating window of due turns one scan terminalizes.
 ///
 /// The cap alone is not fair. A turn can be due forever without ever ending —
-/// one holding pending steering is refused by every scan — so a window taken
-/// from the front of the due order would hand those turns every slot on every
-/// scan, and a turn behind them would wait for one that never comes.
+/// one holding pending steering is refused every time it is attempted — so a
+/// window taken from the front of the due order would hand those turns every
+/// slot on every scan, and a turn behind them would wait for one that never
+/// comes.
 ///
 /// The window therefore works in laps, and a lap is a *membership* fixed when
 /// it opens: the sessions due at that moment, in order. Successive scans take
@@ -189,11 +190,16 @@ impl TerminalizationWindow {
 
 /// One inventory read, as the rotation consumes it.
 ///
-/// The rotation cares about two things a page reports: what it observed, and
-/// whether anything follows it. Naming them here is what lets the drain be
-/// exercised without a database, which two boundary defects in it have earned.
+/// The rotation cares about three things a page reports: what it observed, how
+/// many rows it was drawn from, and whether anything follows it. The row count
+/// is separate from the observations because a row whose evidence cannot be
+/// read is dropped, and every question about the rotation's extent is a
+/// question about the statement rather than about what this pass could read.
+/// Naming them here is what lets the drain be exercised without a database,
+/// which several boundary defects in it have earned.
 struct InventoryPage {
     candidates: Box<[StaleTurnCandidate]>,
+    rows: usize,
     resume_after: Option<SessionId>,
 }
 
@@ -231,8 +237,10 @@ impl QuiescentInventory for PostgresTurnLivenessRepository {
     ) -> Result<InventoryPage, TurnLivenessRepositoryError> {
         let page = self.quiescent_active_turns(after).await?;
         let resume_after = page.resume_after();
+        let rows = page.rows();
         Ok(InventoryPage {
             candidates: page.into_candidates(),
+            rows,
             resume_after,
         })
     }
@@ -402,8 +410,13 @@ where
             return Some(quiescent);
         }
     }
+    // The probe asks whether the statement has anything left, which is a
+    // question about its rows rather than about what this pass could read from
+    // them: a probe whose rows were all dropped is still a page past the
+    // ceiling, and treating it as the end would report a truncated population
+    // as the whole of one.
     let probe = read_inventory_page(inventory, cursor).await?;
-    if probe.candidates.is_empty() {
+    if probe.rows == 0 {
         return Some(quiescent);
     }
     tracing::warn!(
@@ -560,6 +573,7 @@ mod tests {
     fn full_page(seed: u128) -> InventoryPage {
         InventoryPage {
             candidates: Box::new([candidate(seed)]),
+            rows: 1,
             resume_after: Some(SessionId::from_uuid(Uuid::from_u128(seed))),
         }
     }
@@ -568,6 +582,7 @@ mod tests {
     fn last_page(seed: u128) -> InventoryPage {
         InventoryPage {
             candidates: Box::new([candidate(seed)]),
+            rows: 1,
             resume_after: None,
         }
     }
@@ -575,6 +590,17 @@ mod tests {
     fn empty_page() -> InventoryPage {
         InventoryPage {
             candidates: Box::new([]),
+            rows: 0,
+            resume_after: None,
+        }
+    }
+
+    /// A page whose every row this pass could not read: no candidates, but
+    /// rows all the same.
+    fn wholly_dropped_page() -> InventoryPage {
+        InventoryPage {
+            candidates: Box::new([]),
+            rows: 1,
             resume_after: None,
         }
     }
@@ -656,6 +682,7 @@ mod tests {
                 .expect("the fixture is not poisoned")
                 .clone();
             Ok(InventoryPage {
+                rows: candidates.len(),
                 candidates: candidates.into_boxed_slice(),
                 resume_after: None,
             })
@@ -932,6 +959,20 @@ mod tests {
         let drained = drain_quiescent_rotation(&inventory, 2).await;
 
         assert_eq!(drained.map(|turns| turns.len()), Some(2));
+        assert_eq!(inventory.reads(), 3);
+    }
+
+    /// A probe whose rows were all dropped is still a page past the ceiling,
+    /// so it decides nothing rather than proving the rotation ended. Counting
+    /// its candidates instead would report a truncated population as a whole
+    /// one.
+    #[tokio::test]
+    async fn a_probe_of_wholly_unreadable_rows_decides_nothing() {
+        let inventory = ScriptedInventory::new([full_page(1), full_page(2), wholly_dropped_page()]);
+
+        let drained = drain_quiescent_rotation(&inventory, 2).await;
+
+        assert!(drained.is_none());
         assert_eq!(inventory.reads(), 3);
     }
 

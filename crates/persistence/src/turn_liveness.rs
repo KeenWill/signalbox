@@ -212,6 +212,7 @@ impl PostgresTurnLivenessRepository {
 #[derive(Clone, Debug)]
 pub struct QuiescentActiveTurnPage {
     candidates: Box<[StaleTurnCandidate]>,
+    rows: usize,
     resume_after: Option<SessionId>,
 }
 
@@ -236,6 +237,7 @@ impl QuiescentActiveTurnPage {
         let resume_after = filled.then_some(fetched.furthest_session).flatten();
         Self {
             candidates: fetched.candidates,
+            rows: fetched.rows,
             resume_after,
         }
     }
@@ -243,6 +245,15 @@ impl QuiescentActiveTurnPage {
     /// Returns the quiescent turns this page observed.
     pub fn candidates(&self) -> &[StaleTurnCandidate] {
         &self.candidates
+    }
+
+    /// Returns how many rows the statement returned, dropped ones included.
+    ///
+    /// Whether a rotation has ended is a question about the statement, not
+    /// about what this pass could read: a page of rows it dropped entirely is
+    /// still a page of rows behind the cursor.
+    pub const fn rows(&self) -> usize {
+        self.rows
     }
 
     /// Consumes the page, yielding the turns it observed.
@@ -304,9 +315,20 @@ impl QuiescentActiveTurnPage {
 /// transition, so it appends the source turn's own terminal event too, and that
 /// kind is included.
 ///
-/// Everything else is emitted by a transition of a turn, its model calls, its
-/// tool rounds, or its approvals, so it cannot advance while the turn does
-/// nothing. Naming what to exclude rather than what to include means a kind
+/// Everything else in the vocabulary is emitted by a transition of a turn, its
+/// model calls, its tool rounds, or its approvals — activation by
+/// `start_eligible_turn`, the terminal shapes by `model_execution` and
+/// `startup`, calls by `model_execution`, rounds by `tool_loop`, approvals by
+/// `approval_judge` and `tool_loop`, compaction by `context_compaction` — so
+/// none of it can advance while the turn does nothing.
+///
+/// Delegation is outside this statement rather than excluded from it: its
+/// updates and wakes are appended to `delegation_outbox_event`, a separate
+/// table, so they never reach this frontier. That is the right answer for the
+/// same reason `input_accepted` is excluded — a message arriving for a session
+/// queues work rather than advancing the turn holding its slot — and a turn
+/// actually waiting on a child sits in `awaiting_child`, which the phase filter
+/// excludes before any of this is consulted. Naming what to exclude rather than what to include means a kind
 /// added later reads as progress until someone decides otherwise, which delays
 /// a terminalization rather than risking a live turn.
 ///

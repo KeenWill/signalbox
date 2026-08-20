@@ -566,9 +566,9 @@ Later scans serve the next of those members that are still due, and the lap ends
 when they are exhausted, whereupon the next scan opens a fresh lap over whatever
 is due then. Fixing membership rather than taking whatever is due at each scan
 is what makes the lap finish: a turn can be due forever without ending, one
-holding pending steering is refused by every scan, and turns that become due
-while a lap runs would otherwise be served ahead of the members waiting behind
-them.
+holding pending steering is refused every time it is attempted, and turns that
+become due while a lap runs would otherwise be served ahead of the members
+waiting behind them.
 
 What that costs is stated exactly, because it is the one number here that
 depends on population. The staleness bound governs when a turn becomes *due*,
@@ -620,10 +620,13 @@ on the turn is the one refusal with a name of its own: every steering row bound
 to a turn must be closed before it terminalizes — the
 `turn_lifecycle_pending_steering_closed` constraint enforces it — and this
 transition closes none, so the pass reports the turn by identity under
-`turn_liveness_steering_blocks_terminalization` on every scan rather than ending
-it. Such a turn stays wedged; a terminalization that also reclassifies its
-steering into a queued successor is an
-[open question](../open-questions.md#turn-lifecycle). Because the turn ends
+`turn_liveness_steering_blocks_terminalization` each time its lap reaches it,
+rather than ending it. That is once per lap and not once per scan: the turn
+occupies a slot in every lap it is due for, and reporting it more often would
+mean attempting a terminalization already known to be refused, at the cost of
+slots the turns beside it are waiting for. Such a turn stays wedged; a
+terminalization that also reclassifies its steering into a queued successor is
+an [open question](../open-questions.md#turn-lifecycle). Because the turn ends
 through the ordinary lifecycle write, every trigger watching a turn reach
 `terminal` fires unchanged, so a repository-watch dispatch occupying this
 session releases its singleton and records its requeue obligation without this
