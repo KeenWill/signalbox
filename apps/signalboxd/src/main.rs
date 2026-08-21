@@ -23,8 +23,8 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
     InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, SchedulerPassOccupancyBound,
-    StaleActiveTurnBound, StartEligibleTurnService, StartupScanService, TurnLivenessScanInterval,
+    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, StaleActiveTurnBound,
+    StartEligibleTurnService, StartupScanService, TurnLivenessScanInterval,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
@@ -34,7 +34,7 @@ use signalbox_model_provider_runtime::{
     ApprovalJudgeModel, ContextCompactionModel, RuntimeApprovalJudgeModel,
     RuntimeContextCompactionModel, RuntimeModelCallProvider,
 };
-use signalbox_model_runtime::CredentialReference;
+use signalbox_model_runtime::{CredentialReference, DEFAULT_MODEL_EXCHANGE_TIMEOUT};
 use signalbox_model_runtime_anthropic::{
     AnthropicConfig, AnthropicConstructionError, AnthropicRuntime,
 };
@@ -93,9 +93,7 @@ const RUNNER_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_SOCKET_PATH";
 const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 fn graceful_shutdown_window() -> Duration {
-    SchedulerPassOccupancyBound::hard_ceiling()
-        .get()
-        .saturating_add(GRACEFUL_SHUTDOWN_CLEANUP_WINDOW)
+    DEFAULT_MODEL_EXCHANGE_TIMEOUT.saturating_add(GRACEFUL_SHUTDOWN_CLEANUP_WINDOW)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2333,20 +2331,20 @@ mod tests {
 
     use super::{
         AnthropicConstructionError, BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT,
-        GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration, HubConfigurationError,
-        HubConfigurationValues, HubRuntimeError, MODEL_CONFIGURATION_FILE_ENVIRONMENT,
-        OpenAiConstructionError, OperatorFilterDisposition, PROCESS_SOCKET_PATH_ENVIRONMENT,
-        ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RepositoryWatchRuntimeError,
-        RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
-        RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause,
-        ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
-        anthropic_construction_cause, combine_runtime_stop_cause, completed_runtime_outcome,
-        credential_files_conflict, database_close_failure_outcome, drain_runtime_tasks,
-        erase_startup_cause, graceful_shutdown_window, migrate_scan_then_schedule,
-        openai_construction_cause, operator_filter, process_runtime_failure_class,
-        report_database_close_failure, repository_watch_rule_configuration_error,
-        run_scheduler_until_shutdown, runner_lifecycle_failure_class, should_close_pool,
-        staging_sweep_failure_outcome,
+        DEFAULT_MODEL_EXCHANGE_TIMEOUT, GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration,
+        HubConfigurationError, HubConfigurationValues, HubRuntimeError,
+        MODEL_CONFIGURATION_FILE_ENVIRONMENT, OpenAiConstructionError, OperatorFilterDisposition,
+        PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT,
+        RepositoryWatchRuntimeError, RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase,
+        RuntimeStopCause, RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause,
+        SchedulerStopCause, ShutdownOutcome, SingleHubGuardError,
+        TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
+        combine_runtime_stop_cause, completed_runtime_outcome, credential_files_conflict,
+        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
+        graceful_shutdown_window, migrate_scan_then_schedule, openai_construction_cause,
+        operator_filter, process_runtime_failure_class, report_database_close_failure,
+        repository_watch_rule_configuration_error, run_scheduler_until_shutdown,
+        runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
 
@@ -3048,11 +3046,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn adr0044_shutdown_drain_outlives_the_old_thirty_second_window() {
+    async fn adr0044_shutdown_drain_outlives_the_longest_expected_model_call() {
         let (entered_sender, entered_receiver) = oneshot::channel();
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         let session = SessionId::from_uuid(Uuid::from_u128(1));
-        let pass_duration = Duration::from_secs(31);
+        let pass_duration = DEFAULT_MODEL_EXCHANGE_TIMEOUT + Duration::from_secs(1);
         let scheduler = SchedulerLoop::new(
             OneHintThenPending {
                 hints: VecDeque::from([session]),

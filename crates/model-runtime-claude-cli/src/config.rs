@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use signalbox_model_runtime::DEFAULT_MODEL_EXCHANGE_TIMEOUT;
+
 /// Configuration for [`crate::ClaudeCliRuntime`].
 ///
 /// It carries executable paths, bounds, and a non-secret default credential
@@ -44,7 +46,7 @@ impl ClaudeCliConfig {
             mcp_bridge_executable: mcp_bridge_executable.into(),
             working_directory: working_directory.into(),
             credential_reference,
-            exchange_timeout: Duration::from_secs(10 * 60),
+            exchange_timeout: DEFAULT_MODEL_EXCHANGE_TIMEOUT,
             interrupt_grace: Duration::from_secs(2),
             event_limit: 8 * 1024 * 1024,
             stderr_limit: 64 * 1024,
