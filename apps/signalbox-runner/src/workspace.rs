@@ -9,15 +9,14 @@ use std::{
     io::{self, Read, Write},
     os::unix::ffi::{OsStrExt as _, OsStringExt as _},
     os::unix::fs::{MetadataExt as _, PermissionsExt as _},
-    os::unix::io::AsRawFd as _,
     path::{Path, PathBuf},
     rc::Rc,
 };
 
 use rustix::{
     fs::{
-        AtFlags, CWD, Dir, FileType, Mode, OFlags, RenameFlags, chmodat, fchmod, mkdirat, openat,
-        renameat, renameat_with, statat, unlinkat,
+        AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, fchmod, mkdirat, openat, renameat,
+        renameat_with, statat, unlinkat,
     },
     process::geteuid,
 };
@@ -351,6 +350,9 @@ impl RunnerWorkspaceStore {
             REPOSITORY_WORKSPACE_DIRECTORY,
         )
         .map_err(PrepareRepositoryWorkspaceError::Storage)?;
+        staging
+            .retain_for_cleanup(&repository)
+            .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         let staging_execution_path = self
             .canonical_root
             .join(SESSIONS_DIRECTORY)
@@ -862,6 +864,7 @@ struct UnpublishedDirectory {
     parent: File,
     name: OsString,
     directory: Option<File>,
+    cleanup_directories: Vec<File>,
 }
 
 impl UnpublishedDirectory {
@@ -870,7 +873,14 @@ impl UnpublishedDirectory {
             parent,
             name,
             directory: Some(directory),
+            cleanup_directories: Vec::new(),
         }
+    }
+
+    fn retain_for_cleanup(&mut self, directory: &File) -> Result<(), RunnerWorkspaceError> {
+        self.cleanup_directories
+            .push(directory.try_clone().map_err(RunnerWorkspaceError::Io)?);
+        Ok(())
     }
 
     fn directory(&self) -> Result<&File, RunnerWorkspaceError> {
@@ -891,6 +901,9 @@ impl UnpublishedDirectory {
     }
 
     fn remove(&mut self) -> Result<(), RunnerWorkspaceError> {
+        for directory in &self.cleanup_directories {
+            fchmod(directory, Mode::RUSR | Mode::WUSR | Mode::XUSR).map_err(rustix_io)?;
+        }
         let directory = self
             .directory
             .take()
@@ -1018,6 +1031,7 @@ fn remove_open_directory_tree(
     name: &OsStr,
     directory: File,
 ) -> Result<(), RunnerWorkspaceError> {
+    fchmod(&directory, Mode::RUSR | Mode::WUSR | Mode::XUSR).map_err(rustix_io)?;
     let identity = DirectoryIdentity::from_file(&directory)?;
     let parent = Rc::new(parent.try_clone().map_err(RunnerWorkspaceError::Io)?);
     let directory = Rc::new(directory);
@@ -1053,35 +1067,20 @@ fn remove_directory_steps(mut steps: Vec<RemovalStep>) -> Result<(), RunnerWorks
                 let status =
                     statat(parent.as_ref(), &name, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
                 if FileType::from_raw_mode(status.st_mode) == FileType::Directory {
-                    let pinned = File::from(
-                        openat(
-                            parent.as_ref(),
-                            &name,
-                            OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                            Mode::empty(),
-                        )
-                        .map_err(rustix_io)?,
-                    );
-                    let identity = DirectoryIdentity::from_file(&pinned)?;
-                    if !identity.names(parent.as_ref(), &name)? {
-                        return Err(RunnerWorkspaceError::ManifestConflict);
-                    }
-                    let pinned_path = format!("/proc/self/fd/{}", pinned.as_raw_fd());
-                    chmodat(
-                        CWD,
-                        pinned_path,
-                        Mode::RUSR | Mode::WUSR | Mode::XUSR,
-                        AtFlags::empty(),
-                    )
-                    .map_err(rustix_io)?;
                     let descriptor = openat(
-                        &pinned,
-                        ".",
+                        parent.as_ref(),
+                        &name,
                         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                         Mode::empty(),
                     )
                     .map_err(rustix_io)?;
                     let child = Rc::new(File::from(descriptor));
+                    let identity = DirectoryIdentity::from_file(child.as_ref())?;
+                    if !identity.names(parent.as_ref(), &name)? {
+                        return Err(RunnerWorkspaceError::ManifestConflict);
+                    }
+                    fchmod(child.as_ref(), Mode::RUSR | Mode::WUSR | Mode::XUSR)
+                        .map_err(rustix_io)?;
                     if DirectoryIdentity::from_file(child.as_ref())? != identity
                         || !identity.names(parent.as_ref(), &name)?
                     {
@@ -1265,6 +1264,7 @@ mod tests {
     const EXPECTED_RELATIVE_PATH: &str = "sessions/018f6f10-0000-7000-8000-0000000000e1/3/work";
     const CLONE_URL: &str = "https://github.com/KeenWill/signalbox.git";
     const PREPARED_REPOSITORY_BYTES: &[u8] = b"repository\n";
+    const LATE_REPOSITORY_WRITE_BYTES: &[u8] = b"late repository write\n";
 
     fn fixture_root() -> (TempDir, RunnerStateRoot) {
         let parent = tempfile::tempdir().expect("the workspace fixture parent exists");
@@ -1545,7 +1545,7 @@ mod tests {
             fs::File::open(parent.path()).expect("the cleanup fixture parent opens");
         let staging_descriptor =
             fs::File::open(&staging).expect("the cleanup fixture staging directory opens");
-        fs::write(staging.join("late"), b"late repository write\n")
+        fs::write(staging.join("late"), LATE_REPOSITORY_WRITE_BYTES)
             .expect("the concurrent writer adds a file after the stale scan");
 
         super::remove_open_directory_tree_after_stale_scan(
