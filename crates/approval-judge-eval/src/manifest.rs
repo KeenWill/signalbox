@@ -23,6 +23,7 @@ const CORPUS_DIGEST_DOMAIN: &[u8] = b"signalbox-eval-corpus-v1\0";
 const MAX_IDENTITY_BYTES: usize = 128;
 const MAX_REPOSITORY_BYTES: usize = 2_048;
 const MAX_REPOSITORY_PATH_BYTES: usize = 1_024;
+const MAX_PORTABLE_PATH_COMPONENT_UNITS: usize = 255;
 const MAX_BLOB_STORE_BYTES: usize = 64;
 
 /// A self-describing, portable corpus registration document.
@@ -380,6 +381,8 @@ fn repository_relative_path(
 }
 
 fn portable_path_component(component: &str) -> bool {
+    let component_is_bounded = component.len() <= MAX_PORTABLE_PATH_COMPONENT_UNITS
+        && component.encode_utf16().count() <= MAX_PORTABLE_PATH_COMPONENT_UNITS;
     let has_invalid_character = component
         .bytes()
         .any(|byte| matches!(byte, b'<' | b'>' | b':' | b'\"' | b'|' | b'?' | b'*'));
@@ -393,6 +396,7 @@ fn portable_path_component(component: &str) -> bool {
             matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
         });
     !component.is_empty()
+        && component_is_bounded
         && !component.ends_with(['.', ' '])
         && !has_invalid_character
         && !is_reserved_device
@@ -431,7 +435,9 @@ fn validate_manifest_content(
         });
     }
     let observed_cases = case_integrity(&corpus)?;
-    if observed_cases != manifest.integrity.cases {
+    let mut expected_cases = manifest.integrity.cases.clone();
+    expected_cases.sort_by(|left, right| left.id.as_bytes().cmp(right.id.as_bytes()));
+    if observed_cases != expected_cases {
         return Err(ManifestError::CaseIntegrityMismatch);
     }
     let observed_corpus = corpus_digest(&corpus)?;
@@ -593,7 +599,7 @@ mod tests {
 
     use super::{
         CORPUS_MANIFEST_VERSION, CorpusManifest, ManifestCaseSource, case_integrity, corpus_digest,
-        decode_manifest, load_manifest_corpus,
+        decode_manifest, load_manifest_corpus, validate_manifest_content,
     };
     use crate::CorpusSourceDescriptor;
 
@@ -867,6 +873,32 @@ mod tests {
             .expect_err("a component with a platform-specific trailing dot is rejected");
 
         assert!(error.to_string().contains("not a portable relative path"));
+    }
+
+    #[test]
+    fn repository_manifest_rejects_oversized_utf8_path_components() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        manifest["case_source"]["path"] =
+            serde_json::Value::String(format!("corpora/{}.json", "é".repeat(128)));
+        let encoded = serde_json::to_vec(&manifest).expect("the modified manifest serializes");
+
+        let error = decode_manifest(&encoded)
+            .expect_err("a component exceeding the portable byte ceiling is rejected");
+
+        assert!(error.to_string().contains("not a portable relative path"));
+    }
+
+    #[test]
+    fn manifest_case_integrity_is_compared_by_identity() {
+        let mut manifest = decode_manifest(SEED_MANIFEST).expect("the seed manifest is valid");
+        manifest.integrity.cases.reverse();
+        let corpus = crate::decode_corpus(include_bytes!("../corpora/seed-v1.json"))
+            .expect("the seed corpus is valid");
+        let source = manifest_source(&manifest);
+
+        validate_manifest_content(manifest, corpus, source)
+            .expect("per-case integrity ordering is not part of manifest validity");
     }
 
     #[test]
