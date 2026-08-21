@@ -78,6 +78,7 @@ enum ValidationBehavior {
 #[derive(Clone, Copy)]
 enum ReadBehavior {
     Text,
+    InvalidViewArguments,
     OversizedText,
     MalformedStructured,
     DuplicateStructuredMember,
@@ -168,6 +169,7 @@ impl FileMediaProcessor for SyntheticProcessor {
                     truncated: false,
                     cursor: None,
                 },
+                ReadBehavior::InvalidViewArguments => ProcessorReadOutput::InvalidViewArguments,
                 ReadBehavior::OversizedText => ProcessorReadOutput::Text {
                     body: "x".repeat(65),
                     truncated: false,
@@ -477,6 +479,31 @@ fn inv076_contradictory_processor_continuation_is_sanitized_to_failure() {
         view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
         options: Some(serde_json::json!({})),
         continuation: None,
+    };
+
+    let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
+
+    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
+/// INV-076: a processor cannot relabel a continuation cursor as invalid
+/// model-supplied initial options.
+#[test]
+fn inv076_continuation_invalid_arguments_is_sanitized_to_failure() {
+    let source = MemorySource::synthetic();
+    let registry = registry_with_view(text_view());
+    let processor = SyntheticProcessor {
+        validation: ValidationBehavior::Valid,
+        read: ReadBehavior::InvalidViewArguments,
+    };
+    let request = FileReadRequest {
+        inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+        view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
+        options: None,
+        continuation: Some(
+            signalbox_file_media_runtime::ReadContinuationCursor::try_new("next-page")
+                .expect("fixture continuation cursor is valid"),
+        ),
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
