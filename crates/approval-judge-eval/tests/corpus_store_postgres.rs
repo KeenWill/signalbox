@@ -209,6 +209,30 @@ async fn corpus_registration_requires_positive_case_count() -> Result<(), Box<dy
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn corpus_registration_requires_supported_format_version() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let corpus_digest = [0_u8; 32];
+    let replay_digest = [0_u8; 32];
+
+    sqlx::query(
+        "INSERT INTO evaluation_corpus (
+            corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
+            source_kind
+         ) VALUES ('unsupported-format', 'v1', 2, $1, $2, 1, 'database_native')",
+    )
+    .bind(corpus_digest.as_slice())
+    .bind(replay_digest.as_slice())
+    .execute(&pool)
+    .await
+    .expect_err("a durable registration with an unsupported format version is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn stored_case_decode_error_retains_serde_context() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let disk = DiskCorpusStore::open(seed_manifest_path())?;

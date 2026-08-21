@@ -190,9 +190,13 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<CorpusManifest, ManifestError> {
 
 /// Reads a manifest and resolves its repository or embedded case source.
 pub fn load_manifest_corpus(path: impl AsRef<Path>) -> Result<LoadedManifestCorpus, ManifestError> {
-    let path = path.as_ref();
-    let bytes = fs::read(path).map_err(|source| ManifestError::Read {
-        path: path.to_path_buf(),
+    let supplied_path = path.as_ref();
+    let path = fs::canonicalize(supplied_path).map_err(|source| ManifestError::Read {
+        path: supplied_path.to_path_buf(),
+        source,
+    })?;
+    let bytes = fs::read(&path).map_err(|source| ManifestError::Read {
+        path: path.clone(),
         source,
     })?;
     let manifest = decode_manifest(&bytes)?;
@@ -206,7 +210,7 @@ pub fn load_manifest_corpus(path: impl AsRef<Path>) -> Result<LoadedManifestCorp
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .join(relative_path);
-            let resolved_source_path = resolved_repository_source(path, &source_path)?;
+            let resolved_source_path = resolved_repository_source(&path, &source_path)?;
             let source_bytes =
                 fs::read(&resolved_source_path).map_err(|source| ManifestError::Read {
                     path: resolved_source_path,
@@ -221,7 +225,7 @@ pub fn load_manifest_corpus(path: impl AsRef<Path>) -> Result<LoadedManifestCorp
                 return Err(ManifestError::SourceDigestMismatch { expected, observed });
             }
             let corpus = crate::decode_corpus(&source_bytes).map_err(ManifestError::Corpus)?;
-            let durable_path = repository_relative_path(path, &source_path)?;
+            let durable_path = repository_relative_path(&path, &source_path)?;
             (
                 corpus,
                 CorpusSourceDescriptor::Repository {
@@ -493,18 +497,25 @@ fn portable_path_component(component: &str) -> bool {
     let stem = component.split('.').next().unwrap_or_default();
     let uppercase_stem = stem.to_ascii_uppercase();
     let is_reserved_device = matches!(uppercase_stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || uppercase_stem.strip_prefix("COM").is_some_and(|suffix| {
-            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
-        })
-        || uppercase_stem.strip_prefix("LPT").is_some_and(|suffix| {
-            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
-        });
+        || uppercase_stem
+            .strip_prefix("COM")
+            .is_some_and(is_reserved_device_number)
+        || uppercase_stem
+            .strip_prefix("LPT")
+            .is_some_and(is_reserved_device_number);
     !component.is_empty()
         && component_is_bounded
         && !has_control_character
         && !component.ends_with(['.', ' '])
         && !has_invalid_character
         && !is_reserved_device
+}
+
+fn is_reserved_device_number(suffix: &str) -> bool {
+    matches!(
+        suffix,
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+    )
 }
 
 fn validate_unique_case_ids(cases: &[ApprovalJudgeCase]) -> Result<(), ManifestError> {
@@ -1012,6 +1023,29 @@ mod tests {
             decode_manifest(&encoded).expect_err("a Windows reserved device component is rejected");
 
         assert!(error.to_string().contains("not a portable relative path"));
+    }
+
+    #[test]
+    fn repository_manifest_rejects_superscript_windows_device_names() {
+        for component in ["COM¹.json", "COM²", "COM³.txt", "LPT¹", "LPT².json", "LPT³"] {
+            assert!(
+                !super::portable_path_component(component),
+                "{component} is a reserved Windows device name"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_manifest_path_resolves_before_checkout_discovery() {
+        let current = std::env::current_dir().expect("the test working directory is available");
+        let relative = seed_manifest_path()
+            .strip_prefix(&current)
+            .expect("the seed manifest is beneath the test working directory");
+
+        let loaded = load_manifest_corpus(relative)
+            .expect("a relative manifest path discovers the containing checkout");
+
+        assert_eq!(loaded.manifest.name(), "approval-judge-seed");
     }
 
     #[test]

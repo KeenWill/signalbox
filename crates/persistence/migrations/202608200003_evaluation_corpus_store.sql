@@ -22,8 +22,8 @@ CREATE TABLE evaluation_corpus (
         CHECK (octet_length(corpus_name) BETWEEN 1 AND 128),
     CONSTRAINT evaluation_corpus_version_bounded
         CHECK (octet_length(corpus_version) BETWEEN 1 AND 128),
-    CONSTRAINT evaluation_corpus_format_version_positive
-        CHECK (format_version > 0),
+    CONSTRAINT evaluation_corpus_format_version_supported
+        CHECK (format_version = 1),
     CONSTRAINT evaluation_corpus_digest_sha256
         CHECK (octet_length(corpus_digest) = 32),
     CONSTRAINT evaluation_corpus_replay_digest_sha256
