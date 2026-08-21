@@ -71,6 +71,7 @@ use signalbox_persistence::{
     session_metadata::SessionMetadataRepository,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
+    test_support::{FleetSoakCensus, FleetSoakCensusRepository},
 };
 use signalbox_process_protocol::{
     BlobChunk, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame,
@@ -2213,11 +2214,12 @@ fn completed_script(provider_model: &str, text: &str, usage: TokenUsage) -> Scri
 
 // Fleet-soak foundation for issue #1027.
 //
-// The default CI mode proves that current main still exhibits the two live
-// failure signatures without making the PostgreSQL integration job red. Set
-// `SIGNALBOX_ENFORCE_FLEET_LIVENESS=1` to invert those probes into the desired
-// liveness assertions; the two tests then fail until pass occupancy and
-// restart recovery are hardened. Slow/failing tools, boundary loss, an
+// The default CI mode proves that current main still exhibits the hung-call
+// failure signature without making the PostgreSQL integration job red. Set
+// `SIGNALBOX_ENFORCE_FLEET_LIVENESS=1` to invert that probe into the desired
+// bounded-occupancy assertion. Restart recovery separately verifies the
+// specification-mandated ambiguity park without inventing automatic recovery
+// authority. Slow/failing tools, boundary loss, an
 // unprovisioned workspace, and scheduled goal resumption are named follow-on
 // slices: they need the same fleet census but not more boot infrastructure.
 
@@ -2239,6 +2241,7 @@ struct FleetScriptedModel {
     inner: ScriptedModel<ModelCallId>,
     hangs_remaining: Arc<AtomicUsize>,
     in_flight_hangs: Arc<AtomicUsize>,
+    completed_calls: Arc<Mutex<Vec<ModelCallId>>>,
 }
 
 impl FleetScriptedModel {
@@ -2254,11 +2257,19 @@ impl FleetScriptedModel {
             )),
             hangs_remaining: Arc::new(AtomicUsize::new(hang_count)),
             in_flight_hangs: Arc::new(AtomicUsize::new(0)),
+            completed_calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn in_flight_hangs(&self) -> usize {
         self.in_flight_hangs.load(Ordering::SeqCst)
+    }
+
+    fn completed_call_ids(&self) -> Vec<ModelCallId> {
+        self.completed_calls
+            .lock()
+            .expect("the fleet completion lock is available")
+            .clone()
     }
 }
 
@@ -2324,7 +2335,13 @@ impl ModelRuntime<ModelCallId> for FleetScriptedModel {
             let _guard = FleetHangGuard(Arc::clone(&self.in_flight_hangs));
             pending::<TerminalReport<ModelCallId>>().await
         } else {
-            self.inner.execute(prepared.inner, sink, cancellation).await
+            let correlation = prepared.correlation;
+            let report = self.inner.execute(prepared.inner, sink, cancellation).await;
+            self.completed_calls
+                .lock()
+                .expect("the fleet completion lock is available")
+                .push(correlation);
+            report
         }
     }
 }
@@ -2401,51 +2418,34 @@ async fn wait_for_hangs(model: &FleetScriptedModel, expected: usize) -> Result<(
     Ok(())
 }
 
-async fn fleet_lifecycle_counts(pool: &PgPool) -> Result<(i64, i64), Box<dyn Error>> {
-    Ok(sqlx::query_as(
-        "SELECT count(*) FILTER (WHERE state_kind = 'active'),
-                count(*) FILTER (WHERE state_kind = 'terminal')
-           FROM turn_lifecycle",
-    )
-    .fetch_one(pool)
+async fn wait_for_completed_calls(
+    model: &FleetScriptedModel,
+    expected: usize,
+) -> Result<Vec<ModelCallId>, Box<dyn Error>> {
+    Ok(timeout(FLEET_SETUP_BOUND, async {
+        loop {
+            let completed = model.completed_call_ids();
+            if completed.len() == expected {
+                return completed;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
     .await?)
 }
 
-async fn fleet_terminal_call_count(pool: &PgPool) -> Result<i64, Box<dyn Error>> {
-    Ok(sqlx::query_scalar(
-        "SELECT count(*) FROM model_call WHERE terminal_disposition_kind IS NOT NULL",
-    )
-    .fetch_one(pool)
-    .await?)
-}
-
-async fn fleet_model_call_ids(pool: &PgPool) -> Result<Vec<Uuid>, Box<dyn Error>> {
-    Ok(
-        sqlx::query_scalar("SELECT model_call_id FROM model_call ORDER BY model_call_id")
-            .fetch_all(pool)
-            .await?,
-    )
-}
-
-async fn fleet_terminal_call_count_for(
-    pool: &PgPool,
-    model_call_ids: &[Uuid],
-) -> Result<i64, Box<dyn Error>> {
-    Ok(sqlx::query_scalar(
-        "SELECT count(*)
-           FROM model_call
-          WHERE model_call_id = ANY($1)
-            AND terminal_disposition_kind IS NOT NULL",
-    )
-    .bind(model_call_ids)
-    .fetch_one(pool)
-    .await?)
-}
-
-async fn wait_for_terminal_calls(pool: &PgPool, expected: i64) -> Result<(), Box<dyn Error>> {
+async fn wait_for_terminal_calls(
+    repository: &FleetSoakCensusRepository,
+    model_calls: &[ModelCallId],
+) -> Result<(), Box<dyn Error>> {
     timeout(FLEET_SETUP_BOUND, async {
         loop {
-            if fleet_terminal_call_count(pool).await? == expected {
+            if repository
+                .census_for(model_calls)
+                .await?
+                .terminal_model_calls()
+                == i64::try_from(model_calls.len())?
+            {
                 return Ok::<(), Box<dyn Error>>(());
             }
             tokio::task::yield_now().await;
@@ -2462,10 +2462,11 @@ fn enforce_fleet_liveness() -> bool {
 fn assert_hung_fleet_outcome(
     enforce_liveness: bool,
     model: &FleetScriptedModel,
-    active: i64,
-    terminal: i64,
-    typed_terminal_calls: i64,
+    census: FleetSoakCensus,
 ) -> Result<(), Box<dyn Error>> {
+    let active = census.active_turns();
+    let terminal = census.terminal_turns();
+    let typed_terminal_calls = census.terminal_model_calls();
     if enforce_liveness {
         if model.in_flight_hangs() != 0
             || active != 0
@@ -2493,20 +2494,21 @@ fn assert_hung_fleet_outcome(
 }
 
 fn assert_restarted_fleet_outcome(
-    enforce_liveness: bool,
-    active: i64,
-    terminal: i64,
+    census: FleetSoakCensus,
+    replacement_model: &FleetScriptedModel,
 ) -> Result<(), Box<dyn Error>> {
-    if enforce_liveness {
-        if active != 0 || terminal != i64::try_from(FLEET_SESSION_COUNT)? {
-            return Err(io::Error::other(format!(
-                "post-restart active turns were orphaned: active={active}, terminal={terminal}"
-            ))
-            .into());
-        }
-    } else if active != i64::try_from(FLEET_SESSION_COUNT)? || terminal != 0 {
+    if census.active_turns() != i64::try_from(FLEET_SESSION_COUNT)?
+        || census.terminal_turns() != 0
+        || census.awaiting_model_call_recovery_turns() != i64::try_from(FLEET_SESSION_COUNT)?
+        || census.terminal_model_calls() != i64::try_from(FLEET_SESSION_COUNT)?
+        || census.ambiguous_model_calls() != i64::try_from(FLEET_SESSION_COUNT)?
+        || replacement_model.in_flight_hangs() != 0
+        || !replacement_model.completed_call_ids().is_empty()
+    {
         return Err(io::Error::other(format!(
-            "issue #1027 no longer reproduces: active={active}, terminal={terminal}"
+            "restart must preserve the ambiguity park without replacement execution: census={census:?}, replacement_hangs={}, replacement_completions={}",
+            replacement_model.in_flight_hangs(),
+            replacement_model.completed_call_ids().len()
         ))
         .into());
     }
@@ -2523,22 +2525,19 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
     let mut runtime = RunningRuntime::start().await?;
     let enforce_liveness = enforce_fleet_liveness();
     let fleet = commission_fleet(&runtime).await?;
+    let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
     let model = FleetScriptedModel::new(1, FLEET_SESSION_COUNT - 1);
     let scheduler = start_fleet_scheduler(&mut runtime, model.clone())?;
     wait_for_hangs(&model, 1).await?;
-    wait_for_terminal_calls(&runtime.pool, i64::try_from(FLEET_SESSION_COUNT - 1)?).await?;
+    let completed_calls = wait_for_completed_calls(&model, FLEET_SESSION_COUNT - 1).await?;
+    wait_for_terminal_calls(&census_repository, &completed_calls).await?;
     tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
-    let (active, terminal) = fleet_lifecycle_counts(&runtime.pool).await?;
-    let typed_terminal_calls = fleet_terminal_call_count(&runtime.pool).await?;
+    let model_calls = census_repository.model_call_ids().await?;
+    let census = census_repository.census_for(&model_calls).await?;
 
     assert_eq!(fleet.sessions.len(), FLEET_SESSION_COUNT);
-    let outcome = assert_hung_fleet_outcome(
-        enforce_liveness,
-        &model,
-        active,
-        terminal,
-        typed_terminal_calls,
-    );
+    assert_eq!(model_calls.len(), FLEET_SESSION_COUNT);
+    let outcome = assert_hung_fleet_outcome(enforce_liveness, &model, census);
 
     scheduler.abort();
     let _ = scheduler.await;
@@ -2546,41 +2545,32 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
     outcome
 }
 
-/// Issue #1027 expected failure: killing the daemon with a full fleet in model
-/// execution leaves the recovered turns parked and silent after replacement
-/// scheduling begins. Enforcement mode requires every prior active turn to
-/// resume or terminalize within the fleet bound.
+/// Killing the daemon with a full fleet after every send leaves each model
+/// call ambiguous. Recovery must release local scheduler ownership while
+/// preserving every turn in the specification-mandated user-decision park.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
--> Result<(), Box<dyn Error>> {
+async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
-    let enforce_liveness = enforce_fleet_liveness();
     let fleet = commission_fleet(&runtime).await?;
+    let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
     let hanging_model = FleetScriptedModel::new(FLEET_SESSION_COUNT, 0);
     let first_scheduler = start_fleet_scheduler(&mut runtime, hanging_model.clone())?;
     wait_for_hangs(&hanging_model, FLEET_SESSION_COUNT).await?;
-    let pre_kill_model_call_ids = fleet_model_call_ids(&runtime.pool).await?;
+    let pre_kill_model_call_ids = census_repository.model_call_ids().await?;
     assert_eq!(pre_kill_model_call_ids.len(), FLEET_SESSION_COUNT);
     first_scheduler.abort();
     let _ = first_scheduler.await;
     let _recovered = runtime.kill_and_restart().await?;
     let replacement_model = FleetScriptedModel::new(0, FLEET_SESSION_COUNT);
-    let replacement_scheduler = start_fleet_scheduler(&mut runtime, replacement_model)?;
+    let replacement_scheduler = start_fleet_scheduler(&mut runtime, replacement_model.clone())?;
     tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
-    let (active, terminal) = fleet_lifecycle_counts(&runtime.pool).await?;
-    let typed_terminal_calls =
-        fleet_terminal_call_count_for(&runtime.pool, &pre_kill_model_call_ids).await?;
+    let census = census_repository
+        .census_for(&pre_kill_model_call_ids)
+        .await?;
 
     assert_eq!(fleet.sessions.len(), FLEET_SESSION_COUNT);
-    let outcome = if typed_terminal_calls == i64::try_from(FLEET_SESSION_COUNT)? {
-        assert_restarted_fleet_outcome(enforce_liveness, active, terminal)
-    } else {
-        Err(io::Error::other(format!(
-            "restart did not terminalize every prior model call: typed_terminal_calls={typed_terminal_calls}"
-        ))
-        .into())
-    };
+    let outcome = assert_restarted_fleet_outcome(census, &replacement_model);
 
     replacement_scheduler.abort();
     let _ = replacement_scheduler.await;
