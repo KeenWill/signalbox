@@ -58,8 +58,6 @@ const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 const RETRY_BACKOFF_BASE: Duration = Duration::from_secs(60);
 // numeric-bound: ceiling - prevents exhausted transient work from backing off beyond useful operator visibility
 const RETRY_BACKOFF_CAP: Duration = Duration::from_secs(15 * 60);
-// numeric-bound: ceiling - protects the shared database pool and provider from target bursts
-const MAX_CONCURRENT_TARGETS: usize = 8;
 
 const DETAILS_QUERY: &str = r#"
 query PullRequestConvergence($namespace: String!, $name: String!, $number: Int!) {
@@ -233,7 +231,10 @@ impl ConvergenceSweepRuntime {
     /// Runs complete censuses until shutdown; one target failure never halts siblings.
     pub async fn run(self, shutdown: watch::Receiver<bool>) {
         let runtime = &self;
-        let active_targets = Arc::new(Semaphore::new(MAX_CONCURRENT_TARGETS));
+        // Configuration bounds this target set to 256 entries. Giving each enrolled
+        // target one permit preserves its absolute polling deadline while retaining
+        // an explicit, configuration-bounded admission gate.
+        let active_targets = Arc::new(Semaphore::new(self.targets.len()));
         stream::iter(&self.targets)
             .for_each_concurrent(None, |target| {
                 let mut shutdown = shutdown.clone();
