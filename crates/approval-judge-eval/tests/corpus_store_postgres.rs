@@ -23,7 +23,8 @@ use signalbox_model_runtime::{
     Script, ScriptedModel, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
 };
 use signalbox_persistence::{
-    disposable_test_container_labels, local_test_connection_options, migrate,
+    disposable_postgres_state_tmpfs, disposable_test_container_labels,
+    local_test_connection_options, migrate,
 };
 use signalboxd::approval_judge_eval::ApprovalJudgeEvalBinding;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -52,6 +53,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_fsync_enabled()
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()

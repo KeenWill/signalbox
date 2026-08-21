@@ -9,7 +9,10 @@ publish.workspace = true
 
 [features]
 default = []
-postgres-integration = ["dep:testcontainers-modules"]
+postgres-integration = [
+    "dep:testcontainers-modules",
+    "signalbox-persistence/postgres-integration",
+]
 
 [dependencies]
 serde = { version = "1.0.219", features = ["derive"] }
