@@ -51,6 +51,7 @@ mod blob_storage_runtime;
 mod blob_upload_runtime;
 mod configuration;
 mod context_guard;
+mod convergence_sweep_runtime;
 mod conversation_introspection;
 mod credential_pools;
 mod daemon_tools;
@@ -77,14 +78,18 @@ pub use blob_storage_configuration::{
 };
 pub use blob_storage_runtime::{BlobStoreRegistry, BlobStoreRegistryError};
 pub use configuration::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DaemonToolConfiguration, DerivedModelCallCost,
-    FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError, ModelAdapter,
-    ModelBillingRates, OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration,
+    ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, ConvergenceSweepConfiguration,
+    DaemonToolConfiguration, DerivedModelCallCost, FileCredentialAccess, HubModelConfiguration,
+    HubModelConfigurationError, MAX_CONVERGENCE_SWEEP_COOL_OFF, MAX_CONVERGENCE_SWEEP_INTERVAL,
+    ModelAdapter, ModelBillingRates, OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration,
     WatchedRepositoryConfiguration,
 };
 pub use context_guard::{
     ContextGuardedTurnPass, ContextGuardedTurnPassError, ReportedUsageCompaction,
     ReportedUsageCompactionError,
+};
+pub use convergence_sweep_runtime::{
+    ConvergenceSweepRuntime, ConvergenceSweepRuntimeConstructionError,
 };
 pub use conversation_introspection::{
     ConversationIntrospectionError, PostgresConversationIntrospection,

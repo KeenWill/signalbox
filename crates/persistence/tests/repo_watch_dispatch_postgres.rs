@@ -67,6 +67,7 @@ use signalbox_persistence::{
     repo_watch_dispatch_obligation::{
         RepoWatchDispatchObligation, RepoWatchDispatchRetryPolicy, RepoWatchObligationParkRelease,
     },
+    scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
 };
@@ -5964,7 +5965,9 @@ struct CommissionedEscalationVisibility {
 /// commission recorded, through the same authority loading a repository-watch
 /// dispatch feeds, and an unattended escalation terminalizes the turn with a
 /// commissioned audit row instead of pooling forever in the approval wait.
-/// The exact replay is stable and a mismatched replay identity is refused.
+/// The pursuing goal is left as a durable reconciliation hint so the daemon's
+/// ordinary bounded execution-failure policy owns resumption. The exact replay
+/// is stable and a mismatched replay identity is refused.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_commissioned_escalation_terminalizes_under_its_recorded_fence()
@@ -6049,15 +6052,9 @@ async fn a_commissioned_escalation_terminalizes_under_its_recorded_fence()
     .await?;
     assert_eq!(audit.lifecycle_state, "terminal");
     assert_eq!(audit.terminal_disposition.as_deref(), Some("failed"));
-    assert_eq!(audit.goal_event_kind, "blocked");
-    assert_eq!(audit.blocked_reason.as_deref(), Some("execution_failure"));
-    assert!(
-        audit
-            .need
-            .as_deref()
-            .is_some_and(|need| need.contains("commissioned directly")),
-        "the commissioned block names its own repair, not a repository-watch redispatch"
-    );
+    assert_eq!(audit.goal_event_kind, "commissioned");
+    assert_eq!(audit.blocked_reason, None);
+    assert_eq!(audit.need, None);
     assert_eq!(audit.rationale, rationale.as_str());
     let audited_dispatch: bool = sqlx::query_scalar(
         "SELECT EXISTS (
@@ -6071,6 +6068,12 @@ async fn a_commissioned_escalation_terminalizes_under_its_recorded_fence()
     .fetch_one(&fixture.pool)
     .await?;
     assert!(audited_dispatch);
+    let (reconciliation_hints, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert_eq!(reconciliation_hints, vec![fixture.session]);
+    assert!(!continuation);
 
     let replay = approval_repository
         .complete(

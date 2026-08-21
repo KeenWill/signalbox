@@ -319,6 +319,14 @@ allowed_origins = [
 # version = 1
 # signal_reviewers = ["signal-reviewer", "review-bot[bot]"]
 #
+# The sweep remains disabled unless this policy and at least one repository's
+# explicit pull-request list are both present. Deployments may lower, never
+# raise, the five-minute census and thirty-minute cool-off ceilings.
+# [repository_watch.convergence_sweep]
+# template = "review-response"
+# interval_seconds = 300
+# cool_off_seconds = 1800
+#
 # [repository_watch.webhook]
 # bind_address = "127.0.0.1:3333"
 # path = "/"
@@ -327,6 +335,7 @@ allowed_origins = [
 # repository = "namespace/project"
 # poll_interval_seconds = 60
 # credential_file = "/run/credentials/repository-watch-namespace-project"
+# convergence_pull_requests = [892]
 # webhook_hook_id = 123456789
 # webhook_secret_file = "/etc/signalbox/github-webhook-secret"
 #

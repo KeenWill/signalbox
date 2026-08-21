@@ -13,6 +13,7 @@ pub mod automatic_reconciliation;
 pub mod blob;
 pub mod commissioned_dispatch;
 pub mod context_compaction;
+pub mod convergence_sweep;
 pub mod conversation_import;
 pub mod conversation_listing;
 pub mod create_session;
