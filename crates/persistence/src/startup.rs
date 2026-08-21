@@ -343,7 +343,7 @@ where
         ));
     }
 
-    recover_locked_session(
+    let decision = recover_locked_session(
         connection,
         requested_session,
         identities,
@@ -353,7 +353,41 @@ where
         ids,
     )
     .await
-    .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))
+    .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))?;
+
+    if let (Some(turn), TransactionDecision::Commit(outcome)) = (active_turn, &decision)
+        && startup_recovery_created_ambiguous_wait(outcome)
+    {
+        sqlx::query(
+            "INSERT INTO turn_restart_recovery_origin
+                (turn_id, session_id, recorded_at)
+             VALUES ($1, $2, transaction_timestamp())
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(turn)
+        .bind(session_uuid)
+        .execute(&mut *connection)
+        .await?;
+    }
+
+    Ok(decision)
+}
+
+fn startup_recovery_created_ambiguous_wait(outcome: &StartupScanSessionOutcome) -> bool {
+    match outcome {
+        StartupScanSessionOutcome::RecoveredModelCall(outcome) => matches!(
+            outcome.as_ref(),
+            ModelCallTerminalOutcome::AwaitingRecovery(_)
+        ),
+        StartupScanSessionOutcome::RecoveredToolAttempt(outcome) => {
+            matches!(outcome.as_ref(), ToolAttemptCrashOutcome::Ambiguous(_))
+        }
+        StartupScanSessionOutcome::Recovered(_)
+        | StartupScanSessionOutcome::RecoveredContextCompaction { .. }
+        | StartupScanSessionOutcome::ResumableToolBatch { .. }
+        | StartupScanSessionOutcome::AwaitingRecoveryDecision { .. }
+        | StartupScanSessionOutcome::NoActiveTurn => false,
+    }
 }
 
 pub(crate) async fn recover_observed_slot_held_in_transaction<Generator>(

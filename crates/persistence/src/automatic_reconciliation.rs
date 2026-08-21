@@ -29,9 +29,14 @@ use crate::{
     tool_loop::{ToolLoopRepositoryError, load_recovery_batch_by_attempt},
 };
 
-/// Maximum reconciliation attempts claimed by one watchdog scan.
-// numeric-bound: ceiling - bounds reconciliation transactions started per watchdog scan
-const CLAIM_WINDOW: i64 = 64;
+/// Reconciliation attempts claimed before the next transaction starts.
+///
+/// Claiming exactly one keeps a later operation from spending its durable
+/// attempt deadline while earlier session-locked transactions run. The daemon
+/// still drains a bounded multi-operation scan by returning here after each
+/// completed attempt and claiming the next one just in time.
+// numeric-bound: ceiling - prevents durable attempt deadlines expiring before work starts
+const CLAIM_WINDOW: i64 = 1;
 
 fn decode_operation(
     model_call: Option<uuid::Uuid>,

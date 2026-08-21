@@ -526,10 +526,27 @@ impl PostgresGoalPassDisposition {
     async fn plan_automatic_resumption(
         &self,
         session: SessionId,
+        failed_turn: Option<TurnId>,
     ) -> Result<AutomaticResumption, PostgresGoalPassDispositionError> {
         let goal = self.repository.load_goal(session).await?;
+        let Some(goal) = goal else {
+            return Ok(AutomaticResumption::after_spent_attempts(0));
+        };
+        let failed_turn = match failed_turn {
+            Some(turn) => Some(turn),
+            None => {
+                self.repository
+                    .load_current_goal_turn(session, goal.current().generation())
+                    .await?
+            }
+        };
+        let spent_failures = automatic_resume_failure_turns(&goal, failed_turn);
+        let restart_failures = self
+            .repository
+            .restart_reconciled_turns(session, &spent_failures)
+            .await?;
         Ok(AutomaticResumption::after_spent_attempts(
-            goal.as_ref().map_or(0, spent_automatic_resume_attempts),
+            chargeable_automatic_resume_attempts(&spent_failures, &restart_failures),
         ))
     }
 
@@ -727,9 +744,23 @@ impl PostgresGoalPassDisposition {
                     else {
                         return;
                     };
-                    let resumption = AutomaticResumption::after_spent_attempts(
-                        spent_automatic_resume_attempts(&goal),
-                    );
+                    let resumption = match self.plan_automatic_resumption(session, None).await {
+                        Ok(resumption) => resumption,
+                        Err(error) => {
+                            tracing::error!(
+                                session = %session.into_uuid(),
+                                cause_code = "goal_ambiguous_block_budget_reread_failed",
+                                cause = %error,
+                                "an ambiguous goal block could not plan its automatic resumption"
+                            );
+                            if remaining == 0 {
+                                return;
+                            }
+                            remaining = remaining.saturating_sub(1);
+                            tokio::time::sleep(AUTOMATIC_RESUME_BASE_BACKOFF).await;
+                            continue;
+                        }
+                    };
                     self.arm_automatic_resumption(session, event.ordinal(), resumption);
                     return;
                 }
@@ -788,7 +819,7 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let adapter = self.clone();
         async move {
-            let resumption = adapter.plan_automatic_resumption(session).await?;
+            let resumption = adapter.plan_automatic_resumption(session, None).await?;
             let candidates = GoalTurnCandidates::new(
                 AcceptedInputId::from_uuid(Uuid::now_v7()),
                 TurnId::from_uuid(Uuid::now_v7()),
@@ -830,7 +861,9 @@ impl GoalPassDisposition for PostgresGoalPassDisposition {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let adapter = self.clone();
         async move {
-            let resumption = adapter.plan_automatic_resumption(session).await?;
+            let resumption = adapter
+                .plan_automatic_resumption(session, Some(turn))
+                .await?;
             let outcome = match adapter
                 .repository
                 .block_execution_failure(
@@ -912,41 +945,62 @@ impl AutomaticResumption {
     }
 }
 
-/// Counts the automatic resumptions already spent on the current block run.
+/// Returns failed turns whose automatic resumptions spend the current budget.
 ///
 /// The run is the trailing alternation of execution-failure blocks and the
 /// automatic resumptions that answered them, so any other event — a
 /// model-declared block, an operator resume, a commission, or a supersession —
-/// ends it and the budget starts over.
-fn spent_automatic_resume_attempts(goal: &Goal) -> u32 {
+/// ends it and the budget starts over. Each resume is associated with the
+/// failure *after* it: that is the turn the resume started and therefore the
+/// durable restart evidence that may exempt the attempt. Before that failure's
+/// block is appended, `current_failure` supplies the same identity.
+fn automatic_resume_failure_turns(goal: &Goal, current_failure: Option<TurnId>) -> Vec<TurnId> {
     let session = goal.session();
     let generation = goal.current().generation();
     let mut events = goal.events().iter().rev();
     let mut head = events.next();
     // The run is the same whether or not the failure that reads it has already
-    // been appended, so a trailing failure block is skipped rather than counted.
-    if head.is_some_and(is_execution_failure_block) {
+    // been appended. Its turn is the outcome of the newest automatic resume;
+    // before append the caller supplies that same current turn.
+    let mut failed_turn = head.and_then(execution_failure_turn).or(current_failure);
+    if head.and_then(execution_failure_turn).is_some() {
         head = events.next();
     }
-    let mut spent = 0;
+    let mut failures = Vec::new();
     loop {
         let (Some(resumed), Some(blocked)) = (head, events.next()) else {
-            return spent;
+            return failures;
         };
         if resumed.generation() != generation || blocked.generation() != generation {
-            return spent;
+            return failures;
         }
         let GoalEventKind::Resumed { provenance, .. } = resumed.kind() else {
-            return spent;
+            return failures;
         };
-        if !is_execution_failure_block(blocked)
-            || provenance.command() != automatic_resume_command(session, blocked.ordinal())
-        {
-            return spent;
+        let Some(previous_failure) = execution_failure_turn(blocked) else {
+            return failures;
+        };
+        if provenance.command() != automatic_resume_command(session, blocked.ordinal()) {
+            return failures;
         }
-        spent = spent.saturating_add(1);
+        let Some(spent_failure) = failed_turn else {
+            return failures;
+        };
+        failures.push(spent_failure);
+        failed_turn = Some(previous_failure);
         head = events.next();
     }
+}
+
+fn chargeable_automatic_resume_attempts(
+    failed_turns: &[TurnId],
+    restart_reconciled_turns: &[TurnId],
+) -> u32 {
+    let spent = failed_turns
+        .iter()
+        .filter(|turn| !restart_reconciled_turns.contains(turn))
+        .count();
+    u32::try_from(spent).unwrap_or(u32::MAX)
 }
 
 /// Whether the goal is still blocked by exactly the named failure event.
@@ -957,13 +1011,25 @@ fn awaits_automatic_resumption(goal: &Goal, blocked: GoalEventOrdinal) -> bool {
 }
 
 fn is_execution_failure_block(event: &GoalEvent) -> bool {
-    matches!(
-        event.kind(),
+    execution_failure_turn(event).is_some()
+}
+
+fn execution_failure_turn(event: &GoalEvent) -> Option<TurnId> {
+    match event.kind() {
         GoalEventKind::Blocked {
-            block: GoalBlockProvenance::ExecutionFailure { .. },
+            block: GoalBlockProvenance::ExecutionFailure { provenance },
+            ..
+        } => Some(provenance.turn()),
+        GoalEventKind::Commissioned { .. }
+        | GoalEventKind::Resumed { .. }
+        | GoalEventKind::Blocked {
+            block: GoalBlockProvenance::Model { .. },
             ..
         }
-    )
+        | GoalEventKind::Achieved { .. }
+        | GoalEventKind::UserStopped { .. }
+        | GoalEventKind::Superseded { .. } => None,
+    }
 }
 
 /// Derives the durable identity one automatic resumption may ever claim.
@@ -1080,6 +1146,10 @@ mod tests {
         .expect("a pursuing goal blocks on a model declaration")
     }
 
+    fn spent_automatic_resume_attempts(goal: &Goal) -> u32 {
+        u32::try_from(automatic_resume_failure_turns(goal, None).len()).unwrap_or(u32::MAX)
+    }
+
     fn planned(goal: &Goal) -> AutomaticResumption {
         AutomaticResumption::after_spent_attempts(spent_automatic_resume_attempts(goal))
     }
@@ -1101,11 +1171,44 @@ mod tests {
     /// so both readings must name the same attempt.
     #[test]
     fn the_spent_attempt_count_is_unchanged_by_appending_the_failure_it_plans() {
+        let failure = TurnId::from_uuid(Uuid::from_u128(0x02));
         let pursuing = automatically_resumed(failed(pursuing_goal(), 0x01));
         let blocked = failed(pursuing.clone(), 0x02);
 
-        assert_eq!(spent_automatic_resume_attempts(&pursuing), 1);
+        assert_eq!(
+            automatic_resume_failure_turns(&pursuing, Some(failure)).len(),
+            1
+        );
         assert_eq!(spent_automatic_resume_attempts(&blocked), 1);
+    }
+
+    #[test]
+    fn automatic_resume_attempts_are_associated_with_the_turn_they_started() {
+        let first_failure = TurnId::from_uuid(Uuid::from_u128(0x02));
+        let second_failure = TurnId::from_uuid(Uuid::from_u128(0x03));
+        let after_first_resume = automatically_resumed(failed(pursuing_goal(), 0x01));
+        let after_second_resume = automatically_resumed(failed(after_first_resume, 0x02));
+
+        assert_eq!(
+            automatic_resume_failure_turns(&after_second_resume, Some(second_failure)),
+            vec![second_failure, first_failure]
+        );
+    }
+
+    #[test]
+    fn restart_reconciled_failures_do_not_spend_resume_attempts() {
+        let runtime_failure = TurnId::from_uuid(Uuid::from_u128(0x02));
+        let restart_failure = TurnId::from_uuid(Uuid::from_u128(0x03));
+        let failures = [restart_failure, runtime_failure];
+
+        assert_eq!(
+            chargeable_automatic_resume_attempts(&failures, &[restart_failure]),
+            1
+        );
+        assert_eq!(
+            chargeable_automatic_resume_attempts(&failures, &failures),
+            0
+        );
     }
 
     #[test]

@@ -20,10 +20,12 @@ exemption — the block an unattended repository-watch approval escalation appen
 reconciliation of an operator-commissioned escalation is verified against this
 PR (`agent/daemon-live-commissioned-escalation-resume`). Restart reconciliation
 of pending automatic resumptions is verified against this PR
-(`agent/daemon-live-goal-resume-rearm`). Identity and durable-command mechanics
-remain owned by [identity and commands](identity-and-commands.md), turn
-execution by [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md),
-tool dispatch by [tool loop](tool-loop.md), and framing by
+(`agent/daemon-live-goal-resume-rearm`). Restart-caused failure accounting is
+verified against this PR (`agent/daemon-live-restart-recovery-accounting`).
+Identity and durable-command mechanics remain owned by
+[identity and commands](identity-and-commands.md), turn execution by
+[turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
+by [tool loop](tool-loop.md), and framing by
 [process protocol](process-protocol.md). INV-048 is the lifecycle enforcement
 family indexed by [the invariant test index](../invariants.md).
 
@@ -217,6 +219,18 @@ durably rejected, by losing its process, or by never reaching the database, and
 in each case that text is what an operator reads. Resumption does not bypass
 execution-failure blocking or make a failure a silent retry — the block is
 appended first, and every attempt is an ordinary recorded `resumed` event.
+
+A resumed turn the daemon itself loses across restart does not spend that
+five-attempt goal budget. The lineage still records its ordinary resumed event
+and execution-failure block, while budget derivation associates that resumption
+with the turn it started and discounts it only when the turn's terminal attempt
+has an append-only startup-recovery origin and the exact model-call or
+tool-attempt automatic reconciliation is durably `reconciled`. The startup scan
+writes that origin in the transaction that creates the ambiguous wait; the live
+slot-held watchdog does not. Runtime boundary loss therefore remains chargeable.
+Typed records rather than a restart log line remain authority, and startup
+rearming can continue through repeated deploys without turning deployment count
+into goal-attempt exhaustion.
 
 **Implemented behavior.** An automatic resumption's durable command identity is
 derived from the session and the exact blocked event it answers rather than
