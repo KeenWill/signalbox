@@ -15,6 +15,11 @@ name = "signalbox-file-media-synthetic-worker"
 path = "src/bin/signalbox-file-media-synthetic-worker.rs"
 required-features = ["test-worker"]
 
+[[test]]
+name = "isolation"
+path = "tests/isolation.rs"
+required-features = ["test-worker"]
+
 [dependencies]
 base64 = "0.22.1"
 rustix = { version = "1.1.4", default-features = false, features = [

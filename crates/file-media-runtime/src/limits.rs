@@ -179,7 +179,7 @@ impl FileMediaCeilings {
 /// Labeled deployment overrides for lowerable worker resource limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileMediaProcessLimitOverrides {
-    /// Address-space byte limit applied before worker startup.
+    /// Combined worker-memory budget split between address space and writable tmpfs.
     pub memory_bytes: u64,
     /// CPU-second limit applied before worker startup.
     pub cpu_seconds: u64,
@@ -253,7 +253,7 @@ impl FileMediaProcessCeilings {
         self.frame_bytes
     }
 
-    /// Returns the address-space byte limit applied before worker startup.
+    /// Returns the combined worker-memory budget split between address space and writable tmpfs.
     pub const fn memory_bytes(self) -> u64 {
         self.memory_bytes
     }
