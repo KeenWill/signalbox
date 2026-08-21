@@ -1,4 +1,5 @@
-import { type ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
+import { flexRender } from '@tanstack/react-table'
+import { getCoreRowModel, type LegacyColumnDef, useLegacyTable } from '@tanstack/react-table/legacy'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useMemo, useRef } from 'react'
 import type { WebImportSummary } from '../generated/web-contract.mjs'
@@ -27,7 +28,7 @@ export function ImportsTable({
   onSelect: (id: string) => void
 }) {
   'use no memo'
-  const columns = useMemo<ColumnDef<WebImportSummary>[]>(
+  const columns = useMemo<LegacyColumnDef<WebImportSummary>[]>(
     () => [
       {
         accessorKey: 'display_title',
@@ -57,12 +58,20 @@ export function ImportsTable({
       {
         accessorKey: 'source_session_id',
         header: 'Source session evidence',
-        cell: ({ row }) => row.original.source_session_id ?? 'Not attested',
+        cell: ({ row }) => {
+          const evidence = row.original.source_session_id
+          if (!evidence) return 'Not attested'
+          return `${evidence.leading_text}${evidence.completeness === 'truncated' ? '…' : ''}`
+        },
       },
     ],
     [onSelect],
   )
-  const table = useReactTable({ data: [...rows], columns, getCoreRowModel: getCoreRowModel() })
+  const table = useLegacyTable({
+    data: [...rows],
+    columns,
+    getCoreRowModel: getCoreRowModel(),
+  })
   const tableRows = table.getRowModel().rows
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({

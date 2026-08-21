@@ -1,4 +1,5 @@
-import { type ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
+import { flexRender } from '@tanstack/react-table'
+import { getCoreRowModel, type LegacyColumnDef, useLegacyTable } from '@tanstack/react-table/legacy'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useMemo, useRef } from 'react'
 import type { FleetRow } from './platform'
@@ -10,7 +11,7 @@ const TABLE_OVERSCAN_ROWS = 8
 export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount: number }) {
   'use no memo'
   const dispatch = useAppDispatch()
-  const columns = useMemo<ColumnDef<FleetRow>[]>(
+  const columns = useMemo<LegacyColumnDef<FleetRow>[]>(
     () => [
       { accessorKey: 'repository', header: 'Repository / worktree' },
       {
@@ -25,7 +26,7 @@ export function FleetTable({ rows, totalCount }: { rows: FleetRow[]; totalCount:
     ],
     [],
   )
-  const table = useReactTable({ data: rows, columns, getCoreRowModel: getCoreRowModel() })
+  const table = useLegacyTable({ data: rows, columns, getCoreRowModel: getCoreRowModel() })
   const tableRows = table.getRowModel().rows
   const parentRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
