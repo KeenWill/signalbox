@@ -151,6 +151,12 @@ const WEBHOOK_DRAIN_MONITOR_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 // performs it, so remaining work re-arms its own wake after this bounded
 // quantum instead of holding the worker across poll deadlines.
 const WEBHOOK_DRAIN_PAGE_LIMIT: usize = 1;
+// One repository scheduling phase may settle this many cutoff or dispatch
+// records before returning to the webhook-aware outer loop. The remaining work
+// is durable and re-arms that loop; bounding the phase prevents an event backlog
+// from owning the serialized repository task indefinitely.
+// numeric-bound: ceiling - bounds reconciliation work ahead of webhook wake observation
+const REPOSITORY_RECONCILIATION_QUANTUM: usize = 16;
 // How many times one terminal record may be re-attempted while PostgreSQL keeps
 // losing its commit result. Each attempt is settled by a read, so this bounds a
 // flapping connection rather than a genuinely undecided outcome.
@@ -788,6 +794,10 @@ fn next_cadence_deadline(previous: Instant, interval: Duration, now: Instant) ->
     } else {
         now + interval
     }
+}
+
+fn repository_reconciliation_quantum_exhausted(processed: usize) -> bool {
+    processed >= REPOSITORY_RECONCILIATION_QUANTUM
 }
 
 /// Awaits `work`, leaving it cancellable by shutdown.
@@ -2290,6 +2300,7 @@ impl RepositoryWatchTask {
     }
 
     async fn process_cutoffs(&self) -> Result<(), RepositoryWatchAttemptError> {
+        let mut processed = 0_usize;
         loop {
             match self
                 .dispatch_store
@@ -2298,7 +2309,12 @@ impl RepositoryWatchTask {
                 })
                 .await
             {
-                Ok(true) => {}
+                Ok(true) => {
+                    processed = processed.saturating_add(1);
+                    if self.yield_after_reconciliation_quantum("lifecycle_cutoff", processed) {
+                        return Ok(());
+                    }
+                }
                 Ok(false) => return Ok(()),
                 Err(RepoWatchDispatchRepositoryError::GoalCutoff(
                     error @ signalbox_persistence::goal::GoalRepositoryError::Corruption(_),
@@ -2324,6 +2340,7 @@ impl RepositoryWatchTask {
     }
 
     async fn process_dispatches(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+        let mut processed = 0_usize;
         for rule in &self.rules {
             while let Some(event) = self
                 .dispatch_store
@@ -2358,6 +2375,10 @@ impl RepositoryWatchTask {
                     .await
                     .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
                 self.nudge_dispatched_sessions(&outcome);
+                processed = processed.saturating_add(1);
+                if self.yield_after_reconciliation_quantum("rule_evaluation", processed) {
+                    return Ok(());
+                }
             }
             while let Some(obligation) = self
                 .dispatch_store
@@ -2401,9 +2422,28 @@ impl RepositoryWatchTask {
                     .await
                     .map_err(|_| RepositoryWatchAttemptError::Dispatch)?;
                 self.nudge_dispatched_sessions(&outcome);
+                processed = processed.saturating_add(1);
+                if self.yield_after_reconciliation_quantum("dispatch_obligation", processed) {
+                    return Ok(());
+                }
             }
         }
         Ok(())
+    }
+
+    fn yield_after_reconciliation_quantum(&self, phase: &'static str, processed: usize) -> bool {
+        if !repository_reconciliation_quantum_exhausted(processed) {
+            return false;
+        }
+        self.request_webhook_drain_continuation();
+        tracing::info!(
+            repository = %self.repository.as_str(),
+            phase,
+            processed,
+            cause_code = "repository_watch_reconciliation_quantum_exhausted",
+            "repository-watch reconciliation yielded to its webhook-aware scheduler"
+        );
+        true
     }
 
     fn nudge_dispatched_sessions(&self, outcome: &RepoWatchRuleEvaluationOutcome) {
@@ -5318,8 +5358,8 @@ mod tests {
         ListedPullRequest, MAX_CACHED_WIRE_BYTES, MAX_CHECK_SUITES_PER_COMMIT_CHECK_RUN_SEARCH,
         MAX_CONCURRENT_PULL_REQUEST_FETCHES, MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS,
         MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollAttemptWait, PollCache,
-        PullRequestSettlement, PullResponse, ReactionContent, RepoWatchAuthorLogin,
-        RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
+        PullRequestSettlement, PullResponse, REPOSITORY_RECONCILIATION_QUANTUM, ReactionContent,
+        RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchCursorGeneration, RepoWatchObservation,
         RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewObservation,
         RepoWatchThreadState, RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation,
         RepositorySlug, RepositoryWatchAttemptError, RepositoryWatchChildExit,
@@ -5332,8 +5372,9 @@ mod tests {
         commit_check_run_search_is_complete, derive_repo_watch_events, dispatch_context_json,
         inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
         normalize_checks_outcome, normalize_pull_request_context, object_id,
-        observe_webhook_work_before_drain, owed_dispatch_context_json_parts, rule_activation_error,
-        run_until_shutdown, supervise_repository_tasks, targeted_pull_requests,
+        observe_webhook_work_before_drain, owed_dispatch_context_json_parts,
+        repository_reconciliation_quantum_exhausted, rule_activation_error, run_until_shutdown,
+        supervise_repository_tasks, targeted_pull_requests,
     };
     use signalbox_application::{
         InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
@@ -8756,6 +8797,16 @@ mod tests {
 
         assert_eq!(next_poll, completed + POLL_INTERVAL);
         assert!(next_poll > completed, "an elapsed deadline never sleeps");
+    }
+
+    #[test]
+    fn reconciliation_yields_at_the_audited_quantum() {
+        assert!(!repository_reconciliation_quantum_exhausted(
+            REPOSITORY_RECONCILIATION_QUANTUM - 1
+        ));
+        assert!(repository_reconciliation_quantum_exhausted(
+            REPOSITORY_RECONCILIATION_QUANTUM
+        ));
     }
 
     #[tokio::test]

@@ -50,11 +50,13 @@ deadline is verified against this PR
 (`agent/daemon-live-webhook-attempt-deadline`). The provider-wide page backoff
 is verified against this PR (`agent/daemon-live-webhook-provider-backoff`).
 Webhook preemption of slow complete reconciliation is verified against PR #926
-(`agent/webhook-projection-preemption-review`). The approval-judge dispatch
-fence and unattended escalation release described below are verified against
-this PR (`agent/headless-approval-escalation`). The operator-commissioned
-dispatch fence and its unattended-escalation coverage are verified against this
-PR (`agent/commissioned-dispatch-fence`).
+(`agent/webhook-projection-preemption-review`). The finite cutoff and dispatch
+reconciliation quanta ahead of and after a webhook drain are verified against
+this PR (`agent/daemon-live-bounded-repo-reconciliation`). The approval-judge
+dispatch fence and unattended escalation release described below are verified
+against this PR (`agent/headless-approval-escalation`). The
+operator-commissioned dispatch fence and its unattended-escalation coverage are
+verified against this PR (`agent/commissioned-dispatch-fence`).
 
 ## Configuration and credential boundary
 
@@ -173,7 +175,11 @@ and resumes the still-due complete poll without another preemption. A drain
 retry in backoff suppresses preemption, and the original cycle start remains the
 cadence anchor. The wake therefore loses acceleration when its endpoint is
 failed or unavailable, while reconciliation remains bounded and cannot be
-starved by a sustained stream.
+starved by a sustained stream. Each leading or trailing lifecycle-cutoff phase
+and rule-or-obligation dispatch phase settles at most 16 durable records before
+returning to the webhook-aware scheduler. Reaching that ceiling re-arms the
+repository wake, so durable remainder is revisited without letting a sustained
+reconciliation backlog indefinitely delay webhook work.
 
 **Implemented behavior.** One attempt fetches up to eight open pull requests
 concurrently. The fetch sequence within a single pull request stays ordered, and
