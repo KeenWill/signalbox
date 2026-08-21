@@ -991,13 +991,13 @@ const EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND: std::time::Duration = std::time::Dura
 /// Delay before retrying an expired-pass lock refusal.
 ///
 /// Occupancy cancellation releases the execution future immediately, but a
-/// contended outbox commit can hold its rows for several seconds. Two seconds
-/// spaces the four attempts across that handoff without delaying an uncontended
-/// first attempt or extending the work beyond a small fraction of the outer
-/// watchdog interval.
+/// contended outbox commit can hold its rows for tens of seconds. Six seconds
+/// spaces the four attempts across that observed handoff tail without delaying
+/// an uncontended first attempt or extending the work beyond a small fraction
+/// of the outer watchdog interval.
 // numeric-bound: interval - allows the canceled pass to release its database resources
 const EXPIRED_PASS_RECOVERY_LOCK_RETRY_DELAY: std::time::Duration =
-    std::time::Duration::from_secs(2);
+    std::time::Duration::from_secs(6);
 /// Delay before retrying an ambiguous or non-infrastructure recovery failure.
 // numeric-bound: interval - avoids rapid replay when failure safety is not proven
 const EXPIRED_PASS_RECOVERY_CONSERVATIVE_RETRY_DELAY: std::time::Duration =

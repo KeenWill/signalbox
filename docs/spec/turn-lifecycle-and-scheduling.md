@@ -463,7 +463,7 @@ the sweep (INV-007).
   those can return typed failures instead of being masked by the wrapper. A lock
   refusal is preserved as its typed turn-liveness cause even when the shared
   startup transition raises it from its nested session or turn work. It retries
-  after two seconds, spacing the four attempts across several-second commit
+  after six seconds, spacing the four attempts across tens-of-seconds commit
   handoffs under outbox contention. Any other database, ambiguous, or
   non-infrastructure failure retains the two-minute cadence. Three retries bound
   the detached work, and the outer watchdog below remains responsible if all
