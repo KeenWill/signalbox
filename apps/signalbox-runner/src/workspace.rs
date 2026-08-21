@@ -280,7 +280,8 @@ fn read_ready_private_workspace(
     }
     let work = open_directory(placement, PRIVATE_WORKSPACE_DIRECTORY)
         .map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
-    let execution_directory = checked_execution_directory(execution_path, &work)?;
+    let execution_directory = checked_execution_directory(execution_path, &work)
+        .map_err(commit_ambiguous_after_publication)?;
     let manifest_digest =
         workspace_manifest_digest(&manifest).map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
     ReadyManifest::try_new(manifest, manifest_digest, execution_directory)
@@ -850,6 +851,18 @@ mod tests {
             .join(PLACEMENT_REVISION.to_string());
 
         assert!(matches!(failure, RunnerWorkspaceError::CommitAmbiguous(_)));
+        assert!(published.is_dir());
+
+        let replay_failure = state
+            .workspace_store()
+            .expect("the locked root forms another workspace store")
+            .prepare_private_root(&request(RUNNER))
+            .expect_err("replay after namespace loss remains commit ambiguous");
+
+        assert!(matches!(
+            replay_failure,
+            RunnerWorkspaceError::CommitAmbiguous(_)
+        ));
         assert!(published.is_dir());
     }
 
