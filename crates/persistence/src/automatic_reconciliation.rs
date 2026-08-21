@@ -1,6 +1,6 @@
 //! Durable daemon-owned reconciliation of ambiguous physical operations.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, time::Duration};
 
 use signalbox_application::{
     AutomaticReconciliationAttempt, AutomaticReconciliationBatch,
@@ -202,8 +202,9 @@ impl PostgresAutomaticReconciliationRepository {
     /// Discovers exact ambiguity waits and claims one bounded due window.
     pub async fn claim_due(
         &self,
+        transaction_bound: Duration,
     ) -> Result<AutomaticReconciliationBatch, AutomaticReconciliationRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.begin_bounded(transaction_bound).await?;
         discover_recoveries(&mut transaction).await?;
         settle_abandoned_attempts(&mut transaction).await?;
         mark_superseded_recoveries(&mut transaction).await?;
@@ -255,8 +256,9 @@ impl PostgresAutomaticReconciliationRepository {
     pub async fn reconcile(
         &self,
         claimed: ClaimedAutomaticReconciliation,
+        transaction_bound: Duration,
     ) -> Result<AutomaticReconciliationOutcome, AutomaticReconciliationRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.begin_bounded(transaction_bound).await?;
         sqlx::query(crate::lock_inventory::STARTUP_RECOVERY)
             .bind(session_id_to_uuid(claimed.session()))
             .fetch_optional(&mut *transaction)
@@ -416,8 +418,9 @@ impl PostgresAutomaticReconciliationRepository {
         &self,
         claimed: ClaimedAutomaticReconciliation,
         failure: AutomaticReconciliationFailureKind,
+        transaction_bound: Duration,
     ) -> Result<(), AutomaticReconciliationRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.begin_bounded(transaction_bound).await?;
         let rows = sqlx::query(
             "UPDATE automatic_reconciliation_attempt
                 SET outcome_kind = $3, finished_at = statement_timestamp()
@@ -455,6 +458,31 @@ impl PostgresAutomaticReconciliationRepository {
             commit_ambiguous: commit_failure_is_ambiguous(&source),
             source,
         }
+    }
+
+    /// Starts a transaction whose server-side lifetime cannot outlive its
+    /// daemon-owned recovery attempt.
+    ///
+    /// A client-side future timeout cannot cancel PostgreSQL work that is
+    /// already running. Installing the bound in PostgreSQL keeps an abandoned
+    /// client from leaving a transaction queued on the shared outbox allocator
+    /// after the daemon has moved on to later recovery work.
+    async fn begin_bounded(
+        &self,
+        transaction_bound: Duration,
+    ) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, AutomaticReconciliationRepositoryError> {
+        let timeout_millis = i64::try_from(transaction_bound.as_millis())
+            .ok()
+            .filter(|millis| *millis > 0)
+            .ok_or(AutomaticReconciliationRepositoryError::Corruption(
+                "transaction bound",
+            ))?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT set_config('transaction_timeout', $1, true)")
+            .bind(format!("{timeout_millis}ms"))
+            .execute(&mut *transaction)
+            .await?;
+        Ok(transaction)
     }
 }
 

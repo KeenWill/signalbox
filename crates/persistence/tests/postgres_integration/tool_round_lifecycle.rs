@@ -1562,14 +1562,18 @@ async fn inv006_inv025_inv029_inv037_automatic_tool_reconciliation_releases_the_
     );
 
     let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
-    let batch = repository.claim_due().await?;
+    let batch = repository
+        .claim_due(std::time::Duration::from_secs(10))
+        .await?;
     assert_eq!(batch.claimed().len(), 1);
     assert_eq!(
         batch.claimed()[0].operation(),
         AutomaticReconciliationOperation::ToolAttempt(tool_attempt)
     );
     assert_eq!(
-        repository.reconcile(batch.claimed()[0]).await?,
+        repository
+            .reconcile(batch.claimed()[0], std::time::Duration::from_secs(10),)
+            .await?,
         AutomaticReconciliationOutcome::Reconciled
     );
     let durable: (String, String, i32, i64) = sqlx::query_as(
