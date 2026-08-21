@@ -125,12 +125,21 @@ impl PostgresRunnerRegistrationService {
                 ) => {}
             }
         }
-        self.propagate_pending_connection_losses().await?;
+        self.propagate_pending_connection_losses(None).await?;
         Ok(transitions)
     }
 
-    async fn propagate_pending_connection_losses(&self) -> Result<(), RunnerProtocolStoreError> {
-        for loss in self.store.load_pending_connection_losses().await? {
+    async fn propagate_pending_connection_losses(
+        &self,
+        only_enrollment: Option<RunnerEnrollmentId>,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        for loss in self
+            .store
+            .load_pending_connection_losses()
+            .await?
+            .into_iter()
+            .filter(|loss| only_enrollment.is_none_or(|enrollment| loss.enrollment() == enrollment))
+        {
             loop {
                 let page = self
                     .store
@@ -488,30 +497,48 @@ impl PostgresRunnerRegistrationService {
                     error,
                 )
             })?;
-        let outcome = match effect {
+        let (outcome, should_propagate) = match effect {
             RunnerConnectionTransitionEffect::Applied(applied) => {
                 log_connection_transition(applied, transition);
-                RunnerConnectionTransitionOutcome::Current(applied.snapshot())
+                let snapshot = applied.snapshot();
+                (
+                    RunnerConnectionTransitionOutcome::Current(snapshot),
+                    snapshot.state() == RunnerConnectionState::Lost,
+                )
             }
-            RunnerConnectionTransitionEffect::Unchanged(outcome) => outcome,
+            RunnerConnectionTransitionEffect::Unchanged(
+                RunnerConnectionTransitionOutcome::Current(snapshot),
+            ) => (
+                RunnerConnectionTransitionOutcome::Current(snapshot),
+                snapshot.state() == RunnerConnectionState::Lost
+                    && transition_produces_loss(transition),
+            ),
+            RunnerConnectionTransitionEffect::Unchanged(outcome) => (outcome, false),
         };
-        if matches!(
-            outcome,
-            RunnerConnectionTransitionOutcome::Current(snapshot)
-                if snapshot.state() == RunnerConnectionState::Lost
-        ) {
-            self.propagate_pending_connection_losses()
+        if should_propagate {
+            let enrollment = RunnerEnrollmentId::from_uuid(enrollment.into_uuid());
+            if let Err(error) = self
+                .propagate_pending_connection_losses(Some(enrollment))
                 .await
-                .map_err(|error| {
-                    store_failure(
-                        operation_kind,
-                        AvailableCorrelation::ConnectionEpoch(wire_epoch),
-                        error,
-                    )
-                })?;
+            {
+                tracing::error!(
+                    error = %error,
+                    enrollment_id = %enrollment.into_uuid(),
+                    "runner connection loss propagation deferred to startup recovery"
+                );
+            }
         }
         Ok(outcome)
     }
+}
+
+const fn transition_produces_loss(transition: RunnerConnectionTransition) -> bool {
+    matches!(
+        transition,
+        RunnerConnectionTransition::HeartbeatTimeout
+            | RunnerConnectionTransition::TransportClosed
+            | RunnerConnectionTransition::ProtocolFailure
+    )
 }
 
 fn log_connection_transition(
@@ -2016,6 +2043,7 @@ mod tests {
     };
     use signalbox_persistence::{
         create_session::CreateSessionRepository,
+        disposable_postgres_server_args, disposable_postgres_state_tmpfs,
         disposable_test_container_labels, local_test_connection_options, migrate,
         runner_protocol::{RunnerConnectionCause, RunnerConnectionState},
         session_credentials::{SessionCredentialPin, SessionModelCredential},
@@ -2260,7 +2288,8 @@ mod tests {
             .with_user(DATABASE_USER)
             .with_password(DATABASE_PASSWORD)
             .with_db_name(DATABASE_NAME)
-            .with_fsync_enabled()
+            .with_cmd(disposable_postgres_server_args())
+            .with_mount(disposable_postgres_state_tmpfs())
             .with_tag(POSTGRES_IMAGE_TAG)
             .with_labels(disposable_test_container_labels())
             .start()

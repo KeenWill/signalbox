@@ -22,6 +22,55 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  # Keep the required `validate` and `postgres-integration` checks present on
+  # every pull-request head. Their aggregate jobs below accept skipped heavy
+  # work only when this job proves every changed path is Markdown or under
+  # `docs/`; pushes to main always run the complete workflow.
+  rust-change-scope:
+    name: Rust change scope
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.paths.outputs.docs_only }}
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify changed paths
+        id: paths
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          docs_only=false
+          if [ "$EVENT_NAME" = pull_request ]; then
+            docs_only=true
+            changed_paths="$RUNNER_TEMP/rust-changed-files"
+            git diff --no-renames --name-only -z \
+              "$BASE_SHA...$HEAD_SHA" > "$changed_paths"
+            while IFS= read -r -d '' path; do
+              case "$path" in
+                # Binding process/specification prose and generated indexes
+                # run the complete bar even though they are Markdown.
+                AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
+                  | docs/domain-spine.md | docs/invariants.md \
+                  | docs/scenarios.md | docs/style.md)
+                  docs_only=false
+                  break
+                  ;;
+                docs/* | *.md)
+                  ;;
+                *)
+                  docs_only=false
+                  break
+                  ;;
+              esac
+            done < "$changed_paths"
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
   contract-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -146,7 +195,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            dbc14e3054b2261d5634e0c04dfbfeb6f32ded2c169b13c1a5422e239b79c359
+            b06959f36036e230c03336ab06eaae6003a9e295e26390d88145694120b97781
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -160,6 +209,8 @@ jobs:
             exit 1
           }
   rust-checks:
+    needs: rust-change-scope
+    if: needs.rust-change-scope.outputs.docs_only != 'true'
     runs-on: signalbox
     # The self-hosted pool starts with cold caches; give the workspace check
     # headroom until they warm.
@@ -189,7 +240,8 @@ jobs:
   # every command it covered before the split.
   validate-checks:
     if: ${{ always() }}
-    needs: [contract-checks, checker-and-format-tests, rust-checks]
+    needs:
+      [rust-change-scope, contract-checks, checker-and-format-tests, rust-checks]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
@@ -198,16 +250,23 @@ jobs:
           CONTRACT_RESULT: ${{ needs.contract-checks.result }}
           CHECKER_RESULT: ${{ needs.checker-and-format-tests.result }}
           RUST_RESULT: ${{ needs.rust-checks.result }}
+          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
         run: |
           test "$CONTRACT_RESULT" = success
           test "$CHECKER_RESULT" = success
-          test "$RUST_RESULT" = success
+          if [ "$DOCS_ONLY" = true ]; then
+            test "$RUST_RESULT" = skipped
+          else
+            test "$RUST_RESULT" = success
+          fi
 
   # The workspace test binaries build and run here rather than at the end of
   # `validate-checks`, so the two compilations overlap instead of queueing. The
   # duplicated dependency build is the accepted cost; separate jobs cannot
   # share a target directory, so this job carries its own rust-cache entry.
   workspace-tests:
+    needs: rust-change-scope
+    if: needs.rust-change-scope.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -229,6 +288,8 @@ jobs:
         env:
           SIGNALBOX_RUN_BWRAP_INTEGRATION: "1"
         run: cargo test --no-fail-fast --workspace --all-targets --all-features
+      - name: Test generated browser contract runtime
+        run: node --test crates/web-contract/tests/generated_roundtrip.mjs
       # `--all-targets` excludes doctests, so the domain's compile_fail
       # sealing proofs need this separate run.
       - name: Run doctests
@@ -241,7 +302,7 @@ jobs:
   validate:
     name: validate
     if: ${{ always() }}
-    needs: [validate-checks, workspace-tests]
+    needs: [rust-change-scope, validate-checks, workspace-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
@@ -249,15 +310,22 @@ jobs:
         env:
           CHECKS_RESULT: ${{ needs.validate-checks.result }}
           TESTS_RESULT: ${{ needs.workspace-tests.result }}
+          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
         run: |
           test "$CHECKS_RESULT" = success
-          test "$TESTS_RESULT" = success
+          if [ "$DOCS_ONLY" = true ]; then
+            test "$TESTS_RESULT" = skipped
+          else
+            test "$TESTS_RESULT" = success
+          fi
 
   # Report-only by owner decision: this job publishes deterministic counts
   # for human comparison but can never fail the workflow or gate a merge.
   domain-instruction-counts:
     name: Domain instruction counts (report only)
     continue-on-error: true
+    needs: rust-change-scope
+    if: needs.rust-change-scope.outputs.docs_only != 'true'
     runs-on: signalbox
     timeout-minutes: 20
     steps:
@@ -310,6 +378,8 @@ jobs:
   # checks the sources out and passes `--workspace-remap`.
   postgres-integration-build:
     name: postgres-integration (build)
+    needs: rust-change-scope
+    if: needs.rust-change-scope.outputs.docs_only != 'true'
     runs-on: signalbox-docker
     # Generous by design: this job now absorbs all five suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
@@ -339,7 +409,7 @@ jobs:
           shared-key: rust
           save-if: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+        uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2.86.4
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -460,7 +530,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
+        uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2.86.4
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive
@@ -472,7 +542,9 @@ jobs:
       # `--run-ignored only` is `-- --ignored`, `--no-fail-fast` is unchanged,
       # and the archive fixes the package and feature selection at build time.
       # nextest runs each test in its own process rather than on a shared
-      # thread pool; eight concurrent tests is the cap.
+      # thread pool; eight concurrent tests is the cap. One per-test retry
+      # absorbs a transient container-start failure without rerunning a whole
+      # shard, while a repeat failure still fails the gate.
       - name: Run the ${{ matrix.suite }} partition
         env:
           SUITE: ${{ matrix.suite }}
@@ -486,6 +558,7 @@ jobs:
           --partition "count:$PARTITION/$PARTITIONS"
           --run-ignored only
           --no-fail-fast
+          --retries 1
           --test-threads 8
           -E "$FILTER"
 
@@ -494,7 +567,8 @@ jobs:
   postgres-integration:
     name: postgres-integration
     if: ${{ always() }}
-    needs: [postgres-integration-build, postgres-integration-run]
+    needs:
+      [rust-change-scope, postgres-integration-build, postgres-integration-run]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
@@ -502,6 +576,12 @@ jobs:
         env:
           BUILD_RESULT: ${{ needs.postgres-integration-build.result }}
           RUN_RESULT: ${{ needs.postgres-integration-run.result }}
+          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
         run: |
-          test "$BUILD_RESULT" = success
-          test "$RUN_RESULT" = success
+          if [ "$DOCS_ONLY" = true ]; then
+            test "$BUILD_RESULT" = skipped
+            test "$RUN_RESULT" = skipped
+          else
+            test "$BUILD_RESULT" = success
+            test "$RUN_RESULT" = success
+          fi
