@@ -304,6 +304,9 @@ impl RunnerWorkspaceStore {
             .map_err(PrepareRepositoryWorkspaceError::Storage)?;
         match open_directory(&session, &placement_name) {
             Ok(placement) => {
+                validate_root_directory(&self.canonical_root, &self.root)
+                    .map_err(RunnerWorkspaceError::Io)
+                    .map_err(PrepareRepositoryWorkspaceError::Storage)?;
                 return read_ready_repository_workspace(&placement, request, &execution_path)
                     .map_err(PrepareRepositoryWorkspaceError::Storage);
             }
@@ -1013,6 +1016,8 @@ fn push_durability_entries(
     Ok(())
 }
 
+const CLEANUP_DIRECTORY_RESCAN_LIMIT: usize = 16;
+
 enum RemovalStep {
     Inspect {
         parent: Rc<File>,
@@ -1042,7 +1047,7 @@ fn remove_open_directory_tree(
         directory: Rc::clone(&directory),
     }];
     push_directory_entries(&mut steps, Rc::clone(&directory))?;
-    remove_directory_steps(steps)
+    remove_directory_steps(steps, CLEANUP_DIRECTORY_RESCAN_LIMIT)
 }
 
 #[cfg(test)]
@@ -1050,17 +1055,24 @@ fn remove_open_directory_tree_after_stale_scan(
     parent: &File,
     name: &OsStr,
     directory: File,
+    rescans_remaining: usize,
 ) -> Result<(), RunnerWorkspaceError> {
     let identity = DirectoryIdentity::from_file(&directory)?;
-    remove_directory_steps(vec![RemovalStep::RemoveDirectory {
-        parent: Rc::new(parent.try_clone().map_err(RunnerWorkspaceError::Io)?),
-        name: name.to_owned(),
-        identity,
-        directory: Rc::new(directory),
-    }])
+    remove_directory_steps(
+        vec![RemovalStep::RemoveDirectory {
+            parent: Rc::new(parent.try_clone().map_err(RunnerWorkspaceError::Io)?),
+            name: name.to_owned(),
+            identity,
+            directory: Rc::new(directory),
+        }],
+        rescans_remaining,
+    )
 }
 
-fn remove_directory_steps(mut steps: Vec<RemovalStep>) -> Result<(), RunnerWorkspaceError> {
+fn remove_directory_steps(
+    mut steps: Vec<RemovalStep>,
+    mut rescans_remaining: usize,
+) -> Result<(), RunnerWorkspaceError> {
     while let Some(step) = steps.pop() {
         match step {
             RemovalStep::Inspect { parent, name } => {
@@ -1109,6 +1121,9 @@ fn remove_directory_steps(mut steps: Vec<RemovalStep>) -> Result<(), RunnerWorks
                 match unlinkat(parent.as_ref(), &name, AtFlags::REMOVEDIR) {
                     Ok(()) => {}
                     Err(error) if error == rustix::io::Errno::NOTEMPTY => {
+                        if rescans_remaining == 0 {
+                            return Err(rustix_io(error));
+                        }
                         if !identity.names(parent.as_ref(), &name)? {
                             return Err(RunnerWorkspaceError::ManifestConflict);
                         }
@@ -1118,6 +1133,7 @@ fn remove_directory_steps(mut steps: Vec<RemovalStep>) -> Result<(), RunnerWorks
                             identity,
                             directory: Rc::clone(&directory),
                         });
+                        rescans_remaining -= 1;
                         push_directory_entries(&mut steps, directory)?;
                     }
                     Err(error) => return Err(rustix_io(error)),
@@ -1552,10 +1568,36 @@ mod tests {
             &parent_descriptor,
             std::ffi::OsStr::new(staging_name),
             staging_descriptor,
+            1,
         )
         .expect("cleanup rescans and removes the concurrently written file");
 
         assert!(!staging.exists());
+    }
+
+    #[test]
+    fn directory_cleanup_stops_when_the_rescan_budget_is_exhausted() {
+        let parent = tempfile::tempdir().expect("the cleanup fixture parent exists");
+        let staging_name = "staging";
+        let staging = parent.path().join(staging_name);
+        fs::create_dir(&staging).expect("the cleanup fixture staging directory exists");
+        let parent_descriptor =
+            fs::File::open(parent.path()).expect("the cleanup fixture parent opens");
+        let staging_descriptor =
+            fs::File::open(&staging).expect("the cleanup fixture staging directory opens");
+        fs::write(staging.join("late"), LATE_REPOSITORY_WRITE_BYTES)
+            .expect("the concurrent writer adds a file after the stale scan");
+
+        let failure = super::remove_open_directory_tree_after_stale_scan(
+            &parent_descriptor,
+            std::ffi::OsStr::new(staging_name),
+            staging_descriptor,
+            0,
+        )
+        .expect_err("cleanup stops after exhausting its rescan budget");
+
+        assert!(matches!(failure, RunnerWorkspaceError::Io(_)));
+        assert!(staging.exists());
     }
 
     #[test]
@@ -1643,6 +1685,39 @@ mod tests {
         assert!(matches!(
             failure,
             PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::ManifestConflict)
+        ));
+    }
+
+    #[tokio::test]
+    async fn repository_workspace_replay_rejects_a_symlinked_runner_root() {
+        let (parent, state) = fixture_root();
+        publish_repository(
+            &state,
+            Recovery::Commit {
+                revision: "5".repeat(40),
+            },
+        )
+        .await;
+        let root = parent.path().join("runner-state");
+        let moved_root = parent.path().join("moved-runner-state");
+        fs::rename(&root, &moved_root).expect("the runner-root fixture moves");
+        std::os::unix::fs::symlink(&moved_root, &root)
+            .expect("the runner-root symlink fixture exists");
+
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms another workspace store")
+            .prepare_repository_workspace(&repository_request(), |_| async {
+                Err::<Recovery, std::io::Error>(std::io::Error::other(
+                    "replay must not prepare the repository",
+                ))
+            })
+            .await
+            .expect_err("a symlinked runner root cannot replay a repository workspace");
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::Io(_))
         ));
     }
 
