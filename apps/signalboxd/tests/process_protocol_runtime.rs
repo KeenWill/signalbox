@@ -11,6 +11,7 @@ use std::{
     future::pending,
     io::{self, ErrorKind},
     os::unix::fs::PermissionsExt,
+    panic::{AssertUnwindSafe, resume_unwind},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -19,6 +20,7 @@ use std::{
     time::Duration,
 };
 
+use futures_util::FutureExt;
 use signalbox_application::{
     AuthorizeModelCallOutcome, ClassifyOperatorFailure,
     CreateSessionFromImportedFrontierIdGenerator, CreateSessionFromImportedFrontierOutcome,
@@ -2418,6 +2420,20 @@ async fn wait_for_hangs(model: &FleetScriptedModel, expected: usize) -> Result<(
     Ok(())
 }
 
+async fn abort_fleet_scheduler(
+    scheduler: JoinHandle<SchedulerLoopExit>,
+) -> Result<(), Box<dyn Error>> {
+    scheduler.abort();
+    let stopped = scheduler.await;
+    if !matches!(&stopped, Err(error) if error.is_cancelled()) {
+        return Err(io::Error::other(format!(
+            "the fleet scheduler must stop by cancellation: {stopped:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 async fn wait_for_completed_calls(
     model: &FleetScriptedModel,
     expected: usize,
@@ -2523,26 +2539,49 @@ fn assert_restarted_fleet_outcome(
 async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposition()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
-    let enforce_liveness = enforce_fleet_liveness();
-    let fleet = commission_fleet(&runtime).await?;
-    let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
-    let model = FleetScriptedModel::new(1, FLEET_SESSION_COUNT - 1);
-    let scheduler = start_fleet_scheduler(&mut runtime, model.clone())?;
-    wait_for_hangs(&model, 1).await?;
-    let completed_calls = wait_for_completed_calls(&model, FLEET_SESSION_COUNT - 1).await?;
-    wait_for_terminal_calls(&census_repository, &completed_calls).await?;
-    tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
-    let model_calls = census_repository.model_call_ids().await?;
-    let census = census_repository.census_for(&model_calls).await?;
+    let mut scheduler = None;
+    let scenario = AssertUnwindSafe(async {
+        let enforce_liveness = enforce_fleet_liveness();
+        let fleet = commission_fleet(&runtime).await?;
+        let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
+        let model = FleetScriptedModel::new(1, FLEET_SESSION_COUNT - 1);
+        scheduler = Some(start_fleet_scheduler(&mut runtime, model.clone())?);
+        wait_for_hangs(&model, 1).await?;
+        let completed_calls = wait_for_completed_calls(&model, FLEET_SESSION_COUNT - 1).await?;
+        wait_for_terminal_calls(&census_repository, &completed_calls).await?;
+        tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
+        let model_calls = census_repository.model_call_ids().await?;
+        let census = census_repository.census_for(&model_calls).await?;
+        if fleet.sessions.len() != FLEET_SESSION_COUNT || model_calls.len() != FLEET_SESSION_COUNT {
+            return Err(io::Error::other(format!(
+                "fleet census cardinality mismatch: sessions={}, model_calls={}",
+                fleet.sessions.len(),
+                model_calls.len()
+            ))
+            .into());
+        }
+        assert_hung_fleet_outcome(enforce_liveness, &model, census)
+    })
+    .catch_unwind()
+    .await;
 
-    assert_eq!(fleet.sessions.len(), FLEET_SESSION_COUNT);
-    assert_eq!(model_calls.len(), FLEET_SESSION_COUNT);
-    let outcome = assert_hung_fleet_outcome(enforce_liveness, &model, census);
-
-    scheduler.abort();
-    let _ = scheduler.await;
-    runtime.stop().await?;
-    outcome
+    let scheduler_cleanup = match scheduler {
+        Some(scheduler) => abort_fleet_scheduler(scheduler).await,
+        None => Ok(()),
+    };
+    let runtime_cleanup = runtime.stop().await;
+    match scenario {
+        Ok(outcome) => {
+            scheduler_cleanup?;
+            runtime_cleanup?;
+            outcome
+        }
+        Err(panic) => {
+            scheduler_cleanup.expect("fleet scheduler cleanup after panic must succeed");
+            runtime_cleanup.expect("fleet runtime cleanup after panic must succeed");
+            resume_unwind(panic)
+        }
+    }
 }
 
 /// Killing the daemon with a full fleet after every send leaves each model
@@ -2552,30 +2591,66 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
-    let fleet = commission_fleet(&runtime).await?;
-    let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
-    let hanging_model = FleetScriptedModel::new(FLEET_SESSION_COUNT, 0);
-    let first_scheduler = start_fleet_scheduler(&mut runtime, hanging_model.clone())?;
-    wait_for_hangs(&hanging_model, FLEET_SESSION_COUNT).await?;
-    let pre_kill_model_call_ids = census_repository.model_call_ids().await?;
-    assert_eq!(pre_kill_model_call_ids.len(), FLEET_SESSION_COUNT);
-    first_scheduler.abort();
-    let _ = first_scheduler.await;
-    let _recovered = runtime.kill_and_restart().await?;
-    let replacement_model = FleetScriptedModel::new(0, FLEET_SESSION_COUNT);
-    let replacement_scheduler = start_fleet_scheduler(&mut runtime, replacement_model.clone())?;
-    tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
-    let census = census_repository
-        .census_for(&pre_kill_model_call_ids)
+    let mut scheduler = None;
+    let scenario = AssertUnwindSafe(async {
+        let fleet = commission_fleet(&runtime).await?;
+        let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
+        let hanging_model = FleetScriptedModel::new(FLEET_SESSION_COUNT, 0);
+        scheduler = Some(start_fleet_scheduler(&mut runtime, hanging_model.clone())?);
+        wait_for_hangs(&hanging_model, FLEET_SESSION_COUNT).await?;
+        let pre_kill_model_call_ids = census_repository.model_call_ids().await?;
+        if pre_kill_model_call_ids.len() != FLEET_SESSION_COUNT {
+            return Err(io::Error::other(format!(
+                "pre-kill model-call cardinality mismatch: {}",
+                pre_kill_model_call_ids.len()
+            ))
+            .into());
+        }
+        abort_fleet_scheduler(
+            scheduler
+                .take()
+                .expect("the first fleet scheduler was installed"),
+        )
         .await?;
+        let _recovered = runtime.kill_and_restart().await?;
+        let replacement_model = FleetScriptedModel::new(0, FLEET_SESSION_COUNT);
+        scheduler = Some(start_fleet_scheduler(
+            &mut runtime,
+            replacement_model.clone(),
+        )?);
+        tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
+        let census = census_repository
+            .census_for(&pre_kill_model_call_ids)
+            .await?;
+        if fleet.sessions.len() != FLEET_SESSION_COUNT {
+            return Err(io::Error::other(format!(
+                "fleet session cardinality mismatch: {}",
+                fleet.sessions.len()
+            ))
+            .into());
+        }
+        assert_restarted_fleet_outcome(census, &replacement_model)
+    })
+    .catch_unwind()
+    .await;
 
-    assert_eq!(fleet.sessions.len(), FLEET_SESSION_COUNT);
-    let outcome = assert_restarted_fleet_outcome(census, &replacement_model);
-
-    replacement_scheduler.abort();
-    let _ = replacement_scheduler.await;
-    runtime.stop().await?;
-    outcome
+    let scheduler_cleanup = match scheduler {
+        Some(scheduler) => abort_fleet_scheduler(scheduler).await,
+        None => Ok(()),
+    };
+    let runtime_cleanup = runtime.stop().await;
+    match scenario {
+        Ok(outcome) => {
+            scheduler_cleanup?;
+            runtime_cleanup?;
+            outcome
+        }
+        Err(panic) => {
+            scheduler_cleanup.expect("fleet scheduler cleanup after panic must succeed");
+            runtime_cleanup.expect("fleet runtime cleanup after panic must succeed");
+            resume_unwind(panic)
+        }
+    }
 }
 
 fn rendered_text_messages(
