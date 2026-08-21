@@ -814,6 +814,7 @@ impl PostgresModelCallRepository {
             self.credential_families.as_ref(),
         )
         .await?;
+        outbox::lock_sequence_allocator(connection).await?;
         let selected = select_runtime_pool_credential(
             connection,
             prepared.session(),
@@ -977,6 +978,7 @@ impl PostgresModelCallRepository {
                     self.credential_families.as_ref(),
                 )
                 .await?;
+                outbox::lock_sequence_allocator(&mut transaction).await?;
                 Some(
                     select_runtime_pool_credential(
                         &mut transaction,
@@ -1246,6 +1248,7 @@ impl PostgresModelCallRepository {
                 successor_attempt,
             } = identities
             {
+                outbox::lock_sequence_allocator(&mut transaction).await?;
                 let cause =
                     provider_failure_cause.ok_or(ModelCallRepositoryError::InvalidTransition(
                         "availability candidates require a classified provider failure",
@@ -2350,6 +2353,7 @@ where
                 credential_families,
             )
             .await?;
+            outbox::lock_sequence_allocator(connection).await?;
             Some(
                 select_runtime_pool_credential(
                     connection,

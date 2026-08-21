@@ -2893,6 +2893,21 @@ pub(crate) enum ToolBatchOutboxState {
     RecoveryRequired(ToolAttemptId),
 }
 
+/// Acquires the global append allocator before another shared lock class.
+///
+/// Appending an event takes this row through the header trigger. Transactions
+/// that will both append and take another cross-session lock acquire the
+/// allocator explicitly first so another writer cannot close a reverse-order
+/// cycle around that shared lock.
+pub(crate) async fn lock_sequence_allocator(
+    connection: &mut PgConnection,
+) -> Result<(), sqlx::Error> {
+    let _: bool = sqlx::query_scalar(lock_inventory::OUTBOX_SEQUENCE_ALLOCATOR)
+        .fetch_one(connection)
+        .await?;
+    Ok(())
+}
+
 pub(crate) async fn append(
     connection: &mut PgConnection,
     event: OutboxEvent,
