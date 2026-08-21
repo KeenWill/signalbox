@@ -2278,7 +2278,7 @@ impl ModelRuntime<ModelCallId> for FleetScriptedModel {
         operation: ModelOperation<ModelCallId>,
         cancellation: CancellationSignal,
     ) -> PreparationOutcome<ModelCallId, Self::Prepared> {
-        let correlation = operation.correlation.clone();
+        let correlation = operation.correlation;
         match self.inner.prepare(operation, cancellation).await {
             PreparationOutcome::Prepared(inner) => {
                 PreparationOutcome::Prepared(FleetPrepared { correlation, inner })
@@ -2419,16 +2419,39 @@ async fn fleet_terminal_call_count(pool: &PgPool) -> Result<i64, Box<dyn Error>>
     .await?)
 }
 
+async fn fleet_model_call_ids(pool: &PgPool) -> Result<Vec<Uuid>, Box<dyn Error>> {
+    Ok(
+        sqlx::query_scalar("SELECT model_call_id FROM model_call ORDER BY model_call_id")
+            .fetch_all(pool)
+            .await?,
+    )
+}
+
+async fn fleet_terminal_call_count_for(
+    pool: &PgPool,
+    model_call_ids: &[Uuid],
+) -> Result<i64, Box<dyn Error>> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*)
+           FROM model_call
+          WHERE model_call_id = ANY($1)
+            AND terminal_disposition_kind IS NOT NULL",
+    )
+    .bind(model_call_ids)
+    .fetch_one(pool)
+    .await?)
+}
+
 async fn wait_for_terminal_calls(pool: &PgPool, expected: i64) -> Result<(), Box<dyn Error>> {
     timeout(FLEET_SETUP_BOUND, async {
         loop {
-            if fleet_terminal_call_count(pool).await.ok() == Some(expected) {
-                return;
+            if fleet_terminal_call_count(pool).await? == expected {
+                return Ok::<(), Box<dyn Error>>(());
             }
             tokio::task::yield_now().await;
         }
     })
-    .await?;
+    .await??;
     Ok(())
 }
 
@@ -2537,6 +2560,8 @@ async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
     let hanging_model = FleetScriptedModel::new(FLEET_SESSION_COUNT, 0);
     let first_scheduler = start_fleet_scheduler(&mut runtime, hanging_model.clone())?;
     wait_for_hangs(&hanging_model, FLEET_SESSION_COUNT).await?;
+    let pre_kill_model_call_ids = fleet_model_call_ids(&runtime.pool).await?;
+    assert_eq!(pre_kill_model_call_ids.len(), FLEET_SESSION_COUNT);
     first_scheduler.abort();
     let _ = first_scheduler.await;
     let _recovered = runtime.kill_and_restart().await?;
@@ -2544,7 +2569,8 @@ async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
     let replacement_scheduler = start_fleet_scheduler(&mut runtime, replacement_model)?;
     tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
     let (active, terminal) = fleet_lifecycle_counts(&runtime.pool).await?;
-    let typed_terminal_calls = fleet_terminal_call_count(&runtime.pool).await?;
+    let typed_terminal_calls =
+        fleet_terminal_call_count_for(&runtime.pool, &pre_kill_model_call_ids).await?;
 
     assert_eq!(fleet.sessions.len(), FLEET_SESSION_COUNT);
     let outcome = if typed_terminal_calls == i64::try_from(FLEET_SESSION_COUNT)? {
