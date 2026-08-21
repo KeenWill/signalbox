@@ -1951,14 +1951,16 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
     Ok(())
 }
 
-/// S04 / S10: infrastructure failures spend the exact automatic budget; only
-/// then does the still-active ambiguity become a visible operator park.
+/// S04 / S10: infrastructure failures spend the exact automatic budget; the
+/// visible operator park can still be interrupted without leaving its durable
+/// automatic record inconsistent with the terminal turn and queued successor.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let parked = park_restart_ambiguity(&pool, 0xD100).await?;
+    let seed = 0xD100;
+    let parked = park_restart_ambiguity(&pool, seed).await?;
     let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
     spend_automatic_reconciliation_budget(&repository, &pool).await?;
 
@@ -1989,6 +1991,61 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
     );
     assert_eq!(automatic_recovery_status(&snapshot), (5, true));
     assert_eq!(attempt_history, (5, 5));
+
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x203));
+    let operator = SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                seed + 0x200,
+                seed + 1,
+                "operator recovers an exhausted automatic reconciliation",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: parked.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x202)),
+            Some(successor),
+        )
+        .await?;
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(parked.session)
+        .await?
+        .expect("the operator-reconciled exhausted park remains readable");
+    let preview = StartEligibleTurnRepository::new(pool.clone())
+        .preview(
+            parked.session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x204)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x205)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x206)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x207)),
+            ),
+        )
+        .await?
+        .expect("the operator-created successor remains eligible");
+    let durable: (String, i32) = sqlx::query_as(
+        "SELECT state_kind, attempt_count
+           FROM automatic_reconciliation
+          WHERE turn_id = $1",
+    )
+    .bind(parked.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(matches!(
+        operator,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    assert!(matches!(
+        transcript.turns()[0].state(),
+        ProcessTurnState::ReconciliationRequired { .. }
+    ));
+    assert_eq!(preview.prepared().turn().turn(), successor);
+    assert_eq!(durable, ("superseded".into(), 5));
 
     pool.close().await;
     drop(container);
