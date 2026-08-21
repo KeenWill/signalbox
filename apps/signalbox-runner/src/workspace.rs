@@ -1009,6 +1009,7 @@ enum RemovalStep {
         parent: Rc<File>,
         name: OsString,
         identity: DirectoryIdentity,
+        directory: Rc<File>,
     },
 }
 
@@ -1024,8 +1025,28 @@ fn remove_open_directory_tree(
         parent,
         name: name.to_owned(),
         identity,
+        directory: Rc::clone(&directory),
     }];
     push_directory_entries(&mut steps, Rc::clone(&directory))?;
+    remove_directory_steps(steps)
+}
+
+#[cfg(test)]
+fn remove_open_directory_tree_after_stale_scan(
+    parent: &File,
+    name: &OsStr,
+    directory: File,
+) -> Result<(), RunnerWorkspaceError> {
+    let identity = DirectoryIdentity::from_file(&directory)?;
+    remove_directory_steps(vec![RemovalStep::RemoveDirectory {
+        parent: Rc::new(parent.try_clone().map_err(RunnerWorkspaceError::Io)?),
+        name: name.to_owned(),
+        identity,
+        directory: Rc::new(directory),
+    }])
+}
+
+fn remove_directory_steps(mut steps: Vec<RemovalStep>) -> Result<(), RunnerWorkspaceError> {
     while let Some(step) = steps.pop() {
         match step {
             RemovalStep::Inspect { parent, name } => {
@@ -1070,6 +1091,7 @@ fn remove_open_directory_tree(
                         parent,
                         name,
                         identity,
+                        directory: Rc::clone(&child),
                     });
                     push_directory_entries(&mut steps, child)?;
                 } else {
@@ -1080,11 +1102,27 @@ fn remove_open_directory_tree(
                 parent,
                 name,
                 identity,
+                directory,
             } => {
                 if !identity.names(parent.as_ref(), &name)? {
                     return Err(RunnerWorkspaceError::ManifestConflict);
                 }
-                unlinkat(parent.as_ref(), &name, AtFlags::REMOVEDIR).map_err(rustix_io)?;
+                match unlinkat(parent.as_ref(), &name, AtFlags::REMOVEDIR) {
+                    Ok(()) => {}
+                    Err(error) if error == rustix::io::Errno::NOTEMPTY => {
+                        if !identity.names(parent.as_ref(), &name)? {
+                            return Err(RunnerWorkspaceError::ManifestConflict);
+                        }
+                        steps.push(RemovalStep::RemoveDirectory {
+                            parent,
+                            name,
+                            identity,
+                            directory: Rc::clone(&directory),
+                        });
+                        push_directory_entries(&mut steps, directory)?;
+                    }
+                    Err(error) => return Err(rustix_io(error)),
+                }
             }
         }
     }
@@ -1495,6 +1533,29 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn directory_cleanup_rescans_after_a_concurrent_writer() {
+        let parent = tempfile::tempdir().expect("the cleanup fixture parent exists");
+        let staging_name = "staging";
+        let staging = parent.path().join(staging_name);
+        fs::create_dir(&staging).expect("the cleanup fixture staging directory exists");
+        let parent_descriptor =
+            fs::File::open(parent.path()).expect("the cleanup fixture parent opens");
+        let staging_descriptor =
+            fs::File::open(&staging).expect("the cleanup fixture staging directory opens");
+        fs::write(staging.join("late"), b"late repository write\n")
+            .expect("the concurrent writer adds a file after the stale scan");
+
+        super::remove_open_directory_tree_after_stale_scan(
+            &parent_descriptor,
+            std::ffi::OsStr::new(staging_name),
+            staging_descriptor,
+        )
+        .expect("cleanup rescans and removes the concurrently written file");
+
+        assert!(!staging.exists());
     }
 
     #[test]
