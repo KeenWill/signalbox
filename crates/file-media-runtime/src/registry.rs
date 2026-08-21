@@ -423,18 +423,19 @@ impl FileMediaRegistry {
         source: &dyn VerifiedBlobSource,
         cancellation: &dyn crate::CancellationSignal,
     ) -> Result<FileReadResult, FileMediaFailure> {
-        let valid_request = match (&request.options, &request.continuation) {
-            (Some(options), None) => {
-                options.is_object()
+        let initial_request = match (&request.options, &request.continuation) {
+            (Some(options), None)
+                if options.is_object()
                     && serde_json::to_vec(options)
-                        .is_ok_and(|encoded| encoded.len() <= MAX_READ_OPTIONS_BYTES)
+                        .is_ok_and(|encoded| encoded.len() <= MAX_READ_OPTIONS_BYTES) =>
+            {
+                true
             }
-            (None, Some(_)) => true,
-            (Some(_), Some(_)) | (None, None) => false,
+            (None, Some(_)) => false,
+            (Some(_), None) | (Some(_), Some(_)) | (None, None) => {
+                return Err(FileMediaFailure::InvalidViewArguments);
+            }
         };
-        if !valid_request {
-            return Err(FileMediaFailure::InvalidViewArguments);
-        }
         let inspection = self
             .inspect(processor, request.inspection.clone(), source, cancellation)
             .await?;
@@ -486,7 +487,7 @@ impl FileMediaRegistry {
                 cancellation,
             )
             .await?;
-        sanitize_read(reader, view, self.ceilings, raw)
+        sanitize_read(reader, view, self.ceilings, initial_request, raw)
     }
 }
 
@@ -615,6 +616,7 @@ fn sanitize_read(
     reader: &ReaderDeclaration,
     view: &crate::ReadViewDeclaration,
     ceilings: FileMediaCeilings,
+    initial_request: bool,
     raw: ProcessorReadOutput,
 ) -> Result<FileReadResult, FileMediaFailure> {
     match raw {
@@ -678,7 +680,10 @@ fn sanitize_read(
             }
             Ok(FileReadResult::Structured { body, continuation })
         }
-        ProcessorReadOutput::InvalidViewArguments => Err(FileMediaFailure::InvalidViewArguments),
+        ProcessorReadOutput::InvalidViewArguments if initial_request => {
+            Err(FileMediaFailure::InvalidViewArguments)
+        }
+        ProcessorReadOutput::InvalidViewArguments => Err(FileMediaFailure::ProcessorFailed),
         ProcessorReadOutput::UnsupportedView => Err(FileMediaFailure::ProcessorFailed),
         ProcessorReadOutput::SourceTooLarge { maximum_bytes } => {
             if maximum_bytes != view.bounds().source_bytes() {
