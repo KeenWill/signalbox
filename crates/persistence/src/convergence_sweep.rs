@@ -648,7 +648,6 @@ impl PostgresConvergenceSweepStore {
                 AND ($10::uuid IS NULL OR EXISTS (
                     SELECT 1 FROM selected_dispatch
                      WHERE session_id = $10
-                       AND NOT live
                        AND NOT has_model_activity
                 ))
           RETURNING consecutive_failures, state_kind = 'parked'",

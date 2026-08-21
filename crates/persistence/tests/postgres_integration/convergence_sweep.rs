@@ -614,7 +614,7 @@ async fn configured_target_reenrollment_clears_a_durable_park() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn active_session_prevents_inactivity_parking() -> Result<(), Box<dyn Error>> {
+async fn live_session_without_model_activity_is_parked() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
     let store = PostgresConvergenceSweepStore::new(pool);
@@ -636,15 +636,12 @@ async fn active_session_prevents_inactivity_parking() -> Result<(), Box<dyn Erro
         )
         .await?;
 
-    assert_eq!(
-        disposition,
-        ConvergenceSweepFailureDisposition::ActivityObserved
-    );
+    assert_eq!(disposition, ConvergenceSweepFailureDisposition::Parked);
     assert!(
         store
             .load_target(&repository, pull_request())
             .await?
-            .is_some_and(|state| !state.is_parked())
+            .is_some_and(|state| state.is_parked())
     );
     Ok(())
 }

@@ -386,11 +386,6 @@ impl ConvergenceSweepRuntime {
             let cool_off_elapsed = loaded
                 .as_ref()
                 .is_some_and(|state| state.cool_off_elapsed());
-            if dispatch.is_live() {
-                self.record_decision(target, &observation, ConvergenceSweepDecision::LiveSession)
-                    .await;
-                return;
-            }
             if unchanged && !dispatch.has_model_activity() && cool_off_elapsed {
                 match self
                     .state
@@ -416,6 +411,11 @@ impl ConvergenceSweepRuntime {
                         "convergence sweep inactivity decision could not be recorded"
                     ),
                 }
+                return;
+            }
+            if dispatch.is_live() {
+                self.record_decision(target, &observation, ConvergenceSweepDecision::LiveSession)
+                    .await;
                 return;
             }
             if !cool_off_elapsed {
@@ -903,20 +903,26 @@ fn decode_checks(values: &[Value]) -> Result<Vec<PullRequestCheck>, CensusError>
         .iter()
         .map(
             |value| match value.get("__typename").and_then(Value::as_str) {
-                Some("CheckRun") => Ok(PullRequestCheck::new(
-                    value
-                        .get("name")
+                Some("CheckRun") => {
+                    let status = value
+                        .get("status")
                         .and_then(Value::as_str)
-                        .ok_or(CensusError::Shape)?
-                        .to_owned(),
-                    PullRequestCheckState::CheckRun {
-                        completed: value.get("status").and_then(Value::as_str) == Some("COMPLETED"),
-                        conclusion: value
-                            .get("conclusion")
+                        .ok_or(CensusError::Shape)?;
+                    Ok(PullRequestCheck::new(
+                        value
+                            .get("name")
                             .and_then(Value::as_str)
-                            .map(str::to_owned),
-                    },
-                )),
+                            .ok_or(CensusError::Shape)?
+                            .to_owned(),
+                        PullRequestCheckState::CheckRun {
+                            completed: status == "COMPLETED",
+                            conclusion: value
+                                .get("conclusion")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                        },
+                    ))
+                }
                 Some("StatusContext") => Ok(PullRequestCheck::new(
                     value
                         .get("context")
@@ -1121,6 +1127,17 @@ mod tests {
     fn checks_query_is_scoped_to_the_requested_pull_request() {
         assert!(CHECKS_QUERY.contains("pullRequest(number: $number)"));
         assert!(CHECKS_QUERY.contains("commits(last: 1)"));
+    }
+
+    #[test]
+    fn a_check_run_without_status_is_rejected() {
+        let checks = [json!({
+            "__typename": "CheckRun",
+            "name": "test",
+            "conclusion": "SUCCESS"
+        })];
+
+        assert!(matches!(decode_checks(&checks), Err(CensusError::Shape)));
     }
 
     #[test]
