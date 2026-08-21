@@ -9,6 +9,209 @@ fn nonzero_priority(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).expect("fixture membership priority is non-zero")
 }
 
+async fn active_credential_pool_fixture(
+    pool: &sqlx::PgPool,
+    seed: u128,
+    pool_name: &str,
+    member_reference: &str,
+) -> Result<(SessionId, TurnId, PostgresModelCallRepository), Box<dyn Error>> {
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 3));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 4)));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            seed + 5,
+            seed + 1,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 6,
+                seed + 1,
+                "serialize shared locks",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 7)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 8),
+            starting_frontier: Uuid::from_u128(seed + 9),
+            initial_attempt: Uuid::from_u128(seed + 10),
+        },
+    )
+    .await?;
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one pool fixture target forms a catalog");
+    let policy = CredentialPoolRuntimePolicy::new(
+        pool_name.to_owned(),
+        vec![CredentialPoolRuntimeMember::new(
+            member_reference.to_owned(),
+            nonzero_priority(1),
+        )],
+        signalbox_persistence::model_execution::CredentialPoolRuntimeExhaustion::Fail,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    );
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("unused-default"),
+    )
+    .with_credential_pools(HashMap::from([(target, policy)]));
+    Ok((session, turn, repository))
+}
+
+async fn lock_outbox_sequence_allocator(
+    pool: &sqlx::PgPool,
+) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT singleton FROM outbox_sequence_state WHERE singleton FOR UPDATE")
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
+}
+
+async fn credential_action_head_is_available(
+    pool: &sqlx::PgPool,
+    member_reference: &str,
+) -> Result<bool, Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    let available: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("credential_pool_action_head:{member_reference}"))
+            .fetch_one(&mut *transaction)
+            .await?;
+    transaction.rollback().await?;
+    Ok(available)
+}
+
+/// INV-007 / INV-009 / INV-012: model-call writers acquire the shared outbox
+/// allocator ahead of credential action heads, preventing a cross-session
+/// reverse-order cycle with tool-result continuation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv007_inv009_inv012_model_call_writers_order_outbox_before_credential_actions()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7720_u128;
+    let pool_name = "ordered-pool";
+    let member_reference = "ordered-member";
+    let (session, _turn, repository) =
+        active_credential_pool_fixture(&pool, seed, pool_name, member_reference).await?;
+
+    let allocator_holder = lock_outbox_sequence_allocator(&pool).await?;
+    let preparation = tokio::spawn({
+        let repository = repository.clone();
+        async move {
+            repository
+                .prepare_initial_call(
+                    session,
+                    ModelCallId::from_uuid(Uuid::from_u128(seed + 11)),
+                    FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 12)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 13)),
+                    ),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 14)),
+                    |_| {
+                        (
+                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 15)),
+                            TurnId::from_uuid(Uuid::from_u128(seed + 16)),
+                        )
+                    },
+                )
+                .await
+        }
+    });
+    assert!(blocked_backends_reached(&pool, 1).await?);
+    assert!(credential_action_head_is_available(&pool, member_reference).await?);
+    allocator_holder.rollback().await?;
+    let PrepareInitialModelCallOutcome::Checkpointed(prepared_call) = preparation.await?? else {
+        panic!("the released preparation must checkpoint");
+    };
+    assert_eq!(
+        prepared_call,
+        ModelCallId::from_uuid(Uuid::from_u128(seed + 11))
+    );
+
+    let PrepareInitialModelCallOutcome::Ready { request, .. } = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 17)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 18)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 19)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 20)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 22)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the committed call must reload");
+    };
+    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+        .authorize_send(session, request.call().id())
+        .await?
+    else {
+        panic!("the prepared call must authorize");
+    };
+
+    let allocator_holder = lock_outbox_sequence_allocator(&pool).await?;
+    let observation = tokio::spawn({
+        let mut repository = repository.clone();
+        async move {
+            repository
+                .commit_observation(
+                    session,
+                    authorized
+                        .observation_correlation()
+                        .bind_provider_failure_observation_with_retry_after(
+                            ProviderModelCallFailureCause::QuotaExhausted,
+                            ProviderReportedTokenUsage::unreported(),
+                            None,
+                            true,
+                        ),
+                    signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                        failed: FailedModelCallTurnIdentities::new(
+                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
+                            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24)),
+                        ),
+                        successor_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(seed + 25)),
+                    },
+                    |_| TurnId::from_uuid(Uuid::from_u128(seed + 26)),
+                )
+                .await
+        }
+    });
+    assert!(blocked_backends_reached(&pool, 1).await?);
+    assert!(credential_action_head_is_available(&pool, member_reference).await?);
+    allocator_holder.rollback().await?;
+    let Some(ModelCallObservationCommitOutcome::PoolExhausted(_)) = observation.await?? else {
+        panic!("the sole unavailable member must exhaust its pool");
+    };
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// Reproduces #771: a quota failure on member A with `switch_now` must commit
 /// a distinct successor on member B; exhausting B is a typed pool cause.
 #[tokio::test(flavor = "multi_thread")]

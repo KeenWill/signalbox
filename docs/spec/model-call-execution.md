@@ -12,6 +12,9 @@ against this PR (`agent/daemon-live-reported-usage-compaction`).
 Non-ambiguous execution-failure containment is verified against this PR
 (`agent/daemon-live-nonambiguous-execution-containment`).
 
+Credential-pool action and outbox allocator lock ordering is verified against
+this PR (`agent/daemon-live-outbox-credential-lock-order`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -994,12 +997,20 @@ lock statement bundles a session-existence probe (startup's variant also reads
 the active turn) into the same SELECT, so lock-before-read is guaranteed at
 statement granularity, not within the statement. Why: one lock statement issued
 first in every transaction makes per-session serialization total and lock-order
-cycles impossible. The in-process per-attempt dispatch gate is the only other
-ordering primitive; in this slice the execution service is its sole consumer.
-Interrupt application deliberately does not acquire it: once `InFlight` commits,
-the call is issued work, so a later interrupt durably requests cancellation and
-the runtime signal races any provider progress without claiming that acceptance
-was prevented.
+cycles on one session impossible. A model-call transaction that both appends an
+outbox event and locks shared credential-pool action heads explicitly takes the
+global outbox sequence allocator first. Tool-result continuation already takes
+the allocator when it projects results; initial-call preparation and terminal
+observation take it before credential selection or action persistence. Why: a
+credential action head is shared across sessions, so taking it before the
+allocator could deadlock against a different session already holding the
+allocator while selecting that same profile. Prospective preparation takes no
+allocator lock because it rolls back without appending or consuming actions. The
+in-process per-attempt dispatch gate is the only other ordering primitive; in
+this slice the execution service is its sole consumer. Interrupt application
+deliberately does not acquire it: once `InFlight` commits, the call is issued
+work, so a later interrupt durably requests cancellation and the runtime signal
+races any provider progress without claiming that acceptance was prevented.
 
 ## Crash, restart, and supervision
 
