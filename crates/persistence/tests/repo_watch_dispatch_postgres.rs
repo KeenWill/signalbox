@@ -8,10 +8,11 @@ use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use signalbox_application::{
     RepoWatchBranchHead, RepoWatchDispatchService, RepoWatchDispatchTransaction,
-    RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
-    RepoWatchPullRequestStateInput, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
-    RepoWatchResolvedTemplate, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchTemplateResolver, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
+    RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
+    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
 };
 use signalbox_domain::{
     AcceptedInputId, BranchName, CheckConclusion, CommitSha, DangerousToolAutoApproval,
@@ -22,10 +23,11 @@ use signalbox_domain::{
     PullRequestNumber, PullRequestTitle, RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent,
     RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget,
     RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule,
-    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt,
-    RepositorySlug, SessionConfigurationDefaults, SessionId, SessionSystemPrompt,
-    SessionTemplateContentDigest, SessionTemplateName, SessionTemplateProvenance, ToolRequestId,
-    TurnId, UserContent, WorkflowName,
+    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleVersion,
+    RepoWatchSingletonScope, RepoWatchWorkflowRunAttempt, RepositorySlug,
+    SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
+    SessionTemplateName, SessionTemplateProvenance, ToolRequestId, TurnId, UserContent,
+    WorkflowName,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential, disposable_test_container_labels,
@@ -50,6 +52,7 @@ const DATABASE_NAME: &str = "signalbox_repo_watch_dispatch";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const REPOSITORY: &str = "signalbox/repository";
+const SECOND_REPOSITORY: &str = "signalbox/second-repository";
 const HEAD_REPOSITORY: &str = "contributor/repository";
 const BASE_BRANCH: &str = "main";
 const HEAD_BRANCH: &str = "feature/repo-watch";
@@ -59,6 +62,8 @@ const SECOND_HEAD: &str = "2222222222222222222222222222222222222222";
 const THIRD_HEAD: &str = "3333333333333333333333333333333333333333";
 const TEMPLATE: &str = "merge-forward";
 const RULE: &str = "merge-forward-on-conflict";
+const FRESH_RULE: &str = "merge-forward-on-conflict-replacement";
+const REPLACEMENT_RULE_VERSION: u64 = 2;
 const EAGER_RULE: &str = "merge-forward-on-base-advance";
 const AGENT_HEAD_PATTERN: &str = "^agent/.+$";
 const BOTTOM_AGENT_BRANCH: &str = "agent/bottom";
@@ -265,6 +270,16 @@ fn conflict_event(value: u128, head: &str) -> Result<RepoWatchEvent, Box<dyn Err
     )?)
 }
 
+fn identified_event(event: RepoWatchEvent) -> RepoWatchEventOccurrenceV1 {
+    let mut identity = [0_u8; 32];
+    identity[..16].copy_from_slice(event.id().as_uuid().as_bytes());
+    identity[16..].copy_from_slice(event.id().as_uuid().as_bytes());
+    RepoWatchEventOccurrenceV1::from_parts(
+        event,
+        RepoWatchEventContentIdentityV1::from_bytes(identity),
+    )
+}
+
 fn opened_event_for(
     value: u128,
     context: PullRequestEventContext,
@@ -308,11 +323,13 @@ fn base_advanced_event(
 }
 
 fn rule_with_actions_and_cooldown(
+    version: RepoWatchRuleVersion,
     actions: Vec<RepoWatchRuleActionV1>,
     cooldown: Duration,
 ) -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(RULE.to_owned())?,
+        version,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
             mergeable_state: vec![MergeableState::Conflicting],
@@ -325,20 +342,40 @@ fn rule_with_actions_and_cooldown(
 }
 
 fn rule() -> Result<RepoWatchRule, Box<dyn Error>> {
+    rule_at_version(RepoWatchRuleVersion::V1)
+}
+
+fn rule_at_version(version: RepoWatchRuleVersion) -> Result<RepoWatchRule, Box<dyn Error>> {
+    rule_with_identity(RepoWatchRuleId::try_new(RULE.to_owned())?, version)
+}
+
+fn rule_with_identity(
+    id: RepoWatchRuleId,
+    version: RepoWatchRuleVersion,
+) -> Result<RepoWatchRule, Box<dyn Error>> {
     let template = SessionTemplateName::try_new(TEMPLATE.to_owned())?;
-    rule_with_actions_and_cooldown(
+    Ok(RepoWatchRule::try_new(
+        id,
+        version,
+        RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
+            event_kinds: vec![RepoWatchEventKindNameV1::MergeableStateChanged],
+            mergeable_state: vec![MergeableState::Conflicting],
+            ..RepoWatchMatcherV1Input::default()
+        }),
         vec![
             RepoWatchRuleActionV1::DispatchSession {
                 template: template.clone(),
             },
             RepoWatchRuleActionV1::DispatchSession { template },
         ],
+        RepoWatchSingletonScope::PullRequest,
         Duration::ZERO,
-    )
+    )?)
 }
 
 fn cooldown_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     rule_with_actions_and_cooldown(
+        RepoWatchRuleVersion::V1,
         vec![RepoWatchRuleActionV1::DispatchSession {
             template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
         }],
@@ -348,6 +385,7 @@ fn cooldown_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
 
 fn one_action_rule(cooldown: Duration) -> Result<RepoWatchRule, Box<dyn Error>> {
     rule_with_actions_and_cooldown(
+        RepoWatchRuleVersion::V1,
         vec![RepoWatchRuleActionV1::DispatchSession {
             template: SessionTemplateName::try_new(TEMPLATE.to_owned())?,
         }],
@@ -358,6 +396,7 @@ fn one_action_rule(cooldown: Duration) -> Result<RepoWatchRule, Box<dyn Error>> 
 fn eager_merge_forward_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(EAGER_RULE.to_owned())?,
+        RepoWatchRuleVersion::V1,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![RepoWatchEventKindNameV1::BaseAdvanced],
             repository: Some(repository()?),
@@ -375,6 +414,7 @@ fn eager_merge_forward_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
 fn branch_workflow_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(BRANCH_RULE.to_owned())?,
+        RepoWatchRuleVersion::V1,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![RepoWatchEventKindNameV1::BranchWorkflowRunCompleted],
             ..RepoWatchMatcherV1Input::default()
@@ -433,6 +473,7 @@ fn closed_event(value: u128, head: &str) -> Result<RepoWatchEvent, Box<dyn Error
 fn closed_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(RULE.to_owned())?,
+        RepoWatchRuleVersion::V1,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![RepoWatchEventKindNameV1::PullRequestClosed],
             ..RepoWatchMatcherV1Input::default()
@@ -448,6 +489,7 @@ fn closed_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
 fn merged_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(RULE.to_owned())?,
+        RepoWatchRuleVersion::V1,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![RepoWatchEventKindNameV1::PullRequestMerged],
             ..RepoWatchMatcherV1Input::default()
@@ -463,6 +505,7 @@ fn merged_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
 fn conflict_and_merged_event_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
     Ok(RepoWatchRule::try_new(
         RepoWatchRuleId::try_new(RULE.to_owned())?,
+        RepoWatchRuleVersion::V1,
         RepoWatchMatcherV1::new(RepoWatchMatcherV1Input {
             event_kinds: vec![
                 RepoWatchEventKindNameV1::MergeableStateChanged,
@@ -615,18 +658,99 @@ fn session_uuids(fixture: &DispatchFixture) -> Vec<Uuid> {
         .collect()
 }
 
-fn reused_rule_identity(error: &RepoWatchDispatchRepositoryError) -> bool {
-    matches!(
-        error,
-        RepoWatchDispatchRepositoryError::ReusedRuleIdentity { .. }
-    )
+/// Closed classification of one rule-admission refusal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuleAdmissionRefusal {
+    ReusedIdentity,
+    ChangedField(RepoWatchRuleIdentityField),
+    RegressedVersion {
+        configured: RepoWatchRuleVersion,
+        latest: RepoWatchRuleVersion,
+    },
+    StorageCorruption,
+    NotAnAdmissionRefusal,
 }
 
-fn changed_rule_identity(error: &RepoWatchDispatchRepositoryError) -> bool {
-    matches!(
-        error,
-        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { .. }
+/// Classifies a reconciliation failure for the assertions below.
+///
+/// One exhaustive accessor rather than a wildcard per assertion: a repository
+/// error variant added later forces a classification decision here instead of
+/// silently reading as "not the refusal under test" at every call site.
+fn admission_refusal(error: &RepoWatchDispatchRepositoryError) -> RuleAdmissionRefusal {
+    match error {
+        RepoWatchDispatchRepositoryError::ReusedRuleIdentity { .. } => {
+            RuleAdmissionRefusal::ReusedIdentity
+        }
+        RepoWatchDispatchRepositoryError::ChangedRuleIdentity { field, .. } => {
+            RuleAdmissionRefusal::ChangedField(*field)
+        }
+        RepoWatchDispatchRepositoryError::RegressedRuleVersion {
+            rule_version,
+            latest_version,
+            ..
+        } => RuleAdmissionRefusal::RegressedVersion {
+            configured: *rule_version,
+            latest: *latest_version,
+        },
+        RepoWatchDispatchRepositoryError::Corruption(_) => RuleAdmissionRefusal::StorageCorruption,
+        RepoWatchDispatchRepositoryError::Database(_)
+        | RepoWatchDispatchRepositoryError::CommitAmbiguous(_)
+        | RepoWatchDispatchRepositoryError::EventStore(_)
+        | RepoWatchDispatchRepositoryError::SessionCreation(_)
+        | RepoWatchDispatchRepositoryError::InitialInput(_)
+        | RepoWatchDispatchRepositoryError::GoalCommission(_)
+        | RepoWatchDispatchRepositoryError::GoalCutoff(_) => {
+            RuleAdmissionRefusal::NotAnAdmissionRefusal
+        }
+    }
+}
+
+/// The recorded revisions of one rule and whether each is deactivated.
+async fn revisions_of(
+    fixture: &DispatchFixture,
+    rule_id: &str,
+) -> Result<Vec<(i64, bool)>, Box<dyn Error>> {
+    Ok(sqlx::query_as(
+        "SELECT activation.rule_version, deactivation.rule_id IS NOT NULL AS deactivated
+           FROM repo_watch_rule_activation AS activation
+           LEFT JOIN repo_watch_rule_deactivation AS deactivation
+             USING (repository, rule_id, rule_version)
+          WHERE activation.repository = $1 AND activation.rule_id = $2
+          ORDER BY activation.rule_version",
     )
+    .bind(fixture.repository.as_str())
+    .bind(rule_id)
+    .fetch_all(&fixture.pool)
+    .await?)
+}
+
+/// Removes the fixture rule's stored fingerprints to stage a corrupt shape.
+///
+/// The table is append-only in production, so the trigger is disabled only
+/// long enough to reach a state reconciliation must refuse.
+async fn remove_field_fingerprints(fixture: &DispatchFixture) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "ALTER TABLE repo_watch_rule_field_fingerprint
+         DISABLE TRIGGER repo_watch_rule_field_fingerprint_is_append_only",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM repo_watch_rule_field_fingerprint
+          WHERE repository = $1 AND rule_id = $2 AND rule_version = $3",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(fixture.rule.id().as_str())
+    .bind(i64::try_from(fixture.rule.version().get())?)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE repo_watch_rule_field_fingerprint
+         ENABLE TRIGGER repo_watch_rule_field_fingerprint_is_append_only",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    Ok(())
 }
 
 fn outcome_is_dispatched(outcome: &RepoWatchRuleEvaluationOutcome) -> bool {
@@ -960,7 +1084,11 @@ async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Bo
         event_store
             .commit(
                 &repository,
-                RepoWatchCommitRequest::new(None, initial, vec![opened_event(100, INITIAL_HEAD)?]),
+                RepoWatchCommitRequest::new(
+                    None,
+                    initial,
+                    vec![identified_event(opened_event(100, INITIAL_HEAD)?)],
+                ),
             )
             .await?,
     );
@@ -975,7 +1103,7 @@ async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Bo
             RepoWatchCommitRequest::new(
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(observation.clone()),
-                vec![event.clone()],
+                vec![identified_event(event.clone())],
             ),
         )
         .await?;
@@ -1057,7 +1185,7 @@ async fn load_conflict(
             RepoWatchCommitRequest::new(
                 Some(cursor.generation()),
                 RepoWatchCursorCandidate::new(observation.clone()),
-                vec![event],
+                vec![identified_event(event)],
             ),
         )
         .await?;
@@ -1089,7 +1217,7 @@ async fn commit_lifecycle(
             RepoWatchCommitRequest::new(
                 Some(cursor.generation()),
                 RepoWatchCursorCandidate::new(observation),
-                vec![event],
+                vec![identified_event(event)],
             ),
         )
         .await?;
@@ -1195,7 +1323,10 @@ async fn eager_main_advance_dispatches_its_mergeable_dependent_immediately()
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(initial_observation),
-                    vec![opened_event_for(MAIN_OPENED_EVENT_ID, dependent.clone())?],
+                    vec![identified_event(opened_event_for(
+                        MAIN_OPENED_EVENT_ID,
+                        dependent.clone(),
+                    )?)],
                 ),
             )
             .await?,
@@ -1216,10 +1347,10 @@ async fn eager_main_advance_dispatches_its_mergeable_dependent_immediately()
             RepoWatchCommitRequest::new(
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(current_observation.clone()),
-                vec![base_advanced_event(
+                vec![identified_event(base_advanced_event(
                     MAIN_BASE_ADVANCED_EVENT_ID,
                     dependent.clone(),
-                )?],
+                )?)],
             ),
         )
         .await?;
@@ -1287,8 +1418,14 @@ async fn eager_parent_advance_dispatches_only_its_mergeable_child_immediately()
                     None,
                     RepoWatchCursorCandidate::new(initial_observation),
                     vec![
-                        opened_event_for(STACK_BOTTOM_OPENED_EVENT_ID, initial_parent.clone())?,
-                        opened_event_for(STACK_TOP_OPENED_EVENT_ID, child.clone())?,
+                        identified_event(opened_event_for(
+                            STACK_BOTTOM_OPENED_EVENT_ID,
+                            initial_parent.clone(),
+                        )?),
+                        identified_event(opened_event_for(
+                            STACK_TOP_OPENED_EVENT_ID,
+                            child.clone(),
+                        )?),
                     ],
                 ),
             )
@@ -1317,12 +1454,15 @@ async fn eager_parent_advance_dispatches_only_its_mergeable_child_immediately()
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(current_observation.clone()),
                 vec![
-                    head_changed_event(
+                    identified_event(head_changed_event(
                         STACK_PARENT_HEAD_CHANGED_EVENT_ID,
                         advanced_parent.clone(),
                         INITIAL_HEAD,
-                    )?,
-                    base_advanced_event(STACK_BASE_ADVANCED_EVENT_ID, child.clone())?,
+                    )?),
+                    identified_event(base_advanced_event(
+                        STACK_BASE_ADVANCED_EVENT_ID,
+                        child.clone(),
+                    )?),
                 ],
             ),
         )
@@ -1538,11 +1678,11 @@ async fn achievement_after_a_head_change_requeues_once_and_then_seals() -> Resul
             RepoWatchCommitRequest::new(
                 Some(cursor.generation()),
                 RepoWatchCursorCandidate::new(advanced.clone()),
-                vec![head_changed_event(
+                vec![identified_event(head_changed_event(
                     SUPERSEDING_HEAD_EVENT_ID,
                     context(SECOND_HEAD)?,
                     FIRST_HEAD,
-                )?],
+                )?)],
             ),
         )
         .await?;
@@ -1675,7 +1815,10 @@ async fn achieved_branch_dispatch_seals_without_requeue() -> Result<(), Box<dyn 
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(observation(context(INITIAL_HEAD)?)?),
-                    vec![opened_event(BRANCH_ACTIVATION_EVENT_ID, INITIAL_HEAD)?],
+                    vec![identified_event(opened_event(
+                        BRANCH_ACTIVATION_EVENT_ID,
+                        INITIAL_HEAD,
+                    )?)],
                 ),
             )
             .await?,
@@ -1690,7 +1833,9 @@ async fn achieved_branch_dispatch_seals_without_requeue() -> Result<(), Box<dyn 
             RepoWatchCommitRequest::new(
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(branch.clone()),
-                vec![branch_workflow_event(BRANCH_WORKFLOW_EVENT_ID)?],
+                vec![identified_event(branch_workflow_event(
+                    BRANCH_WORKFLOW_EVENT_ID,
+                )?)],
             ),
         )
         .await?;
@@ -1738,7 +1883,10 @@ async fn reopening_a_pull_request_drops_a_stopped_close_dispatch_requeue()
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(observation(context(INITIAL_HEAD)?)?),
-                    vec![opened_event(REOPENED_CLOSE_OPENED_EVENT_ID, INITIAL_HEAD)?],
+                    vec![identified_event(opened_event(
+                        REOPENED_CLOSE_OPENED_EVENT_ID,
+                        INITIAL_HEAD,
+                    )?)],
                 ),
             )
             .await?,
@@ -1755,7 +1903,10 @@ async fn reopening_a_pull_request_drops_a_stopped_close_dispatch_requeue()
                 RepoWatchCommitRequest::new(
                     Some(first_generation),
                     RepoWatchCursorCandidate::new(closed.clone()),
-                    vec![closed_event(REOPENED_CLOSE_CLOSED_EVENT_ID, SECOND_HEAD)?],
+                    vec![identified_event(closed_event(
+                        REOPENED_CLOSE_CLOSED_EVENT_ID,
+                        SECOND_HEAD,
+                    )?)],
                 ),
             )
             .await?,
@@ -1781,7 +1932,10 @@ async fn reopening_a_pull_request_drops_a_stopped_close_dispatch_requeue()
             RepoWatchCommitRequest::new(
                 Some(second_generation),
                 RepoWatchCursorCandidate::new(observation(context(THIRD_HEAD)?)?),
-                vec![opened_event(REOPENED_CLOSE_REOPENED_EVENT_ID, THIRD_HEAD)?],
+                vec![identified_event(opened_event(
+                    REOPENED_CLOSE_REOPENED_EVENT_ID,
+                    THIRD_HEAD,
+                )?)],
             ),
         )
         .await?;
@@ -1810,10 +1964,10 @@ async fn stopped_terminal_event_dispatch_keeps_its_requeue() -> Result<(), Box<d
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(observation(context(INITIAL_HEAD)?)?),
-                    vec![opened_event(
+                    vec![identified_event(opened_event(
                         STOPPED_TERMINAL_OPENED_EVENT_ID,
                         INITIAL_HEAD,
-                    )?],
+                    )?)],
                 ),
             )
             .await?,
@@ -1829,7 +1983,10 @@ async fn stopped_terminal_event_dispatch_keeps_its_requeue() -> Result<(), Box<d
             RepoWatchCommitRequest::new(
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(merged.clone()),
-                vec![merged_event(STOPPED_TERMINAL_MERGED_EVENT_ID, SECOND_HEAD)?],
+                vec![identified_event(merged_event(
+                    STOPPED_TERMINAL_MERGED_EVENT_ID,
+                    SECOND_HEAD,
+                )?)],
             ),
         )
         .await?;
@@ -2141,7 +2298,10 @@ async fn matching_merged_event_dispatch_survives_its_lifecycle_cutoff() -> Resul
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(initial),
-                    vec![opened_event(TERMINAL_RULE_OPENED_EVENT_ID, INITIAL_HEAD)?],
+                    vec![identified_event(opened_event(
+                        TERMINAL_RULE_OPENED_EVENT_ID,
+                        INITIAL_HEAD,
+                    )?)],
                 ),
             )
             .await?,
@@ -2157,7 +2317,10 @@ async fn matching_merged_event_dispatch_survives_its_lifecycle_cutoff() -> Resul
             RepoWatchCommitRequest::new(
                 Some(first_generation),
                 RepoWatchCursorCandidate::new(merged.clone()),
-                vec![merged_event(TERMINAL_RULE_MERGED_EVENT_ID, SECOND_HEAD)?],
+                vec![identified_event(merged_event(
+                    TERMINAL_RULE_MERGED_EVENT_ID,
+                    SECOND_HEAD,
+                )?)],
             ),
         )
         .await?;
@@ -2219,7 +2382,7 @@ async fn merged_event_before_a_later_terminal_cutoff_records_target_closed()
                 RepoWatchCommitRequest::new(
                     None,
                     RepoWatchCursorCandidate::new(initial),
-                    vec![opened_event(0x54_300, INITIAL_HEAD)?],
+                    vec![identified_event(opened_event(0x54_300, INITIAL_HEAD)?)],
                 ),
             )
             .await?,
@@ -2236,7 +2399,7 @@ async fn merged_event_before_a_later_terminal_cutoff_records_target_closed()
                 RepoWatchCommitRequest::new(
                     Some(first_generation),
                     RepoWatchCursorCandidate::new(first_merged),
-                    vec![merged_event(0x54_310, SECOND_HEAD)?],
+                    vec![identified_event(merged_event(0x54_310, SECOND_HEAD)?)],
                 ),
             )
             .await?,
@@ -2250,7 +2413,7 @@ async fn merged_event_before_a_later_terminal_cutoff_records_target_closed()
                 RepoWatchCommitRequest::new(
                     Some(second_generation),
                     RepoWatchCursorCandidate::new(reopened),
-                    vec![opened_event(0x54_320, THIRD_HEAD)?],
+                    vec![identified_event(opened_event(0x54_320, THIRD_HEAD)?)],
                 ),
             )
             .await?,
@@ -2263,7 +2426,7 @@ async fn merged_event_before_a_later_terminal_cutoff_records_target_closed()
             RepoWatchCommitRequest::new(
                 Some(third_generation),
                 RepoWatchCursorCandidate::new(second_merged.clone()),
-                vec![merged_event(0x54_330, THIRD_HEAD)?],
+                vec![identified_event(merged_event(0x54_330, THIRD_HEAD)?)],
             ),
         )
         .await?;
@@ -2583,7 +2746,10 @@ async fn retired_rule_identity_cannot_resume_from_its_old_activation() -> Result
         .await
         .expect_err("retired rule identity must not reactivate");
 
-    assert!(reused_rule_identity(&error));
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ReusedIdentity
+    );
     Ok(())
 }
 
@@ -2602,7 +2768,10 @@ async fn removed_repository_deactivates_its_rule_identities() -> Result<(), Box<
         .await
         .expect_err("a rule from a removed repository must be retired");
 
-    assert!(reused_rule_identity(&error));
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ReusedIdentity
+    );
     Ok(())
 }
 
@@ -2634,16 +2803,397 @@ async fn startup_drain_processes_cutoff_after_repository_removal() -> Result<(),
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn active_rule_identity_rejects_in_place_content_changes() -> Result<(), Box<dyn Error>> {
+async fn active_rule_identity_names_the_matcher_field_changed_without_a_version_bump()
+-> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture().await?;
-    let changed_rule = cooldown_rule()?;
+    let changed_rule = merged_event_rule()?;
     let error = fixture
         .store
         .reconcile_rules(&fixture.repository, std::slice::from_ref(&changed_rule))
         .await
         .expect_err("active rule semantics require a new identity");
 
-    assert!(changed_rule_identity(&error));
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ChangedField(RepoWatchRuleIdentityField::MatcherEventKinds)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn active_activation_without_field_fingerprints_is_storage_corruption()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    remove_field_fingerprints(&fixture).await?;
+
+    let error = fixture
+        .store
+        .reconcile_rules(&fixture.repository, std::slice::from_ref(&fixture.rule))
+        .await
+        .expect_err("an active activation without fingerprints is not a tolerated shape");
+
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::StorageCorruption
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retiring_a_removed_repository_validates_its_field_fingerprints()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    remove_field_fingerprints(&fixture).await?;
+
+    let error = fixture
+        .store
+        .deactivate_unconfigured_repositories(&[])
+        .await
+        .expect_err("a removed repository is retired against a validated stored shape");
+
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::StorageCorruption
+    );
+    let deactivated: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM repo_watch_rule_deactivation
+              WHERE repository = $1 AND rule_id = $2 AND rule_version = $3
+         )",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(fixture.rule.id().as_str())
+    .bind(i64::try_from(fixture.rule.version().get())?)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(!deactivated);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retiring_an_omitted_rule_validates_its_field_fingerprints() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    remove_field_fingerprints(&fixture).await?;
+
+    let error = fixture
+        .store
+        .reconcile_rules(&fixture.repository, &[])
+        .await
+        .expect_err("an omitted rule is retired against a validated stored shape");
+
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::StorageCorruption
+    );
+    let deactivated: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM repo_watch_rule_deactivation
+              WHERE repository = $1 AND rule_id = $2 AND rule_version = $3
+         )",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(fixture.rule.id().as_str())
+    .bind(i64::try_from(fixture.rule.version().get())?)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(!deactivated);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn every_active_activation_carries_its_field_fingerprints() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let retired: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM repo_watch_rule_activation AS activation
+              WHERE NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_rule_field_fingerprint AS fingerprint
+                     WHERE fingerprint.repository = activation.repository
+                       AND fingerprint.rule_id = activation.rule_id
+                       AND fingerprint.rule_version = activation.rule_version
+              )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_rule_deactivation AS deactivation
+                     WHERE deactivation.repository = activation.repository
+                       AND deactivation.rule_id = activation.rule_id
+                       AND deactivation.rule_version = activation.rule_version
+              )
+         )",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(!retired);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_revision_below_the_highest_recorded_revision_is_refused() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(rule_at_version(
+        RepoWatchRuleVersion::new(
+            NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("recorded version is positive"),
+        )
+        .expect("recorded version is within the durable range"),
+    )?)
+    .await?;
+
+    let error = fixture
+        .store
+        .reconcile_rules(
+            &fixture.repository,
+            std::slice::from_ref(&rule_at_version(RepoWatchRuleVersion::V1)?),
+        )
+        .await
+        .expect_err("a revision below the highest recorded revision is not a replacement");
+
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::RegressedVersion {
+            configured: RepoWatchRuleVersion::V1,
+            latest: RepoWatchRuleVersion::new(
+                NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("recorded version is positive")
+            )
+            .expect("recorded version is within the durable range")
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repeating_an_admission_commit_changes_nothing() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let replacement_version = RepoWatchRuleVersion::new(
+        NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
+    )
+    .expect("replacement version is within the durable range");
+    let replacement = rule_at_version(replacement_version)?;
+    let repositories = [fixture.repository.clone()];
+    fixture
+        .store
+        .reconcile_configured_rules(&repositories, std::slice::from_ref(&replacement))
+        .await?;
+    let after_first: Vec<(i64, bool)> = revisions_of(&fixture, replacement.id().as_str()).await?;
+
+    // The rerun that resolves a lost commit response takes this path.
+    fixture
+        .store
+        .reconcile_configured_rules(&repositories, std::slice::from_ref(&replacement))
+        .await?;
+
+    let after_second: Vec<(i64, bool)> = revisions_of(&fixture, replacement.id().as_str()).await?;
+    assert_eq!(
+        after_first,
+        [
+            (i64::try_from(fixture.rule.version().get())?, true),
+            (i64::try_from(replacement.version().get())?, false)
+        ]
+    );
+    assert_eq!(after_second, after_first);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn validating_an_admissible_revision_consumes_no_revision() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let replacement_version = RepoWatchRuleVersion::new(
+        NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
+    )
+    .expect("replacement version is within the durable range");
+    let replacement = rule_at_version(replacement_version)?;
+
+    fixture
+        .store
+        .validate_configured_rules(
+            std::slice::from_ref(&fixture.repository),
+            std::slice::from_ref(&replacement),
+        )
+        .await?;
+
+    let revisions: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT activation.rule_version, deactivation.rule_id IS NOT NULL AS deactivated
+           FROM repo_watch_rule_activation AS activation
+           LEFT JOIN repo_watch_rule_deactivation AS deactivation
+             USING (repository, rule_id, rule_version)
+          WHERE activation.repository = $1 AND activation.rule_id = $2
+          ORDER BY activation.rule_version",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(replacement.id().as_str())
+    .fetch_all(&fixture.pool)
+    .await?;
+
+    assert_eq!(
+        revisions,
+        [(i64::try_from(fixture.rule.version().get())?, false)]
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn validation_refuses_an_inadmissible_rule_before_any_write() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let changed_rule = merged_event_rule()?;
+
+    let error = fixture
+        .store
+        .validate_configured_rules(
+            std::slice::from_ref(&fixture.repository),
+            std::slice::from_ref(&changed_rule),
+        )
+        .await
+        .expect_err("an unbumped semantic change is refused during validation");
+
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ChangedField(RepoWatchRuleIdentityField::MatcherEventKinds)
+    );
+    let deactivated: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM repo_watch_rule_deactivation WHERE repository = $1)",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(!deactivated);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_refused_repository_leaves_every_other_repository_unmutated() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture().await?;
+    let second_repository = RepositorySlug::try_new(SECOND_REPOSITORY.to_owned())?;
+    let replacement_version = RepoWatchRuleVersion::new(
+        NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
+    )
+    .expect("replacement version is within the durable range");
+    let replacement = rule_at_version(replacement_version)?;
+    fixture
+        .store
+        .reconcile_rules(&second_repository, std::slice::from_ref(&replacement))
+        .await?;
+    fixture
+        .store
+        .reconcile_rules(&second_repository, &[])
+        .await?;
+
+    let error = fixture
+        .store
+        .reconcile_configured_rules(
+            &[fixture.repository.clone(), second_repository.clone()],
+            std::slice::from_ref(&replacement),
+        )
+        .await
+        .expect_err("the second repository retired the configured identity");
+
+    assert_eq!(
+        admission_refusal(&error),
+        RuleAdmissionRefusal::ReusedIdentity
+    );
+    let revisions: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT activation.rule_version, deactivation.rule_id IS NOT NULL AS deactivated
+           FROM repo_watch_rule_activation AS activation
+           LEFT JOIN repo_watch_rule_deactivation AS deactivation
+             USING (repository, rule_id, rule_version)
+          WHERE activation.repository = $1 AND activation.rule_id = $2
+          ORDER BY activation.rule_version",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(fixture.rule.id().as_str())
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert_eq!(
+        revisions,
+        [(i64::try_from(fixture.rule.version().get())?, false)]
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn version_bump_retires_the_old_rule_and_activates_the_replacement_after_history()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let replacement_version = RepoWatchRuleVersion::new(
+        NonZeroU64::new(REPLACEMENT_RULE_VERSION).expect("replacement version is positive"),
+    )
+    .expect("replacement version is within the durable range");
+    let replacement = rule_at_version(replacement_version)?;
+
+    fixture
+        .store
+        .reconcile_rules(&fixture.repository, std::slice::from_ref(&replacement))
+        .await?;
+
+    let revisions: Vec<(i64, bool)> = sqlx::query_as(
+        "SELECT activation.rule_version, deactivation.rule_id IS NOT NULL AS deactivated
+           FROM repo_watch_rule_activation AS activation
+           LEFT JOIN repo_watch_rule_deactivation AS deactivation
+             USING (repository, rule_id, rule_version)
+          WHERE activation.repository = $1 AND activation.rule_id = $2
+          ORDER BY activation.rule_version",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(replacement.id().as_str())
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert_eq!(
+        revisions,
+        [
+            (i64::try_from(fixture.rule.version().get())?, true),
+            (i64::try_from(replacement.version().get())?, false)
+        ]
+    );
+    assert_eq!(
+        fixture
+            .store
+            .load_next_event(&fixture.repository, replacement.id(), replacement.version())
+            .await?,
+        None
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn fresh_rule_identity_still_replaces_an_active_rule() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let replacement_id = RepoWatchRuleId::try_new(FRESH_RULE.to_owned())?;
+    let replacement = rule_with_identity(replacement_id, RepoWatchRuleVersion::V1)?;
+
+    fixture
+        .store
+        .reconcile_rules(&fixture.repository, std::slice::from_ref(&replacement))
+        .await?;
+
+    let active_rule: String = sqlx::query_scalar(
+        "SELECT activation.rule_id
+           FROM repo_watch_rule_activation AS activation
+          WHERE activation.repository = $1
+            AND NOT EXISTS (
+                SELECT 1 FROM repo_watch_rule_deactivation AS deactivation
+                 WHERE deactivation.repository = activation.repository
+                   AND deactivation.rule_id = activation.rule_id
+                   AND deactivation.rule_version = activation.rule_version
+            )",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(active_rule, replacement.id().as_str());
     Ok(())
 }
 
