@@ -51,46 +51,46 @@ impl VerifiedBlobSource for BytesSource {
     }
 }
 
-/// INV-074: registered processors require the real accepted sandbox profile.
+/// INV-081: registered processors require the real accepted sandbox profile.
 #[tokio::test]
-async fn inv074_real_worker_has_the_accepted_isolation_profile() -> Result<(), Box<dyn Error>> {
+async fn inv081_real_worker_has_the_accepted_isolation_profile() -> Result<(), Box<dyn Error>> {
     real_worker_profile_scenario().await
 }
 
-/// INV-075: worker source reads pass only through the daemon's bounded broker.
+/// INV-082: worker source reads pass only through the daemon's bounded broker.
 #[tokio::test]
-async fn inv075_worker_can_read_only_through_the_bounded_broker() -> Result<(), Box<dyn Error>> {
+async fn inv082_worker_can_read_only_through_the_bounded_broker() -> Result<(), Box<dyn Error>> {
     bounded_broker_scenario().await
 }
 
-/// INV-076: an incomplete result from a crashed worker is never admitted.
+/// INV-083: an incomplete result from a crashed worker is never admitted.
 #[tokio::test]
-async fn inv076_worker_crash_discards_its_incomplete_result() -> Result<(), Box<dyn Error>> {
+async fn inv083_worker_crash_discards_its_incomplete_result() -> Result<(), Box<dyn Error>> {
     worker_crash_scenario().await
 }
 
-/// INV-077: the daemon wall deadline terminates work without content leakage.
+/// INV-084: the daemon wall deadline terminates work without content leakage.
 #[tokio::test]
-async fn inv077_worker_wall_timeout_is_a_content_silent_failure() -> Result<(), Box<dyn Error>> {
+async fn inv084_worker_wall_timeout_is_a_content_silent_failure() -> Result<(), Box<dyn Error>> {
     worker_timeout_scenario().await
 }
 
-/// INV-078: workers may create threads but cannot create descendant processes.
+/// INV-085: workers may create threads but cannot create descendant processes.
 #[tokio::test]
-async fn inv078_worker_process_creation_is_denied_without_blocking_threads()
+async fn inv085_worker_process_creation_is_denied_without_blocking_threads()
 -> Result<(), Box<dyn Error>> {
     worker_descendant_scenario().await
 }
 
-/// INV-079: injection-shaped worker output is sanitized before registry use.
+/// INV-086: injection-shaped worker output is sanitized before registry use.
 #[tokio::test]
-async fn inv079_hostile_worker_output_never_propagates() -> Result<(), Box<dyn Error>> {
+async fn inv086_hostile_worker_output_never_propagates() -> Result<(), Box<dyn Error>> {
     hostile_worker_output_scenario().await
 }
 
-/// INV-080: authoritative cancellation terminates in-flight worker processing.
+/// INV-087: authoritative cancellation terminates in-flight worker processing.
 #[tokio::test]
-async fn inv080_authoritative_cancellation_terminates_the_worker() -> Result<(), Box<dyn Error>> {
+async fn inv087_authoritative_cancellation_terminates_the_worker() -> Result<(), Box<dyn Error>> {
     worker_cancellation_scenario().await
 }
 

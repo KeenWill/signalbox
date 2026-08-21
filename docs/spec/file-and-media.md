@@ -156,25 +156,27 @@ network namespace. An architecture-checked seccomp filter returns `ENOSYS` for
 creation. Decoder threads remain available while worker descendants stay zero.
 
 Before releasing a dedicated startup gate, the daemon applies hard
-address-space, CPU, task, core-dump, and descriptor limits to the sandbox process
-and all inherited worker threads. The configured memory ceiling is one combined
-budget: half is reserved for address space and half is split between the two
-writable tmpfs mounts, so their maxima cannot add to more than the configured
-value. Construction fails when either the real or effective UID is 0 because
-Linux exempts those identities from `RLIMIT_NPROC`, making the task ceiling
-unenforceable. The daemon
-independently owns the wall deadline and kills the isolated process group on
-timeout or authoritative cancellation. Bounded stderr is drained and discarded;
-it is never parser evidence, telemetry content, or model-visible output.
+address-space, CPU, task, core-dump, and descriptor limits to the sandbox
+process and all inherited worker threads. The configured memory ceiling is one
+combined budget: half is reserved for address space and half is split between
+the two writable tmpfs mounts, so their maxima cannot add to more than the
+configured value. Construction fails when either the real or effective UID is 0
+because Linux exempts those identities from `RLIMIT_NPROC`, making the task
+ceiling unenforceable. The daemon independently owns the wall deadline and kills
+the isolated process group on timeout or authoritative cancellation. Bounded
+stderr is drained and discarded; it is never parser evidence, telemetry content,
+or model-visible output.
 
 The worker receives one digest and positive length, then requests exact byte
 ranges over length-delimited standard I/O. The daemon checks every request for
 positive checked arithmetic, source length, per-frame size, access posture,
 range count, cumulative source work, and cancellation before calling
-`VerifiedBlobSource`. Probe and validation share the reader's declared probe
-envelope. A typed read uses its selected view's streaming or random-access
-envelope. Streaming access is monotonic; no range can exceed half the effective
-frame ceiling, so encoded source replies remain bounded.
+`VerifiedBlobSource`. Probing uses the reader's declared probe envelope.
+Validation uses its independent effective random-access source-byte and
+exact-range ceilings, up to the compiled 1 GiB and 4,096-range maxima. A typed
+read uses its selected view's streaming or random-access envelope. Streaming
+access is monotonic; no range can exceed half the effective frame ceiling, so
+encoded source replies remain bounded.
 
 A worker result is eligible for the existing durable tool-result commit path
 only after one matching final frame, exact EOF with no trailing byte, successful
@@ -182,8 +184,8 @@ worker exit, and complete bounded stderr drain. EOF before a final frame, crash,
 signal, timeout, cancellation, malformed or oversized framing, extra output,
 source failure, or limit excess discards the whole result. Thus the isolation
 slice can leave neither a partial durable result nor parser output that bypasses
-the registry sanitizer (INV-074 through INV-079). Authoritative cancellation
-terminates the in-flight worker and admits no result (INV-080).
+the registry sanitizer (INV-081 through INV-086). Authoritative cancellation
+terminates the in-flight worker and admits no result (INV-087).
 
 The version-one compiled ceilings are:
 

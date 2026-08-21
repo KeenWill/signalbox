@@ -252,8 +252,7 @@ impl SandboxedFileMediaProcessor {
         let outcome = {
             let session = run_session(
                 &mut running,
-                stdin,
-                stdout,
+                (stdin, stdout),
                 invocation,
                 expected,
                 source,
@@ -296,6 +295,7 @@ impl SandboxedFileMediaProcessor {
         }
     }
 
+    #[allow(unsafe_code)]
     async fn spawn(
         &self,
         worker: &Path,
@@ -463,8 +463,7 @@ fn require_file_use_source(
 
 async fn run_session(
     running: &mut RunningWorker,
-    mut stdin: ChildStdin,
-    mut stdout: ChildStdout,
+    (mut stdin, mut stdout): (ChildStdin, ChildStdout),
     invocation: Invocation,
     expected: ExpectedOutput,
     source: &dyn VerifiedBlobSource,
@@ -829,23 +828,24 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
     #[cfg(not(target_arch = "x86_64"))]
     const X32_SYSCALL_BIT: Option<u32> = None;
     #[cfg(target_arch = "x86_64")]
-    let (audit_arch, clone, clone3, fork, vfork, memfd_create) = (
+    let (audit_arch, clone, clone3, fork, vfork, memfd_create, shmget) = (
         0xc000_003e,
         56_u32,
         435_u32,
         Some(57_u32),
         Some(58_u32),
         319_u32,
+        29_u32,
     );
     #[cfg(target_arch = "aarch64")]
-    let (audit_arch, clone, clone3, fork, vfork, memfd_create) =
-        (0xc000_00b7, 220_u32, 435_u32, None, None, 279_u32);
+    let (audit_arch, clone, clone3, fork, vfork, memfd_create, shmget) =
+        (0xc000_00b7, 220_u32, 435_u32, None, None, 279_u32, 194_u32);
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     return Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "unsupported seccomp architecture",
     ));
-    let mut syscall_denials = vec![memfd_create];
+    let mut syscall_denials = vec![memfd_create, shmget];
     if let Some(fork) = fork {
         syscall_denials.push(fork);
     }
@@ -1116,6 +1116,26 @@ mod tests {
             .enumerate()
             .find(|(_, entry)| entry.value == memfd_create)
             .expect("memfd_create is checked");
+        assert_eq!(check.code, 0x15);
+        let denial = index + 1 + usize::from(check.jump_true);
+        assert_eq!(
+            program.get(denial).map(|entry| entry.value),
+            Some(0x0005_0001)
+        );
+    }
+
+    #[test]
+    fn descendant_filter_denies_persistent_system_v_shared_memory() {
+        let program = seccomp_instructions().expect("the test architecture is supported");
+        #[cfg(target_arch = "x86_64")]
+        let shmget = 29_u32;
+        #[cfg(target_arch = "aarch64")]
+        let shmget = 194_u32;
+        let (index, check) = program
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.value == shmget)
+            .expect("shmget is checked");
         assert_eq!(check.code, 0x15);
         let denial = index + 1 + usize::from(check.jump_true);
         assert_eq!(
