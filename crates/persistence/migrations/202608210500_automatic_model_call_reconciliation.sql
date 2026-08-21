@@ -102,7 +102,22 @@ BEGIN
            AND turn_id = checked_turn_id
            AND session_id = checked_session
            AND state_kind = 'ended'
-           AND end_disposition IN ('ambiguous', 'lost')
+           AND (
+                end_disposition IN ('ambiguous', 'lost')
+                OR (
+                    end_disposition = 'yielded_to_durable_wait'
+                    AND EXISTS (
+                        SELECT 1
+                          FROM turn_runner_recovery_interrupt_effect AS effect
+                         WHERE effect.session_id = checked_session
+                           AND effect.turn_id = checked_turn_id
+                           AND effect.yielded_turn_attempt_id =
+                                turn_attempt.turn_attempt_id
+                           AND effect.interrupted_tool_attempt_id =
+                                checked_tool_attempt
+                    )
+                )
+           )
            AND (
                 (
                     end_variant = 'after_cancellation'
@@ -287,7 +302,8 @@ BEGIN
                AND result.payload_kind IN (
                     'tool_execution_result',
                     'tool_denied',
-                    'tool_closed_by_turn_end'
+                    'tool_closed_by_turn_end',
+                    'delegation_result'
                )
               LEFT JOIN tool_attempt AS result_attempt
                 ON result_attempt.attempt_id =
@@ -370,3 +386,18 @@ BEGIN
     END IF;
 END;
 $$;
+
+-- CREATE OR REPLACE clears per-function configuration. Restore the canonical
+-- persistent-schema pin used by constraint-reachable functions.
+DO $migration$
+DECLARE
+    migration_schema name := pg_catalog.current_schema();
+BEGIN
+    EXECUTE pg_catalog.format(
+        'ALTER FUNCTION %I.assert_reconciliation_required_turn_final_state(uuid) '
+        'SET search_path TO %I, pg_catalog, pg_temp',
+        migration_schema,
+        migration_schema
+    );
+END;
+$migration$;

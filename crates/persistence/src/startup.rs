@@ -3,8 +3,8 @@
 use std::{collections::BTreeSet, error::Error, fmt};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, OperatorFailureClass, StartupScanIdGenerator, StartupScanRepository,
-    StartupScanSessionOutcome, ToolCrashClosureIdentities,
+    ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StartupScanIdGenerator,
+    StartupScanRepository, StartupScanSessionOutcome, ToolCrashClosureIdentities,
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, AttemptEnd,
@@ -34,6 +34,7 @@ use crate::{
         ToolLoopRepositoryError, load_active_batch_from_connection, persist_ended_attempt,
         persist_result_entries, persist_tool_recovery_wait,
     },
+    turn_liveness::slot_held_candidate_matches,
 };
 
 /// Which fresh startup-recovery identity collided durably.
@@ -256,7 +257,8 @@ impl PostgresStartupScanRepository {
         Generator: StartupScanIdGenerator + Send,
     {
         let mut transaction = self.pool.begin().await?;
-        let decision = recover_in_transaction(&mut transaction, session, identities, ids).await;
+        let decision =
+            recover_in_transaction(&mut transaction, session, None, identities, ids).await;
 
         match decision {
             Ok(TransactionDecision::Commit(outcome)) => {
@@ -269,6 +271,51 @@ impl PostgresStartupScanRepository {
             Ok(TransactionDecision::Rollback(outcome)) => {
                 transaction.rollback().await?;
                 Ok(outcome)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = transaction.rollback().await {
+                    return Err(rollback_error.into());
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Recovers only while the exact watchdog observation remains current
+    /// under the session scheduler lock.
+    pub async fn recover_candidate<Generator>(
+        &self,
+        candidate: StaleTurnCandidate,
+        identities: AcceptedInputTurnFailureIdentities,
+        ids: &mut Generator,
+    ) -> Result<Option<StartupScanSessionOutcome>, StartupScanRepositoryError>
+    where
+        Generator: StartupScanIdGenerator + Send,
+    {
+        let mut transaction = self.pool.begin().await?;
+        let decision = recover_in_transaction(
+            &mut transaction,
+            candidate.session(),
+            Some(candidate),
+            identities,
+            ids,
+        )
+        .await;
+        match decision {
+            Ok(TransactionDecision::Commit(outcome)) => {
+                transaction.commit().await.map_err(|error| {
+                    let commit_ambiguous = commit_failure_is_ambiguous(&error);
+                    StartupScanRepositoryError::from_database(error, commit_ambiguous)
+                })?;
+                Ok(Some(outcome))
+            }
+            Ok(TransactionDecision::Rollback(StartupScanSessionOutcome::NoActiveTurn)) => {
+                transaction.rollback().await?;
+                Ok(None)
+            }
+            Ok(TransactionDecision::Rollback(outcome)) => {
+                transaction.rollback().await?;
+                Ok(Some(outcome))
             }
             Err(error) => {
                 if let Err(rollback_error) = transaction.rollback().await {
@@ -303,6 +350,7 @@ impl StartupScanRepository for PostgresStartupScanRepository {
 async fn recover_in_transaction<Generator>(
     connection: &mut PgConnection,
     requested_session: SessionId,
+    expected_candidate: Option<StaleTurnCandidate>,
     identities: AcceptedInputTurnFailureIdentities,
     ids: &mut Generator,
 ) -> Result<TransactionDecision, StartupScanRepositoryError>
@@ -338,6 +386,14 @@ where
         .await?;
 
     if active_turn != observed_active_turn {
+        return Ok(TransactionDecision::Rollback(
+            StartupScanSessionOutcome::NoActiveTurn,
+        ));
+    }
+
+    if let Some(candidate) = expected_candidate
+        && !slot_held_candidate_matches(connection, candidate).await?
+    {
         return Ok(TransactionDecision::Rollback(
             StartupScanSessionOutcome::NoActiveTurn,
         ));

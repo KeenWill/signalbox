@@ -282,6 +282,30 @@ impl QuiescentInventory for PostgresTurnLivenessRepository {
     }
 }
 
+/// Reads one page of the slot-held inventory.
+trait SlotHeldInventory {
+    fn read_slot_held_page(
+        &self,
+        after: Option<SessionId>,
+    ) -> impl Future<Output = Result<InventoryPage, TurnLivenessRepositoryError>> + Send;
+}
+
+impl SlotHeldInventory for PostgresTurnLivenessRepository {
+    async fn read_slot_held_page(
+        &self,
+        after: Option<SessionId>,
+    ) -> Result<InventoryPage, TurnLivenessRepositoryError> {
+        let page = self.slot_held_active_turns(after).await?;
+        let resume_after = page.resume_after();
+        let rows = page.rows();
+        Ok(InventoryPage {
+            candidates: page.into_candidates(),
+            rows,
+            resume_after,
+        })
+    }
+}
+
 /// What woke the supervising loop.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TurnLivenessWake {
@@ -420,7 +444,8 @@ async fn reconcile_slot_held_turns(
     ledger: &mut TurnLivenessLedger,
     window: &mut TerminalizationWindow,
 ) {
-    let Some(active) = drain_slot_held_rotation(inventory).await else {
+    let Some(active) = drain_slot_held_rotation(inventory, QUIESCENT_ROTATION_PAGE_CEILING).await
+    else {
         return;
     };
     let due = ledger.reconcile(&active, Instant::now());
@@ -433,7 +458,7 @@ async fn reconcile_slot_held_turns(
         let mut ids = UuidV7StartupScanIdGenerator;
         match timeout(
             RECOVERY_ATTEMPT_BOUND,
-            recovery.recover(candidate.session(), identities, &mut ids),
+            recovery.recover_candidate(candidate, identities, &mut ids),
         )
         .await
         {
@@ -457,28 +482,54 @@ async fn reconcile_slot_held_turns(
     }
 }
 
-async fn drain_slot_held_rotation(
-    inventory: &PostgresTurnLivenessRepository,
-) -> Option<Vec<StaleTurnCandidate>> {
+async fn drain_slot_held_rotation<Inventory>(
+    inventory: &Inventory,
+    page_ceiling: usize,
+) -> Option<Vec<StaleTurnCandidate>>
+where
+    Inventory: SlotHeldInventory,
+{
     let mut active = Vec::new();
     let mut cursor = None;
-    for _ in 0..QUIESCENT_ROTATION_PAGE_CEILING {
-        let page = match inventory.slot_held_active_turns(cursor).await {
-            Ok(page) => page,
-            Err(error) => {
+    for _ in 0..page_ceiling {
+        let page = match timeout(
+            RECOVERY_ATTEMPT_BOUND,
+            inventory.read_slot_held_page(cursor),
+        )
+        .await
+        {
+            Ok(Ok(page)) => page,
+            Ok(Err(error)) => {
                 report_turn_liveness_failure(&error);
                 return None;
             }
+            Err(_) => return None,
         };
-        cursor = page.resume_after();
-        active.extend(page.into_candidates());
+        cursor = page.resume_after;
+        active.extend(page.candidates);
         if cursor.is_none() {
             return Some(active);
         }
     }
+    let probe = match timeout(
+        RECOVERY_ATTEMPT_BOUND,
+        inventory.read_slot_held_page(cursor),
+    )
+    .await
+    {
+        Ok(Ok(page)) => page,
+        Ok(Err(error)) => {
+            report_turn_liveness_failure(&error);
+            return None;
+        }
+        Err(_) => return None,
+    };
+    if probe.rows == 0 {
+        return Some(active);
+    }
     tracing::warn!(
         cause_code = "turn_liveness_slot_held_rotation_ceiling_reached",
-        page_ceiling = QUIESCENT_ROTATION_PAGE_CEILING,
+        page_ceiling,
         observed_turns = active.len(),
         "slot-held turn rotation exceeded the population its scan can drain"
     );
@@ -883,10 +934,10 @@ mod tests {
         InventoryPage, PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, QuiescentInventory,
         RECOVERY_ATTEMPT_BOUND, ROTATION_CEILING_CAUSE, STALE_TURN_AMBIGUOUS_CAUSE,
         STALE_TURN_LOCK_UNAVAILABLE_CAUSE, STALE_TURN_STEERING_BLOCKED_CAUSE,
-        STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE, StaleTurnTerminalizer,
-        TERMINALIZATION_DEFERRED_CAUSE, TERMINALIZATIONS_PER_SCAN, TerminalizationWindow,
-        TurnLivenessWake, drain_quiescent_rotation, next_turn_liveness_wake,
-        reconcile_turn_liveness,
+        STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE, SlotHeldInventory,
+        StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE, TERMINALIZATIONS_PER_SCAN,
+        TerminalizationWindow, TurnLivenessWake, drain_quiescent_rotation,
+        drain_slot_held_rotation, next_turn_liveness_wake, reconcile_turn_liveness,
     };
     use signalbox_application::{
         StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
@@ -1084,6 +1135,15 @@ mod tests {
                 .next()
                 .expect("the script supplies every read the drain takes");
             Ok(page)
+        }
+    }
+
+    impl SlotHeldInventory for ScriptedInventory {
+        async fn read_slot_held_page(
+            &self,
+            after: Option<SessionId>,
+        ) -> Result<InventoryPage, TurnLivenessRepositoryError> {
+            self.read_page(after).await
         }
     }
     use tokio::{
@@ -1340,6 +1400,30 @@ mod tests {
         let drained = drain_quiescent_rotation(&inventory, 2).await;
 
         assert_eq!(drained.map(|turns| turns.len()), Some(2));
+        assert_eq!(inventory.reads(), 3);
+    }
+
+    /// Slot-held rotation also requires a non-contributing empty probe after
+    /// the final allowed full page before returning the accumulated cohort.
+    #[tokio::test]
+    async fn slot_held_empty_probe_proves_an_exact_ceiling_population() {
+        let inventory = ScriptedInventory::new([full_page(1), full_page(2), empty_page()]);
+
+        let drained = drain_slot_held_rotation(&inventory, 2).await;
+
+        assert_eq!(drained.map(|turns| turns.len()), Some(2));
+        assert_eq!(inventory.reads(), 3);
+    }
+
+    /// A candidate-bearing slot-held probe proves the allowed pages did not
+    /// cover the population, and its candidate is not folded past the ceiling.
+    #[tokio::test]
+    async fn slot_held_candidate_bearing_probe_decides_nothing() {
+        let inventory = ScriptedInventory::new([full_page(1), full_page(2), last_page(3)]);
+
+        let drained = drain_slot_held_rotation(&inventory, 2).await;
+
+        assert_eq!(drained, None);
         assert_eq!(inventory.reads(), 3);
     }
 

@@ -2892,7 +2892,7 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         reconciling_attempt: TurnAttemptId,
         reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
         ambiguous_call: ModelCallId,
-        interrupt: AppliedInterruptCommandResult,
+        interrupt: Option<AppliedInterruptCommandResult>,
         terminal_frontier: ContextFrontierId,
     },
     TerminalToolReconciliationRequired {

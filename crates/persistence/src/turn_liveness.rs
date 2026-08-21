@@ -245,10 +245,31 @@ impl PostgresTurnLivenessRepository {
             .acquire()
             .await
             .map_err(TurnLivenessRepositoryError::Inventory)?;
-        let fetched = read_slot_held_active_turns(&mut connection, after)
+        let fetched = read_slot_held_active_turns(
+            &mut connection,
+            None,
+            after,
+            QUIESCENT_INVENTORY_PAGE_SIZE,
+        )
+        .await
+        .map_err(TurnLivenessRepositoryError::Inventory)?;
+        Ok(QuiescentActiveTurnPage::new(fetched))
+    }
+
+    /// Reads the slot-held observation for one exact session.
+    pub async fn slot_held_active_turn(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<StaleTurnCandidate>, TurnLivenessRepositoryError> {
+        let mut connection = self
+            .pool
+            .acquire()
             .await
             .map_err(TurnLivenessRepositoryError::Inventory)?;
-        Ok(QuiescentActiveTurnPage::new(fetched))
+        let fetched = read_slot_held_active_turns(&mut connection, Some(session), None, 1)
+            .await
+            .map_err(TurnLivenessRepositoryError::Inventory)?;
+        Ok(fetched.candidates.first().copied())
     }
 
     /// Terminalizes one observed-stale turn as failed under the session locks.
@@ -545,9 +566,10 @@ const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
                    AND live.state_kind <> 'terminal'
             )
         )
-        AND ($1::uuid IS NULL OR active.session_id > $1)
+        AND ($1::uuid IS NULL OR active.session_id = $1)
+        AND ($2::uuid IS NULL OR active.session_id > $2)
       ORDER BY active.session_id
-      LIMIT $2";
+      LIMIT $3";
 
 /// Reads one page, leaving classification of any failure to the caller.
 ///
@@ -621,14 +643,31 @@ fn decode_candidate_page(rows: Vec<sqlx::postgres::PgRow>) -> Result<FetchedPage
 
 async fn read_slot_held_active_turns(
     connection: &mut PgConnection,
+    session: Option<SessionId>,
     after: Option<SessionId>,
+    limit: i64,
 ) -> Result<FetchedPage, sqlx::Error> {
     let rows = sqlx::query(SLOT_HELD_ACTIVE_TURNS)
+        .bind(session.map(session_id_to_uuid))
         .bind(after.map(session_id_to_uuid))
-        .bind(QUIESCENT_INVENTORY_PAGE_SIZE)
+        .bind(limit)
         .fetch_all(connection)
         .await?;
     decode_candidate_page(rows)
+}
+
+/// Revalidates one exact slot-held observation on a connection whose scheduler
+/// row is already locked by the caller.
+///
+/// The unlocked inventory and locked recovery check deliberately share the
+/// statement and decoder, preventing either path from adopting weaker evidence.
+pub(crate) async fn slot_held_candidate_matches(
+    connection: &mut PgConnection,
+    candidate: StaleTurnCandidate,
+) -> Result<bool, sqlx::Error> {
+    let fetched =
+        read_slot_held_active_turns(connection, Some(candidate.session()), None, 1).await?;
+    Ok(fetched.candidates.first().copied() == Some(candidate))
 }
 
 /// Reads one outbox sequence as the token the ledger compares, or nothing if

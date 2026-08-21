@@ -4422,6 +4422,7 @@ pub(crate) fn apply_automatic_model_call_reconciliation(
         || call.turn() != active_turn.turn()
         || call.attempt() != attempt.id()
         || call.disposition() != ModelCallDisposition::Ambiguous
+        || source_snapshot.frontier().owning_session() != active_turn.session()
         || call.frontier() != source_snapshot.frontier()
     {
         return Err(ModelCallClosureError::InterruptCorrelationMismatch);

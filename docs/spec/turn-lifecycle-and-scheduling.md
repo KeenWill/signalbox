@@ -452,11 +452,11 @@ the sweep (INV-007).
   including identity generators, is never cloned per admitted pass; only the
   detached expiry handler is cloned.
 
-  With Prometheus export enabled, the loop publishes current admitted-pass
-  occupancy, the oldest admitted pass's age, and that pass's session identity.
-  The identity metric has zero or one series and removes the former label when
-  the oldest pass changes. Age is calculated at scrape time, so it advances
-  while a pass is stalled even when the scheduler emits no event.
+  With Prometheus export enabled, the loop publishes scheduler occupancy and
+  oldest-pass telemetry through the registry owned by
+  [configuration and credentials](configuration-and-credentials.md). Age is
+  calculated at scrape time, so it advances while a pass is stalled even when
+  the scheduler emits no event.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. This recovers a goal disposition when the

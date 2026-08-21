@@ -2851,6 +2851,8 @@ async fn load_next_transcript_turn(
                 AS automatic_reconciliation_state_kind,
             automatic_reconciliation.attempt_count
                 AS automatic_reconciliation_attempt_count,
+            automatic_reconciliation.model_call_id
+                AS automatic_reconciliation_model_call_id,
             active_tool_round.boundary_frontier_id AS active_tool_round_frontier_id,
             logical_terminal.spawning_tool_request_id
                 AS logical_terminal_spawning_request_id,
@@ -2929,7 +2931,6 @@ async fn load_next_transcript_turn(
            LEFT JOIN automatic_model_call_reconciliation AS automatic_reconciliation
              ON automatic_reconciliation.turn_id = turn.turn_id
             AND automatic_reconciliation.session_id = turn.session_id
-            AND automatic_reconciliation.model_call_id = turn.recovery_model_call_id
            LEFT JOIN model_call AS terminal_call
              ON terminal_call.model_call_id = turn.terminal_model_call_id
             AND terminal_call.turn_attempt_id = turn.terminal_attempt_id
@@ -3400,7 +3401,20 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         row.try_get("automatic_reconciliation_state_kind")?;
     let automatic_reconciliation_attempts: Option<i32> =
         row.try_get("automatic_reconciliation_attempt_count")?;
+    let automatic_reconciliation_call: Option<Uuid> =
+        row.try_get("automatic_reconciliation_model_call_id")?;
     let active_tool_round_frontier: Option<Uuid> = row.try_get("active_tool_round_frontier_id")?;
+    if state_kind == "active"
+        && active_phase.as_deref() != Some("awaiting_model_call_recovery")
+        && (automatic_reconciliation_state.is_some()
+            || automatic_reconciliation_attempts.is_some()
+            || automatic_reconciliation_call.is_some())
+    {
+        return Err(ProcessReadCorruption::Inconsistent(
+            "automatic model-call reconciliation active phase",
+        )
+        .into());
+    }
 
     if !matches!(state_kind.as_str(), "queued" | "active" | "terminal") {
         return Err(ProcessReadCorruption::Unsupported {
@@ -3866,6 +3880,14 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             let call_frontier = recovery_model_call_frontier.ok_or(
                 ProcessReadCorruption::Inconsistent("recovery model call frontier"),
             )?;
+            if automatic_reconciliation_call.is_some()
+                && automatic_reconciliation_call != Some(call)
+            {
+                return Err(ProcessReadCorruption::Inconsistent(
+                    "automatic model-call reconciliation call correlation",
+                )
+                .into());
+            }
             let (automatic_reconciliation_attempts, operator_action_required) = match (
                 automatic_reconciliation_state.as_deref(),
                 automatic_reconciliation_attempts,
