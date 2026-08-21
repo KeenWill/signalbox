@@ -190,11 +190,11 @@ LOCAL_USE = re.compile(
 # its path, so this deliberately matches the qualified spelling too.
 IMPORTED_NAME = re.compile(r"\b(?P<name>[A-Z][A-Z0-9_]*)\b")
 DIRECT_DECLARATION = re.compile(
-    r"^\s*// numeric-bound: (?P<kind>ceiling|tunable|not-a-bound) - "
+    r"^\s*// numeric-bound: (?P<kind>guard|ceiling|tunable|not-a-bound) - "
     r"(?P<rationale>\S.*)$"
 )
 DERIVED_DECLARATION = re.compile(
-    r"^\s*// numeric-bound: derived (?P<kind>ceiling|tunable) from "
+    r"^\s*// numeric-bound: derived (?P<kind>guard|ceiling|tunable) from "
     r"(?P<source>[A-Z][A-Z0-9_]*)\s*$"
 )
 DECLARATION_SITE = re.compile(r"\bconst\s+$")

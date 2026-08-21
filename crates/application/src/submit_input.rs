@@ -28,6 +28,8 @@ pub enum SubmitInputRequestError {
     OversizedContent {
         /// The rejected text's exact UTF-8 length in bytes.
         utf8_byte_length: usize,
+        /// The deployment's configured inclusive admission maximum.
+        max_utf8_bytes: usize,
     },
 }
 
@@ -35,10 +37,12 @@ impl fmt::Display for SubmitInputRequestError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidCommandId(error) => error.fmt(formatter),
-            Self::OversizedContent { utf8_byte_length } => write!(
+            Self::OversizedContent {
+                utf8_byte_length,
+                max_utf8_bytes,
+            } => write!(
                 formatter,
-                "accepted-input content is {utf8_byte_length} UTF-8 bytes; the provisional maximum is {}",
-                SubmitInputRequest::MAX_CONTENT_UTF8_BYTES,
+                "accepted-input content is {utf8_byte_length} UTF-8 bytes; the configured maximum is {max_utf8_bytes}",
             ),
         }
     }
@@ -62,17 +66,23 @@ pub struct SubmitInputRequest {
 }
 
 impl SubmitInputRequest {
-    /// The provisional inclusive admission maximum: one mebibyte of UTF-8
-    /// text.
-    // numeric-bound: ceiling - protects command memory and durable input storage
-    pub const MAX_CONTENT_UTF8_BYTES: usize = 1_048_576;
-
-    /// Validates admission policy before canonical command construction.
+    /// Validates structural admission before canonical command construction.
     pub fn try_new(
         command_id: DurableCommandId,
         session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
+    ) -> Result<Self, SubmitInputRequestError> {
+        Self::try_new_with_content_limit(command_id, session, content, delivery, None)
+    }
+
+    /// Validates structural admission and the deployment's optional content policy.
+    pub fn try_new_with_content_limit(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+        max_content_utf8_bytes: Option<usize>,
     ) -> Result<Self, SubmitInputRequestError> {
         if command_id.as_uuid().is_nil() {
             return Err(SubmitInputRequestError::InvalidCommandId(
@@ -85,8 +95,13 @@ impl SubmitInputRequest {
             ));
         }
         let utf8_byte_length = content.text().as_str().len();
-        if utf8_byte_length > Self::MAX_CONTENT_UTF8_BYTES {
-            return Err(SubmitInputRequestError::OversizedContent { utf8_byte_length });
+        if let Some(max_utf8_bytes) = max_content_utf8_bytes
+            && utf8_byte_length > max_utf8_bytes
+        {
+            return Err(SubmitInputRequestError::OversizedContent {
+                utf8_byte_length,
+                max_utf8_bytes,
+            });
         }
 
         Ok(Self {
@@ -697,31 +712,43 @@ mod tests {
     /// canonical command construction, including a multi-byte terminal scalar.
     #[test]
     fn accepted_input_content_at_the_utf8_byte_bound_is_admitted() {
-        let mut exact = "a".repeat(SubmitInputRequest::MAX_CONTENT_UTF8_BYTES - 2);
+        const CONFIGURED_MAX_UTF8_BYTES: usize = 1_048_576;
+        let mut exact = "a".repeat(CONFIGURED_MAX_UTF8_BYTES - 2);
         exact.push('\u{e9}');
 
-        let request =
-            SubmitInputRequest::try_new(command_id(1), session_id(2), content(&exact), delivery(1))
-                .expect("text ending exactly at the UTF-8 byte bound is admitted");
+        let request = SubmitInputRequest::try_new_with_content_limit(
+            command_id(1),
+            session_id(2),
+            content(&exact),
+            delivery(1),
+            Some(CONFIGURED_MAX_UTF8_BYTES),
+        )
+        .expect("text ending exactly at the UTF-8 byte bound is admitted");
 
-        assert_eq!(request.content().text().as_str().len(), 1_048_576);
+        assert_eq!(
+            request.content().text().as_str().len(),
+            CONFIGURED_MAX_UTF8_BYTES
+        );
     }
 
     /// The accepted-input contract rejects oversized text at the application
     /// admission boundary without retaining it in the error.
     #[test]
     fn oversized_accepted_input_content_is_rejected_before_command_construction() {
-        let oversized = "a".repeat(SubmitInputRequest::MAX_CONTENT_UTF8_BYTES + 1);
+        const CONFIGURED_MAX_UTF8_BYTES: usize = 1_048_576;
+        let oversized = "a".repeat(CONFIGURED_MAX_UTF8_BYTES + 1);
 
         assert_eq!(
-            SubmitInputRequest::try_new(
+            SubmitInputRequest::try_new_with_content_limit(
                 command_id(1),
                 session_id(2),
                 content(&oversized),
                 delivery(1),
+                Some(CONFIGURED_MAX_UTF8_BYTES),
             ),
             Err(SubmitInputRequestError::OversizedContent {
-                utf8_byte_length: 1_048_577,
+                utf8_byte_length: CONFIGURED_MAX_UTF8_BYTES + 1,
+                max_utf8_bytes: CONFIGURED_MAX_UTF8_BYTES,
             })
         );
     }

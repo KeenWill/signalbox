@@ -35,17 +35,16 @@ use signalbox_process_protocol::{
     DelegationWaitMode, DescendantTerminationScope, ErrorCode, ErrorDetail, FrameEncodeError,
     GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_BLOB_CHUNK_BYTES,
     MAX_BLOB_READ_BYTES, MAX_CONTENT_FRAGMENT_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
-    MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
-    ModelSelection, ModelSettingsOverlay, ProtocolVersion, RejectionDetail, RequestId,
-    ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
-    ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
-    ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
-    ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
-    ReviewRunSnapshot, RunnerConnectionHealth, RunnerProjection, RunnerProjectionState,
-    RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
-    SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision, TurnState,
-    decode_server_line, encode_client_line, encode_server_line,
+    MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState, ModelSelection, ModelSettingsOverlay,
+    ProtocolVersion, RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent,
+    ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
+    ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
+    ReviewOrchestrationState, ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome,
+    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
+    ReviewRepairTerminalOutcome, ReviewRunSnapshot, RunnerConnectionHealth, RunnerProjection,
+    RunnerProjectionState, RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent,
+    SessionPlacement, SystemPromptMember, SystemPromptText, ToolBatchState, ToolDecision,
+    TurnState, decode_server_line, encode_client_line, encode_server_line,
 };
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
@@ -60,6 +59,8 @@ mod transcript;
 
 // numeric-bound: ceiling - protects request memory and durable input storage
 const MAX_INPUT_CONTENT_BYTES: usize = 1_048_576;
+// numeric-bound: guard - prevents a system prompt from exceeding one wire frame
+const MAX_SYSTEM_PROMPT_FRAME_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 // numeric-bound: ceiling - protects frame memory while decoding review input
 const MAX_REVIEW_JSON_INPUT_BYTES: usize = MAX_FRAME_BYTES / 4 * 3;
 // numeric-bound: ceiling - protects frame memory while reading import source
@@ -534,7 +535,8 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::ReviewFindingsEnd { .. }
         | ServerMessage::ReviewOrchestrationStarted { .. }
         | ServerMessage::ReviewOrchestrationAdvanced { .. }
-        | ServerMessage::ReviewOrchestration { .. } => DelegationResponse::Unexpected,
+        | ServerMessage::ReviewOrchestration { .. }
+        | ServerMessage::DeploymentLimits { .. } => DelegationResponse::Unexpected,
     }
 }
 
@@ -636,7 +638,8 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::ReviewFindingsEnd { .. }
         | ServerMessage::ReviewOrchestrationStarted { .. }
         | ServerMessage::ReviewOrchestrationAdvanced { .. }
-        | ServerMessage::ReviewOrchestration { .. } => ConversationImportResponse::Unexpected,
+        | ServerMessage::ReviewOrchestration { .. }
+        | ServerMessage::DeploymentLimits { .. } => ConversationImportResponse::Unexpected,
     }
 }
 
@@ -750,7 +753,8 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::ReviewFindingsEnd { .. }
         | ServerMessage::ReviewOrchestrationStarted { .. }
         | ServerMessage::ReviewOrchestrationAdvanced { .. }
-        | ServerMessage::ReviewOrchestration { .. } => BlobUploadResponse::Unexpected,
+        | ServerMessage::ReviewOrchestration { .. }
+        | ServerMessage::DeploymentLimits { .. } => BlobUploadResponse::Unexpected,
     }
 }
 
@@ -1611,7 +1615,7 @@ async fn read_system_prompt_file(path: &Path) -> Result<SystemPromptText, Client
     let file = tokio::fs::File::open(path)
         .await
         .map_err(ClientError::system_prompt_file)?;
-    let read_limit = u64::try_from(MAX_SYSTEM_PROMPT_UTF8_BYTES)
+    let read_limit = u64::try_from(MAX_SYSTEM_PROMPT_FRAME_BYTES)
         .ok()
         .and_then(|bound| bound.checked_add(1))
         .ok_or(ClientError::Protocol("system prompt read bound overflow"))?;
@@ -1626,9 +1630,9 @@ async fn read_system_prompt_file(path: &Path) -> Result<SystemPromptText, Client
             "the system prompt file must not be empty",
         ));
     }
-    if bytes.len() > MAX_SYSTEM_PROMPT_UTF8_BYTES {
+    if bytes.len() > MAX_SYSTEM_PROMPT_FRAME_BYTES {
         return Err(ClientError::Input(
-            "the system prompt exceeds the 1 MiB UTF-8 byte limit",
+            "the system prompt exceeds the wire-frame byte limit",
         ));
     }
     let text = String::from_utf8(bytes)

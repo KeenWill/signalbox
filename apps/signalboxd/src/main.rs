@@ -23,9 +23,10 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
     InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, SchedulerPassOccupancyBound,
-    StaleActiveTurnBound, StartEligibleTurnService, StartupScanService, TurnLivenessScanInterval,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
+    SchedulerPassOccupancyBound, StaleActiveTurnBound, StartEligibleTurnService,
+    StartupScanService, TurnLivenessScanInterval, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -92,9 +93,10 @@ const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
 const RUNNER_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_SOCKET_PATH";
 const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
-fn graceful_shutdown_window() -> Duration {
-    SchedulerPassOccupancyBound::hard_ceiling()
+fn graceful_shutdown_window(occupancy_bound: SchedulerPassOccupancyBound) -> Duration {
+    occupancy_bound
         .get()
+        .unwrap_or(Duration::ZERO)
         .saturating_add(GRACEFUL_SHUTDOWN_CLEANUP_WINDOW)
 }
 
@@ -1160,6 +1162,95 @@ async fn run_hub(
                 SanitizedStartupCause::ModelConfiguration(&error),
             )
         })?;
+    let numeric_bounds = model_configuration.numeric_bounds();
+    let configured_duration = |field| numeric_bounds.duration(field).flatten();
+    let configured_usize = |field| {
+        numeric_bounds
+            .integer(field)
+            .flatten()
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("configured_numeric_bound_exceeds_platform"),
+                )
+            })
+    };
+    let scheduler_pass_occupancy_bound = configured_duration("scheduler_pass_occupancy_bound")
+        .map(SchedulerPassOccupancyBound::try_new)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_scheduler_pass_occupancy_bound"),
+            )
+        })?
+        .unwrap_or_else(SchedulerPassOccupancyBound::unbounded);
+    let shutdown_grace_window = graceful_shutdown_window(scheduler_pass_occupancy_bound);
+    let stale_active_turn_bound = configured_duration("stale_active_turn_bound")
+        .map(StaleActiveTurnBound::try_new)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_stale_active_turn_bound"),
+            )
+        })?;
+    let turn_liveness_scan_interval = configured_duration("turn_liveness_scan_interval")
+        .map(TurnLivenessScanInterval::try_new)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_turn_liveness_scan_interval"),
+            )
+        })?;
+    let reconciliation_sweep_interval = configured_duration("reconciliation_sweep_interval")
+        .map(ReconciliationSweepInterval::try_new)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_reconciliation_sweep_interval"),
+            )
+        })?;
+    let nudge_buffer_capacity = match configured_usize("nudge_buffer_capacity")? {
+        Some(capacity) => Some(NonZeroUsize::new(capacity).ok_or_else(|| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_nudge_buffer_capacity"),
+            )
+        })?),
+        None => None,
+    };
+    let scheduler_pass_admission_cap = configured_usize("scheduler_pass_admission_cap")?;
+    let automatic_reconciliation_attempt_budget = numeric_bounds
+        .integer("automatic_reconciliation_attempt_budget")
+        .flatten()
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static(
+                    "automatic_reconciliation_attempt_budget_exceeds_platform",
+                ),
+            )
+        })?;
+    if automatic_reconciliation_attempt_budget.is_some_and(|budget| i32::try_from(budget).is_err())
+    {
+        return Err(erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static(
+                "automatic_reconciliation_attempt_budget_exceeds_storage",
+            ),
+        ));
+    }
+    let automatic_reconciliation_base_backoff =
+        configured_duration("automatic_reconciliation_base_backoff");
+    let automatic_reconciliation_backoff_cap =
+        configured_duration("automatic_reconciliation_backoff_cap");
     if configuration.repository_watch_credential_conflicts(&model_configuration) {
         let error = HubConfigurationError::new(
             GITHUB_TOKEN_FILE_ENVIRONMENT,
@@ -1646,7 +1737,11 @@ async fn run_hub(
     }
     let scheduler_pool = pool.clone();
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
-    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::with_options(
+        sweep,
+        reconciliation_sweep_interval,
+        nudge_buffer_capacity,
+    );
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let repository_watch_runtime = match model_configuration.repository_watch() {
         Some(configuration) => match RepositoryWatchRuntime::try_new(
@@ -1800,8 +1895,11 @@ async fn run_hub(
     .with_occupancy_recovery(scheduler_pool.clone(), eligibility_nudge.clone());
     let turn_liveness_runtime = TurnLivenessRuntime::new(
         scheduler_pool.clone(),
-        StaleActiveTurnBound::hard_ceiling(),
-        TurnLivenessScanInterval::baseline(),
+        stale_active_turn_bound,
+        turn_liveness_scan_interval,
+        automatic_reconciliation_attempt_budget,
+        automatic_reconciliation_base_backoff,
+        automatic_reconciliation_backoff_cap,
     );
     let goal_disposition = PostgresGoalPassDisposition::new(
         scheduler_pool,
@@ -1825,7 +1923,7 @@ async fn run_hub(
         ),
     }
     let pass = GoalAwareEligibilityPass::new(activated_pass, goal_disposition);
-    let scheduler_max_in_flight_passes = model_configuration.scheduler_max_in_flight_passes();
+    let scheduler_max_in_flight_passes = scheduler_pass_admission_cap;
     let mut scheduler = match scheduler_max_in_flight_passes {
         Some(limit) => match NonZeroUsize::new(limit) {
             Some(limit) => SchedulerLoop::with_max_in_flight(work_source, pass, limit),
@@ -1833,6 +1931,7 @@ async fn run_hub(
         },
         None => SchedulerLoop::new(work_source, pass),
     };
+    scheduler = scheduler.with_occupancy_bound(scheduler_pass_occupancy_bound);
     if let Some((metrics, _server)) = prometheus_runtime.as_ref() {
         scheduler = scheduler.with_occupancy_observer(Arc::new(metrics.clone()));
     }
@@ -1993,7 +2092,7 @@ async fn run_hub(
             let (drain, components_clean) = drain_runtime_tasks(
                 &mut runtime_tasks,
                 guard_loss.as_mut(),
-                graceful_shutdown_window(),
+                shutdown_grace_window,
             )
             .await;
             cause = combine_runtime_stop_cause(cause, components_clean);
@@ -2209,10 +2308,7 @@ async fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(ShutdownOutcome::GraceWindowExpired) => {
-            tracing::warn!(
-                grace_window_seconds = graceful_shutdown_window().as_secs(),
-                "daemon shutdown grace window expired; abandoning in-flight work"
-            );
+            tracing::warn!("daemon shutdown grace window expired; abandoning in-flight work");
             ExitCode::SUCCESS
         }
         Ok(ShutdownOutcome::SignalListenerFailed) => {
@@ -2238,7 +2334,6 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
-                grace_window_seconds = graceful_shutdown_window().as_secs(),
                 "activated-turn execution failed and shutdown grace expired; abandoning in-flight work for startup recovery"
             );
             ExitCode::FAILURE
@@ -2266,7 +2361,6 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
-                grace_window_seconds = graceful_shutdown_window().as_secs(),
                 "daemon runtime component failed and shutdown grace expired; abandoning in-flight work"
             );
             ExitCode::FAILURE
@@ -2283,7 +2377,6 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?RuntimePhase::Runtime,
                 failure_class = ?OperatorFailureClass::CallerOrHubBug,
-                grace_window_seconds = graceful_shutdown_window().as_secs(),
                 "daemon runtime task defect was followed by an expired shutdown grace window"
             );
             ExitCode::FAILURE
@@ -2321,7 +2414,7 @@ mod tests {
     use expect_test::expect;
     use signalbox_application::{
         ClassifyOperatorFailure, EligibilityPass, EligibilityWorkSource, OperatorFailureClass,
-        SchedulerLoop,
+        SchedulerLoop, SchedulerPassOccupancyBound,
     };
     use signalbox_domain::{
         RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleVersion, SessionId, TurnId,
@@ -3068,7 +3161,10 @@ mod tests {
                 shutdown_receiver.await.expect("the test requests shutdown");
                 SchedulerStopCause::Requested
             },
-            graceful_shutdown_window(),
+            graceful_shutdown_window(
+                SchedulerPassOccupancyBound::try_new(Duration::from_secs(900))
+                    .expect("the test occupancy bound is valid"),
+            ),
         ));
 
         entered_receiver

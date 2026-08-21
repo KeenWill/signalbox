@@ -7,11 +7,11 @@ use signalbox_process_protocol::{
     BoundChildAction, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, CommandId,
     ConversationCursor, ConversationImportFormat, ConversationOrigin, ConversationOriginFilter,
     DelegationPolicy, DelegationWaitMode, ImportedSessionRelationship, MAX_BLOB_READ_BYTES,
-    MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
-    MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, ModelSelection, ReviewConcernTerminalOutcome,
-    ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput,
-    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewPassTerminalOutcome,
-    ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, SessionPlacement,
+    MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, ModelSelection,
+    ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent,
+    ReviewFindingInput, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
+    ReviewPassTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow,
+    SessionPlacement,
 };
 use uuid::Uuid;
 
@@ -1942,14 +1942,6 @@ pub(crate) fn parse(
                     "search requires distinct --tag values",
                 )));
             }
-            if arguments.tags.len() > MAX_SESSION_METADATA_REQUIRED_TAGS {
-                return Err(UsageError(Cli::command().error(
-                    ErrorKind::TooManyValues,
-                    format!(
-                        "search admits at most {MAX_SESSION_METADATA_REQUIRED_TAGS} --tag values"
-                    ),
-                )));
-            }
             if arguments
                 .tags
                 .iter()
@@ -2677,8 +2669,7 @@ mod tests {
         CanonicalU64, CanonicalUuid, ConversationCursor, ConversationImportFormat,
         ConversationOrigin, ConversationOriginFilter, DelegationPolicy, DelegationWaitMode,
         ImportedSessionRelationship, MAX_SESSION_METADATA_INDEXED_UTF8_BYTES,
-        MAX_SESSION_METADATA_REQUIRED_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
-        SessionPlacement,
+        MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, SessionPlacement,
     };
     use uuid::Uuid;
 
@@ -3546,12 +3537,8 @@ mod tests {
     }
 
     #[test]
-    fn search_rejects_more_required_tags_than_the_process_filter_admits() {
-        let admitted = search_requiring_tags(MAX_SESSION_METADATA_REQUIRED_TAGS);
-        let one_tag_beyond = search_requiring_tags(MAX_SESSION_METADATA_REQUIRED_TAGS + 1);
-
-        assert!(parse(admitted).is_ok());
-        assert!(parse(one_tag_beyond).is_err());
+    fn search_defers_required_tag_count_policy_to_the_daemon() {
+        assert!(parse(search_requiring_tags(3)).is_ok());
     }
 
     #[test]

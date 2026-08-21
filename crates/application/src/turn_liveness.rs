@@ -13,28 +13,6 @@ use std::{collections::HashMap, error::Error, fmt, num::NonZeroU32, time::Durati
 use signalbox_domain::{ModelCallId, SessionId, ToolAttemptId, TurnAttemptId, TurnId};
 use tokio::time::Instant;
 
-/// How long a turn's durable evidence may stand still before the turn is
-/// treated as wedged rather than working.
-///
-/// Set at the real production danger point: the longest legitimate tool
-/// execution and the longest legitimate provider call both complete far
-/// inside it, while an operator waiting on a wedged session notices well
-/// before the next half hour passes.
-// numeric-bound: ceiling - protects against a wedged turn holding its session slot forever
-const STALE_ACTIVE_TURN_BOUND: Duration = Duration::from_secs(30 * 60);
-/// How often turn liveness is reconsidered.
-// numeric-bound: tunable - controls the turn-liveness reconsideration cadence
-const BASELINE_TURN_LIVENESS_SCAN_INTERVAL: Duration = Duration::from_secs(60);
-/// Delay before a daemon first retries an ambiguous-operation reconciliation.
-// numeric-bound: tunable - controls the first automatic reconciliation retry delay
-const AUTOMATIC_RECONCILIATION_BASE_BACKOFF: Duration = Duration::from_secs(120);
-/// Longest delay between automatic ambiguous-operation reconciliation attempts.
-// numeric-bound: ceiling - bounds automatic reconciliation latency growth
-const AUTOMATIC_RECONCILIATION_BACKOFF_CAP: Duration = Duration::from_secs(1_800);
-/// Durable attempts one ambiguous-operation wait may spend automatically.
-// numeric-bound: ceiling - bounds automatic reconciliation work per ambiguous operation
-const AUTOMATIC_RECONCILIATION_ATTEMPT_BUDGET: u32 = 5;
-
 /// One durable automatic reconciliation attempt.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct AutomaticReconciliationAttempt(NonZeroU32);
@@ -45,13 +23,11 @@ impl AutomaticReconciliationAttempt {
         Self(NonZeroU32::MIN)
     }
 
-    /// Reconstitutes an admitted attempt ordinal.
+    /// Reconstitutes a structurally valid attempt ordinal.
     pub const fn try_from_u32(value: u32) -> Option<Self> {
         match NonZeroU32::new(value) {
-            Some(value) if value.get() <= AUTOMATIC_RECONCILIATION_ATTEMPT_BUDGET => {
-                Some(Self(value))
-            }
-            Some(_) | None => None,
+            Some(value) => Some(Self(value)),
+            None => None,
         }
     }
 
@@ -60,21 +36,23 @@ impl AutomaticReconciliationAttempt {
         self.0.get()
     }
 
-    /// Returns the delay after this failed attempt before another is due.
-    pub fn retry_backoff(self) -> Duration {
-        AUTOMATIC_RECONCILIATION_BASE_BACKOFF
-            .saturating_mul(2_u32.saturating_pow(self.get() - 1))
-            .min(AUTOMATIC_RECONCILIATION_BACKOFF_CAP)
+    /// Returns the configured delay after this failed attempt before another is due.
+    pub fn retry_backoff(self, base: Duration, cap: Option<Duration>) -> Duration {
+        let backoff = base.saturating_mul(2_u32.saturating_pow(self.get() - 1));
+        cap.map_or(backoff, |cap| backoff.min(cap))
     }
 
-    /// Returns the next admitted attempt, or `None` at the product budget.
+    /// Returns the next structurally representable attempt.
     pub const fn next(self) -> Option<Self> {
         Self::try_from_u32(self.get().saturating_add(1))
     }
 
-    /// Returns the hard product attempt budget.
-    pub const fn budget() -> u32 {
-        AUTOMATIC_RECONCILIATION_ATTEMPT_BUDGET
+    /// Reports whether this attempt is admitted by the deployment budget.
+    pub const fn is_within_budget(self, budget: Option<u32>) -> bool {
+        match budget {
+            Some(budget) => self.get() <= budget,
+            None => true,
+        }
     }
 }
 
@@ -231,25 +209,10 @@ impl ClaimedAutomaticReconciliation {
 pub struct StaleActiveTurnBound(Duration);
 
 impl StaleActiveTurnBound {
-    /// Returns the hard safety ceiling compiled into this binary.
-    pub const fn hard_ceiling() -> Self {
-        Self(STALE_ACTIVE_TURN_BOUND)
-    }
-
-    /// Accepts a shorter whole-second bound, rejecting anything else.
-    ///
-    /// A deployment may make the watchdog react sooner. Raising the bound is
-    /// refused here rather than in a caller, because the ceiling is what makes
-    /// the maximum wedge duration a property of the binary. Sub-second
-    /// precision is refused rather than truncated: nothing could act on it —
-    /// staleness is decided from evidence sampled once per scan interval — and
-    /// admitting it would make the audited bound disagree with the bound in
-    /// force.
-    pub fn try_lowered(bound: Duration) -> Result<Self, TurnLivenessBoundError> {
+    /// Accepts a configured nonzero whole-second bound.
+    pub fn try_new(bound: Duration) -> Result<Self, TurnLivenessBoundError> {
         if bound.is_zero() {
             Err(TurnLivenessBoundError::Zero)
-        } else if bound > STALE_ACTIVE_TURN_BOUND {
-            Err(TurnLivenessBoundError::AboveCeiling)
         } else if bound.subsec_nanos() != 0 {
             Err(TurnLivenessBoundError::Subsecond)
         } else {
@@ -273,9 +236,17 @@ impl StaleActiveTurnBound {
 pub struct TurnLivenessScanInterval(Duration);
 
 impl TurnLivenessScanInterval {
-    /// Returns the one-minute baseline compiled into this binary.
-    pub const fn baseline() -> Self {
-        Self(BASELINE_TURN_LIVENESS_SCAN_INTERVAL)
+    /// Accepts a configured nonzero timer-representable interval.
+    pub fn try_new(interval: Duration) -> Result<Self, TurnLivenessBoundError> {
+        if interval.is_zero() {
+            Err(TurnLivenessBoundError::Zero)
+        } else if interval.subsec_nanos() != 0 {
+            Err(TurnLivenessBoundError::Subsecond)
+        } else if Instant::now().checked_add(interval).is_none() {
+            Err(TurnLivenessBoundError::TimerRange)
+        } else {
+            Ok(Self(interval))
+        }
     }
 
     /// Returns the validated duration.
@@ -289,18 +260,18 @@ impl TurnLivenessScanInterval {
 pub enum TurnLivenessBoundError {
     /// A zero bound would terminalize a turn the moment it was first observed.
     Zero,
-    /// The proposal exceeds the hard safety ceiling, which only lowers.
-    AboveCeiling,
     /// The proposal carries precision finer than a whole second.
     Subsecond,
+    /// The proposal cannot be represented by the runtime timer.
+    TimerRange,
 }
 
 impl fmt::Display for TurnLivenessBoundError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let reason = match self {
             Self::Zero => "must be nonzero",
-            Self::AboveCeiling => "cannot exceed the compiled staleness ceiling",
             Self::Subsecond => "must be a whole number of seconds",
+            Self::TimerRange => "does not fit the runtime timer range",
         };
         write!(formatter, "turn-liveness staleness bound {reason}")
     }
@@ -446,7 +417,7 @@ impl TurnLivenessLedger {
     ///
     /// The bound is supplied rather than reloaded from the ceiling so a
     /// deployment that validated a shorter one through
-    /// [`StaleActiveTurnBound::try_lowered`] actually gets it.
+    /// [`StaleActiveTurnBound::try_new`] actually gets it.
     pub fn new(bound: StaleActiveTurnBound) -> Self {
         Self {
             bound,
@@ -534,19 +505,25 @@ mod tests {
     }
 
     fn ledger() -> TurnLivenessLedger {
-        TurnLivenessLedger::new(StaleActiveTurnBound::hard_ceiling())
+        TurnLivenessLedger::new(
+            StaleActiveTurnBound::try_new(BOUND).expect("fixture bound is valid"),
+        )
     }
 
-    /// A deployment may react sooner than the compiled ceiling but never later.
+    /// The deployment may select any positive whole-second staleness bound.
     #[test]
-    fn the_staleness_bound_lowers_and_never_raises() {
+    fn the_staleness_bound_accepts_configured_whole_seconds() {
         let shorter = Duration::from_secs(60);
-        let lowered = StaleActiveTurnBound::try_lowered(shorter);
-        let raised = StaleActiveTurnBound::try_lowered(Duration::from_secs(60 * 60));
-        let zero = StaleActiveTurnBound::try_lowered(Duration::ZERO);
+        let longer = Duration::from_secs(60 * 60);
+        let configured_shorter = StaleActiveTurnBound::try_new(shorter);
+        let configured_longer = StaleActiveTurnBound::try_new(longer);
+        let zero = StaleActiveTurnBound::try_new(Duration::ZERO);
 
-        assert_eq!(lowered.map(StaleActiveTurnBound::get), Ok(shorter));
-        assert_eq!(raised, Err(TurnLivenessBoundError::AboveCeiling));
+        assert_eq!(
+            configured_shorter.map(StaleActiveTurnBound::get),
+            Ok(shorter)
+        );
+        assert_eq!(configured_longer.map(StaleActiveTurnBound::get), Ok(longer));
         assert_eq!(zero, Err(TurnLivenessBoundError::Zero));
     }
 
@@ -554,44 +531,54 @@ mod tests {
     /// so the reported bound and the bound in force can never disagree.
     #[test]
     fn a_subsecond_bound_is_refused_rather_than_truncated() {
-        let millis = StaleActiveTurnBound::try_lowered(Duration::from_millis(500));
-        let fractional = StaleActiveTurnBound::try_lowered(Duration::from_millis(1_500));
-        let whole = StaleActiveTurnBound::try_lowered(Duration::from_secs(1));
+        let millis = StaleActiveTurnBound::try_new(Duration::from_millis(500));
+        let fractional = StaleActiveTurnBound::try_new(Duration::from_millis(1_500));
+        let whole = StaleActiveTurnBound::try_new(Duration::from_secs(1));
 
         assert_eq!(millis, Err(TurnLivenessBoundError::Subsecond));
         assert_eq!(fractional, Err(TurnLivenessBoundError::Subsecond));
         assert_eq!(whole.map(StaleActiveTurnBound::as_secs), Ok(1));
     }
 
-    /// The compiled constants are the production values this page states.
+    /// The scan interval uses the same explicit deployment validation.
     #[test]
-    fn the_compiled_constants_are_thirty_minutes_and_one_minute() {
-        assert_eq!(StaleActiveTurnBound::hard_ceiling().get(), BOUND);
+    fn the_scan_interval_accepts_a_configured_duration() {
         assert_eq!(
-            TurnLivenessScanInterval::baseline().get(),
-            Duration::from_secs(60)
+            TurnLivenessScanInterval::try_new(Duration::from_secs(60))
+                .map(TurnLivenessScanInterval::get),
+            Ok(Duration::from_secs(60))
         );
     }
 
-    /// Automatic reconciliation spends one durable five-attempt budget and
-    /// applies exponential backoff without exceeding the thirty-minute cap.
+    /// Automatic reconciliation applies the supplied budget and backoff policy.
     #[test]
-    fn ambiguous_model_call_reconciliation_has_a_bounded_retry_schedule() {
+    fn ambiguous_model_call_reconciliation_uses_configured_retry_policy() {
+        let base = Duration::from_secs(120);
+        let cap = Some(Duration::from_secs(1_800));
         let first = AutomaticReconciliationAttempt::first();
         let second = first.next().expect("the second attempt is admitted");
         let third = second.next().expect("the third attempt is admitted");
         let fourth = third.next().expect("the fourth attempt is admitted");
         let fifth = fourth.next().expect("the fifth attempt is admitted");
 
-        assert_eq!(AutomaticReconciliationAttempt::budget(), 5);
-        assert_eq!(first.retry_backoff(), Duration::from_secs(120));
-        assert_eq!(second.retry_backoff(), Duration::from_secs(240));
-        assert_eq!(third.retry_backoff(), Duration::from_secs(480));
-        assert_eq!(fourth.retry_backoff(), Duration::from_secs(960));
-        assert_eq!(fifth.retry_backoff(), Duration::from_secs(1_800));
-        assert_eq!(fifth.next(), None);
+        assert!(fifth.is_within_budget(Some(5)));
+        assert!(
+            !fifth
+                .next()
+                .expect("sixth is representable")
+                .is_within_budget(Some(5))
+        );
+        assert_eq!(first.retry_backoff(base, cap), Duration::from_secs(120));
+        assert_eq!(second.retry_backoff(base, cap), Duration::from_secs(240));
+        assert_eq!(third.retry_backoff(base, cap), Duration::from_secs(480));
+        assert_eq!(fourth.retry_backoff(base, cap), Duration::from_secs(960));
+        assert_eq!(fifth.retry_backoff(base, cap), Duration::from_secs(1_800));
         assert_eq!(AutomaticReconciliationAttempt::try_from_u32(0), None);
-        assert_eq!(AutomaticReconciliationAttempt::try_from_u32(6), None);
+        assert_eq!(
+            AutomaticReconciliationAttempt::try_from_u32(6)
+                .map(AutomaticReconciliationAttempt::get),
+            Some(6)
+        );
     }
 
     /// A turn seen for the first time is never due, however long the daemon
@@ -668,12 +655,10 @@ mod tests {
         assert_eq!(ledger.watched_turn_count(), 1);
     }
 
-    /// The validated lowered bound is the one the ledger decides by, so a
-    /// deployment that shortened it does not silently keep the ceiling.
+    /// The validated configured bound is the one the ledger decides by.
     #[tokio::test(start_paused = true)]
     async fn a_lowered_bound_is_the_one_the_ledger_applies() {
-        let lowered =
-            StaleActiveTurnBound::try_lowered(Duration::from_secs(60)).expect("60s is below 30m");
+        let lowered = StaleActiveTurnBound::try_new(Duration::from_secs(60)).expect("60s is valid");
         let mut ledger = TurnLivenessLedger::new(lowered);
         let _ = ledger.reconcile(&[candidate(1)], Instant::now());
         tokio::time::advance(Duration::from_secs(60)).await;

@@ -2753,21 +2753,24 @@ async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
-    let oversized = UserContent::try_text("a".repeat(1_048_577))
+    const CONFIGURED_MAX_UTF8_BYTES: usize = 11;
+    let oversized = UserContent::try_text("a".repeat(CONFIGURED_MAX_UTF8_BYTES + 1))
         .expect("domain text is intentionally unbounded");
-    let error = SubmitInputRequest::try_new(
+    let error = SubmitInputRequest::try_new_with_content_limit(
         DurableCommandId::from_uuid(Uuid::from_u128(0x320)),
         SessionId::from_uuid(Uuid::from_u128(0x720)),
         oversized,
         DeliveryRequest::StartWhenNoActiveTurn {
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
+        Some(CONFIGURED_MAX_UTF8_BYTES),
     )
     .expect_err("text over the provisional bound fails application admission");
     assert_eq!(
         error,
         SubmitInputRequestError::OversizedContent {
-            utf8_byte_length: 1_048_577,
+            utf8_byte_length: CONFIGURED_MAX_UTF8_BYTES + 1,
+            max_utf8_bytes: CONFIGURED_MAX_UTF8_BYTES,
         }
     );
     let claimed: i64 = sqlx::query_scalar("SELECT count(*) FROM durable_command")

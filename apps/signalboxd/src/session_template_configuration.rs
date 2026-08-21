@@ -604,6 +604,13 @@ fn parse_template(
     home: &dyn Fn() -> Option<PathBuf>,
     models: &HubModelConfiguration,
 ) -> Result<ResolvedSessionTemplate, SessionTemplateConfigurationError> {
+    let max_system_prompt_utf8_bytes = models
+        .numeric_bounds()
+        .integer("max_system_prompt_utf8_bytes")
+        .flatten()
+        .map(usize::try_from)
+        .transpose()
+        .map_err(|_| SessionTemplateConfigurationError::InvalidPrompt)?;
     reject_unknown_fields(
         table,
         &[
@@ -660,9 +667,12 @@ fn parse_template(
         (Some(value), None) => value.to_owned(),
         (None, Some(reference)) => {
             let prompt_path = resolve_prompt_path(reference, catalog_path, home)?;
-            read_prompt_file(&prompt_path)?
+            read_prompt_file(&prompt_path, max_system_prompt_utf8_bytes)?
         }
     };
+    if max_system_prompt_utf8_bytes.is_some_and(|limit| prompt.len() > limit) {
+        return Err(SessionTemplateConfigurationError::InvalidPrompt);
+    }
     let prompt = SessionSystemPrompt::try_new(prompt)
         .map_err(|_| SessionTemplateConfigurationError::InvalidPrompt)?;
     let dangerous_tool_auto_approval = table
@@ -734,7 +744,10 @@ fn is_reserved_review_template_name(name: &SessionTemplateName) -> bool {
             .any(|(_, template_name)| name.as_str() == *template_name)
 }
 
-fn read_prompt_file(path: &Path) -> Result<String, SessionTemplateConfigurationError> {
+fn read_prompt_file(
+    path: &Path,
+    max_utf8_bytes: Option<usize>,
+) -> Result<String, SessionTemplateConfigurationError> {
     let file = open(
         path,
         OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
@@ -748,19 +761,28 @@ fn read_prompt_file(path: &Path) -> Result<String, SessionTemplateConfigurationE
     if !metadata.is_file() {
         return Err(SessionTemplateConfigurationError::ReadPrompt);
     }
-    let maximum_bytes = u64::try_from(SessionSystemPrompt::MAX_UTF8_BYTES)
-        .map_err(|_| SessionTemplateConfigurationError::InvalidPrompt)?;
-    if metadata.len() > maximum_bytes {
-        return Err(SessionTemplateConfigurationError::InvalidPrompt);
-    }
-    let read_limit = maximum_bytes
-        .checked_add(1)
-        .ok_or(SessionTemplateConfigurationError::InvalidPrompt)?;
     let mut bytes = Vec::new();
-    file.take(read_limit)
-        .read_to_end(&mut bytes)
-        .map_err(|_| SessionTemplateConfigurationError::ReadPrompt)?;
-    if bytes.len() > SessionSystemPrompt::MAX_UTF8_BYTES {
+    match max_utf8_bytes {
+        Some(maximum_bytes) => {
+            let maximum_bytes = u64::try_from(maximum_bytes)
+                .map_err(|_| SessionTemplateConfigurationError::InvalidPrompt)?;
+            if metadata.len() > maximum_bytes {
+                return Err(SessionTemplateConfigurationError::InvalidPrompt);
+            }
+            let read_limit = maximum_bytes
+                .checked_add(1)
+                .ok_or(SessionTemplateConfigurationError::InvalidPrompt)?;
+            file.take(read_limit)
+                .read_to_end(&mut bytes)
+                .map_err(|_| SessionTemplateConfigurationError::ReadPrompt)?;
+        }
+        None => {
+            file.take(u64::MAX)
+                .read_to_end(&mut bytes)
+                .map_err(|_| SessionTemplateConfigurationError::ReadPrompt)?;
+        }
+    }
+    if max_utf8_bytes.is_some_and(|limit| bytes.len() > limit) {
         return Err(SessionTemplateConfigurationError::InvalidPrompt);
     }
     String::from_utf8(bytes).map_err(|_| SessionTemplateConfigurationError::ReadPrompt)
@@ -926,7 +948,7 @@ mod tests {
     use signalbox_application::ReviewOrchestrationAttemptId;
     use signalbox_domain::{
         DangerousToolAutoApproval, ModelSelectionRequest, ModelSettingSource, ReasoningLevel,
-        RepoWatchDispatchContextShape, ReviewTargetId, SessionSystemPrompt, SessionTemplateName,
+        RepoWatchDispatchContextShape, ReviewTargetId, SessionTemplateName,
     };
 
     use super::{
@@ -1374,11 +1396,14 @@ dangerous_tool_auto_approval = false
     fn oversized_prompt_file_returns_precise_typed_failure() {
         let temporary = tempfile::tempdir().expect("temporary deployment root");
         let prompt_path = temporary.path().join("oversized.txt");
-        fs::write(
-            &prompt_path,
-            "x".repeat(SessionSystemPrompt::MAX_UTF8_BYTES + 1),
-        )
-        .expect("oversized synthetic prompt is written");
+        let models = models();
+        let configured_limit = models
+            .numeric_bounds()
+            .integer("max_system_prompt_utf8_bytes")
+            .expect("the required prompt bound is present")
+            .expect("the fixture prompt bound is finite");
+        fs::write(&prompt_path, "x".repeat(configured_limit as usize + 1))
+            .expect("oversized synthetic prompt is written");
         let catalog = inline_catalog("").replace(
             &format!("system_prompt = \"{INLINE_PROMPT}\""),
             "system_prompt_file = \"oversized.txt\"",
@@ -1387,7 +1412,7 @@ dangerous_tool_auto_approval = false
             &catalog,
             &temporary.path().join("session-templates.toml"),
             None,
-            &models(),
+            &models,
         );
 
         assert_eq!(

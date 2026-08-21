@@ -502,7 +502,7 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
             if matches!(*outcome, signalbox_domain::ModelCallTerminalOutcome::Completed(_))
     ));
 
-    let (_, _, _, _, _, provider, _, _, retained) = model_service.into_parts();
+    let (_, _, _, _, _, provider, _, _, retained, _) = model_service.into_parts();
     assert!(retained.is_none());
     let messages = provider
         .last_prepared_messages()

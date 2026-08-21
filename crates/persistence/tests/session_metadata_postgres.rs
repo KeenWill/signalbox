@@ -565,25 +565,25 @@ async fn inv012_tool_metadata_actor_round_trips_exactly() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// INV-012: the maximum admitted tag and attribute sets are retained exactly in
-/// both the current snapshot and its immutable receipt.
+/// INV-012: a multi-member tag and attribute set is retained exactly in both
+/// the current snapshot and its immutable receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_maximum_metadata_satellites_install_as_one_receipt() -> Result<(), Box<dyn Error>> {
+async fn inv012_metadata_satellites_install_as_one_receipt() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(creation(0x801, 0x701))
         .await?;
     let repository = SessionMetadataRepository::new(pool.clone());
-    let tags = (0..SessionMetadataContent::MAX_TAGS)
+    let tags = (0..3)
         .map(|index| format!("tag-{index:03}"))
         .collect::<Vec<_>>();
-    let attributes = (0..SessionMetadataContent::MAX_ATTRIBUTES)
+    let attributes = (0..3)
         .map(|index| (format!("key-{index:03}"), format!("value-{index:03}")))
         .collect::<Vec<_>>();
     let content =
-        SessionMetadataContent::try_new(Some(String::from("maximum")), tags, attributes, false)
-            .expect("the exact metadata member bounds are valid");
+        SessionMetadataContent::try_new(Some(String::from("multiple")), tags, attributes, false)
+            .expect("the exact metadata members are valid");
     let command = replacement(0x902, 0x701, content.clone());
 
     assert!(matches!(
@@ -1488,7 +1488,7 @@ async fn inv002_metadata_list_validates_omitted_attributes() -> Result<(), Box<d
     .execute(&pool)
     .await?;
 
-    let query = signalbox_application::SessionMetadataListQuery::default_page();
+    let query = signalbox_application::SessionMetadataListQuery::default_page(5);
     let mut page = repository.open_page(query).await?;
     assert!(matches!(
         page.next_item().await,
