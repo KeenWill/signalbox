@@ -6,6 +6,7 @@
 
 use std::{error::Error, num::NonZeroU64};
 
+use super::migrated_postgres;
 use signalbox_application::{
     CommissionDispatchRequest, CommissionedDispatchFence, UuidV7CommissionedDispatchIdGenerator,
 };
@@ -22,19 +23,9 @@ use signalbox_persistence::{
         ConvergenceSweepDecision, ConvergenceSweepFailureDisposition, ConvergenceSweepFailureKind,
         ConvergenceSweepObservation, PostgresConvergenceSweepStore,
     },
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
-    disposable_test_container_labels, local_test_connection_options, migrate,
 };
-use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
-use testcontainers_modules::{
-    postgres::Postgres,
-    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
-};
+use sqlx::types::Uuid;
 
-const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
-const DATABASE_NAME: &str = "signalbox_convergence_sweep";
-const DATABASE_USER: &str = "signalbox";
-const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const REPOSITORY: &str = "signalbox/repository";
 const HEAD_REPOSITORY: &str = "contributor/repository";
 const HEAD_SHA: &str = "1111111111111111111111111111111111111111";
@@ -48,29 +39,6 @@ const RETRY_DELAY_SECONDS: u64 = 60;
 const RETRY_BUDGET: i16 = 5;
 const MODEL_SELECTION_ID: u128 = 0x89_200;
 const CREDENTIAL_REFERENCE: &str = "fixture-credential";
-
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
-    let container = Postgres::default()
-        .with_db_name(DATABASE_NAME)
-        .with_user(DATABASE_USER)
-        .with_password(DATABASE_PASSWORD)
-        .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
-        .with_tag(POSTGRES_IMAGE_TAG)
-        .with_labels(disposable_test_container_labels())
-        .start()
-        .await?;
-    let host = container.get_host().await?;
-    let port = container.get_host_port_ipv4(5432).await?;
-    let database_url =
-        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect_with(local_test_connection_options(&database_url)?)
-        .await?;
-    migrate(&pool).await?;
-    Ok((container, pool))
-}
 
 fn repository() -> Result<RepositorySlug, Box<dyn Error>> {
     Ok(RepositorySlug::try_new(REPOSITORY.to_owned())?)
@@ -169,7 +137,7 @@ fn dispatched_and_busy(
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<(), Box<dyn Error>> {
-    let (_container, pool) = migrated_postgres().await?;
+    let (_container, pool, _database_url) = migrated_postgres().await?;
     let store = PostgresConvergenceSweepStore::new(pool.clone());
     let repository = repository()?;
     let observation = observation()?;
@@ -249,7 +217,7 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), Box<dyn Error>> {
-    let (_container, pool) = migrated_postgres().await?;
+    let (_container, pool, _database_url) = migrated_postgres().await?;
     let store = PostgresConvergenceSweepStore::new(pool);
     let repository = repository()?;
     let observation = observation()?;
@@ -301,7 +269,7 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn racing_pull_request_commissions_skip_the_second_live_session() -> Result<(), Box<dyn Error>>
 {
-    let (_container, pool) = migrated_postgres().await?;
+    let (_container, pool, _database_url) = migrated_postgres().await?;
     let store = PostgresCommissionedDispatchStore::new(pool, credential_pin());
     let first = prepared_commission(0x89_201)?;
     let second = prepared_commission(0x89_202)?;
@@ -319,7 +287,7 @@ async fn racing_pull_request_commissions_skip_the_second_live_session() -> Resul
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn no_model_activity_parks_immediately_with_its_typed_need() -> Result<(), Box<dyn Error>> {
-    let (_container, pool) = migrated_postgres().await?;
+    let (_container, pool, _database_url) = migrated_postgres().await?;
     let store = PostgresConvergenceSweepStore::new(pool.clone());
     let repository = repository()?;
     let observation = observation()?;
@@ -359,7 +327,7 @@ async fn no_model_activity_parks_immediately_with_its_typed_need() -> Result<(),
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn a_live_session_observation_is_retained_for_movement_detection()
 -> Result<(), Box<dyn Error>> {
-    let (_container, pool) = migrated_postgres().await?;
+    let (_container, pool, _database_url) = migrated_postgres().await?;
     let store = PostgresConvergenceSweepStore::new(pool);
     let repository = repository()?;
     let observation = observation()?;
