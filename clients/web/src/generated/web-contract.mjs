@@ -123,6 +123,9 @@ const schemas = {
             "$ref": "#/$defs/WebBlobDerivationProducer"
           },
           "transformation_name": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
             "type": "string"
           },
           "transformation_version": {
@@ -482,6 +485,21 @@ function assertSchema(root, schema, value, path) {
     }
     if (schema.maximum !== undefined && value > schema.maximum) {
       fail(path, `at most ${schema.maximum}`);
+    }
+    return;
+  }
+  if (schema.type === "string") {
+    if (typeof value !== "string") {
+      fail(path, "string");
+    }
+    if (schema.minLength !== undefined && value.length < schema.minLength) {
+      fail(path, `at least ${schema.minLength} characters`);
+    }
+    if (schema.maxLength !== undefined && value.length > schema.maxLength) {
+      fail(path, `at most ${schema.maxLength} characters`);
+    }
+    if (schema.pattern !== undefined && !new RegExp(schema.pattern, "u").test(value)) {
+      fail(path, `matching ${schema.pattern}`);
     }
     return;
   }
