@@ -4,6 +4,9 @@ The scheduler occupancy ceiling and metrics, daemon-owned ambiguous-call
 reconciliation, and outer slot-held watchdog coverage were verified against this
 PR (`agent/turn-lifecycle-hardening`).
 
+The expired-pass recovery operation and retry budgets were re-verified against
+this PR (`agent/daemon-live-recovery-attempt-budget`).
+
 The runner-recovery active-phase algebra, checked persistence reconstitution,
 and preserved interrupt/stop authority were verified against this PR
 (`agent/runner-awaiting-recovery-persistence`). The atomic persistence
@@ -447,10 +450,15 @@ the sweep (INV-007).
   releases the admission slot. The handoff marks the correlated cancellation so
   fatal supervision does not mistake the scheduler's bounded drop for an
   unrelated failure, and invokes the existing startup-recovery transaction
-  immediately plus three retries at two-minute intervals. The outer watchdog
-  below remains responsible if those attempts all fail. Stateful pass data,
-  including identity generators, is never cloned per admitted pass; only the
-  detached expiry handler is cloned.
+  immediately. Each operation has a three-second ceiling, which is wider than
+  the repository's ordered connection, scheduler-row, and write-lock budgets so
+  those can return typed failures instead of being masked by the wrapper.
+  Nonambiguous infrastructure refusals retry after 50 milliseconds, allowing a
+  canceled pass to release its database resources; an ambiguous or other-class
+  failure retains the two-minute cadence. Three retries bound the detached work,
+  and the outer watchdog below remains responsible if all attempts fail.
+  Stateful pass data, including identity generators, is never cloned per
+  admitted pass; only the detached expiry handler is cloned.
 
   With Prometheus export enabled, the loop publishes the scheduler occupancy
   observations owned by
