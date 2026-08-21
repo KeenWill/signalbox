@@ -1,8 +1,8 @@
 # Pull-request convergence reconciliation
 
 This page is verified against PR #1056
-(`agent/daemon-live-commissioned-escalation-resume`; via PR #1061
-`agent/daemon-live-restart-recovery-accounting`). The daemon-native convergence
+(`agent/daemon-live-commissioned-escalation-resume`; via PR #1062
+`agent/daemon-live-graceful-shutdown-drain`). The daemon-native convergence
 sweep, predicate, fenced commission, durable retry and park records, and
 explicit configuration throttle are its implementation scope.
 

@@ -23,8 +23,8 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
     InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, StaleActiveTurnBound,
-    StartEligibleTurnService, StartupScanService, TurnLivenessScanInterval,
+    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, SchedulerPassOccupancyBound,
+    StaleActiveTurnBound, StartEligibleTurnService, StartupScanService, TurnLivenessScanInterval,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
@@ -80,7 +80,8 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-const GRACEFUL_SHUTDOWN_WINDOW: Duration = Duration::from_secs(30);
+// numeric-bound: tunable - allows runtime components to commit after scheduler work drains
+const GRACEFUL_SHUTDOWN_CLEANUP_WINDOW: Duration = Duration::from_secs(30);
 const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
 const DATABASE_URL_ENVIRONMENT: &str = "DATABASE_URL";
 const TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_TEMPLATE_CONFIG_FILE";
@@ -90,6 +91,12 @@ const LOG_FILTER_ENVIRONMENT: &str = "RUST_LOG";
 const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
 const RUNNER_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_SOCKET_PATH";
 const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+fn graceful_shutdown_window() -> Duration {
+    SchedulerPassOccupancyBound::hard_ceiling()
+        .get()
+        .saturating_add(GRACEFUL_SHUTDOWN_CLEANUP_WINDOW)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimePhase {
@@ -1986,7 +1993,7 @@ async fn run_hub(
             let (drain, components_clean) = drain_runtime_tasks(
                 &mut runtime_tasks,
                 guard_loss.as_mut(),
-                GRACEFUL_SHUTDOWN_WINDOW,
+                graceful_shutdown_window(),
             )
             .await;
             cause = combine_runtime_stop_cause(cause, components_clean);
@@ -2203,7 +2210,7 @@ async fn main() -> ExitCode {
         }
         Ok(ShutdownOutcome::GraceWindowExpired) => {
             tracing::warn!(
-                grace_window_seconds = GRACEFUL_SHUTDOWN_WINDOW.as_secs(),
+                grace_window_seconds = graceful_shutdown_window().as_secs(),
                 "daemon shutdown grace window expired; abandoning in-flight work"
             );
             ExitCode::SUCCESS
@@ -2231,7 +2238,7 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
-                grace_window_seconds = GRACEFUL_SHUTDOWN_WINDOW.as_secs(),
+                grace_window_seconds = graceful_shutdown_window().as_secs(),
                 "activated-turn execution failed and shutdown grace expired; abandoning in-flight work for startup recovery"
             );
             ExitCode::FAILURE
@@ -2259,7 +2266,7 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
-                grace_window_seconds = GRACEFUL_SHUTDOWN_WINDOW.as_secs(),
+                grace_window_seconds = graceful_shutdown_window().as_secs(),
                 "daemon runtime component failed and shutdown grace expired; abandoning in-flight work"
             );
             ExitCode::FAILURE
@@ -2276,7 +2283,7 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?RuntimePhase::Runtime,
                 failure_class = ?OperatorFailureClass::CallerOrHubBug,
-                grace_window_seconds = GRACEFUL_SHUTDOWN_WINDOW.as_secs(),
+                grace_window_seconds = graceful_shutdown_window().as_secs(),
                 "daemon runtime task defect was followed by an expired shutdown grace window"
             );
             ExitCode::FAILURE
@@ -2335,10 +2342,11 @@ mod tests {
         ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
         anthropic_construction_cause, combine_runtime_stop_cause, completed_runtime_outcome,
         credential_files_conflict, database_close_failure_outcome, drain_runtime_tasks,
-        erase_startup_cause, migrate_scan_then_schedule, openai_construction_cause,
-        operator_filter, process_runtime_failure_class, report_database_close_failure,
-        repository_watch_rule_configuration_error, run_scheduler_until_shutdown,
-        runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
+        erase_startup_cause, graceful_shutdown_window, migrate_scan_then_schedule,
+        openai_construction_cause, operator_filter, process_runtime_failure_class,
+        report_database_close_failure, repository_watch_rule_configuration_error,
+        run_scheduler_until_shutdown, runner_lifecycle_failure_class, should_close_pool,
+        staging_sweep_failure_outcome,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
 
@@ -2951,6 +2959,34 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct DelayedPass {
+        entered: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        duration: Duration,
+    }
+
+    impl EligibilityPass for DelayedPass {
+        type Error = FakeFailure;
+
+        fn run(
+            &mut self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let entered = self
+                .entered
+                .lock()
+                .expect("the fake pass state is not poisoned")
+                .take()
+                .expect("the test pass runs once");
+            let duration = self.duration;
+            async move {
+                entered.send(()).expect("the test waits for pass entry");
+                tokio::time::sleep(duration).await;
+                Ok(())
+            }
+        }
+    }
+
     struct PendingWorkSource;
 
     impl EligibilityWorkSource for PendingWorkSource {
@@ -3008,6 +3044,44 @@ mod tests {
         assert_eq!(
             runtime.await.expect("the runtime task completes"),
             ShutdownOutcome::GraceWindowExpired
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn adr0044_shutdown_drain_outlives_the_old_thirty_second_window() {
+        let (entered_sender, entered_receiver) = oneshot::channel();
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let session = SessionId::from_uuid(Uuid::from_u128(1));
+        let pass_duration = Duration::from_secs(31);
+        let scheduler = SchedulerLoop::new(
+            OneHintThenPending {
+                hints: VecDeque::from([session]),
+            },
+            DelayedPass {
+                entered: Arc::new(Mutex::new(Some(entered_sender))),
+                duration: pass_duration,
+            },
+        );
+        let runtime = tokio::spawn(run_scheduler_until_shutdown(
+            scheduler,
+            async move {
+                shutdown_receiver.await.expect("the test requests shutdown");
+                SchedulerStopCause::Requested
+            },
+            graceful_shutdown_window(),
+        ));
+
+        entered_receiver
+            .await
+            .expect("the scheduler admitted the first pass");
+        shutdown_sender
+            .send(())
+            .expect("the scheduler still listens for shutdown");
+        tokio::time::advance(pass_duration).await;
+
+        assert_eq!(
+            runtime.await.expect("the runtime task completes"),
+            ShutdownOutcome::Clean
         );
     }
 
