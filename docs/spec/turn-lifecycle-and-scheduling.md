@@ -452,11 +452,11 @@ the sweep (INV-007).
   including identity generators, is never cloned per admitted pass; only the
   detached expiry handler is cloned.
 
-  With Prometheus export enabled, the loop publishes current admitted-pass
-  occupancy, the oldest admitted pass's age, and that pass's session identity.
-  The identity metric has zero or one series and removes the former label when
-  the oldest pass changes. Age is calculated at scrape time, so it advances
-  while a pass is stalled even when the scheduler emits no event.
+  With Prometheus export enabled, the loop publishes the scheduler occupancy
+  observations owned by
+  [configuration and credentials](configuration-and-credentials.md#telemetry-export).
+  Age is calculated at scrape time, so it advances while a pass is stalled even
+  when the scheduler emits no event.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. This recovers a goal disposition when the
@@ -1166,16 +1166,18 @@ are conclusions derived from complete owner facts, never trusted discriminators.
 - A reconciliation-required terminal turn names its exact ended turn attempt and
   exactly one required terminal `ambiguous` model call or tool attempt. The
   attempt end is either `WithoutStop(Ambiguous|Lost)` with a later
-  turn-correlated applied interrupt, or `AfterCancellation(Ambiguous|Lost)`
-  carrying that same proof. A model-call reconciliation terminal frontier is an
-  equal-content boundary over the ambiguous call's source frontier — for an
-  interrupted continuation call, the completed round's batch-correlated result
-  projection, proven by the round's durable result evidence. A tool-attempt
-  reconciliation terminal frontier extends the producing call's yielded frontier
-  by exactly one batch-correlated result entry per request in proposal order,
-  with the ambiguous request represented as `ToolClosed`. The checked scheduling
-  input validates those correlations before the turn can serve as a terminal
-  predecessor.
+  turn-correlated applied interrupt or a one-based durable automatic recovery
+  attempt, or `AfterCancellation(Ambiguous|Lost)` carrying the interrupt proof.
+  Automatic authority binds the exact session, turn, and model call and is not
+  admitted for a tool reconciliation. A model-call reconciliation terminal
+  frontier is an equal-content boundary over the ambiguous call's source
+  frontier — for an interrupted continuation call, the completed round's
+  batch-correlated result projection, proven by the round's durable result
+  evidence. A tool-attempt reconciliation terminal frontier extends the
+  producing call's yielded frontier by exactly one batch-correlated result entry
+  per request in proposal order, with the ambiguous request represented as
+  `ToolClosed`. The checked scheduling input validates those correlations before
+  the turn can serve as a terminal predecessor.
 - A consumed steering input reconstitutes only against its exact consuming call,
   whose frontier is the turn's starting frontier — or, for a call prepared at a
   tool-round continuation boundary, the round's batch-correlated result

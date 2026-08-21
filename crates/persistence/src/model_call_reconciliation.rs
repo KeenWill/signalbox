@@ -393,6 +393,25 @@ async fn mark_superseded_recoveries(
     connection: &mut PgConnection,
 ) -> Result<(), ModelCallReconciliationRepositoryError> {
     sqlx::query(
+        "UPDATE automatic_model_call_reconciliation_attempt AS attempt
+            SET outcome_kind = 'superseded', finished_at = statement_timestamp()
+           FROM automatic_model_call_reconciliation AS recovery
+          WHERE recovery.turn_id = attempt.turn_id
+            AND recovery.state_kind = 'attempting'
+            AND attempt.attempt_ordinal = recovery.attempt_count
+            AND attempt.outcome_kind = 'attempting'
+            AND NOT EXISTS (
+                SELECT 1 FROM turn_lifecycle AS lifecycle
+                 WHERE lifecycle.turn_id = recovery.turn_id
+                   AND lifecycle.session_id = recovery.session_id
+                   AND lifecycle.state_kind = 'active'
+                   AND lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
+                   AND lifecycle.recovery_model_call_id = recovery.model_call_id
+            )",
+    )
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
         "UPDATE automatic_model_call_reconciliation AS recovery
             SET state_kind = 'superseded', exhausted_at = NULL
           WHERE recovery.state_kind IN ('scheduled', 'attempting', 'exhausted')

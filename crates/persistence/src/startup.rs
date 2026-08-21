@@ -3,8 +3,8 @@
 use std::{collections::BTreeSet, error::Error, fmt};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, OperatorFailureClass, StartupScanIdGenerator, StartupScanRepository,
-    StartupScanSessionOutcome, ToolCrashClosureIdentities,
+    ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StartupScanIdGenerator,
+    StartupScanRepository, StartupScanSessionOutcome, ToolCrashClosureIdentities,
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, AttemptEnd,
@@ -203,7 +203,7 @@ impl StartupScanRepositoryError {
     }
 }
 
-enum TransactionDecision {
+pub(crate) enum TransactionDecision {
     Commit(StartupScanSessionOutcome),
     Rollback(StartupScanSessionOutcome),
 }
@@ -353,6 +353,62 @@ where
         ids,
     )
     .await
+    .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))
+}
+
+pub(crate) async fn recover_observed_slot_held_in_transaction<Generator>(
+    connection: &mut PgConnection,
+    candidate: StaleTurnCandidate,
+    identities: AcceptedInputTurnFailureIdentities,
+    ids: &mut Generator,
+) -> Result<Option<TransactionDecision>, StartupScanRepositoryError>
+where
+    Generator: StartupScanIdGenerator + Send,
+{
+    let requested_session = candidate.session();
+    let session_uuid = session_id_to_uuid(requested_session);
+    let observed_active_turn: Option<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND state_kind = 'active'
+            AND NOT delegation_runtime_terminal",
+    )
+    .bind(session_uuid)
+    .fetch_optional(&mut *connection)
+    .await?;
+    if observed_active_turn != Some(turn_id_to_uuid(candidate.turn())) {
+        return Ok(None);
+    }
+    lock_delegated_turn_terminal_frontier(connection, requested_session, candidate.turn())
+        .await
+        .map_err(map_model_call_error)?;
+    let (session_exists, scheduler_session, active_turn) =
+        sqlx::query_as::<_, (bool, Option<Uuid>, Option<Uuid>)>(
+            crate::lock_inventory::STARTUP_RECOVERY,
+        )
+        .bind(session_uuid)
+        .fetch_one(&mut *connection)
+        .await?;
+    if active_turn != Some(turn_id_to_uuid(candidate.turn())) {
+        return Ok(None);
+    }
+    let locked =
+        crate::turn_liveness::read_exact_slot_held_candidate(connection, requested_session).await?;
+    if locked != Some(candidate) {
+        return Ok(None);
+    }
+    recover_locked_session(
+        connection,
+        requested_session,
+        identities,
+        session_exists,
+        scheduler_session,
+        active_turn,
+        ids,
+    )
+    .await
+    .map(Some)
     .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))
 }
 

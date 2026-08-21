@@ -1483,6 +1483,22 @@ async fn s04_automatic_model_call_reconciliation_records_the_operator_transition
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xC100).await?;
     let repository = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let steering = AcceptedInputId::from_uuid(Uuid::from_u128(0xC300));
+    let steering_outcome = SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xC301)),
+                parked.session,
+                UserContent::try_text(String::from("steering retained by automatic recovery"))
+                    .expect("fixture steering content is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: parked.turn,
+                },
+            ),
+            steering,
+            None,
+        )
+        .await?;
 
     let batch = repository.claim_due().await?;
     let claimed = batch.claimed()[0];
@@ -1531,6 +1547,40 @@ async fn s04_automatic_model_call_reconciliation_records_the_operator_transition
         )
     );
     assert_eq!(ambiguous_call, ("terminal".into(), "ambiguous".into()));
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(parked.session)
+        .await?
+        .expect("the automatically reconciled terminal turn remains readable");
+    assert!(matches!(
+        transcript.turns()[0].state(),
+        ProcessTurnState::ReconciliationRequired { .. }
+    ));
+    assert!(matches!(
+        steering_outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+    let successor: Uuid = sqlx::query_scalar(
+        "SELECT origin_turn_id
+           FROM accepted_input
+          WHERE accepted_input_id = $1
+            AND disposition_kind = 'reclassified_as_turn_origin'",
+    )
+    .bind(steering.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let activated = activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: parked.session.into_uuid(),
+            origin_entry: Uuid::from_u128(0xC302),
+            starting_frontier: Uuid::from_u128(0xC303),
+            initial_attempt: Uuid::from_u128(0xC304),
+        },
+    )
+    .await?;
+    assert_eq!(activated.turn().into_uuid(), successor);
 
     pool.close().await;
     drop(container);
@@ -1549,7 +1599,6 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
     let parked = park_restart_ambiguity(&pool, seed).await?;
     let repository = PostgresModelCallReconciliationRepository::new(pool.clone());
     let batch = repository.claim_due().await?;
-    let claimed = batch.claimed()[0];
     let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x203));
 
     let operator = SubmitInputRepository::new(pool.clone())
@@ -1568,7 +1617,7 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
             Some(successor),
         )
         .await?;
-    let automatic = repository.reconcile(claimed).await?;
+    let automatic = repository.claim_due().await?;
     let durable: (String, String, i64) = sqlx::query_as(
         "SELECT recovery.state_kind,
                 attempt.outcome_kind,
@@ -1591,8 +1640,18 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
             SubmitInputAppliedResult::TurnOrigin(_)
         ))
     ));
-    assert_eq!(automatic, ModelCallReconciliationOutcome::Superseded);
+    assert_eq!(batch.claimed().len(), 1);
+    assert_eq!(automatic.claimed(), &[]);
+    assert_eq!(automatic.exhausted(), &[]);
     assert_eq!(durable, ("superseded".into(), "superseded".into(), 1));
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(parked.session)
+        .await?
+        .expect("the operator-reconciled terminal turn remains readable");
+    assert!(matches!(
+        transcript.turns()[0].state(),
+        ProcessTurnState::ReconciliationRequired { .. }
+    ));
 
     pool.close().await;
     drop(container);

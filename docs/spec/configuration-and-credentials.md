@@ -372,7 +372,7 @@ rate-limited and a transient failure does not stop later scrapes.
 SIGNALBOX_PROMETHEUS_BIND=127.0.0.1:9464
 ```
 
-The initial registry contains exactly three metric names:
+The registry contains exactly six metric names:
 
 - `signalbox_turns_started_total`, with no labels, counts durable turn
   activations. An operator graphs it as the workload-rate denominator and
@@ -385,18 +385,24 @@ The initial registry contains exactly three metric names:
   values are `completed`, `known_failed`, `refused`, `cancelled`, and
   `ambiguous`, counts durable terminal model calls. It separates provider-call
   health and refusal from ambiguity that requires recovery handling.
+- `signalbox_scheduler_passes_in_flight`, with no labels, is the current count
+  of authoritative scheduler passes holding admission slots.
+- `signalbox_scheduler_oldest_in_flight_pass_age_seconds`, with no labels, is
+  the scrape-time age of the oldest admitted pass, or zero while idle.
+- `signalbox_scheduler_oldest_in_flight_pass_info{session_id}` identifies that
+  oldest pass by its daemon-minted session UUID. It has zero or one series and
+  removes the prior series whenever the oldest pass changes or the loop becomes
+  idle.
 
-All label children are allocated from those closed enums at registry
-construction. The metric API accepts no string, session id, turn id, model-call
-id, prompt, completion, or tool value. The source is the already-committed typed
-outbox transition, and content-bearing input events are ignored. The dispatcher
+Counter label children are allocated from closed enums at registry construction.
+The only free-form metric label is the scheduler information gauge's
+daemon-minted `session_id`; no turn id, model-call id, prompt, completion, or
+tool value is accepted. The durable counters use already-committed typed outbox
+transitions, and content-bearing input events are ignored. The dispatcher
 retains only the last observed durable sequence, so a retry of that sequence is
 not counted twice and deduplication has constant memory. Metric help and type
-lines are fixed strings; sample values are counters. There are no tool,
-scheduler, queue-depth, or database-duration metrics in this initial surface:
-the daemon-owned durable transition path can state the three metrics above
-without inventing an inexact observation or instrumenting an adapter or another
-crate's boundary.
+lines are fixed strings. There are no tool, queue-depth, or database-duration
+metrics in this surface.
 
 The complete OTLP record inventory is:
 

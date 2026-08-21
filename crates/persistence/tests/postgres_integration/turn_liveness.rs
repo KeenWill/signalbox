@@ -2,7 +2,9 @@
 
 use crate::*;
 
-use signalbox_application::{StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence};
+use signalbox_application::{
+    StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence, UuidV7StartupScanIdGenerator,
+};
 use signalbox_persistence::turn_liveness::PostgresTurnLivenessRepository;
 
 struct WatchdogFixture {
@@ -212,6 +214,50 @@ async fn an_outstanding_provider_call_moves_from_quiescent_to_slot_held_inventor
     assert_eq!(slot_held.candidates().len(), 1);
     assert_eq!(slot_held.candidates()[0].session(), fixture.session);
     assert_eq!(slot_held.candidates()[0].turn(), fixture.turn);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S10: slot-held recovery revalidates the exact turn-progress evidence under
+/// the scheduler lock and declines evidence that changed after observation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_slot_held_recovery_declines_changed_progress_evidence() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = activated_watchdog_session(&pool, 0x12_500).await?;
+    checkpoint_model_call(&pool, &fixture, 0x12_500).await?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone());
+    let observed = repository
+        .observed_slot_held_turn(fixture.session)
+        .await?
+        .expect("the checkpointed provider call holds the session slot");
+    let stale = StaleTurnCandidate::new(
+        observed.session(),
+        observed.turn(),
+        TurnLivenessEvidence::new(observed.evidence().current_attempt(), Some(u64::MAX)),
+    );
+    let mut ids = UuidV7StartupScanIdGenerator;
+
+    let outcome = repository
+        .recover_observed_slot_held_turn(
+            stale,
+            AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x12_600)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x12_601)),
+            ),
+            &mut ids,
+        )
+        .await?;
+    let state: String =
+        sqlx::query_scalar("SELECT state_kind FROM turn_lifecycle WHERE turn_id = $1")
+            .bind(fixture.turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(outcome, None);
+    assert_eq!(state, "active");
 
     pool.close().await;
     drop(container);

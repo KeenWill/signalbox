@@ -4373,6 +4373,7 @@ pub(crate) fn apply_interrupt_to_recovery_wait(
         || call.attempt() != attempt.id()
         || call.disposition() != ModelCallDisposition::Ambiguous
         || call.frontier() != source_snapshot.frontier()
+        || source_snapshot.frontier().owning_session() != active_turn.session()
     {
         return Err(ModelCallClosureError::InterruptCorrelationMismatch);
     }
@@ -4423,6 +4424,7 @@ pub(crate) fn apply_automatic_model_call_reconciliation(
         || call.attempt() != attempt.id()
         || call.disposition() != ModelCallDisposition::Ambiguous
         || call.frontier() != source_snapshot.frontier()
+        || source_snapshot.frontier().owning_session() != active_turn.session()
     {
         return Err(ModelCallClosureError::InterruptCorrelationMismatch);
     }

@@ -2515,6 +2515,9 @@ pub struct SubmitInputTerminalSourceConstructionInput {
 pub struct SubmitInputInterruptedModelCallReconciliationConstructionInput {
     /* public named canonical origin, turn, ambiguous call, and interrupt facts */
 }
+pub struct SubmitInputAutomaticModelCallReconciliationConstructionInput {
+    /* public named canonical origin, turn, ambiguous call, and recovery-attempt facts */
+}
 pub struct SubmitInputInterruptedToolReconciliationConstructionInput {
     /* public named canonical origin, turn, ambiguous attempt, and interrupt facts */
 }
@@ -2522,6 +2525,9 @@ impl SubmitInputTerminalSourceReconstitutionInput {
     pub fn new(input: SubmitInputTerminalSourceConstructionInput) -> Self;
     pub fn interrupted_model_call_reconciliation(
         input: SubmitInputInterruptedModelCallReconciliationConstructionInput,
+    ) -> Self;
+    pub fn automatic_model_call_reconciliation(
+        input: SubmitInputAutomaticModelCallReconciliationConstructionInput,
     ) -> Self;
     pub fn interrupted_tool_reconciliation(
         input: SubmitInputInterruptedToolReconciliationConstructionInput,
@@ -2892,7 +2898,7 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         reconciling_attempt: TurnAttemptId,
         reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
         ambiguous_call: ModelCallId,
-        interrupt: AppliedInterruptCommandResult,
+        authority: ModelCallReconciliationAuthority,
         terminal_frontier: ContextFrontierId,
     },
     TerminalToolReconciliationRequired {
@@ -2904,6 +2910,11 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         interrupt: AppliedInterruptCommandResult,
         terminal_frontier: ContextFrontierId,
     },
+}
+
+pub enum ModelCallReconciliationAuthority {
+    AppliedInterrupt(AppliedInterruptCommandResult),
+    AutomaticRecovery { attempt: NonZeroU32 },
 }
 
 pub struct FailedTurnExecutionReconstitutionInput { /* private */ }
@@ -11122,11 +11133,11 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: accepted_input                             | 5                                |
 | domain: delivery_request                           | 2                                |
 | domain: user_content                               | 4                                |
-| domain: submit_input                               | 34                               |
+| domain: submit_input                               | 35                               |
 | domain: queue_order                                | 5 (+1 free fn)                   |
 | domain: repo_watch                                 | 51                               |
 | domain: turn_lifecycle                             | 10                               |
-| domain: turn_eligibility                           | 37                               |
+| domain: turn_eligibility                           | 38                               |
 | domain: turn_attempt                               | 13                               |
 | domain: model_call                                 | 12                               |
 | domain: context_compaction                         | 12                               |
@@ -11146,7 +11157,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                               |
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
-| **signalbox-domain total**                         | **806 (+12 free fn)**            |
+| **signalbox-domain total**                         | **808 (+12 free fn)**            |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |

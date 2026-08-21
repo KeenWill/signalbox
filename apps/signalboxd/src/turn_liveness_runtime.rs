@@ -20,7 +20,6 @@ use signalbox_persistence::{
     model_call_reconciliation::{
         ModelCallReconciliationRepositoryError, PostgresModelCallReconciliationRepository,
     },
-    startup::{PostgresStartupScanRepository, StartupScanRepositoryError},
     turn_liveness::{PostgresTurnLivenessRepository, TurnLivenessRepositoryError},
 };
 use sqlx::PgPool;
@@ -296,7 +295,6 @@ enum TurnLivenessWake {
 pub struct TurnLivenessRuntime {
     repository: PostgresTurnLivenessRepository,
     model_call_reconciliation: PostgresModelCallReconciliationRepository,
-    startup_recovery: PostgresStartupScanRepository,
     staleness_bound: StaleActiveTurnBound,
     scan_interval: TurnLivenessScanInterval,
 }
@@ -315,7 +313,6 @@ impl TurnLivenessRuntime {
         Self {
             repository: PostgresTurnLivenessRepository::new(pool.clone()),
             model_call_reconciliation: PostgresModelCallReconciliationRepository::new(pool.clone()),
-            startup_recovery: PostgresStartupScanRepository::new(pool),
             staleness_bound,
             scan_interval,
         }
@@ -341,7 +338,6 @@ impl TurnLivenessRuntime {
         );
         let slot_held = run_slot_held_watchdog(
             self.repository,
-            self.startup_recovery,
             self.staleness_bound,
             self.scan_interval,
             slot_held_shutdown,
@@ -379,7 +375,6 @@ async fn run_quiescent_watchdog(
 
 async fn run_slot_held_watchdog(
     repository: PostgresTurnLivenessRepository,
-    startup_recovery: PostgresStartupScanRepository,
     staleness_bound: StaleActiveTurnBound,
     scan_interval: TurnLivenessScanInterval,
     mut shutdown: watch::Receiver<bool>,
@@ -392,8 +387,7 @@ async fn run_slot_held_watchdog(
         match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
             TurnLivenessWake::Shutdown => return,
             TurnLivenessWake::Scan => {
-                reconcile_slot_held_turns(&repository, &startup_recovery, &mut ledger, &mut window)
-                    .await;
+                reconcile_slot_held_turns(&repository, &mut ledger, &mut window).await;
             }
         }
     }
@@ -416,7 +410,6 @@ async fn run_ambiguous_model_call_watchdog(
 
 async fn reconcile_slot_held_turns(
     inventory: &PostgresTurnLivenessRepository,
-    recovery: &PostgresStartupScanRepository,
     ledger: &mut TurnLivenessLedger,
     window: &mut TerminalizationWindow,
 ) {
@@ -433,16 +426,22 @@ async fn reconcile_slot_held_turns(
         let mut ids = UuidV7StartupScanIdGenerator;
         match timeout(
             RECOVERY_ATTEMPT_BOUND,
-            recovery.recover(candidate.session(), identities, &mut ids),
+            inventory.recover_observed_slot_held_turn(candidate, identities, &mut ids),
         )
         .await
         {
-            Ok(Ok(outcome)) => tracing::warn!(
+            Ok(Ok(Some(outcome))) => tracing::warn!(
                 cause_code = "turn_liveness_slot_held_recovered",
                 session_id = %candidate.session().as_uuid(),
                 turn_id = %candidate.turn().as_uuid(),
                 recovery_outcome = ?outcome,
                 "slot-held turn exceeded the liveness bound and was handed to durable startup recovery"
+            ),
+            Ok(Ok(None)) => tracing::info!(
+                cause_code = "turn_liveness_slot_held_superseded",
+                session_id = %candidate.session().as_uuid(),
+                turn_id = %candidate.turn().as_uuid(),
+                "slot-held turn or its progress evidence changed under the lock and was left alone"
             ),
             Ok(Err(error)) => report_slot_held_recovery_failure(candidate, &error),
             Err(_) => tracing::error!(
@@ -463,18 +462,16 @@ async fn drain_slot_held_rotation(
     let mut active = Vec::new();
     let mut cursor = None;
     for _ in 0..QUIESCENT_ROTATION_PAGE_CEILING {
-        let page = match inventory.slot_held_active_turns(cursor).await {
-            Ok(page) => page,
-            Err(error) => {
-                report_turn_liveness_failure(&error);
-                return None;
-            }
-        };
+        let page = read_slot_held_inventory_page(inventory, cursor).await?;
         cursor = page.resume_after();
         active.extend(page.into_candidates());
         if cursor.is_none() {
             return Some(active);
         }
+    }
+    let probe = read_slot_held_inventory_page(inventory, cursor).await?;
+    if probe.rows() == 0 {
+        return Some(active);
     }
     tracing::warn!(
         cause_code = "turn_liveness_slot_held_rotation_ceiling_reached",
@@ -485,9 +482,35 @@ async fn drain_slot_held_rotation(
     None
 }
 
+async fn read_slot_held_inventory_page(
+    inventory: &PostgresTurnLivenessRepository,
+    cursor: Option<SessionId>,
+) -> Option<signalbox_persistence::turn_liveness::QuiescentActiveTurnPage> {
+    match timeout(
+        RECOVERY_ATTEMPT_BOUND,
+        inventory.slot_held_active_turns(cursor),
+    )
+    .await
+    {
+        Ok(Ok(page)) => Some(page),
+        Ok(Err(error)) => {
+            report_turn_liveness_failure(&error);
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                cause_code = "turn_liveness_slot_held_inventory_timed_out",
+                attempt_bound_seconds = RECOVERY_ATTEMPT_BOUND.as_secs(),
+                "slot-held inventory read exceeded its bound; the rotation made no decision"
+            );
+            None
+        }
+    }
+}
+
 fn report_slot_held_recovery_failure(
     candidate: StaleTurnCandidate,
-    error: &StartupScanRepositoryError,
+    error: &TurnLivenessRepositoryError,
 ) {
     let failure_class = error.operator_failure_class();
     tracing::error!(
