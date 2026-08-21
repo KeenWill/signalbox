@@ -7,6 +7,8 @@ tool attempts is verified against this PR
 (`agent/daemon-live-tool-recovery-reconcile`). The watchdog recovery transaction
 ceiling was re-verified against this PR
 (`agent/daemon-live-reconciliation-attempt-bound`).
+Just-in-time recovery claiming and shutdown-preemptible watchdog batches are
+verified against this PR (`agent/daemon-live-restart-recovery-accounting`).
 
 The expired-pass recovery operation and retry budgets were re-verified against
 this PR (`agent/daemon-live-recovery-attempt-budget`).
@@ -758,9 +760,12 @@ durably distinguishable from a restart-recovered one.
 
 **Ambiguous-operation reconciliation.** Every watchdog wake also discovers
 active `awaiting_model_call_recovery` and `awaiting_tool_recovery` turns and
-durably claims at most 64 due attempts. The recovery row binds the exact
-session, turn, and one ambiguous model call or tool attempt; each claim inserts
-a one-based attempt row. Failed attempts end with the typed outcome
+drains at most 64 due attempts. It durably claims exactly one attempt immediately
+before starting that attempt's transaction, then returns to the durable
+inventory for the next; no claimed attempt spends its deadline queued behind
+another session's locked transaction. The recovery row binds the exact session,
+turn, and one ambiguous model call or tool attempt; each claim inserts a
+one-based attempt row. Failed attempts end with the typed outcome
 `infrastructure_failure` or `integrity_failure`, and recovery becomes due after
 120, 240, 480, 960, then 1,800 seconds. If a daemon disappears while an attempt
 is `attempting`, its recorded deadline lets the next daemon classify it as an
@@ -772,6 +777,13 @@ durably `attempting` until that deadline makes it classifiable. An explicitly
 recorded fifth failure becomes exhausted on the next watchdog scan without
 waiting out that final ambiguity deadline; the deadline remains necessary when
 the daemon cannot tell whether the fifth attempt committed.
+
+Each inventory, reconciliation, and failure-record stage observes daemon
+shutdown ahead of its ten-second deadline. A requested stop therefore ends the
+batch without waiting behind the remaining scan population; a cancelled stage's
+ordinary transaction drop or durable attempt deadline remains the recovery
+authority. The slot-held watchdog applies the same shutdown preemption between
+and during its sequential recovery transactions.
 
 The automatic budget is five attempts. Each attempt locks the same session
 scheduler row as the operator path, reconstitutes the complete scheduling

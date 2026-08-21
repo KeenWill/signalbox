@@ -502,6 +502,61 @@ impl GoalRepository {
         load_goal_from_connection(&mut connection, session).await
     }
 
+    /// Loads the current turn in one goal generation.
+    ///
+    /// The daemon uses this only to associate a pre-block execution failure
+    /// with the automatic resume whose budget it would otherwise spend. The
+    /// guarded goal transition still revalidates the same turn under the
+    /// session lock before appending anything.
+    pub async fn load_current_goal_turn(
+        &self,
+        session: SessionId,
+        generation: GoalGeneration,
+    ) -> Result<Option<TurnId>, GoalRepositoryError> {
+        let mut connection = self.pool.acquire().await?;
+        current_goal_turn(&mut connection, session, generation).await
+    }
+
+    /// Selects failed turns whose automatic reconciliation followed restart.
+    ///
+    /// The startup scan records the restart origin in the same transaction
+    /// that creates an ambiguous operation wait. Requiring that origin and a
+    /// reconciled automatic-operation row keeps runtime liveness recovery
+    /// chargeable while discounting only work interrupted across a process
+    /// boundary.
+    pub async fn restart_reconciled_turns(
+        &self,
+        session: SessionId,
+        turns: &[TurnId],
+    ) -> Result<Box<[TurnId]>, GoalRepositoryError> {
+        if turns.is_empty() {
+            return Ok(Box::new([]));
+        }
+        let turn_ids = turns
+            .iter()
+            .map(|turn| turn_id_to_uuid(*turn))
+            .collect::<Vec<_>>();
+        let rows = sqlx::query(
+            "SELECT recovery.turn_id
+               FROM automatic_reconciliation AS recovery
+               JOIN turn_restart_recovery_origin AS restart
+                 ON restart.turn_id = recovery.turn_id
+                AND restart.session_id = recovery.session_id
+              WHERE recovery.session_id = $1
+                AND recovery.turn_id = ANY($2::uuid[])
+                AND recovery.state_kind = 'reconciled'
+              ORDER BY recovery.turn_id",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(turn_ids)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| Ok(turn_id_from_uuid(column(row, "turn_id")?)))
+            .collect::<Result<Vec<_>, GoalRepositoryError>>()
+            .map(Vec::into_boxed_slice)
+    }
+
     /// Lists latest execution-failure blocks carrying one exact need.
     ///
     /// The need distinguishes daemon-scheduled automatic resumption from

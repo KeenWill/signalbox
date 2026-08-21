@@ -115,6 +115,14 @@ const QUIESCENT_ROTATION_PAGE_CEILING: usize = 4_096;
 // numeric-bound: ceiling - prevents one database operation from wedging liveness supervision
 const RECOVERY_ATTEMPT_BOUND: Duration = Duration::from_secs(10);
 
+/// Just-in-time automatic reconciliation claims one scan may drain.
+///
+/// The persistence adapter claims only the operation whose transaction starts
+/// next. This scan cap retains the previous population-independent upper bound
+/// without letting queued claims age behind those transactions.
+// numeric-bound: ceiling - bounds automatic reconciliation transactions per scan
+const AUTOMATIC_RECONCILIATIONS_PER_SCAN: usize = 64;
+
 /// What one scan's terminalization phase actually did.
 ///
 /// Attempting a turn is not ending one: a candidate can be superseded under the
@@ -393,7 +401,8 @@ async fn run_slot_held_watchdog(
         match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
             TurnLivenessWake::Shutdown => return,
             TurnLivenessWake::Scan => {
-                reconcile_slot_held_turns(&repository, &mut ledger, &mut window).await;
+                reconcile_slot_held_turns(&repository, &mut ledger, &mut window, &mut shutdown)
+                    .await;
             }
         }
     }
@@ -409,7 +418,9 @@ async fn run_ambiguous_operation_watchdog(
     loop {
         match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
             TurnLivenessWake::Shutdown => return,
-            TurnLivenessWake::Scan => reconcile_ambiguous_operations(&repository).await,
+            TurnLivenessWake::Scan => {
+                reconcile_ambiguous_operations(&repository, &mut shutdown).await;
+            }
         }
     }
 }
@@ -418,6 +429,7 @@ async fn reconcile_slot_held_turns(
     inventory: &PostgresTurnLivenessRepository,
     ledger: &mut TurnLivenessLedger,
     window: &mut TerminalizationWindow,
+    shutdown: &mut watch::Receiver<bool>,
 ) {
     let Some(active) = drain_slot_held_rotation(inventory).await else {
         return;
@@ -430,12 +442,14 @@ async fn reconcile_slot_held_turns(
             ContextFrontierId::from_uuid(Uuid::now_v7()),
         );
         let mut ids = UuidV7StartupScanIdGenerator;
-        match timeout(
+        let attempt = timeout(
             RECOVERY_ATTEMPT_BOUND,
             inventory.recover_observed_slot_held_turn(candidate, identities, &mut ids),
-        )
-        .await
-        {
+        );
+        let Some(outcome) = complete_before_shutdown(shutdown, attempt).await else {
+            return;
+        };
+        match outcome {
             Ok(Ok(Some(outcome))) => tracing::warn!(
                 cause_code = "turn_liveness_slot_held_recovered",
                 session_id = %candidate.session().as_uuid(),
@@ -529,33 +543,47 @@ fn report_slot_held_recovery_failure(
 }
 
 /// Claims and applies one bounded window of durable ambiguous-call work.
-async fn reconcile_ambiguous_operations(repository: &PostgresAutomaticReconciliationRepository) {
-    let batch = match timeout(RECOVERY_ATTEMPT_BOUND, repository.claim_due()).await {
-        Ok(Ok(batch)) => batch,
-        Ok(Err(error)) => {
-            report_automatic_reconciliation_failure("inventory", None, &error);
+async fn reconcile_ambiguous_operations(
+    repository: &PostgresAutomaticReconciliationRepository,
+    shutdown: &mut watch::Receiver<bool>,
+) {
+    for _ in 0..AUTOMATIC_RECONCILIATIONS_PER_SCAN {
+        let claim = timeout(RECOVERY_ATTEMPT_BOUND, repository.claim_due());
+        let Some(claim_outcome) = complete_before_shutdown(shutdown, claim).await else {
             return;
+        };
+        let batch = match claim_outcome {
+            Ok(Ok(batch)) => batch,
+            Ok(Err(error)) => {
+                report_automatic_reconciliation_failure("inventory", None, &error);
+                return;
+            }
+            Err(_) => {
+                report_automatic_reconciliation_timeout("inventory", None);
+                return;
+            }
+        };
+        for exhausted in batch.exhausted() {
+            let (operation_kind, operation_id) = operation_log_fields(exhausted.operation());
+            tracing::warn!(
+                cause_code = "automatic_reconciliation_exhausted",
+                session_id = %exhausted.session().as_uuid(),
+                turn_id = %exhausted.turn().as_uuid(),
+                operation_kind,
+                operation_id = %operation_id,
+                attempt_budget = signalbox_application::AutomaticReconciliationAttempt::budget(),
+                "automatic operation reconciliation exhausted; the turn remains visibly parked for an operator"
+            );
         }
-        Err(_) => {
-            report_automatic_reconciliation_timeout("inventory", None);
+        let Some(claimed) = batch.claimed().first().copied() else {
             return;
-        }
-    };
-    for exhausted in batch.exhausted() {
-        let (operation_kind, operation_id) = operation_log_fields(exhausted.operation());
-        tracing::warn!(
-            cause_code = "automatic_reconciliation_exhausted",
-            session_id = %exhausted.session().as_uuid(),
-            turn_id = %exhausted.turn().as_uuid(),
-            operation_kind,
-            operation_id = %operation_id,
-            attempt_budget = signalbox_application::AutomaticReconciliationAttempt::budget(),
-            "automatic operation reconciliation exhausted; the turn remains visibly parked for an operator"
-        );
-    }
-    for claimed in batch.claimed() {
+        };
         let (operation_kind, operation_id) = operation_log_fields(claimed.operation());
-        match timeout(RECOVERY_ATTEMPT_BOUND, repository.reconcile(*claimed)).await {
+        let attempt = timeout(RECOVERY_ATTEMPT_BOUND, repository.reconcile(claimed));
+        let Some(attempt_outcome) = complete_before_shutdown(shutdown, attempt).await else {
+            return;
+        };
+        match attempt_outcome {
             Ok(Ok(AutomaticReconciliationOutcome::Reconciled)) => tracing::warn!(
                 cause_code = "model_call_automatically_reconciled",
                 session_id = %claimed.session().as_uuid(),
@@ -575,35 +603,43 @@ async fn reconcile_ambiguous_operations(repository: &PostgresAutomaticReconcilia
                 "automatic reconciliation found that the ambiguity had moved on"
             ),
             Ok(Err(error)) => {
-                report_automatic_reconciliation_failure("attempt", Some(*claimed), &error);
+                report_automatic_reconciliation_failure("attempt", Some(claimed), &error);
                 if !matches!(
                     error.operator_failure_class(),
                     signalbox_application::OperatorFailureClass::Infrastructure {
                         commit_ambiguous: true
                     }
                 ) {
-                    match timeout(
+                    let record_failure = timeout(
                         RECOVERY_ATTEMPT_BOUND,
-                        repository.record_failure(*claimed, error.failure_kind()),
-                    )
-                    .await
-                    {
+                        repository.record_failure(claimed, error.failure_kind()),
+                    );
+                    let Some(record_outcome) =
+                        complete_before_shutdown(shutdown, record_failure).await
+                    else {
+                        return;
+                    };
+                    match record_outcome {
                         Ok(Ok(())) => {}
                         Ok(Err(record_error)) => report_automatic_reconciliation_failure(
                             "failure_record",
-                            Some(*claimed),
+                            Some(claimed),
                             &record_error,
                         ),
-                        Err(_) => report_automatic_reconciliation_timeout(
-                            "failure_record",
-                            Some(*claimed),
-                        ),
+                        Err(_) => {
+                            report_automatic_reconciliation_timeout("failure_record", Some(claimed))
+                        }
                     }
                 }
             }
-            Err(_) => report_automatic_reconciliation_timeout("attempt", Some(*claimed)),
+            Err(_) => report_automatic_reconciliation_timeout("attempt", Some(claimed)),
         }
     }
+    tracing::info!(
+        cause_code = "automatic_reconciliation_scan_ceiling_reached",
+        attempt_ceiling = AUTOMATIC_RECONCILIATIONS_PER_SCAN,
+        "automatic reconciliation reached its per-scan ceiling; due work remains discoverable"
+    );
 }
 
 fn report_automatic_reconciliation_timeout(
@@ -697,6 +733,32 @@ async fn next_turn_liveness_wake(
             }
         }
         _ = ticker.tick() => TurnLivenessWake::Scan,
+    }
+}
+
+/// Completes one recovery stage unless daemon shutdown wins first.
+///
+/// The future stays pinned while false-valued watch notifications are ignored,
+/// so observing a configuration-neutral notification never cancels a database
+/// transaction and reissues it.
+async fn complete_before_shutdown<Output>(
+    shutdown: &mut watch::Receiver<bool>,
+    future: impl Future<Output = Output>,
+) -> Option<Output> {
+    tokio::pin!(future);
+    loop {
+        if *shutdown.borrow() {
+            return None;
+        }
+        select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return None;
+                }
+            }
+            output = &mut future => return Some(output),
+        }
     }
 }
 
@@ -931,13 +993,13 @@ fn report_turn_liveness_failure(error: &TurnLivenessRepositoryError) {
 #[cfg(test)]
 mod tests {
     use super::{
-        InventoryPage, PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, QuiescentInventory,
-        RECOVERY_ATTEMPT_BOUND, ROTATION_CEILING_CAUSE, STALE_TURN_AMBIGUOUS_CAUSE,
-        STALE_TURN_LOCK_UNAVAILABLE_CAUSE, STALE_TURN_STEERING_BLOCKED_CAUSE,
-        STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE, StaleTurnTerminalizer,
-        TERMINALIZATION_DEFERRED_CAUSE, TERMINALIZATIONS_PER_SCAN, TerminalizationWindow,
-        TurnLivenessWake, drain_quiescent_rotation, next_turn_liveness_wake,
-        reconcile_turn_liveness,
+        AUTOMATIC_RECONCILIATIONS_PER_SCAN, InventoryPage, PASS_FAILURE_CAUSE,
+        QUIESCENT_ROTATION_PAGE_CEILING, QuiescentInventory, RECOVERY_ATTEMPT_BOUND,
+        ROTATION_CEILING_CAUSE, STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_LOCK_UNAVAILABLE_CAUSE,
+        STALE_TURN_STEERING_BLOCKED_CAUSE, STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE,
+        StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE, TERMINALIZATIONS_PER_SCAN,
+        TerminalizationWindow, TurnLivenessWake, complete_before_shutdown,
+        drain_quiescent_rotation, next_turn_liveness_wake, reconcile_turn_liveness,
     };
     use signalbox_application::{
         StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
@@ -1475,5 +1537,31 @@ mod tests {
     #[test]
     fn recovery_attempts_have_a_ten_second_hard_ceiling() {
         assert_eq!(RECOVERY_ATTEMPT_BOUND, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn one_scan_claims_operations_just_in_time_under_a_finite_ceiling() {
+        assert_eq!(AUTOMATIC_RECONCILIATIONS_PER_SCAN, 64);
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_a_recovery_stage() {
+        let (sender, mut shutdown) = tokio::sync::watch::channel(false);
+        sender
+            .send(true)
+            .expect("the shutdown receiver remains live");
+
+        let outcome = complete_before_shutdown(&mut shutdown, std::future::pending::<()>()).await;
+
+        assert_eq!(outcome, None);
+    }
+
+    #[tokio::test]
+    async fn a_completed_recovery_stage_returns_while_shutdown_is_clear() {
+        let (_sender, mut shutdown) = tokio::sync::watch::channel(false);
+
+        let outcome = complete_before_shutdown(&mut shutdown, std::future::ready(7_u8)).await;
+
+        assert_eq!(outcome, Some(7));
     }
 }

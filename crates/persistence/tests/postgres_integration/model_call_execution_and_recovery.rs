@@ -1503,6 +1503,9 @@ async fn s04_automatic_reconciliation_records_the_operator_transition() -> Resul
     let batch = repository.claim_due().await?;
     let claimed = batch.claimed()[0];
     let outcome = repository.reconcile(claimed).await?;
+    let restart_reconciled = GoalRepository::new(pool.clone())
+        .restart_reconciled_turns(parked.session, &[parked.turn])
+        .await?;
     let durable: (String, String, String, i32, i64) = sqlx::query_as(
         "SELECT lifecycle.state_kind,
                 lifecycle.terminal_disposition_kind,
@@ -1539,6 +1542,7 @@ async fn s04_automatic_reconciliation_records_the_operator_transition() -> Resul
     );
     assert_eq!(claimed.attempt().get(), 1);
     assert_eq!(outcome, AutomaticReconciliationOutcome::Reconciled);
+    assert_eq!(restart_reconciled.as_ref(), &[parked.turn]);
     assert_eq!(
         durable,
         (
