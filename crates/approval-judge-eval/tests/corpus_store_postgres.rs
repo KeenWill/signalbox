@@ -281,6 +281,60 @@ async fn corpus_registration_requires_nonblank_version() -> Result<(), Box<dyn E
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_registration_requires_nonblank_repository() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let corpus_digest = [0_u8; 32];
+    let replay_digest = [0_u8; 32];
+    let source_digest = [0_u8; 32];
+
+    sqlx::query(
+        "INSERT INTO evaluation_corpus (
+            corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
+            source_kind, source_repository, source_path, source_sha256
+         ) VALUES ('invalid-repository', 'v1', 1, $1, $2, 1,
+                   'repository', '   ', 'cases.json', $3)",
+    )
+    .bind(corpus_digest.as_slice())
+    .bind(replay_digest.as_slice())
+    .bind(source_digest.as_slice())
+    .execute(&pool)
+    .await
+    .expect_err("a durable repository registration with blank provenance is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_registration_requires_portable_relative_path() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let corpus_digest = [0_u8; 32];
+    let replay_digest = [0_u8; 32];
+    let source_digest = [0_u8; 32];
+
+    sqlx::query(
+        "INSERT INTO evaluation_corpus (
+            corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
+            source_kind, source_repository, source_path, source_sha256
+         ) VALUES ('invalid-repository-path', 'v1', 1, $1, $2, 1,
+                   'repository', 'KeenWill/signalbox', '../cases.json', $3)",
+    )
+    .bind(corpus_digest.as_slice())
+    .bind(replay_digest.as_slice())
+    .bind(source_digest.as_slice())
+    .execute(&pool)
+    .await
+    .expect_err("a durable repository registration with parent traversal is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn stored_case_decode_error_retains_serde_context() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let disk = DiskCorpusStore::open(seed_manifest_path())?;

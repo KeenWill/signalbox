@@ -46,8 +46,19 @@ CREATE TABLE evaluation_corpus (
                 source_kind = 'repository'
                 AND source_repository IS NOT NULL
                 AND octet_length(source_repository) BETWEEN 1 AND 2048
+                AND source_repository !~ '^[[:space:]]*$'
+                AND source_repository !~ '[[:cntrl:]]'
                 AND source_path IS NOT NULL
                 AND octet_length(source_path) BETWEEN 1 AND 1024
+                AND source_path !~ '^[[:space:]]*$'
+                AND source_path !~ '[[:cntrl:]<>:"|?*]'
+                AND strpos(source_path, chr(92)) = 0
+                AND source_path !~ '^/'
+                AND source_path !~ '/$'
+                AND source_path !~ '//'
+                AND source_path !~ '(^|/)\.{1,2}(/|$)'
+                AND source_path !~ '(^|/)[^/]*[. ](/|$)'
+                AND source_path !~* '(^|/)(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(\.|/|$)'
                 AND source_sha256 IS NOT NULL
                 AND octet_length(source_sha256) = 32
                 AND source_blob_store IS NULL
