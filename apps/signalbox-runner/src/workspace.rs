@@ -152,7 +152,7 @@ impl RunnerWorkspaceStore {
         let placement_name = request.placement_revision().get().to_string();
         let execution_path = self.canonical_root.join(request.relative_path());
         match open_directory(&session, &placement_name) {
-            Ok(placement) => read_ready_private_workspace(&placement, request, &execution_path),
+            Ok(placement) => read_ready_private_workspace(&placement, request),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 create_private_workspace(&session, &placement_name, request, &execution_path)
             }
@@ -243,7 +243,7 @@ fn create_private_workspace(
         .map_err(RunnerWorkspaceError::CommitAmbiguous)?;
     let placement =
         open_directory(session, placement_name).map_err(RunnerWorkspaceError::CommitAmbiguous)?;
-    let published = read_ready_private_workspace(&placement, request, execution_path)
+    let published = read_ready_private_workspace(&placement, request)
         .map_err(commit_ambiguous_after_publication)?;
     if published.execution_directory() != &execution_directory {
         return Err(commit_ambiguous_after_publication(
@@ -276,7 +276,6 @@ fn private_manifest(
 fn read_ready_private_workspace(
     placement: &File,
     request: &PrivateWorkspaceRequest,
-    execution_path: &Path,
 ) -> Result<ReadyManifest, RunnerWorkspaceError> {
     let document = read_manifest(placement)?;
     let manifest = document.manifest;
@@ -286,7 +285,7 @@ fn read_ready_private_workspace(
     }
     let work = open_directory(placement, PRIVATE_WORKSPACE_DIRECTORY)
         .map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
-    checked_execution_directory(execution_path, &work)
+    checked_execution_directory(Path::new(document.execution_directory.as_str()), &work)
         .map_err(commit_ambiguous_after_publication)?;
     let manifest_digest =
         workspace_manifest_digest(&manifest).map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
@@ -840,9 +839,9 @@ mod tests {
     }
 
     #[test]
-    fn private_root_reopen_after_root_rename_preserves_the_authored_path() {
+    fn private_root_reopen_rejects_a_missing_authored_path() {
         let (parent, state) = fixture_root();
-        let first = state
+        state
             .workspace_store()
             .expect("the locked root forms a workspace store")
             .prepare_private_root(&request(RUNNER))
@@ -853,13 +852,13 @@ mod tests {
         fs::rename(&original_root, &moved_root).expect("the runner root moves between processes");
         let reopened = RunnerStateRoot::open(&moved_root)
             .expect("the runner root reopens at its new configured path");
-        let replay = reopened
+        let failure = reopened
             .workspace_store()
             .expect("the reopened root forms a workspace store")
             .prepare_private_root(&request(RUNNER))
-            .expect("the moved private workspace replays");
+            .expect_err("the missing authored path prevents replay");
 
-        assert_eq!(replay, first);
+        assert!(matches!(failure, RunnerWorkspaceError::CommitAmbiguous(_)));
     }
 
     #[test]
