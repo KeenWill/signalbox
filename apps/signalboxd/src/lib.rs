@@ -932,9 +932,19 @@ const EXPIRED_PASS_RECOVERY_ATTEMPTS: u32 = 4;
 /// Wall-clock bound for each detached database operation.
 // numeric-bound: ceiling - prevents one database operation from wedging recovery
 const EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
-/// Delay between failed expired-pass recovery attempts.
+/// Delay before retrying an expired-pass recovery whose scheduler row is busy.
+///
+/// Occupancy cancellation releases the execution future immediately, but the
+/// canceled database transaction can retain its row lock briefly while it
+/// unwinds. This short delay lets that expected handoff finish while the
+/// per-attempt lock wait still prevents a busy loop.
+// numeric-bound: interval - allows the canceled pass to release its scheduler-row lock
+const EXPIRED_PASS_RECOVERY_LOCK_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(50);
+/// Delay before retrying any other expired-pass recovery failure.
 // numeric-bound: interval - spends a database outage without busy retrying
-const EXPIRED_PASS_RECOVERY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(120);
+const EXPIRED_PASS_RECOVERY_INFRASTRUCTURE_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(120);
 
 async fn recover_expired_scheduler_pass(
     recovery: SchedulerPassOccupancyRecovery,
@@ -1013,7 +1023,7 @@ async fn recover_expired_scheduler_pass(
             Ok(Err(error)) => {
                 report_scheduler_pass_recovery_failure(session, expected_turn, attempt, &error);
                 if attempt < EXPIRED_PASS_RECOVERY_ATTEMPTS {
-                    sleep(EXPIRED_PASS_RECOVERY_RETRY_DELAY).await;
+                    sleep(expired_pass_recovery_retry_delay(&error)).await;
                 }
             }
             Err(_) => {
@@ -1027,7 +1037,7 @@ async fn recover_expired_scheduler_pass(
                     "scheduler pass expiry recovery attempt exceeded its bound"
                 );
                 if attempt < EXPIRED_PASS_RECOVERY_ATTEMPTS {
-                    sleep(EXPIRED_PASS_RECOVERY_RETRY_DELAY).await;
+                    sleep(EXPIRED_PASS_RECOVERY_INFRASTRUCTURE_RETRY_DELAY).await;
                 }
             }
         }
@@ -1041,6 +1051,15 @@ async fn recover_expired_scheduler_pass(
     );
 }
 
+fn expired_pass_recovery_retry_delay(error: &TurnLivenessRepositoryError) -> std::time::Duration {
+    match error {
+        TurnLivenessRepositoryError::TerminalizationLockUnavailable(_) => {
+            EXPIRED_PASS_RECOVERY_LOCK_RETRY_DELAY
+        }
+        _ => EXPIRED_PASS_RECOVERY_INFRASTRUCTURE_RETRY_DELAY,
+    }
+}
+
 fn report_scheduler_pass_recovery_failure(
     session: SessionId,
     turn: TurnId,
@@ -1048,9 +1067,11 @@ fn report_scheduler_pass_recovery_failure(
     error: &TurnLivenessRepositoryError,
 ) {
     let failure_class = error.operator_failure_class();
+    let failure_cause_code = error.operator_failure_cause_code();
     tracing::error!(
         ?failure_class,
         cause_code = "scheduler_pass_occupancy_recovery_failed",
+        failure_cause_code,
         session_id = %session.as_uuid(),
         turn_id = %turn.as_uuid(),
         attempt,
@@ -2162,13 +2183,39 @@ mod tests {
 
     use super::{
         APPROVAL_JUDGE_SYSTEM_PROMPT, ActivatedTurnExecution, ActivatedTurnPass,
-        ActivatedTurnPassError, ApprovalJudgeModelError, FailedApprovalJudgeDisposition,
-        FatalExecutionGuardState, FatalExecutionOccupancyExpiry, FatalExecutionSignal,
-        FatalExecutionSupervisor, JudgeRequestFields, MAX_QUOTED_CONTEXT_BYTES,
-        SessionAuthorityContext, TokenUsage, TurnPassExecutionStage, activation_session_matches,
+        ActivatedTurnPassError, ApprovalJudgeModelError,
+        EXPIRED_PASS_RECOVERY_INFRASTRUCTURE_RETRY_DELAY, EXPIRED_PASS_RECOVERY_LOCK_RETRY_DELAY,
+        FailedApprovalJudgeDisposition, FatalExecutionGuardState, FatalExecutionOccupancyExpiry,
+        FatalExecutionSignal, FatalExecutionSupervisor, JudgeRequestFields,
+        MAX_QUOTED_CONTEXT_BYTES, SessionAuthorityContext, TokenUsage, TurnLivenessRepositoryError,
+        TurnPassExecutionStage, activation_session_matches, expired_pass_recovery_retry_delay,
         reconcile_retained_once, render_dispatch_authority, render_judge_request_payload,
         render_session_authority_context, supervise_execution, supervise_execution_for_session,
     };
+
+    #[test]
+    fn expired_pass_lock_contention_retries_on_the_handoff_cadence() {
+        let error =
+            TurnLivenessRepositoryError::TerminalizationLockUnavailable(sqlx::Error::PoolTimedOut);
+
+        assert_eq!(
+            expired_pass_recovery_retry_delay(&error),
+            EXPIRED_PASS_RECOVERY_LOCK_RETRY_DELAY
+        );
+    }
+
+    #[test]
+    fn expired_pass_database_failure_keeps_the_outage_cadence() {
+        let error = TurnLivenessRepositoryError::TerminalizationDatabase {
+            commit_ambiguous: false,
+            source: sqlx::Error::PoolTimedOut,
+        };
+
+        assert_eq!(
+            expired_pass_recovery_retry_delay(&error),
+            EXPIRED_PASS_RECOVERY_INFRASTRUCTURE_RETRY_DELAY
+        );
+    }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct ExecutionFailure;
