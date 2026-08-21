@@ -623,6 +623,30 @@ fn oversized_reader_inventory(provider: &FileReaderProviderName) -> Vec<ReaderDe
         .collect()
 }
 
+fn oversized_inspection_view_inventory() -> Vec<ReadViewDeclaration> {
+    (0..17)
+        .map(|index| {
+            let name = format!("view-{index:02}");
+            let schema = format!(
+                r#"{{"description":"{}","type":"object"}}"#,
+                "x".repeat(65_000)
+            );
+            ReadViewDeclaration::try_new(
+                ReadViewName::try_new(name).expect("fixture view name is valid"),
+                String::from("Reads one bounded synthetic projection."),
+                CanonicalJsonObjectSchema::try_new(&schema)
+                    .expect("fixture schema is object-rooted and individually bounded"),
+                ReadAccessPattern::Streaming,
+                ReadViewBounds::Text {
+                    source_bytes: 1_024,
+                    output_bytes: 64,
+                },
+            )
+            .expect("fixture view declaration is individually valid")
+        })
+        .collect()
+}
+
 #[test]
 fn oversized_provider_reader_inventory_is_rejected() {
     let provider =
@@ -630,6 +654,37 @@ fn oversized_provider_reader_inventory_is_rejected() {
     let readers = oversized_reader_inventory(&provider);
     let declaration = FileMediaProviderDeclaration::try_new(provider, readers)
         .expect("the provider constructor defers inventory limits to the registry");
+
+    let outcome = FileMediaRegistry::try_new(
+        vec![declaration],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    );
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::Inventory)
+    ));
+}
+
+#[test]
+fn oversized_inspection_view_inventory_is_rejected() {
+    let provider =
+        FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
+    let views = oversized_inspection_view_inventory();
+    let reader = ReaderDeclaration::try_new(ReaderDeclarationInput {
+        provider: provider.clone(),
+        reader: FileReaderName::try_new("fixture").expect("fixture reader name is valid"),
+        revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
+        media_types: vec![media_type(SYNTHETIC_MEDIA_TYPE)],
+        probe: ProbeDeclaration::new(4, 0, 0, 4),
+        views,
+        reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
+        streaming_text_fallback: StreamingTextFallback::Disabled,
+    })
+    .expect("fixture reader declaration is nonempty");
+    let declaration = FileMediaProviderDeclaration::try_new(provider, vec![reader])
+        .expect("fixture provider owns its reader");
 
     let outcome = FileMediaRegistry::try_new(
         vec![declaration],

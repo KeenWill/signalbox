@@ -22,6 +22,8 @@ const MAX_MEDIA_TYPES_PER_READER: usize = 256;
 const MAX_REGISTRY_MEDIA_TYPES: usize = 4_096;
 // numeric-bound: ceiling - bounds per-reader model-visible view inventory memory
 const MAX_VIEWS_PER_READER: usize = 256;
+// numeric-bound: ceiling - reserves tool-result space for fixed inspection facts and metadata
+const MAX_INSPECTION_VIEW_INVENTORY_BYTES: usize = 512 * 1_024;
 // numeric-bound: ceiling - bounds aggregate process-lifetime view inventory memory
 const MAX_REGISTRY_VIEWS: usize = 4_096;
 // numeric-bound: ceiling - bounds aggregate retained view-schema bytes
@@ -795,6 +797,7 @@ fn validate_reader(
     {
         return Err(FileMediaRegistryConstructionError::DuplicateReaderMember);
     }
+    validate_inspection_view_inventory(reader)?;
     let probe = reader.probe();
     if probe.prefix_bytes() > ceilings.probe_prefix_bytes
         || probe.suffix_bytes() > ceilings.probe_suffix_bytes
@@ -813,6 +816,39 @@ fn validate_reader(
         validate_view(view.access(), view.bounds(), ceilings)?;
     }
     Ok(())
+}
+
+fn validate_inspection_view_inventory(
+    reader: &ReaderDeclaration,
+) -> Result<(), FileMediaRegistryConstructionError> {
+    let mut projected_bytes = 2_usize;
+    for (index, view) in reader.views().iter().enumerate() {
+        let encoded = serde_json::to_vec(&serde_json::json!({
+            "name": view.name().as_str(),
+            "description": view.description(),
+            "arguments_schema": view.arguments_schema().value(),
+            "output": inspection_output_kind(view.output_kind()),
+        }))
+        .map_err(|_| FileMediaRegistryConstructionError::Inventory)?;
+        projected_bytes = projected_bytes
+            .checked_add(encoded.len())
+            .and_then(|total| total.checked_add(usize::from(index > 0)))
+            .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+        if projected_bytes > MAX_INSPECTION_VIEW_INVENTORY_BYTES {
+            return Err(FileMediaRegistryConstructionError::Inventory);
+        }
+    }
+    Ok(())
+}
+
+const fn inspection_output_kind(kind: crate::ReadOutputKind) -> &'static str {
+    match kind {
+        crate::ReadOutputKind::Text => "text",
+        crate::ReadOutputKind::Structured => "structured",
+        crate::ReadOutputKind::Image => "image",
+        crate::ReadOutputKind::Audio => "audio",
+        crate::ReadOutputKind::File => "file",
+    }
 }
 
 fn validate_aggregate_inventory(
