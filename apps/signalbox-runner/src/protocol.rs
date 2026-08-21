@@ -2031,10 +2031,13 @@ mod tests {
             .expect("the fixture manifest has a canonical digest");
         WorkspaceReady {
             correlation,
-            ready: ReadyManifest {
+            ready: ReadyManifest::try_new(
                 manifest,
                 manifest_digest,
-            },
+                WorkingDirectory::try_new("/runner/sessions/provision/repo".to_owned())
+                    .expect("the fixture execution directory is absolute"),
+            )
+            .expect("the fixture ready manifest is valid"),
         }
     }
 
@@ -2042,8 +2045,8 @@ mod tests {
         let ready = workspace_ready();
         WorkspaceRecorded {
             correlation: ready.correlation,
-            manifest_id: ready.ready.manifest.manifest_id,
-            manifest_digest: ready.ready.manifest_digest,
+            manifest_id: ready.ready.manifest().manifest_id,
+            manifest_digest: ready.ready.manifest_digest().clone(),
         }
     }
 
@@ -2262,7 +2265,7 @@ mod tests {
             credential_profile: None,
             grant_revision: None,
             normalized_arguments: serde_json::json!({ "program": "true" }),
-            result_bounds: ResultBounds::version_one(),
+            result_bounds: ResultBounds::version_two(),
         }
     }
 

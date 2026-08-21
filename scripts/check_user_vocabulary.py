@@ -214,7 +214,7 @@ ALLOWLIST = (
     Allowance(
         "Unix file-owner and permission semantics",
         re.compile(
-            r"^(?:apps/signalbox-runner/src/(?:configuration|protocol|state)[.]rs|"
+            r"^(?:apps/signalbox-runner/src/(?:configuration|dispatch_https|main|protocol|state|workspace)[.]rs|"
             r"apps/signalboxd/src/(?:local_socket|runner_protocol_runtime)[.]rs|"
             r"apps/signalboxd/tests/process_substrate[.]rs|"
             r"crates/model-runtime-(?:claude|codex)-cli/tests/live_smoke[.]rs|"
@@ -222,11 +222,11 @@ ALLOWLIST = (
             r"runner-protocol)[.]md)$"
         ),
         re.compile(
-            r"(?:socket|listener|directory|file|root|state|parent|sidecar|spool|mode|"
+            r"(?:socket|listener|directory|file|root|state|storage|parent|sidecar|spool|mode|"
             r"permissions|fixture|enrollment|durable)(?:(?!owner).)*"
             r"owner-(?:only|private)|"
             r"owner-(?:only|private)(?:(?!owner).)*(?:socket|listener|directory|file|root|state|"
-            r"parent|sidecar|spool|mode|permissions|fixture|enrollment|durable)|"
+            r"storage|parent|sidecar|spool|mode|permissions|fixture|enrollment|durable)|"
             r"unreadable, oversized, wrong-owner, wrong-mode|"
             r"unprivileged different owner cannot make a currently protected directory|"
             r"An untrusted owner, a non-sticky writable ancestor|"
@@ -491,9 +491,9 @@ ALLOWLIST = (
             r"replace_session_defaults|review_workflow|runner|session|submit_input|"
             r"tool_execution|turn_eligibility)[.]rs|"
             r"crates/persistence/tests/(?:postgres_integration/[a-z_]+|"
-            r"review_workflow_postgres)[.]rs|"
+            r"review_workflow_postgres|runner_protocol_postgres)[.]rs|"
             r"docs/spec/(?:conversation-import|model-call-execution|persistence-protocol|"
-            r"process-protocol|review-workflows|sessions-and-transcript|"
+            r"process-protocol|review-workflows|runner-protocol|sessions-and-transcript|"
             r"turn-lifecycle-and-scheduling)[.]md)$"
         ),
         re.compile(
@@ -508,7 +508,11 @@ ALLOWLIST = (
             r"observation owner must match the aggregate link|"
             r"attachment owner must match the aggregate link|terminal-record owner,|"
             r"loss before and after pin, owner replacement|complete owner facts|"
-            r"operation-owner facts|"
+            r"operation-owner facts|validate_operation_journal_owner|"
+            r"(?:durably )?lost cleanup owner|"
+            r"s32_inv044_workspace_release_rejects_a_lost_cleanup_owner|"
+            r"owner-gated workstation inventory decision|the only command owner|"
+            r"the live owner connection|"
             r"(?:defaults|pending steering|snapshot) owner cross-wired|"
             r"OwnerMismatch|"
             r"ModelCallOwners|attempt_owners|wrong_owner|wrong_terminal_owner|"
