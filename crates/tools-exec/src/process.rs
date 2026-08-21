@@ -1239,6 +1239,34 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         let environment = SandboxEnvironmentDelivery::try_new(environment)
             .map_err(|()| SandboxEnvironmentRunError::Delivery)?;
         #[cfg(target_os = "linux")]
+        {
+            let sandbox_path = self.mount_profile.executable_path(&self.workspace_root);
+            let budget_request = bwrap_request(
+                SandboxLaunchContext {
+                    bind_source: &self.workspace_identity.bind_source,
+                    bind_descriptor: i32::MIN,
+                    launcher_descriptor: i32::MIN,
+                    working_directory_bind_descriptor: Some(i32::MIN),
+                },
+                &self.bubblewrap_program,
+                SandboxInvocation {
+                    program: &arguments.program,
+                    arguments: &arguments.arguments,
+                    working_directory: &arguments.working_directory,
+                    timeout: Duration::ZERO,
+                    capture_bytes: 0,
+                    environment: Some(&environment),
+                },
+                SandboxRequestProfile {
+                    mounts: &self.mount_profile,
+                    executable_path: &sandbox_path,
+                },
+            );
+            if !process_request_fits_linux_arg_max(&budget_request) {
+                return Err(SandboxEnvironmentRunError::Arguments);
+            }
+        }
+        #[cfg(target_os = "linux")]
         let probe_environment = SandboxEnvironmentDelivery::try_probe()
             .map_err(|()| SandboxEnvironmentRunError::Delivery)?;
         Ok(self
@@ -1927,6 +1955,42 @@ fn sandbox_environment_fits_linux_arg_max(
     let pointer_bytes = (1_usize
         .saturating_add(arguments.arguments.len())
         .saturating_add(environment_count)
+        .saturating_add(2))
+    .saturating_mul(std::mem::size_of::<usize>());
+
+    argument_strings
+        .saturating_add(environment_strings)
+        .saturating_add(pointer_bytes)
+        < MIN_LINUX_ARG_MAX_BYTES
+}
+
+#[cfg(target_os = "linux")]
+fn process_request_fits_linux_arg_max(request: &ProcessRequest) -> bool {
+    fn string_bytes(value: &std::ffi::OsStr) -> usize {
+        value.as_bytes().len().saturating_add(1)
+    }
+
+    let argument_strings = string_bytes(&request.program).saturating_add(
+        request
+            .arguments
+            .iter()
+            .map(|argument| string_bytes(argument))
+            .sum::<usize>(),
+    );
+    let environment_strings = request
+        .environment
+        .iter()
+        .map(|(name, value)| {
+            name.as_bytes()
+                .len()
+                .saturating_add(1)
+                .saturating_add(value.as_bytes().len())
+                .saturating_add(1)
+        })
+        .sum::<usize>();
+    let pointer_bytes = (1_usize
+        .saturating_add(request.arguments.len())
+        .saturating_add(request.environment.len())
         .saturating_add(2))
     .saturating_mul(std::mem::size_of::<usize>());
 
@@ -3766,6 +3830,24 @@ mod tests {
     const ISOLATION_FIXTURE_TIMEOUT: Duration = Duration::from_secs(30);
     const SYNTHETIC_ENVIRONMENT_NAME: &str = "GH_TOKEN";
     const SYNTHETIC_ENVIRONMENT_VALUE: &str = "synthetic-runner-token";
+    #[cfg(target_os = "linux")]
+    const OVERSIZED_MOUNT_INVENTORY_COUNT: usize = 512;
+    #[cfg(target_os = "linux")]
+    const OVERSIZED_MOUNT_COMPONENT_BYTES: usize = 220;
+
+    #[cfg(target_os = "linux")]
+    fn oversized_mount_inventory(root: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
+        (0..OVERSIZED_MOUNT_INVENTORY_COUNT)
+            .map(|index| {
+                let path = root.join(format!(
+                    "{index:03}-{}",
+                    "m".repeat(OVERSIZED_MOUNT_COMPONENT_BYTES)
+                ));
+                std::fs::create_dir(&path)?;
+                Ok(path)
+            })
+            .collect()
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -5386,6 +5468,45 @@ mod tests {
             .try_run_with_environment(arguments, environment)
             .await
             .expect_err("an oversized launch payload cannot reach the sandbox probe");
+
+        assert_eq!(error, SandboxEnvironmentRunError::Arguments);
+        assert_eq!(observation.recorded_probes(), Vec::new());
+        assert_eq!(observation.recorded_requests(), Vec::new());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn runner_environment_rejects_an_oversized_mount_inventory_before_the_probe()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let read_only_paths = oversized_mount_inventory(read_only.path())?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new_runner_restricted(
+            runner,
+            workspace.path(),
+            &read_only_paths,
+        )?;
+        let arguments = ExecArguments {
+            program: String::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let environment = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        )?;
+
+        let error = command_runner
+            .try_run_with_environment(arguments, environment)
+            .await
+            .expect_err("an oversized mount inventory cannot reach the sandbox probe");
 
         assert_eq!(error, SandboxEnvironmentRunError::Arguments);
         assert_eq!(observation.recorded_probes(), Vec::new());

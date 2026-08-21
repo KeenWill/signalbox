@@ -250,10 +250,6 @@ BEGIN
                        checked_turn_id,
                        checked_session_id
                    )
-                   + turn_start_model_identity_entry_count(
-                       checked_turn_id,
-                       checked_starting_frontier
-                   )
                ) AS effective'
     );
     IF revised = definition THEN
@@ -278,10 +274,6 @@ BEGIN
                    turn_lifecycle_origin_member_span(
                        checked_turn_id,
                        checked_session
-                   )
-                   + turn_start_model_identity_entry_count(
-                       checked_turn_id,
-                       checked_starting_frontier
                    )
                ) AS effective'
     );

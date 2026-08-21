@@ -1776,9 +1776,11 @@ environment identifier of at most 4,096 UTF-8 bytes and cannot replace `HOME`,
 `HTTPS_PROXY`, `LANG`, `LC_ALL`, or `PATH`; every `LD_*` name is also reserved.
 The byte-preserving value is nonempty, NUL-free, and at most 65,536 bytes. The
 complete target argv, fixed cleared environment, optional HTTPS proxy entries,
-and injected name/value must also fit the process core's conservative 128 KiB
-Linux launch budget, including terminators and pointer arrays; a combination
-that exceeds it is rejected before the availability probe. The caller value is
+and injected name/value must fit the process core's conservative 128 KiB Linux
+launch budget. The fully constructed outer bubblewrap request, including every
+configured mount argument, must independently fit the same budget. Both checks
+include terminators and pointer arrays, and an oversized request is rejected
+before the availability probe. The caller value is
 written to a private anonymous descriptor, materialized as a mode-`0600` file
 inside the namespace after configured mounts, read and removed by the
 namespace-local dispatcher, and added only to the final target environment. The
