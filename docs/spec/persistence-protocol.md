@@ -287,7 +287,11 @@ Implemented table families (across the forward-only migrations):
   records dedicated approval-judge calls in the global model-call identity
   namespace only while their request is the current active approval wait,
   correlates delegate decisions to their completed call, selection,
-  recommendation, and rationale;
+  recommendation, and rationale; migration `202608110014` supersedes its
+  decision-shape constraint so a delegate denial stores the checked reason
+  derived from its rationale, and backfills earlier delegate denials with the
+  same derivation, so a null reason means exactly one thing everywhere: the
+  rationale sanitizes to nothing;
 - migration `202608030001` adds the typed `tool_approval_decided_outbox_event`
   family, appends one migration-boundary event for each explicit decision that
   already exists, and requires every later explicit decision to install exactly
@@ -719,8 +723,8 @@ that cannot be reconstructed is corruption, never an unclaimed identifier.
 ## Lock protocol
 
 Every Rust-issued SQL statement that takes an explicit row lock lives in
-`crates/persistence/src/lock_inventory.rs`. Twenty-three explicit lock
-statements live in the schema instead:
+`crates/persistence/src/lock_inventory.rs`. Twenty-four explicit lock statements
+live in the schema instead:
 
 - the deferred pending-steering source-turn trigger (migration `202607180005`)
   takes `FOR UPDATE` on the named `turn_lifecycle` row when a pending-steering
@@ -765,13 +769,26 @@ statements live in the schema instead:
 - the placement-loss baseline trigger in migration `202608110005` takes
   `FOR UPDATE` on the session scheduler, then `FOR SHARE` on the selected
   enrollment, connection authority head, and optional current loss head before
-  deriving the immutable baseline and before the placement row becomes visible.
+  deriving the immutable baseline and before the placement row becomes visible;
+  migration `202608110006` adds a transaction-level runner-identity advisory
+  lock between the scheduler and enrollment locks, and enrollment insertion and
+  loss-cursor completion take that same identity lock before they can publish
+  the competing fact; and
+- the program-journal append-sequence trigger in migration `202608140004` takes
+  `FOR UPDATE` on the run's sequence row before admitting the next contiguous
+  global and direction-specific ordinal.
 
 Why: a single reviewed inventory makes lock ordering auditable instead of
 scattered through query strings; trigger-resident locks are recorded here
 because they fire outside the Rust inventory's view.
 
 Locks per transaction, in acquisition order:
+
+- **Program journal append**: the adapter locks the run's sequence row
+  `FOR UPDATE`, inserts the immutable frame, then advances that same sequence
+  row. The insert trigger reacquires the already-held row lock to reject a frame
+  that does not extend the committed global position and its applicable request
+  or delivery ordinal by exactly one.
 
 - **CreateSessionFromImportedFrontier**: no explicit row lock. Registry claim
   insertion and the command/session uniqueness constraints serialize competing
@@ -894,17 +911,26 @@ Locks per transaction, in acquisition order:
   authority trigger takes the `tool_request` row `FOR UPDATE` after the
   scheduler lock and before checking that no nonterminal judge remains.
 
-- **Approval-judge transactions** (prepare, authorize, complete, and fail): the
-  `session_scheduler` row `FOR UPDATE` is always the first Rust-issued explicit
-  lock. Preparation then inserts the call; its schema guard takes the exact
-  `tool_request` row `FOR UPDATE`, followed by the active `turn_lifecycle` row
-  `FOR UPDATE`, before checking for an existing decision and validating the
-  prepared call. Completion performs its guarded lifecycle transition under the
-  scheduler lock; at commit, the deferred decision-authority trigger then takes
-  the `tool_request` row `FOR UPDATE`. Authorization and failure need no
-  additional explicit lock. The shared scheduler-first prefix prevents
-  approval-judge, tool-loop, and lifecycle-transition transactions from holding
-  these rows in reverse order.
+- **Approval-judge transactions** (prepare, authorize, complete, and fail):
+  preparation, authorization, and failure take the `session_scheduler` row
+  `FOR UPDATE` as their first Rust-issued explicit lock. Preparation then
+  inserts the call; its schema guard takes the exact `tool_request` row
+  `FOR UPDATE`, followed by the active `turn_lifecycle` row `FOR UPDATE`, before
+  checking for an existing decision and validating the prepared call. Completion
+  first locks the session row `FOR NO KEY UPDATE` and only then the scheduler
+  row: it resolves the goal authority in force before committing a decision, and
+  a goal system transition — a model declaration or scheduler-failure blocking —
+  serializes on the session row without taking the scheduler row, so holding the
+  session row from before that read until commit is what makes a goal-closing
+  transition and the completion recheck mutually exclusive. Applied goal
+  commands take the scheduler row too, after that same session row. The session
+  row precedes the scheduler row because every transaction that locks both
+  acquires them in that order. Completion performs its guarded lifecycle
+  transition under the scheduler lock; at commit, the deferred
+  decision-authority trigger then takes the `tool_request` row `FOR UPDATE`.
+  Authorization and failure need no additional explicit lock. The shared
+  scheduler-lock position prevents approval-judge, tool-loop, and
+  lifecycle-transition transactions from holding these rows in reverse order.
 
 - **Delegated terminal-observation transactions**: after nonlocking reads of the
   call's turn and delegation identity, observation commit and authoritative
@@ -1052,11 +1078,12 @@ Locks per transaction, in acquisition order:
   its own transaction by locking `session_scheduler` first, then the loss head,
   placement, current lease, and guarded turn rows. Offered leases with no
   durable claim acquire exact no-execution proof; claimed leases follow effect
-  loss law. That same session transaction retires any unacknowledged release the
-  lost connection still owed, since no successor inherits authority to complete
-  it. A crash resumes at the first uncommitted session, while every
-  not-yet-projected placement is already effectively lost through the epoch
-  fence.
+  loss law. Retirement of any unacknowledged release the lost connection still
+  owed remains a daemon-orchestration responsibility outside this persistence
+  transaction; this adapter commits the session projection and advances its
+  cursor without retiring that release. A crash resumes at the first uncommitted
+  session, while every not-yet-projected placement is already effectively lost
+  through the epoch fence.
 
 - **Runner replace, abandon, and release**: an unseen abandonment command owns
   its durable-command claim and terminalizes in one transaction. An unseen

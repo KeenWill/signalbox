@@ -2060,6 +2060,18 @@ impl RunnerProtocolStore {
                 RunnerDomainError::CorrelationMismatch,
             ));
         }
+        let current: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
+            .bind(enrollment_id.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if let Some(current) = current {
+            require_completed_registration_reconciliation(
+                &mut transaction,
+                enrollment_id,
+                decode_registration_revision(current)?,
+            )
+            .await?;
+        }
         terminalize_connection_for_revocation(&mut transaction, enrollment_id).await?;
         let runner = enrollment.runner();
         let authentication = enrollment.authentication();

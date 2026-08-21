@@ -18,19 +18,20 @@ use signalbox_domain::{
     ModelCallId, ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
     PerInputConfigurationChoices, ProvisionedWorkspace, ResolvedContextFrontierReconstitutionInput,
     RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
-    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId,
-    RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
-    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLostBeforePin,
-    RunnerPlacementReconstitutionHistory, RunnerRepositoryEntry, RunnerSandboxProfile,
-    RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
-    RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
-    RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SessionRunnerPlacementState, SubmitInput, ToolAdmissibleLoci,
-    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
-    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
-    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerEnrollmentState,
+    RunnerGeneration, RunnerId, RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId,
+    RunnerLeaseOfferRequest, RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation,
+    RunnerLostBeforePin, RunnerPlacementReconstitutionHistory, RunnerRepositoryEntry,
+    RunnerSandboxProfile, RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration,
+    RunnerToolEffectClass, RunnerToolModelDefinition, RunnerToolPermissionOverride,
+    RunnerToolPermissionOverrides, RunnerWorkingDirectory, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionRunnerPin, SessionRunnerPlacement,
+    SessionRunnerPlacementReconstitutionInput, SessionRunnerPlacementRequest,
+    SessionRunnerPlacementState, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
+    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
@@ -6315,6 +6316,45 @@ async fn s30_inv042_current_registration_gates_new_leases() -> Result<(), Box<dy
         preserved,
         RunnerRegistrationReconciliationDisposition::Preserved
     );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042 / INV-044: enrollment revocation cannot invalidate the registration
+/// authority of a pending reconciliation cursor.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv042_inv044_revocation_waits_for_registration_reconciliation()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, mut expected_enrollment, _, pin) = stored_credentialless_pin_fixture(&pool).await?;
+    store
+        .register(&expected_enrollment, expanded_advertisement())
+        .await?;
+    let reconciliation = store.load_pending_registration_reconciliations().await?[0];
+
+    let rejected = store
+        .revoke_enrollment(&mut expected_enrollment)
+        .await
+        .expect_err("revocation must wait for the pending registration cursor");
+    let retained = store
+        .load_enrollment(expected_enrollment.enrollment())
+        .await?
+        .expect("the rejected revocation leaves enrollment authority intact");
+
+    assert_store_domain_error(rejected, RunnerDomainError::RegistrationInProgress);
+    assert_eq!(retained.state(), RunnerEnrollmentState::Active);
+    assert_eq!(
+        store
+            .reconcile_registration_session(reconciliation, pin.placement.session())
+            .await?,
+        RunnerRegistrationReconciliationDisposition::Preserved
+    );
+    store
+        .complete_registration_reconciliation(reconciliation)
+        .await?;
+    assert!(store.revoke_enrollment(&mut expected_enrollment).await?);
+    assert_eq!(expected_enrollment.state(), RunnerEnrollmentState::Revoked);
     drop(pool);
     Ok(())
 }
