@@ -32,12 +32,12 @@ bounded as a canonical JSON object before it reaches a tool result.
 The common output vocabulary is closed as text, structure, image, audio, or
 general file. The provider-neutral core admits only text and structured views;
 rich view registration remains unavailable until the durable media-reference
-result path lands. View names and meanings remain provider-owned. Every view declares
-an object options schema, streaming or finite-range access posture, cumulative
-source work, and output-specific finite bounds. Text and structured views bound
-body bytes; structure also bounds depth, nodes, and strings. Image, audio, and
-general-file views carry the corresponding dimension, pixel, channel, sample,
-duration, and byte bounds.
+result path lands. View names and meanings remain provider-owned. Every view
+declares an object options schema, streaming or finite-range access posture,
+cumulative source work, and output-specific finite bounds. Text and structured
+views bound body bytes; structure also bounds depth, nodes, and strings. Image,
+audio, and general-file views carry the corresponding dimension, pixel, channel,
+sample, duration, and byte bounds.
 
 ## Registry and adapter boundary
 

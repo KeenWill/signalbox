@@ -621,11 +621,13 @@ mod tests {
 
         let evidence = read_evidence(result);
 
-        assert!(matches!(
-            evidence,
-            ToolExecutorEvidence::KnownFailed { detail: Some(detail) }
-                if detail.as_str() == RESULT_TOO_LARGE_DETAIL
-        ));
+        let ToolExecutorEvidence::KnownFailed {
+            detail: Some(detail),
+        } = evidence
+        else {
+            panic!("an oversized encoded result must retain fallback detail");
+        };
+        assert_eq!(detail.as_str(), RESULT_TOO_LARGE_DETAIL);
     }
 
     #[test]

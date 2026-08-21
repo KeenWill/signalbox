@@ -262,8 +262,11 @@ impl FromStr for CanonicalMediaType {
 }
 
 fn valid_media_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && bytes.all(|byte| {
             byte.is_ascii_lowercase()
                 || byte.is_ascii_digit()
                 || matches!(
@@ -479,13 +482,20 @@ pub(crate) fn parse_json_without_duplicate_members(
     value: &str,
 ) -> Result<serde_json::Value, serde_json::Error> {
     let raw = serde_json::from_str::<Box<RawValue>>(value)?;
-    parse_raw_json(raw.get())
+    parse_raw_json(raw.get(), 0)
 }
 
-fn parse_raw_json(value: &str) -> Result<serde_json::Value, serde_json::Error> {
+fn parse_raw_json(value: &str, depth: u32) -> Result<serde_json::Value, serde_json::Error> {
     match value.trim_start().as_bytes().first() {
-        Some(b'{') => deserialize_seed(value, DuplicateAwareObject),
-        Some(b'[') => deserialize_seed(value, DuplicateAwareArray),
+        Some(b'{') if depth < crate::MAX_STRUCTURED_DEPTH => {
+            deserialize_seed(value, DuplicateAwareObject { depth })
+        }
+        Some(b'[') if depth < crate::MAX_STRUCTURED_DEPTH => {
+            deserialize_seed(value, DuplicateAwareArray { depth })
+        }
+        Some(b'{' | b'[') => Err(serde_json::Error::custom(
+            "JSON nesting depth exceeds the compiled ceiling",
+        )),
         _ => serde_json::from_str(value),
     }
 }
@@ -500,7 +510,9 @@ where
     Ok(parsed)
 }
 
-struct DuplicateAwareObject;
+struct DuplicateAwareObject {
+    depth: u32,
+}
 
 impl<'de> DeserializeSeed<'de> for DuplicateAwareObject {
     type Value = serde_json::Value;
@@ -512,11 +524,13 @@ impl<'de> DeserializeSeed<'de> for DuplicateAwareObject {
     where
         Deserializer: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_map(DuplicateAwareObjectVisitor)
+        deserializer.deserialize_map(DuplicateAwareObjectVisitor { depth: self.depth })
     }
 }
 
-struct DuplicateAwareArray;
+struct DuplicateAwareArray {
+    depth: u32,
+}
 
 impl<'de> DeserializeSeed<'de> for DuplicateAwareArray {
     type Value = serde_json::Value;
@@ -528,11 +542,13 @@ impl<'de> DeserializeSeed<'de> for DuplicateAwareArray {
     where
         Deserializer: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_seq(DuplicateAwareArrayVisitor)
+        deserializer.deserialize_seq(DuplicateAwareArrayVisitor { depth: self.depth })
     }
 }
 
-struct DuplicateAwareObjectVisitor;
+struct DuplicateAwareObjectVisitor {
+    depth: u32,
+}
 
 impl<'de> Visitor<'de> for DuplicateAwareObjectVisitor {
     type Value = serde_json::Value;
@@ -551,14 +567,16 @@ impl<'de> Visitor<'de> for DuplicateAwareObjectVisitor {
                 return Err(Access::Error::custom("duplicate JSON object member"));
             }
             let raw = object.next_value::<Box<RawValue>>()?;
-            let value = parse_raw_json(raw.get()).map_err(Access::Error::custom)?;
+            let value = parse_raw_json(raw.get(), self.depth + 1).map_err(Access::Error::custom)?;
             values.insert(name, value);
         }
         Ok(serde_json::Value::Object(values.into_iter().collect()))
     }
 }
 
-struct DuplicateAwareArrayVisitor;
+struct DuplicateAwareArrayVisitor {
+    depth: u32,
+}
 
 impl<'de> Visitor<'de> for DuplicateAwareArrayVisitor {
     type Value = serde_json::Value;
@@ -573,7 +591,7 @@ impl<'de> Visitor<'de> for DuplicateAwareArrayVisitor {
     {
         let mut values = Vec::new();
         while let Some(raw) = sequence.next_element::<Box<RawValue>>()? {
-            values.push(parse_raw_json(raw.get()).map_err(Access::Error::custom)?);
+            values.push(parse_raw_json(raw.get(), self.depth + 1).map_err(Access::Error::custom)?);
         }
         Ok(serde_json::Value::Array(values))
     }
@@ -646,11 +664,27 @@ impl Error for RegistryValueError {}
 mod tests {
     use super::*;
 
+    fn nested_metadata(depth: u32) -> String {
+        let depth = usize::try_from(depth).expect("compiled depth ceiling fits usize");
+        format!("{{\"value\":{}0{}}}", "[".repeat(depth), "]".repeat(depth))
+    }
+
     #[test]
     fn canonical_media_types_reject_parameters_and_uppercase() {
         assert!(CanonicalMediaType::from_str("text/plain").is_ok());
         assert!(CanonicalMediaType::from_str("text/plain; charset=utf-8").is_err());
         assert!(CanonicalMediaType::from_str("Text/plain").is_err());
+        assert!(CanonicalMediaType::from_str("!text/plain").is_err());
+        assert!(CanonicalMediaType::from_str("text/!plain").is_err());
+    }
+
+    #[test]
+    fn metadata_rejects_nesting_above_the_compiled_ceiling() {
+        let input = nested_metadata(crate::MAX_STRUCTURED_DEPTH);
+
+        let outcome = BoundedMetadata::try_new(&input);
+
+        assert_eq!(outcome, Err(RegistryValueError::Metadata));
     }
 
     #[test]
