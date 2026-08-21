@@ -1,6 +1,7 @@
 use std::{error::Error, fmt, num::NonZeroU64, str::FromStr, sync::Arc};
 
 use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
+use serde_json::value::RawValue;
 
 const SHA256_PREFIX: &str = "sha256:";
 // numeric-bound: not-a-bound - fixed lowercase SHA-256 hexadecimal width
@@ -477,15 +478,31 @@ impl BoundedMetadata {
 pub(crate) fn parse_json_without_duplicate_members(
     value: &str,
 ) -> Result<serde_json::Value, serde_json::Error> {
+    let raw = serde_json::from_str::<Box<RawValue>>(value)?;
+    parse_raw_json(raw.get())
+}
+
+fn parse_raw_json(value: &str) -> Result<serde_json::Value, serde_json::Error> {
+    match value.trim_start().as_bytes().first() {
+        Some(b'{') => deserialize_seed(value, DuplicateAwareObject),
+        Some(b'[') => deserialize_seed(value, DuplicateAwareArray),
+        _ => serde_json::from_str(value),
+    }
+}
+
+fn deserialize_seed<Seed>(value: &str, seed: Seed) -> Result<serde_json::Value, serde_json::Error>
+where
+    for<'de> Seed: DeserializeSeed<'de, Value = serde_json::Value>,
+{
     let mut deserializer = serde_json::Deserializer::from_str(value);
-    let parsed = DuplicateAwareJson.deserialize(&mut deserializer)?;
+    let parsed = seed.deserialize(&mut deserializer)?;
     deserializer.end()?;
     Ok(parsed)
 }
 
-struct DuplicateAwareJson;
+struct DuplicateAwareObject;
 
-impl<'de> DeserializeSeed<'de> for DuplicateAwareJson {
+impl<'de> DeserializeSeed<'de> for DuplicateAwareObject {
     type Value = serde_json::Value;
 
     fn deserialize<Deserializer>(
@@ -495,54 +512,59 @@ impl<'de> DeserializeSeed<'de> for DuplicateAwareJson {
     where
         Deserializer: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_any(DuplicateAwareJsonVisitor)
+        deserializer.deserialize_map(DuplicateAwareObjectVisitor)
     }
 }
 
-struct DuplicateAwareJsonVisitor;
+struct DuplicateAwareArray;
 
-impl<'de> Visitor<'de> for DuplicateAwareJsonVisitor {
+impl<'de> DeserializeSeed<'de> for DuplicateAwareArray {
+    type Value = serde_json::Value;
+
+    fn deserialize<Deserializer>(
+        self,
+        deserializer: Deserializer,
+    ) -> Result<Self::Value, Deserializer::Error>
+    where
+        Deserializer: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(DuplicateAwareArrayVisitor)
+    }
+}
+
+struct DuplicateAwareObjectVisitor;
+
+impl<'de> Visitor<'de> for DuplicateAwareObjectVisitor {
     type Value = serde_json::Value;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("JSON without duplicate object members")
     }
 
-    fn visit_bool<Error>(self, value: bool) -> Result<Self::Value, Error> {
-        Ok(serde_json::Value::Bool(value))
-    }
-
-    fn visit_i64<Error>(self, value: i64) -> Result<Self::Value, Error> {
-        Ok(serde_json::Value::Number(value.into()))
-    }
-
-    fn visit_u64<Error>(self, value: u64) -> Result<Self::Value, Error> {
-        Ok(serde_json::Value::Number(value.into()))
-    }
-
-    fn visit_f64<Error>(self, value: f64) -> Result<Self::Value, Error>
+    fn visit_map<Access>(self, mut object: Access) -> Result<Self::Value, Access::Error>
     where
-        Error: serde::de::Error,
+        Access: MapAccess<'de>,
     {
-        serde_json::Number::from_f64(value)
-            .map(serde_json::Value::Number)
-            .ok_or_else(|| Error::custom("non-finite JSON number"))
+        let mut values = std::collections::BTreeMap::new();
+        while let Some(name) = object.next_key::<String>()? {
+            if values.contains_key(&name) {
+                return Err(Access::Error::custom("duplicate JSON object member"));
+            }
+            let raw = object.next_value::<Box<RawValue>>()?;
+            let value = parse_raw_json(raw.get()).map_err(Access::Error::custom)?;
+            values.insert(name, value);
+        }
+        Ok(serde_json::Value::Object(values.into_iter().collect()))
     }
+}
 
-    fn visit_str<Error>(self, value: &str) -> Result<Self::Value, Error> {
-        Ok(serde_json::Value::String(value.to_owned()))
-    }
+struct DuplicateAwareArrayVisitor;
 
-    fn visit_string<Error>(self, value: String) -> Result<Self::Value, Error> {
-        Ok(serde_json::Value::String(value))
-    }
+impl<'de> Visitor<'de> for DuplicateAwareArrayVisitor {
+    type Value = serde_json::Value;
 
-    fn visit_none<Error>(self) -> Result<Self::Value, Error> {
-        Ok(serde_json::Value::Null)
-    }
-
-    fn visit_unit<Error>(self) -> Result<Self::Value, Error> {
-        Ok(serde_json::Value::Null)
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JSON array without duplicate object members")
     }
 
     fn visit_seq<Access>(self, mut sequence: Access) -> Result<Self::Value, Access::Error>
@@ -550,36 +572,10 @@ impl<'de> Visitor<'de> for DuplicateAwareJsonVisitor {
         Access: SeqAccess<'de>,
     {
         let mut values = Vec::new();
-        while let Some(value) = sequence.next_element_seed(DuplicateAwareJson)? {
-            values.push(value);
+        while let Some(raw) = sequence.next_element::<Box<RawValue>>()? {
+            values.push(parse_raw_json(raw.get()).map_err(Access::Error::custom)?);
         }
         Ok(serde_json::Value::Array(values))
-    }
-
-    fn visit_map<Access>(self, mut object: Access) -> Result<Self::Value, Access::Error>
-    where
-        Access: MapAccess<'de>,
-    {
-        let mut values = serde_json::Map::new();
-        while let Some(name) = object.next_key::<String>()? {
-            if name == "$serde_json::private::Number" && values.is_empty() {
-                let encoded = object.next_value::<String>()?;
-                if object.next_key::<String>()?.is_some() {
-                    return Err(Access::Error::custom(
-                        "invalid arbitrary-precision JSON number",
-                    ));
-                }
-                let number = serde_json::Number::from_str(&encoded)
-                    .map_err(|_| Access::Error::custom("invalid JSON number"))?;
-                return Ok(serde_json::Value::Number(number));
-            }
-            if values.contains_key(&name) {
-                return Err(Access::Error::custom("duplicate JSON object member"));
-            }
-            let value = object.next_value_seed(DuplicateAwareJson)?;
-            values.insert(name, value);
-        }
-        Ok(serde_json::Value::Object(values))
     }
 }
 
@@ -684,6 +680,42 @@ mod tests {
             .expect("arbitrary-precision fixture remains valid metadata");
 
         assert_eq!(metadata.as_str(), input);
+    }
+
+    #[test]
+    fn metadata_preserves_reserved_number_key_objects() {
+        let input = r#"{"$serde_json::private::Number":"1"}"#;
+        let metadata = BoundedMetadata::try_new(input)
+            .expect("the reserved spelling remains an ordinary object member");
+
+        assert_eq!(metadata.as_str(), input);
+        assert_eq!(
+            metadata.value()["$serde_json::private::Number"],
+            serde_json::Value::String(String::from("1"))
+        );
+    }
+
+    #[test]
+    fn metadata_preserves_nested_reserved_number_key_objects() {
+        let input = r#"{"nested":{"$serde_json::private::Number":"1","tail":true}}"#;
+        let metadata = BoundedMetadata::try_new(input)
+            .expect("nested reserved spelling remains ordinary object data");
+
+        assert_eq!(metadata.as_str(), input);
+        assert_eq!(
+            metadata.value()["nested"]["$serde_json::private::Number"],
+            serde_json::Value::String(String::from("1"))
+        );
+    }
+
+    #[test]
+    fn metadata_canonicalizes_object_members_lexically() {
+        let input = r#"{"z":0,"a":{"z":0,"a":1}}"#;
+        let expected = r#"{"a":{"a":1,"z":0},"z":0}"#;
+        let metadata = BoundedMetadata::try_new(input)
+            .expect("unordered object fixture remains valid metadata");
+
+        assert_eq!(metadata.as_str(), expected);
     }
 
     #[test]

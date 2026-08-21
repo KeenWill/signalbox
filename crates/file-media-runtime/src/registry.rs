@@ -13,12 +13,22 @@ use crate::{
 const MAX_REGISTRY_PROVIDERS: usize = 256;
 // numeric-bound: ceiling - bounds per-provider reader inventory memory and startup work
 const MAX_READERS_PER_PROVIDER: usize = 256;
+// numeric-bound: ceiling - bounds aggregate process-lifetime reader inventory memory
+const MAX_REGISTRY_READERS: usize = 256;
 // numeric-bound: ceiling - bounds per-reader media-claim memory and conflict checks
 const MAX_MEDIA_TYPES_PER_READER: usize = 256;
+// numeric-bound: ceiling - bounds aggregate process-lifetime media-claim memory
+const MAX_REGISTRY_MEDIA_TYPES: usize = 4_096;
 // numeric-bound: ceiling - bounds per-reader model-visible view inventory memory
 const MAX_VIEWS_PER_READER: usize = 256;
+// numeric-bound: ceiling - bounds aggregate process-lifetime view inventory memory
+const MAX_REGISTRY_VIEWS: usize = 4_096;
+// numeric-bound: ceiling - bounds aggregate retained view-schema bytes
+const MAX_REGISTRY_SCHEMA_BYTES: usize = 16 * 1_024 * 1_024;
 // numeric-bound: ceiling - bounds per-reader sanitized reason inventory memory
 const MAX_REASON_CODES_PER_READER: usize = 256;
+// numeric-bound: ceiling - bounds aggregate process-lifetime reason inventory memory
+const MAX_REGISTRY_REASON_CODES: usize = 4_096;
 // numeric-bound: ceiling - bounds retained untrusted continuation state
 const MAX_CURSOR_BYTES: usize = 1_024;
 
@@ -63,6 +73,7 @@ impl FileMediaRegistry {
         {
             return Err(FileMediaRegistryConstructionError::Inventory);
         }
+        validate_aggregate_inventory(&providers)?;
         providers.sort_by(|left, right| left.provider().cmp(right.provider()));
         for provider in &mut providers {
             provider.sort_readers();
@@ -772,6 +783,46 @@ fn validate_reader(
     Ok(())
 }
 
+fn validate_aggregate_inventory(
+    providers: &[FileMediaProviderDeclaration],
+) -> Result<(), FileMediaRegistryConstructionError> {
+    let mut readers = 0_usize;
+    let mut media_types = 0_usize;
+    let mut views = 0_usize;
+    let mut schema_bytes = 0_usize;
+    let mut reason_codes = 0_usize;
+    for provider in providers {
+        readers = readers
+            .checked_add(provider.readers().len())
+            .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+        for reader in provider.readers() {
+            media_types = media_types
+                .checked_add(reader.media_types().len())
+                .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+            views = views
+                .checked_add(reader.views().len())
+                .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+            reason_codes = reason_codes
+                .checked_add(reader.reason_codes().len())
+                .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+            for view in reader.views() {
+                schema_bytes = schema_bytes
+                    .checked_add(view.arguments_schema().as_str().len())
+                    .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+            }
+        }
+    }
+    if readers > MAX_REGISTRY_READERS
+        || media_types > MAX_REGISTRY_MEDIA_TYPES
+        || views > MAX_REGISTRY_VIEWS
+        || schema_bytes > MAX_REGISTRY_SCHEMA_BYTES
+        || reason_codes > MAX_REGISTRY_REASON_CODES
+    {
+        return Err(FileMediaRegistryConstructionError::Inventory);
+    }
+    Ok(())
+}
+
 fn has_duplicates<Value: Ord + Clone>(values: &[Value]) -> bool {
     values
         .iter()
@@ -825,44 +876,9 @@ fn validate_view(
                 && string_bytes > 0
                 && string_bytes <= output_bytes
         }
-        ReadViewBounds::Image {
-            width,
-            height,
-            pixels,
-            output_bytes,
-            ..
-        } => {
-            width > 0
-                && width <= ceilings.image_axis
-                && height > 0
-                && height <= ceilings.image_axis
-                && pixels > 0
-                && pixels <= ceilings.decoded_image_pixels
-                && u64::from(width)
-                    .checked_mul(u64::from(height))
-                    .is_some_and(|area| area >= pixels)
-                && output_bytes > 0
-                && output_bytes <= ceilings.presented_image_bytes
-        }
-        ReadViewBounds::Audio {
-            channels,
-            sample_rate_hz,
-            duration_seconds,
-            output_bytes,
-            ..
-        } => {
-            channels > 0
-                && channels <= ceilings.audio_channels
-                && sample_rate_hz > 0
-                && sample_rate_hz <= ceilings.audio_sample_rate_hz
-                && duration_seconds > 0
-                && duration_seconds <= ceilings.audio_clip_seconds
-                && output_bytes > 0
-                && output_bytes <= ceilings.presented_audio_bytes
-        }
-        ReadViewBounds::File { output_bytes, .. } => {
-            output_bytes > 0 && output_bytes <= ceilings.presented_file_bytes
-        }
+        ReadViewBounds::Image { .. }
+        | ReadViewBounds::Audio { .. }
+        | ReadViewBounds::File { .. } => false,
     };
     if valid {
         Ok(())

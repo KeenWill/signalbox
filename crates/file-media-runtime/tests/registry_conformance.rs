@@ -283,9 +283,9 @@ fn inspect(
     ))
 }
 
-/// INV-067: byte signatures, not caller metadata, select one reader.
+/// INV-075: byte signatures, not caller metadata, select one reader.
 #[test]
-fn inv067_synthetic_signature_produces_validated_detection() {
+fn inv075_synthetic_signature_produces_validated_detection() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
 
@@ -308,9 +308,9 @@ fn inv067_synthetic_signature_produces_validated_detection() {
     assert_eq!(validated.source().digest(), source.digest());
 }
 
-/// INV-067: a caller declaration cannot override byte-derived detection.
+/// INV-075: a caller declaration cannot override byte-derived detection.
 #[test]
-fn inv067_declared_type_disagreement_is_reported_without_fallback() {
+fn inv075_declared_type_disagreement_is_reported_without_fallback() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
 
@@ -332,9 +332,9 @@ fn inv067_declared_type_disagreement_is_reported_without_fallback() {
     );
 }
 
-/// INV-068: oversized processor metadata never crosses the registry boundary.
+/// INV-076: oversized processor metadata never crosses the registry boundary.
 #[test]
-fn inv068_oversized_processor_metadata_is_sanitized_to_failure() {
+fn inv076_oversized_processor_metadata_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -347,9 +347,9 @@ fn inv068_oversized_processor_metadata_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-068: malformed injection-shaped processor metadata never propagates.
+/// INV-076: malformed injection-shaped processor metadata never propagates.
 #[test]
-fn inv068_malformed_injection_shaped_metadata_is_sanitized_to_failure() {
+fn inv076_malformed_injection_shaped_metadata_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -362,9 +362,9 @@ fn inv068_malformed_injection_shaped_metadata_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-068: an oversized processor text body never becomes a typed read result.
+/// INV-076: an oversized processor text body never becomes a typed read result.
 #[test]
-fn inv068_oversized_processor_text_is_sanitized_to_failure() {
+fn inv076_oversized_processor_text_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -382,9 +382,9 @@ fn inv068_oversized_processor_text_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-068: malformed structured output carrying injection-shaped text is discarded.
+/// INV-076: malformed structured output carrying injection-shaped text is discarded.
 #[test]
-fn inv068_malformed_injection_shaped_structure_is_sanitized_to_failure() {
+fn inv076_malformed_injection_shaped_structure_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(structured_view());
     let processor = SyntheticProcessor {
@@ -402,9 +402,9 @@ fn inv068_malformed_injection_shaped_structure_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-068: duplicate structured members never cross the processor boundary.
+/// INV-076: duplicate structured members never cross the processor boundary.
 #[test]
-fn inv068_duplicate_structured_member_is_sanitized_to_failure() {
+fn inv076_duplicate_structured_member_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(structured_view());
     let processor = SyntheticProcessor {
@@ -422,10 +422,10 @@ fn inv068_duplicate_structured_member_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-068: contradictory continuation facts from a processor do not enter the
+/// INV-076: contradictory continuation facts from a processor do not enter the
 /// sanitized read-result type.
 #[test]
-fn inv068_contradictory_processor_continuation_is_sanitized_to_failure() {
+fn inv076_contradictory_processor_continuation_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -544,6 +544,8 @@ fn provider_reader_inventory_is_canonically_sorted() {
         FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
     let second = reader_declaration(&provider, "second", OTHER_SYNTHETIC_MEDIA_TYPE);
     let first = reader_declaration(&provider, "first", SYNTHETIC_MEDIA_TYPE);
+    let first_name = first.identity().reader().clone();
+    let second_name = second.identity().reader().clone();
     let declaration = FileMediaProviderDeclaration::try_new(provider, vec![second, first])
         .expect("fixture provider owns both readers");
 
@@ -559,28 +561,32 @@ fn provider_reader_inventory_is_canonically_sorted() {
             .identity()
             .reader()
             .as_str(),
-        "first"
+        first_name.as_str()
     );
     assert_eq!(
         registry.providers()[0].readers()[1]
             .identity()
             .reader()
             .as_str(),
-        "second"
+        second_name.as_str()
     );
+}
+
+fn oversized_reader_inventory(provider: &FileReaderProviderName) -> Vec<ReaderDeclaration> {
+    (0..257)
+        .map(|index| {
+            let reader = format!("reader-{index:03}");
+            let owned_media_type = format!("application/x-synthetic-{index:03}");
+            reader_declaration(provider, &reader, &owned_media_type)
+        })
+        .collect()
 }
 
 #[test]
 fn oversized_provider_reader_inventory_is_rejected() {
     let provider =
         FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
-    let readers = (0..257)
-        .map(|index| {
-            let reader = format!("reader-{index:03}");
-            let owned_media_type = format!("application/x-synthetic-{index:03}");
-            reader_declaration(&provider, &reader, &owned_media_type)
-        })
-        .collect();
+    let readers = oversized_reader_inventory(&provider);
     let declaration = FileMediaProviderDeclaration::try_new(provider, readers)
         .expect("the provider constructor defers inventory limits to the registry");
 

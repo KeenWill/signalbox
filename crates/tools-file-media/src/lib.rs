@@ -623,7 +623,8 @@ mod tests {
 
         assert!(matches!(
             evidence,
-            ToolExecutorEvidence::KnownFailed { detail: Some(_) }
+            ToolExecutorEvidence::KnownFailed { detail: Some(detail) }
+                if detail.as_str() == RESULT_TOO_LARGE_DETAIL
         ));
     }
 

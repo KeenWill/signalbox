@@ -30,7 +30,9 @@ whose root declares `type: object`; processor metadata is separately parsed and
 bounded as a canonical JSON object before it reaches a tool result.
 
 The common output vocabulary is closed as text, structure, image, audio, or
-general file. View names and meanings remain provider-owned. Every view declares
+general file. The provider-neutral core admits only text and structured views;
+rich view registration remains unavailable until the durable media-reference
+result path lands. View names and meanings remain provider-owned. Every view declares
 an object options schema, streaming or finite-range access posture, cumulative
 source work, and output-specific finite bounds. Text and structured views bound
 body bytes; structure also bounds depth, nodes, and strings. Image, audio, and
@@ -127,8 +129,8 @@ The raw processor enums deliberately carry strings and JSON text rather than
 checked registry values. Oversized, malformed, injection-shaped, cross-reader,
 unregistered-reason, wrong-output-kind, contradictory continuation, and
 excessively nested responses collapse to sanitized processor failure without
-partial success (INV-068). Detection uses generated synthetic bytes and
-byte-derived evidence independent of caller declaration (INV-067).
+partial success (INV-076). Detection uses generated synthetic bytes and
+byte-derived evidence independent of caller declaration (INV-075).
 
 **Committed unimplemented functionality.** The daemon-supervised fresh local
 worker, sandbox launch, source-read broker, framing, process resource
