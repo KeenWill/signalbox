@@ -1326,53 +1326,8 @@ impl RunnerProtocolStore {
 
         if let Some(lease) = current_lease {
             persist_runner_loss_lease_and_wait(&mut transaction, &lost, lease).await?;
-        } else {
-            let has_active_runner_boundary: bool = sqlx::query_scalar(
-                "SELECT EXISTS (
-                     SELECT 1
-                       FROM turn_lifecycle AS lifecycle
-                       JOIN turn_attempt AS turn_attempt
-                         ON turn_attempt.turn_attempt_id =
-                            lifecycle.current_attempt_id
-                        AND turn_attempt.turn_id = lifecycle.turn_id
-                        AND turn_attempt.session_id = lifecycle.session_id
-                       JOIN tool_request AS request
-                         ON request.producing_model_call_id =
-                            lifecycle.active_tool_round_call_id
-                        AND request.turn_id = lifecycle.turn_id
-                        AND request.session_id = lifecycle.session_id
-                       JOIN runner_current_session_placement AS placement_head
-                         ON placement_head.session_id = lifecycle.session_id
-                       JOIN runner_session_placement_tool AS required
-                         ON required.session_id = placement_head.session_id
-                        AND required.event_ordinal = placement_head.event_ordinal
-                        AND required.tool_name = request.tool_name
-                        AND required.runner_required
-                      WHERE lifecycle.session_id = $1
-                        AND lifecycle.state_kind = 'active'
-                        AND lifecycle.active_phase_kind = 'running'
-                        AND lifecycle.active_tool_round_call_id IS NOT NULL
-                        AND turn_attempt.state_kind = 'running'
-                        AND NOT EXISTS (
-                            SELECT 1
-                              FROM tool_approval_decision AS denied
-                             WHERE denied.request_id = request.request_id
-                               AND denied.decision_kind = 'deny'
-                        )
-                        AND NOT EXISTS (
-                            SELECT 1
-                              FROM tool_attempt AS finished
-                             WHERE finished.request_id = request.request_id
-                               AND finished.state_kind = 'terminal'
-                        )
-                 )",
-            )
-            .bind(session.into_uuid())
-            .fetch_one(&mut *transaction)
-            .await?;
-            if has_active_runner_boundary {
-                yield_turn_to_runner_recovery_without_lease(&mut transaction, &lost).await?;
-            }
+        } else if has_active_runner_boundary(&mut transaction, session).await? {
+            yield_turn_to_runner_recovery_without_lease(&mut transaction, &lost).await?;
         }
         outbox::append(
             transaction.as_mut(),
@@ -1691,6 +1646,8 @@ impl RunnerProtocolStore {
         }
         if let Some(lease) = current_lease {
             persist_runner_loss_lease_and_wait(&mut transaction, &reconciled, lease).await?;
+        } else if has_active_runner_boundary(&mut transaction, session).await? {
+            yield_turn_to_runner_recovery_without_lease(&mut transaction, &reconciled).await?;
         }
         insert_registration_reconciliation_observation(
             &mut transaction,
@@ -3874,6 +3831,53 @@ async fn persist_runner_loss_lease_and_wait(
         terminalize_runner_loss_attempt_ambiguous(transaction, &correlation).await?;
     }
     yield_turn_to_runner_recovery(transaction, placement, &correlation).await
+}
+
+async fn has_active_runner_boundary(
+    transaction: &mut Transaction<'_, Postgres>,
+    session: SessionId,
+) -> Result<bool, RunnerProtocolStoreError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM turn_lifecycle AS lifecycle
+               JOIN turn_attempt AS turn_attempt
+                 ON turn_attempt.turn_attempt_id = lifecycle.current_attempt_id
+                AND turn_attempt.turn_id = lifecycle.turn_id
+                AND turn_attempt.session_id = lifecycle.session_id
+               JOIN tool_request AS request
+                 ON request.producing_model_call_id = lifecycle.active_tool_round_call_id
+                AND request.turn_id = lifecycle.turn_id
+                AND request.session_id = lifecycle.session_id
+               JOIN runner_current_session_placement AS placement_head
+                 ON placement_head.session_id = lifecycle.session_id
+               JOIN runner_session_placement_tool AS required
+                 ON required.session_id = placement_head.session_id
+                AND required.event_ordinal = placement_head.event_ordinal
+                AND required.tool_name = request.tool_name
+                AND required.runner_required
+              WHERE lifecycle.session_id = $1
+                AND lifecycle.state_kind = 'active'
+                AND lifecycle.active_phase_kind = 'running'
+                AND lifecycle.active_tool_round_call_id IS NOT NULL
+                AND turn_attempt.state_kind = 'running'
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM tool_approval_decision AS denied
+                     WHERE denied.request_id = request.request_id
+                       AND denied.decision_kind = 'deny'
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM tool_attempt AS finished
+                     WHERE finished.request_id = request.request_id
+                       AND finished.state_kind = 'terminal'
+                )
+         )",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await?)
 }
 
 async fn yield_turn_to_runner_recovery_without_lease(

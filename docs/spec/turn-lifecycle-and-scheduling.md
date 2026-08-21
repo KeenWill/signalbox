@@ -748,8 +748,9 @@ end (INV-034):
   `prepare_active_turn_lost_failure`: the current attempt ends
   `WithoutStop(Lost)` and the turn fails;
 - a turn holding a `Prepared` model call proves that no send authorization
-  existed. Startup validates its exact stored frontier and leaves the call,
-  attempt, and turn unchanged for the ordinary scheduler to retry; and
+  existed. Startup validates its exact stored frontier, ends the call
+  `known_failed`, and follows the same logical closure as an evidence-free lost
+  active turn; and
 - a turn holding an unstopped in-flight call ends the call `ambiguous` and the
   attempt `WithoutStop(Lost)`, but the turn does not terminalize: it stays
   active, parked in the `awaiting_model_call_recovery` phase naming the

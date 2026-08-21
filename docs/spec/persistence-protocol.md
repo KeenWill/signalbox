@@ -1231,14 +1231,9 @@ that look individually valid while their cross-record correlations are not, so
 authority comes only from complete validated projections, never from raw
 identifiers.
 
-Startup recovery terminalizes an evidence-free lost active turn as failed and
-atomically reclassifies its pending steering to successor origins. A turn
-holding a `Prepared` call follows the same logical closure after ending the call
-known-failed; an in-flight call recovers into the `awaiting_model_call_recovery`
-wait. A persisted `stop_requested` attempt and `cancellation_requested` call
-reconstruct through their exact applied interrupt, end the abandoned attempt
-`after_cancellation/lost`, and terminalize proof-bearing reconciliation for the
-ambiguous call without erasing stop intent. The schema guard
+Startup recovery follows the state-specific lifecycle rules owned by
+[turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#startup-scan-and-recovery).
+The schema guard
 (`turn_lifecycle_pending_steering_closed`) independently requires every pending
 row to be consumed or reclassified before terminalization. The same finite
 startup inventory includes every nonterminal dedicated compaction call. Under

@@ -740,16 +740,16 @@ daemon-side policy. A pinned session never inherits additions from
 re-registration. If a new registration omits a runner-required capability in
 that session's pinned snapshot, no later lease is authorized. Every changed
 registration beyond the first creates a durable bounded reconciliation cursor.
-Before acknowledging the registration, the daemon pages older pinned sessions in
-session-identity order and atomically records either preservation or a
-`RunnerLost` placement whose registration loss source names the exact
-incompatible registration revision. A current offered or claimed lease and its
-active turn move through the same loss and `AwaitingRunnerRecovery` transaction
-as connection loss. Cursor and per-session evidence make a crash restartable;
-startup completes pending registration cursors before classifying prior-process
-connections lost, so an already-recorded registration cause cannot be relabeled
-as connection loss. Another changed registration is refused while the current
-cursor still has an unobserved pinned session. Omitting a combined-locus tool
+Before acknowledging the registration, the daemon reconciles older pinned
+sessions and atomically records either preservation or a `RunnerLost` placement
+whose registration loss source names the exact incompatible registration
+revision. A current offered or claimed lease and its active turn move through
+the same loss and `AwaitingRunnerRecovery` transaction as connection loss.
+Cursor creation, bounded session-identity paging, crash restartability, and
+startup ordering are owned by
+[persistence protocol](persistence-protocol.md). Another changed registration is
+refused while the current cursor still has an unobserved pinned session.
+Omitting a combined-locus tool
 records preservation and disables runner dispatch for that tool, while retaining
 placement so daemon fallback remains admissible. Why: re-registration can narrow
 current availability without downgrading a confirmation requirement, widening

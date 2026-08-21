@@ -75,7 +75,7 @@ skip = []
 [[suite]]
 name = "signalboxd"
 package = "signalboxd"
-features = []
+features = ["test-support"]
 shards = 1
 # Subprocess entry points invoked only by their owning process tests.
 skip = ["bridge_build_direct_invocation_fixture", "bridge_wait_"]

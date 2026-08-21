@@ -4468,6 +4468,54 @@ async fn s31_inv009_inv032_inv042_inv044_registration_reconciliation_projects_ru
     Ok(())
 }
 
+/// INV-032 / INV-044: registration reconciliation parks an active
+/// runner-required boundary even when its prior lease already completed.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv032_inv044_registration_reconciliation_parks_without_current_lease()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin, _) =
+        stored_active_pin_fixture_with_authorization(
+            &pool,
+            authorized,
+            catalog(),
+            no_permission_overrides(),
+            "effect_free",
+        )
+        .await?;
+    let claimed = duplicate_lease(&pin.lease, registration.registration())
+        .claim(pin.lease.correlation())
+        .expect("the exact fixture lease correlation claims");
+    store.store_lease(&claimed).await?;
+    let completed = claimed
+        .complete(pin.lease.correlation())
+        .expect("the exact claimed fixture lease correlation completes");
+    store.store_lease(&completed).await?;
+    store
+        .register(&expected_enrollment, narrowed_advertisement())
+        .await?;
+    let reconciliation = store.load_pending_registration_reconciliations().await?[0];
+
+    let disposition = store
+        .reconcile_registration_session(reconciliation, pin.placement.session())
+        .await?;
+    let wait = store
+        .load_runner_recovery_wait(pin.placement.session())
+        .await?
+        .expect("the active runner boundary parks without a current lease");
+
+    assert_eq!(
+        disposition,
+        RunnerRegistrationReconciliationDisposition::RunnerLost
+    );
+    assert_eq!(wait.runner(), expected_enrollment.runner());
+    assert_eq!(wait.placement_revision(), pin.placement.revision());
+    assert_eq!(wait.interrupted_tool_attempt(), None);
+    drop(pool);
+    Ok(())
+}
+
 /// INV-042 / INV-044: an availability-equivalent registration records one
 /// preservation observation and leaves the exact pinned placement untouched.
 #[tokio::test]
