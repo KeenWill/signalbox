@@ -756,10 +756,11 @@ const DISPATCH_COMMISSIONED_GENERATION: GoalGeneration = GoalGeneration::new(Non
 ///
 /// Work a repository-watch session has already escalated once is the third.
 /// Its exceptional block is never resumed automatically, so a later turn in
-/// that session is work an operator resumed and waits for them. A commissioned
-/// session is different: its terminal turn is reconciled through the ordinary
-/// bounded automatic-resumption path, so a prior escalation does not prove a
-/// user is now attending it.
+/// that session is work an operator resumed and waits for them. An
+/// operator-commissioned session is attended by the commissioning operator:
+/// its completed delegate escalation is the bounded automatic decision's
+/// exhaustion point and parks the exact request for that operator instead of
+/// spending a goal retry on the same undecided action.
 ///
 /// Standing authority is the last word on it. Withdrawn authority means the
 /// goal ended while this judge was in flight, so nobody is behind the work
@@ -787,7 +788,7 @@ async fn unattended_escalation_applies(
         return Ok(false);
     }
     match dispatch.dispatch() {
-        ApprovalJudgeDispatchProvenance::Commissioned(_) => Ok(true),
+        ApprovalJudgeDispatchProvenance::Commissioned(_) => Ok(!authority_stands),
         ApprovalJudgeDispatchProvenance::RepoWatch(_) => {
             let escalated_before: bool = sqlx::query_scalar(
                 "SELECT EXISTS (

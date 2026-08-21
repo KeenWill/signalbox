@@ -5954,24 +5954,20 @@ async fn commissioned_fixture() -> Result<CommissionedFixture, Box<dyn Error>> {
 #[derive(Debug, sqlx::FromRow)]
 struct CommissionedEscalationVisibility {
     lifecycle_state: String,
-    terminal_disposition: Option<String>,
+    active_phase: Option<String>,
     goal_event_kind: String,
-    blocked_reason: Option<String>,
-    need: Option<String>,
+    recommendation: String,
     rationale: String,
 }
 
 /// A commissioned session's first turn is judged under the exact fence its
 /// commission recorded, through the same authority loading a repository-watch
-/// dispatch feeds, and an unattended escalation terminalizes the turn with a
-/// commissioned audit row instead of pooling forever in the approval wait.
-/// The pursuing goal is left as a durable reconciliation hint so the daemon's
-/// ordinary bounded execution-failure policy owns resumption. The exact replay
-/// is stable and a mismatched replay identity is refused.
+/// dispatch feeds. When that bounded judge escalates, the completed call and
+/// rationale stay durable while the exact request remains parked for the
+/// commissioning operator. The exact replay is stable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn a_commissioned_escalation_terminalizes_under_its_recorded_fence()
--> Result<(), Box<dyn Error>> {
+async fn a_commissioned_escalation_parks_under_its_recorded_fence() -> Result<(), Box<dyn Error>> {
     let fixture = commissioned_fixture().await?;
     let seed = 0x61_240;
     let (model_repository, prepared, turn, requests) = checkpoint_delegated_approval_at(
@@ -6022,40 +6018,38 @@ async fn a_commissioned_escalation_terminalizes_under_its_recorded_fence()
             closed_result,
         )
         .await?;
-    assert_eq!(
-        outcome,
-        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
-    );
+    assert_eq!(outcome, CompleteApprovalJudgeOutcome::EscalatedToHuman);
 
-    let audit: CommissionedEscalationVisibility = sqlx::query_as(
+    let visibility: CommissionedEscalationVisibility = sqlx::query_as(
         "SELECT lifecycle.state_kind AS lifecycle_state,
-                lifecycle.terminal_disposition_kind AS terminal_disposition,
+                lifecycle.active_phase_kind AS active_phase,
                 latest_goal.event_kind AS goal_event_kind,
-                latest_goal.blocked_reason,
-                latest_goal.need,
-                audit.rationale
-           FROM commissioned_dispatch_headless_approval_escalation_audit AS audit
+                judge.recommendation_kind AS recommendation,
+                judge.rationale
+           FROM tool_approval_judge_model_call AS judge
            JOIN turn_lifecycle AS lifecycle
-             ON lifecycle.session_id = audit.session_id
-            AND lifecycle.turn_id = audit.turn_id
+             ON lifecycle.session_id = judge.session_id
+            AND lifecycle.turn_id = judge.turn_id
            JOIN LATERAL (
-                SELECT event_kind, blocked_reason, need
+                SELECT event_kind
                   FROM goal_event
-                 WHERE session_id = audit.session_id
+                 WHERE session_id = judge.session_id
                  ORDER BY event_ordinal DESC
                  LIMIT 1
            ) AS latest_goal ON true
-          WHERE audit.model_call_id = $1",
+          WHERE judge.model_call_id = $1",
     )
     .bind(prepared.call().as_uuid())
     .fetch_one(&fixture.pool)
     .await?;
-    assert_eq!(audit.lifecycle_state, "terminal");
-    assert_eq!(audit.terminal_disposition.as_deref(), Some("failed"));
-    assert_eq!(audit.goal_event_kind, "commissioned");
-    assert_eq!(audit.blocked_reason, None);
-    assert_eq!(audit.need, None);
-    assert_eq!(audit.rationale, rationale.as_str());
+    assert_eq!(visibility.lifecycle_state, "active");
+    assert_eq!(
+        visibility.active_phase.as_deref(),
+        Some("awaiting_tool_approval")
+    );
+    assert_eq!(visibility.goal_event_kind, "commissioned");
+    assert_eq!(visibility.recommendation, "escalate_to_human");
+    assert_eq!(visibility.rationale, rationale.as_str());
     let audited_dispatch: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1
@@ -6067,12 +6061,12 @@ async fn a_commissioned_escalation_terminalizes_under_its_recorded_fence()
     .bind(fixture.session.as_uuid())
     .fetch_one(&fixture.pool)
     .await?;
-    assert!(audited_dispatch);
+    assert!(!audited_dispatch);
     let (reconciliation_hints, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
         .find_sessions()
         .await?
         .into_parts();
-    assert_eq!(reconciliation_hints, vec![fixture.session]);
+    assert_eq!(reconciliation_hints, Vec::<SessionId>::new());
     assert!(!continuation);
 
     let replay = approval_repository
@@ -6085,30 +6079,7 @@ async fn a_commissioned_escalation_terminalizes_under_its_recorded_fence()
             closed_result,
         )
         .await?;
-    assert_eq!(
-        replay,
-        CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
-    );
-    let mismatched = approval_repository
-        .complete(
-            &prepared,
-            DelegateApprovalRecommendation::EscalateToHuman,
-            rationale.clone(),
-            ProviderReportedTokenUsage::unreported(),
-            ApprovalJudgeCompletionIdentities::new(
-                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 30)),
-                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 11)),
-                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 12)),
-            ),
-            closed_result,
-        )
-        .await;
-    assert!(matches!(
-        mismatched,
-        Err(ApprovalJudgeRepositoryError::Corruption(
-            ApprovalJudgeCorruption::Inconsistent("completed judge replay")
-        ))
-    ));
+    assert_eq!(replay, CompleteApprovalJudgeOutcome::EscalatedToHuman);
     assert_eq!(prepared.request().id(), *request);
     assert_eq!(turn, prepared.request().turn());
     Ok(())

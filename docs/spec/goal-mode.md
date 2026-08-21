@@ -16,10 +16,10 @@ against this PR (`agent/daemon-ops-overnight`). This bottom specification diff
 owns both stack slices. Bounded automatic resumption of execution-failure blocks
 is verified against this PR (`agent/goal-blocked-autoresume`), and its one
 exemption — the block an unattended repository-watch approval escalation appends
-— against this PR (`agent/headless-approval-escalation`). Ordinary bounded
-reconciliation of an operator-commissioned escalation is verified against this
-PR (`agent/daemon-live-commissioned-escalation-resume`). Restart reconciliation
-of pending automatic resumptions is verified against this PR
+— against this PR (`agent/headless-approval-escalation`). Operator-attended
+parking of an operator-commissioned escalation is verified against this PR
+(`agent/daemon-live-headless-approval-park`). Restart reconciliation of pending
+automatic resumptions is verified against this PR
 (`agent/daemon-live-goal-resume-rearm`). Restart-caused failure accounting is
 verified against this PR (`agent/daemon-live-restart-recovery-accounting`).
 Identity and durable-command mechanics remain owned by
@@ -281,13 +281,12 @@ would re-run an escalating turn against a request no user is attending, beside
 that redispatch, until the budget ran out. Where that redispatch is withheld,
 because the rule was deactivated or the pull request closed or merged, the work
 is not wanted at all, and an automatic resumption would be the only thing still
-pursuing it. An operator-commissioned dispatch has no independent redispatch
-path, so its unattended escalation leaves the terminal goal turn for ordinary
-reconciliation. The resulting execution-failure block receives the bounded
-automatic resumption above and visibly requires an operator only after that
-budget is exhausted. Every other execution-failure block likewise owes the
-bounded resumption, including one appended for a session repository watch
-created or an operator commissioned.
+pursuing it. An operator-commissioned dispatch has an attending operator and no
+independent redispatch path, so its delegated approval escalation remains an
+active operator-visible approval wait rather than creating an execution-failure
+block. Every actual execution-failure block still owes the bounded resumption,
+including one appended for a session repository watch created or an operator
+commissioned.
 
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The
