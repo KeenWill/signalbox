@@ -163,6 +163,7 @@ pub struct WebBlobAvailableView {
     pub media_type: String,
     pub byte_length: String,
     pub content_url: String,
+    #[schemars(length(max = 1))]
     pub derivations: Vec<WebBlobDerivation>,
 }
 
@@ -175,6 +176,7 @@ pub struct WebBlobDescriptor {
     pub declared_media_type: String,
     #[schemars(length(max = 1))]
     pub display_filename: Vec<String>,
+    #[schemars(length(max = 4))]
     pub available_views: Vec<WebBlobAvailableView>,
 }
 
@@ -512,6 +514,11 @@ function assertSameOriginBlobUrl(value, path) {{
   if (parsed.origin !== base || !parsed.pathname.startsWith("/api/blobs/") || parsed.hash !== "") {{
     fail(path, "a same-origin blob API path");
   }}
+  const route = /^\/api\/blobs\/(sha256:[0-9a-f]{{64}})\/(?:download|content\/[a-z0-9-]+)$/u.exec(parsed.pathname);
+  if (route === null) {{
+    fail(path, "a canonical blob API route");
+  }}
+  return route[1];
 }}
 
 export function decodeWebBlobDescriptor(value) {{
@@ -520,7 +527,15 @@ export function decodeWebBlobDescriptor(value) {{
   assertCanonicalU64(value.byte_length, "blob_descriptor.byte_length");
   value.available_views.forEach((view, index) => {{
     assertCanonicalU64(view.byte_length, `blob_descriptor.available_views[${{index}}].byte_length`);
-    assertSameOriginBlobUrl(view.content_url, `blob_descriptor.available_views[${{index}}].content_url`);
+    const contentPath = `blob_descriptor.available_views[${{index}}].content_url`;
+    const contentDigest = assertSameOriginBlobUrl(view.content_url, contentPath);
+    if (view.kind === "download" || view.kind === "browser_native") {{
+      if (contentDigest !== value.digest) {{
+        fail(contentPath, "a route for the descriptor digest");
+      }}
+    }} else if (!view.derivations.some((derivation) => derivation.output_digests.includes(contentDigest))) {{
+      fail(contentPath, "a route for an advertised derivation output digest");
+    }}
     view.derivations.forEach((derivation, derivationIndex) => {{
       const path = `blob_descriptor.available_views[${{index}}].derivations[${{derivationIndex}}]`;
       assertCanonicalParametersJson(derivation.parameters_json, `${{path}}.parameters_json`);

@@ -403,8 +403,10 @@ digest and catalogued byte length and projects only server-admitted
 `available_views`. Each view names a closed capability kind, same-origin content
 URL, exact response media type, and canonical-decimal byte length. The browser
 selects renderers from the kind; it never derives a capability from the media
-type. Transcript DTOs carry descriptors and URLs, never embedded bytes, in
-accordance with the [web campaign laws](../agents/web-campaign.md).
+type. **Committed unimplemented functionality.** Present transcript DTOs do not
+yet carry blob descriptors or URLs. Their compatibility constraint is that the
+future transcript projection carries descriptors and URLs, never embedded bytes,
+in accordance with the [web campaign laws](../agents/web-campaign.md).
 
 Every descriptor carries metadata and an ordinary-download view. The download
 response uses `attachment` disposition and keeps caller filename bytes in an RFC

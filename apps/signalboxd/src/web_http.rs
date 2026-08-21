@@ -252,7 +252,10 @@ impl WebHttpRuntime {
 pub fn production_router(asset_root: Option<PathBuf>, blobs: Option<WebBlobRuntime>) -> Router {
     let api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
-        .route("/blobs/{digest}/descriptor", get(blob_descriptor))
+        .route(
+            "/blobs/{digest}/descriptor",
+            get(blob_descriptor).head(blob_descriptor_head),
+        )
         .route(
             "/blobs/{digest}/content/{representation}",
             get(blob_content).head(blob_content),
@@ -405,6 +408,14 @@ async fn blob_descriptor(
         available_views,
     })
     .into_response()
+}
+
+async fn blob_descriptor_head() -> Response {
+    transport_error(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "descriptor_method_not_allowed",
+        "blob descriptors are available through GET",
+    )
 }
 
 async fn append_image_derivative_view(
@@ -1365,6 +1376,21 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["kind"], "transport");
         assert_eq!(body["error"]["code"], "invalid_blob_use");
+    }
+
+    #[tokio::test]
+    async fn descriptor_head_is_rejected_without_blob_runtime_work() {
+        let request = Request::head(
+            "/api/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/descriptor",
+        )
+        .body(Body::empty())
+        .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[tokio::test]

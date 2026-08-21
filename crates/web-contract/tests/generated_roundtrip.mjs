@@ -55,6 +55,7 @@ test("generated bootstrap decoder rejects another contract version", () => {
 
 test("generated blob decoder accepts capability-projected views", () => {
   const digest = `sha256:${"a1".repeat(32)}`;
+  const outputDigest = `sha256:${"b2".repeat(32)}`;
   const descriptor = decodeWebBlobDescriptor({
     digest,
     byte_length: "94371840",
@@ -70,14 +71,14 @@ test("generated blob decoder accepts capability-projected views", () => {
       },
       {
         kind: "thumbnail",
-        content_url: `/api/blobs/${digest}/content/image-png`,
+        content_url: `/api/blobs/${outputDigest}/content/image-png`,
         media_type: "image/png",
         byte_length: "2048",
         derivations: [
           {
             derivation_id: "01990f5f-55c0-7000-8000-000000000001",
             input_digests: [digest],
-            output_digests: [`sha256:${"b2".repeat(32)}`],
+            output_digests: [outputDigest],
             transformation_name: "signalbox.image.thumbnail",
             transformation_version: 1,
             parameters_json: '{"max_edge":256}',
@@ -378,6 +379,85 @@ test("generated blob decoder rejects zero-length descriptors and views", () => {
         available_views: [{ ...download, byte_length: "0" }],
       }),
     /byte_length must be a positive canonical/,
+  );
+});
+
+test("generated blob decoder ties content routes to advertised digests", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const otherDigest = `sha256:${"b2".repeat(32)}`;
+  const descriptor = {
+    digest,
+    byte_length: "1",
+    declared_media_type: "application/octet-stream",
+    display_filename: [],
+    available_views: [
+      {
+        kind: "download",
+        content_url: `/api/blobs/${otherDigest}/download?media_type=application%2Foctet-stream`,
+        media_type: "application/octet-stream",
+        byte_length: "1",
+        derivations: [],
+      },
+    ],
+  };
+
+  assert.throws(
+    () => decodeWebBlobDescriptor(descriptor),
+    /content_url must be a route for the descriptor digest/,
+  );
+});
+
+test("generated blob decoder bounds nested view collections", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const download = {
+    kind: "download",
+    content_url: `/api/blobs/${digest}/download?media_type=application%2Foctet-stream`,
+    media_type: "application/octet-stream",
+    byte_length: "1",
+    derivations: [],
+  };
+  const descriptor = {
+    digest,
+    byte_length: "1",
+    declared_media_type: "application/octet-stream",
+    display_filename: [],
+    available_views: Array.from({ length: 5 }, () => download),
+  };
+
+  assert.throws(
+    () => decodeWebBlobDescriptor(descriptor),
+    /available_views must be at most 4 items/,
+  );
+
+  const derivation = {
+    derivation_id: "01990f5f-55c0-7000-8000-000000000001",
+    input_digests: [digest],
+    output_digests: [digest],
+    transformation_name: "image.preview",
+    transformation_version: 1,
+    parameters_json: "{}",
+    producer: {
+      class: "deterministic",
+      implementation_digest: digest,
+      cache_key: digest,
+    },
+  };
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        ...descriptor,
+        available_views: [
+          download,
+          {
+            kind: "preview",
+            content_url: `/api/blobs/${digest}/content/image-png`,
+            media_type: "image/png",
+            byte_length: "1",
+            derivations: [derivation, derivation],
+          },
+        ],
+      }),
+    /derivations must be at most 1 items/,
   );
 });
 
