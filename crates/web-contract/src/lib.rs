@@ -9,6 +9,7 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use signalbox_application::{max_timeline_window_bytes, max_timeline_window_items};
 
 /// Exact browser HTTP contract version served by this daemon build.
 pub const WEB_CONTRACT_VERSION: &str = "1";
@@ -40,6 +41,8 @@ pub struct WebContractCapabilities {
     pub same_origin_json_mutations: bool,
     /// Incremental response items use newline-delimited JSON.
     pub ndjson_streaming: bool,
+    /// Stable bounded session descriptors and historical windows are available.
+    pub bounded_session_timeline: bool,
 }
 
 /// Effective hard limits clients must honor for this contract version.
@@ -50,6 +53,10 @@ pub struct WebContractLimits {
     pub max_json_body_bytes: u32,
     /// Maximum encoded bytes for one NDJSON item, excluding its newline.
     pub max_ndjson_item_bytes: u32,
+    /// Maximum durable event headers returned in one timeline window.
+    pub max_timeline_window_items: u32,
+    /// Maximum projected structured item bytes in one timeline window.
+    pub max_timeline_window_bytes: u32,
 }
 
 /// Response from the contract bootstrap endpoint.
@@ -77,10 +84,13 @@ impl WebContractBootstrap {
                 bounded_json: true,
                 same_origin_json_mutations: true,
                 ndjson_streaming: true,
+                bounded_session_timeline: true,
             },
             limits: WebContractLimits {
                 max_json_body_bytes: MAX_JSON_BODY_BYTES as u32,
                 max_ndjson_item_bytes: MAX_NDJSON_ITEM_BYTES as u32,
+                max_timeline_window_items: u32::from(max_timeline_window_items()),
+                max_timeline_window_bytes: max_timeline_window_bytes(),
             },
         }
     }
@@ -94,6 +104,89 @@ pub struct WebContractExample {
     pub request_id: String,
     /// Bounded example payload.
     pub message: String,
+}
+
+/// Stable browser-visible location of one durable session event.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineAddress {
+    /// Positive global durable event sequence encoded losslessly for JavaScript.
+    pub event_sequence: String,
+}
+
+/// Explicit lifetime size facts used only for browser loading policy.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineSizeFacts {
+    pub item_count: String,
+    pub projected_text_bytes: String,
+    pub projected_structured_bytes: String,
+    pub referenced_blob_count: String,
+    pub referenced_blob_bytes: String,
+}
+
+/// Current work facts carried by the lightweight session descriptor.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionWorkFacts {
+    pub active_turn_count: String,
+    pub queued_turn_count: String,
+}
+
+/// Browser descriptor for one authoritative bounded session projection.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineDescriptor {
+    pub session_id: String,
+    pub sizes: WebSessionTimelineSizeFacts,
+    pub first_address: WebTimelineAddress,
+    pub latest_address: WebTimelineAddress,
+    pub work: WebSessionWorkFacts,
+    pub observed_through: String,
+}
+
+/// Closed durable event categories in the browser timeline foundation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSessionTimelineEventKind {
+    SessionCreated,
+    SessionModelSettingsChanged,
+    TurnModelSettingsResolved,
+    InputAccepted,
+    GoalTurnRetired,
+    TurnActivated,
+    TurnFailed,
+    ModelCallTransition,
+    ToolBatchTransition,
+    ToolApprovalDecided,
+    ContextCompacted,
+    TurnCompleted,
+    TurnRefused,
+    TurnCancelled,
+    TurnReconciliationRequired,
+    RunnerStateTransition,
+    DelegationUpdate,
+    DelegationWake,
+}
+
+/// One typed, header-only event in a bounded browser window.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineItem {
+    pub address: WebTimelineAddress,
+    pub kind: WebSessionTimelineEventKind,
+    pub projected_structured_bytes: u32,
+}
+
+/// One bounded, logically ordered browser timeline window.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineWindow {
+    pub session_id: String,
+    pub items: Vec<WebSessionTimelineItem>,
+    pub projected_structured_bytes: u32,
+    pub continuation_before: Option<WebTimelineAddress>,
+    pub continuation_after: Option<WebTimelineAddress>,
 }
 
 /// Layer that owns one browser API failure.
@@ -175,6 +268,10 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     let bootstrap_schema = canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value());
     let example_schema = canonical_schema(schemars::schema_for!(WebContractExample).to_value());
     let error_schema = canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value());
+    let descriptor_schema =
+        canonical_schema(schemars::schema_for!(WebSessionTimelineDescriptor).to_value());
+    let window_schema =
+        canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -186,11 +283,23 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     Ok(vec![
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.mjs",
-            contents: runtime_module(&bootstrap_schema, &example_schema, &error_schema)?,
+            contents: runtime_module(
+                &bootstrap_schema,
+                &example_schema,
+                &error_schema,
+                &descriptor_schema,
+                &window_schema,
+            )?,
         },
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.d.mts",
-            contents: declaration_module(&bootstrap_schema, &example_schema, &error_schema)?,
+            contents: declaration_module(
+                &bootstrap_schema,
+                &example_schema,
+                &error_schema,
+                &descriptor_schema,
+                &window_schema,
+            )?,
         },
         GeneratedArtifact {
             path: "crates/web-contract/tests/fixtures/example.json",
@@ -211,11 +320,15 @@ fn runtime_module(
     bootstrap_schema: &Value,
     example_schema: &Value,
     error_schema: &Value,
+    descriptor_schema: &Value,
+    window_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
         "WebContractBootstrap": bootstrap_schema,
         "WebContractExample": example_schema,
         "WebApiErrorResponse": error_schema,
+        "WebSessionTimelineDescriptor": descriptor_schema,
+        "WebSessionTimelineWindow": window_schema,
     });
     schemas.sort_all_objects();
     let schemas = serde_json::to_string_pretty(&schemas)
@@ -273,6 +386,38 @@ function assertSchema(root, schema, value, path) {{
     }}
     return;
   }}
+  if (schema.anyOf !== undefined) {{
+    const accepted = schema.anyOf.some((candidate) => {{
+      try {{
+        assertSchema(root, candidate, value, path);
+        return true;
+      }} catch {{
+        return false;
+      }}
+    }});
+    if (!accepted) {{
+      fail(path, "one recognized variant");
+    }}
+    return;
+  }}
+  if (Array.isArray(schema.type)) {{
+    if (value === null && schema.type.includes("null")) {{
+      return;
+    }}
+    const concrete = schema.type.filter((candidate) => candidate !== "null");
+    const accepted = concrete.some((candidate) => {{
+      try {{
+        assertSchema(root, {{ ...schema, type: candidate }}, value, path);
+        return true;
+      }} catch {{
+        return false;
+      }}
+    }});
+    if (!accepted) {{
+      fail(path, concrete.join(" or "));
+    }}
+    return;
+  }}
   if (schema.type === "object") {{
     if (value === null || typeof value !== "object" || Array.isArray(value)) {{
       fail(path, "an object");
@@ -319,6 +464,12 @@ function assertSchema(root, schema, value, path) {{
     }}
     return;
   }}
+  if (schema.type === "null") {{
+    if (value !== null) {{
+      fail(path, "null");
+    }}
+    return;
+  }}
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
   }}
@@ -341,6 +492,16 @@ export function decodeWebApiErrorResponse(value) {{
   assertSchema(schemas.WebApiErrorResponse, schemas.WebApiErrorResponse, value, "error_response");
   return value;
 }}
+
+export function decodeWebSessionTimelineDescriptor(value) {{
+  assertSchema(schemas.WebSessionTimelineDescriptor, schemas.WebSessionTimelineDescriptor, value, "session_descriptor");
+  return value;
+}}
+
+export function decodeWebSessionTimelineWindow(value) {{
+  assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "timeline_window");
+  return value;
+}}
 "##,
         contract_name = WEB_CONTRACT_NAME,
         contract_version = WEB_CONTRACT_VERSION,
@@ -351,11 +512,15 @@ fn declaration_module(
     bootstrap_schema: &Value,
     example_schema: &Value,
     error_schema: &Value,
+    descriptor_schema: &Value,
+    window_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
     let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
     let example = typescript_type(example_schema, example_schema, &mut definitions)?;
     let error = typescript_type(error_schema, error_schema, &mut definitions)?;
+    let descriptor = typescript_type(descriptor_schema, descriptor_schema, &mut definitions)?;
+    let window = typescript_type(window_schema, window_schema, &mut definitions)?;
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",
     );
@@ -367,8 +532,14 @@ fn declaration_module(
     ));
     output.push_str(&format!("export type WebContractExample = {example};\n\n"));
     output.push_str(&format!("export type WebApiErrorResponse = {error};\n\n"));
+    output.push_str(&format!(
+        "export type WebSessionTimelineDescriptor = {descriptor};\n\n"
+    ));
+    output.push_str(&format!(
+        "export type WebSessionTimelineWindow = {window};\n\n"
+    ));
     output.push_str(
-        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\n",
+        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\n",
     );
     Ok(output)
 }
@@ -409,6 +580,28 @@ fn typescript_type(
             .collect::<Result<Vec<_>, _>>()?
             .join(" | "));
     }
+    if let Some(variants) = schema.get("anyOf").and_then(Value::as_array) {
+        return Ok(variants
+            .iter()
+            .map(|variant| typescript_type(root, variant, definitions))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" | "));
+    }
+    if let Some(types) = schema.get("type").and_then(Value::as_array) {
+        return Ok(types
+            .iter()
+            .map(|kind| match kind.as_str() {
+                Some("null") => Ok("null".to_owned()),
+                Some(kind) => {
+                    let mut concrete = schema.clone();
+                    concrete["type"] = Value::String(kind.to_owned());
+                    typescript_type(root, &concrete, definitions)
+                }
+                None => Err(GenerateWebContractError::UnsupportedSchema),
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" | "));
+    }
     match schema.get("type").and_then(Value::as_str) {
         Some("object") => typescript_object(root, schema, definitions),
         Some("array") => {
@@ -422,6 +615,7 @@ fn typescript_type(
         }
         Some("integer" | "number") => Ok("number".to_owned()),
         Some("boolean") => Ok("boolean".to_owned()),
+        Some("null") => Ok("null".to_owned()),
         Some("string") => Ok("string".to_owned()),
         _ => Err(GenerateWebContractError::UnsupportedSchema),
     }

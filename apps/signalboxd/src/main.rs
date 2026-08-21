@@ -1593,7 +1593,7 @@ async fn run_hub(
             return Err(failure);
         }
     };
-    let web_http_runtime = match WebHttpRuntime::bind(web_configuration).await {
+    let web_http_runtime = match WebHttpRuntime::bind(web_configuration, pool.clone()).await {
         Ok(runtime) => runtime,
         Err(_) => {
             let failure = erase_startup_cause(

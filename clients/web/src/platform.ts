@@ -1,3 +1,5 @@
+import { SESSION_FOUNDATION_TOTAL, sessionFoundationScenario } from './session-timeline/model'
+
 export type TimelineKind = 'origin' | 'progress' | 'tool' | 'result' | 'unknown'
 
 export interface TimelineItem {
@@ -65,6 +67,14 @@ export const scenarios = [
     connection: 'connected',
     timelineTotal: 100_000,
     tableTotal: 500,
+  },
+  {
+    id: 'session-foundation',
+    title: 'Million-event session',
+    description: 'Stable addresses and bounded windows over one enormous durable history.',
+    connection: 'connected',
+    timelineTotal: SESSION_FOUNDATION_TOTAL,
+    tableTotal: 120,
   },
   {
     id: 'large-table',
@@ -185,6 +195,35 @@ export class ScenarioTransport implements SignalboxTransport {
   }
 
   async readTimeline(request: WindowRequest): Promise<CursorWindow<TimelineItem>> {
+    if (this.scenario.id === 'session-foundation') {
+      const result = await sessionFoundationScenario(request.after, request.limit)
+      const items = result.window.items.map((item, offset) => {
+        const sequence = item.address.event_sequence
+        const kind: TimelineKind = item.kind.includes('tool')
+          ? 'tool'
+          : item.kind === 'turn_completed'
+            ? 'result'
+            : item.kind === 'input_accepted'
+              ? 'origin'
+              : 'progress'
+        return {
+          id: `event-${sequence}`,
+          cursor: `timeline:${sequence}`,
+          turn: Math.max(Math.floor((Number(sequence) - 1) / 6) + 1, 1),
+          kind,
+          label: item.kind.replaceAll('_', ' '),
+          body: `Durable header at stable address ${sequence}; detail is loaded separately.`,
+          elapsed: `${(offset % 41) + 1}s`,
+        }
+      })
+      return {
+        items,
+        nextCursor: result.window.continuation_after
+          ? `timeline:${result.window.continuation_after.event_sequence}`
+          : undefined,
+        totalCount: Number(result.descriptor.sizes.item_count),
+      }
+    }
     const start = Math.min(parseCursor(request.after, 'timeline'), this.scenario.timelineTotal)
     const count = normalizedLimit({
       requested: request.limit,
