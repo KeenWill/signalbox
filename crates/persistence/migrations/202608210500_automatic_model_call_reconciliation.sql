@@ -32,12 +32,26 @@ CREATE TABLE automatic_model_call_reconciliation_discovery_state (
 INSERT INTO automatic_model_call_reconciliation_discovery_state (singleton)
 VALUES (true);
 
+CREATE TABLE automatic_model_call_reconciliation_supersession_state (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    after_turn_id uuid
+);
+
+INSERT INTO automatic_model_call_reconciliation_supersession_state (singleton)
+VALUES (true);
+
 CREATE INDEX turn_lifecycle_automatic_model_call_recovery_discovery
     ON turn_lifecycle (turn_id)
     INCLUDE (session_id, recovery_model_call_id)
     WHERE state_kind = 'active'
+      AND origin_kind = 'accepted_input'
       AND active_phase_kind = 'awaiting_model_call_recovery'
       AND recovery_model_call_id IS NOT NULL;
+
+CREATE INDEX automatic_model_call_reconciliation_supersession
+    ON automatic_model_call_reconciliation (turn_id)
+    INCLUDE (session_id, model_call_id, state_kind, attempt_count)
+    WHERE state_kind IN ('scheduled', 'attempting', 'exhausted');
 
 CREATE TABLE automatic_model_call_reconciliation_attempt (
     turn_id uuid NOT NULL,

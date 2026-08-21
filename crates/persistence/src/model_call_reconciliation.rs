@@ -168,7 +168,7 @@ impl PostgresModelCallReconciliationRepository {
         let mut transaction = self.pool.begin().await?;
         discover_recoveries(&mut transaction, CLAIM_WINDOW).await?;
         settle_abandoned_attempts(&mut transaction).await?;
-        mark_superseded_recoveries(&mut transaction).await?;
+        mark_superseded_recoveries(&mut transaction, CLAIM_WINDOW).await?;
         let exhausted_rows = mark_exhausted_recoveries(&mut transaction).await?;
         let rows = sqlx::query(crate::lock_inventory::AUTOMATIC_MODEL_CALL_RECONCILIATION_CLAIM)
             .bind(CLAIM_WINDOW)
@@ -223,6 +223,7 @@ impl PostgresModelCallReconciliationRepository {
                  WHERE session_id = $1
                    AND turn_id = $2
                    AND state_kind = 'active'
+                   AND origin_kind = 'accepted_input'
                    AND active_phase_kind = 'awaiting_model_call_recovery'
                    AND recovery_model_call_id = $3
             )",
@@ -357,17 +358,41 @@ async fn discover_recoveries(
 #[cfg(test)]
 mod tests {
     use super::CLAIM_WINDOW;
-    use crate::lock_inventory::AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY;
+    use crate::lock_inventory::{
+        AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY,
+        AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION,
+    };
 
     #[test]
     fn discovery_is_a_bounded_keyset_page() {
         assert!(CLAIM_WINDOW > 0);
         assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("turn_id > after_turn_id"));
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY
+                .contains("origin_kind = 'accepted_input'")
+        );
         assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("ORDER BY turn_id"));
         assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("LIMIT $1"));
         assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("SET after_turn_id"));
         assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("ORDER BY turn_id DESC"));
         assert!(!AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY.contains("max(turn_id)"));
+    }
+
+    #[test]
+    fn supersession_is_an_independent_bounded_keyset_page() {
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
+                .contains("recovery.turn_id > cursor.after_turn_id")
+        );
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("ORDER BY recovery.turn_id")
+        );
+        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("LIMIT $1"));
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
+                .contains("origin_kind = 'accepted_input'")
+        );
+        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("SET after_turn_id"));
     }
 }
 
@@ -401,42 +426,12 @@ async fn settle_abandoned_attempts(
 
 async fn mark_superseded_recoveries(
     connection: &mut PgConnection,
+    window: i64,
 ) -> Result<(), ModelCallReconciliationRepositoryError> {
-    sqlx::query(
-        "UPDATE automatic_model_call_reconciliation_attempt AS attempt
-            SET outcome_kind = 'superseded',
-                finished_at = statement_timestamp()
-           FROM automatic_model_call_reconciliation AS recovery
-          WHERE recovery.turn_id = attempt.turn_id
-            AND recovery.state_kind = 'attempting'
-            AND attempt.attempt_ordinal = recovery.attempt_count
-            AND attempt.outcome_kind = 'attempting'
-            AND NOT EXISTS (
-                SELECT 1 FROM turn_lifecycle AS lifecycle
-                 WHERE lifecycle.turn_id = recovery.turn_id
-                   AND lifecycle.session_id = recovery.session_id
-                   AND lifecycle.state_kind = 'active'
-                   AND lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
-                   AND lifecycle.recovery_model_call_id = recovery.model_call_id
-            )",
-    )
-    .execute(&mut *connection)
-    .await?;
-    sqlx::query(
-        "UPDATE automatic_model_call_reconciliation AS recovery
-            SET state_kind = 'superseded', exhausted_at = NULL
-          WHERE recovery.state_kind IN ('scheduled', 'attempting', 'exhausted')
-            AND NOT EXISTS (
-                SELECT 1 FROM turn_lifecycle AS lifecycle
-                 WHERE lifecycle.turn_id = recovery.turn_id
-                   AND lifecycle.session_id = recovery.session_id
-                   AND lifecycle.state_kind = 'active'
-                   AND lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
-                   AND lifecycle.recovery_model_call_id = recovery.model_call_id
-            )",
-    )
-    .execute(connection)
-    .await?;
+    sqlx::query(crate::lock_inventory::AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION)
+        .bind(window)
+        .execute(connection)
+        .await?;
     Ok(())
 }
 
