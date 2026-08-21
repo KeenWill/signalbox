@@ -132,6 +132,9 @@ fn contains_json_decoded_spelling(text: &str, value: &str) -> bool {
     decode_json_escapes(text).0.contains(value)
 }
 
+// `serde_json` can decode complete JSON values, but this scrubber receives
+// arbitrary captured-text fragments and must retain each decoded character's
+// exact source span so it can remove the original escaped spelling.
 fn decode_json_escapes(text: &str) -> (String, Vec<(usize, usize)>) {
     let mut decoded = String::with_capacity(text.len());
     let mut source_spans = Vec::with_capacity(text.len());
@@ -465,10 +468,10 @@ injection_env = "{ENVIRONMENT}"
             resolved.redact_text(captured),
             "raw=[redacted]; json=[redacted]"
         );
-        assert_eq!(
-            format!("{resolved:?}"),
-            "ResolvedRunnerCredential { profile: ProfileName(\"github-runner\"), injection_env: \"GH_TOKEN\", value: \"<redacted>\", escaped_value: \"<redacted>\", solidus_escaped_value: \"<redacted>\", unicode_escaped_value: \"<redacted>\", solidus_unicode_escaped_value: \"<redacted>\" }"
+        let expected_debug = format!(
+            "ResolvedRunnerCredential {{ profile: ProfileName({PROFILE:?}), injection_env: {ENVIRONMENT:?}, value: \"<redacted>\", escaped_value: \"<redacted>\", solidus_escaped_value: \"<redacted>\", unicode_escaped_value: \"<redacted>\", solidus_unicode_escaped_value: \"<redacted>\" }}"
         );
+        assert_eq!(format!("{resolved:?}"), expected_debug);
     }
 
     /// INV-035: ASCII-only JSON Unicode escapes cannot expose the credential.
