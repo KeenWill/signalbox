@@ -63,6 +63,52 @@ const DELEGATION_UPDATE: &str = "delegation_update";
 const DELEGATION_WAKE: &str = "delegation_wake";
 const STORAGE_VERSION: i16 = 1;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutboxEventDiscriminator {
+    SessionCreated,
+    SessionModelSettingsChanged,
+    TurnModelSettingsResolved,
+    InputAccepted,
+    GoalTurnRetired,
+    TurnActivated,
+    TurnFailed,
+    ModelCallTransition,
+    ToolBatchTransition,
+    ToolApprovalDecided,
+    ContextCompacted,
+    TurnCompleted,
+    TurnRefused,
+    TurnCancelled,
+    TurnReconciliationRequired,
+    RunnerStateTransition,
+    DelegationUpdate,
+    DelegationWake,
+}
+
+pub(crate) fn outbox_event_discriminator_from_str(value: &str) -> Option<OutboxEventDiscriminator> {
+    Some(match value {
+        SESSION_CREATED => OutboxEventDiscriminator::SessionCreated,
+        SESSION_MODEL_SETTINGS_CHANGED => OutboxEventDiscriminator::SessionModelSettingsChanged,
+        TURN_MODEL_SETTINGS_RESOLVED => OutboxEventDiscriminator::TurnModelSettingsResolved,
+        INPUT_ACCEPTED => OutboxEventDiscriminator::InputAccepted,
+        GOAL_TURN_RETIRED => OutboxEventDiscriminator::GoalTurnRetired,
+        TURN_ACTIVATED => OutboxEventDiscriminator::TurnActivated,
+        TURN_FAILED => OutboxEventDiscriminator::TurnFailed,
+        MODEL_CALL_TRANSITION => OutboxEventDiscriminator::ModelCallTransition,
+        TOOL_BATCH_TRANSITION => OutboxEventDiscriminator::ToolBatchTransition,
+        TOOL_APPROVAL_DECIDED => OutboxEventDiscriminator::ToolApprovalDecided,
+        CONTEXT_COMPACTED => OutboxEventDiscriminator::ContextCompacted,
+        TURN_COMPLETED => OutboxEventDiscriminator::TurnCompleted,
+        TURN_REFUSED => OutboxEventDiscriminator::TurnRefused,
+        TURN_CANCELLED => OutboxEventDiscriminator::TurnCancelled,
+        TURN_RECONCILIATION_REQUIRED => OutboxEventDiscriminator::TurnReconciliationRequired,
+        RUNNER_STATE_TRANSITION => OutboxEventDiscriminator::RunnerStateTransition,
+        DELEGATION_UPDATE => OutboxEventDiscriminator::DelegationUpdate,
+        DELEGATION_WAKE => OutboxEventDiscriminator::DelegationWake,
+        _ => return None,
+    })
+}
+
 type OutboxSlotRow = (
     Decimal,
     bool,
@@ -812,8 +858,10 @@ async fn load_event(
         return Err(OutboxCorruption::UnsupportedStorageVersion.into());
     }
     let session = session_id_from_uuid(stored_session);
-    let kind = match event_kind.as_str() {
-        SESSION_CREATED => {
+    let discriminator = outbox_event_discriminator_from_str(&event_kind)
+        .ok_or(OutboxCorruption::UnsupportedEventKind)?;
+    let kind = match discriminator {
+        OutboxEventDiscriminator::SessionCreated => {
             require_typed_record(
                 transaction,
                 "SELECT event_sequence
@@ -826,7 +874,7 @@ async fn load_event(
             .await?;
             DispatchedOutboxEventKind::SessionCreated
         }
-        SESSION_MODEL_SETTINGS_CHANGED => {
+        OutboxEventDiscriminator::SessionModelSettingsChanged => {
             let row = sqlx::query(
                 "SELECT changed.command_id, changed.prior_defaults_version,
                         changed.installed_defaults_version,
@@ -912,7 +960,7 @@ async fn load_event(
             .ok_or(OutboxCorruption::InvalidModelSettingsEvent)?;
             DispatchedOutboxEventKind::SessionModelSettingsChanged(event)
         }
-        TURN_MODEL_SETTINGS_RESOLVED => {
+        OutboxEventDiscriminator::TurnModelSettingsResolved => {
             let row = sqlx::query(
                 "WITH RECURSIVE configuration_origin AS (
                      SELECT queued.*
@@ -1029,7 +1077,7 @@ async fn load_event(
             }
             DispatchedOutboxEventKind::TurnModelSettingsResolved(event)
         }
-        INPUT_ACCEPTED => {
+        OutboxEventDiscriminator::InputAccepted => {
             // The two admitted shapes are the two ways an input is authored:
             // by an applied submit command, or by the goal machinery, which
             // mints a commandless input and proves it with a `goal_turn` row.
@@ -1113,7 +1161,7 @@ async fn load_event(
                 content: row.try_get("content_text")?,
             }
         }
-        GOAL_TURN_RETIRED => {
+        OutboxEventDiscriminator::GoalTurnRetired => {
             let turn = sqlx::query_scalar::<_, Uuid>(
                 "SELECT event.turn_id
                    FROM goal_turn_retired_outbox_event AS event
@@ -1140,7 +1188,7 @@ async fn load_event(
                 turn: TurnId::from_uuid(turn),
             }
         }
-        TURN_ACTIVATED => {
+        OutboxEventDiscriminator::TurnActivated => {
             let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
                 "SELECT event.turn_id, event.current_attempt_id,
                         (
@@ -1197,7 +1245,7 @@ async fn load_event(
                 current_attempt: TurnAttemptId::from_uuid(current_attempt),
             }
         }
-        TURN_FAILED => {
+        OutboxEventDiscriminator::TurnFailed => {
             let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
                 "SELECT event.turn_id, event.failure_entry_id,
                         event.terminal_frontier_id
@@ -1336,7 +1384,7 @@ async fn load_event(
                 terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
             }
         }
-        MODEL_CALL_TRANSITION => {
+        OutboxEventDiscriminator::ModelCallTransition => {
             let row = sqlx::query(
                 "SELECT event.turn_id, event.model_call_id,
                         event.call_state_kind,
@@ -1393,7 +1441,7 @@ async fn load_event(
                 state,
             }
         }
-        TOOL_BATCH_TRANSITION => {
+        OutboxEventDiscriminator::ToolBatchTransition => {
             let row: Option<ToolBatchTransitionRow> = sqlx::query_as(
                 "SELECT event.turn_id, event.producing_model_call_id,
                             event.transition_kind, event.frontier_id,
@@ -1551,7 +1599,7 @@ async fn load_event(
                 state,
             }
         }
-        TOOL_APPROVAL_DECIDED => {
+        OutboxEventDiscriminator::ToolApprovalDecided => {
             let row: ToolApprovalDecidedRow = sqlx::query_as(
                 "SELECT event.turn_id, event.request_id
                    FROM tool_approval_decided_outbox_event AS event
@@ -1592,7 +1640,7 @@ async fn load_event(
                 decider,
             }
         }
-        CONTEXT_COMPACTED => {
+        OutboxEventDiscriminator::ContextCompacted => {
             let row: (Uuid, Uuid, Decimal, Uuid, Uuid) = sqlx::query_as(
                 "SELECT event.context_compaction_id, event.model_call_id,
                         event.through_position, event.summary_entry_id,
@@ -1645,7 +1693,7 @@ async fn load_event(
                 result_frontier: ContextFrontierId::from_uuid(row.4),
             }
         }
-        TURN_COMPLETED => {
+        OutboxEventDiscriminator::TurnCompleted => {
             let row: Option<(Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as(
                 "SELECT event.turn_id, event.model_call_id,
                         event.completion_entry_id, event.terminal_frontier_id
@@ -1706,7 +1754,7 @@ async fn load_event(
                 terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
             }
         }
-        TURN_REFUSED => {
+        OutboxEventDiscriminator::TurnRefused => {
             let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
                 "SELECT event.turn_id, event.model_call_id,
                         event.terminal_frontier_id
@@ -1748,7 +1796,7 @@ async fn load_event(
                 terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
             }
         }
-        TURN_CANCELLED => {
+        OutboxEventDiscriminator::TurnCancelled => {
             let row: Option<TurnCancelledOutboxRow> = sqlx::query_as(
                 "SELECT event.turn_id AS turn_id,
                         event.cancellation_entry_id AS cancellation_entry_id,
@@ -1838,7 +1886,7 @@ async fn load_event(
                 terminal_frontier: ContextFrontierId::from_uuid(row.terminal_frontier_id),
             }
         }
-        TURN_RECONCILIATION_REQUIRED => {
+        OutboxEventDiscriminator::TurnReconciliationRequired => {
             let row: Option<(Uuid, Option<Uuid>, Option<Uuid>, Uuid)> = sqlx::query_as(
                 "SELECT event.turn_id, event.model_call_id,
                         event.tool_attempt_id, event.terminal_frontier_id
@@ -1991,16 +2039,15 @@ async fn load_event(
                 terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
             }
         }
-        RUNNER_STATE_TRANSITION => {
+        OutboxEventDiscriminator::RunnerStateTransition => {
             load_runner_state_transition(transaction, expected_sequence, stored_session).await?
         }
-        DELEGATION_UPDATE => DispatchedOutboxEventKind::DelegationUpdate(
+        OutboxEventDiscriminator::DelegationUpdate => DispatchedOutboxEventKind::DelegationUpdate(
             load_delegation_update(transaction, expected_sequence, stored_session).await?,
         ),
-        DELEGATION_WAKE => DispatchedOutboxEventKind::DelegationWake(
+        OutboxEventDiscriminator::DelegationWake => DispatchedOutboxEventKind::DelegationWake(
             load_delegation_wake(transaction, expected_sequence, stored_session).await?,
         ),
-        _ => return Err(OutboxCorruption::UnsupportedEventKind.into()),
     };
 
     Ok((

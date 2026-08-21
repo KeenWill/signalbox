@@ -11,6 +11,8 @@ use signalbox_application::{
 use signalbox_domain::SessionId;
 use sqlx::{PgConnection, PgPool, Row};
 
+use crate::outbox::{OutboxEventDiscriminator, outbox_event_discriminator_from_str};
+
 const PROJECTED_ITEM_ENVELOPE_BYTES: u32 = 64;
 
 /// Integrity failure in the durable timeline projection.
@@ -184,12 +186,20 @@ impl SessionTimelineRepository {
         items.sort_by_key(|item| item.address);
         let first = items.first().map(|item| item.address);
         let latest = items.last().map(|item| item.address);
-        let has_more_before = first
-            .zip(descriptor.bounds.first)
-            .is_some_and(|(loaded, bound)| loaded > bound);
-        let has_more_after = latest
-            .zip(descriptor.bounds.latest)
-            .is_some_and(|(loaded, bound)| loaded < bound);
+        let has_more_before = first.map_or_else(
+            || match (anchor, descriptor.bounds.first) {
+                (TimelineWindowAnchor::After(address), Some(bound)) => address >= bound,
+                _ => false,
+            },
+            |loaded| descriptor.bounds.first.is_some_and(|bound| loaded > bound),
+        );
+        let has_more_after = latest.map_or_else(
+            || match (anchor, descriptor.bounds.latest) {
+                (TimelineWindowAnchor::Before(address), Some(bound)) => address <= bound,
+                _ => false,
+            },
+            |loaded| descriptor.bounds.latest.is_some_and(|bound| loaded < bound),
+        );
         transaction.commit().await?;
 
         Ok(Some(SessionTimelineWindow {
@@ -223,41 +233,15 @@ impl SessionTimelineReader for SessionTimelineRepository {
 }
 
 const DESCRIPTOR_SQL: &str = r#"
-WITH session_events AS (
-    SELECT event_sequence, event_kind FROM outbox_event WHERE session_id = $1
-    UNION ALL
-    SELECT event_sequence, event_kind FROM delegation_outbox_event WHERE session_id = $1
-), event_facts AS (
-    SELECT count(*)::numeric AS item_count,
-           min(event_sequence) AS first_sequence,
-           max(event_sequence) AS latest_sequence,
-           coalesce(sum(64 + octet_length(event_kind)), 0)::numeric AS structured_bytes
-      FROM session_events
-), text_facts AS (
-    SELECT (
-        coalesce((SELECT sum(octet_length(convert_to(content_text, 'UTF8')))::numeric
-                    FROM accepted_input WHERE session_id = $1), 0)
-        + coalesce((SELECT sum(octet_length(convert_to(assistant_text_value, 'UTF8')))::numeric
-                      FROM semantic_transcript_entry
-                     WHERE source_session_id = $1 AND assistant_text_value IS NOT NULL), 0)
-        + coalesce((SELECT sum(octet_length(convert_to(context_summary_value, 'UTF8')))::numeric
-                      FROM semantic_transcript_entry
-                     WHERE source_session_id = $1 AND context_summary_value IS NOT NULL), 0)
-    ) AS text_bytes
-), work_facts AS (
-    SELECT count(*) FILTER (WHERE state_kind = 'active')::numeric AS active_count,
-           count(*) FILTER (WHERE state_kind = 'queued')::numeric AS queued_count
-      FROM turn_lifecycle WHERE session_id = $1
-)
-SELECT session.session_id, event_facts.item_count, event_facts.first_sequence,
-       event_facts.latest_sequence, event_facts.structured_bytes, text_facts.text_bytes,
-       work_facts.active_count, work_facts.queued_count, allocator.last_sequence
+SELECT session.session_id, facts.item_count, facts.first_sequence,
+       facts.latest_sequence,
+       facts.item_count * $2 + facts.event_kind_bytes AS structured_bytes,
+       facts.projected_text_bytes AS text_bytes,
+       facts.active_turn_count AS active_count, facts.queued_turn_count AS queued_count,
+       (SELECT last_sequence FROM outbox_sequence_state WHERE singleton) AS last_sequence
   FROM session
- CROSS JOIN event_facts
- CROSS JOIN text_facts
- CROSS JOIN work_facts
- CROSS JOIN outbox_sequence_state AS allocator
- WHERE session.session_id = $1 AND allocator.singleton
+  JOIN session_timeline_fact AS facts USING (session_id)
+ WHERE session.session_id = $1
 "#;
 
 macro_rules! window_sql {
@@ -323,6 +307,7 @@ async fn load_descriptor(
 ) -> Result<Option<SessionTimelineDescriptor>, SessionTimelineRepositoryError> {
     let row = sqlx::query(DESCRIPTOR_SQL)
         .bind(session.into_uuid())
+        .bind(i64::from(PROJECTED_ITEM_ENVELOPE_BYTES))
         .fetch_optional(connection)
         .await?;
     let Some(row) = row else { return Ok(None) };
@@ -345,7 +330,11 @@ async fn load_descriptor(
             active_turn_count: nonnegative(row.try_get("active_count")?, "active turn count")?,
             queued_turn_count: nonnegative(row.try_get("queued_count")?, "queued turn count")?,
         },
-        observed_through: nonnegative(row.try_get("last_sequence")?, "observation cursor")?,
+        observed_through: nonnegative(
+            row.try_get::<Option<Decimal>, _>("last_sequence")?
+                .ok_or(SessionTimelineCorruption::Missing("observation cursor"))?,
+            "observation cursor",
+        )?,
     }))
 }
 
@@ -390,30 +379,41 @@ fn decode_item(
 }
 
 fn decode_kind(value: &str) -> Result<SessionTimelineEventKind, SessionTimelineCorruption> {
-    Ok(match value {
-        "session_created" => SessionTimelineEventKind::SessionCreated,
-        "session_model_settings_changed" => SessionTimelineEventKind::SessionModelSettingsChanged,
-        "turn_model_settings_resolved" => SessionTimelineEventKind::TurnModelSettingsResolved,
-        "input_accepted" => SessionTimelineEventKind::InputAccepted,
-        "goal_turn_retired" => SessionTimelineEventKind::GoalTurnRetired,
-        "turn_activated" => SessionTimelineEventKind::TurnActivated,
-        "turn_failed" => SessionTimelineEventKind::TurnFailed,
-        "model_call_transition" => SessionTimelineEventKind::ModelCallTransition,
-        "tool_batch_transition" => SessionTimelineEventKind::ToolBatchTransition,
-        "tool_approval_decided" => SessionTimelineEventKind::ToolApprovalDecided,
-        "context_compacted" => SessionTimelineEventKind::ContextCompacted,
-        "turn_completed" => SessionTimelineEventKind::TurnCompleted,
-        "turn_refused" => SessionTimelineEventKind::TurnRefused,
-        "turn_cancelled" => SessionTimelineEventKind::TurnCancelled,
-        "turn_reconciliation_required" => SessionTimelineEventKind::TurnReconciliationRequired,
-        "runner_state_transition" => SessionTimelineEventKind::RunnerStateTransition,
-        "delegation_update" => SessionTimelineEventKind::DelegationUpdate,
-        "delegation_wake" => SessionTimelineEventKind::DelegationWake,
-        other => {
-            return Err(SessionTimelineCorruption::UnsupportedEventKind(
-                other.to_owned(),
-            ));
+    let discriminator = outbox_event_discriminator_from_str(value)
+        .ok_or_else(|| SessionTimelineCorruption::UnsupportedEventKind(value.to_owned()))?;
+    Ok(match discriminator {
+        OutboxEventDiscriminator::SessionCreated => SessionTimelineEventKind::SessionCreated,
+        OutboxEventDiscriminator::SessionModelSettingsChanged => {
+            SessionTimelineEventKind::SessionModelSettingsChanged
         }
+        OutboxEventDiscriminator::TurnModelSettingsResolved => {
+            SessionTimelineEventKind::TurnModelSettingsResolved
+        }
+        OutboxEventDiscriminator::InputAccepted => SessionTimelineEventKind::InputAccepted,
+        OutboxEventDiscriminator::GoalTurnRetired => SessionTimelineEventKind::GoalTurnRetired,
+        OutboxEventDiscriminator::TurnActivated => SessionTimelineEventKind::TurnActivated,
+        OutboxEventDiscriminator::TurnFailed => SessionTimelineEventKind::TurnFailed,
+        OutboxEventDiscriminator::ModelCallTransition => {
+            SessionTimelineEventKind::ModelCallTransition
+        }
+        OutboxEventDiscriminator::ToolBatchTransition => {
+            SessionTimelineEventKind::ToolBatchTransition
+        }
+        OutboxEventDiscriminator::ToolApprovalDecided => {
+            SessionTimelineEventKind::ToolApprovalDecided
+        }
+        OutboxEventDiscriminator::ContextCompacted => SessionTimelineEventKind::ContextCompacted,
+        OutboxEventDiscriminator::TurnCompleted => SessionTimelineEventKind::TurnCompleted,
+        OutboxEventDiscriminator::TurnRefused => SessionTimelineEventKind::TurnRefused,
+        OutboxEventDiscriminator::TurnCancelled => SessionTimelineEventKind::TurnCancelled,
+        OutboxEventDiscriminator::TurnReconciliationRequired => {
+            SessionTimelineEventKind::TurnReconciliationRequired
+        }
+        OutboxEventDiscriminator::RunnerStateTransition => {
+            SessionTimelineEventKind::RunnerStateTransition
+        }
+        OutboxEventDiscriminator::DelegationUpdate => SessionTimelineEventKind::DelegationUpdate,
+        OutboxEventDiscriminator::DelegationWake => SessionTimelineEventKind::DelegationWake,
     })
 }
 

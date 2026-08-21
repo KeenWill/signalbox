@@ -155,9 +155,10 @@ stated where each is owned.
   configuration failure. Otherwise the runner socket uses the same private-node
   discipline but has an independent lock, identity, vocabulary, and listener.
 - `SIGNALBOX_WEB_BIND` — optional browser HTTP socket address. Absence binds
-  `127.0.0.1:37231`, keeping the listener on loopback; an explicit valid socket
-  address is the deployment's opt-in override. An invalid or non-Unicode value
-  fails the `Configuration` phase without logging the value.
+  `127.0.0.1:37231`, keeping the listener on loopback. Explicit addresses must
+  also be loopback because these routes have no application authentication; an
+  invalid, non-Unicode, or non-loopback value fails the `Configuration` phase
+  without logging the value.
 - `SIGNALBOX_WEB_ASSET_ROOT` — optional path to a static production web build.
   An explicitly empty path fails the `Configuration` phase. When absent, non-API
   paths return `404 Not Found`; when present, the daemon serves files from that
@@ -169,8 +170,9 @@ The browser application and `/api/**` share the configured listener and origin.
 API routing takes precedence over static files: an unknown `/api/**` path
 returns a structured API `404` and never the web application's `index.html`. The
 daemon does not emit permissive CORS headers and adds no account, login,
-bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. Those
-deployment boundaries remain outside Signalbox.
+bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. The
+listener therefore rejects non-loopback binds; any future remote deployment
+requires an explicit authentication and transport-security design first.
 
 `GET /api/bootstrap` describes the production browser contract. It returns the
 exact contract family `signalbox.web-http`, version `1`, the `bounded_json`,

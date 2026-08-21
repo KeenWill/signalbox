@@ -103,6 +103,7 @@ test('browses an enormous production-shaped session from its bounded tail', asyn
 
   const timeline = page.getByRole('listbox', { name: 'Session timeline' })
   await expect(timeline).toBeVisible()
+  await expect(timeline).toHaveAttribute('data-mounted-rows', /^\d+$/)
   expect(Number(await timeline.getAttribute('data-mounted-rows'))).toBeLessThan(
     sessionFoundationFixture.mountedRowsCeiling,
   )

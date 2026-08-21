@@ -14,7 +14,10 @@ use signalbox_domain::{
     TranscriptAncestry,
 };
 use signalbox_persistence::{
-    create_session::CreateSessionRepository, session_timeline::SessionTimelineRepository,
+    create_session::CreateSessionRepository,
+    session_timeline::{
+        SessionTimelineCorruption, SessionTimelineRepository, SessionTimelineRepositoryError,
+    },
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -80,6 +83,14 @@ async fn descriptor_and_windows_share_one_stable_creation_address() -> Result<()
         )
         .await?
         .expect("created session has an addressed window");
+    let after_latest = repository
+        .read_window(
+            identity,
+            TimelineWindowAnchor::After(creation_address),
+            limits,
+        )
+        .await?
+        .expect("created session has an empty window after its latest event");
 
     assert_eq!(
         descriptor.sizes.item_count,
@@ -89,8 +100,32 @@ async fn descriptor_and_windows_share_one_stable_creation_address() -> Result<()
     assert_eq!(first.items[0].address, creation_address);
     assert_eq!(latest.items[0].address, creation_address);
     assert_eq!(around.items[0].address, creation_address);
+    assert_eq!(
+        descriptor.sizes.projected_structured_bytes,
+        u64::from(first.items[0].projected_structured_bytes)
+    );
     assert!(!first.has_more_before);
     assert!(!latest.has_more_after);
+    assert!(after_latest.items.is_empty());
+    assert!(after_latest.has_more_before);
+    assert!(!after_latest.has_more_after);
+
+    sqlx::query("DROP TRIGGER outbox_sequence_state_cannot_be_deleted ON outbox_sequence_state")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM outbox_sequence_state WHERE singleton")
+        .execute(&pool)
+        .await?;
+    let error = repository
+        .read_descriptor(identity)
+        .await
+        .expect_err("a missing allocator singleton is durable corruption");
+    assert!(matches!(
+        error,
+        SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::Missing(
+            "observation cursor"
+        ))
+    ));
 
     pool.close().await;
     drop(container);

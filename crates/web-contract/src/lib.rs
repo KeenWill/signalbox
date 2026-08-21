@@ -404,8 +404,18 @@ function assertSchema(root, schema, value, path) {{
     if (value === null && schema.type.includes("null")) {{
       return;
     }}
-    const concrete = schema.type.find((candidate) => candidate !== "null");
-    assertSchema(root, {{ ...schema, type: concrete }}, value, path);
+    const concrete = schema.type.filter((candidate) => candidate !== "null");
+    const accepted = concrete.some((candidate) => {{
+      try {{
+        assertSchema(root, {{ ...schema, type: candidate }}, value, path);
+        return true;
+      }} catch {{
+        return false;
+      }}
+    }});
+    if (!accepted) {{
+      fail(path, concrete.join(" or "));
+    }}
     return;
   }}
   if (schema.type === "object") {{

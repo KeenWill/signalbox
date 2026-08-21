@@ -1,15 +1,22 @@
 import type {
+  WebApiErrorResponse,
+  WebContractBootstrap,
   WebSessionTimelineDescriptor,
   WebSessionTimelineWindow,
 } from '../generated/web-contract.mjs'
 import {
+  decodeWebApiErrorResponse,
+  decodeWebContractBootstrap,
   decodeWebSessionTimelineDescriptor,
   decodeWebSessionTimelineWindow,
 } from '../generated/web-contract.mjs'
 
-export const MAX_SESSION_WINDOW_ITEMS = 256
-export const MAX_SESSION_WINDOW_BYTES = 64 * 1024
 export const MAX_RETAINED_SESSION_ITEMS = 768
+
+type TimelineContractLimits = Pick<
+  WebContractBootstrap['limits'],
+  'max_timeline_window_items' | 'max_timeline_window_bytes'
+>
 
 export type SessionWindowAnchor =
   | { kind: 'first' | 'latest' }
@@ -21,6 +28,7 @@ export interface SessionWindowLimits {
 }
 
 export interface SessionTimelineSource {
+  readonly limits: TimelineContractLimits
   readDescriptor(sessionId: string, signal?: AbortSignal): Promise<WebSessionTimelineDescriptor>
   readWindow(
     sessionId: string,
@@ -45,13 +53,46 @@ const decimalAddress = (value: string): bigint => {
   return parsed
 }
 
-const boundedLimits = (limits: SessionWindowLimits): SessionWindowLimits => ({
-  maxItems: Math.min(Math.max(Math.trunc(limits.maxItems), 1), MAX_SESSION_WINDOW_ITEMS),
-  maxBytes: Math.min(Math.max(Math.trunc(limits.maxBytes), 256), MAX_SESSION_WINDOW_BYTES),
+const boundedLimit = (value: number, minimum: number, maximum: number): number =>
+  Number.isFinite(value) ? Math.min(Math.max(Math.trunc(value), minimum), maximum) : minimum
+
+const boundedLimits = (
+  limits: SessionWindowLimits,
+  contract: TimelineContractLimits,
+): SessionWindowLimits => ({
+  maxItems: boundedLimit(limits.maxItems, 1, contract.max_timeline_window_items),
+  maxBytes: boundedLimit(limits.maxBytes, 256, contract.max_timeline_window_bytes),
 })
 
+const canonicalSessionId = (value: string): string => {
+  const compact = value.replaceAll('-', '').toLowerCase()
+  if (!/^[0-9a-f]{32}$/.test(compact)) throw new TypeError('session id must be a UUID')
+  return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`
+}
+
+export class SessionTimelineClientError extends Error {
+  constructor(readonly response: WebApiErrorResponse) {
+    super(response.error.message)
+    this.name = 'SessionTimelineClientError'
+  }
+}
+
+const throwApiError = async (response: Response): Promise<never> => {
+  throw new SessionTimelineClientError(decodeWebApiErrorResponse(await response.json()))
+}
+
 export class HttpSessionTimelineSource implements SessionTimelineSource {
-  constructor(private readonly request: typeof fetch = fetch) {}
+  private constructor(
+    readonly limits: TimelineContractLimits,
+    private readonly request: typeof fetch,
+  ) {}
+
+  static async connect(request: typeof fetch = fetch): Promise<HttpSessionTimelineSource> {
+    const response = await request('/api/bootstrap')
+    if (!response.ok) return throwApiError(response)
+    const bootstrap = decodeWebContractBootstrap(await response.json())
+    return new HttpSessionTimelineSource(bootstrap.limits, request)
+  }
 
   async readDescriptor(
     sessionId: string,
@@ -60,7 +101,7 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     const response = await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
       signal,
     })
-    if (!response.ok) throw new Error(`session descriptor failed with ${response.status}`)
+    if (!response.ok) return throwApiError(response)
     return decodeWebSessionTimelineDescriptor(await response.json())
   }
 
@@ -70,7 +111,7 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     limits: SessionWindowLimits,
     signal?: AbortSignal,
   ): Promise<WebSessionTimelineWindow> {
-    const bounded = boundedLimits(limits)
+    const bounded = boundedLimits(limits, this.limits)
     const query = new URLSearchParams({
       anchor: anchor.kind,
       max_items: String(bounded.maxItems),
@@ -81,7 +122,7 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       `/api/sessions/${encodeURIComponent(sessionId)}/timeline?${query}`,
       { signal },
     )
-    if (!response.ok) throw new Error(`session timeline failed with ${response.status}`)
+    if (!response.ok) return throwApiError(response)
     return decodeWebSessionTimelineWindow(await response.json())
   }
 }
@@ -89,11 +130,14 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
 export class BoundedSessionHistory {
   private descriptorValue: WebSessionTimelineDescriptor | undefined
   private retainedValue: WebSessionTimelineWindow['items'] = []
+  private readonly sessionId: string
 
   constructor(
-    private readonly sessionId: string,
+    sessionId: string,
     private readonly source: SessionTimelineSource,
-  ) {}
+  ) {
+    this.sessionId = canonicalSessionId(sessionId)
+  }
 
   get descriptor(): WebSessionTimelineDescriptor | undefined {
     return this.descriptorValue
@@ -105,7 +149,9 @@ export class BoundedSessionHistory {
 
   async describe(signal?: AbortSignal): Promise<WebSessionTimelineDescriptor> {
     const descriptor = await this.source.readDescriptor(this.sessionId, signal)
-    if (descriptor.session_id !== this.sessionId) throw new TypeError('descriptor session mismatch')
+    if (canonicalSessionId(descriptor.session_id) !== this.sessionId) {
+      throw new TypeError('descriptor session mismatch')
+    }
     decimalAddress(descriptor.first_address.event_sequence)
     decimalAddress(descriptor.latest_address.event_sequence)
     decimalU64(descriptor.observed_through)
@@ -126,9 +172,9 @@ export class BoundedSessionHistory {
     signal?: AbortSignal,
   ): Promise<WebSessionTimelineWindow> {
     if ('eventSequence' in anchor) decimalAddress(anchor.eventSequence)
-    const bounded = boundedLimits(limits)
+    const bounded = boundedLimits(limits, this.source.limits)
     const window = await this.source.readWindow(this.sessionId, anchor, bounded, signal)
-    if (window.session_id !== this.sessionId)
+    if (canonicalSessionId(window.session_id) !== this.sessionId)
       throw new TypeError('timeline window session mismatch')
     if (window.items.length > bounded.maxItems) {
       throw new TypeError('timeline window exceeds the requested item ceiling')
@@ -162,8 +208,14 @@ export class BoundedSessionHistory {
 const SCENARIO_SESSION_ID = '00000000-0000-0000-0000-000000000991'
 export const SESSION_FOUNDATION_TOTAL = 1_000_000
 const SCENARIO_ITEM_BYTES = 96
+const SCENARIO_TIMELINE_LIMITS: TimelineContractLimits = {
+  max_timeline_window_items: 256,
+  max_timeline_window_bytes: 64 * 1024,
+}
 
 export class EnormousSessionScenarioSource implements SessionTimelineSource {
+  readonly limits = SCENARIO_TIMELINE_LIMITS
+
   async readDescriptor(sessionId: string): Promise<WebSessionTimelineDescriptor> {
     return decodeWebSessionTimelineDescriptor({
       session_id: sessionId,
@@ -186,7 +238,7 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
     anchor: SessionWindowAnchor,
     limits: SessionWindowLimits,
   ): Promise<WebSessionTimelineWindow> {
-    const bounded = boundedLimits(limits)
+    const bounded = boundedLimits(limits, this.limits)
     const count = Math.min(bounded.maxItems, Math.floor(bounded.maxBytes / SCENARIO_ITEM_BYTES))
     const addressed = 'eventSequence' in anchor ? Number(decimalAddress(anchor.eventSequence)) : 0
     const start = (() => {
@@ -241,7 +293,7 @@ export const sessionFoundationScenario = async (after: string | undefined, limit
   const eventSequence = after?.match(/^timeline:([1-9]\d*)$/)?.[1]
   const window = await history.load(
     eventSequence ? { kind: 'after', eventSequence } : { kind: 'latest' },
-    { maxItems: limit, maxBytes: MAX_SESSION_WINDOW_BYTES },
+    { maxItems: limit, maxBytes: SCENARIO_TIMELINE_LIMITS.max_timeline_window_bytes },
   )
   return { descriptor, window, retained: history.retained.length }
 }

@@ -16,7 +16,7 @@ use std::{
 use axum::{
     Json, Router,
     body::{Body, Bytes, to_bytes},
-    extract::{DefaultBodyLimit, Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State, rejection::QueryRejection},
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
         header::{CONTENT_TYPE, HOST, ORIGIN},
@@ -32,7 +32,9 @@ use signalbox_application::{
     TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::SessionId;
-use signalbox_persistence::session_timeline::SessionTimelineRepository;
+use signalbox_persistence::session_timeline::{
+    SessionTimelineRepository, SessionTimelineRepositoryError,
+};
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
     WebContractBootstrap, WebContractExample, WebSessionTimelineDescriptor,
@@ -84,6 +86,9 @@ impl WebHttpConfiguration {
                 .parse()
                 .map_err(|_| WebHttpConfigurationError::InvalidBindAddress)?,
         };
+        if !bind_address.ip().is_loopback() {
+            return Err(WebHttpConfigurationError::NonLoopbackBindAddress);
+        }
         let asset_root = match asset_root {
             None => None,
             Some(value) if value.is_empty() => {
@@ -126,6 +131,8 @@ pub enum WebHttpConfigurationError {
     BindAddressNotUnicode,
     /// Explicit listener setting was not a socket address.
     InvalidBindAddress,
+    /// Explicit listener setting would expose unauthenticated routes off-host.
+    NonLoopbackBindAddress,
     /// Explicit production asset root was empty.
     EmptyAssetRoot,
 }
@@ -145,6 +152,10 @@ impl fmt::Display for WebHttpConfigurationError {
                     "setting {WEB_BIND_ENVIRONMENT} is not a socket address"
                 )
             }
+            Self::NonLoopbackBindAddress => write!(
+                formatter,
+                "setting {WEB_BIND_ENVIRONMENT} must use a loopback address"
+            ),
             Self::EmptyAssetRoot => {
                 write!(formatter, "setting {WEB_ASSET_ROOT_ENVIRONMENT} is empty")
             }
@@ -262,8 +273,8 @@ struct WebApiState {
 struct TimelineWindowQuery {
     anchor: String,
     address: Option<String>,
-    max_items: u16,
-    max_bytes: u32,
+    max_items: Option<String>,
+    max_bytes: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -292,11 +303,17 @@ impl SessionTimelineRequestError {
                 "invalid_timeline_anchor",
                 "timeline anchor and address do not form a recognized request",
             ),
-            Self::MissingBounds => application_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "session_projection_failed",
-                "an existing session has no durable timeline bound",
-            ),
+            Self::MissingBounds => {
+                tracing::error!(
+                    failure_class = "fail_closed_corruption",
+                    "session timeline projection has missing bounds"
+                );
+                application_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_projection_failed",
+                    "an existing session has no durable timeline bound",
+                )
+            }
         }
     }
 }
@@ -326,19 +343,19 @@ async fn session_descriptor(
             "session_not_found",
             "the requested session does not exist",
         ),
-        Err(_) => application_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "session_projection_failed",
-            "the durable session projection could not be read",
-        ),
+        Err(error) => repository_projection_error(error),
     }
 }
 
 async fn session_timeline_window(
     State(state): State<WebApiState>,
     Path(session_id): Path<String>,
-    Query(query): Query<TimelineWindowQuery>,
+    query: Result<Query<TimelineWindowQuery>, QueryRejection>,
 ) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_timeline_query(),
+    };
     let Some(repository) = state.timeline else {
         return application_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -354,29 +371,61 @@ async fn session_timeline_window(
         Ok(anchor) => anchor,
         Err(error) => return error.into_response(),
     };
-    let limits = match TimelineWindowLimits::new(query.max_items, query.max_bytes) {
-        Ok(limits) => limits,
-        Err(_) => {
-            return application_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_timeline_limits",
-                "timeline limits are outside the contract bounds",
-            );
-        }
+    let advertised = WebContractBootstrap::current().limits;
+    let limits = (|| {
+        let max_items = query
+            .max_items
+            .as_deref()
+            .map(str::parse::<u16>)
+            .transpose()
+            .ok()?
+            .unwrap_or(u16::try_from(advertised.max_timeline_window_items).ok()?);
+        let max_bytes = query
+            .max_bytes
+            .as_deref()
+            .map(str::parse::<u32>)
+            .transpose()
+            .ok()?
+            .unwrap_or(advertised.max_timeline_window_bytes);
+        TimelineWindowLimits::new(max_items, max_bytes).ok()
+    })();
+    let Some(limits) = limits else {
+        return invalid_timeline_query();
     };
     match repository.read_window(session, anchor, limits).await {
-        Ok(Some(window)) => Json(window_dto(window)).into_response(),
+        Ok(Some(window)) => Json(window_dto(window, anchor)).into_response(),
         Ok(None) => application_error(
             StatusCode::NOT_FOUND,
             "session_not_found",
             "the requested session does not exist",
         ),
-        Err(_) => application_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "session_projection_failed",
-            "the durable session projection could not be read",
-        ),
+        Err(error) => repository_projection_error(error),
     }
+}
+
+fn invalid_timeline_query() -> Response {
+    application_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_timeline_limits",
+        "timeline query parameters are malformed or outside the contract bounds",
+    )
+}
+
+fn repository_projection_error(error: SessionTimelineRepositoryError) -> Response {
+    let failure_class = match &error {
+        SessionTimelineRepositoryError::Database(_) => "infrastructure",
+        SessionTimelineRepositoryError::Corruption(_) => "fail_closed_corruption",
+    };
+    tracing::error!(
+        failure_class,
+        cause = %error,
+        "session timeline projection read failed"
+    );
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "session_projection_failed",
+        "the durable session projection could not be read",
+    )
 }
 
 fn parse_session_id(value: &str) -> Result<SessionId, SessionTimelineRequestError> {
@@ -391,6 +440,11 @@ fn parse_window_anchor(
 ) -> Result<TimelineWindowAnchor, SessionTimelineRequestError> {
     let parsed_address = || {
         address
+            .filter(|value| {
+                !value.is_empty()
+                    && value.bytes().all(|byte| byte.is_ascii_digit())
+                    && !value.starts_with('0')
+            })
             .and_then(|value| value.parse::<u64>().ok())
             .and_then(std::num::NonZeroU64::new)
             .map(TimelineAddress::new)
@@ -440,14 +494,37 @@ fn descriptor_dto(
     })
 }
 
-fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
+fn window_dto(
+    window: SessionTimelineWindow,
+    anchor: TimelineWindowAnchor,
+) -> WebSessionTimelineWindow {
+    let anchor_address = match anchor {
+        TimelineWindowAnchor::Before(address) | TimelineWindowAnchor::After(address) => {
+            Some(address_dto(address))
+        }
+        TimelineWindowAnchor::First
+        | TimelineWindowAnchor::Latest
+        | TimelineWindowAnchor::Around(_) => None,
+    };
     let continuation_before = window
         .has_more_before
-        .then(|| window.items.first().map(|item| address_dto(item.address)))
+        .then(|| {
+            window
+                .items
+                .first()
+                .map(|item| address_dto(item.address))
+                .or_else(|| anchor_address.clone())
+        })
         .flatten();
     let continuation_after = window
         .has_more_after
-        .then(|| window.items.last().map(|item| address_dto(item.address)))
+        .then(|| {
+            window
+                .items
+                .last()
+                .map(|item| address_dto(item.address))
+                .or(anchor_address)
+        })
         .flatten();
     WebSessionTimelineWindow {
         session_id: window.session.into_uuid().to_string(),
@@ -850,8 +927,8 @@ mod tests {
     }
 
     #[test]
-    fn explicit_deployment_configuration_is_admitted() {
-        let bind_address: SocketAddr = "0.0.0.0:8080"
+    fn explicit_loopback_deployment_configuration_is_admitted() {
+        let bind_address: SocketAddr = "127.0.0.1:8080"
             .parse()
             .expect("the fixture address is valid");
         let asset_root = PathBuf::from("web-dist");
@@ -863,6 +940,14 @@ mod tests {
 
         assert_eq!(configuration.bind_address(), bind_address);
         assert_eq!(configuration.asset_root(), Some(&asset_root));
+    }
+
+    #[test]
+    fn non_loopback_bind_is_rejected_without_authentication() {
+        let error = WebHttpConfiguration::from_values(Some(OsString::from("0.0.0.0:8080")), None)
+            .expect_err("unauthenticated browser routes remain loopback-only");
+
+        assert_eq!(error, WebHttpConfigurationError::NonLoopbackBindAddress);
     }
 
     #[test]
@@ -1116,6 +1201,37 @@ mod tests {
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"]["code"], "api_route_not_found");
+    }
+
+    #[tokio::test]
+    async fn malformed_timeline_query_uses_the_structured_error_envelope() {
+        let request = Request::get(
+            "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?max_items=nope",
+        )
+        .body(Body::empty())
+        .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["kind"], "application");
+        assert_eq!(body["error"]["code"], "invalid_timeline_limits");
+    }
+
+    #[test]
+    fn timeline_addresses_require_canonical_positive_decimal() {
+        for address in ["+5", "05", "0", "-5", " 5", "5 "] {
+            assert!(
+                super::parse_window_anchor("after", Some(address)).is_err(),
+                "{address:?} must not be accepted as a canonical address"
+            );
+        }
+        assert!(super::parse_window_anchor("after", Some("5")).is_ok());
     }
 
     #[tokio::test]
