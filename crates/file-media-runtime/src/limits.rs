@@ -8,6 +8,10 @@ pub const MAX_PROBE_SUFFIX_BYTES: u64 = 65_536;
 pub const MAX_PROBE_RANGES: u32 = 16;
 /// Hard safety ceiling; bounds aggregate probe reads to protect broker resources.
 pub const MAX_PROBE_CUMULATIVE_BYTES: u64 = 262_144;
+/// Hard safety ceiling; bounds one validation's aggregate source I/O.
+pub const MAX_VALIDATION_SOURCE_BYTES: u64 = 1_073_741_824;
+/// Hard safety ceiling; bounds one validation's exact-range fan-out.
+pub const MAX_VALIDATION_RANGES: u32 = 4_096;
 /// Hard safety ceiling; bounds one view's aggregate source I/O.
 pub const MAX_READ_SOURCE_BYTES: u64 = 1_073_741_824;
 /// Hard safety ceiling; bounds one random-access view's range fan-out.
@@ -70,6 +74,10 @@ pub struct FileMediaCeilings {
     pub probe_ranges: u32,
     /// Maximum cumulative probe bytes.
     pub probe_cumulative_bytes: u64,
+    /// Maximum cumulative source bytes for one validation.
+    pub validation_source_bytes: u64,
+    /// Maximum exact ranges for one validation.
+    pub validation_ranges: u32,
     /// Maximum cumulative source bytes for one read view.
     pub read_source_bytes: u64,
     /// Maximum exact ranges for one random-access read view.
@@ -112,6 +120,8 @@ impl FileMediaCeilings {
             probe_suffix_bytes: MAX_PROBE_SUFFIX_BYTES,
             probe_ranges: MAX_PROBE_RANGES,
             probe_cumulative_bytes: MAX_PROBE_CUMULATIVE_BYTES,
+            validation_source_bytes: MAX_VALIDATION_SOURCE_BYTES,
+            validation_ranges: MAX_VALIDATION_RANGES,
             read_source_bytes: MAX_READ_SOURCE_BYTES,
             read_ranges: MAX_READ_RANGES,
             text_or_json_bytes: MAX_TEXT_OR_JSON_BYTES,
@@ -141,6 +151,10 @@ impl FileMediaCeilings {
             && candidate.probe_ranges <= self.probe_ranges
             && candidate.probe_cumulative_bytes > 0
             && candidate.probe_cumulative_bytes <= self.probe_cumulative_bytes
+            && candidate.validation_source_bytes > 0
+            && candidate.validation_source_bytes <= self.validation_source_bytes
+            && candidate.validation_ranges > 0
+            && candidate.validation_ranges <= self.validation_ranges
             && candidate.read_source_bytes > 0
             && candidate.read_source_bytes <= self.read_source_bytes
             && candidate.read_ranges > 0

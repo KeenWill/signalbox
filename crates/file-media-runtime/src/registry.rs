@@ -354,6 +354,8 @@ impl FileMediaRegistry {
                     source: request.source.clone(),
                     media_type: candidate.media_type.clone(),
                     evidence,
+                    maximum_source_bytes: self.ceilings.validation_source_bytes,
+                    maximum_ranges: self.ceilings.validation_ranges,
                 },
                 source,
                 cancellation,

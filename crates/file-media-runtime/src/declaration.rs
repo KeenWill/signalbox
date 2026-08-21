@@ -383,6 +383,10 @@ pub struct FileMediaProviderValidationRequest {
     pub media_type: CanonicalMediaType,
     /// Evidence path requested by the registry.
     pub evidence: crate::ValidationEvidence,
+    /// Maximum cumulative source bytes the processor broker may serve.
+    pub maximum_source_bytes: u64,
+    /// Maximum exact ranges the processor broker may serve.
+    pub maximum_ranges: u32,
 }
 
 /// Provider request to interpret one validated file through one view.

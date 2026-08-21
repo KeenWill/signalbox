@@ -391,12 +391,16 @@ impl FileMediaProcessor for SandboxedFileMediaProcessor {
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
         Box::pin(async move {
-            let declaration = self.reader(reader)?;
+            self.reader(reader)?;
             require_file_use_source(&request.source, source)?;
+            let envelope = WireReadEnvelope::RandomAccess {
+                ranges: request.maximum_ranges,
+                cumulative_bytes: request.maximum_source_bytes,
+            };
             let invocation = Invocation::Validate {
                 reader: reader.into(),
                 source: WireSource::from_source(source),
-                envelope: WireReadEnvelope::for_probe(declaration.probe()),
+                envelope,
                 request: (&request).into(),
             };
             match self

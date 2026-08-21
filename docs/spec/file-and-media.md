@@ -63,9 +63,11 @@ An adapter author supplies one provider declaration with exact owned canonical
 types, probe budget, view schemas and resource envelopes, registered sanitized
 reason codes, and immutable reader revision. Probe, inspect, and read methods
 receive only a placement-free `VerifiedBlobSource`, cooperative cancellation,
-and their checked request. They return raw processor outputs: the registry
-reparses and cross-checks every type, evidence claim, reason, metadata object,
-body, JSON tree, continuation, and bound before admitting it.
+and their checked request. Validation requests carry effective lowerable
+source-byte and exact-range ceilings for broker enforcement. They return raw
+processor outputs: the registry reparses and cross-checks every type, evidence
+claim, reason, metadata object, body, JSON tree, continuation, and bound before
+admitting it.
 
 ## Detection and validation
 

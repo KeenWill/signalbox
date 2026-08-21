@@ -396,6 +396,8 @@ pub(crate) struct WireValidationRequest {
     source: WireFileUse,
     media_type: String,
     evidence: ValidationEvidence,
+    maximum_source_bytes: u64,
+    maximum_ranges: u32,
 }
 
 impl From<&FileMediaProviderValidationRequest> for WireValidationRequest {
@@ -404,6 +406,8 @@ impl From<&FileMediaProviderValidationRequest> for WireValidationRequest {
             source: (&request.source).into(),
             media_type: request.media_type.as_str().to_owned(),
             evidence: request.evidence,
+            maximum_source_bytes: request.maximum_source_bytes,
+            maximum_ranges: request.maximum_ranges,
         }
     }
 }
@@ -417,6 +421,8 @@ impl TryFrom<WireValidationRequest> for FileMediaProviderValidationRequest {
             media_type: CanonicalMediaType::from_str(&value.media_type)
                 .map_err(|_| ProtocolValueError)?,
             evidence: value.evidence,
+            maximum_source_bytes: value.maximum_source_bytes,
+            maximum_ranges: value.maximum_ranges,
         })
     }
 }

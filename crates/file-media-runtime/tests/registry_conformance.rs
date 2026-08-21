@@ -12,11 +12,12 @@ use signalbox_file_media_runtime::{
     FileMediaProcessor, FileMediaProcessorFuture, FileMediaProviderDeclaration,
     FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileMediaRegistry,
     FileReadRequest, FileReaderName, FileReaderProviderName, FileReaderRevision, FileUse,
-    InspectionRequest, NeverCancelled, ProbeDeclaration, ProbeStrength, ProcessorFailure,
-    ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
-    ReaderDeclarationInput, ReaderIdentity, ReasonCode, SourceReadError, SourceReadFuture,
-    StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
+    InspectionRequest, MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, NeverCancelled,
+    ProbeDeclaration, ProbeStrength, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds,
+    ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity,
+    ReasonCode, SourceReadError, SourceReadFuture, StreamingTextFallback, ValidationEvidence,
+    VerifiedBlobSource,
 };
 
 const SYNTHETIC_MEDIA_TYPE: &str = "application/x-signalbox-synthetic";
@@ -131,6 +132,11 @@ impl FileMediaProcessor for SyntheticProcessor {
         _cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
         Box::pin(async move {
+            if request.maximum_source_bytes != MAX_VALIDATION_SOURCE_BYTES
+                || request.maximum_ranges != MAX_VALIDATION_RANGES
+            {
+                return Err(ProcessorFailure::Failed.into());
+            }
             let metadata_json = match self.validation {
                 ValidationBehavior::Valid => String::from(r#"{"synthetic":true}"#),
                 ValidationBehavior::OversizedMetadata => {
@@ -664,6 +670,22 @@ fn random_access_range_fanout_above_the_compiled_ceiling_is_rejected() {
         outcome,
         Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ViewBounds)
     ));
+}
+
+#[test]
+fn validation_source_work_ceiling_can_only_be_lowered() {
+    let compiled = FileMediaCeilings::version_one();
+    let mut lowered = compiled;
+    lowered.validation_source_bytes = compiled.validation_source_bytes - 1;
+    lowered.validation_ranges = compiled.validation_ranges - 1;
+    let mut raised_bytes = compiled;
+    raised_bytes.validation_source_bytes = compiled.validation_source_bytes + 1;
+    let mut raised_ranges = compiled;
+    raised_ranges.validation_ranges = compiled.validation_ranges + 1;
+
+    assert!(compiled.admits(lowered));
+    assert!(!compiled.admits(raised_bytes));
+    assert!(!compiled.admits(raised_ranges));
 }
 
 fn bounded_text_view(access: ReadAccessPattern, source_bytes: u64) -> ReadViewDeclaration {
