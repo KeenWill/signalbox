@@ -746,13 +746,12 @@ whose registration loss source names the exact incompatible registration
 revision. A current offered or claimed lease and its active turn move through
 the same loss and `AwaitingRunnerRecovery` transaction as connection loss.
 Cursor creation, bounded session-identity paging, crash restartability, and
-startup ordering are owned by
-[persistence protocol](persistence-protocol.md). Another changed registration is
-refused while the current cursor still has an unobserved pinned session.
-Omitting a combined-locus tool
-records preservation and disables runner dispatch for that tool, while retaining
-placement so daemon fallback remains admissible. Why: re-registration can narrow
-current availability without downgrading a confirmation requirement, widening
+startup ordering are owned by [persistence protocol](persistence-protocol.md).
+Another changed registration is refused while the current cursor still has an
+unobserved pinned session. Omitting a combined-locus tool records preservation
+and disables runner dispatch for that tool, while retaining placement so daemon
+fallback remains admissible. Why: re-registration can narrow current
+availability without downgrading a confirmation requirement, widening
 authorization, silently changing established affinity, or losing the recovery
 distinction carried by the exact loss source (INV-009, INV-042, INV-044).
 

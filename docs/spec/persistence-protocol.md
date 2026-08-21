@@ -1233,16 +1233,15 @@ identifiers.
 
 Startup recovery follows the state-specific lifecycle rules owned by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md#startup-scan-and-recovery).
-The schema guard
-(`turn_lifecycle_pending_steering_closed`) independently requires every pending
-row to be consumed or reclassified before terminalization. The same finite
-startup inventory includes every nonterminal dedicated compaction call. Under
-the session scheduler lock it requires exactly one matching pending command,
-terminalizes Prepared as `known_failed` or InFlight as `ambiguous`, and marks
-the command failed in the same transaction; disagreement fails closed and no
-summary or result frontier is synthesized. Why: a pending steering row is an
-accepted delivery obligation, so every recovery branch must account for it
-rather than block startup or strand it.
+The schema guard (`turn_lifecycle_pending_steering_closed`) independently
+requires every pending row to be consumed or reclassified before
+terminalization. The same finite startup inventory includes every nonterminal
+dedicated compaction call. Under the session scheduler lock it requires exactly
+one matching pending command, terminalizes Prepared as `known_failed` or
+InFlight as `ambiguous`, and marks the command failed in the same transaction;
+disagreement fails closed and no summary or result frontier is synthesized. Why:
+a pending steering row is an accepted delivery obligation, so every recovery
+branch must account for it rather than block startup or strand it.
 
 An interrupt accepted against an unstopped `awaiting_model_call_recovery` row
 does not rewrite its terminal ambiguous call. In the accepting transaction, the
