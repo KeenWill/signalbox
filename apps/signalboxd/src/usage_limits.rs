@@ -36,6 +36,21 @@ struct ReportedUsageLowerBound {
     cache_read_input_tokens: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfiguredUsageLimitExcess {
+    Output,
+    Context,
+}
+
+impl ConfiguredUsageLimitExcess {
+    const fn cause_code(self) -> &'static str {
+        match self {
+            Self::Output => "model_output_usage_exceeded_after_completion",
+            Self::Context => "model_context_usage_exceeded_after_completion",
+        }
+    }
+}
+
 impl From<ProviderReportedTokenUsage> for ReportedUsageLowerBound {
     fn from(usage: ProviderReportedTokenUsage) -> Self {
         Self {
@@ -121,16 +136,16 @@ fn configured_usage_limits(
     })
 }
 
-fn exceeds_configured_limits(
+fn configured_usage_limit_excess(
     usage: impl Into<ReportedUsageLowerBound>,
     limits: ConfiguredUsageLimits,
-) -> bool {
+) -> Option<ConfiguredUsageLimitExcess> {
     let usage = usage.into();
     if usage
         .output_tokens
         .is_some_and(|output| output > limits.max_output_tokens)
     {
-        return true;
+        return Some(ConfiguredUsageLimitExcess::Output);
     }
     let input_tokens = if limits.adapter.reports_cache_inclusive_input() {
         usage.input_tokens.unwrap_or(0)
@@ -141,7 +156,8 @@ fn exceeds_configured_limits(
             .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0))
             .saturating_add(usage.cache_read_input_tokens.unwrap_or(0))
     };
-    input_tokens.saturating_add(usage.output_tokens.unwrap_or(0)) > limits.context_window_tokens
+    (input_tokens.saturating_add(usage.output_tokens.unwrap_or(0)) > limits.context_window_tokens)
+        .then_some(ConfiguredUsageLimitExcess::Context)
 }
 
 /// Classifies dedicated-compaction usage against immutable model limits.
@@ -170,14 +186,17 @@ fn dedicated_model_usage_exceeds_configured_limits(
     let models = configuration.runtime_model_catalog();
     let definition = models.resolve(target)?;
     let adapter = configuration.adapter_for_provider_model(definition.provider_model())?;
-    Some(exceeds_configured_limits(
-        usage,
-        ConfiguredUsageLimits {
-            max_output_tokens: u64::from(definition.max_output_tokens()),
-            context_window_tokens: u64::from(definition.context_window_tokens()),
-            adapter,
-        },
-    ))
+    Some(
+        configured_usage_limit_excess(
+            usage,
+            ConfiguredUsageLimits {
+                max_output_tokens: u64::from(definition.max_output_tokens()),
+                context_window_tokens: u64::from(definition.context_window_tokens()),
+                adapter,
+            },
+        )
+        .is_some(),
+    )
 }
 
 impl<P> ModelCallProvider for UsageLimitedModelCallProvider<P>
@@ -231,6 +250,9 @@ where
         AcceptancePossible: FnOnce() + Send,
         Cancellation: Future<Output = ()> + Send + 'static,
     {
+        let session = authorized.session();
+        let turn = authorized.turn();
+        let call = authorized.call().id();
         let observation = self
             .inner
             .invoke(
@@ -246,13 +268,17 @@ where
             ModelCallTerminalObservation::Completed { .. }
                 | ModelCallTerminalObservation::CompletedWithTools { .. }
         );
-        if completed && exceeds_configured_limits(observation.usage(), capability.limits) {
-            return Ok(observation
-                .correlation()
-                .bind_terminal_observation_with_usage(
-                    ModelCallTerminalObservation::KnownFailed,
-                    observation.usage(),
-                ));
+        if let Some(excess) = completed
+            .then(|| configured_usage_limit_excess(observation.usage(), capability.limits))
+            .flatten()
+        {
+            tracing::warn!(
+                cause_code = excess.cause_code(),
+                session_id = %session.as_uuid(),
+                turn_id = %turn.as_uuid(),
+                model_call_id = %call.as_uuid(),
+                "completed model output exceeded a configured usage limit and was preserved"
+            );
         }
         Ok(observation)
     }
@@ -272,8 +298,8 @@ mod tests {
     use crate::configuration::ModelAdapter;
 
     use super::{
-        ConfiguredUsageLimits, UsageLimitedProviderError, configured_usage_limits,
-        exceeds_configured_limits,
+        ConfiguredUsageLimitExcess, ConfiguredUsageLimits, UsageLimitedProviderError,
+        configured_usage_limit_excess, configured_usage_limits,
     };
 
     #[derive(Debug)]
@@ -305,8 +331,11 @@ mod tests {
             adapter: ModelAdapter::Anthropic,
         };
 
-        assert!(!exceeds_configured_limits(at_limit, limits));
-        assert!(exceeds_configured_limits(output_exceeded, limits));
+        assert_eq!(configured_usage_limit_excess(at_limit, limits), None);
+        assert_eq!(
+            configured_usage_limit_excess(output_exceeded, limits),
+            Some(ConfiguredUsageLimitExcess::Output)
+        );
     }
 
     #[test]
@@ -323,8 +352,11 @@ mod tests {
             adapter: ModelAdapter::Anthropic,
         };
 
-        assert!(!exceeds_configured_limits(at_limit, limits));
-        assert!(exceeds_configured_limits(context_exceeded, limits));
+        assert_eq!(configured_usage_limit_excess(at_limit, limits), None);
+        assert_eq!(
+            configured_usage_limit_excess(context_exceeded, limits),
+            Some(ConfiguredUsageLimitExcess::Context)
+        );
     }
 
     #[test]
@@ -345,8 +377,11 @@ mod tests {
             adapter: ModelAdapter::Anthropic,
         };
 
-        assert!(!exceeds_configured_limits(at_limit, limits));
-        assert!(exceeds_configured_limits(context_exceeded, limits));
+        assert_eq!(configured_usage_limit_excess(at_limit, limits), None);
+        assert_eq!(
+            configured_usage_limit_excess(context_exceeded, limits),
+            Some(ConfiguredUsageLimitExcess::Context)
+        );
     }
 
     /// Claude Code reports the same cache-exclusive input shape the Anthropic
@@ -369,8 +404,11 @@ mod tests {
             adapter: ModelAdapter::ClaudeCli,
         };
 
-        assert!(!exceeds_configured_limits(at_limit, limits));
-        assert!(exceeds_configured_limits(context_exceeded, limits));
+        assert_eq!(configured_usage_limit_excess(at_limit, limits), None);
+        assert_eq!(
+            configured_usage_limit_excess(context_exceeded, limits),
+            Some(ConfiguredUsageLimitExcess::Context)
+        );
     }
 
     /// OpenAI's `prompt_tokens` already contains the cached prompt tokens it
@@ -387,7 +425,7 @@ mod tests {
             adapter: ModelAdapter::OpenAi,
         };
 
-        assert!(!exceeds_configured_limits(usage, limits));
+        assert_eq!(configured_usage_limit_excess(usage, limits), None);
     }
 
     #[test]
@@ -403,7 +441,7 @@ mod tests {
             adapter: ModelAdapter::CodexCli,
         };
 
-        assert!(!exceeds_configured_limits(usage, limits));
+        assert_eq!(configured_usage_limit_excess(usage, limits), None);
     }
 
     #[test]
@@ -414,10 +452,10 @@ mod tests {
             adapter: ModelAdapter::Anthropic,
         };
 
-        assert!(!exceeds_configured_limits(
-            ProviderReportedTokenUsage::unreported(),
-            limits,
-        ));
+        assert_eq!(
+            configured_usage_limit_excess(ProviderReportedTokenUsage::unreported(), limits),
+            None
+        );
     }
 
     #[test]

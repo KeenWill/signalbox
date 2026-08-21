@@ -3,6 +3,9 @@
 The daemon-owned terminal treatment of a restart-ambiguous model call is
 verified against this PR (`agent/turn-lifecycle-hardening`).
 
+Post-response configured-usage treatment is verified against this PR
+(`agent/daemon-live-known-failed-cause`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -403,13 +406,14 @@ exceeds the context ceiling. Both are operator-declared per selection and never
 inferred from provider or model names. Adapters with a provider setting surface,
 including Anthropic, send the configured output ceiling in the provider request.
 Codex CLI instead renders the ceiling as model-visible advisory context because
-the CLI exposes no provider-side control. After a nominal completion, the daemon
-retains adapter-reported usage and changes the observation to `KnownFailed` when
-reported output exceeds `max_output_tokens`, or when the reported
-input-plus-output lower bound exceeds `context_window_tokens`. Missing usage
-fields remain missing and are never invented. Adapters need no separate counting
-operation, and the daemon performs no automatic pre-activation compaction;
-explicit compaction remains available.
+the CLI exposes no provider-side control. The exact pre-activation guard owns
+proactive context enforcement. After a nominal completion, the daemon retains
+adapter-reported usage and the completed observation even when reported output
+exceeds `max_output_tokens` or the reported input-plus-output lower bound
+exceeds `context_window_tokens`; it emits a closed operator cause for the
+overage rather than discarding assistant material after the provider has already
+accepted and served the request. Missing usage fields remain missing and are
+never invented. Adapters need no separate counting operation.
 
 The explicit trigger uses the same compaction transaction and provider-call
 lifecycle. An explicit command first resolves its user-global replay state; an
