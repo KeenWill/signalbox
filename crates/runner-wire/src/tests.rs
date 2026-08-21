@@ -613,6 +613,7 @@ fn ready_frame_rejects_manifest_digest_disagreement() {
         ready: ReadyManifest {
             manifest: manifest(),
             manifest_digest: digest(EXPECTED_ADVERTISEMENT_DIGEST),
+            working_directory: working_directory("/workspace/ready-replacement"),
         },
     });
 
@@ -631,6 +632,7 @@ fn ready_frame_rejects_nondeterministic_relative_path() {
         ready: ReadyManifest {
             manifest: ready_manifest,
             manifest_digest,
+            working_directory: working_directory("/workspace/ready-replacement"),
         },
     });
 
@@ -721,6 +723,7 @@ fn ready_frame_rejects_manifest_correlation_disagreement() {
         ready: ReadyManifest {
             manifest: ready_manifest,
             manifest_digest: digest,
+            working_directory: working_directory("/workspace/ready-replacement"),
         },
     });
 

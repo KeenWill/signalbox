@@ -402,7 +402,7 @@ The closed version-one frame vocabulary is:
 | runner → daemon | `workspace_leak_page`        | Registration revision, report digest, positive page, prior-page digest, final-page flag, and at most 64 sorted typed leak facts. Spool until acknowledged.                                                                |
 | daemon → runner | `workspace_leak_recorded`    | Exact report digest, page, and page digest after durable page admission; the final acknowledgement publishes the complete startup report.                                                                                 |
 | daemon → runner | `workspace_provision`        | Single-use provisioning authorization, session, placement revision, runner/registration, repository key, sandbox profile, and optional credential-profile name.                                                           |
-| runner → daemon | `workspace_ready`            | Same authorization correlation plus complete provisioned-workspace manifest identity and bounded content digest. Spool until acknowledged.                                                                                |
+| runner → daemon | `workspace_ready`            | Same authorization correlation plus complete provisioned-workspace manifest identity, bounded content digest, and exact runner-interpreted working directory. Spool until acknowledged.                                  |
 | daemon → runner | `workspace_recorded`         | Exact authorization and manifest correlation after durable receipt admission.                                                                                                                                             |
 | daemon → runner | `workspace_release`          | Exact retired session placement revision and workspace-manifest identity.                                                                                                                                                 |
 | runner → daemon | `workspace_released`         | Same release correlation after manifest transition and symlink-safe removal. Spool until acknowledged.                                                                                                                    |
@@ -437,6 +437,9 @@ retired placement revision, runner, and stable workspace-manifest id. A
 leak-page correlation contains registration revision, report digest, and
 positive page. Repeating a shared correlation in an acknowledgement means
 repeating that complete record.
+The ready manifest additionally carries the exact bounded runner-interpreted
+working directory selected for later execution; the daemon persists that fact
+without deriving it from the runner-relative manifest path.
 
 A lease offer's result bounds record has exactly `success_text_bytes` and
 `failure_detail_bytes`, both unsigned integers. Version one requires 1,048,576

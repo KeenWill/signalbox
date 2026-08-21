@@ -849,6 +849,91 @@ impl StoredWorkspaceProvisioningAuthorization {
     }
 }
 
+/// One immutable ready-workspace receipt retained for replacement replay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredWorkspaceProvisioningReceipt {
+    authorization: WorkspaceProvisioningAuthorizationId,
+    session: SessionId,
+    placement_revision: RunnerGeneration,
+    runner: RunnerId,
+    manifest: WorkspaceManifestId,
+    manifest_digest: String,
+    repository: WorkspaceRepositoryKey,
+    canonical_clone_url_digest: CanonicalCloneUrlDigest,
+    credential_profile: Option<CredentialProfileName>,
+    sandbox: RunnerSandboxProfile,
+    working_directory: RunnerWorkingDirectory,
+    relative_path: WorkspaceRelativePath,
+    recovery: WorkspaceRecovery,
+}
+
+impl StoredWorkspaceProvisioningReceipt {
+    /// Returns the single-use authorization consumed by the receipt.
+    pub const fn authorization(&self) -> WorkspaceProvisioningAuthorizationId {
+        self.authorization
+    }
+
+    /// Returns the session whose successor workspace became ready.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the successor placement revision.
+    pub const fn placement_revision(&self) -> RunnerGeneration {
+        self.placement_revision
+    }
+
+    /// Returns the runner that created the workspace.
+    pub const fn runner(&self) -> RunnerId {
+        self.runner
+    }
+
+    /// Returns the stable workspace-manifest identity.
+    pub const fn manifest_id(&self) -> WorkspaceManifestId {
+        self.manifest
+    }
+
+    /// Returns the retained canonical-shaped ready-manifest digest bytes.
+    pub fn manifest_digest(&self) -> &str {
+        &self.manifest_digest
+    }
+
+    /// Returns the authorized repository key.
+    pub const fn repository(&self) -> &WorkspaceRepositoryKey {
+        &self.repository
+    }
+
+    /// Returns the runner-authored canonical clone-URL digest.
+    pub const fn canonical_clone_url_digest(&self) -> &CanonicalCloneUrlDigest {
+        &self.canonical_clone_url_digest
+    }
+
+    /// Returns the optional profile used while provisioning.
+    pub const fn credential_profile(&self) -> Option<&CredentialProfileName> {
+        self.credential_profile.as_ref()
+    }
+
+    /// Returns the sandbox profile bound by the authorization.
+    pub const fn sandbox(&self) -> RunnerSandboxProfile {
+        self.sandbox
+    }
+
+    /// Returns the runner-interpreted workspace working directory.
+    pub const fn working_directory(&self) -> &RunnerWorkingDirectory {
+        &self.working_directory
+    }
+
+    /// Returns the runner-root-relative workspace path from the manifest.
+    pub const fn relative_path(&self) -> &WorkspaceRelativePath {
+        &self.relative_path
+    }
+
+    /// Returns the repository recovery facts from the ready manifest.
+    pub const fn recovery(&self) -> &WorkspaceRecovery {
+        &self.recovery
+    }
+}
+
 /// One relationally authenticated pending managed-workspace release.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StoredRunnerWorkspaceRelease {
@@ -3068,6 +3153,276 @@ impl RunnerProtocolStore {
             sandbox,
             credential_profile,
         }))
+    }
+
+    /// Loads one immutable ready-workspace receipt and rechecks its authority.
+    pub async fn load_workspace_provisioning_receipt(
+        &self,
+        authorization: WorkspaceProvisioningAuthorizationId,
+    ) -> Result<Option<StoredWorkspaceProvisioningReceipt>, RunnerProtocolStoreError> {
+        let row = sqlx::query(
+            "SELECT receipt.session_id, receipt.placement_revision,
+                    receipt.runner_id, receipt.manifest_id,
+                    receipt.manifest_digest, receipt.repository_key,
+                    receipt.canonical_clone_url_digest,
+                    receipt.credential_profile_name, receipt.sandbox_profile,
+                    receipt.working_directory, receipt.relative_path,
+                    receipt.recovery_kind,
+                    receipt.branch_name, receipt.revision,
+                    staged.session_id AS staged_session_id,
+                    staged.lost_placement_event_ordinal,
+                    staged.lost_placement_revision,
+                    staged.successor_placement_revision,
+                    staged.enrollment_id, staged.runner_id AS staged_runner_id,
+                    staged.registration_revision,
+                    staged.repository_key AS staged_repository_key,
+                    staged.sandbox_profile AS staged_sandbox_profile,
+                    staged.credential_profile_name AS staged_profile_name,
+                    command.expected_placement_revision,
+                    command.target_kind, command.target_runner_id,
+                    command.target_pending_request_id,
+                    placement.event_kind AS placement_event_kind,
+                    placement.state_kind AS placement_state_kind,
+                    placement.workspace_manifest_id AS predecessor_manifest_id,
+                    placement.lost_runner_id,
+                    placement.loss_source_kind,
+                    placement.loss_registration_revision,
+                    registration.runner_id AS registration_runner_id,
+                    connection.state_kind AS connection_state_kind,
+                    pending.enrollment_id AS pending_enrollment_id
+               FROM runner_replacement_workspace_receipt AS receipt
+               JOIN runner_workspace_provisioning_authorization AS staged
+                 ON staged.authorization_id = receipt.authorization_id
+                AND staged.session_id = receipt.session_id
+               JOIN replace_lost_runner_command AS command
+                 ON command.command_id = staged.command_id
+                AND command.session_id = staged.session_id
+               JOIN runner_session_placement_record AS placement
+                 ON placement.session_id = staged.session_id
+                AND placement.event_ordinal =
+                    staged.lost_placement_event_ordinal
+                AND placement.placement_revision =
+                    staged.lost_placement_revision
+               JOIN runner_registration AS registration
+                 ON registration.enrollment_id = staged.enrollment_id
+                AND registration.registration_revision =
+                    staged.registration_revision
+                AND registration.runner_id = staged.runner_id
+               JOIN runner_connection_event AS connection
+                 ON connection.enrollment_id = staged.enrollment_id
+                AND connection.connection_epoch = staged.connection_epoch
+                AND connection.event_ordinal =
+                    staged.connection_event_ordinal
+               LEFT JOIN runner_pending_enrollment AS pending
+                 ON pending.request_id = command.target_pending_request_id
+                AND pending.enrollment_id = staged.enrollment_id
+              WHERE receipt.authorization_id = $1",
+        )
+        .bind(authorization.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        self.load_workspace_provisioning_authorization(authorization)
+            .await?
+            .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+        let session = session_id(row.decode_column("session_id")?);
+        let placement_revision =
+            decode_runner_generation(row.decode_column("placement_revision")?)?;
+        let runner = runner_id(row.decode_column("runner_id")?);
+        let manifest = WorkspaceManifestId::from_uuid(row.decode_column("manifest_id")?);
+        let manifest_digest: String = row.decode_column("manifest_digest")?;
+        let repository = WorkspaceRepositoryKey::try_new(row.decode_column("repository_key")?)
+            .map_err(|_| RunnerProtocolCorruption::InvalidEncoding)?;
+        let canonical_clone_url_digest =
+            CanonicalCloneUrlDigest::try_new(row.decode_column("canonical_clone_url_digest")?)
+                .map_err(RunnerProtocolStoreError::Domain)?;
+        let credential_profile = row
+            .decode_column::<Option<String>>("credential_profile_name")?
+            .map(CredentialProfileName::try_new)
+            .transpose()
+            .map_err(RunnerProtocolStoreError::Domain)?;
+        let sandbox = runner_sandbox_from_str(&row.decode_column::<String>("sandbox_profile")?)
+            .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+        let working_directory =
+            RunnerWorkingDirectory::try_new(row.decode_column("working_directory")?)
+                .map_err(RunnerProtocolStoreError::Domain)?;
+        let relative_path = WorkspaceRelativePath::try_new(row.decode_column("relative_path")?)
+            .map_err(RunnerProtocolStoreError::Domain)?;
+        let recovery_kind: String = row.decode_column("recovery_kind")?;
+        let branch_name: Option<String> = row.decode_column("branch_name")?;
+        let revision = row.decode_column::<String>("revision")?;
+        let recovery = match (recovery_kind.as_str(), branch_name) {
+            ("commit", None) => WorkspaceRecovery::Commit {
+                revision: WorkspaceRevision::try_new(revision)
+                    .map_err(RunnerProtocolStoreError::Domain)?,
+            },
+            ("branch", Some(name)) => WorkspaceRecovery::Branch {
+                name: WorkspaceBranchName::try_new(name)
+                    .map_err(RunnerProtocolStoreError::Domain)?,
+                revision: WorkspaceRevision::try_new(revision)
+                    .map_err(RunnerProtocolStoreError::Domain)?,
+            },
+            _ => return Err(RunnerProtocolCorruption::InvalidEncoding.into()),
+        };
+        let staged_session = session_id(row.decode_column("staged_session_id")?);
+        let lost_event_ordinal = decode_u64(row.decode_column("lost_placement_event_ordinal")?)?;
+        let lost_revision =
+            decode_runner_generation(row.decode_column("lost_placement_revision")?)?;
+        let successor_revision =
+            decode_runner_generation(row.decode_column("successor_placement_revision")?)?;
+        let enrollment = RunnerEnrollmentId::from_uuid(row.decode_column("enrollment_id")?);
+        let staged_runner = runner_id(row.decode_column("staged_runner_id")?);
+        let staged_registration_revision =
+            decode_runner_generation(row.decode_column("registration_revision")?)?;
+        let expected_revision =
+            decode_runner_generation(row.decode_column("expected_placement_revision")?)?;
+        let target_kind: String = row.decode_column("target_kind")?;
+        let target_runner: Option<Uuid> = row.decode_column("target_runner_id")?;
+        let target_pending: Option<Uuid> = row.decode_column("target_pending_request_id")?;
+        let pending_enrollment: Option<Uuid> = row.decode_column("pending_enrollment_id")?;
+        let lost_runner: Uuid = row.decode_column("lost_runner_id")?;
+        let loss_source: String = row.decode_column("loss_source_kind")?;
+        let loss_registration: Option<Decimal> = row.decode_column("loss_registration_revision")?;
+        let target_matches = match target_kind.as_str() {
+            "runner" => {
+                target_runner == Some(runner.into_uuid())
+                    && target_pending.is_none()
+                    && lost_runner != runner.into_uuid()
+            }
+            "same_runner_reenrollment" => {
+                target_runner == Some(runner.into_uuid())
+                    && target_pending.is_none()
+                    && lost_runner == runner.into_uuid()
+                    && loss_source == "registration"
+                    && loss_registration.is_some_and(|revision| {
+                        revision <= Decimal::from(staged_registration_revision.get())
+                    })
+            }
+            "pending_enrollment" => {
+                target_runner.is_none()
+                    && target_pending.is_some()
+                    && pending_enrollment == Some(enrollment.into_uuid())
+                    && lost_runner != runner.into_uuid()
+            }
+            _ => false,
+        };
+        let expected_relative_path = format!(
+            "sessions/{}/{}/repo",
+            session.as_uuid(),
+            placement_revision.get()
+        );
+        let expected_successor_revision = lost_revision
+            .checked_next()
+            .ok_or(RunnerProtocolCorruption::GenerationExhausted)?;
+        if !is_lower_hex_digest(&manifest_digest)
+            || session != staged_session
+            || expected_revision != lost_revision
+            || placement_revision != successor_revision
+            || successor_revision != expected_successor_revision
+            || staged_runner != runner
+            || row.decode_column::<String>("staged_repository_key")? != repository.as_str()
+            || row.decode_column::<String>("staged_sandbox_profile")?
+                != runner_sandbox_to_str(sandbox)
+            || row
+                .decode_column::<Option<String>>("staged_profile_name")?
+                .as_deref()
+                != credential_profile
+                    .as_ref()
+                    .map(CredentialProfileName::as_str)
+            || row.decode_column::<String>("placement_event_kind")? != "runner_lost"
+            || row.decode_column::<String>("placement_state_kind")? != "runner_lost"
+            || row.decode_column::<Option<Uuid>>("predecessor_manifest_id")?
+                == Some(manifest.into_uuid())
+            || row.decode_column::<Uuid>("registration_runner_id")? != runner.into_uuid()
+            || row.decode_column::<String>("connection_state_kind")? != "connected"
+            || relative_path.as_str() != expected_relative_path
+            || lost_event_ordinal == 0
+            || !target_matches
+        {
+            return Err(RunnerProtocolCorruption::CrossWiredReference.into());
+        }
+        Ok(Some(StoredWorkspaceProvisioningReceipt {
+            authorization,
+            session,
+            placement_revision,
+            runner,
+            manifest,
+            manifest_digest,
+            repository,
+            canonical_clone_url_digest,
+            credential_profile,
+            sandbox,
+            working_directory,
+            relative_path,
+            recovery,
+        }))
+    }
+
+    /// Stores one already-authenticated receipt projection for integration tests.
+    #[cfg(feature = "postgres-integration")]
+    #[doc(hidden)]
+    pub async fn store_workspace_provisioning_receipt_projection_for_test(
+        &self,
+        authorization: WorkspaceProvisioningAuthorizationId,
+        workspace: &ProvisionedWorkspace,
+        manifest_digest: &str,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        let repository = workspace
+            .repository
+            .as_ref()
+            .ok_or(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ))?;
+        let clone_url_digest = workspace.canonical_clone_url_digest.as_ref().ok_or(
+            RunnerProtocolStoreError::Domain(RunnerDomainError::InvalidState),
+        )?;
+        let recovery = workspace
+            .recovery
+            .as_ref()
+            .ok_or(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::InvalidState,
+            ))?;
+        let (recovery_kind, branch_name, revision) = match recovery {
+            WorkspaceRecovery::Commit { revision } => ("commit", None, revision.as_str()),
+            WorkspaceRecovery::Branch { name, revision } => {
+                ("branch", Some(name.as_str()), revision.as_str())
+            }
+        };
+        sqlx::query(
+            "INSERT INTO runner_replacement_workspace_receipt
+                (authorization_id, session_id, placement_revision, runner_id,
+                 manifest_id, manifest_digest, repository_key,
+                 canonical_clone_url_digest, credential_profile_name,
+                 sandbox_profile, working_directory, relative_path,
+                 recovery_kind, branch_name, revision)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                     $12, $13, $14, $15)",
+        )
+        .bind(authorization.into_uuid())
+        .bind(workspace.session.into_uuid())
+        .bind(Decimal::from(workspace.placement_revision.get()))
+        .bind(workspace.runner.into_uuid())
+        .bind(workspace.manifest_id.into_uuid())
+        .bind(manifest_digest)
+        .bind(repository.as_str())
+        .bind(clone_url_digest.as_str())
+        .bind(
+            workspace
+                .credential_profile
+                .as_ref()
+                .map(CredentialProfileName::as_str),
+        )
+        .bind(runner_sandbox_to_str(workspace.sandbox))
+        .bind(workspace.working_directory.as_str())
+        .bind(workspace.relative_path.as_str())
+        .bind(recovery_kind)
+        .bind(branch_name)
+        .bind(revision)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Loads one exact pending managed-workspace release correlation.
@@ -8787,6 +9142,13 @@ async fn load_abandonment_record(
 fn decode_runner_generation(value: Decimal) -> Result<RunnerGeneration, RunnerProtocolStoreError> {
     RunnerGeneration::try_from_u64(decode_u64(value)?)
         .ok_or_else(|| RunnerProtocolCorruption::InvalidEncoding.into())
+}
+
+fn is_lower_hex_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn decode_runner_placement_recovery_state(
