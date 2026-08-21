@@ -31,7 +31,7 @@ use signalbox_application::{
     ReplaceSessionMetadataRequest, ReplaceSessionMetadataService, SchedulerLoop, SchedulerLoopExit,
     ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanService, UuidV7ModelCallExecutionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, scheduler_pass_admission_cap,
 };
 use signalbox_blob_store::BlobObjectKey;
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
@@ -51,9 +51,9 @@ use signalbox_model_provider_runtime::{RuntimeContextCompactionModel, RuntimeMod
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CancellationSignal, CompletionEvidence, CompletionFinish,
     DeliveryMode, ExchangeFacts, InputTokenCountOutcome, LossCause, MessagePart,
-    ModelInputTokenCounter, ModelOperation, ModelRuntime, ObservationFact, ObservationSink,
-    PreparationOutcome, ProviderReportedModel, Script, ScriptedModel, ScriptedPrepared,
-    TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss,
+    ModelInputTokenCounter, ModelOperation, ModelRuntime, Observation, ObservationFact,
+    ObservationSink, PreparationOutcome, ProviderReportedModel, Script, ScriptedModel,
+    ScriptedPrepared, TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss,
 };
 use signalbox_persistence::{
     blob::BlobCatalogRepository,
@@ -736,7 +736,10 @@ impl RunningRuntime {
     async fn kill_and_restart(&mut self) -> Result<usize, Box<dyn Error>> {
         self.runtime_task.abort();
         let killed = (&mut self.runtime_task).await;
-        assert!(killed.is_err_and(|error| error.is_cancelled()));
+        assert!(
+            matches!(&killed, Err(error) if error.is_cancelled()),
+            "the runtime task must stop by cancellation, not by returning: {killed:?}"
+        );
 
         let mut scan = StartupScanService::new(
             UuidV7StartupScanIdGenerator,
@@ -2218,8 +2221,8 @@ fn completed_script(provider_model: &str, text: &str, usage: TokenUsage) -> Scri
 // unprovisioned workspace, and scheduled goal resumption are named follow-on
 // slices: they need the same fleet census but not more boot infrastructure.
 
-// numeric-bound: test fleet - matches the production scheduler admission cap
-const FLEET_SESSION_COUNT: usize = 16;
+// numeric-bound: test fleet - follows the production scheduler admission cap
+const FLEET_SESSION_COUNT: usize = scheduler_pass_admission_cap();
 // numeric-bound: test deadline - keeps each fault probe inside one CI minute
 const FLEET_ASSERTION_BOUND: Duration = Duration::from_secs(2);
 // numeric-bound: test setup - admits contended CI scheduling without weakening assertions
@@ -2227,7 +2230,8 @@ const FLEET_SETUP_BOUND: Duration = Duration::from_secs(60);
 const FLEET_ENFORCEMENT_ENV: &str = "SIGNALBOX_ENFORCE_FLEET_LIVENESS";
 
 struct FleetPrepared {
-    inner: Option<ScriptedPrepared<ModelCallId>>,
+    correlation: ModelCallId,
+    inner: ScriptedPrepared<ModelCallId>,
 }
 
 #[derive(Clone)]
@@ -2246,7 +2250,7 @@ impl FleetScriptedModel {
                     "fleet session completed",
                     TokenUsage::unreported(),
                 ),
-                completed_count,
+                hang_count + completed_count,
             )),
             hangs_remaining: Arc::new(AtomicUsize::new(hang_count)),
             in_flight_hangs: Arc::new(AtomicUsize::new(0)),
@@ -2274,37 +2278,28 @@ impl ModelRuntime<ModelCallId> for FleetScriptedModel {
         operation: ModelOperation<ModelCallId>,
         cancellation: CancellationSignal,
     ) -> PreparationOutcome<ModelCallId, Self::Prepared> {
-        let hangs = self
-            .hangs_remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok();
-        if hangs {
-            PreparationOutcome::Prepared(FleetPrepared { inner: None })
-        } else {
-            match self.inner.prepare(operation, cancellation).await {
-                PreparationOutcome::Prepared(inner) => {
-                    PreparationOutcome::Prepared(FleetPrepared { inner: Some(inner) })
-                }
-                PreparationOutcome::Defect {
-                    correlation,
-                    defect,
-                } => PreparationOutcome::Defect {
-                    correlation,
-                    defect,
-                },
-                PreparationOutcome::Cancelled { correlation } => {
-                    PreparationOutcome::Cancelled { correlation }
-                }
-                PreparationOutcome::Failed {
-                    correlation,
-                    failure,
-                } => PreparationOutcome::Failed {
-                    correlation,
-                    failure,
-                },
+        let correlation = operation.correlation.clone();
+        match self.inner.prepare(operation, cancellation).await {
+            PreparationOutcome::Prepared(inner) => {
+                PreparationOutcome::Prepared(FleetPrepared { correlation, inner })
             }
+            PreparationOutcome::Defect {
+                correlation,
+                defect,
+            } => PreparationOutcome::Defect {
+                correlation,
+                defect,
+            },
+            PreparationOutcome::Cancelled { correlation } => {
+                PreparationOutcome::Cancelled { correlation }
+            }
+            PreparationOutcome::Failed {
+                correlation,
+                failure,
+            } => PreparationOutcome::Failed {
+                correlation,
+                failure,
+            },
         }
     }
 
@@ -2314,13 +2309,22 @@ impl ModelRuntime<ModelCallId> for FleetScriptedModel {
         sink: &mut (dyn ObservationSink<ModelCallId> + Send),
         cancellation: CancellationSignal,
     ) -> TerminalReport<ModelCallId> {
-        match prepared.inner {
-            Some(inner) => self.inner.execute(inner, sink, cancellation).await,
-            None => {
-                self.in_flight_hangs.fetch_add(1, Ordering::SeqCst);
-                let _guard = FleetHangGuard(Arc::clone(&self.in_flight_hangs));
-                pending::<TerminalReport<ModelCallId>>().await
-            }
+        let hangs = self
+            .hangs_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
+        if hangs {
+            sink.observe(Observation {
+                correlation: prepared.correlation,
+                fact: ObservationFact::SendCommenced,
+            });
+            self.in_flight_hangs.fetch_add(1, Ordering::SeqCst);
+            let _guard = FleetHangGuard(Arc::clone(&self.in_flight_hangs));
+            pending::<TerminalReport<ModelCallId>>().await
+        } else {
+            self.inner.execute(prepared.inner, sink, cancellation).await
         }
     }
 }
@@ -2365,7 +2369,7 @@ fn start_fleet_scheduler(
     let configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
     let provider = RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog())
         .with_text_delta_sink(runtime.provider_text_delta_sink());
-    let (execution, _fatal) = FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+    let (execution, fatal) = FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
         PostgresModelCallRepository::new(
             runtime.pool.clone(),
             configuration.target_catalog(),
@@ -2383,7 +2387,7 @@ fn start_fleet_scheduler(
     );
     let mut scheduler = SchedulerLoop::new(runtime.take_work_source(), pass);
     Ok(tokio::spawn(async move {
-        scheduler.run_until(pending::<()>()).await
+        scheduler.run_until(fatal.wait()).await
     }))
 }
 
@@ -2415,44 +2419,73 @@ async fn fleet_terminal_call_count(pool: &PgPool) -> Result<i64, Box<dyn Error>>
     .await?)
 }
 
+async fn wait_for_terminal_calls(pool: &PgPool, expected: i64) -> Result<(), Box<dyn Error>> {
+    timeout(FLEET_SETUP_BOUND, async {
+        loop {
+            if fleet_terminal_call_count(pool).await.ok() == Some(expected) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
 fn enforce_fleet_liveness() -> bool {
-    std::env::var_os(FLEET_ENFORCEMENT_ENV).is_some()
+    std::env::var(FLEET_ENFORCEMENT_ENV).is_ok_and(|value| value == "1")
 }
 
 fn assert_hung_fleet_outcome(
+    enforce_liveness: bool,
     model: &FleetScriptedModel,
     active: i64,
     terminal: i64,
     typed_terminal_calls: i64,
 ) -> Result<(), Box<dyn Error>> {
-    if enforce_fleet_liveness() {
-        assert_eq!(model.in_flight_hangs(), 0, "hung call retained a pass slot");
-        assert_eq!(active, 0, "an active turn exceeded the watchdog bound");
-        assert_eq!(terminal, i64::try_from(FLEET_SESSION_COUNT)?);
-        assert_eq!(typed_terminal_calls, i64::try_from(FLEET_SESSION_COUNT)?);
-    } else {
-        assert_eq!(
-            model.in_flight_hangs(),
-            1,
-            "issue #1027 no longer reproduces"
-        );
-        assert_eq!(active, 1);
-        assert_eq!(terminal, i64::try_from(FLEET_SESSION_COUNT - 1)?);
-        assert_eq!(
-            typed_terminal_calls,
-            i64::try_from(FLEET_SESSION_COUNT - 1)?
-        );
+    if enforce_liveness {
+        if model.in_flight_hangs() != 0
+            || active != 0
+            || terminal != i64::try_from(FLEET_SESSION_COUNT)?
+            || typed_terminal_calls != i64::try_from(FLEET_SESSION_COUNT)?
+        {
+            return Err(io::Error::other(format!(
+                "fleet liveness failed: hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}",
+                model.in_flight_hangs()
+            ))
+            .into());
+        }
+    } else if model.in_flight_hangs() != 1
+        || active != 1
+        || terminal != i64::try_from(FLEET_SESSION_COUNT - 1)?
+        || typed_terminal_calls != i64::try_from(FLEET_SESSION_COUNT - 1)?
+    {
+        return Err(io::Error::other(format!(
+            "issue #1027 no longer reproduces: hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}",
+            model.in_flight_hangs()
+        ))
+        .into());
     }
     Ok(())
 }
 
-fn assert_restarted_fleet_outcome(active: i64, terminal: i64) -> Result<(), Box<dyn Error>> {
-    if enforce_fleet_liveness() {
-        assert_eq!(active, 0, "post-restart active turns were orphaned");
-        assert_eq!(terminal, i64::try_from(FLEET_SESSION_COUNT)?);
-    } else {
-        assert_eq!(active, i64::try_from(FLEET_SESSION_COUNT)?);
-        assert_eq!(terminal, 0, "issue #1027 no longer reproduces");
+fn assert_restarted_fleet_outcome(
+    enforce_liveness: bool,
+    active: i64,
+    terminal: i64,
+) -> Result<(), Box<dyn Error>> {
+    if enforce_liveness {
+        if active != 0 || terminal != i64::try_from(FLEET_SESSION_COUNT)? {
+            return Err(io::Error::other(format!(
+                "post-restart active turns were orphaned: active={active}, terminal={terminal}"
+            ))
+            .into());
+        }
+    } else if active != i64::try_from(FLEET_SESSION_COUNT)? || terminal != 0 {
+        return Err(io::Error::other(format!(
+            "issue #1027 no longer reproduces: active={active}, terminal={terminal}"
+        ))
+        .into());
     }
     Ok(())
 }
@@ -2465,20 +2498,29 @@ fn assert_restarted_fleet_outcome(active: i64, terminal: i64) -> Result<(), Box<
 async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposition()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
+    let enforce_liveness = enforce_fleet_liveness();
     let fleet = commission_fleet(&runtime).await?;
     let model = FleetScriptedModel::new(1, FLEET_SESSION_COUNT - 1);
     let scheduler = start_fleet_scheduler(&mut runtime, model.clone())?;
     wait_for_hangs(&model, 1).await?;
+    wait_for_terminal_calls(&runtime.pool, i64::try_from(FLEET_SESSION_COUNT - 1)?).await?;
     tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
     let (active, terminal) = fleet_lifecycle_counts(&runtime.pool).await?;
     let typed_terminal_calls = fleet_terminal_call_count(&runtime.pool).await?;
 
     assert_eq!(fleet.sessions.len(), FLEET_SESSION_COUNT);
-    assert_hung_fleet_outcome(&model, active, terminal, typed_terminal_calls)?;
+    let outcome = assert_hung_fleet_outcome(
+        enforce_liveness,
+        &model,
+        active,
+        terminal,
+        typed_terminal_calls,
+    );
 
     scheduler.abort();
     let _ = scheduler.await;
-    runtime.stop().await
+    runtime.stop().await?;
+    outcome
 }
 
 /// Issue #1027 expected failure: killing the daemon with a full fleet in model
@@ -2490,6 +2532,7 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
 async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
+    let enforce_liveness = enforce_fleet_liveness();
     let fleet = commission_fleet(&runtime).await?;
     let hanging_model = FleetScriptedModel::new(FLEET_SESSION_COUNT, 0);
     let first_scheduler = start_fleet_scheduler(&mut runtime, hanging_model.clone())?;
@@ -2504,12 +2547,19 @@ async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
     let typed_terminal_calls = fleet_terminal_call_count(&runtime.pool).await?;
 
     assert_eq!(fleet.sessions.len(), FLEET_SESSION_COUNT);
-    assert_eq!(typed_terminal_calls, i64::try_from(FLEET_SESSION_COUNT)?);
-    assert_restarted_fleet_outcome(active, terminal)?;
+    let outcome = if typed_terminal_calls == i64::try_from(FLEET_SESSION_COUNT)? {
+        assert_restarted_fleet_outcome(enforce_liveness, active, terminal)
+    } else {
+        Err(io::Error::other(format!(
+            "restart did not terminalize every prior model call: typed_terminal_calls={typed_terminal_calls}"
+        ))
+        .into())
+    };
 
     replacement_scheduler.abort();
     let _ = replacement_scheduler.await;
-    runtime.stop().await
+    runtime.stop().await?;
+    outcome
 }
 
 fn rendered_text_messages(
