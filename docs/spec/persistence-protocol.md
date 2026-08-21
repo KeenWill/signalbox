@@ -6,7 +6,9 @@ final-state authority were verified against this PR
 tool-attempt operations is verified against this PR
 (`agent/daemon-live-tool-recovery-reconcile`). The server-enforced
 automatic-reconciliation transaction deadline is verified against this PR
-(`agent/daemon-live-server-bounded-reconciliation`).
+(`agent/daemon-live-server-bounded-reconciliation`). Recursive-frontier prefix
+validation is verified against this PR
+(`agent/daemon-live-frontier-validation-materialization`).
 
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
@@ -381,8 +383,10 @@ Representation rules, all enforced in the schema:
   equal-content identities) without changing any frontier identity or resolved
   sequence. Deferred completeness checks reject missing prefixes, cycles,
   inherited duplicates, gaps, and a resolved count different from the header.
-  Why: append-derived histories store and load each immutable suffix once while
-  preserving the complete-snapshot contract.
+  Prefix-preservation checks materialize the compared recursive memberships once
+  each before matching their ordered members. Why: append-derived histories
+  store and load each immutable suffix once while preserving the
+  complete-snapshot contract.
 - Closed variant sets are `text` discriminators under `CHECK` constraints, with
   variant payload columns constrained present exactly when the discriminator
   requires them (for example `turn_lifecycle_state_payload_shape`). The

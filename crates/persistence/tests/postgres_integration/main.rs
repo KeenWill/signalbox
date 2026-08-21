@@ -16,6 +16,7 @@ mod convergence_sweep;
 mod delegated_result_rereads;
 mod delegation_schema;
 mod delegation_transactions;
+mod frontier_validation;
 mod hub_fence;
 mod model_call_execution_and_recovery;
 mod model_call_usage_and_interrupts;
