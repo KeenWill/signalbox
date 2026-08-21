@@ -29,6 +29,9 @@ The immutable repository-watch authority supplied to a dispatched approval judge
 and the unattended-escalation terminal path are verified against this PR
 (`agent/headless-approval-escalation`).
 
+Bounded reconciliation after an operator-commissioned approval escalation is
+verified against this PR (`agent/daemon-live-commissioned-escalation-resume`).
+
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
 
@@ -243,28 +246,28 @@ the completed call but no approval decision and leaves the same request parked.
 A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous` terminal judge call
 likewise retains that attended park while immediately admitting a user decision,
 so a terminal judge failure cannot prevent that decision. In a session judged
-under dispatch authority, no user attends the approval wait — unless steering
-accepted while the judge was outstanding still names the judged turn, which is a
-user attending it, or the session has already recorded an escalation while the
-commissioned goal's authority still stands, which means an operator resumed this
-work by hand — nothing else can, because the block an escalation writes is
-exempt from automatic resumption. Either turn keeps the attended park described
-above: its completed `EscalateToHuman` leaves the turn active and the request
-parked for that user, exactly as in a session no dispatch created, and no steer
-is reclassified or stranded by a terminalization it did not expect. Otherwise a
-completed `EscalateToHuman` closes every unresolved request in the active batch
-as `ToolClosed`, appends `TurnFailed`, terminalizes the turn with the completed
-judge escalation as its typed cause, and blocks the commissioned goal for
-execution failure while that goal's authority still stands. A generation
-stopped, achieved, or superseded during the provider round-trip is failed but
-not blocked: [goal mode](goal-mode.md) fixes that the authority the block would
-record has already ended, and a released batch whose authority ended this way is
-the stale work [repository watch](repo-watch.md) terminalizes rather than parks.
-The same transaction records an append-only audit row linking the judge call and
-rationale, request, dispatch action, terminal attempt, failure entry, and
-terminal frontier. The blocked goal then participates in the ordinary
-repository-watch release and re-arm rules instead of leaving the active turn
-parked.
+under dispatch authority, no user attends the approval wait unless steering
+accepted while the judge was outstanding still names the judged turn. A
+repository-watch session that already recorded an escalation is also attended:
+its exceptional block has no automatic resumption, so only an operator could
+have resumed it. Either turn keeps the attended park described above: its
+completed `EscalateToHuman` leaves the turn active and the request parked for
+that user, exactly as in a session no dispatch created, and no steer is
+reclassified or stranded by a terminalization it did not expect. A prior
+operator-commissioned escalation does not imply attendance because its bounded
+automatic resumption can create the later turn. Otherwise a completed
+`EscalateToHuman` closes every unresolved request in the active batch as
+`ToolClosed`, appends `TurnFailed`, terminalizes the turn with the completed
+judge escalation as its typed cause, and records an append-only audit row
+linking the judge call and rationale, request, dispatch action, terminal
+attempt, failure entry, and terminal frontier. Repository-watch work atomically
+blocks its still-authoritative goal under the exceptional no-resume policy and
+participates in the ordinary release and re-arm rules. Operator-commissioned
+work leaves its still-authoritative goal pursuing; the durable eligibility sweep
+then reconciles the terminal goal turn through [goal mode](goal-mode.md), whose
+ordinary bounded automatic-resumption budget retries and visibly parks only on
+exhaustion. A generation stopped, achieved, or superseded during the provider
+round-trip remains ended, so reconciliation has nothing to resume.
 
 A request frozen as `Human` admits only an escalation result from a delegate; a
 delegate approval or denial is rejected by both domain reconstruction and

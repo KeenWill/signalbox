@@ -225,7 +225,7 @@ Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing loudly when Docker is absent) exercise the real constraints,
 triggers, locks, and races described below against a pinned Postgres image.
 
-Migration `202608210400_convergence_sweep.sql` uses the reserved `2026082104xx`
+Migration `202608210602_convergence_sweep.sql` uses the reserved `2026082106xx`
 block to add the mutable `convergence_sweep_target` scheduler projection, the
 append-only `convergence_sweep_event` audit, and the
 `convergence_sweep_parked_target` operator view. Closed checks bind retry and

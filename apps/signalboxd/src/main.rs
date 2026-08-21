@@ -62,10 +62,9 @@ use signalboxd::{
     LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs, ModelAdapter,
     OtlpRuntime, PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
     ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction, RepositoryWatchRuntime,
-    RepositoryWatchRuntimeError,
-    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
-    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, TurnLivenessRuntime,
+    RepositoryWatchRuntimeError, SessionTemplateConfiguration, SessionTemplateConfigurationError,
+    SingleHubGuardError, SystemCurrentTimeClock, TelemetryConfiguration,
+    TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics, TurnLivenessRuntime,
     model_adapter::ConfiguredModelRuntime,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
