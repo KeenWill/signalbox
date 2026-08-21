@@ -3312,7 +3312,7 @@ fn workspace_release_acknowledgement(
 }
 
 fn workspace_ready_receipt(ready: &WorkspaceReady) -> Option<RunnerWorkspaceReadyReceipt> {
-    let manifest = &ready.ready.manifest;
+    let manifest = ready.ready.manifest();
     let repository = manifest.repository.as_ref()?;
     let canonical_clone_url_digest = manifest.canonical_clone_url_digest.as_ref()?;
     let recovery = manifest.recovery.as_ref()?;
@@ -3342,7 +3342,8 @@ fn workspace_ready_receipt(ready: &WorkspaceReady) -> Option<RunnerWorkspaceRead
         RunnerGeneration::try_from_u64(ready.correlation.placement_revision.get())?,
         RunnerId::from_uuid(ready.correlation.runner_id.into_uuid()),
         WorkspaceManifestId::from_uuid(manifest.manifest_id.into_uuid()),
-        RunnerReadyManifestDigest::try_new(ready.ready.manifest_digest.as_str().to_owned()).ok()?,
+        RunnerReadyManifestDigest::try_new(ready.ready.manifest_digest().as_str().to_owned())
+            .ok()?,
         WorkspaceRepositoryKey::try_new(repository.as_str().to_owned()).ok()?,
         CanonicalCloneUrlDigest::try_new(canonical_clone_url_digest.as_str().to_owned()).ok()?,
         credential_profile,
@@ -3351,7 +3352,7 @@ fn workspace_ready_receipt(ready: &WorkspaceReady) -> Option<RunnerWorkspaceRead
             SandboxProfile::WorkspaceRestricted => RunnerSandboxProfile::WorkspaceRestricted,
         },
         WorkspaceRelativePath::try_new(manifest.relative_path.clone()).ok()?,
-        RunnerWorkingDirectory::try_new(ready.ready.execution_directory.as_str().to_owned())
+        RunnerWorkingDirectory::try_new(ready.ready.execution_directory().as_str().to_owned())
             .ok()?,
         recovery,
     )
@@ -4927,21 +4928,30 @@ mod tests {
             acknowledgement,
             Message::WorkspaceRecorded(WorkspaceRecorded {
                 correlation: ready.correlation,
-                manifest_id: ready.ready.manifest.manifest_id,
-                manifest_digest: ready.ready.manifest_digest,
+                manifest_id: ready.ready.manifest().manifest_id,
+                manifest_digest: ready.ready.manifest_digest().clone(),
             })
         );
     }
 
     #[test]
     fn workspace_ready_receipt_preserves_an_unborn_branch() {
-        let mut ready = repository_workspace_ready();
-        ready.ready.manifest.recovery = Some(WireWorkspaceRecovery::UnbornBranch {
+        let original = repository_workspace_ready();
+        let mut manifest = original.ready.manifest().clone();
+        manifest.recovery = Some(WireWorkspaceRecovery::UnbornBranch {
             name: workspace_branch_name(),
         });
-        ready.ready.manifest_digest =
-            signalbox_runner_wire::workspace_manifest_digest(&ready.ready.manifest)
-                .expect("the unborn ready manifest has a canonical digest");
+        let manifest_digest = signalbox_runner_wire::workspace_manifest_digest(&manifest)
+            .expect("the unborn ready manifest has a canonical digest");
+        let ready = WorkspaceReady {
+            correlation: original.correlation,
+            ready: signalbox_runner_wire::ReadyManifest::try_new(
+                manifest,
+                manifest_digest,
+                original.ready.execution_directory().clone(),
+            )
+            .expect("the unborn ready manifest is valid"),
+        };
         let receipt = workspace_ready_receipt(&ready)
             .expect("the unborn ready manifest projects into a domain receipt");
         let expected = WorkspaceRecovery::UnbornBranch {
@@ -4954,12 +4964,19 @@ mod tests {
 
     #[test]
     fn workspace_ready_receipt_rejects_a_relative_execution_directory() {
-        let mut ready = repository_workspace_ready();
-        ready.ready.execution_directory =
+        let ready = repository_workspace_ready();
+        let relative =
             signalbox_runner_wire::WorkingDirectory::try_new("sessions/provision/repo".to_owned())
                 .expect("the relative execution-directory fixture is exact text");
 
-        assert_eq!(workspace_ready_receipt(&ready), None);
+        assert!(
+            signalbox_runner_wire::ReadyManifest::try_new(
+                ready.ready.manifest().clone(),
+                ready.ready.manifest_digest().clone(),
+                relative,
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -5396,14 +5413,15 @@ mod tests {
             .expect("the fixture ready manifest has a canonical digest");
         WorkspaceReady {
             correlation,
-            ready: signalbox_runner_wire::ReadyManifest {
+            ready: signalbox_runner_wire::ReadyManifest::try_new(
                 manifest,
                 manifest_digest,
-                execution_directory: signalbox_runner_wire::WorkingDirectory::try_new(
+                signalbox_runner_wire::WorkingDirectory::try_new(
                     "/runner/sessions/provision/repo".to_owned(),
                 )
                 .expect("the fixture execution directory is absolute"),
-            },
+            )
+            .expect("the fixture ready manifest is valid"),
         }
     }
 
@@ -5478,7 +5496,7 @@ mod tests {
             WorkspaceManifestId::from_uuid(
                 identity(ARBITRARY_WORKSPACE_MANIFEST_ID_SEED).into_uuid(),
             ),
-            RunnerReadyManifestDigest::try_new(ready.ready.manifest_digest.as_str().to_owned())
+            RunnerReadyManifestDigest::try_new(ready.ready.manifest_digest().as_str().to_owned())
                 .expect("the fixture ready digest is canonical"),
             WorkspaceRepositoryKey::try_new(CONFIGURED_REPOSITORY.to_owned())
                 .expect("the fixture repository key is checked"),
@@ -5495,7 +5513,7 @@ mod tests {
                 correlation.placement_revision.get()
             ))
             .expect("the fixture relative path is checked"),
-            RunnerWorkingDirectory::try_new(ready.ready.execution_directory.as_str().to_owned())
+            RunnerWorkingDirectory::try_new(ready.ready.execution_directory().as_str().to_owned())
                 .expect("the fixture execution directory is checked"),
             WorkspaceRecovery::Commit {
                 revision: WorkspaceRevision::try_new(workspace_revision_text())

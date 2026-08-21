@@ -229,11 +229,12 @@ fn frame_round_trip_preserves_unborn_workspace_recovery() {
         .unwrap_or_else(|error| panic!("unborn manifest digests: {error}"));
     let expected = frame(Message::WorkspaceReady(WorkspaceReady {
         correlation: provision_correlation(),
-        ready: ReadyManifest {
-            manifest: ready_manifest,
-            manifest_digest: ready_digest,
-            execution_directory: working_directory("/runner/sessions/unborn/repo"),
-        },
+        ready: ReadyManifest::try_new(
+            ready_manifest,
+            ready_digest,
+            working_directory("/runner/sessions/unborn/repo"),
+        )
+        .unwrap_or_else(|error| panic!("unborn ready manifest is valid: {error}")),
     }));
     let encoded = encode_line(&expected)
         .unwrap_or_else(|error| panic!("unborn ready frame encodes: {error}"));
@@ -634,16 +635,14 @@ fn manifest_rejects_abbreviated_revision() {
 
 #[test]
 fn ready_frame_rejects_manifest_digest_disagreement() {
-    let invalid = Message::WorkspaceReady(WorkspaceReady {
-        correlation: provision_correlation(),
-        ready: ReadyManifest {
-            manifest: manifest(),
-            manifest_digest: digest(EXPECTED_ADVERTISEMENT_DIGEST),
-            execution_directory: working_directory("/runner/sessions/ready/repo"),
-        },
-    });
-
-    assert!(Frame::try_new(invalid).is_err());
+    assert!(
+        ReadyManifest::try_new(
+            manifest(),
+            digest(EXPECTED_ADVERTISEMENT_DIGEST),
+            working_directory("/runner/sessions/ready/repo"),
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -655,11 +654,12 @@ fn ready_frame_rejects_nondeterministic_relative_path() {
         .unwrap_or_else(|error| panic!("changed manifest digests: {error}"));
     let invalid = Message::WorkspaceReady(WorkspaceReady {
         correlation: provision_correlation(),
-        ready: ReadyManifest {
-            manifest: ready_manifest,
+        ready: ReadyManifest::try_new(
+            ready_manifest,
             manifest_digest,
-            execution_directory: working_directory("/runner/sessions/alternate/repo"),
-        },
+            working_directory("/runner/sessions/alternate/repo"),
+        )
+        .unwrap_or_else(|error| panic!("alternate ready manifest is valid: {error}")),
     });
 
     assert!(Frame::try_new(invalid).is_err());
@@ -758,11 +758,12 @@ fn ready_frame_rejects_manifest_correlation_disagreement() {
         .unwrap_or_else(|error| panic!("changed manifest digests: {error}"));
     let invalid = Message::WorkspaceReady(WorkspaceReady {
         correlation: provision_correlation(),
-        ready: ReadyManifest {
-            manifest: ready_manifest,
-            manifest_digest: digest,
-            execution_directory: working_directory("/runner/sessions/cross-wired/repo"),
-        },
+        ready: ReadyManifest::try_new(
+            ready_manifest,
+            digest,
+            working_directory("/runner/sessions/cross-wired/repo"),
+        )
+        .unwrap_or_else(|error| panic!("cross-wired ready manifest is valid: {error}")),
     });
 
     assert!(Frame::try_new(invalid).is_err());
@@ -773,16 +774,15 @@ fn ready_frame_rejects_a_relative_execution_directory() {
     let ready_manifest = manifest();
     let manifest_digest = workspace_manifest_digest(&ready_manifest)
         .unwrap_or_else(|error| panic!("ready manifest digests: {error}"));
-    let invalid = Message::WorkspaceReady(WorkspaceReady {
-        correlation: provision_correlation(),
-        ready: ReadyManifest {
-            manifest: ready_manifest,
-            manifest_digest,
-            execution_directory: working_directory("sessions/ready/repo"),
-        },
-    });
 
-    assert!(Frame::try_new(invalid).is_err());
+    assert!(
+        ReadyManifest::try_new(
+            ready_manifest,
+            manifest_digest,
+            working_directory("sessions/ready/repo"),
+        )
+        .is_err()
+    );
 }
 
 #[test]

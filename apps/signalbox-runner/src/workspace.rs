@@ -240,7 +240,7 @@ fn create_private_workspace(
         open_directory(session, placement_name).map_err(RunnerWorkspaceError::CommitAmbiguous)?;
     let published = read_ready_private_workspace(&placement, request, execution_path)
         .map_err(commit_ambiguous_after_publication)?;
-    if published.execution_directory != execution_directory {
+    if published.execution_directory() != &execution_directory {
         return Err(commit_ambiguous_after_publication(
             RunnerWorkspaceError::ManifestConflict,
         ));
@@ -283,11 +283,8 @@ fn read_ready_private_workspace(
     let execution_directory = checked_execution_directory(execution_path, &work)?;
     let manifest_digest =
         workspace_manifest_digest(&manifest).map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
-    Ok(ReadyManifest {
-        manifest,
-        manifest_digest,
-        execution_directory,
-    })
+    ReadyManifest::try_new(manifest, manifest_digest, execution_directory)
+        .map_err(|_| RunnerWorkspaceError::CorruptManifest)
 }
 
 fn checked_execution_directory(
@@ -760,10 +757,10 @@ mod tests {
 
     fn release_correlation(prepared: &signalbox_runner_wire::ReadyManifest) -> ReleaseCorrelation {
         ReleaseCorrelation {
-            session_id: prepared.manifest.session,
-            placement_revision: prepared.manifest.placement_revision,
-            runner_id: prepared.manifest.runner,
-            manifest_id: prepared.manifest.manifest_id,
+            session_id: prepared.manifest().session,
+            placement_revision: prepared.manifest().placement_revision,
+            runner_id: prepared.manifest().runner,
+            manifest_id: prepared.manifest().manifest_id,
         }
     }
 
@@ -792,24 +789,24 @@ mod tests {
             .canonicalize()
             .expect("the published work directory has a canonical path");
 
-        assert_eq!(prepared.manifest.session, expected.session());
-        assert_eq!(prepared.manifest.runner, expected.runner());
-        assert_eq!(prepared.manifest.lifecycle, ManifestLifecycle::Ready);
-        assert_eq!(prepared.manifest.relative_path, EXPECTED_RELATIVE_PATH);
+        assert_eq!(prepared.manifest().session, expected.session());
+        assert_eq!(prepared.manifest().runner, expected.runner());
+        assert_eq!(prepared.manifest().lifecycle, ManifestLifecycle::Ready);
+        assert_eq!(prepared.manifest().relative_path, EXPECTED_RELATIVE_PATH);
         assert_eq!(
-            prepared.execution_directory.as_str(),
+            prepared.execution_directory().as_str(),
             expected_execution_directory
                 .to_str()
                 .expect("the fixture path is UTF-8")
         );
         assert_eq!(
-            prepared.manifest_digest,
-            workspace_manifest_digest(&prepared.manifest)
+            prepared.manifest_digest(),
+            &workspace_manifest_digest(prepared.manifest())
                 .expect("the ready private manifest has its canonical digest")
         );
-        assert!(prepared.manifest.repository.is_none());
-        assert!(prepared.manifest.credential_profile.is_none());
-        assert!(prepared.manifest.recovery.is_none());
+        assert!(prepared.manifest().repository.is_none());
+        assert!(prepared.manifest().credential_profile.is_none());
+        assert!(prepared.manifest().recovery.is_none());
         assert!(placement.join("work").is_dir());
         assert_eq!(manifest_mode, DOCUMENT_MODE);
     }

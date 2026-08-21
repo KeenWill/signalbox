@@ -736,14 +736,44 @@ pub enum ShutdownReason {
 #[serde(deny_unknown_fields)]
 pub struct ReadyManifest {
     /// Complete ready manifest facts.
-    pub manifest: WorkspaceManifest,
+    manifest: WorkspaceManifest,
     /// Exact content digest of these lifecycle-specific facts.
-    pub manifest_digest: Digest,
+    manifest_digest: Digest,
     /// Absolute runner-authored directory selected for later execution.
-    pub execution_directory: WorkingDirectory,
+    execution_directory: WorkingDirectory,
 }
 
 impl ReadyManifest {
+    /// Constructs ready evidence only when its digest and execution directory are valid.
+    pub fn try_new(
+        manifest: WorkspaceManifest,
+        manifest_digest: Digest,
+        execution_directory: WorkingDirectory,
+    ) -> Result<Self, ValueError> {
+        let ready = Self {
+            manifest,
+            manifest_digest,
+            execution_directory,
+        };
+        ready.validate()?;
+        Ok(ready)
+    }
+
+    /// Borrows the complete ready manifest facts.
+    pub const fn manifest(&self) -> &WorkspaceManifest {
+        &self.manifest
+    }
+
+    /// Borrows the exact content digest of the ready manifest.
+    pub const fn manifest_digest(&self) -> &Digest {
+        &self.manifest_digest
+    }
+
+    /// Borrows the absolute runner-authored execution directory.
+    pub const fn execution_directory(&self) -> &WorkingDirectory {
+        &self.execution_directory
+    }
+
     fn validate(&self) -> Result<(), ValueError> {
         let expected = workspace_manifest_digest(&self.manifest)?;
         if expected != self.manifest_digest {

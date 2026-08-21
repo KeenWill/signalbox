@@ -528,10 +528,10 @@ mod tests {
             .join(request.placement_revision().get().to_string());
         let accepted = state
             .accept_workspace_release(ReleaseCorrelation {
-                session_id: prepared.manifest.session,
-                placement_revision: prepared.manifest.placement_revision,
-                runner_id: prepared.manifest.runner,
-                manifest_id: prepared.manifest.manifest_id,
+                session_id: prepared.manifest().session,
+                placement_revision: prepared.manifest().placement_revision,
+                runner_id: prepared.manifest().runner,
+                manifest_id: prepared.manifest().manifest_id,
             })
             .expect("the exact private release is journaled");
         PrivateReleaseFixture {

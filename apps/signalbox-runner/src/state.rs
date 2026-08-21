@@ -841,8 +841,8 @@ impl RunnerStateRoot {
             .ok_or(RunnerStateError::InvalidTransition)?;
         if correlation != &recorded.correlation
             || ready.correlation != recorded.correlation
-            || ready.ready.manifest.manifest_id != recorded.manifest_id
-            || ready.ready.manifest_digest != recorded.manifest_digest
+            || ready.ready.manifest().manifest_id != recorded.manifest_id
+            || ready.ready.manifest_digest() != &recorded.manifest_digest
         {
             return Err(RunnerStateError::OperationCorrelationMismatch);
         }
@@ -1676,14 +1676,13 @@ mod tests {
             .expect("the fixture manifest has a canonical digest");
         WorkspaceReady {
             correlation,
-            ready: ReadyManifest {
+            ready: ReadyManifest::try_new(
                 manifest,
                 manifest_digest,
-                execution_directory: WorkingDirectory::try_new(
-                    "/runner/sessions/provision/repo".to_owned(),
-                )
-                .expect("the fixture execution directory is absolute"),
-            },
+                WorkingDirectory::try_new("/runner/sessions/provision/repo".to_owned())
+                    .expect("the fixture execution directory is absolute"),
+            )
+            .expect("the fixture ready manifest is valid"),
         }
     }
 
@@ -1691,8 +1690,8 @@ mod tests {
         let ready = workspace_ready();
         WorkspaceRecorded {
             correlation: ready.correlation,
-            manifest_id: ready.ready.manifest.manifest_id,
-            manifest_digest: ready.ready.manifest_digest,
+            manifest_id: ready.ready.manifest().manifest_id,
+            manifest_digest: ready.ready.manifest_digest().clone(),
         }
     }
 
