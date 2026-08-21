@@ -27,14 +27,14 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, ActiveTurnPhase,
     ActiveTurnSchedulingReconstitutionInput, AmbiguousModelCallTurn, AssistantResponsePart,
-    AssistantText, AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, CancelledModelCallTurn,
-    CancelledToolRoundModelCallTurn, CompletedModelCallTurn, ConsumedSteeringReconstitutionInput,
-    CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
-    DelegatedTurnActivationInput, DelegatedWakeTurnActivationInput, DelegationContent,
-    DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason, DirectModelSelection,
-    DurableCommandId, FailedModelCallTurn, FailedModelCallTurnIdentities, FastMode,
-    FrozenAliasDefinition, FrozenModelSelection, ModelAlias, ModelCallDisposition,
-    ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    AssistantText, AttachmentBlobFact, AuthorizedModelCall, AvailabilitySuccessorModelCallTurn,
+    BlobDigest, CancelledModelCallTurn, CancelledToolRoundModelCallTurn, CompletedModelCallTurn,
+    ConsumedSteeringReconstitutionInput, CorrelatedModelCallTerminalObservation,
+    CredentialPoolExhaustedModelCallTurn, DelegatedTurnActivationInput,
+    DelegatedWakeTurnActivationInput, DelegationContent, DelegationOutcome, DelegationOutcomeKind,
+    DelegationOutcomeReason, DirectModelSelection, DurableCommandId, FailedModelCallTurn,
+    FailedModelCallTurnIdentities, FastMode, FrozenAliasDefinition, FrozenModelSelection,
+    ModelAlias, ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
     ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
     ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
@@ -591,6 +591,8 @@ impl PostgresModelCallRepository {
             .collect::<Result<Vec<_>, ModelCallRepositoryError>>()?;
         let origin_contents =
             load_origin_contents(&mut transaction, &frontier_entries, &[], &[]).await?;
+        let attachment_blob_facts =
+            load_attachment_blob_facts(&mut transaction, &origin_contents).await?;
         let tool_result_correlations =
             load_tool_result_correlations(&mut transaction, &frontier_entries).await?;
         let tool_denial_correlations =
@@ -604,6 +606,7 @@ impl PostgresModelCallRepository {
             None,
             Vec::new(),
         )
+        .with_attachment_blob_facts(attachment_blob_facts)
         .with_tool_result_correlations(tool_result_correlations)
         .with_tool_denial_correlations(tool_denial_correlations)
         .reconstitute()
@@ -4175,6 +4178,7 @@ async fn require_live_execution_with_targets(
         active_turn.consumed_steering(),
     )
     .await?;
+    let attachment_blob_facts = load_attachment_blob_facts(connection, &origin_contents).await?;
     let tool_result_correlations =
         load_tool_result_correlations(connection, &frontier_entries).await?;
     let tool_denial_correlations =
@@ -4216,6 +4220,7 @@ async fn require_live_execution_with_targets(
         pinned_target,
         calls,
     )
+    .with_attachment_blob_facts(attachment_blob_facts)
     .with_tool_result_correlations(tool_result_correlations)
     .with_tool_denial_correlations(tool_denial_correlations);
     if availability_successor {
@@ -5058,6 +5063,59 @@ async fn load_origin_contents(
                 return Err(ModelCallCorruption::Inconsistent("accepted content identity").into());
             }
             Ok(content)
+        })
+        .collect()
+}
+
+async fn load_attachment_blob_facts(
+    connection: &mut PgConnection,
+    origin_contents: &[ModelCallOriginContent],
+) -> Result<Vec<AttachmentBlobFact>, ModelCallRepositoryError> {
+    let digests = origin_contents
+        .iter()
+        .flat_map(|origin| origin.content().parts())
+        .filter_map(|part| match part {
+            signalbox_domain::UserContentPart::Attachment { digest, .. } => Some(*digest),
+            signalbox_domain::UserContentPart::Text { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if digests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let encoded = digests
+        .iter()
+        .map(|digest| digest.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        "SELECT digest, byte_length
+           FROM blob
+          WHERE digest = ANY($1::bytea[])
+          ORDER BY digest",
+    )
+    .bind(&encoded)
+    .fetch_all(&mut *connection)
+    .await?;
+    if rows.len() != digests.len() {
+        return Err(ModelCallCorruption::Missing("attachment blob catalog fact").into());
+    }
+    rows.into_iter()
+        .map(|row| {
+            let bytes: Vec<u8> = row.try_get("digest")?;
+            let digest = BlobDigest::from_bytes(bytes.try_into().map_err(|_| {
+                ModelCallCorruption::Inconsistent("attachment blob catalog digest")
+            })?);
+            if !digests.contains(&digest) {
+                return Err(
+                    ModelCallCorruption::Inconsistent("attachment blob catalog inventory").into(),
+                );
+            }
+            let length = positive_u64_from_numeric(row.try_get("byte_length")?).map_err(|_| {
+                ModelCallCorruption::Inconsistent("attachment blob catalog byte length")
+            })?;
+            let length = NonZeroU64::new(length).ok_or(ModelCallCorruption::Inconsistent(
+                "attachment blob catalog byte length",
+            ))?;
+            Ok(AttachmentBlobFact::new(digest, length))
         })
         .collect()
 }
