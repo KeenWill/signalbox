@@ -87,11 +87,12 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: rust-coverage
+          shared-key: coverage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Exact version pin, as cargo-deny is pinned in deny.yml: an instrumented
       # build and its report must come from one known tool build.
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2.86.2
         with:
           tool: cargo-llvm-cov@0.8.7
       # Each measured suite runs under `--no-report`, which accumulates
@@ -259,7 +260,7 @@ jobs:
       - name: Upload coverage reports to Codecov
         if: ${{ always() }}
         continue-on-error: true
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ${{ runner.temp }}/coverage/lcov.info

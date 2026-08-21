@@ -85,6 +85,13 @@ concurrency:
 
 permissions: {}
 
+# Matches the Rust workflow, whose workspace-tests job writes the shared
+# cache: both the cache key and cargo's own artifact fingerprints
+# incorporate RUSTFLAGS, so restore-only jobs must build identically
+# to reuse it.
+env:
+  RUSTFLAGS: "-D warnings"
+
 jobs:
   gate:
     name: Claude smoke eligibility
@@ -172,6 +179,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
       # The runner image ships Node, and the pinned package is a Node CLI, so
       # no Node toolchain setup is needed. `npm ci` installs the lockfile's
@@ -193,7 +201,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: claude-smoke
+          shared-key: rust
+          save-if: false
       # Compile the smoke test binary BEFORE any step carries the credential, so
       # no repository build script or procedural macro executes while the API
       # key is present in a step environment. The later test run is fresh and

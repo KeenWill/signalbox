@@ -40,7 +40,8 @@ use signalbox_domain::{
     SteeringReclassificationReason, SubmitInput,
     SubmitInputAppliedPendingSteeringReconstitutionInput, SubmitInputAppliedResult,
     SubmitInputAppliedTurnOriginReconstitutionInput, SubmitInputDirectTurnOriginConstructionInput,
-    SubmitInputInterruptedModelCallReconciliationConstructionInput, SubmitInputPreparationFailure,
+    SubmitInputInterruptedModelCallReconciliationConstructionInput,
+    SubmitInputInterruptedToolReconciliationConstructionInput, SubmitInputPreparationFailure,
     SubmitInputReclassifiedTurnOriginConstructionInput, SubmitInputReconstitutionFailure,
     SubmitInputReconstitutionInput,
     SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput,
@@ -156,7 +157,7 @@ enum StoredTerminalTurnDisposition {
     },
     ReconciliationRequired {
         interrupt_command: DurableCommandId,
-        ambiguous_call: ModelCallId,
+        ambiguous_operation: IssuedOperationRef,
     },
 }
 
@@ -7209,6 +7210,7 @@ pub(crate) async fn load_turn_origin_graph(
             source.state_kind AS source_state_kind,
             source.terminal_disposition_kind AS source_terminal_disposition_kind,
             source.terminal_model_call_id AS source_terminal_model_call_id,
+            source.terminal_tool_attempt_id AS source_terminal_tool_attempt_id,
             COALESCE(
                 source_attempt.interrupt_command_id,
                 source_interrupt.command_id
@@ -7391,12 +7393,27 @@ pub(crate) async fn load_turn_origin_graph(
                                     "reconciliation source interrupt command",
                                 )
                             })?;
+                            let model_call: Option<Uuid> =
+                                row.try_get("source_terminal_model_call_id")?;
+                            let tool_attempt: Option<Uuid> =
+                                row.try_get("source_terminal_tool_attempt_id")?;
+                            let ambiguous_operation = match (model_call, tool_attempt) {
+                                (Some(call), None) => {
+                                    IssuedOperationRef::ModelCall(ModelCallId::from_uuid(call))
+                                }
+                                (None, Some(attempt)) => IssuedOperationRef::ToolAttempt(
+                                    ToolAttemptId::from_uuid(attempt),
+                                ),
+                                (Some(_), Some(_)) | (None, None) => {
+                                    return Err(SubmitInputCorruption::Inconsistent(
+                                        "reconciliation source ambiguous operation",
+                                    )
+                                    .into());
+                                }
+                            };
                             StoredTerminalTurnDisposition::ReconciliationRequired {
                                 interrupt_command: command,
-                                ambiguous_call: ModelCallId::from_uuid(required(
-                                    &row,
-                                    "source_terminal_model_call_id",
-                                )?),
+                                ambiguous_operation,
                             }
                         }
                         Some(value) => {
@@ -7676,7 +7693,7 @@ pub(crate) async fn load_turn_origin_graph(
                     }
                     StoredTerminalTurnDisposition::ReconciliationRequired {
                         interrupt_command,
-                        ambiguous_call,
+                        ambiguous_operation,
                     } => {
                         let interrupt_uuid = durable_command_id_to_uuid(interrupt_command);
                         let mut interrupt_rows =
@@ -7707,20 +7724,36 @@ pub(crate) async fn load_turn_origin_graph(
                             )
                             .into());
                         };
-                        SubmitInputTerminalSourceReconstitutionInput::
-                            interrupted_model_call_reconciliation(
-                                SubmitInputInterruptedModelCallReconciliationConstructionInput {
-                                    origin: source_origin.clone(),
-                                    turn: source_turn,
-                                    ambiguous_call,
-                                    interrupt: interrupt_origin
-                                        .applied_interrupt()
-                                        .ok_or(SubmitInputCorruption::Inconsistent(
-                                            "reconciliation source interrupt authority",
-                                        ))?
-                                        .proof(),
-                                },
-                            )
+                        let interrupt = interrupt_origin
+                            .applied_interrupt()
+                            .ok_or(SubmitInputCorruption::Inconsistent(
+                                "reconciliation source interrupt authority",
+                            ))?
+                            .proof();
+                        match ambiguous_operation {
+                            IssuedOperationRef::ModelCall(ambiguous_call) => {
+                                SubmitInputTerminalSourceReconstitutionInput::
+                                    interrupted_model_call_reconciliation(
+                                        SubmitInputInterruptedModelCallReconciliationConstructionInput {
+                                            origin: source_origin.clone(),
+                                            turn: source_turn,
+                                            ambiguous_call,
+                                            interrupt,
+                                        },
+                                    )
+                            }
+                            IssuedOperationRef::ToolAttempt(ambiguous_attempt) => {
+                                SubmitInputTerminalSourceReconstitutionInput::
+                                    interrupted_tool_reconciliation(
+                                        SubmitInputInterruptedToolReconciliationConstructionInput {
+                                            origin: source_origin.clone(),
+                                            turn: source_turn,
+                                            ambiguous_attempt,
+                                            interrupt,
+                                        },
+                                    )
+                            }
+                        }
                     }
                 };
                 SubmitInputTurnOriginReconstitutionInput::reclassified(

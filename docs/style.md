@@ -122,6 +122,29 @@ remembered to read it. This repository's domain crate already works this way —
 see the exemplars below; the rule extends that standard to test fixtures and
 helper signatures, where it is applied least consistently today.
 
+## Numeric bounds
+
+Every numeric bound declares whether it is a **hard safety ceiling** or a
+**tunable effective ceiling** and carries a one-line rationale naming what it
+protects. A hard safety ceiling is code-defined against runaway memory, latency,
+spend, or storage. Configuration may lower a deployment's effective ceiling but
+never raise the hard safety ceiling.
+
+Set a hard safety ceiling at the real production danger point. Ordinary real
+work must not reach it; otherwise it is a product limit, not runaway protection.
+
+A constant whose name reads like a bound but states a fixed representation fact
+— a numeric type's exact maximum, UTF-8's continuation width, the basis points
+in full scale — is **not a bound**, and says so in place of a kind. Declaring it
+keeps the exception visible where silence would read as an undeclared cap.
+
+The test is whether the number could sensibly have been chosen differently. A
+representation fact has one correct value that no deployment raises or lowers; a
+number anyone could argue about is a ceiling or a tunable however its name
+reads. Checking live input against a representation fact does not convert it
+into a bound, and no amount of arithmetic converts a chosen allowance into a
+fact.
+
 ## Conventions at component seams
 
 The core principles imply the following narrower rules where representations,
