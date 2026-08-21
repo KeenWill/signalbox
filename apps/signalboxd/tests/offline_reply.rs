@@ -394,7 +394,10 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
 
     let transcript = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
         "SELECT entry.payload_kind,
-                accepted.content_text,
+                (SELECT string_agg(part.text_value, '' ORDER BY part.position)
+                   FROM accepted_input_content_part AS part
+                  WHERE part.accepted_input_id = entry.origin_accepted_input_id
+                    AND part.part_kind = 'text'),
                 entry.assistant_text_value
            FROM turn_lifecycle AS lifecycle
            JOIN context_frontier_member AS member
@@ -403,9 +406,6 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
             AND entry.semantic_entry_id = member.semantic_entry_id
-           LEFT JOIN accepted_input AS accepted
-             ON accepted.session_id = entry.source_session_id
-            AND accepted.accepted_input_id = entry.origin_accepted_input_id
           WHERE lifecycle.session_id = $1
             AND lifecycle.turn_id = $2
           ORDER BY member.member_position",
