@@ -703,6 +703,43 @@ struct SchedulerPassOccupancyRecovery {
     pool: sqlx::PgPool,
     eligibility_nudge: signalbox_application::InProcessEligibilityNudge,
     execution_expiry: Option<std::sync::Arc<dyn SchedulerPassExpiryHandler>>,
+    active_turns: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<SessionId, TurnId>>>,
+}
+
+#[derive(Debug)]
+struct SchedulerPassActiveTurnGuard {
+    active_turns: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<SessionId, TurnId>>>,
+    session: SessionId,
+}
+
+impl Drop for SchedulerPassActiveTurnGuard {
+    fn drop(&mut self) {
+        self.active_turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.session);
+    }
+}
+
+impl SchedulerPassOccupancyRecovery {
+    fn track_active_turn(&self, session: SessionId, turn: TurnId) -> SchedulerPassActiveTurnGuard {
+        self.active_turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session, turn);
+        SchedulerPassActiveTurnGuard {
+            active_turns: std::sync::Arc::clone(&self.active_turns),
+            session,
+        }
+    }
+
+    fn active_turn(&self, session: SessionId) -> Option<TurnId> {
+        self.active_turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session)
+            .copied()
+    }
 }
 
 /// Attempts spent on daemon-owned recovery for one expired scheduler pass.
@@ -720,9 +757,13 @@ impl SchedulerPassExpiryHandler for SchedulerPassOccupancyRecovery {
         if let Some(execution_expiry) = &self.execution_expiry {
             execution_expiry.occupancy_expired(session);
         }
+        let Some(expected_turn) = self.active_turn(session) else {
+            return;
+        };
         drop(tokio::spawn(recover_expired_scheduler_pass(
             self.clone(),
             session,
+            expected_turn,
         )));
     }
 }
@@ -753,6 +794,9 @@ impl<Generator, Transaction, Execution> ActivatedTurnPass<Generator, Transaction
             pool,
             eligibility_nudge,
             execution_expiry: self.execution.occupancy_expiry_handler(),
+            active_turns: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         });
         self
     }
@@ -801,6 +845,7 @@ where
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let activation = self.activation.execute_with_cloned_transaction(session);
         let execution = self.execution.clone();
+        let occupancy_recovery = self.occupancy_recovery.clone();
         async move {
             execution.resume_active(session).await.map_err(|source| {
                 ActivatedTurnPassError::Execution {
@@ -823,6 +868,9 @@ where
                     if !activation_session_matches(&execution, session, activated.session()) {
                         return Err(ActivatedTurnPassError::ActivationSessionMismatch);
                     }
+                    let _occupancy_guard = occupancy_recovery
+                        .as_ref()
+                        .map(|recovery| recovery.track_active_turn(session, turn));
                     execution
                         .execute(activated)
                         .instrument(turn_work_span(session, turn))
@@ -841,40 +889,66 @@ where
 async fn recover_expired_scheduler_pass(
     recovery: SchedulerPassOccupancyRecovery,
     session: SessionId,
+    expected_turn: TurnId,
 ) {
     let inventory = PostgresTurnLivenessRepository::new(recovery.pool.clone());
-    let candidate = match timeout(
-        EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND,
-        inventory.slot_held_active_turn(session),
-    )
-    .await
-    {
-        Ok(Ok(Some(candidate))) => candidate,
-        Ok(Ok(None)) => return,
-        Ok(Err(error)) => {
-            tracing::error!(
-                failure_class = ?error.operator_failure_class(),
-                cause_code = "scheduler_pass_occupancy_inventory_failed",
-                session_id = %session.as_uuid(),
-                "scheduler pass expiry could not capture its durable turn correlation"
-            );
-            return;
-        }
-        Err(_) => {
-            tracing::error!(
-                failure_class = ?signalbox_application::OperatorFailureClass::Infrastructure { commit_ambiguous: false },
-                cause_code = "scheduler_pass_occupancy_inventory_timed_out",
-                session_id = %session.as_uuid(),
-                attempt_bound_seconds = EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND.as_secs(),
-                "scheduler pass expiry correlation read exceeded its bound"
-            );
-            return;
-        }
-    };
     // The first attempt is immediate. A database outage spends three bounded
     // retries while the independent liveness scan remains the durable
     // backstop for the still-active turn.
+    let mut candidate = None;
     for attempt in 1_u32..=EXPIRED_PASS_RECOVERY_ATTEMPTS {
+        if candidate.is_none() {
+            match timeout(
+                EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND,
+                inventory.recoverable_active_turn(session),
+            )
+            .await
+            {
+                Ok(Ok(Some(observed))) if observed.turn() == expected_turn => {
+                    candidate = Some(observed);
+                }
+                Ok(Ok(Some(observed))) => {
+                    tracing::info!(
+                        cause_code = "scheduler_pass_occupancy_recovery_superseded",
+                        session_id = %session.as_uuid(),
+                        expected_turn_id = %expected_turn.as_uuid(),
+                        observed_turn_id = %observed.turn().as_uuid(),
+                        attempt,
+                        "expired scheduler-pass turn was superseded before recovery"
+                    );
+                    return;
+                }
+                Ok(Ok(None)) => return,
+                Ok(Err(error)) => {
+                    tracing::error!(
+                        failure_class = ?error.operator_failure_class(),
+                        cause_code = "scheduler_pass_occupancy_inventory_failed",
+                        session_id = %session.as_uuid(),
+                        expected_turn_id = %expected_turn.as_uuid(),
+                        attempt,
+                        "scheduler pass expiry could not capture its durable turn correlation"
+                    );
+                }
+                Err(_) => {
+                    tracing::error!(
+                        failure_class = ?signalbox_application::OperatorFailureClass::Infrastructure { commit_ambiguous: false },
+                        cause_code = "scheduler_pass_occupancy_inventory_timed_out",
+                        session_id = %session.as_uuid(),
+                        expected_turn_id = %expected_turn.as_uuid(),
+                        attempt,
+                        attempt_bound_seconds = EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND.as_secs(),
+                        "scheduler pass expiry correlation read exceeded its bound"
+                    );
+                }
+            }
+            if candidate.is_none() {
+                if attempt < EXPIRED_PASS_RECOVERY_ATTEMPTS {
+                    sleep(EXPIRED_PASS_RECOVERY_RETRY_DELAY).await;
+                }
+                continue;
+            }
+        }
+        let candidate = candidate.expect("candidate was established above");
         let repository = PostgresStartupScanRepository::new(recovery.pool.clone());
         let mut ids = UuidV7StartupScanIdGenerator;
         let identities = signalbox_domain::AcceptedInputTurnFailureIdentities::new(
@@ -883,7 +957,7 @@ async fn recover_expired_scheduler_pass(
         );
         match timeout(
             EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND,
-            repository.recover_candidate(candidate, identities, &mut ids),
+            repository.recover_running_candidate(candidate, identities, &mut ids),
         )
         .await
         {
@@ -934,7 +1008,7 @@ async fn recover_expired_scheduler_pass(
     tracing::error!(
         cause_code = "scheduler_pass_occupancy_recovery_exhausted",
         session_id = %session.as_uuid(),
-        turn_id = %candidate.turn().as_uuid(),
+        turn_id = %expected_turn.as_uuid(),
         attempts = EXPIRED_PASS_RECOVERY_ATTEMPTS,
         "scheduler pass expiry recovery exhausted; the turn-liveness watchdog remains responsible"
     );

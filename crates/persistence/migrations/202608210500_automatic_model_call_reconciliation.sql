@@ -24,6 +24,21 @@ CREATE INDEX automatic_model_call_reconciliation_due
     ON automatic_model_call_reconciliation (next_attempt_at, turn_id)
     WHERE state_kind IN ('scheduled', 'attempting');
 
+CREATE TABLE automatic_model_call_reconciliation_discovery_state (
+    singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+    after_turn_id uuid
+);
+
+INSERT INTO automatic_model_call_reconciliation_discovery_state (singleton)
+VALUES (true);
+
+CREATE INDEX turn_lifecycle_automatic_model_call_recovery_discovery
+    ON turn_lifecycle (turn_id)
+    INCLUDE (session_id, recovery_model_call_id)
+    WHERE state_kind = 'active'
+      AND active_phase_kind = 'awaiting_model_call_recovery'
+      AND recovery_model_call_id IS NOT NULL;
+
 CREATE TABLE automatic_model_call_reconciliation_attempt (
     turn_id uuid NOT NULL,
     attempt_ordinal integer NOT NULL,

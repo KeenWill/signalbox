@@ -166,7 +166,7 @@ impl PostgresModelCallReconciliationRepository {
         &self,
     ) -> Result<ModelCallReconciliationBatch, ModelCallReconciliationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        discover_recoveries(&mut transaction).await?;
+        discover_recoveries(&mut transaction, CLAIM_WINDOW).await?;
         settle_abandoned_attempts(&mut transaction).await?;
         mark_superseded_recoveries(&mut transaction).await?;
         let exhausted_rows = mark_exhausted_recoveries(&mut transaction).await?;
@@ -343,22 +343,62 @@ impl PostgresModelCallReconciliationRepository {
     }
 }
 
+const DISCOVER_RECOVERIES: &str = "WITH discovery AS (
+            SELECT after_turn_id
+              FROM automatic_model_call_reconciliation_discovery_state
+             WHERE singleton
+             FOR UPDATE
+         ), page AS (
+            SELECT turn_id, session_id, recovery_model_call_id
+              FROM turn_lifecycle, discovery
+             WHERE state_kind = 'active'
+               AND active_phase_kind = 'awaiting_model_call_recovery'
+               AND recovery_model_call_id IS NOT NULL
+               AND (after_turn_id IS NULL OR turn_id > after_turn_id)
+             ORDER BY turn_id
+             LIMIT $1
+         ), inserted AS (
+            INSERT INTO automatic_model_call_reconciliation
+                (turn_id, session_id, model_call_id)
+            SELECT turn_id, session_id, recovery_model_call_id FROM page
+            ON CONFLICT (turn_id) DO NOTHING
+            RETURNING turn_id
+         )
+         UPDATE automatic_model_call_reconciliation_discovery_state
+            SET after_turn_id = (
+                SELECT turn_id
+                  FROM page
+                 ORDER BY turn_id DESC
+                 LIMIT 1
+            )
+          WHERE singleton";
+
 async fn discover_recoveries(
     connection: &mut PgConnection,
+    window: i64,
 ) -> Result<(), ModelCallReconciliationRepositoryError> {
-    sqlx::query(
-        "INSERT INTO automatic_model_call_reconciliation
-            (turn_id, session_id, model_call_id)
-         SELECT turn_id, session_id, recovery_model_call_id
-           FROM turn_lifecycle
-          WHERE state_kind = 'active'
-            AND active_phase_kind = 'awaiting_model_call_recovery'
-            AND recovery_model_call_id IS NOT NULL
-         ON CONFLICT (turn_id) DO NOTHING",
-    )
-    .execute(connection)
-    .await?;
+    sqlx::query(DISCOVER_RECOVERIES)
+        .bind(window)
+        .execute(connection)
+        .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CLAIM_WINDOW, DISCOVER_RECOVERIES};
+
+    #[test]
+    fn discovery_is_a_bounded_keyset_page() {
+        assert!(CLAIM_WINDOW > 0);
+        assert!(DISCOVER_RECOVERIES.contains("turn_id > after_turn_id"));
+        assert!(DISCOVER_RECOVERIES.contains("ORDER BY turn_id"));
+        assert!(DISCOVER_RECOVERIES.contains("LIMIT $1"));
+        assert!(DISCOVER_RECOVERIES.contains("FOR UPDATE"));
+        assert!(DISCOVER_RECOVERIES.contains("SET after_turn_id"));
+        assert!(DISCOVER_RECOVERIES.contains("ORDER BY turn_id DESC"));
+        assert!(!DISCOVER_RECOVERIES.contains("max(turn_id)"));
+    }
 }
 
 async fn settle_abandoned_attempts(
