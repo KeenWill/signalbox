@@ -18,12 +18,14 @@ is verified against this PR (`agent/goal-blocked-autoresume`), and its one
 exemption — the block an unattended dispatch approval escalation appends —
 against this PR (`agent/headless-approval-escalation`); that exemption's
 extension to operator-commissioned dispatch is verified against this PR
-(`agent/commissioned-dispatch-fence`). Identity and durable-command mechanics
-remain owned by [identity and commands](identity-and-commands.md), turn
-execution by [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md),
-tool dispatch by [tool loop](tool-loop.md), and framing by
-[process protocol](process-protocol.md). INV-048 is the lifecycle enforcement
-family indexed by [the invariant test index](../invariants.md).
+(`agent/commissioned-dispatch-fence`). Restart reconciliation of pending
+automatic resumptions is verified against this PR
+(`agent/daemon-live-goal-resume-rearm`). Identity and durable-command mechanics
+remain owned by [identity and commands](identity-and-commands.md), turn execution
+by [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool
+dispatch by [tool loop](tool-loop.md), and framing by [process
+protocol](process-protocol.md). INV-048 is the lifecycle enforcement family
+indexed by [the invariant test index](../invariants.md).
 
 ## Statement lineage and state
 
@@ -245,6 +247,15 @@ scheduler pass, which returns its ambiguity without waiting. Arming a block
 another pass already armed is harmless for the same reason a retry is: both
 derive one identity, and the second attempt replays it.
 
+**Implemented behavior.** Startup inventories current execution-failure blocks
+whose exact need promises automatic resumption and treats their lost timers as
+immediately due. The inventory excludes exhausted attempts and blocks whose
+need requires an operator, including unattended approval escalations. Inventory
+failure receives three retries at a one-second cadence and then remains a
+visible durable block; individual resume attempts use the ordinary bounded
+reconciliation and derived command identity, so concurrent or repeated startup
+attempts cannot append two resumptions for one block.
+
 **Implemented behavior.** One execution-failure block is exempt from automatic
 resumption: the block an unattended dispatch approval escalation appends in the
 transaction that fails its turn, described by [repository watch](repo-watch.md),
@@ -389,8 +400,7 @@ re-entering completion.
 
 ## Open edges
 
-**Deferred or undecided work.** Re-arming a pending automatic resumption across
-a daemon restart, and separating consecutive execution failures from ones
-distant in the same pursuit, are recorded under
-[goal mode](../open-questions.md#goal-mode). No other goal-mode open question is
+**Deferred or undecided work.** Separating consecutive execution failures from
+ones distant in the same pursuit is recorded under [goal
+mode](../open-questions.md#goal-mode). No other goal-mode open question is
 recorded by this version-one contract.

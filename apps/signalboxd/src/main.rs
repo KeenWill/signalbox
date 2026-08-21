@@ -1755,14 +1755,28 @@ async fn run_hub(
         StaleActiveTurnBound::hard_ceiling(),
         TurnLivenessScanInterval::baseline(),
     );
-    let pass = GoalAwareEligibilityPass::new(
-        activated_pass,
-        PostgresGoalPassDisposition::new(
-            scheduler_pool,
-            model_configuration.clone(),
-            eligibility_nudge,
-        ),
+    let goal_disposition = PostgresGoalPassDisposition::new(
+        scheduler_pool,
+        model_configuration.clone(),
+        eligibility_nudge,
     );
+    match goal_disposition
+        .reconcile_automatic_resumptions_after_restart()
+        .await
+    {
+        Ok(rearmed) => tracing::info!(
+            phase = ?RuntimePhase::StartupScan,
+            rearmed_goal_resumption_count = rearmed,
+            "daemon startup reconciled automatic goal resumptions"
+        ),
+        Err(error) => tracing::error!(
+            phase = ?RuntimePhase::StartupScan,
+            cause_code = error.operator_failure_cause_code(),
+            cause = %error,
+            "daemon startup exhausted automatic goal-resumption reconciliation"
+        ),
+    }
+    let pass = GoalAwareEligibilityPass::new(activated_pass, goal_disposition);
     let scheduler_max_in_flight_passes = model_configuration.scheduler_max_in_flight_passes();
     let mut scheduler = match scheduler_max_in_flight_passes {
         Some(limit) => match NonZeroUsize::new(limit) {

@@ -898,16 +898,26 @@ async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<()
         attached_turn.turn()
     );
     terminalize_goal_turn_as_failed(&pool, 0xe70).await?;
+    let scheduled_need = GoalNeed::try_new(String::from(
+        "automatic resumption is scheduled; repair execution",
+    ))
+    .expect("fixture need is admitted");
     let blocked = repository
         .block_execution_failure(
             session(SESSION),
-            GoalNeed::try_new(String::from("repair execution")).expect("fixture need is admitted"),
+            scheduled_need.clone(),
             GoalSchedulerProvenance::new(attached_turn.turn()),
         )
         .await?;
     let GoalTransitionOutcome::Applied(blocked) = blocked else {
         panic!("fixture execution-failure block must apply");
     };
+    let pending = repository
+        .pending_execution_failures_with_need(&scheduled_need)
+        .await?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].session(), session(SESSION));
+    assert_eq!(pending[0].blocked(), blocked.ordinal());
 
     // The attach event is no longer the lineage head, so a command expecting it
     // answers a state that has moved on.
@@ -944,6 +954,12 @@ async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<()
         )
         .await?;
     assert_applied_command(resumed);
+    assert!(
+        repository
+            .pending_execution_failures_with_need(&scheduled_need)
+            .await?
+            .is_empty()
+    );
     let spent: i64 =
         sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
             .bind(Uuid::from_u128(RESUME_COMMAND))
