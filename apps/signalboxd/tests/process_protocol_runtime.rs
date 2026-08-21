@@ -8,10 +8,14 @@ use std::{
     collections::VecDeque,
     error::Error,
     fs,
+    future::pending,
     io::{self, ErrorKind},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -717,6 +721,41 @@ impl RunningRuntime {
         if let Some(registry) = self.blob_store_registry.as_ref() {
             runtime = runtime.with_blob_store_registry(Arc::clone(registry));
         }
+        let provider_text_deltas = runtime.provider_text_delta_sink();
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        self.shutdown = shutdown;
+        self.runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
+        self.work_source = Some(work_source);
+        self.provider_text_deltas = provider_text_deltas;
+        Ok(recovered_turn_count)
+    }
+
+    /// Simulates the uncatchable process death used by the fleet soak. The
+    /// replacement opens the same socket and database only after the killed
+    /// task has stopped, so no graceful runtime shutdown can repair its work.
+    async fn kill_and_restart(&mut self) -> Result<usize, Box<dyn Error>> {
+        self.runtime_task.abort();
+        let killed = (&mut self.runtime_task).await;
+        assert!(killed.is_err_and(|error| error.is_cancelled()));
+
+        let mut scan = StartupScanService::new(
+            UuidV7StartupScanIdGenerator,
+            PostgresStartupScanRepository::new(self.pool.clone()),
+        );
+        let recovered_turn_count = scan.execute().await?.recovered_turn_count();
+        let listener = LocalProcessListener::bind(self.socket())?;
+        let sweep = PostgresEligibilitySweep::new(self.pool.clone());
+        let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+        let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+        let template_configuration = session_template_configuration(&model_configuration)?;
+        let runtime = ProcessRuntime::new_with_templates(
+            listener,
+            self.pool.clone(),
+            eligibility_nudge,
+            InProcessToolDispatchGate::default(),
+            model_configuration,
+            template_configuration,
+        );
         let provider_text_deltas = runtime.provider_text_delta_sink();
         let (shutdown, shutdown_receiver) = watch::channel(false);
         self.shutdown = shutdown;
@@ -2167,6 +2206,310 @@ fn completed_script(provider_model: &str, text: &str, usage: TokenUsage) -> Scri
         content: vec![AssistantPart::Text(text.to_owned())],
         usage,
     }))
+}
+
+// Fleet-soak foundation for issue #1027.
+//
+// The default CI mode proves that current main still exhibits the two live
+// failure signatures without making the PostgreSQL integration job red. Set
+// `SIGNALBOX_ENFORCE_FLEET_LIVENESS=1` to invert those probes into the desired
+// liveness assertions; the two tests then fail until pass occupancy and
+// restart recovery are hardened. Slow/failing tools, boundary loss, an
+// unprovisioned workspace, and scheduled goal resumption are named follow-on
+// slices: they need the same fleet census but not more boot infrastructure.
+
+// numeric-bound: test fleet - matches the production scheduler admission cap
+const FLEET_SESSION_COUNT: usize = 16;
+// numeric-bound: test deadline - keeps each fault probe inside one CI minute
+const FLEET_ASSERTION_BOUND: Duration = Duration::from_secs(2);
+// numeric-bound: test setup - admits contended CI scheduling without weakening assertions
+const FLEET_SETUP_BOUND: Duration = Duration::from_secs(60);
+const FLEET_ENFORCEMENT_ENV: &str = "SIGNALBOX_ENFORCE_FLEET_LIVENESS";
+
+struct FleetPrepared {
+    inner: Option<ScriptedPrepared<ModelCallId>>,
+}
+
+#[derive(Clone)]
+struct FleetScriptedModel {
+    inner: ScriptedModel<ModelCallId>,
+    hangs_remaining: Arc<AtomicUsize>,
+    in_flight_hangs: Arc<AtomicUsize>,
+}
+
+impl FleetScriptedModel {
+    fn new(hang_count: usize, completed_count: usize) -> Self {
+        Self {
+            inner: ScriptedModel::following(std::iter::repeat_n(
+                completed_script(
+                    "fixture-model",
+                    "fleet session completed",
+                    TokenUsage::unreported(),
+                ),
+                completed_count,
+            )),
+            hangs_remaining: Arc::new(AtomicUsize::new(hang_count)),
+            in_flight_hangs: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn in_flight_hangs(&self) -> usize {
+        self.in_flight_hangs.load(Ordering::SeqCst)
+    }
+}
+
+struct FleetHangGuard(Arc<AtomicUsize>);
+
+impl Drop for FleetHangGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl ModelRuntime<ModelCallId> for FleetScriptedModel {
+    type Prepared = FleetPrepared;
+
+    async fn prepare(
+        &self,
+        operation: ModelOperation<ModelCallId>,
+        cancellation: CancellationSignal,
+    ) -> PreparationOutcome<ModelCallId, Self::Prepared> {
+        let hangs = self
+            .hangs_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
+        if hangs {
+            PreparationOutcome::Prepared(FleetPrepared { inner: None })
+        } else {
+            match self.inner.prepare(operation, cancellation).await {
+                PreparationOutcome::Prepared(inner) => {
+                    PreparationOutcome::Prepared(FleetPrepared { inner: Some(inner) })
+                }
+                PreparationOutcome::Defect {
+                    correlation,
+                    defect,
+                } => PreparationOutcome::Defect {
+                    correlation,
+                    defect,
+                },
+                PreparationOutcome::Cancelled { correlation } => {
+                    PreparationOutcome::Cancelled { correlation }
+                }
+                PreparationOutcome::Failed {
+                    correlation,
+                    failure,
+                } => PreparationOutcome::Failed {
+                    correlation,
+                    failure,
+                },
+            }
+        }
+    }
+
+    async fn execute(
+        &self,
+        prepared: Self::Prepared,
+        sink: &mut (dyn ObservationSink<ModelCallId> + Send),
+        cancellation: CancellationSignal,
+    ) -> TerminalReport<ModelCallId> {
+        match prepared.inner {
+            Some(inner) => self.inner.execute(inner, sink, cancellation).await,
+            None => {
+                self.in_flight_hangs.fetch_add(1, Ordering::SeqCst);
+                let _guard = FleetHangGuard(Arc::clone(&self.in_flight_hangs));
+                pending::<TerminalReport<ModelCallId>>().await
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CommissionedFleet {
+    sessions: Vec<CanonicalUuid>,
+}
+
+async fn commission_fleet(runtime: &RunningRuntime) -> Result<CommissionedFleet, Box<dyn Error>> {
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let mut sessions = Vec::with_capacity(FLEET_SESSION_COUNT);
+    for index in 0..FLEET_SESSION_COUNT {
+        connection
+            .request(
+                u64::try_from(index + 2)?,
+                ClientRequest::CommissionSession {
+                    command_id: command()?,
+                    template_name: String::from("merge-forward"),
+                    fence: CommissionedSessionFence::Branch {
+                        repository: String::from("sample-user/sample-repository"),
+                        branch: format!("agent/fleet-soak-{index}"),
+                    },
+                    statement: format!("complete fleet soak session {index}"),
+                    content: InputContent::new(String::from("return the scripted reply")),
+                },
+            )
+            .await?;
+        let response = response_within(&mut connection).await?.message().clone();
+        let ServerMessage::SessionCommissioned { session_id, .. } = response else {
+            panic!("fleet commission returned {response:?}");
+        };
+        sessions.push(session_id);
+    }
+    Ok(CommissionedFleet { sessions })
+}
+
+fn start_fleet_scheduler(
+    runtime: &mut RunningRuntime,
+    model: FleetScriptedModel,
+) -> Result<JoinHandle<SchedulerLoopExit>, Box<dyn Error>> {
+    let configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let provider = RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog())
+        .with_text_delta_sink(runtime.provider_text_delta_sink());
+    let (execution, _fatal) = FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+        PostgresModelCallRepository::new(
+            runtime.pool.clone(),
+            configuration.target_catalog(),
+            ModelCallCredentialReference::new("fleet-soak-fixture"),
+        ),
+        InProcessAttemptDispatchGate::default(),
+        provider,
+    ));
+    let pass = ActivatedTurnPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(runtime.pool.clone()),
+        ),
+        execution,
+    );
+    let mut scheduler = SchedulerLoop::new(runtime.take_work_source(), pass);
+    Ok(tokio::spawn(async move {
+        scheduler.run_until(pending::<()>()).await
+    }))
+}
+
+async fn wait_for_hangs(model: &FleetScriptedModel, expected: usize) -> Result<(), Box<dyn Error>> {
+    timeout(FLEET_SETUP_BOUND, async {
+        while model.in_flight_hangs() != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
+async fn fleet_lifecycle_counts(pool: &PgPool) -> Result<(i64, i64), Box<dyn Error>> {
+    Ok(sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE state_kind = 'active'),
+                count(*) FILTER (WHERE state_kind = 'terminal')
+           FROM turn_lifecycle",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn fleet_terminal_call_count(pool: &PgPool) -> Result<i64, Box<dyn Error>> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*) FROM model_call WHERE terminal_disposition_kind IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+fn enforce_fleet_liveness() -> bool {
+    std::env::var_os(FLEET_ENFORCEMENT_ENV).is_some()
+}
+
+fn assert_hung_fleet_outcome(
+    model: &FleetScriptedModel,
+    active: i64,
+    terminal: i64,
+    typed_terminal_calls: i64,
+) -> Result<(), Box<dyn Error>> {
+    if enforce_fleet_liveness() {
+        assert_eq!(model.in_flight_hangs(), 0, "hung call retained a pass slot");
+        assert_eq!(active, 0, "an active turn exceeded the watchdog bound");
+        assert_eq!(terminal, i64::try_from(FLEET_SESSION_COUNT)?);
+        assert_eq!(typed_terminal_calls, i64::try_from(FLEET_SESSION_COUNT)?);
+    } else {
+        assert_eq!(
+            model.in_flight_hangs(),
+            1,
+            "issue #1027 no longer reproduces"
+        );
+        assert_eq!(active, 1);
+        assert_eq!(terminal, i64::try_from(FLEET_SESSION_COUNT - 1)?);
+        assert_eq!(
+            typed_terminal_calls,
+            i64::try_from(FLEET_SESSION_COUNT - 1)?
+        );
+    }
+    Ok(())
+}
+
+fn assert_restarted_fleet_outcome(active: i64, terminal: i64) -> Result<(), Box<dyn Error>> {
+    if enforce_fleet_liveness() {
+        assert_eq!(active, 0, "post-restart active turns were orphaned");
+        assert_eq!(terminal, i64::try_from(FLEET_SESSION_COUNT)?);
+    } else {
+        assert_eq!(active, i64::try_from(FLEET_SESSION_COUNT)?);
+        assert_eq!(terminal, 0, "issue #1027 no longer reproduces");
+    }
+    Ok(())
+}
+
+/// Issue #1027 expected failure: a hung model call retains one authoritative
+/// scheduler pass and has no durable typed terminal record beyond the stated
+/// occupancy bound. Enforcement mode asserts the intended inverse.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposition()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let fleet = commission_fleet(&runtime).await?;
+    let model = FleetScriptedModel::new(1, FLEET_SESSION_COUNT - 1);
+    let scheduler = start_fleet_scheduler(&mut runtime, model.clone())?;
+    wait_for_hangs(&model, 1).await?;
+    tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
+    let (active, terminal) = fleet_lifecycle_counts(&runtime.pool).await?;
+    let typed_terminal_calls = fleet_terminal_call_count(&runtime.pool).await?;
+
+    assert_eq!(fleet.sessions.len(), FLEET_SESSION_COUNT);
+    assert_hung_fleet_outcome(&model, active, terminal, typed_terminal_calls)?;
+
+    scheduler.abort();
+    let _ = scheduler.await;
+    runtime.stop().await
+}
+
+/// Issue #1027 expected failure: killing the daemon with a full fleet in model
+/// execution leaves the recovered turns parked and silent after replacement
+/// scheduling begins. Enforcement mode requires every prior active turn to
+/// resume or terminalize within the fleet bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let fleet = commission_fleet(&runtime).await?;
+    let hanging_model = FleetScriptedModel::new(FLEET_SESSION_COUNT, 0);
+    let first_scheduler = start_fleet_scheduler(&mut runtime, hanging_model.clone())?;
+    wait_for_hangs(&hanging_model, FLEET_SESSION_COUNT).await?;
+    first_scheduler.abort();
+    let _ = first_scheduler.await;
+    let _recovered = runtime.kill_and_restart().await?;
+    let replacement_model = FleetScriptedModel::new(0, FLEET_SESSION_COUNT);
+    let replacement_scheduler = start_fleet_scheduler(&mut runtime, replacement_model)?;
+    tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
+    let (active, terminal) = fleet_lifecycle_counts(&runtime.pool).await?;
+    let typed_terminal_calls = fleet_terminal_call_count(&runtime.pool).await?;
+
+    assert_eq!(fleet.sessions.len(), FLEET_SESSION_COUNT);
+    assert_eq!(typed_terminal_calls, i64::try_from(FLEET_SESSION_COUNT)?);
+    assert_restarted_fleet_outcome(active, terminal)?;
+
+    replacement_scheduler.abort();
+    let _ = replacement_scheduler.await;
+    runtime.stop().await
 }
 
 fn rendered_text_messages(
