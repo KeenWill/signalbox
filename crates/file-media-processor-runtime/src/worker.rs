@@ -70,13 +70,40 @@ impl WorkerCatalog {
             .collect()
     }
 
-    fn declaration_fingerprint(&self) -> [u8; 32] {
-        declaration_fingerprint_ordered(
-            self.provider_order.len(),
-            self.provider_order
+    fn declaration_fingerprint(
+        &self,
+        requested_providers: &[std::ffi::OsString],
+    ) -> Result<[u8; 32], WorkerServiceError> {
+        let mut selected = if requested_providers.is_empty() {
+            self.provider_order.clone()
+        } else {
+            Vec::with_capacity(requested_providers.len())
+        };
+        for requested in requested_providers {
+            let requested = requested.to_str().ok_or(WorkerServiceError::Protocol)?;
+            let index = self
+                .provider_order
+                .iter()
+                .copied()
+                .find(|index| self.providers[*index].declaration().provider().as_str() == requested)
+                .ok_or(WorkerServiceError::Protocol)?;
+            if selected.contains(&index) {
+                return Err(WorkerServiceError::Protocol);
+            }
+            selected.push(index);
+        }
+        selected.sort_by(|left, right| {
+            self.providers[*left]
+                .declaration()
+                .provider()
+                .cmp(self.providers[*right].declaration().provider())
+        });
+        Ok(declaration_fingerprint_ordered(
+            selected.len(),
+            selected
                 .iter()
                 .map(|index| self.providers[*index].declaration()),
-        )
+        ))
     }
 
     fn provider(
@@ -141,12 +168,10 @@ impl Error for WorkerServiceError {}
 /// Serves exactly one daemon invocation over length-delimited standard I/O.
 pub async fn serve_one(catalog: &WorkerCatalog) -> Result<(), WorkerServiceError> {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if arguments
-        == [std::ffi::OsString::from(
-            "--signalbox-file-media-isolation-probe",
-        )]
-    {
-        let fingerprint = catalog.declaration_fingerprint();
+    if arguments.first().is_some_and(|argument| {
+        argument == std::ffi::OsStr::new("--signalbox-file-media-isolation-probe")
+    }) {
+        let fingerprint = catalog.declaration_fingerprint(&arguments[1..])?;
         let mut output = tokio::io::stdout();
         output
             .write_all(fingerprint.as_slice())

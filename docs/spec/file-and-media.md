@@ -158,8 +158,9 @@ address-space, CPU, task, core-dump, and descriptor limits to the sandbox proces
 and all inherited worker threads. The configured memory ceiling is one combined
 budget: half is reserved for address space and half is split between the two
 writable tmpfs mounts, so their maxima cannot add to more than the configured
-value. Construction fails for effective UID 0 because Linux exempts that
-identity from `RLIMIT_NPROC`, making the task ceiling unenforceable. The daemon
+value. Construction fails when either the real or effective UID is 0 because
+Linux exempts those identities from `RLIMIT_NPROC`, making the task ceiling
+unenforceable. The daemon
 independently owns the wall deadline and kills the isolated process group on
 timeout or authoritative cancellation. Bounded stderr is drained and discarded;
 it is never parser evidence, telemetry content, or model-visible output.

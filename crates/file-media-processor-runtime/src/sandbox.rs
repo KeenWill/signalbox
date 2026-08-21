@@ -147,7 +147,7 @@ impl SandboxedFileMediaProcessor {
         worker: &Path,
         declarations: &[FileMediaProviderDeclaration],
     ) -> Result<(), ProcessorFailure> {
-        let mut running = self.spawn(worker, true).await?;
+        let mut running = self.spawn(worker, Some(declarations)).await?;
         running.release_startup()?;
         let stdout = running
             .child
@@ -230,7 +230,7 @@ impl SandboxedFileMediaProcessor {
                 self.worker(&identity)?.to_owned()
             }
         };
-        let mut running = self.spawn(&worker, false).await?;
+        let mut running = self.spawn(&worker, None).await?;
         running.release_startup()?;
         let stdin = running
             .child
@@ -295,7 +295,11 @@ impl SandboxedFileMediaProcessor {
         }
     }
 
-    async fn spawn(&self, worker: &Path, probe: bool) -> Result<RunningWorker, ProcessorFailure> {
+    async fn spawn(
+        &self,
+        worker: &Path,
+        probe_declarations: Option<&[FileMediaProviderDeclaration]>,
+    ) -> Result<RunningWorker, ProcessorFailure> {
         let seccomp = process_creation_filter().map_err(|_| ProcessorFailure::Unavailable)?;
         let (block_read, block_write) =
             rustix::pipe::pipe().map_err(|_| ProcessorFailure::Unavailable)?;
@@ -306,8 +310,9 @@ impl SandboxedFileMediaProcessor {
             seccomp.as_raw_fd(),
             block_read.as_raw_fd(),
             self.ceilings.memory_bytes(),
-            probe,
+            probe_declarations,
         );
+        let probe = probe_declarations.is_some();
         let mut command = Command::new(&self.bubblewrap);
         command
             .args(profile)
@@ -677,7 +682,7 @@ fn sandbox_arguments(
     seccomp_fd: i32,
     block_fd: i32,
     memory_bytes: u64,
-    probe: bool,
+    probe_declarations: Option<&[FileMediaProviderDeclaration]>,
 ) -> Vec<std::ffi::OsString> {
     let memory = worker_memory_budget(memory_bytes);
     let mut arguments = [
@@ -737,8 +742,14 @@ fn sandbox_arguments(
         std::ffi::OsString::from("--"),
         std::ffi::OsString::from(WORKER_SANDBOX_PATH),
     ]);
-    if probe {
+    if let Some(declarations) = probe_declarations {
         arguments.push(std::ffi::OsString::from(BWRAP_PROBE_ARGUMENT));
+        let mut providers = declarations
+            .iter()
+            .map(|declaration| declaration.provider().as_str())
+            .collect::<Vec<_>>();
+        providers.sort_unstable();
+        arguments.extend(providers.into_iter().map(std::ffi::OsString::from));
     }
     arguments
 }
@@ -809,16 +820,23 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
     #[cfg(not(target_arch = "x86_64"))]
     const X32_SYSCALL_BIT: Option<u32> = None;
     #[cfg(target_arch = "x86_64")]
-    let (audit_arch, clone, clone3, fork, vfork) =
-        (0xc000_003e, 56_u32, 435_u32, Some(57_u32), Some(58_u32));
+    let (audit_arch, clone, clone3, fork, vfork, memfd_create) = (
+        0xc000_003e,
+        56_u32,
+        435_u32,
+        Some(57_u32),
+        Some(58_u32),
+        319_u32,
+    );
     #[cfg(target_arch = "aarch64")]
-    let (audit_arch, clone, clone3, fork, vfork) = (0xc000_00b7, 220_u32, 435_u32, None, None);
+    let (audit_arch, clone, clone3, fork, vfork, memfd_create) =
+        (0xc000_00b7, 220_u32, 435_u32, None, None, 279_u32);
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     return Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "unsupported seccomp architecture",
     ));
-    let mut syscall_denials = Vec::new();
+    let mut syscall_denials = vec![memfd_create];
     if let Some(fork) = fork {
         syscall_denials.push(fork);
     }
@@ -985,7 +1003,7 @@ mod tests {
     #[test]
     fn sandbox_profile_clears_authority_before_the_exact_worker() {
         let arguments =
-            sandbox_arguments(Path::new("/fixture/worker"), 8, 9, 512 * 1024 * 1024, false);
+            sandbox_arguments(Path::new("/fixture/worker"), 8, 9, 512 * 1024 * 1024, None);
         let expected_prefix = [
             "--die-with-parent",
             "--new-session",
@@ -1075,6 +1093,26 @@ mod tests {
         assert_eq!(program[0].value, 4);
         assert_eq!(program[2].value, 0x8000_0000);
         assert_eq!(program.last().map(|entry| entry.value), Some(0x7fff_0000));
+    }
+
+    #[test]
+    fn descendant_filter_denies_unbudgeted_memfd_allocations() {
+        let program = seccomp_instructions().expect("the test architecture is supported");
+        #[cfg(target_arch = "x86_64")]
+        let memfd_create = 319_u32;
+        #[cfg(target_arch = "aarch64")]
+        let memfd_create = 279_u32;
+        let (index, check) = program
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.value == memfd_create)
+            .expect("memfd_create is checked");
+        assert_eq!(check.code, 0x15);
+        let denial = index + 1 + usize::from(check.jump_true);
+        assert_eq!(
+            program.get(denial).map(|entry| entry.value),
+            Some(0x0005_0001)
+        );
     }
 
     #[cfg(target_arch = "x86_64")]
