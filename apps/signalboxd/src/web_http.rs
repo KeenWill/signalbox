@@ -13,6 +13,7 @@ use std::{
     num::NonZeroU64,
     path::PathBuf,
     str::FromStr as _,
+    sync::Arc,
 };
 
 use axum::{
@@ -33,13 +34,18 @@ use axum::{
 };
 use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use signalbox_blob_store::MAX_BLOB_RANGE_BYTES;
 use signalbox_domain::{BlobDerivation, BlobDerivationProducer, BlobDigest};
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
     WebBlobAvailableView, WebBlobDerivation, WebBlobDerivationProducer, WebBlobDescriptor,
     WebBlobViewKind, WebContractBootstrap, WebContractExample,
 };
-use tokio::{io::AsyncReadExt as _, net::TcpListener, sync::watch};
+use tokio::{
+    io::AsyncReadExt as _,
+    net::TcpListener,
+    sync::{OwnedSemaphorePermit, Semaphore, watch},
+};
 use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
 
@@ -62,10 +68,12 @@ const HTTP_DEFAULT_PORT: u16 = 80;
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 const MAX_DISPLAY_FILENAME_BYTES: usize = 1024;
 const BLOB_STREAM_CHUNK_BYTES: usize = 64 * 1024;
+const MAX_CONCURRENT_WEB_BLOB_READS: usize = 4;
 
 #[derive(Clone, Debug)]
 struct WebHttpState {
     blobs: Option<WebBlobRuntime>,
+    blob_read_budget: Arc<Semaphore>,
 }
 
 /// Deployment-owned browser listener and production assets configuration.
@@ -253,7 +261,10 @@ pub fn production_router(asset_root: Option<PathBuf>, blobs: Option<WebBlobRunti
             get(blob_download).head(blob_download),
         )
         .fallback(api_not_found)
-        .with_state(WebHttpState { blobs });
+        .with_state(WebHttpState {
+            blobs,
+            blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS)),
+        });
     let router = Router::new().nest("/api", api);
     match asset_root {
         Some(root) => router.fallback_service(
@@ -587,10 +598,10 @@ async fn serve_blob(
         return not_modified_response(&etag);
     }
     let total = entry.expected().byte_length();
-    let requested_range = request
-        .headers()
-        .get(RANGE)
-        .filter(|_| if_range_matches(request.headers(), &etag));
+    let requested_range = match single_range_header(request.headers()) {
+        Ok(range) => range.filter(|_| if_range_matches(request.headers(), &etag)),
+        Err(()) => return range_not_satisfiable(total, &etag),
+    };
     let (offset, length, partial) = match requested_range {
         Some(range) => match parse_byte_range(range, total) {
             Ok(range) => range,
@@ -609,18 +620,29 @@ async fn serve_blob(
         }
     };
     let method = request.method().clone();
+    if method != Method::HEAD && length > MAX_BLOB_RANGE_BYTES {
+        return range_not_satisfiable(total, &etag);
+    }
     let body = if method == Method::HEAD {
         Body::empty()
     } else {
         let Some(length) = NonZeroU64::new(length) else {
             return range_not_satisfiable(total, &etag);
         };
+        let Some(permit) = try_acquire_web_blob_read_permit(Arc::clone(&state.blob_read_budget))
+        else {
+            return application_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "blob_read_busy",
+                "blob read capacity is busy",
+            );
+        };
         let reader =
             match open_recorded_blob_range(runtime.registry(), &entry, offset, length).await {
                 Ok(reader) => reader,
                 Err(error) => return blob_read_error_response(error),
             };
-        reader_body(reader, length.get())
+        reader_body(reader, length.get(), permit)
     };
     let mut response = Response::new(body);
     *response.status_mut() = if partial {
@@ -644,24 +666,38 @@ async fn serve_blob(
     response
 }
 
-fn reader_body(reader: signalbox_blob_store::BlobReader, length: u64) -> Body {
-    let source = stream::try_unfold((reader, length), |(mut reader, remaining)| async move {
-        if remaining == 0 {
-            return Ok(None);
-        }
-        let capacity = usize::try_from(remaining.min(BLOB_STREAM_CHUNK_BYTES as u64))
-            .map_err(|_| io::Error::other("blob response length is invalid"))?;
-        let mut buffer = vec![0_u8; capacity];
-        let read = reader.read(&mut buffer).await?;
-        if read == 0 {
-            return Err(io::Error::other(
-                "blob response ended before its declared length",
-            ));
-        }
-        buffer.truncate(read);
-        let read = u64::try_from(read).map_err(|_| io::Error::other("blob read is invalid"))?;
-        Ok(Some((Bytes::from(buffer), (reader, remaining - read))))
-    });
+fn try_acquire_web_blob_read_permit(budget: Arc<Semaphore>) -> Option<OwnedSemaphorePermit> {
+    budget.try_acquire_owned().ok()
+}
+
+fn reader_body(
+    reader: signalbox_blob_store::BlobReader,
+    length: u64,
+    permit: OwnedSemaphorePermit,
+) -> Body {
+    let source = stream::try_unfold(
+        (reader, length, permit),
+        |(mut reader, remaining, permit)| async move {
+            if remaining == 0 {
+                return Ok(None);
+            }
+            let capacity = usize::try_from(remaining.min(BLOB_STREAM_CHUNK_BYTES as u64))
+                .map_err(|_| io::Error::other("blob response length is invalid"))?;
+            let mut buffer = vec![0_u8; capacity];
+            let read = reader.read(&mut buffer).await?;
+            if read == 0 {
+                return Err(io::Error::other(
+                    "blob response ended before its declared length",
+                ));
+            }
+            buffer.truncate(read);
+            let read = u64::try_from(read).map_err(|_| io::Error::other("blob read is invalid"))?;
+            Ok(Some((
+                Bytes::from(buffer),
+                (reader, remaining - read, permit),
+            )))
+        },
+    );
     Body::from_stream(source)
 }
 
@@ -699,6 +735,15 @@ fn parse_canonical_u64(value: &str) -> Result<u64, ()> {
         return Err(());
     }
     value.parse().map_err(|_| ())
+}
+
+fn single_range_header(headers: &HeaderMap) -> Result<Option<&HeaderValue>, ()> {
+    let mut values = headers.get_all(RANGE).iter();
+    let first = values.next();
+    if values.next().is_some() {
+        return Err(());
+    }
+    Ok(first)
 }
 
 fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
@@ -1079,6 +1124,7 @@ mod tests {
         io::{self, Write as _},
         net::SocketAddr,
         path::PathBuf,
+        sync::Arc,
         time::Duration,
     };
 
@@ -1090,14 +1136,15 @@ mod tests {
     use signalbox_web_contract::{
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebContractBootstrap, WebContractExample,
     };
-    use tokio::sync::{mpsc, watch};
+    use tokio::sync::{Semaphore, mpsc, watch};
     use tower::ServiceExt as _;
     use url::Url;
 
     use super::{
-        DEFAULT_WEB_BIND_ADDRESS, WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime,
-        content_disposition, deterministic_test_router, ndjson_response, parse_byte_range,
-        production_router,
+        DEFAULT_WEB_BIND_ADDRESS, MAX_CONCURRENT_WEB_BLOB_READS, WebHttpConfiguration,
+        WebHttpConfigurationError, WebHttpRuntime, content_disposition, deterministic_test_router,
+        ndjson_response, parse_byte_range, production_router, single_range_header,
+        try_acquire_web_blob_read_permit,
     };
 
     fn loopback_ephemeral() -> SocketAddr {
@@ -1126,6 +1173,30 @@ mod tests {
         assert_eq!(multiple, Err(()));
         assert_eq!(noncanonical, Err(()));
         assert_eq!(unsatisfied, Err(()));
+    }
+
+    #[test]
+    fn repeated_http_range_fields_are_rejected() {
+        let mut headers = header::HeaderMap::new();
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=0-1"));
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=4-5"));
+
+        assert_eq!(single_range_header(&headers), Err(()));
+    }
+
+    #[test]
+    fn web_blob_read_budget_rejects_without_waiting_and_recovers_on_drop() {
+        let budget = Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS));
+        let held = Arc::clone(&budget)
+            .try_acquire_many_owned(
+                u32::try_from(MAX_CONCURRENT_WEB_BLOB_READS)
+                    .expect("the fixed web blob read capacity fits u32"),
+            )
+            .expect("the fixture acquires the complete read budget");
+
+        assert!(try_acquire_web_blob_read_permit(Arc::clone(&budget)).is_none());
+        drop(held);
+        assert!(try_acquire_web_blob_read_permit(budget).is_some());
     }
 
     #[test]

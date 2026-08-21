@@ -49,11 +49,6 @@ test.afterEach(async ({ page }, testInfo) => {
 
 test('selects an image capability without prefetching original bytes', async ({ page }) => {
   const problems = watchBrowser(page)
-  const blobRequests: string[] = []
-  page.on('request', (request) => {
-    const path = new URL(request.url()).pathname
-    if (path.startsWith('/api/blobs/')) blobRequests.push(path)
-  })
 
   const previewResponse = page.waitForResponse(
     (response) => new URL(response.url()).pathname === previewPath,
@@ -66,19 +61,24 @@ test('selects an image capability without prefetching original bytes', async ({ 
     .poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth))
     .toBeGreaterThan(0)
   expect((await previewResponse).headers()['content-type']).toContain('image/png')
-  expect(blobRequests).toContain(previewPath)
-  expect(blobRequests).not.toContain(originalPath)
+  expect(
+    await page.evaluate(
+      (path) => performance.getEntriesByName(new URL(path, location.href).href).length,
+      originalPath,
+    ),
+  ).toBe(0)
 
   const originalResponse = page.waitForResponse(
     (response) => new URL(response.url()).pathname === originalPath,
   )
   await page.getByRole('button', { name: 'Load original' }).click()
-  await expect(image).toHaveAttribute('src', originalPath)
+  const original = page.getByRole('img', { name: 'Original of orbital-map.png' })
+  await expect(original).toBeVisible()
+  await expect(original).toHaveAttribute('src', originalPath)
   await expect
-    .poll(() => image.evaluate((element) => (element as HTMLImageElement).naturalWidth))
+    .poll(() => original.evaluate((element) => (element as HTMLImageElement).naturalWidth))
     .toBeGreaterThan(0)
   expect((await originalResponse).headers()['content-type']).toContain('image/png')
-  expect(blobRequests).toContain(originalPath)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -95,7 +95,8 @@ test('falls back to metadata and download for an unknown binary capability', asy
   await expect(download).toHaveAttribute('download', 'telemetry.capture')
   const href = await download.getAttribute('href')
   expect(href).not.toBeNull()
-  const url = new URL(href ?? '', 'http://signalbox.invalid')
+  const url = new URL(href ?? '', page.url())
+  expect(url.origin).toBe(new URL(page.url()).origin)
   expect(url.pathname).toBe(binaryDownloadPath)
   expect(url.searchParams.get('media_type')).toBe('application/octet-stream')
   expect(url.searchParams.get('display_filename')).toBe('telemetry.capture')

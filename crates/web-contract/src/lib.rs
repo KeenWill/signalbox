@@ -143,12 +143,14 @@ pub enum WebBlobDerivationProducer {
 #[serde(deny_unknown_fields)]
 pub struct WebBlobDerivation {
     pub derivation_id: String,
+    #[schemars(length(min = 1, max = 16))]
     pub input_digests: Vec<String>,
     pub transformation_name: String,
     #[schemars(range(min = 1))]
     pub transformation_version: u32,
     pub parameters_json: String,
     pub producer: WebBlobDerivationProducer,
+    #[schemars(length(min = 1, max = 16))]
     pub output_digests: Vec<String>,
 }
 

@@ -162,6 +162,56 @@ test("generated blob decoder rejects a zero transformation version", () => {
   );
 });
 
+test("generated blob decoder rejects invalid derivation digest cardinality", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const derivation = {
+    derivation_id: "01990f5f-55c0-7000-8000-000000000001",
+    input_digests: [],
+    output_digests: Array.from({ length: 17 }, () => digest),
+    transformation_name: "image.preview",
+    transformation_version: 1,
+    parameters_json: "{}",
+    producer: {
+      class: "deterministic",
+      implementation_digest: digest,
+      cache_key: digest,
+    },
+  };
+  const descriptor = {
+    digest,
+    byte_length: "1",
+    declared_media_type: "image/png",
+    display_filename: [],
+    available_views: [
+      {
+        kind: "preview",
+        content_url: `/api/blobs/${digest}/content/image-png`,
+        media_type: "image/png",
+        byte_length: "1",
+        derivations: [derivation],
+      },
+    ],
+  };
+
+  assert.throws(
+    () => decodeWebBlobDescriptor(descriptor),
+    /input_digests must be at least 1 items/,
+  );
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        ...descriptor,
+        available_views: [
+          {
+            ...descriptor.available_views[0],
+            derivations: [{ ...derivation, input_digests: [digest] }],
+          },
+        ],
+      }),
+    /output_digests must be at most 16 items/,
+  );
+});
+
 test("generated blob decoder rejects an absolute sentinel-origin URL", () => {
   assert.throws(
     () =>

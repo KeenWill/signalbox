@@ -36,7 +36,7 @@ function ArtifactRenderer({ descriptor }: { descriptor: WebBlobDescriptor }) {
         {rendered ? (
           <img
             src={rendered.content_url}
-            alt={`Preview of ${displayName(descriptor)}`}
+            alt={`${rendered.kind === 'browser_native' ? 'Original' : 'Preview'} of ${displayName(descriptor)}`}
             loading="lazy"
           />
         ) : (

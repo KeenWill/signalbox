@@ -104,12 +104,16 @@ const schemas = {
             "items": {
               "type": "string"
             },
+            "maxItems": 16,
+            "minItems": 1,
             "type": "array"
           },
           "output_digests": {
             "items": {
               "type": "string"
             },
+            "maxItems": 16,
+            "minItems": 1,
             "type": "array"
           },
           "parameters_json": {

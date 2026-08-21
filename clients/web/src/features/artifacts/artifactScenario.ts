@@ -6,21 +6,21 @@ const binaryDigest = `sha256:${'3c'.repeat(32)}`
 
 export const imageArtifact = decodeWebBlobDescriptor({
   digest: sourceDigest,
-  byte_length: '94371840',
+  byte_length: '62914560',
   declared_media_type: 'image/png',
   display_filename: ['orbital-map.png'],
   available_views: [
     {
       kind: 'download',
       media_type: 'image/png',
-      byte_length: '94371840',
+      byte_length: '62914560',
       content_url: `/api/blobs/${sourceDigest}/download?media_type=image%2Fpng&display_filename=orbital-map.png`,
       derivations: [],
     },
     {
       kind: 'browser_native',
       media_type: 'image/png',
-      byte_length: '94371840',
+      byte_length: '62914560',
       content_url: `/api/blobs/${sourceDigest}/content/image-png`,
       derivations: [],
     },
