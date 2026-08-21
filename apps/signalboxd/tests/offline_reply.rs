@@ -4,7 +4,7 @@
     reason = "the standalone integration test uses assertion panics and explicit fixture expectations"
 )]
 
-use std::{error::Error, process::Command, time::Duration};
+use std::{error::Error, io, process::Command, time::Duration};
 
 use signalbox_application::{
     ClassifyOperatorFailure, CorrelatedToolExecutorEvidence, CreateSessionOutcome,
@@ -508,10 +508,30 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
 
 /// INV-048: a completed goal turn is followed without user input, and an
 /// unsuccessful successor blocks with scheduler provenance without a retry.
-#[tokio::test(flavor = "multi_thread")]
+#[test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_retry()
+fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_retry()
 -> Result<(), Box<dyn Error>> {
+    let outcome = std::thread::Builder::new()
+        .name(String::from("goal-successor-integration"))
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(16 * 1024 * 1024)
+                .build()
+                .map_err(|error| error.to_string())?;
+            runtime
+                .block_on(run_goal_successor_integration())
+                .map_err(|error| error.to_string())
+        })?
+        .join()
+        .map_err(|_| io::Error::other("the goal successor integration thread panicked"))?;
+    outcome.map_err(io::Error::other)?;
+    Ok(())
+}
+
+async fn run_goal_successor_integration() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let configuration = HubModelConfiguration::parse(GOAL_MODEL_CONFIGURATION)?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));

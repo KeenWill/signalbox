@@ -8,6 +8,7 @@ use std::{
     error::Error,
     fmt, fs,
     future::Future,
+    io,
     os::unix::fs::PermissionsExt,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -4496,10 +4497,30 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_completes()
 /// approval wait still admits submits — and a second input steers the
 /// continuation, so one turn consumes steering at both safe points and the
 /// completed history reloads.
-#[tokio::test(flavor = "multi_thread")]
+#[test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s08_s10_inv016_inv036_steering_consumed_at_both_safe_points_reloads()
+fn s02_s08_s10_inv016_inv036_steering_consumed_at_both_safe_points_reloads()
 -> Result<(), Box<dyn Error>> {
+    let outcome = std::thread::Builder::new()
+        .name(String::from("double-steering-integration"))
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(16 * 1024 * 1024)
+                .build()
+                .map_err(|error| error.to_string())?;
+            runtime
+                .block_on(run_double_steering_integration())
+                .map_err(|error| error.to_string())
+        })?
+        .join()
+        .map_err(|_| io::Error::other("the double-steering integration thread panicked"))?;
+    outcome.map_err(io::Error::other)?;
+    Ok(())
+}
+
+async fn run_double_steering_integration() -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
     let tool_catalog = catalog([tool(
         "confirmed",

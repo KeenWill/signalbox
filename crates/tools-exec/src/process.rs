@@ -133,16 +133,13 @@ pub struct ExecArguments {
     pub timeout_seconds: u64,
 }
 
-/// One explicit value injected through the cleared restricted-process environment.
-#[derive(Eq, PartialEq)]
-pub struct SandboxEnvironmentVariable {
-    name: OsString,
-    value: OsString,
-}
+/// One checked name for an explicit restricted-process environment value.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SandboxEnvironmentName(String);
 
-impl SandboxEnvironmentVariable {
-    /// Validates one nonempty bounded UTF-8 value under a non-reserved name.
-    pub fn try_new(name: String, value: String) -> Result<Self, InvalidSandboxEnvironmentVariable> {
+impl SandboxEnvironmentName {
+    /// Validates one bounded canonical uppercase non-reserved name.
+    pub fn try_new(name: String) -> Result<Self, InvalidSandboxEnvironmentVariable> {
         let mut name_bytes = name.bytes();
         let valid_name = name_bytes
             .next()
@@ -160,16 +157,38 @@ impl SandboxEnvironmentVariable {
         {
             return Err(InvalidSandboxEnvironmentVariable::ReservedName);
         }
-        if value.is_empty()
-            || value.len() > MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES
-            || value.contains('\0')
+        Ok(Self(name))
+    }
+
+    /// Borrows the exact checked environment name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// One explicit value injected through the cleared restricted-process environment.
+#[derive(Eq, PartialEq)]
+pub struct SandboxEnvironmentVariable {
+    name: SandboxEnvironmentName,
+    value: OsString,
+}
+
+impl SandboxEnvironmentVariable {
+    /// Validates one nonempty bounded byte-preserving value under a checked name.
+    pub fn try_new(
+        name: String,
+        value: impl Into<OsString>,
+    ) -> Result<Self, InvalidSandboxEnvironmentVariable> {
+        let name = SandboxEnvironmentName::try_new(name)?;
+        let value = value.into();
+        let value_bytes = value.as_encoded_bytes();
+        if value_bytes.is_empty()
+            || value_bytes.len() > MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES
+            || value_bytes.contains(&0)
         {
             return Err(InvalidSandboxEnvironmentVariable::Value);
         }
-        Ok(Self {
-            name: OsString::from(name),
-            value: OsString::from(value),
-        })
+        Ok(Self { name, value })
     }
 }
 
@@ -192,7 +211,7 @@ pub enum InvalidSandboxEnvironmentVariable {
     /// The name belongs to the fixed sandbox runtime environment or controls
     /// the dynamic loader used to start the outer supervisor.
     ReservedName,
-    /// The value is empty, contains NUL, or exceeds 65,536 UTF-8 bytes.
+    /// The value is empty, contains NUL, or exceeds 65,536 bytes.
     Value,
 }
 
@@ -653,7 +672,7 @@ pub struct ProcessRequest {
 }
 
 struct SandboxEnvironmentDelivery {
-    name: OsString,
+    name: SandboxEnvironmentName,
     #[cfg(target_os = "linux")]
     descriptor: OwnedFd,
 }
@@ -680,7 +699,7 @@ impl SandboxEnvironmentDelivery {
     #[cfg(target_os = "linux")]
     fn try_probe() -> Result<Self, ()> {
         Self::try_new(SandboxEnvironmentVariable {
-            name: OsString::from(SANDBOX_ENVIRONMENT_PROBE_NAME),
+            name: SandboxEnvironmentName(String::from(SANDBOX_ENVIRONMENT_PROBE_NAME)),
             value: OsString::from(SANDBOX_ENVIRONMENT_PROBE_VALUE),
         })
     }
@@ -1889,7 +1908,7 @@ fn sandbox_environment_fits_linux_arg_max(
         .saturating_add(environment_bytes(b"LC_ALL", b"C.UTF-8"))
         .saturating_add(environment_bytes(b"PATH", executable_path.as_bytes()))
         .saturating_add(environment_bytes(
-            environment.name.as_bytes(),
+            environment.name.as_str().as_bytes(),
             environment.value.as_bytes(),
         ));
     let mut environment_count = 5_usize;
@@ -2152,18 +2171,6 @@ fn bwrap_request(
             https_broker,
         } => {
             bwrap_arguments.extend([OsString::from("--tmpfs"), OsString::from("/run")]);
-            #[cfg(target_os = "linux")]
-            if let Some(environment) = invocation.environment {
-                bwrap_arguments.extend([
-                    OsString::from("--dir"),
-                    OsString::from(SANDBOX_HTTPS_BROKER_DIRECTORY),
-                    OsString::from("--perms"),
-                    OsString::from("0600"),
-                    OsString::from("--file"),
-                    OsString::from(environment.descriptor.as_raw_fd().to_string()),
-                    OsString::from(SANDBOX_ENVIRONMENT_FILE),
-                ]);
-            }
             append_read_only_parent_directories(&mut bwrap_arguments, paths);
             for path in paths {
                 bwrap_arguments.extend([
@@ -2180,6 +2187,20 @@ fn bwrap_request(
                     OsString::from("--ro-bind"),
                     https_broker.bind_source.as_os_str().to_owned(),
                     OsString::from(SANDBOX_HTTPS_BROKER_SOCKET),
+                ]);
+            }
+            // Apply private environment delivery after every configured mount
+            // so a read-only `/run` ancestor cannot hide the delivery file.
+            #[cfg(target_os = "linux")]
+            if let Some(environment) = invocation.environment {
+                bwrap_arguments.extend([
+                    OsString::from("--dir"),
+                    OsString::from(SANDBOX_HTTPS_BROKER_DIRECTORY),
+                    OsString::from("--perms"),
+                    OsString::from("0600"),
+                    OsString::from("--file"),
+                    OsString::from(environment.descriptor.as_raw_fd().to_string()),
+                    OsString::from(SANDBOX_ENVIRONMENT_FILE),
                 ]);
             }
         }
@@ -2262,7 +2283,7 @@ fn bwrap_request(
         }),
     ]);
     if let Some(environment) = invocation.environment {
-        bwrap_arguments.push(environment.name.clone());
+        bwrap_arguments.push(OsString::from(environment.name.as_str()));
     }
     bwrap_arguments.push(OsString::from(invocation.program));
     bwrap_arguments.extend(invocation.arguments.iter().map(OsString::from));
@@ -3714,6 +3735,7 @@ fn discarded_process_result(outcome: ProcessOutcome) -> ProcessRunResult {
 mod tests {
     #[cfg(target_os = "linux")]
     use std::os::unix::{
+        ffi::OsStringExt,
         fs::{PermissionsExt, symlink},
         net::UnixListener,
     };
@@ -5157,12 +5179,23 @@ mod tests {
                     && arguments[4] == SANDBOX_ENVIRONMENT_FILE
             })
             .ok_or_else(|| std::io::Error::other("one private environment file"))?;
+        let read_only_mount_position = request
+            .arguments
+            .windows(3)
+            .position(|arguments| arguments[0] == "--ro-bind" && arguments[2] == read_only.path())
+            .ok_or_else(|| std::io::Error::other("one configured read-only mount"))?;
+        let private_file_position = request
+            .arguments
+            .iter()
+            .position(|argument| argument == SANDBOX_ENVIRONMENT_FILE)
+            .ok_or_else(|| std::io::Error::other("private environment file position"))?;
         assert!(
             private_file_arguments[3]
                 .to_string_lossy()
                 .parse::<i32>()
                 .is_ok()
         );
+        assert!(private_file_position > read_only_mount_position);
         assert!(request.arguments.ends_with(&dispatch_arguments));
         assert!(
             !request
@@ -5369,7 +5402,7 @@ mod tests {
         .expect("the synthetic environment fixture is valid");
         let rendered = format!("{environment:?}");
         let expected = format!(
-            "SandboxEnvironmentVariable {{ name: {name:?}, value: \"<redacted>\" }}",
+            "SandboxEnvironmentVariable {{ name: SandboxEnvironmentName({name:?}), value: \"<redacted>\" }}",
             name = OsString::from(SYNTHETIC_ENVIRONMENT_NAME)
         );
 
@@ -5519,6 +5552,17 @@ mod tests {
             String::from(SYNTHETIC_ENVIRONMENT_NAME),
             "s".repeat(MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES),
         );
+
+        assert!(result.is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sandbox_environment_accepts_non_utf8_value_bytes() {
+        let value = OsString::from_vec(vec![b's', 0xff, b'x']);
+
+        let result =
+            SandboxEnvironmentVariable::try_new(String::from(SYNTHETIC_ENVIRONMENT_NAME), value);
 
         assert!(result.is_ok());
     }

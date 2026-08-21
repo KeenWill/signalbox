@@ -1767,20 +1767,28 @@ before both the availability probe and dispatch, recreates standard usr-merge
 aliases only when their targets are inside the configured mounts, and derives
 `PATH` only from configured mounts. The proof-only generic exec-family runner
 composes that constructor and advertises `WorkspaceRestricted`. Resource limits
-remain separate work, with first-release resource limits still owner-gated in
+remain separate work, with first-release resource limits still user-gated in
 [open questions](../open-questions.md#identity-credentials-and-resource-governance).
 
 The reusable process core can add one explicit environment value only to the
 runner-restricted dispatch request. The name is a canonical uppercase
 environment identifier of at most 4,096 UTF-8 bytes and cannot replace `HOME`,
 `HTTPS_PROXY`, `LANG`, `LC_ALL`, or `PATH`; every `LD_*` name is also reserved.
-The UTF-8 value is nonempty, NUL-free, and at most 65,536 bytes. The bubblewrap
-process receives it through the exact cleared environment, not argv, while the
-availability probe receives no caller value. Debug output retains only the name
-and a redaction marker. The daemon-local sandbox profile cannot use this
-channel. This core does not resolve credential files or redact captured command
-output; the runner preparer that owns a selected credential must do both before
-and after this boundary.
+The byte-preserving value is nonempty, NUL-free, and at most 65,536 bytes. The
+complete target argv, fixed cleared environment, optional HTTPS proxy entries,
+and injected name/value must also fit the process core's conservative 128 KiB
+Linux launch budget, including terminators and pointer arrays; a combination
+that exceeds it is rejected before the availability probe. The caller value is
+written to a private anonymous descriptor, materialized as a mode-`0600` file
+inside the namespace after configured mounts, read and removed by the
+namespace-local dispatcher, and added only to the final target environment. The
+outer supervisor and bubblewrap process never receive the caller value in argv
+or environment. The availability probe exercises the same descriptor/file shape
+with a fixed non-secret value rather than the caller value. Debug output retains
+only the name and a redaction marker. The daemon-local sandbox profile cannot
+use this channel. This core does not resolve credential files or redact captured
+command output; the runner preparer that owns a selected credential must do both
+before and after this boundary.
 
 Confinement is defined over that writable root, which need not be a repository.
 The root is the provisioned repository when the placement requires a worktree,

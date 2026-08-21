@@ -13,6 +13,7 @@ use serde::Deserialize;
 use signalbox_runner_wire::{Advertisement, ProfileName, RepositoryKey, ValueError};
 #[cfg(feature = "runner-execution-proof")]
 use signalbox_runner_wire::{SandboxProfile, WireToolName};
+use signalbox_tools_exec::SandboxEnvironmentName;
 use url::Url;
 
 const CONFIGURATION_VERSION: u64 = 1;
@@ -121,7 +122,7 @@ pub struct RunnerConfiguration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerCredentialConfiguration {
     file: PathBuf,
-    injection_env: String,
+    injection_env: SandboxEnvironmentName,
 }
 
 impl RunnerCredentialConfiguration {
@@ -132,7 +133,7 @@ impl RunnerCredentialConfiguration {
 
     /// Returns the exact environment name used only inside an admitted dispatch.
     pub fn injection_env(&self) -> &str {
-        &self.injection_env
+        self.injection_env.as_str()
     }
 }
 
@@ -423,9 +424,10 @@ fn validate_credentials(
         if profile.as_str() == RESERVED_MODEL_PROFILE {
             return Err(RunnerConfigurationError::InvalidCredentials);
         }
+        let injection_env = SandboxEnvironmentName::try_new(credential.injection_env.clone())
+            .map_err(|_| RunnerConfigurationError::InvalidCredentials)?;
         if !valid_absolute_path(&credential.file)
-            || !valid_environment_name(&credential.injection_env)
-            || reserved_environment_name(&credential.injection_env)
+            || reserved_environment_name(injection_env.as_str())
             || !files.insert(credential.file.clone())
             || !environments.insert(credential.injection_env.clone())
         {
@@ -433,7 +435,7 @@ fn validate_credentials(
         }
         let configured = RunnerCredentialConfiguration {
             file: credential.file.clone(),
-            injection_env: credential.injection_env.clone(),
+            injection_env,
         };
         if profiles.insert(profile, configured).is_some() {
             return Err(RunnerConfigurationError::InvalidCredentials);
@@ -448,14 +450,6 @@ fn reserved_environment_name(value: &str) -> bool {
         || value.starts_with("OPENAI_")
         || value.starts_with("LD_")
         || value.starts_with("DYLD_")
-}
-
-fn valid_environment_name(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_uppercase() || byte == b'_')
-        && bytes.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn validate_repositories(
@@ -881,6 +875,37 @@ injection_env = "{CONFIGURED_INJECTION_ENV}""#,
 
         let error = RunnerConfiguration::parse(&document)
             .expect_err("a dynamic-loader environment must fail closed");
+
+        assert_eq!(
+            error.to_string(),
+            "runner credential configuration is invalid"
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_process_core_runtime_environment() {
+        let document = configured_fixture()
+            .document
+            .replace(CONFIGURED_INJECTION_ENV, "HOME");
+
+        let error = RunnerConfiguration::parse(&document)
+            .expect_err("a fixed process-core environment must fail closed");
+
+        assert_eq!(
+            error.to_string(),
+            "runner credential configuration is invalid"
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_environment_beyond_the_process_core_bound() {
+        let oversized = "A".repeat(4097);
+        let document = configured_fixture()
+            .document
+            .replace(CONFIGURED_INJECTION_ENV, &oversized);
+
+        let error = RunnerConfiguration::parse(&document)
+            .expect_err("an oversized process-core environment must fail closed");
 
         assert_eq!(
             error.to_string(),

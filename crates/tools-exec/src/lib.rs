@@ -69,9 +69,9 @@ pub use process::{
     InvalidSandboxEnvironmentVariable, OutputCapture, OutputEncoding, ProcessEnvironment,
     ProcessOutcome, ProcessOutput, ProcessRequest, ProcessRunResult, ProcessRunner,
     ProcessSpawnFailure, ProcessStatusProtocol, ProcessSupervisionFailure, SANDBOXED_EXEC_NAME,
-    SandboxEnvironmentRunError, SandboxEnvironmentVariable, SandboxedCommandRunner,
-    SandboxedExecTool, TokioProcessRunner, UNSANDBOXED_EXEC_NAME, UnsandboxedCommandRunner,
-    UnsandboxedExecTool,
+    SandboxEnvironmentName, SandboxEnvironmentRunError, SandboxEnvironmentVariable,
+    SandboxedCommandRunner, SandboxedExecTool, TokioProcessRunner, UNSANDBOXED_EXEC_NAME,
+    UnsandboxedCommandRunner, UnsandboxedExecTool,
 };
 
 /// Runs the separately packaged process-tree supervisor entrypoint.
