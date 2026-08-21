@@ -469,10 +469,10 @@ the sweep (INV-007).
   wrapper. A lock refusal is preserved as its typed turn-liveness cause even
   when the shared startup transition raises it from its nested session or turn
   work. When a fresh observation proves that the same exact turn still owns a
-  live operation, the refusal is a concurrent live owner and the handoff leaves
-  it alone rather than spending recovery attempts. Other lock refusals retry
-  after six seconds, spacing the four attempts across tens-of-seconds commit
-  handoffs under outbox contention. Any other database, ambiguous, or
+  live operation, the refusal is concurrent live execution and the handoff
+  leaves it alone rather than spending recovery attempts. Other lock refusals
+  retry after six seconds, spacing the four attempts across tens-of-seconds
+  commit handoffs under outbox contention. Any other database, ambiguous, or
   non-infrastructure failure retains the two-minute cadence. Three retries bound
   the detached work, and the outer watchdog below remains responsible if all
   attempts fail. Every terminal handoff nudges the session back into eligibility

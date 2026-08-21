@@ -1117,7 +1117,8 @@ async fn recover_expired_scheduler_pass(
                 if matches!(
                     &error,
                     TurnLivenessRepositoryError::TerminalizationLockUnavailable(_)
-                ) && expired_pass_lock_owner_is_live(&repository, session, expected_turn).await
+                ) && expired_pass_exact_operation_is_live(&repository, session, expected_turn)
+                    .await
                 {
                     recovery.nudge(session);
                     tracing::info!(
@@ -1125,7 +1126,7 @@ async fn recover_expired_scheduler_pass(
                         session_id = %session.as_uuid(),
                         turn_id = %expected_turn.as_uuid(),
                         attempt,
-                        "expired scheduler pass found the exact live operation owned by another transaction and left it alone"
+                        "expired scheduler pass found exact live operation evidence under lock contention and left it alone"
                     );
                     return;
                 }
@@ -1160,7 +1161,7 @@ async fn recover_expired_scheduler_pass(
     recovery.nudge(session);
 }
 
-async fn expired_pass_lock_owner_is_live(
+async fn expired_pass_exact_operation_is_live(
     repository: &PostgresTurnLivenessRepository,
     session: SessionId,
     expected_turn: TurnId,
@@ -2432,7 +2433,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_pass_live_owner_matches_only_the_exact_reported_turn() {
+    fn expired_pass_live_operation_matches_only_the_exact_reported_turn() {
         let expected = TurnId::from_uuid(Uuid::from_u128(0x51));
         let other = TurnId::from_uuid(Uuid::from_u128(0x52));
         let candidate = StaleTurnCandidate::new(
