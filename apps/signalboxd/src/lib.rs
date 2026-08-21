@@ -197,6 +197,17 @@ pub trait ActivatedTurnExecution {
         activated: Box<ActivatedTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
 
+    /// Reports whether a returned initial-execution failure may require
+    /// startup recovery rather than ordinary scheduler disposition.
+    ///
+    /// The fail-safe default treats every failure as potentially
+    /// post-mutation. Implementations may return `false` only when the error
+    /// proves that no retained execution evidence remains and no durable
+    /// commit outcome is ambiguous.
+    fn execution_failure_requires_recovery(_error: &Self::Error) -> bool {
+        true
+    }
+
     /// Reconciles a durable active tool turn for one scheduler hint.
     ///
     /// Implementations without tool orchestration have no active work to
@@ -346,6 +357,7 @@ where
             std::sync::Arc::clone(&self.bounded_expirations),
             session,
             execution,
+            Execution::execution_failure_requires_recovery,
         )
     }
 
@@ -364,6 +376,10 @@ where
 
     fn active_resume_failure_requires_recovery(error: &Self::Error) -> bool {
         Execution::active_resume_failure_requires_recovery(error)
+    }
+
+    fn execution_failure_requires_recovery(error: &Self::Error) -> bool {
+        Execution::execution_failure_requires_recovery(error)
     }
 
     fn active_resume_failure_turn(error: &Self::Error) -> Option<TurnId> {
@@ -386,13 +402,18 @@ async fn supervise_execution_for_session<Execution, ExecutionError>(
     bounded_expirations: std::sync::Arc<std::sync::Mutex<FatalExecutionGuardState>>,
     session: SessionId,
     execution: Execution,
+    failure_requires_recovery: impl FnOnce(&ExecutionError) -> bool,
 ) -> Result<(), ExecutionError>
 where
     Execution: Future<Output = Result<(), ExecutionError>>,
 {
     let fatal_on_drop = FatalOnIncompleteExecution::new(fatal_signal, bounded_expirations, session);
     let result = execution.await;
-    if result.is_ok() {
+    let requires_recovery = match &result {
+        Ok(()) => false,
+        Err(error) => failure_requires_recovery(error),
+    };
+    if !requires_recovery {
         fatal_on_drop.disarm();
     }
     result
@@ -411,6 +432,7 @@ where
         std::sync::Arc::new(std::sync::Mutex::new(FatalExecutionGuardState::default())),
         SessionId::from_uuid(uuid::Uuid::from_u128(1)),
         execution,
+        |_| true,
     )
     .await
 }
@@ -556,6 +578,29 @@ const fn is_fatal_failure_class(failure: OperatorFailureClass) -> bool {
         failure,
         OperatorFailureClass::FailClosedCorruption | OperatorFailureClass::CallerOrHubBug
     )
+}
+
+const fn is_nonambiguous_infrastructure_failure(failure: OperatorFailureClass) -> bool {
+    matches!(
+        failure,
+        OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false
+        }
+    )
+}
+
+fn retained_execution_failure_requires_recovery<ExecutionError>(
+    error: &RetainedExecutionError<ExecutionError>,
+) -> bool
+where
+    ExecutionError: ClassifyOperatorFailure,
+{
+    match error {
+        RetainedExecutionError::Primary(error) => {
+            !is_nonambiguous_infrastructure_failure(error.operator_failure_class())
+        }
+        RetainedExecutionError::Reconciliation { .. } => true,
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1264,6 +1309,28 @@ where
     }
 }
 
+fn tool_loop_execution_failure_requires_recovery<ProviderError, ExecutorError>(
+    error: &PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError>,
+) -> bool
+where
+    ProviderError: ClassifyOperatorFailure,
+    ExecutorError: ClassifyOperatorFailure,
+{
+    match error {
+        PostgresProviderToolLoopExecutionError::Model(error) => {
+            retained_execution_failure_requires_recovery(error)
+        }
+        PostgresProviderToolLoopExecutionError::Tool(error) => {
+            retained_execution_failure_requires_recovery(error)
+        }
+        PostgresProviderToolLoopExecutionError::ApprovalJudge(error) => {
+            !is_nonambiguous_infrastructure_failure(error.operator_failure_class())
+        }
+        PostgresProviderToolLoopExecutionError::ResumeLookup(_)
+        | PostgresProviderToolLoopExecutionError::ResumeExecution { .. } => true,
+    }
+}
+
 /// Production execution factory over PostgreSQL orchestration and one cloned
 /// provider-port adapter per activation.
 #[derive(Clone, Debug)]
@@ -1367,6 +1434,10 @@ where
                 }
             }
         }
+    }
+
+    fn execution_failure_requires_recovery(error: &Self::Error) -> bool {
+        retained_execution_failure_requires_recovery(error)
     }
 }
 
@@ -2070,11 +2141,20 @@ where
         }
     }
 
+    fn execution_failure_requires_recovery(error: &Self::Error) -> bool {
+        tool_loop_execution_failure_requires_recovery(error)
+    }
+
     fn active_resume_failure_requires_recovery(error: &Self::Error) -> bool {
-        !matches!(
-            error,
-            PostgresProviderToolLoopExecutionError::ResumeLookup(_)
-        )
+        match error {
+            PostgresProviderToolLoopExecutionError::ResumeLookup(_) => false,
+            PostgresProviderToolLoopExecutionError::ResumeExecution { source, .. } => {
+                tool_loop_execution_failure_requires_recovery(source)
+            }
+            PostgresProviderToolLoopExecutionError::Model(_)
+            | PostgresProviderToolLoopExecutionError::Tool(_)
+            | PostgresProviderToolLoopExecutionError::ApprovalJudge(_) => true,
+        }
     }
 
     fn active_resume_failure_turn(error: &Self::Error) -> Option<TurnId> {
@@ -2167,6 +2247,10 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                 }
             }
         }
+    }
+
+    fn execution_failure_requires_recovery(error: &Self::Error) -> bool {
+        retained_execution_failure_requires_recovery(error)
     }
 }
 
@@ -2436,6 +2520,24 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug)]
+    struct NonambiguousInitialFailureExecution;
+
+    impl ActivatedTurnExecution for NonambiguousInitialFailureExecution {
+        type Error = StagedExecutionFailure;
+
+        fn execute(
+            &self,
+            _activated: Box<ActivatedTurn>,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            ready(Err(StagedExecutionFailure::Infrastructure))
+        }
+
+        fn execution_failure_requires_recovery(_error: &Self::Error) -> bool {
+            false
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
     struct PostMutationResumeFailureExecution;
 
     impl PostMutationResumeFailureExecution {
@@ -2615,6 +2717,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nonambiguous_initial_failure_remains_an_ordinary_pass_error() {
+        let (fatal_signal, triggered) = watch::channel(false);
+        let signal = FatalExecutionSignal { triggered };
+
+        assert!(matches!(
+            supervise_execution_for_session(
+                fatal_signal,
+                Arc::new(std::sync::Mutex::new(FatalExecutionGuardState::default())),
+                SessionId::from_uuid(Uuid::from_u128(9)),
+                ready(Err(StagedExecutionFailure::Infrastructure)),
+                NonambiguousInitialFailureExecution::execution_failure_requires_recovery,
+            )
+            .await,
+            Err(StagedExecutionFailure::Infrastructure)
+        ));
+        assert!(!signal.is_triggered());
+    }
+
+    #[tokio::test]
     async fn read_only_active_resume_failure_remains_an_ordinary_pass_error() {
         let (execution, signal) = FatalExecutionSupervisor::new(ReadOnlyResumeFailureExecution);
 
@@ -2725,6 +2846,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn nonambiguous_primary_failure_does_not_require_startup_recovery() {
+        let error = super::RetainedExecutionError::Primary(StagedExecutionFailure::Infrastructure);
+
+        assert!(!super::retained_execution_failure_requires_recovery(&error));
+    }
+
+    #[test]
+    fn failed_retained_reconciliation_requires_startup_recovery() {
+        let error = super::RetainedExecutionError::Reconciliation {
+            original: StagedExecutionFailure::Infrastructure,
+            reconciliation: StagedExecutionFailure::Infrastructure,
+        };
+
+        assert!(super::retained_execution_failure_requires_recovery(&error));
+    }
+
     #[track_caller]
     fn assert_reconciliation_preserves_cause_and_reports_classification(
         error: super::RetainedModelExecutionError<StagedExecutionFailure>,
@@ -2778,6 +2916,7 @@ mod tests {
                 execution_entered.notify_one();
                 pending::<Result<(), ExecutionFailure>>().await
             },
+            |_| true,
         ));
         entered.notified().await;
         FatalExecutionOccupancyExpiry {
@@ -2816,6 +2955,7 @@ mod tests {
                 execution_entered.notify_one();
                 pending::<Result<(), ExecutionFailure>>().await
             },
+            |_| true,
         ));
         entered.notified().await;
 

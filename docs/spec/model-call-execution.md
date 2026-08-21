@@ -9,6 +9,9 @@ Post-response configured-usage treatment is verified against this PR
 Pre-activation reconciliation from durable completed-call usage is verified
 against this PR (`agent/daemon-live-reported-usage-compaction`).
 
+Non-ambiguous execution-failure containment is verified against this PR
+(`agent/daemon-live-nonambiguous-execution-containment`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -1001,14 +1004,19 @@ was prevented.
 ## Crash, restart, and supervision
 
 signalboxd (`apps/signalboxd/src/lib.rs`, `main.rs`) wraps execution in
-`FatalExecutionSupervisor`: a post-activation stage failure — after at most one
-same-incarnation reconciliation pass when retained evidence exists — raises a
-fatal signal, the scheduler stops (in-flight work bounded by a shutdown grace
-window), and the process exits nonzero so the next incarnation's startup scan
-regains authority. Why: startup recovery is the one audited path that classifies
-an issued call from durable evidence, so a live process that cannot construct a
-trustworthy result must stop rather than improvise. An eligibility pass raises
-the same signal whenever a durable stage it owns reports
+`FatalExecutionSupervisor`. A failure with retained execution evidence after its
+one same-incarnation reconciliation pass, a failure whose durable commit outcome
+is ambiguous, an execution unwind, or cancellation raises a fatal signal; the
+scheduler stops (in-flight work bounded by a shutdown grace window) and the
+process exits nonzero so the next incarnation's startup scan regains authority.
+Why: startup recovery is the one audited path that classifies an issued call
+from durable evidence, so a live process that cannot construct a trustworthy
+result must stop rather than improvise. A returned infrastructure failure that
+proves both a non-ambiguous commit outcome and the absence of retained execution
+evidence instead remains an ordinary per-session scheduler failure: goal-aware
+disposition durably blocks its selected turn and arms the bounded
+automatic-resumption policy while unrelated sessions continue. An eligibility
+pass raises the same signal whenever a durable stage it owns reports
 `Infrastructure { commit_ambiguous: true }` from the guarded counted activation
 commit, since only that next scan can decide what committed. After recovering
 any active call, the scheduled pass prepares bounded automatic compaction before
