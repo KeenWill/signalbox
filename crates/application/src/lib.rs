@@ -18,6 +18,7 @@ mod repo_watch_webhook;
 mod review_orchestration;
 mod review_workflow;
 mod scheduler;
+mod search;
 mod session_delegation;
 mod session_metadata;
 mod session_timeline;
@@ -139,6 +140,14 @@ pub use scheduler::{
     GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityNudge,
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit, scheduler_pass_admission_cap,
+};
+pub use search::{
+    SearchArtifactId, SearchArtifactProjection, SearchArtifactProjectionClass, SearchContentClass,
+    SearchCursor, SearchHighlight, SearchPage, SearchPageLimit, SearchPageLimitError,
+    SearchProjectionText, SearchProjectionTextError, SearchProjectionWriter, SearchQuery,
+    SearchReader, SearchResult, SearchResultOwner, SearchScope, SearchService, SearchStrategy,
+    SearchText, SearchTextError, max_search_page_items, max_search_projection_text_bytes,
+    max_search_query_bytes, max_search_snippet_bytes,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{

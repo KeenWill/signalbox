@@ -3,7 +3,8 @@
 The browser HTTP listener, same-origin static assets, and generated contract
 bootstrap are verified against this PR (`agent/web-http-transport`). The
 composed bounded session descriptor and historical-window routes are verified
-against this PR (`agent/web-session-timeline`).
+against this PR (`agent/web-session-timeline`). The bounded lexical-search route
+and generated DTOs are verified against this PR (`agent/web-search-usage`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -177,13 +178,17 @@ requires an explicit authentication and transport-security design first.
 `GET /api/bootstrap` describes the production browser contract. It returns the
 exact contract family `signalbox.web-http`, version `1`, the `bounded_json`,
 `same_origin_json_mutations`, and `ndjson_streaming` capabilities, the
-`bounded_session_timeline` capability, the effective 65,536-byte JSON-body and
-NDJSON-item hard ceilings, and the 256-item and 65,536-projected-byte timeline
-ceilings. The generated browser decoder rejects an unknown field, wrong shape,
-different family, or different version rather than interpreting it as the local
-process protocol. No process-protocol frame is a browser DTO. The descriptor and
-historical-window route shapes and semantics are owned by
-[Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline).
+`bounded_session_timeline` and `bounded_lexical_search` capabilities, the
+effective 65,536-byte JSON-body and NDJSON-item hard ceilings, the 256-item and
+65,536-projected-byte timeline ceilings, and the 512-byte query, 100-item page,
+and 512-byte snippet search ceilings. The generated browser decoder rejects an
+unknown field, wrong shape, different family, or different version rather than
+interpreting it as the local process protocol. No process-protocol frame is a
+browser DTO. The descriptor, historical-window, and lexical-search route shapes
+and semantics are owned by
+[Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline)
+and its
+[lexical-search section](sessions-and-transcript.md#bounded-browser-lexical-search).
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and

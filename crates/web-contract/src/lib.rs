@@ -9,7 +9,10 @@ use std::{collections::BTreeMap, error::Error, fmt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use signalbox_application::{max_timeline_window_bytes, max_timeline_window_items};
+use signalbox_application::{
+    max_search_page_items, max_search_query_bytes, max_search_snippet_bytes,
+    max_timeline_window_bytes, max_timeline_window_items,
+};
 
 /// Exact browser HTTP contract version served by this daemon build.
 pub const WEB_CONTRACT_VERSION: &str = "1";
@@ -43,6 +46,8 @@ pub struct WebContractCapabilities {
     pub ndjson_streaming: bool,
     /// Stable bounded session descriptors and historical windows are available.
     pub bounded_session_timeline: bool,
+    /// Bounded lexical search with stable history reveal addresses is available.
+    pub bounded_lexical_search: bool,
 }
 
 /// Effective hard limits clients must honor for this contract version.
@@ -57,6 +62,12 @@ pub struct WebContractLimits {
     pub max_timeline_window_items: u32,
     /// Maximum projected structured item bytes in one timeline window.
     pub max_timeline_window_bytes: u32,
+    /// Maximum UTF-8 bytes in one product search expression.
+    pub max_search_query_bytes: u32,
+    /// Maximum results in one search page.
+    pub max_search_page_items: u32,
+    /// Maximum UTF-8 bytes in one search result snippet.
+    pub max_search_snippet_bytes: u32,
 }
 
 /// Response from the contract bootstrap endpoint.
@@ -85,12 +96,16 @@ impl WebContractBootstrap {
                 same_origin_json_mutations: true,
                 ndjson_streaming: true,
                 bounded_session_timeline: true,
+                bounded_lexical_search: true,
             },
             limits: WebContractLimits {
                 max_json_body_bytes: MAX_JSON_BODY_BYTES as u32,
                 max_ndjson_item_bytes: MAX_NDJSON_ITEM_BYTES as u32,
                 max_timeline_window_items: u32::from(max_timeline_window_items()),
                 max_timeline_window_bytes: max_timeline_window_bytes(),
+                max_search_query_bytes: max_search_query_bytes() as u32,
+                max_search_page_items: u32::from(max_search_page_items()),
+                max_search_snippet_bytes: max_search_snippet_bytes() as u32,
             },
         }
     }
@@ -189,6 +204,90 @@ pub struct WebSessionTimelineWindow {
     pub continuation_after: Option<WebTimelineAddress>,
 }
 
+/// Closed browser-visible class of matched indexed content.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchContentClass {
+    UserTranscript,
+    AssistantTranscript,
+    ToolArguments,
+    ToolResult,
+    SessionMetadata,
+    AttachmentFilename,
+    AttachmentMediaMetadata,
+    DerivedTextArtifact,
+}
+
+/// Typed durable owner of one browser search result.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebSearchResultOwner {
+    Session {
+        session_id: String,
+    },
+    AcceptedInput {
+        accepted_input_id: String,
+        turn_id: String,
+    },
+    TurnTranscriptEntry {
+        semantic_entry_id: String,
+        turn_id: String,
+    },
+    SessionTranscriptEntry {
+        semantic_entry_id: String,
+    },
+    ToolRequest {
+        tool_request_id: String,
+        turn_id: String,
+    },
+    ToolAttempt {
+        tool_attempt_id: String,
+        turn_id: String,
+    },
+    Attachment {
+        attachment_id: String,
+    },
+    DerivedArtifact {
+        artifact_id: String,
+    },
+}
+
+/// One half-open UTF-8 byte range within a bounded snippet.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchHighlight {
+    pub start_byte: u32,
+    pub end_byte: u32,
+}
+
+/// Stable opaque descending search keyset boundary.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchCursor {
+    pub address: WebTimelineAddress,
+    pub projection_id: String,
+}
+
+/// One bounded lexical match with enough identity to reveal unloaded history.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchResult {
+    pub session_id: String,
+    pub address: WebTimelineAddress,
+    pub owner: WebSearchResultOwner,
+    pub content_class: WebSearchContentClass,
+    pub snippet: String,
+    pub highlights: Vec<WebSearchHighlight>,
+}
+
+/// One bounded, stable page of lexical matches.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchPage {
+    pub results: Vec<WebSearchResult>,
+    pub continuation: Option<WebSearchCursor>,
+}
+
 /// Layer that owns one browser API failure.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -272,6 +371,7 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
         canonical_schema(schemars::schema_for!(WebSessionTimelineDescriptor).to_value());
     let window_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
+    let search_page_schema = canonical_schema(schemars::schema_for!(WebSearchPage).to_value());
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -289,6 +389,7 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
                 &error_schema,
                 &descriptor_schema,
                 &window_schema,
+                &search_page_schema,
             )?,
         },
         GeneratedArtifact {
@@ -299,6 +400,7 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
                 &error_schema,
                 &descriptor_schema,
                 &window_schema,
+                &search_page_schema,
             )?,
         },
         GeneratedArtifact {
@@ -322,6 +424,7 @@ fn runtime_module(
     error_schema: &Value,
     descriptor_schema: &Value,
     window_schema: &Value,
+    search_page_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
         "WebContractBootstrap": bootstrap_schema,
@@ -329,6 +432,7 @@ fn runtime_module(
         "WebApiErrorResponse": error_schema,
         "WebSessionTimelineDescriptor": descriptor_schema,
         "WebSessionTimelineWindow": window_schema,
+        "WebSearchPage": search_page_schema,
     });
     schemas.sort_all_objects();
     let schemas = serde_json::to_string_pretty(&schemas)
@@ -502,6 +606,11 @@ export function decodeWebSessionTimelineWindow(value) {{
   assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "timeline_window");
   return value;
 }}
+
+export function decodeWebSearchPage(value) {{
+  assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
+  return value;
+}}
 "##,
         contract_name = WEB_CONTRACT_NAME,
         contract_version = WEB_CONTRACT_VERSION,
@@ -514,6 +623,7 @@ fn declaration_module(
     error_schema: &Value,
     descriptor_schema: &Value,
     window_schema: &Value,
+    search_page_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
     let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
@@ -521,6 +631,7 @@ fn declaration_module(
     let error = typescript_type(error_schema, error_schema, &mut definitions)?;
     let descriptor = typescript_type(descriptor_schema, descriptor_schema, &mut definitions)?;
     let window = typescript_type(window_schema, window_schema, &mut definitions)?;
+    let search_page = typescript_type(search_page_schema, search_page_schema, &mut definitions)?;
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",
     );
@@ -538,8 +649,9 @@ fn declaration_module(
     output.push_str(&format!(
         "export type WebSessionTimelineWindow = {window};\n\n"
     ));
+    output.push_str(&format!("export type WebSearchPage = {search_page};\n\n"));
     output.push_str(
-        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\n",
+        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\nexport function decodeWebSearchPage(value: unknown): WebSearchPage;\n",
     );
     Ok(output)
 }

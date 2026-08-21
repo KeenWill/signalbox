@@ -28,18 +28,21 @@ use axum::{
 use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
-    SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress,
-    TimelineWindowAnchor, TimelineWindowLimits,
+    SearchContentClass, SearchCursor, SearchPageLimit, SearchQuery, SearchResultOwner, SearchScope,
+    SearchStrategy, SearchText, SessionTimelineDescriptor, SessionTimelineEventKind,
+    SessionTimelineWindow, TimelineAddress, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::SessionId;
+use signalbox_persistence::search::{SearchRepository, SearchRepositoryError};
 use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
 };
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
-    WebContractBootstrap, WebContractExample, WebSessionTimelineDescriptor,
-    WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
+    WebContractBootstrap, WebContractExample, WebSearchContentClass, WebSearchCursor,
+    WebSearchHighlight, WebSearchPage, WebSearchResult, WebSearchResultOwner,
+    WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
+    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -246,7 +249,8 @@ impl WebHttpRuntime {
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
 pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> Router {
     let state = WebApiState {
-        timeline: pool.map(SessionTimelineRepository::new),
+        timeline: pool.clone().map(SessionTimelineRepository::new),
+        search: pool.map(SearchRepository::new),
     };
     let api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
@@ -255,6 +259,7 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
             "/sessions/{session_id}/timeline",
             get(session_timeline_window),
         )
+        .route("/search", get(search))
         .with_state(state)
         .fallback(api_not_found);
     let router = Router::new().nest("/api", api);
@@ -271,6 +276,7 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
 #[derive(Clone, Debug)]
 struct WebApiState {
     timeline: Option<SessionTimelineRepository>,
+    search: Option<SearchRepository>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -280,6 +286,192 @@ struct TimelineWindowQuery {
     address: Option<String>,
     max_items: Option<String>,
     max_bytes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchHttpQuery {
+    strategy: String,
+    q: String,
+    session_id: Option<String>,
+    max_items: String,
+    after_address: Option<String>,
+    after_projection: Option<String>,
+}
+
+async fn search(
+    State(state): State<WebApiState>,
+    query: Result<Query<SearchHttpQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_search_query(),
+    };
+    let Some(request) = parse_search_query(query) else {
+        return invalid_search_query();
+    };
+    let Some(repository) = state.search else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "search_projection_unavailable",
+            "search projection is not configured",
+        );
+    };
+    match repository.search(request).await {
+        Ok(page) => Json(search_page_dto(page)).into_response(),
+        Err(error) => search_repository_error(error),
+    }
+}
+
+fn parse_search_query(query: SearchHttpQuery) -> Option<SearchQuery> {
+    if query.strategy != "lexical" {
+        return None;
+    }
+    let text = SearchText::try_new(query.q).ok()?;
+    let limit = query
+        .max_items
+        .parse::<u16>()
+        .ok()
+        .and_then(|value| SearchPageLimit::new(value).ok())?;
+    let scope = match query.session_id {
+        Some(value) => SearchScope::Session(parse_session_id(&value).ok()?),
+        None => SearchScope::Global,
+    };
+    let after = match (query.after_address, query.after_projection) {
+        (None, None) => None,
+        (Some(address), Some(projection)) => Some(SearchCursor::new(
+            TimelineAddress::new(parse_positive_u64(&address)?),
+            parse_positive_i64(&projection)?,
+        )),
+        _ => return None,
+    };
+    Some(SearchQuery {
+        strategy: SearchStrategy::Lexical,
+        scope,
+        text,
+        limit,
+        after,
+    })
+}
+
+fn parse_positive_u64(value: &str) -> Option<std::num::NonZeroU64> {
+    if value.is_empty()
+        || value.starts_with('0')
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .and_then(std::num::NonZeroU64::new)
+}
+
+fn parse_positive_i64(value: &str) -> Option<std::num::NonZeroU64> {
+    let value = parse_positive_u64(value)?;
+    i64::try_from(value.get()).ok()?;
+    Some(value)
+}
+
+fn invalid_search_query() -> Response {
+    application_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_search_query",
+        "search parameters are malformed or outside the contract bounds",
+    )
+}
+
+fn search_repository_error(error: SearchRepositoryError) -> Response {
+    let failure_class = match &error {
+        SearchRepositoryError::Database(_) => "infrastructure",
+        SearchRepositoryError::Corruption(_) => "fail_closed_corruption",
+    };
+    tracing::error!(failure_class, cause = %error, "lexical search projection read failed");
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "search_projection_failed",
+        "the durable search projection could not be read",
+    )
+}
+
+fn search_page_dto(page: signalbox_application::SearchPage) -> WebSearchPage {
+    WebSearchPage {
+        results: page.results.into_iter().map(search_result_dto).collect(),
+        continuation: page.next.map(|cursor| WebSearchCursor {
+            address: address_dto(cursor.address()),
+            projection_id: cursor.projection().get().to_string(),
+        }),
+    }
+}
+
+fn search_result_dto(result: signalbox_application::SearchResult) -> WebSearchResult {
+    WebSearchResult {
+        session_id: result.session.into_uuid().to_string(),
+        address: address_dto(result.address),
+        owner: search_owner_dto(result.owner),
+        content_class: search_content_class_dto(result.content_class),
+        snippet: result.snippet,
+        highlights: result
+            .highlights
+            .into_iter()
+            .map(|highlight| WebSearchHighlight {
+                start_byte: u32::from(highlight.start_byte),
+                end_byte: u32::from(highlight.end_byte),
+            })
+            .collect(),
+    }
+}
+
+fn search_owner_dto(owner: SearchResultOwner) -> WebSearchResultOwner {
+    match owner {
+        SearchResultOwner::Session(session) => WebSearchResultOwner::Session {
+            session_id: session.into_uuid().to_string(),
+        },
+        SearchResultOwner::AcceptedInput { input, turn } => WebSearchResultOwner::AcceptedInput {
+            accepted_input_id: input.into_uuid().to_string(),
+            turn_id: turn.into_uuid().to_string(),
+        },
+        SearchResultOwner::TurnTranscriptEntry { entry, turn } => {
+            WebSearchResultOwner::TurnTranscriptEntry {
+                semantic_entry_id: entry.into_uuid().to_string(),
+                turn_id: turn.into_uuid().to_string(),
+            }
+        }
+        SearchResultOwner::SessionTranscriptEntry { entry } => {
+            WebSearchResultOwner::SessionTranscriptEntry {
+                semantic_entry_id: entry.into_uuid().to_string(),
+            }
+        }
+        SearchResultOwner::ToolRequest { request, turn } => WebSearchResultOwner::ToolRequest {
+            tool_request_id: request.into_uuid().to_string(),
+            turn_id: turn.into_uuid().to_string(),
+        },
+        SearchResultOwner::ToolAttempt { attempt, turn } => WebSearchResultOwner::ToolAttempt {
+            tool_attempt_id: attempt.into_uuid().to_string(),
+            turn_id: turn.into_uuid().to_string(),
+        },
+        SearchResultOwner::Attachment { attachment } => WebSearchResultOwner::Attachment {
+            attachment_id: attachment.into_uuid().to_string(),
+        },
+        SearchResultOwner::DerivedArtifact { artifact } => WebSearchResultOwner::DerivedArtifact {
+            artifact_id: artifact.into_uuid().to_string(),
+        },
+    }
+}
+
+fn search_content_class_dto(content: SearchContentClass) -> WebSearchContentClass {
+    match content {
+        SearchContentClass::UserTranscript => WebSearchContentClass::UserTranscript,
+        SearchContentClass::AssistantTranscript => WebSearchContentClass::AssistantTranscript,
+        SearchContentClass::ToolArguments => WebSearchContentClass::ToolArguments,
+        SearchContentClass::ToolResult => WebSearchContentClass::ToolResult,
+        SearchContentClass::SessionMetadata => WebSearchContentClass::SessionMetadata,
+        SearchContentClass::AttachmentFilename => WebSearchContentClass::AttachmentFilename,
+        SearchContentClass::AttachmentMediaMetadata => {
+            WebSearchContentClass::AttachmentMediaMetadata
+        }
+        SearchContentClass::DerivedTextArtifact => WebSearchContentClass::DerivedTextArtifact,
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1226,6 +1418,67 @@ mod tests {
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["code"], "invalid_timeline_limits");
+    }
+
+    #[tokio::test]
+    async fn search_rejects_non_product_strategy_and_partial_cursor() {
+        let unsupported = Request::get("/api/search?strategy=postgres&q=term&max_items=10")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let unsupported = production_router(None, None)
+            .oneshot(unsupported)
+            .await
+            .expect("the production router responds");
+        let unsupported_status = unsupported.status();
+        let unsupported_body: serde_json::Value =
+            serde_json::from_slice(&response_body(unsupported).await)
+                .expect("the rejection is structured JSON");
+        let partial =
+            Request::get("/api/search?strategy=lexical&q=term&max_items=10&after_address=5")
+                .body(Body::empty())
+                .expect("the request is valid");
+        let partial = production_router(None, None)
+            .oneshot(partial)
+            .await
+            .expect("the production router responds");
+        let partial_status = partial.status();
+        let partial_body: serde_json::Value = serde_json::from_slice(&response_body(partial).await)
+            .expect("the rejection is structured JSON");
+        let oversized = Request::get(
+            "/api/search?strategy=lexical&q=term&max_items=10&after_address=5&after_projection=9223372036854775808",
+        )
+        .body(Body::empty())
+        .expect("the request is valid");
+        let oversized = production_router(None, None)
+            .oneshot(oversized)
+            .await
+            .expect("the production router responds");
+        let oversized_status = oversized.status();
+
+        assert_eq!(unsupported_status, StatusCode::BAD_REQUEST);
+        assert_eq!(unsupported_body["error"]["code"], "invalid_search_query");
+        assert_eq!(partial_status, StatusCode::BAD_REQUEST);
+        assert_eq!(partial_body["error"]["code"], "invalid_search_query");
+        assert_eq!(oversized_status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn valid_search_is_parsed_before_repository_availability_is_reported() {
+        let request = Request::get(
+            "/api/search?strategy=lexical&q=natural%20terms&max_items=100&after_address=5&after_projection=7",
+        )
+        .body(Body::empty())
+        .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the response is structured JSON");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "search_projection_unavailable");
     }
 
     #[test]

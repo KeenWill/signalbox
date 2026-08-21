@@ -69,6 +69,10 @@ const schemas = {
             "description": "Ordinary bounded JSON responses are available under `/api/`.",
             "type": "boolean"
           },
+          "bounded_lexical_search": {
+            "description": "Bounded lexical search with stable history reveal addresses is available.",
+            "type": "boolean"
+          },
           "bounded_session_timeline": {
             "description": "Stable bounded session descriptors and historical windows are available.",
             "type": "boolean"
@@ -86,7 +90,8 @@ const schemas = {
           "bounded_json",
           "same_origin_json_mutations",
           "ndjson_streaming",
-          "bounded_session_timeline"
+          "bounded_session_timeline",
+          "bounded_lexical_search"
         ],
         "type": "object"
       },
@@ -125,6 +130,24 @@ const schemas = {
             "minimum": 0,
             "type": "integer"
           },
+          "max_search_page_items": {
+            "description": "Maximum results in one search page.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_search_query_bytes": {
+            "description": "Maximum UTF-8 bytes in one product search expression.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_search_snippet_bytes": {
+            "description": "Maximum UTF-8 bytes in one search result snippet.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "max_timeline_window_bytes": {
             "description": "Maximum projected structured item bytes in one timeline window.",
             "format": "uint32",
@@ -142,7 +165,10 @@ const schemas = {
           "max_json_body_bytes",
           "max_ndjson_item_bytes",
           "max_timeline_window_items",
-          "max_timeline_window_bytes"
+          "max_timeline_window_bytes",
+          "max_search_query_bytes",
+          "max_search_page_items",
+          "max_search_snippet_bytes"
         ],
         "type": "object"
       }
@@ -191,6 +217,295 @@ const schemas = {
       "message"
     ],
     "title": "WebContractExample",
+    "type": "object"
+  },
+  "WebSearchPage": {
+    "$defs": {
+      "WebSearchContentClass": {
+        "description": "Closed browser-visible class of matched indexed content.",
+        "enum": [
+          "user_transcript",
+          "assistant_transcript",
+          "tool_arguments",
+          "tool_result",
+          "session_metadata",
+          "attachment_filename",
+          "attachment_media_metadata",
+          "derived_text_artifact"
+        ],
+        "type": "string"
+      },
+      "WebSearchCursor": {
+        "additionalProperties": false,
+        "description": "Stable opaque descending search keyset boundary.",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "projection_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "address",
+          "projection_id"
+        ],
+        "type": "object"
+      },
+      "WebSearchHighlight": {
+        "additionalProperties": false,
+        "description": "One half-open UTF-8 byte range within a bounded snippet.",
+        "properties": {
+          "end_byte": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_byte": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_byte",
+          "end_byte"
+        ],
+        "type": "object"
+      },
+      "WebSearchResult": {
+        "additionalProperties": false,
+        "description": "One bounded lexical match with enough identity to reveal unloaded history.",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "content_class": {
+            "$ref": "#/$defs/WebSearchContentClass"
+          },
+          "highlights": {
+            "items": {
+              "$ref": "#/$defs/WebSearchHighlight"
+            },
+            "type": "array"
+          },
+          "owner": {
+            "$ref": "#/$defs/WebSearchResultOwner"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "snippet": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "address",
+          "owner",
+          "content_class",
+          "snippet",
+          "highlights"
+        ],
+        "type": "object"
+      },
+      "WebSearchResultOwner": {
+        "description": "Typed durable owner of one browser search result.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "accepted_input_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "accepted_input",
+                "type": "string"
+              },
+              "turn_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "accepted_input_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "turn_transcript_entry",
+                "type": "string"
+              },
+              "semantic_entry_id": {
+                "type": "string"
+              },
+              "turn_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "semantic_entry_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "session_transcript_entry",
+                "type": "string"
+              },
+              "semantic_entry_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "semantic_entry_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "tool_request",
+                "type": "string"
+              },
+              "tool_request_id": {
+                "type": "string"
+              },
+              "turn_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_request_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "tool_attempt",
+                "type": "string"
+              },
+              "tool_attempt_id": {
+                "type": "string"
+              },
+              "turn_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_attempt_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "attachment_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "attachment",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "attachment_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "artifact_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "derived_artifact",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "artifact_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineAddress": {
+        "additionalProperties": false,
+        "description": "Stable browser-visible location of one durable session event.",
+        "properties": {
+          "event_sequence": {
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_sequence"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One bounded, stable page of lexical matches.",
+    "properties": {
+      "continuation": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebSearchCursor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "results": {
+        "items": {
+          "$ref": "#/$defs/WebSearchResult"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "results"
+    ],
+    "title": "WebSearchPage",
     "type": "object"
   },
   "WebSessionTimelineDescriptor": {
@@ -564,5 +879,10 @@ export function decodeWebSessionTimelineDescriptor(value) {
 
 export function decodeWebSessionTimelineWindow(value) {
   assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "timeline_window");
+  return value;
+}
+
+export function decodeWebSearchPage(value) {
+  assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
   return value;
 }

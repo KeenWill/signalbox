@@ -11,6 +11,7 @@ type WebApiErrorKind = "transport" | "application";
 
 type WebContractCapabilities = {
   readonly bounded_json: boolean;
+  readonly bounded_lexical_search: boolean;
   readonly bounded_session_timeline: boolean;
   readonly ndjson_streaming: boolean;
   readonly same_origin_json_mutations: boolean;
@@ -24,8 +25,62 @@ type WebContractIdentity = {
 type WebContractLimits = {
   readonly max_json_body_bytes: number;
   readonly max_ndjson_item_bytes: number;
+  readonly max_search_page_items: number;
+  readonly max_search_query_bytes: number;
+  readonly max_search_snippet_bytes: number;
   readonly max_timeline_window_bytes: number;
   readonly max_timeline_window_items: number;
+};
+
+type WebSearchContentClass = "user_transcript" | "assistant_transcript" | "tool_arguments" | "tool_result" | "session_metadata" | "attachment_filename" | "attachment_media_metadata" | "derived_text_artifact";
+
+type WebSearchCursor = {
+  readonly address: WebTimelineAddress;
+  readonly projection_id: string;
+};
+
+type WebSearchHighlight = {
+  readonly end_byte: number;
+  readonly start_byte: number;
+};
+
+type WebSearchResult = {
+  readonly address: WebTimelineAddress;
+  readonly content_class: WebSearchContentClass;
+  readonly highlights: ReadonlyArray<WebSearchHighlight>;
+  readonly owner: WebSearchResultOwner;
+  readonly session_id: string;
+  readonly snippet: string;
+};
+
+type WebSearchResultOwner = {
+  readonly kind: "session";
+  readonly session_id: string;
+} | {
+  readonly accepted_input_id: string;
+  readonly kind: "accepted_input";
+  readonly turn_id: string;
+} | {
+  readonly kind: "turn_transcript_entry";
+  readonly semantic_entry_id: string;
+  readonly turn_id: string;
+} | {
+  readonly kind: "session_transcript_entry";
+  readonly semantic_entry_id: string;
+} | {
+  readonly kind: "tool_request";
+  readonly tool_request_id: string;
+  readonly turn_id: string;
+} | {
+  readonly kind: "tool_attempt";
+  readonly tool_attempt_id: string;
+  readonly turn_id: string;
+} | {
+  readonly attachment_id: string;
+  readonly kind: "attachment";
+} | {
+  readonly artifact_id: string;
+  readonly kind: "derived_artifact";
 };
 
 type WebSessionTimelineEventKind = "session_created" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
@@ -84,8 +139,14 @@ export type WebSessionTimelineWindow = {
   readonly session_id: string;
 };
 
+export type WebSearchPage = {
+  readonly continuation?: WebSearchCursor | null;
+  readonly results: ReadonlyArray<WebSearchResult>;
+};
+
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;
 export function decodeWebContractExample(value: unknown): WebContractExample;
 export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;
 export function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;
 export function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;
+export function decodeWebSearchPage(value: unknown): WebSearchPage;
