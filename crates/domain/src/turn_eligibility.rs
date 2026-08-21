@@ -3308,6 +3308,7 @@ pub struct DelegatedTurnActivationInput {
     pub spawning_request: ToolRequestId,
     pub task: DelegationContent,
     pub task_entry: SemanticTranscriptEntryReconstitutionInput,
+    pub runner_placement_snapshot: Option<ResolvedContextFrontierSnapshot>,
     pub configuration: OriginConfiguration,
     pub starting_frontier: ContextFrontierId,
     pub initial_attempt: TurnAttemptId,
@@ -3323,6 +3324,7 @@ pub struct DelegatedWakeTurnActivationInput {
     pub deliveries: Vec<SemanticTranscriptEntryReconstitutionInput>,
     pub predecessor: TurnId,
     pub predecessor_snapshot: ResolvedContextFrontierSnapshot,
+    pub runner_placement_snapshot: Option<ResolvedContextFrontierSnapshot>,
     pub configuration: OriginConfiguration,
     pub starting_frontier: ContextFrontierId,
     pub initial_attempt: TurnAttemptId,
@@ -3355,12 +3357,18 @@ impl PreparedDelegatedTurnActivation {
             input.task_entry.source_session(),
             input.task_entry.payload().clone(),
         );
-        let starting_snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
-            input.session,
-            input.starting_frontier,
-            vec![task_entry.reference()],
-        )
-        .ok()?;
+        let starting_snapshot = match input.runner_placement_snapshot {
+            Some(placement) if placement.frontier().owning_session() == input.session => placement
+                .derive_appending_candidate(input.starting_frontier, vec![task_entry.reference()])
+                .ok()?,
+            Some(_) => return None,
+            None => ResolvedContextFrontierSnapshot::try_from_candidate(
+                input.session,
+                input.starting_frontier,
+                vec![task_entry.reference()],
+            )
+            .ok()?,
+        };
         let start = AcceptedInputTurnStart::from_validated_eligibility(
             AcceptedInputStartingLineage::FirstInSession,
             starting_snapshot.frontier(),
@@ -3415,8 +3423,17 @@ impl PreparedDelegatedTurnActivation {
                 delivery.payload().clone(),
             ));
         }
-        let starting_snapshot = input
-            .predecessor_snapshot
+        let base = match input.runner_placement_snapshot {
+            Some(placement) if input.predecessor_snapshot.is_semantic_prefix_of(&placement) => {
+                placement
+            }
+            Some(placement) if placement.is_semantic_prefix_of(&input.predecessor_snapshot) => {
+                input.predecessor_snapshot
+            }
+            Some(_) => return None,
+            None => input.predecessor_snapshot,
+        };
+        let starting_snapshot = base
             .derive_appending_candidate(
                 input.starting_frontier,
                 entries
@@ -8403,7 +8420,7 @@ mod tests {
     }
 
     #[test]
-    fn delegated_activation_preserves_task_origin_and_first_session_lineage() {
+    fn delegated_activation_extends_placement_and_preserves_task_origin() {
         let child = current_session();
         let spawning_request = tool_request_id(401);
         let child_turn = turn_id(402);
@@ -8419,15 +8436,27 @@ mod tests {
                 content: task.clone(),
             },
         );
+        let placement_frontier = context_frontier_id(406);
+        let placement_snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
+            child.id(),
+            placement_frontier,
+            vec![SemanticTranscriptEntryRef::from_source(
+                child.id(),
+                semantic_transcript_entry_id(407),
+            )],
+        )
+        .expect("fixture placement snapshot is valid");
+        let starting_frontier = context_frontier_id(408);
         let prepared = PreparedDelegatedTurnActivation::prepare(DelegatedTurnActivationInput {
             session: child.id(),
             turn: child_turn,
             spawning_request,
             task: task.clone(),
             task_entry,
+            runner_placement_snapshot: Some(placement_snapshot),
             configuration: configuration(&child),
-            starting_frontier: context_frontier_id(406),
-            initial_attempt: turn_attempt_id(407),
+            starting_frontier,
+            initial_attempt: turn_attempt_id(409),
         })
         .expect("exact delegated task facts prepare activation");
         let (active, origin, snapshot) = prepared.into_parts();
@@ -8440,11 +8469,15 @@ mod tests {
             active.start().lineage(),
             AcceptedInputStartingLineage::FirstInSession
         );
-        assert_eq!(snapshot.entry_count(), 1);
+        assert_eq!(snapshot.entry_count(), 2);
+        assert_eq!(
+            snapshot.immediate_semantic_prefix().unwrap().snapshot(),
+            placement_frontier
+        );
         assert_eq!(origin.len(), 1);
         assert_eq!(
             origin.first().unwrap().reference(),
-            snapshot.ordered_entries().next().unwrap()
+            snapshot.ordered_entries().last().unwrap()
         );
     }
 
@@ -8470,6 +8503,7 @@ mod tests {
             spawning_request: tool_request_id(410),
             task,
             task_entry,
+            runner_placement_snapshot: None,
             configuration: configuration(&child),
             starting_frontier: context_frontier_id(413),
             initial_attempt: turn_attempt_id(414),
@@ -8509,7 +8543,7 @@ mod tests {
     }
 
     #[test]
-    fn delegated_wake_activation_preserves_delivery_range_and_predecessor_lineage() {
+    fn delegated_wake_activation_extends_placement_and_preserves_lineage() {
         let recipient = current_session();
         let predecessor = turn_id(411);
         let predecessor_entry = SemanticTranscriptEntryRef::from_source(
@@ -8522,6 +8556,16 @@ mod tests {
             vec![predecessor_entry],
         )
         .expect("fixture predecessor snapshot is valid");
+        let placement_frontier = context_frontier_id(423);
+        let placement_snapshot = predecessor_snapshot
+            .derive_appending_candidate(
+                placement_frontier,
+                vec![SemanticTranscriptEntryRef::from_source(
+                    recipient.id(),
+                    semantic_transcript_entry_id(424),
+                )],
+            )
+            .expect("fixture placement extends the predecessor");
         let first_sequence = NonZeroU64::new(1).unwrap();
         let through_sequence = NonZeroU64::new(2).unwrap();
         let first_delivery = SemanticTranscriptEntryReconstitutionInput::new(
@@ -8557,6 +8601,7 @@ mod tests {
                 deliveries: vec![first_delivery, through_delivery],
                 predecessor,
                 predecessor_snapshot,
+                runner_placement_snapshot: Some(placement_snapshot),
                 configuration: configuration(&recipient),
                 starting_frontier: context_frontier_id(421),
                 initial_attempt: turn_attempt_id(422),
@@ -8577,10 +8622,10 @@ mod tests {
             }
         );
         assert_eq!(entries.len(), 2);
-        assert_eq!(snapshot.entry_count(), 3);
+        assert_eq!(snapshot.entry_count(), 4);
         assert_eq!(
             snapshot.immediate_semantic_prefix().unwrap().snapshot(),
-            context_frontier_id(413)
+            placement_frontier
         );
     }
 

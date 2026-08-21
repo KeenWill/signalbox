@@ -441,14 +441,14 @@ async fn prepare_preview(
             return Err(StartEligibleTurnCorruption::CurrentSession(error).into());
         }
     };
-    if let Some(prepared) =
-        prepare_delegated_preview(connection, requested_session, identities).await?
-    {
-        return Ok(Some(prepared.into()));
-    }
     let scheduling = load_scheduling_projection(connection, session)
         .await
         .map_err(map_scheduling_error)?;
+    if let Some(prepared) =
+        prepare_delegated_preview(connection, requested_session, identities, &scheduling).await?
+    {
+        return Ok(Some(prepared.into()));
+    }
     if let Some(prepared) =
         prepare_delegated_wake_preview(connection, requested_session, identities, &scheduling)
             .await?
@@ -500,6 +500,7 @@ async fn prepare_delegated_preview(
     connection: &mut PgConnection,
     session: SessionId,
     identities: AcceptedInputTurnActivationIdentities,
+    scheduling: &AcceptedInputSchedulingProjection,
 ) -> Result<Option<PreparedDelegatedTurnActivation>, StartEligibleTurnRepositoryError> {
     let row = sqlx::query(
         "SELECT
@@ -601,12 +602,15 @@ async fn prepare_delegated_preview(
             content: task.clone(),
         },
     );
+    let runner_placement_snapshot =
+        load_runner_placement_snapshot(connection, session, scheduling).await?;
     PreparedDelegatedTurnActivation::prepare(DelegatedTurnActivationInput {
         session,
         turn: TurnId::from_uuid(row.try_get("turn_id")?),
         spawning_request,
         task,
         task_entry,
+        runner_placement_snapshot,
         configuration,
         starting_frontier,
         initial_attempt,
@@ -749,6 +753,8 @@ async fn prepare_delegated_wake_preview(
         .ok_or(StartEligibleTurnCorruption::Missing(
             "wake predecessor snapshot",
         ))?;
+    let runner_placement_snapshot =
+        load_runner_placement_snapshot(connection, session, scheduling).await?;
     let configuration =
         decode_goal_origin_configuration(&row, session).map_err(map_scheduling_error)?;
     PreparedDelegatedTurnActivation::prepare_wake(DelegatedWakeTurnActivationInput {
@@ -759,6 +765,7 @@ async fn prepare_delegated_wake_preview(
         deliveries,
         predecessor,
         predecessor_snapshot,
+        runner_placement_snapshot,
         configuration,
         starting_frontier: identities.starting_frontier(),
         initial_attempt: identities.initial_attempt(),
@@ -767,6 +774,42 @@ async fn prepare_delegated_wake_preview(
     .ok_or_else(|| {
         StartEligibleTurnCorruption::Inconsistent("delegated wake activation projection").into()
     })
+}
+
+async fn load_runner_placement_snapshot(
+    connection: &mut PgConnection,
+    session: SessionId,
+    scheduling: &AcceptedInputSchedulingProjection,
+) -> Result<
+    Option<signalbox_domain::ResolvedContextFrontierSnapshot>,
+    StartEligibleTurnRepositoryError,
+> {
+    let frontier = sqlx::query_scalar::<_, Uuid>(
+        "SELECT pointer.context_frontier_id
+           FROM runner_current_session_placement AS head
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = head.session_id
+            AND placement.event_ordinal = head.event_ordinal
+           JOIN session_runner_placement_frontier AS pointer
+             ON pointer.session_id = placement.session_id
+            AND pointer.placement_revision = placement.placement_revision
+          WHERE head.session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+
+    frontier
+        .map(|frontier| {
+            scheduling
+                .resolved_snapshot(signalbox_domain::ContextFrontierId::from_uuid(frontier))
+                .cloned()
+                .ok_or_else(|| {
+                    StartEligibleTurnCorruption::Missing("delegated runner placement snapshot")
+                        .into()
+                })
+        })
+        .transpose()
 }
 
 async fn handle_in_transaction(
@@ -813,17 +856,17 @@ async fn handle_in_transaction(
             return Err(StartEligibleTurnCorruption::CurrentSession(error).into());
         }
     };
+    let scheduling = load_scheduling_projection(connection, session)
+        .await
+        .map_err(map_scheduling_error)?;
     if let Some(prepared) =
-        prepare_delegated_preview(connection, requested_session, identities).await?
+        prepare_delegated_preview(connection, requested_session, identities, &scheduling).await?
     {
         let activated = insert_prepared_activation(connection, prepared.into()).await?;
         return Ok(TransactionDecision::Commit(
             StartEligibleTurnOutcome::Activated(Box::new(activated)),
         ));
     }
-    let scheduling = load_scheduling_projection(connection, session)
-        .await
-        .map_err(map_scheduling_error)?;
     if let Some(prepared) =
         prepare_delegated_wake_preview(connection, requested_session, identities, &scheduling)
             .await?

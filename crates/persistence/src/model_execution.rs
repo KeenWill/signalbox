@@ -3643,12 +3643,23 @@ async fn load_delegated_live_turn(
             content: task.clone(),
         },
     );
+    let stored_snapshot = load_call_snapshot(connection, session, starting_frontier)
+        .await?
+        .reconstitute()
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "delegated starting snapshot",
+        ))?;
+    let runner_placement_snapshot = stored_snapshot
+        .immediate_semantic_prefix()
+        .and_then(|prefix| scheduling.resolved_snapshot(prefix.snapshot()))
+        .cloned();
     let prepared = PreparedDelegatedTurnActivation::prepare(DelegatedTurnActivationInput {
         session,
         turn,
         spawning_request,
         task,
         task_entry,
+        runner_placement_snapshot,
         configuration,
         starting_frontier,
         initial_attempt,
@@ -3672,12 +3683,6 @@ async fn load_delegated_live_turn(
         .with_consumed_steering(load_delegated_consumed_steering(connection, session, turn).await?)
         .ok_or(ModelCallCorruption::Inconsistent(
             "delegated consumed steering",
-        ))?;
-    let stored_snapshot = load_call_snapshot(connection, session, starting_frontier)
-        .await?
-        .reconstitute()
-        .ok_or(ModelCallCorruption::Inconsistent(
-            "delegated starting snapshot",
         ))?;
     if stored_snapshot != prepared_snapshot {
         return Err(ModelCallCorruption::Inconsistent("delegated starting snapshot").into());
@@ -3890,6 +3895,17 @@ async fn load_delegated_live_wake_turn(
         signalbox_domain::ContextFrontierId::from_uuid(required(&row, "starting_frontier_id")?);
     let initial_attempt =
         signalbox_domain::TurnAttemptId::from_uuid(required(&row, "projection_attempt_id")?);
+    let stored_snapshot = load_call_snapshot(connection, session, starting_frontier)
+        .await?
+        .reconstitute()
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "delegated wake starting snapshot",
+        ))?;
+    let runner_placement_snapshot = stored_snapshot
+        .immediate_semantic_prefix()
+        .filter(|prefix| prefix.snapshot() != predecessor_frontier)
+        .and_then(|prefix| scheduling.resolved_snapshot(prefix.snapshot()))
+        .cloned();
     let prepared =
         PreparedDelegatedTurnActivation::prepare_wake(DelegatedWakeTurnActivationInput {
             session,
@@ -3899,6 +3915,7 @@ async fn load_delegated_live_wake_turn(
             deliveries,
             predecessor,
             predecessor_snapshot,
+            runner_placement_snapshot,
             configuration,
             starting_frontier,
             initial_attempt,
