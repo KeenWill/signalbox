@@ -1327,20 +1327,50 @@ impl RunnerProtocolStore {
         if let Some(lease) = current_lease {
             persist_runner_loss_lease_and_wait(&mut transaction, &lost, lease).await?;
         } else {
-            let has_active_boundary: bool = sqlx::query_scalar(
+            let has_active_runner_boundary: bool = sqlx::query_scalar(
                 "SELECT EXISTS (
                      SELECT 1
-                       FROM turn_lifecycle
-                      WHERE session_id = $1
-                        AND state_kind = 'active'
-                        AND active_phase_kind = 'running'
-                        AND active_tool_round_call_id IS NOT NULL
+                       FROM turn_lifecycle AS lifecycle
+                       JOIN turn_attempt AS turn_attempt
+                         ON turn_attempt.turn_attempt_id =
+                            lifecycle.current_attempt_id
+                        AND turn_attempt.turn_id = lifecycle.turn_id
+                        AND turn_attempt.session_id = lifecycle.session_id
+                       JOIN tool_request AS request
+                         ON request.producing_model_call_id =
+                            lifecycle.active_tool_round_call_id
+                        AND request.turn_id = lifecycle.turn_id
+                        AND request.session_id = lifecycle.session_id
+                       JOIN runner_current_session_placement AS placement_head
+                         ON placement_head.session_id = lifecycle.session_id
+                       JOIN runner_session_placement_tool AS required
+                         ON required.session_id = placement_head.session_id
+                        AND required.event_ordinal = placement_head.event_ordinal
+                        AND required.tool_name = request.tool_name
+                        AND required.runner_required
+                      WHERE lifecycle.session_id = $1
+                        AND lifecycle.state_kind = 'active'
+                        AND lifecycle.active_phase_kind = 'running'
+                        AND lifecycle.active_tool_round_call_id IS NOT NULL
+                        AND turn_attempt.state_kind = 'running'
+                        AND NOT EXISTS (
+                            SELECT 1
+                              FROM tool_approval_decision AS denied
+                             WHERE denied.request_id = request.request_id
+                               AND denied.decision_kind = 'deny'
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1
+                              FROM tool_attempt AS finished
+                             WHERE finished.request_id = request.request_id
+                               AND finished.state_kind = 'terminal'
+                        )
                  )",
             )
             .bind(session.into_uuid())
             .fetch_one(&mut *transaction)
             .await?;
-            if has_active_boundary {
+            if has_active_runner_boundary {
                 yield_turn_to_runner_recovery_without_lease(&mut transaction, &lost).await?;
             }
         }
@@ -1607,7 +1637,7 @@ impl RunnerProtocolStore {
             return Err(RunnerProtocolCorruption::CrossWiredReference.into());
         }
         let current_lease = self
-            .load_current_loss_lease_in(&mut transaction, session, prior_event_ordinal)
+            .load_current_loss_lease_in(&mut transaction, session)
             .await?;
         let interrupted_attempt = current_lease.as_ref().map(RunnerLease::attempt);
         let reconciled = placement
@@ -3025,14 +3055,14 @@ impl RunnerProtocolStore {
             .bind(Decimal::from(generation.get()))
             .fetch_optional(&mut **transaction)
             .await?
-            .ok_or(RunnerProtocolCorruption::MissingCanonicalLoss)?;
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalLease)?;
         let state: String = locked.decode_column("state_kind")?;
         if !matches!(state.as_str(), "offered" | "claimed") {
             return Ok(None);
         }
         self.load_lease_in(transaction, lease_id, generation)
             .await?
-            .ok_or(RunnerProtocolCorruption::MissingCanonicalLoss.into())
+            .ok_or(RunnerProtocolCorruption::MissingCanonicalLease.into())
             .map(Some)
     }
 
@@ -3852,6 +3882,40 @@ async fn yield_turn_to_runner_recovery_without_lease(
 ) -> Result<(), RunnerProtocolStoreError> {
     let runner = placement_loss_fence_runner(placement)
         .ok_or(RunnerProtocolCorruption::CrossWiredReference)?;
+    let retired = sqlx::query(
+        "UPDATE tool_attempt AS attempt
+            SET state_kind = 'terminal',
+                terminal_disposition_kind = 'known_failed',
+                error_kind = 'crash_lost'
+           FROM tool_request AS request,
+                turn_lifecycle AS lifecycle,
+                runner_current_session_placement AS placement_head,
+                runner_session_placement_tool AS required
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.state_kind = 'active'
+            AND lifecycle.active_phase_kind = 'running'
+            AND lifecycle.active_tool_round_call_id IS NOT NULL
+            AND request.producing_model_call_id =
+                lifecycle.active_tool_round_call_id
+            AND request.turn_id = lifecycle.turn_id
+            AND request.session_id = lifecycle.session_id
+            AND attempt.request_id = request.request_id
+            AND attempt.turn_id = request.turn_id
+            AND attempt.session_id = request.session_id
+            AND attempt.state_kind = 'prepared'
+            AND placement_head.session_id = lifecycle.session_id
+            AND required.session_id = placement_head.session_id
+            AND required.event_ordinal = placement_head.event_ordinal
+            AND required.tool_name = request.tool_name
+            AND required.runner_required",
+    )
+    .bind(placement.session().into_uuid())
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if retired > 1 {
+        return Err(RunnerProtocolCorruption::IncompleteInventory.into());
+    }
     let yielded = sqlx::query(
         "UPDATE turn_attempt AS attempt
             SET state_kind = 'ended', end_variant = 'without_stop',
@@ -6584,6 +6648,9 @@ fn placement_row_has_loss_facts(row: &PgRow) -> Result<bool, RunnerProtocolStore
         .is_some()
         || row
             .decode_column::<Option<String>>("loss_source_kind")?
+            .is_some()
+        || row
+            .decode_column::<Option<Decimal>>("loss_registration_revision")?
             .is_some())
 }
 
@@ -8452,6 +8519,8 @@ pub enum RunnerProtocolCorruption {
     MissingCanonicalConnection,
     /// Canonical connection-loss state or its propagation cursor is absent.
     MissingCanonicalLoss,
+    /// Canonical runner-lease state is absent.
+    MissingCanonicalLease,
     /// Canonical placement state is absent.
     MissingCanonicalPlacement,
     /// Canonical credential-grant state is absent.
@@ -8488,6 +8557,7 @@ impl fmt::Display for RunnerProtocolCorruption {
             Self::MissingCanonicalLoss => {
                 formatter.write_str("canonical runner connection loss is missing")
             }
+            Self::MissingCanonicalLease => formatter.write_str("canonical runner lease is missing"),
             Self::MissingCanonicalPlacement => {
                 formatter.write_str("canonical runner placement is missing")
             }

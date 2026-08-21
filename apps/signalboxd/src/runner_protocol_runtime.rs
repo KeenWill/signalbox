@@ -128,7 +128,7 @@ impl PostgresRunnerRegistrationService {
                 ) => {}
             }
         }
-        self.propagate_pending_connection_losses().await?;
+        self.propagate_pending_connection_losses(None).await?;
         Ok(transitions)
     }
 
@@ -172,8 +172,17 @@ impl PostgresRunnerRegistrationService {
         Ok(())
     }
 
-    async fn propagate_pending_connection_losses(&self) -> Result<(), RunnerProtocolStoreError> {
-        for loss in self.store.load_pending_connection_losses().await? {
+    async fn propagate_pending_connection_losses(
+        &self,
+        only_enrollment: Option<RunnerEnrollmentId>,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        for loss in self
+            .store
+            .load_pending_connection_losses()
+            .await?
+            .into_iter()
+            .filter(|loss| only_enrollment.is_none_or(|enrollment| loss.enrollment() == enrollment))
+        {
             loop {
                 let page = self
                     .store
@@ -523,6 +532,28 @@ impl PostgresRunnerRegistrationService {
     ) -> Result<RunnerConnectionTransitionOutcome, RunnerRegistrationFailure> {
         let wire_epoch = epoch;
         let operation_kind = transition_operation_kind(transition);
+        let terminal_loss = matches!(
+            transition,
+            RunnerConnectionTransition::HeartbeatTimeout
+                | RunnerConnectionTransition::TransportClosed
+                | RunnerConnectionTransition::ProtocolFailure
+        );
+        let _registration_admission = if terminal_loss {
+            Some(self.registration_admission.lock().await)
+        } else {
+            None
+        };
+        if terminal_loss {
+            self.propagate_pending_registration_reconciliations()
+                .await
+                .map_err(|error| {
+                    store_failure(
+                        operation_kind,
+                        AvailableCorrelation::ConnectionEpoch(wire_epoch),
+                        error,
+                    )
+                })?;
+        }
         let epoch = RunnerConnectionEpoch::try_from_u64(epoch.get()).ok_or_else(|| {
             RunnerRegistrationFailure::new(
                 operation_kind,
@@ -557,7 +588,8 @@ impl PostgresRunnerRegistrationService {
             RunnerConnectionTransitionOutcome::Current(snapshot)
                 if snapshot.state() == RunnerConnectionState::Lost
         ) {
-            self.propagate_pending_connection_losses()
+            let enrollment = RunnerEnrollmentId::from_uuid(enrollment.into_uuid());
+            self.propagate_pending_connection_losses(Some(enrollment))
                 .await
                 .map_err(|error| {
                     store_failure(
@@ -2074,6 +2106,7 @@ mod tests {
     };
     use signalbox_persistence::{
         create_session::CreateSessionRepository,
+        disposable_postgres_server_args, disposable_postgres_state_tmpfs,
         disposable_test_container_labels, local_test_connection_options, migrate,
         runner_protocol::{RunnerConnectionCause, RunnerConnectionState},
         session_credentials::{SessionCredentialPin, SessionModelCredential},
@@ -2318,7 +2351,8 @@ mod tests {
             .with_user(DATABASE_USER)
             .with_password(DATABASE_PASSWORD)
             .with_db_name(DATABASE_NAME)
-            .with_fsync_enabled()
+            .with_cmd(disposable_postgres_server_args())
+            .with_mount(disposable_postgres_state_tmpfs())
             .with_tag(POSTGRES_IMAGE_TAG)
             .with_labels(disposable_test_container_labels())
             .start()
@@ -3297,7 +3331,7 @@ mod tests {
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
         let enrolled = service
             .enroll(Enroll {
-                request_id: identity(1),
+                request_id: identity(ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED),
                 digest_version: DIGEST_VERSION,
                 advertisement: empty_advertisement(),
             })

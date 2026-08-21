@@ -46,7 +46,7 @@
 name = "persistence"
 package = "signalbox-persistence"
 features = ["postgres-integration"]
-# The long pole by an order of magnitude: 695 of the 1,122 ignored tests these
+# The long pole by an order of magnitude: 695 of the 1,134 ignored tests these
 # suites hold. Three shards still took about 8m15s each at the measured
 # baseline, so six bring the test-execution long pole into the four-minute band.
 # Counts are a snapshot, taken with `cargo test --tests -- --ignored --list`;
@@ -59,11 +59,18 @@ exclude_binaries = ["runner_protocol_postgres"]
 name = "runner"
 package = "signalbox-persistence"
 features = ["postgres-integration"]
-# The 251 runner-protocol tests took about eight minutes as one partition at the
+# The 263 runner-protocol tests took about eight minutes as one partition at the
 # measured baseline, so they are split across two runners.
 shards = 2
 skip = []
 include_binaries = ["runner_protocol_postgres"]
+
+[[suite]]
+name = "program-runtime"
+package = "signalbox-program-runtime"
+features = ["postgres-integration"]
+shards = 1
+skip = []
 
 [[suite]]
 name = "signalboxd"

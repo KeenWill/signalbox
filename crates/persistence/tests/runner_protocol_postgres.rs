@@ -41,6 +41,7 @@ use signalbox_domain::{
 use signalbox_persistence::{
     MIGRATOR,
     create_session::CreateSessionRepository,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
     disposable_test_container_labels, local_test_connection_options, migrate,
     outbox::{
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedRunnerState, OutboxCorruption,
@@ -158,7 +159,8 @@ async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_db_name(DATABASE_NAME)
-        .with_fsync_enabled()
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -1297,6 +1299,7 @@ async fn migrated_unconnected_later_lease_fixture(
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(pool).await?;
+    install_pre_loss_identity_compatibility_function(pool).await?;
     let (store, expected_enrollment, registration, pin) = prepared_pin_fixture_with_authorization(
         pool,
         authorized,
@@ -1402,6 +1405,36 @@ async fn install_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<()
     )
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+async fn install_pre_loss_identity_compatibility_function(
+    pool: &PgPool,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "CREATE FUNCTION lock_runner_loss_identity(checked_runner uuid)
+         RETURNS void
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             PERFORM pg_advisory_xact_lock(
+                 hashtextextended(
+                     'signalbox.runner-loss-identity.' || checked_runner::text,
+                     0
+                 )
+             );
+         END;
+         $$;",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn drop_pre_loss_identity_compatibility_function(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("DROP FUNCTION lock_runner_loss_identity(uuid)")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -3649,6 +3682,7 @@ async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(&pool).await?;
+    install_pre_loss_identity_compatibility_function(&pool).await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -3771,6 +3805,7 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
     MIGRATOR
         .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
         .await?;
+    install_pre_loss_identity_compatibility_function(&pool).await?;
     let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
@@ -3781,6 +3816,7 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
         connection.epoch(),
     )
     .await?;
+    drop_pre_loss_identity_compatibility_function(&pool).await?;
     let refusal = migrate(&pool)
         .await
         .expect_err("legacy placement history has no exact loss baseline");
@@ -3942,6 +3978,7 @@ async fn s32_inv044_runner_loss_cursor_migration_preserves_pending_placement()
     MIGRATOR
         .run_to(PRE_RUNNER_LOSS_CURSOR_MIGRATION, &pool)
         .await?;
+    install_pre_loss_identity_compatibility_function(&pool).await?;
     insert_session(&pool).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
     let expected_enrollment = enrollment();
@@ -3960,6 +3997,7 @@ async fn s32_inv044_runner_loss_cursor_migration_preserves_pending_placement()
         connection.epoch(),
     )
     .await?;
+    drop_pre_loss_identity_compatibility_function(&pool).await?;
     migrate(&pool).await?;
     let loss = store
         .load_current_connection_loss(expected_enrollment.enrollment())
@@ -5158,6 +5196,7 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(&pool).await?;
+    install_pre_loss_identity_compatibility_function(&pool).await?;
     let (store, _, registration, pin) = prepared_pin_fixture_with_authorization(
         &pool,
         authorized,
@@ -5168,6 +5207,7 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
     .await?;
     store.store_pin(&pin, &registration).await?;
     drop_pre_loss_fence_compatibility_tables(&pool).await?;
+    drop_pre_loss_identity_compatibility_function(&pool).await?;
     let refusal = migrate(&pool)
         .await
         .expect_err("an outstanding legacy offer has no reconstructible issue baseline");
@@ -13635,11 +13675,11 @@ async fn s32_inv002_inv044_runner_replacement_authenticates_historical_pin_regis
     Ok(())
 }
 
-/// INV-002 / INV-044: every historical runner-replacement row retains the
-/// closed pinned shape even when a later successor becomes current.
+/// INV-002 / INV-044: every historical runner-replacement row rejects a
+/// registration loss cause even when a later successor becomes current.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv002_inv044_historical_runner_replacement_rejects_loss_metadata()
+async fn s32_inv002_inv044_historical_runner_replacement_rejects_registration_loss_cause()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let (store, _, _, pin) = stored_pin_fixture(&pool).await?;
@@ -13727,8 +13767,7 @@ async fn s32_inv002_inv044_historical_runner_replacement_rejects_loss_metadata()
     .await?;
     sqlx::query(
         "UPDATE runner_session_placement_record
-            SET lost_runner_id = pinned_runner_id,
-                loss_source_kind = 'registration'
+            SET loss_registration_revision = 1
           WHERE session_id = $1
             AND event_kind = 'runner_replaced'
             AND placement_revision = $2",
@@ -13737,10 +13776,9 @@ async fn s32_inv002_inv044_historical_runner_replacement_rejects_loss_metadata()
     .bind(Decimal::from(historical_replacement_revision.get()))
     .execute(&pool)
     .await?;
-    let corrupted = store
-        .load_placement(later_loss.session())
-        .await
-        .expect_err("a current successor cannot hide loss metadata on historical pinned state");
+    let corrupted = store.load_placement(later_loss.session()).await.expect_err(
+        "a current successor cannot hide a registration loss cause on historical pinned state",
+    );
 
     assert_store_corruption(corrupted, RunnerProtocolCorruption::InvalidEncoding);
     drop(pool);
