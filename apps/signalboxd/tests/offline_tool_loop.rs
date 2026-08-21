@@ -2836,7 +2836,10 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
             "entries": [{
                 "position": 1,
                 "kind": "user",
-                "content": FIXTURE_USER_CONTENT,
+                "content": serde_json::json!([{
+                    "type": "text",
+                    "text": FIXTURE_USER_CONTENT
+                }]).to_string(),
                 "content_truncated": false
             }, {
                 "position": 2,
