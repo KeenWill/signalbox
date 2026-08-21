@@ -2529,6 +2529,16 @@ impl RunnerProtocolStore {
                 ));
             }
         }
+        let current: Option<Decimal> = sqlx::query_scalar(RUNNER_REGISTRATION_HEAD)
+            .bind(enrollment.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let current = current.ok_or(RunnerProtocolCorruption::MissingCanonicalRegistration)?;
+        if decode_registration_revision(current)? != registration.revision() {
+            return Err(RunnerProtocolStoreError::Domain(
+                RunnerDomainError::RegistrationChanged,
+            ));
+        }
         match load_connection_head_in(transaction.as_mut(), enrollment).await? {
             None
             | Some(RunnerConnectionSnapshot {

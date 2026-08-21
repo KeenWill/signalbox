@@ -319,7 +319,7 @@ Representation rules, all enforced in the schema:
   ([sessions-and-transcript](sessions-and-transcript.md)).
 - Migration `202608030003` advances native creation to storage version 7,
   imported creation to version 5, defaults replacement to version 4, and
-  submit-input to version 2 for their settings-bearing command payloads. Rust
+  submit-input to version 3 for their settings-bearing command payloads. Rust
   decoders require provider-default full settings or an inherit-all overlay on
   every earlier supported version. Imported-creation version 4 remains
   unsupported and reserved for its committed runner-placement shape. Existing
@@ -628,9 +628,11 @@ Representation rules, all enforced in the schema:
   rejection directly against its named turn's recorded `awaiting_tool_approval`
   wait, so a receipt naming a running or terminal turn cannot commit and
   therefore never replays as authoritative.
-- Accepted user text is bounded to 1 MiB of UTF-8 in both the command record and
-  `accepted_input` (`octet_length(convert_to(...))` checks), independent of the
-  application admission bound.
+- Accepted user content is stored only in the mirrored ordered command and
+  `accepted_input` part satellites. Their parent completeness, ordinal,
+  structural, text-byte, attachment-metadata, and blob-correlation constraints
+  are owned by [blob storage](blob-storage.md#multipart-user-content); neither
+  parent retains a `content_text` column.
 - Current and receipt metadata tag and attribute-key columns are bounded to
   1,024 UTF-8 bytes with the same explicit octet-length checks as their domain
   admission boundary.
@@ -661,7 +663,7 @@ identifier: `command_id` is the primary key across all kinds and sessions
 `update_session_placement`) and a kind-scoped `storage_version`. The gates above
 fix the current numbers: create-session records write version 7, imported-create
 records write version 5, replace-defaults records write version 4, and
-submit-input records write version 2; every other closed kind writes version 1.
+submit-input records write version 3; every other closed kind writes version 1.
 The four settings-bearing families require the migration's provider-default full
 settings or inherit-all overlay on every earlier supported version.
 Create-session records reconstitute version 1 with the disabled dangerous-tool

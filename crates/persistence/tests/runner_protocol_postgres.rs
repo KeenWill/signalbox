@@ -1547,6 +1547,35 @@ fn propagation_session(ordinal: u128) -> SessionId {
     ))
 }
 
+async fn insert_uncommitted_exact_placement(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session: SessionId,
+    runner: RunnerId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, directory_selection_kind,
+             workspace_requirement_kind, requested_sandbox_profile,
+             permission_override_count, state_kind, pinned_tool_count)
+         VALUES ($1, 1, 1, 'created', 'identity', $2, 'runner_default',
+                 'none', 'workspace_restricted', 0, 'unpinned', 0)",
+    )
+    .bind(session.into_uuid())
+    .bind(runner.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_current_session_placement
+            (session_id, event_ordinal)
+         VALUES ($1, 1)",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn insert_bounded_propagation_session_fixture(
     pool: &PgPool,
     runner: RunnerId,
@@ -4249,6 +4278,127 @@ async fn s32_inv044_runner_loss_cursor_rejects_premature_completion() -> Result<
     Ok(())
 }
 
+/// INV-044: an exact-identity placement that observes enrollment absence
+/// commits before the matching enrollment can create or complete a loss cursor.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv044_pre_enrollment_placement_serializes_loss_cursor_creation()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    let expected_session = SessionId::from_uuid(uuid(SESSION));
+    let mut placement = pool.begin().await?;
+    insert_uncommitted_exact_placement(
+        &mut placement,
+        expected_session,
+        expected_enrollment.runner(),
+    )
+    .await?;
+    let mut enrollment_insert = Box::pin(store.insert_enrollment(&expected_enrollment));
+
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut enrollment_insert)
+        .await
+        .expect_err("enrollment must wait for the absent-baseline placement");
+    placement.commit().await?;
+    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, enrollment_insert).await??;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the serialized terminal connection owns its loss cursor");
+    let page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_eq!(page.sessions(), &[expected_session]);
+    assert!(!page.is_complete());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: exact-identity placement takes the runner-identity fence before
+/// enrollment authority, so cursor completion cannot form an opposing edge.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv044_loss_cursor_completion_serializes_on_runner_identity()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its pending propagation cursor");
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    let mut enrollment_authority = pool.begin().await?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_enrollment
+          WHERE enrollment_id = $1
+          FOR UPDATE",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .fetch_one(&mut *enrollment_authority)
+    .await?;
+    let placement_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let placement_insert = tokio::spawn(async move {
+        tokio::time::timeout(
+            LOCK_COMPLETION_TIMEOUT,
+            placement_store.store_placement(&placement, None, None),
+        )
+        .await
+    });
+    let placement_blocked =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1))
+            .await
+            .expect("placement enrollment-lock observation must remain bounded")?;
+    let mut completion = Box::pin(store.complete_connection_loss_propagation(loss));
+
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut completion)
+        .await
+        .expect_err("cursor completion must wait for placement's identity fence");
+    enrollment_authority.commit().await?;
+    placement_insert
+        .await
+        .expect("the placement task remains joinable")
+        .expect("the placement insert must finish within its operation timeout")?;
+    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, completion).await??;
+    let page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert!(
+        placement_blocked,
+        "placement must reach enrollment authority after taking identity"
+    );
+    assert_eq!(page.sessions(), &[]);
+    assert!(page.is_complete());
+    drop(pool);
+    Ok(())
+}
+
 /// INV-044: a fully projected loss cursor may transition once to completed.
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -6086,6 +6236,42 @@ async fn s30_inv042_current_registration_gates_new_leases() -> Result<(), Box<dy
         preserved,
         RunnerRegistrationReconciliationDisposition::Preserved
     );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-042: a pin prepared from an older registration cannot commit after the
+/// newer registration's reconciliation cursor has completed.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv042_store_pin_rechecks_current_registration_after_reconciliation()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin) = prepared_pin_fixture_with_authorization(
+        &pool,
+        authorized,
+        catalog(),
+        no_permission_overrides(),
+        "effect_free",
+    )
+    .await?;
+    store
+        .register(&expected_enrollment, narrowed_advertisement())
+        .await?;
+    let reconciliation = store.load_pending_registration_reconciliations().await?[0];
+    store
+        .complete_registration_reconciliation(reconciliation)
+        .await?;
+    store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+
+    let rejected = store
+        .store_pin(&pin, &registration)
+        .await
+        .expect_err("a completed cursor cannot admit a stale prepared pin");
+
+    assert_store_domain_error(rejected, RunnerDomainError::RegistrationChanged);
     drop(pool);
     Ok(())
 }

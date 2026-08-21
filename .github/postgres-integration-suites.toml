@@ -76,7 +76,9 @@ skip = []
 name = "signalboxd"
 package = "signalboxd"
 features = ["test-support"]
-shards = 1
+# One partition took about five minutes at the measured baseline; two keep it
+# from replacing persistence as the integration-test long pole.
+shards = 2
 # Subprocess entry points invoked only by their owning process tests.
 skip = ["bridge_build_direct_invocation_fixture", "bridge_wait_"]
 
