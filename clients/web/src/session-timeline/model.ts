@@ -241,7 +241,7 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
     const bounded = boundedLimits(limits, this.limits)
     const count = Math.min(bounded.maxItems, Math.floor(bounded.maxBytes / SCENARIO_ITEM_BYTES))
     const addressed = 'eventSequence' in anchor ? Number(decimalAddress(anchor.eventSequence)) : 0
-    const start = (() => {
+    const initialStart = (() => {
       switch (anchor.kind) {
         case 'first':
           return 1
@@ -250,12 +250,16 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
         case 'after':
           return Math.min(addressed + 1, SESSION_FOUNDATION_TOTAL + 1)
         case 'before':
-          return Math.max(addressed - count, 1)
+          return 1
         case 'around':
           return Math.max(Math.min(addressed - Math.floor(count / 2), SESSION_FOUNDATION_TOTAL), 1)
       }
     })()
-    const end = Math.min(start + count - 1, SESSION_FOUNDATION_TOTAL)
+    const end =
+      anchor.kind === 'before'
+        ? Math.min(addressed - 1, SESSION_FOUNDATION_TOTAL)
+        : Math.min(initialStart + count - 1, SESSION_FOUNDATION_TOTAL)
+    const start = anchor.kind === 'before' ? Math.max(end - count + 1, 1) : initialStart
     const items =
       start > end
         ? []

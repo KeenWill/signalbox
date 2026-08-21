@@ -28,6 +28,10 @@ describe('BoundedSessionHistory', () => {
       { kind: 'around', eventSequence: arbitraryAddress },
       { maxItems: scenario.limits.max_timeline_window_items, maxBytes: 64 * 1024 },
     )
+    const another = await history.load(
+      { kind: 'around', eventSequence: '250000' },
+      { maxItems: scenario.limits.max_timeline_window_items, maxBytes: 64 * 1024 },
+    )
 
     expect(descriptor.sizes.item_count).toBe(String(SESSION_FOUNDATION_TOTAL))
     expect(tail.items.at(-1)?.address).toEqual(descriptor.latest_address)
@@ -35,6 +39,7 @@ describe('BoundedSessionHistory', () => {
     expect(arbitrary.items.some((item) => item.address.event_sequence === arbitraryAddress)).toBe(
       true,
     )
+    expect(another.items.some((item) => item.address.event_sequence === '250000')).toBe(true)
     expect(history.retained.length).toBeLessThanOrEqual(MAX_RETAINED_SESSION_ITEMS)
   })
 
@@ -99,6 +104,17 @@ describe('BoundedSessionHistory', () => {
     expect(window.items).toEqual([])
     expect(window.continuation_before).toBeNull()
     expect(window.continuation_after).toBeNull()
+  })
+
+  it('stops a scenario before window strictly before its anchor', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const window = await scenario.readWindow(
+      sessionId,
+      { kind: 'before', eventSequence: '5' },
+      { maxItems: scenario.limits.max_timeline_window_items, maxBytes: 64 * 1024 },
+    )
+
+    expect(window.items.map((item) => item.address.event_sequence)).toEqual(['1', '2', '3', '4'])
   })
 
   it('decodes structured API errors before throwing', async () => {

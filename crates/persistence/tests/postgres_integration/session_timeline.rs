@@ -110,16 +110,28 @@ async fn descriptor_and_windows_share_one_stable_creation_address() -> Result<()
     assert!(!after_latest.has_more_before);
     assert!(!after_latest.has_more_after);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn missing_allocator_is_observation_cursor_corruption() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x993);
+    create_session(&pool, identity).await?;
     sqlx::query("DROP TRIGGER outbox_sequence_state_cannot_be_deleted ON outbox_sequence_state")
         .execute(&pool)
         .await?;
     sqlx::query("DELETE FROM outbox_sequence_state WHERE singleton")
         .execute(&pool)
         .await?;
-    let error = repository
+    let error = SessionTimelineRepository::new(pool.clone())
         .read_descriptor(identity)
         .await
         .expect_err("a missing allocator singleton is durable corruption");
+
     assert!(matches!(
         error,
         SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::Missing(
