@@ -362,6 +362,52 @@ async fn repository_registration_requires_portable_relative_path() -> Result<(),
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn stored_case_identity_requires_nonblank_text() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let database = DatabaseCorpusStore::new(pool.clone());
+    let imported = database.import_manifest(seed_manifest_path()).await?;
+
+    sqlx::query(
+        "UPDATE evaluation_corpus_case
+            SET case_id = '   '
+          WHERE corpus_name = $1 AND corpus_version = $2 AND replay_position = 0",
+    )
+    .bind(&imported.key().name)
+    .bind(&imported.key().version)
+    .execute(&pool)
+    .await
+    .expect_err("a whitespace-only durable case identity is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stored_case_identity_rejects_control_characters() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let database = DatabaseCorpusStore::new(pool.clone());
+    let imported = database.import_manifest(seed_manifest_path()).await?;
+
+    sqlx::query(
+        "UPDATE evaluation_corpus_case
+            SET case_id = E'control\nidentity'
+          WHERE corpus_name = $1 AND corpus_version = $2 AND replay_position = 0",
+    )
+    .bind(&imported.key().name)
+    .bind(&imported.key().version)
+    .execute(&pool)
+    .await
+    .expect_err("a control-bearing durable case identity is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn stored_case_decode_error_retains_serde_context() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let disk = DiskCorpusStore::open(seed_manifest_path())?;

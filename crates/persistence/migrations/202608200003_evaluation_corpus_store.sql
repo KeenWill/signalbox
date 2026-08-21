@@ -107,7 +107,11 @@ CREATE TABLE evaluation_corpus_case (
     CONSTRAINT evaluation_corpus_case_position_unique
         UNIQUE (corpus_name, corpus_version, replay_position),
     CONSTRAINT evaluation_corpus_case_identity_bounded
-        CHECK (octet_length(case_id) BETWEEN 1 AND 128),
+        CHECK (
+            octet_length(case_id) BETWEEN 1 AND 128
+            AND case_id !~ '^[[:space:]]*$'
+            AND case_id !~ '[[:cntrl:]]'
+        ),
     CONSTRAINT evaluation_corpus_case_position_nonnegative
         CHECK (replay_position >= 0),
     CONSTRAINT evaluation_corpus_case_json_object
