@@ -49,13 +49,15 @@ specification diff. Accepted cross-component and wire contracts live in the
 Whether execution-approval judging should replace its direct recommendation with
 separate risk and brief-alignment grades remains undecided. Any such change must
 define the grade contract, trusted outcome derivation, remaining input evidence,
-durable audit shape, operator presentation, evaluation method, and
+durable audit shape, graded wire and projection data, evaluation method, and
 shadow-to-live promotion path in an owner-accepted specification and
 implementing stack. Safety ceilings remain owned by
 [Additional high-risk guardrails](#tool-safety), while parent-supplied task and
 authority evidence remains owned by
 [Turn-origin instructions in the approval-judge request](#tool-safety). The
-following related questions also require owner rulings:
+interactive prompting and later client-form choices remain owned by
+[Client approval presentation](#client-scope). The following related questions
+also require owner rulings:
 
 - **Corpus governance.** Approval corpora follow the identity, admitted storage
   forms, digest, and cross-storage reproducibility contract owned by
@@ -79,10 +81,11 @@ following related questions also require owner rulings:
   recorded corpus is selected toward parked requests and cannot support
   whole-population promotion claims.
 
-- **Shadow budget.** The graded shadow sampling fraction, provider-cost ceiling,
-  and concurrency for production shadow traffic remain open. Retention and
-  deletion of observations admitted to the approval corpus remain owned by
-  Corpus governance above.
+- **Shadow budget.** The graded shadow sampling fraction for production shadow
+  traffic remains open. Provider-cost ceilings and concurrency remain owned by
+  [First-release resource limits](#identity-credentials-and-resource-governance).
+  Retention and deletion of observations admitted to the approval corpus remain
+  owned by Corpus governance above.
 
 - **Configuration actor audit.** Whether source-control and deployment audit are
   sufficient provenance for threshold changes, or Signalbox needs an
