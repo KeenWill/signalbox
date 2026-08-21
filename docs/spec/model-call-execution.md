@@ -6,6 +6,9 @@ verified against this PR (`agent/turn-lifecycle-hardening`).
 Post-response configured-usage treatment is verified against this PR
 (`agent/daemon-live-known-failed-cause`).
 
+Pre-activation reconciliation from durable completed-call usage is verified
+against this PR (`agent/daemon-live-reported-usage-compaction`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -57,14 +60,15 @@ compaction-call evidence were verified through PR #312
 (`agent/context-compaction-core`); the explicit trigger, dormant automatic
 preparation machinery, configured prompt, and provider-native input-counting
 implementation were verified through PR #314
-(`agent/context-compaction-protocol`). The daemon does not schedule that
-automatic machinery. Session-delegation semantic rendering and its
-provider-neutral bridge were verified against this PR (`agent/delegation`). The
-runner-placement rendering and executable session-tool snapshot paragraphs are
-the foundation proposal at the bottom of their implementing stack and become
-verified only with those child pull requests. Availability successor calls and
-their durable provider-directed backoff are verified against this PR
-(`agent/multi-account-pools`). Invariant tags cite
+(`agent/context-compaction-protocol`). The production scheduler's
+provider-reported-usage trigger for that automatic machinery is verified against
+this PR (`agent/daemon-live-reported-usage-compaction`). Session-delegation
+semantic rendering and its provider-neutral bridge were verified against this PR
+(`agent/delegation`). The runner-placement rendering and executable session-tool
+snapshot paragraphs are the foundation proposal at the bottom of their
+implementing stack and become verified only with those child pull requests.
+Availability successor calls and their durable provider-directed backoff are
+verified against this PR (`agent/multi-account-pools`). Invariant tags cite
 [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
@@ -376,13 +380,15 @@ command lifecycle: an equal `InFlight`, failed terminal disposition, or complete
 summary/result is a successful replay, while a different terminal fact fails
 closed. The daemon retries database and ambiguous-commit outcomes at this seam;
 it does not start provider interaction until authorization is resolved. The
-dormant automatic preparation path retries transient database failures while
-loading its selected transcript range, retaining the live `Prepared` call as
-provably unsent rather than consuming that queued turn's sole automatic attempt.
-The daemon does not invoke that path. An integrity failure still terminalizes
-the unsent call if a future scheduler admits it. After a successful provider
-result, the daemon retains the summary and its usage in memory until the exact
-completion is durably applied or replayed.
+automatic preparation path retries transient database failures while loading its
+selected transcript range, retaining the live `Prepared` call as provably unsent
+rather than consuming that queued turn's sole automatic attempt. It selects a
+safe prefix at or before the model-visible midpoint, or the first safe boundary
+after that midpoint when an open tool exchange crosses it, so the summary
+request does not repeat the complete oversized input. An integrity failure still
+terminalizes the unsent call. After a successful provider result, the daemon
+retains the summary and its usage in memory until the exact completion is
+durably applied or replayed.
 
 The explicit `compact_session` request names a session and an optional semantic
 transcript position. Absence selects the latest safe terminal or pre-call
@@ -406,14 +412,23 @@ exceeds the context ceiling. Both are operator-declared per selection and never
 inferred from provider or model names. Adapters with a provider setting surface,
 including Anthropic, send the configured output ceiling in the provider request.
 Codex CLI instead renders the ceiling as model-visible advisory context because
-the CLI exposes no provider-side control. The exact pre-activation guard owns
-proactive context enforcement. After a nominal completion, the daemon retains
-adapter-reported usage and the completed observation even when reported output
-exceeds `max_output_tokens` or the reported input-plus-output lower bound
-exceeds `context_window_tokens`; it emits a closed operator cause for the
-overage rather than discarding assistant material after the provider has already
-accepted and served the request. Missing usage fields remain missing and are
-never invented. Adapters need no separate counting operation.
+the CLI exposes no provider-side control. Before activating a queued turn, the
+daemon reads the newest completed call for the same resolved target since the
+latest compaction. If its provider-reported input, interpreted with the stored
+cache-inclusion semantics, plus its completed output and the next configured
+output reservation exceeds the context window, the daemon performs one bounded
+automatic compaction before activation. This is a conservative lower-bound
+trigger: later transcript entries can only increase the next input. A queued
+turn spends at most one automatic attempt; if durable evidence says that attempt
+was already spent, the scheduler reports exhaustion and permits activation
+rather than wedging the queue on a compaction it may not repeat. After a nominal
+completion, the daemon retains adapter-reported usage and the completed
+observation even when reported output exceeds `max_output_tokens` or the
+reported input-plus-output lower bound exceeds `context_window_tokens`; it emits
+a closed operator cause for the overage rather than discarding assistant
+material after the provider has already accepted and served the request. Missing
+usage fields remain missing and are never invented. Adapters need no separate
+counting operation.
 
 The explicit trigger uses the same compaction transaction and provider-call
 lifecycle. An explicit command first resolves its user-global replay state; an
@@ -995,15 +1010,17 @@ an issued call from durable evidence, so a live process that cannot construct a
 trustworthy result must stop rather than improvise. An eligibility pass raises
 the same signal whenever a durable stage it owns reports
 `Infrastructure { commit_ambiguous: true }` from the guarded counted activation
-commit, since only that next scan can decide what committed. The scheduled pass
-no longer prepares automatic compaction. The connection runtime raises the same
-signal through its recovery handle for an explicit compaction command reporting
-that class, and still answers the client `commit_ambiguous`: a connection
-handler holds no prepared record to terminalize, replay of the command finds it
-pending, and a fresh command finds the nonterminal call, so the restart is the
-only remedy and nothing else would ask for it. Attachment unavailability is not
-a stage failure under this paragraph: it carries no ambiguous durable effect,
-returns the nonfatal deferred result above, and leaves the scheduler running. A
+commit, since only that next scan can decide what committed. After recovering
+any active call, the scheduled pass prepares bounded automatic compaction before
+activating queued work when durable completed-call usage proves the configured
+headroom is exhausted. The connection runtime raises the same signal through its
+recovery handle for an explicit compaction command reporting that class, and
+still answers the client `commit_ambiguous`: a connection handler holds no
+prepared record to terminalize, replay of the command finds it pending, and a
+fresh command finds the nonterminal call, so the restart is the only remedy and
+nothing else would ask for it. Attachment unavailability is not a stage failure
+under this paragraph: it carries no ambiguous durable effect, returns the
+nonfatal deferred result above, and leaves the scheduler running. A
 deterministic capability-preparation defect first attempts the guarded unsent
 known-failure closure above and raises the fatal signal only after that closure
 commits or fails; therefore a successful closure leaves no `Prepared` call for

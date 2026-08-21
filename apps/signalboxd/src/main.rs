@@ -61,10 +61,10 @@ use signalboxd::{
     HubModelConfiguration, HubModelConfigurationError, LocalProcessListener, LocalSocketError,
     MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
-    RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
-    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
-    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
-    TurnLivenessRuntime,
+    ReportedUsageCompaction, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
+    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
+    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
+    TelemetryExportFilter, TelemetryMetrics, TurnLivenessRuntime,
     model_adapter::ConfiguredModelRuntime,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
@@ -1716,6 +1716,14 @@ async fn run_hub(
     .with_session_credentials(model_configuration.credential_family_catalog())
     .with_credential_pools(model_configuration.credential_pool_runtime_catalog())
     .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets());
+    let reported_usage_compaction = ReportedUsageCompaction::new(
+        StartEligibleTurnRepository::new(scheduler_pool.clone()),
+        model_repository.clone(),
+        tool_catalog.clone(),
+        runtime_models,
+        model_configuration.clone(),
+        Arc::clone(&context_compaction_model),
+    );
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
             model_repository,
@@ -1740,6 +1748,7 @@ async fn run_hub(
         ),
         execution,
     )
+    .with_reported_usage_compaction(reported_usage_compaction)
     .with_occupancy_recovery(scheduler_pool.clone(), eligibility_nudge.clone());
     let turn_liveness_runtime = TurnLivenessRuntime::new(
         scheduler_pool.clone(),

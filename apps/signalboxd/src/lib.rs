@@ -82,7 +82,10 @@ pub use configuration::{
     ModelBillingRates, OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration,
     WatchedRepositoryConfiguration,
 };
-pub use context_guard::{ContextGuardedTurnPass, ContextGuardedTurnPassError};
+pub use context_guard::{
+    ContextGuardedTurnPass, ContextGuardedTurnPassError, ReportedUsageCompaction,
+    ReportedUsageCompactionError,
+};
 pub use conversation_introspection::{
     ConversationIntrospectionError, PostgresConversationIntrospection,
 };
@@ -635,6 +638,8 @@ pub enum ActivatedTurnPassError<ActivationError, ExecutionError> {
         /// Typed application failure.
         source: ExecutionError,
     },
+    /// Provider-reported usage required pre-activation compaction, which failed.
+    ReportedUsageCompaction(crate::context_guard::ReportedUsageCompactionError),
     /// The transaction returned an activation for another hinted session.
     ActivationSessionMismatch,
 }
@@ -651,6 +656,7 @@ where
             Self::Execution { source, .. } => {
                 write!(formatter, "activated turn execution failed: {source}")
             }
+            Self::ReportedUsageCompaction(error) => error.fmt(formatter),
             Self::ActivationSessionMismatch => {
                 formatter.write_str("turn activation returned a different session")
             }
@@ -676,6 +682,7 @@ where
         match self {
             Self::Activation(error) => error.operator_failure_class(),
             Self::Execution { source, .. } => source.operator_failure_class(),
+            Self::ReportedUsageCompaction(error) => error.operator_failure_class(),
             Self::ActivationSessionMismatch => {
                 signalbox_application::OperatorFailureClass::CallerOrHubBug
             }
@@ -686,6 +693,7 @@ where
         match self {
             Self::Activation(error) => error.operator_failure_cause_code(),
             Self::Execution { source, .. } => source.operator_failure_cause_code(),
+            Self::ReportedUsageCompaction(error) => error.operator_failure_cause_code(),
             Self::ActivationSessionMismatch => "activation_session_mismatch",
         }
     }
@@ -697,6 +705,7 @@ pub struct ActivatedTurnPass<Generator, Transaction, Execution> {
     activation: StartEligibleTurnService<Generator, Transaction>,
     execution: Execution,
     occupancy_recovery: Option<SchedulerPassOccupancyRecovery>,
+    reported_usage_compaction: Option<crate::context_guard::ReportedUsageCompaction>,
 }
 
 #[derive(Clone, Debug)]
@@ -771,7 +780,17 @@ impl<Generator, Transaction, Execution> ActivatedTurnPass<Generator, Transaction
             activation,
             execution,
             occupancy_recovery: None,
+            reported_usage_compaction: None,
         }
+    }
+
+    /// Compacts queued turns whose last completed call proves headroom is gone.
+    pub fn with_reported_usage_compaction(
+        mut self,
+        compaction: crate::context_guard::ReportedUsageCompaction,
+    ) -> Self {
+        self.reported_usage_compaction = Some(compaction);
+        self
     }
 
     /// Installs daemon-owned recovery for passes ended by the occupancy bound.
@@ -812,6 +831,7 @@ where
         match error {
             ActivatedTurnPassError::Activation(_) => "activation",
             ActivatedTurnPassError::Execution { stage, .. } => stage.operator_label(),
+            ActivatedTurnPassError::ReportedUsageCompaction(_) => "context_compaction",
             ActivatedTurnPassError::ActivationSessionMismatch => "activation_correlation",
         }
     }
@@ -820,6 +840,7 @@ where
         match error {
             ActivatedTurnPassError::Activation(_) => None,
             ActivatedTurnPassError::Execution { turn, .. } => *turn,
+            ActivatedTurnPassError::ReportedUsageCompaction(error) => error.turn(),
             ActivatedTurnPassError::ActivationSessionMismatch => None,
         }
     }
@@ -837,6 +858,7 @@ where
         let activation = self.activation.execute_with_cloned_transaction(session);
         let execution = self.execution.clone();
         let occupancy_recovery = self.occupancy_recovery.clone();
+        let reported_usage_compaction = self.reported_usage_compaction.clone();
         async move {
             if let Some(recovery) = &occupancy_recovery {
                 recovery.capture_resumed_turn(session).await;
@@ -850,6 +872,12 @@ where
                     turn: Execution::active_resume_failure_turn(&source),
                     source,
                 });
+            }
+            if let Some(compaction) = reported_usage_compaction {
+                compaction
+                    .compact_if_needed(session)
+                    .await
+                    .map_err(ActivatedTurnPassError::ReportedUsageCompaction)?;
             }
             let outcome = match activation.await {
                 Ok(outcome) => outcome,

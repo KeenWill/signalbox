@@ -22,8 +22,226 @@ use signalbox_persistence::{
 use crate::{
     ActivatedTurnExecution, HubModelConfiguration, TurnPassExecutionStage,
     process_runtime::compact_automatically, report_ambiguous_commit,
+    usage_limits::completed_usage_requires_compaction,
 };
 use tracing::Instrument;
+
+/// Failure while reconciling provider-reported context growth before activation.
+#[derive(Debug)]
+pub enum ReportedUsageCompactionError {
+    /// Read-only selection of the queued turn failed.
+    Activation(StartEligibleTurnRepositoryError),
+    /// Prospective operation or prior completed usage could not be read.
+    Model {
+        /// Selected queued turn.
+        turn: TurnId,
+        /// Typed persistence failure.
+        source: ModelCallRepositoryError,
+    },
+    /// The canonical prospective frontier could not be rendered.
+    Render(TurnId),
+    /// The prospective target was absent from immutable configuration.
+    ContextWindowUnavailable(TurnId),
+    /// The shared append-only compaction lifecycle failed.
+    Compaction {
+        /// Selected queued turn.
+        turn: TurnId,
+        /// Closed operator class retained across error erasure.
+        failure_class: OperatorFailureClass,
+        /// Closed operator cause retained across error erasure.
+        cause_code: &'static str,
+    },
+}
+
+impl ReportedUsageCompactionError {
+    /// Returns the selected queued turn when selection got that far.
+    pub const fn turn(&self) -> Option<TurnId> {
+        match self {
+            Self::Activation(_) => None,
+            Self::Model { turn, .. }
+            | Self::Render(turn)
+            | Self::ContextWindowUnavailable(turn)
+            | Self::Compaction { turn, .. } => Some(*turn),
+        }
+    }
+}
+
+impl fmt::Display for ReportedUsageCompactionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("reported-usage context reconciliation failed")
+    }
+}
+
+impl Error for ReportedUsageCompactionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Activation(error) => Some(error),
+            Self::Model { source, .. } => Some(source),
+            Self::Render(_) | Self::ContextWindowUnavailable(_) | Self::Compaction { .. } => None,
+        }
+    }
+}
+
+impl ClassifyOperatorFailure for ReportedUsageCompactionError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::Activation(error) => error.operator_failure_class(),
+            Self::Model { source, .. } => source.operator_failure_class(),
+            Self::Render(_) => OperatorFailureClass::FailClosedCorruption,
+            Self::ContextWindowUnavailable(_) => OperatorFailureClass::CallerOrHubBug,
+            Self::Compaction { failure_class, .. } => *failure_class,
+        }
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::Activation(_) => "reported_usage_activation_preview",
+            Self::Model { source, .. } => source.operator_failure_cause_code(),
+            Self::Render(_) => "reported_usage_frontier_rendering",
+            Self::ContextWindowUnavailable(_) => "reported_usage_context_window_unavailable",
+            Self::Compaction { cause_code, .. } => cause_code,
+        }
+    }
+}
+
+/// Conservative compaction preflight for adapters without a prospective count API.
+#[derive(Clone)]
+pub struct ReportedUsageCompaction {
+    activation: StartEligibleTurnRepository,
+    model_calls: PostgresModelCallRepository,
+    tools: Arc<dyn ToolCatalog>,
+    runtime_models: RuntimeModelCatalog,
+    model_configuration: HubModelConfiguration,
+    compaction_model: Arc<dyn ContextCompactionModel>,
+}
+
+impl fmt::Debug for ReportedUsageCompaction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReportedUsageCompaction")
+            .field("activation", &self.activation)
+            .field("model_calls", &self.model_calls)
+            .field("tools", &"[tool catalog]")
+            .field("runtime_models", &self.runtime_models)
+            .field("model_configuration", &self.model_configuration)
+            .field("compaction_model", &"[context compaction model]")
+            .finish()
+    }
+}
+
+impl ReportedUsageCompaction {
+    /// Composes the read-only queued-turn preflight and shared compaction path.
+    pub fn new(
+        activation: StartEligibleTurnRepository,
+        model_calls: PostgresModelCallRepository,
+        tools: impl ToolCatalog + 'static,
+        runtime_models: RuntimeModelCatalog,
+        model_configuration: HubModelConfiguration,
+        compaction_model: Arc<dyn ContextCompactionModel>,
+    ) -> Self {
+        Self {
+            activation,
+            model_calls,
+            tools: Arc::new(tools),
+            runtime_models,
+            model_configuration,
+            compaction_model,
+        }
+    }
+
+    /// Compacts once when the newest completed call proves reserved headroom is gone.
+    pub async fn compact_if_needed(
+        &self,
+        session: SessionId,
+    ) -> Result<(), ReportedUsageCompactionError> {
+        let Some(preview) = self
+            .activation
+            .preview(session, activation_identities())
+            .await
+            .map_err(ReportedUsageCompactionError::Activation)?
+        else {
+            return Ok(());
+        };
+        let turn = preview.prepared().turn().turn();
+        let prospective = self
+            .model_calls
+            .preview_activation_operation(
+                preview.prepared(),
+                ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+            )
+            .await
+            .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?;
+        let Some(prospective) = prospective else {
+            return Ok(());
+        };
+        let operation = prospective
+            .render(self.tools.definitions())
+            .map_err(|_| ReportedUsageCompactionError::Render(turn))?;
+        let target = operation.request().call().target();
+        let selected = self
+            .runtime_models
+            .resolve(target)
+            .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
+        let definition = self
+            .runtime_models
+            .effective_definition(
+                selected,
+                operation.request().model_settings().effective().fast_mode(),
+            )
+            .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
+        let Some(completed) = self
+            .model_calls
+            .latest_completed_usage(session, target)
+            .await
+            .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?
+        else {
+            return Ok(());
+        };
+        if !completed_usage_requires_compaction(
+            completed.usage(),
+            completed.input_includes_cache_tokens(),
+            u64::from(definition.max_output_tokens()),
+            u64::from(definition.context_window_tokens()),
+        ) {
+            return Ok(());
+        }
+        let applied = match compact_automatically(
+            &self.model_calls,
+            &self.model_configuration,
+            &self.compaction_model,
+            session,
+            turn,
+        )
+        .await
+        {
+            Ok(applied) => applied,
+            Err(crate::process_runtime::AutomaticContextCompactionError::AlreadyAttempted) => {
+                tracing::warn!(
+                    cause_code = "reported_usage_context_compaction_exhausted",
+                    session_id = %session.as_uuid(),
+                    turn_id = %turn.as_uuid(),
+                    "the queued turn's bounded automatic compaction attempt was already spent; activation remains eligible"
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(ReportedUsageCompactionError::Compaction {
+                    turn,
+                    failure_class: error.operator_failure_class(),
+                    cause_code: error.operator_failure_cause_code(),
+                });
+            }
+        };
+        tracing::warn!(
+            cause_code = "reported_usage_context_compacted",
+            session_id = %session.as_uuid(),
+            turn_id = %turn.as_uuid(),
+            context_compaction_id = %applied.compaction.into_uuid(),
+            "provider-reported usage exhausted reserved context headroom; queued turn compacted before activation"
+        );
+        Ok(())
+    }
+}
 
 /// Exact-guard failure before activation or during the resulting execution.
 #[derive(Debug)]

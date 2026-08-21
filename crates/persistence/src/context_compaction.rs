@@ -1008,6 +1008,7 @@ async fn prepare_in_transaction(
         Some(position) => visible
             .iter()
             .position(|member| member.position == position),
+        None if request.automatic_for_turn.is_some() => bounded_safe_boundary(&visible),
         None => latest_safe_boundary(&visible),
     };
     let Some(through_index) = through_index else {
@@ -1339,6 +1340,15 @@ fn latest_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
     latest
 }
 
+fn bounded_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
+    let midpoint = members.len().div_ceil(2);
+    let preferred = latest_safe_boundary(&members[..midpoint]);
+    preferred.or_else(|| {
+        (midpoint..members.len())
+            .find(|boundary| range_closes_tool_exchanges(&members[..=*boundary]))
+    })
+}
+
 fn required<T>(
     row: &sqlx::postgres::PgRow,
     field: &'static str,
@@ -1481,7 +1491,10 @@ impl From<ContextCompactionCorruption> for ContextCompactionRepositoryError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectedFrontierMember, Uuid, latest_safe_boundary, project_frontier_members};
+    use super::{
+        ProjectedFrontierMember, Uuid, bounded_safe_boundary, latest_safe_boundary,
+        project_frontier_members,
+    };
     use signalbox_domain::{SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId};
 
     fn entry(value: u128) -> SemanticTranscriptEntryRef {
@@ -1559,5 +1572,51 @@ mod tests {
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].reference, successor_summary);
         assert_eq!(visible[0].position, 5);
+    }
+
+    #[test]
+    fn automatic_boundary_selects_the_latest_safe_member_in_the_first_half() {
+        let visible = vec![
+            ordinary(1, entry(0x7021)),
+            ordinary(2, entry(0x7022)),
+            ordinary(3, entry(0x7023)),
+            ordinary(4, entry(0x7024)),
+        ];
+
+        assert_eq!(bounded_safe_boundary(&visible), Some(1));
+    }
+
+    #[test]
+    fn automatic_boundary_closes_a_tool_exchange_crossing_the_midpoint() {
+        let visible = vec![
+            ProjectedFrontierMember {
+                position: 1,
+                reference: entry(0x7031),
+                payload_kind: "assistant_tool_use".to_owned(),
+                summary_range: None,
+            },
+            ProjectedFrontierMember {
+                position: 2,
+                reference: entry(0x7032),
+                payload_kind: "assistant_tool_use".to_owned(),
+                summary_range: None,
+            },
+            ProjectedFrontierMember {
+                position: 3,
+                reference: entry(0x7033),
+                payload_kind: "tool_execution_result".to_owned(),
+                summary_range: None,
+            },
+            ProjectedFrontierMember {
+                position: 4,
+                reference: entry(0x7034),
+                payload_kind: "tool_execution_result".to_owned(),
+                summary_range: None,
+            },
+            ordinary(5, entry(0x7035)),
+            ordinary(6, entry(0x7036)),
+        ];
+
+        assert_eq!(bounded_safe_boundary(&visible), Some(3));
     }
 }
