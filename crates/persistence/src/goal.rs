@@ -34,8 +34,8 @@ use crate::{
         goal_blocked_reason_from_str, goal_blocked_reason_to_str, goal_command_rejection_from_str,
         goal_command_rejection_to_str, goal_event_kind_from_str, goal_event_kind_to_str,
         goal_model_blocked_reason_from_str, goal_operation_from_str, goal_operation_to_str,
-        positive_u64_from_numeric, session_id_to_uuid, tool_request_id_from_uuid,
-        tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+        positive_u64_from_numeric, session_id_from_uuid, session_id_to_uuid,
+        tool_request_id_from_uuid, tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
     outbox::{self, OutboxEvent},
     session::SessionCorruption,
@@ -69,6 +69,25 @@ pub enum GoalTransitionOutcome {
     Rejected(GoalTransitionError),
     /// Scheduler provenance did not name a turn in the current goal generation.
     NotCurrentGoalTurn,
+}
+
+/// One latest execution-failure block selected for daemon reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PendingGoalExecutionFailure {
+    session: SessionId,
+    blocked: GoalEventOrdinal,
+}
+
+impl PendingGoalExecutionFailure {
+    /// Returns the session whose goal remains blocked.
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the exact blocked event the reconciliation must answer.
+    pub const fn blocked(self) -> GoalEventOrdinal {
+        self.blocked
+    }
 }
 
 /// A durable goal shape that cannot reconstruct domain values.
@@ -481,6 +500,43 @@ impl GoalRepository {
     pub async fn load_goal(&self, session: SessionId) -> Result<Option<Goal>, GoalRepositoryError> {
         let mut connection = self.pool.acquire().await?;
         load_goal_from_connection(&mut connection, session).await
+    }
+
+    /// Lists latest execution-failure blocks carrying one exact need.
+    ///
+    /// The need distinguishes daemon-scheduled automatic resumption from
+    /// execution-failure blocks that deliberately require an operator, such as
+    /// an unattended approval escalation. A later event removes the session
+    /// from this inventory without mutating the historical block.
+    pub async fn pending_execution_failures_with_need(
+        &self,
+        need: &GoalNeed,
+    ) -> Result<Box<[PendingGoalExecutionFailure]>, GoalRepositoryError> {
+        let rows = sqlx::query(
+            "SELECT event.session_id, event.event_ordinal
+               FROM goal_event AS event
+              WHERE event.event_kind = 'blocked'
+                AND event.blocked_reason = 'execution_failure'
+                AND event.need = $1
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM goal_event AS later
+                     WHERE later.session_id = event.session_id
+                       AND later.event_ordinal > event.event_ordinal)
+              ORDER BY event.session_id",
+        )
+        .bind(need.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(PendingGoalExecutionFailure {
+                    session: session_id_from_uuid(column(row, "session_id")?),
+                    blocked: GoalEventOrdinal::new(positive(column(row, "event_ordinal")?)?),
+                })
+            })
+            .collect::<Result<Vec<_>, GoalRepositoryError>>()
+            .map(Vec::into_boxed_slice)
     }
 
     /// Reconciles one current goal turn's durable terminal disposition.

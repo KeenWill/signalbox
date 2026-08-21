@@ -93,6 +93,13 @@ const AUTOMATIC_RESUME_ATTEMPT_BUDGET: u32 = 5;
 /// database outage from holding a task open indefinitely.
 // numeric-bound: ceiling - protects the daemon from retrying an unreachable database forever
 const AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES: u32 = 3;
+/// Delay between startup inventory retries.
+///
+/// The pool is already established when this inventory runs, so a failure is a
+/// short-lived database operation failure rather than the condition the normal
+/// goal backoff waits out. Keeping this short also bounds configuration startup.
+// numeric-bound: tunable - controls startup recovery latency after a transient database failure
+const AUTOMATIC_RESUME_STARTUP_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// Domain separation for the derived automatic-resume command identity.
 ///
 /// The identity must not collide with any other derived durable command, and
@@ -463,6 +470,53 @@ impl PostgresGoalPassDisposition {
             model_configuration,
             eligibility_nudge,
         }
+    }
+
+    /// Reconciles automatic-resume timers lost with a prior daemon process.
+    ///
+    /// A persisted block that promises automatic resumption is treated as due
+    /// on restart. Its derived command identity still binds the attempt to that
+    /// exact event, so a duplicate startup attempt replays or observes that the
+    /// lineage moved rather than appending a second resume. Operator-required
+    /// execution-failure blocks carry different need text and are not selected.
+    pub async fn reconcile_automatic_resumptions_after_restart(
+        &self,
+    ) -> Result<usize, PostgresGoalPassDispositionError> {
+        let scheduled_need = AutomaticResumption::Scheduled {
+            delay: AUTOMATIC_RESUME_BASE_BACKOFF,
+        }
+        .need()?;
+        let mut remaining = AUTOMATIC_RESUME_INFRASTRUCTURE_RETRIES;
+        let pending = loop {
+            match self
+                .repository
+                .pending_execution_failures_with_need(&scheduled_need)
+                .await
+            {
+                Ok(pending) => break pending,
+                Err(error) if remaining > 0 => {
+                    remaining = remaining.saturating_sub(1);
+                    tracing::error!(
+                        retries_remaining = remaining,
+                        cause_code = "goal_automatic_resume_startup_inventory_failed",
+                        cause = %error,
+                        "startup could not inventory automatic goal resumptions; retrying"
+                    );
+                    tokio::time::sleep(AUTOMATIC_RESUME_STARTUP_RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        let count = pending.len();
+        for candidate in pending {
+            let adapter = self.clone();
+            drop(tokio::spawn(async move {
+                adapter
+                    .resume_after_execution_failure(candidate.session(), candidate.blocked())
+                    .await;
+            }));
+        }
+        Ok(count)
     }
 
     /// Reads the lineage a pending execution-failure block would extend.
