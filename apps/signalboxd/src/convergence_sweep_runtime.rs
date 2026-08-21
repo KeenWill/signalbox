@@ -55,11 +55,11 @@ const RETRY_BACKOFF_BASE: Duration = Duration::from_secs(60);
 const RETRY_BACKOFF_CAP: Duration = Duration::from_secs(15 * 60);
 
 const DETAILS_QUERY: &str = r#"
-query PullRequestConvergence($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) {
+query PullRequestConvergence($namespace: String!, $name: String!, $number: Int!) {
+  repository(owner: $namespace, name: $name) {
     pullRequest(number: $number) {
       state isDraft baseRefName headRefName headRefOid mergeable
-      headRepository { nameWithOwner }
+      headRepository { name_with_owner: nameWithOwner }
       reviewThreads(first: 100) {
         nodes { isResolved }
         pageInfo { hasNextPage endCursor }
@@ -82,9 +82,9 @@ query PullRequestConvergence($owner: String!, $name: String!, $number: Int!) {
 
 const THREADS_QUERY: &str = r#"
 query PullRequestConvergenceThreads(
-  $owner: String!, $name: String!, $number: Int!, $after: String!
+  $namespace: String!, $name: String!, $number: Int!, $after: String!
 ) {
-  repository(owner: $owner, name: $name) {
+  repository(owner: $namespace, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
         nodes { isResolved }
@@ -97,9 +97,9 @@ query PullRequestConvergenceThreads(
 
 const CHECKS_QUERY: &str = r#"
 query PullRequestConvergenceChecks(
-  $owner: String!, $name: String!, $number: Int!, $after: String!
+  $namespace: String!, $name: String!, $number: Int!, $after: String!
 ) {
-  repository(owner: $owner, name: $name) {
+  repository(owner: $namespace, name: $name) {
     commits(last: 1) { nodes { commit {
       oid
       statusCheckRollup { contexts(first: 100, after: $after) {
@@ -538,12 +538,12 @@ impl ConvergenceSweepRuntime {
         let mut authorization =
             HeaderValue::from_bytes(&authorization).map_err(|_| CensusError::Credential)?;
         authorization.set_sensitive(true);
-        let (owner, name) = target
+        let (namespace, name) = target
             .repository
             .as_str()
             .split_once('/')
             .ok_or(CensusError::Shape)?;
-        let variables = json!({"owner": owner, "name": name,
+        let variables = json!({"namespace": namespace, "name": name,
             "number": target.pull_request.get()});
         let root = self
             .graphql(DETAILS_QUERY, variables.clone(), &authorization)
@@ -625,7 +625,7 @@ impl ConvergenceSweepRuntime {
             base_branch: branch_at(pull, "baseRefName")?,
             head_branch: branch_at(pull, "headRefName")?,
             head_repository: RepositorySlug::try_new(
-                pull.pointer("/headRepository/nameWithOwner")
+                pull.pointer("/headRepository/name_with_owner")
                     .and_then(Value::as_str)
                     .ok_or(CensusError::Shape)?
                     .to_lowercase(),
