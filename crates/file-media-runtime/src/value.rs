@@ -18,6 +18,8 @@ const MAX_REVISION_BYTES: usize = 32;
 const MAX_SCHEMA_BYTES: usize = 65_536;
 // numeric-bound: ceiling - bounds retained and parsed processor-metadata memory
 const MAX_METADATA_BYTES: usize = 16_384;
+// numeric-bound: ceiling - bounds retained untrusted continuation state
+const MAX_CONTINUATION_CURSOR_BYTES: usize = 1_024;
 
 /// SHA-256 identity at the provider-neutral boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -622,6 +624,35 @@ impl VisiblePartSelector {
     }
 }
 
+/// Checked opaque continuation cursor returned by one bounded read.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ReadContinuationCursor(Arc<str>);
+
+impl ReadContinuationCursor {
+    /// Admits one bounded control-free restart-ephemeral cursor.
+    pub fn try_new(value: impl Into<Arc<str>>) -> Result<Self, RegistryValueError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > MAX_CONTINUATION_CURSOR_BYTES
+            || value.contains('\0')
+            || value.chars().any(char::is_control)
+        {
+            return Err(RegistryValueError::Continuation);
+        }
+        Ok(Self(value))
+    }
+
+    /// Borrows the opaque cursor spelling.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the owned opaque cursor spelling.
+    pub fn into_string(self) -> String {
+        self.0.to_string()
+    }
+}
+
 /// Closed construction failure for provider-neutral checked values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegistryValueError {
@@ -641,6 +672,8 @@ pub enum RegistryValueError {
     Metadata,
     /// Invalid visible-part selector.
     Selector,
+    /// Invalid read-continuation cursor.
+    Continuation,
 }
 
 impl fmt::Display for RegistryValueError {
@@ -654,6 +687,7 @@ impl fmt::Display for RegistryValueError {
             Self::Schema => "view schema is invalid",
             Self::Metadata => "processor metadata is invalid",
             Self::Selector => "visible-part selector is invalid",
+            Self::Continuation => "read continuation cursor is invalid",
         })
     }
 }

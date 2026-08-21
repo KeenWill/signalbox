@@ -390,7 +390,8 @@ fn inv076_oversized_processor_text_is_sanitized_to_failure() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
-        options: serde_json::json!({}),
+        options: Some(serde_json::json!({})),
+        continuation: None,
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
@@ -410,7 +411,8 @@ fn inv076_malformed_injection_shaped_structure_is_sanitized_to_failure() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(STRUCTURED_VIEW_NAME).expect("fixture view name is valid"),
-        options: serde_json::json!({}),
+        options: Some(serde_json::json!({})),
+        continuation: None,
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
@@ -430,7 +432,8 @@ fn inv076_duplicate_structured_member_is_sanitized_to_failure() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(STRUCTURED_VIEW_NAME).expect("fixture view name is valid"),
-        options: serde_json::json!({}),
+        options: Some(serde_json::json!({})),
+        continuation: None,
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
@@ -450,7 +453,8 @@ fn inv076_canonicalized_structured_bytes_are_rechecked() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(STRUCTURED_VIEW_NAME).expect("fixture view name is valid"),
-        options: serde_json::json!({}),
+        options: Some(serde_json::json!({})),
+        continuation: None,
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
@@ -471,7 +475,8 @@ fn inv076_contradictory_processor_continuation_is_sanitized_to_failure() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
-        options: serde_json::json!({}),
+        options: Some(serde_json::json!({})),
+        continuation: None,
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));

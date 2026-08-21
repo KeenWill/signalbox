@@ -118,7 +118,8 @@ only a declared view; options remain structured data for adapter validation.
 Text must be bounded valid UTF-8 without U+0000. Structured output must parse as
 bounded JSON within its declared depth, node, string, and byte limits. A cursor
 is absent on complete output and is a bounded control-free opaque value on a
-truncated result.
+truncated result. A continuation read sends that cursor instead of initial view
+options through the same checked service and processor request contracts.
 
 **Committed unimplemented functionality.** No present daemon catalog composes
 these tools because the concrete rendered-frontier attachment resolver is not

@@ -8,9 +8,9 @@ use signalbox_file_media_runtime::{
     FileDigest, FileMediaProviderDeclaration, FileMediaProviderReadRequest,
     FileMediaProviderValidationRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
     FileUse, ProbeDeclaration, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, ReadAccessPattern, ReadOutputKind, ReadViewBounds,
-    ReadViewDeclaration, ReadViewName, ReaderIdentity, RegistryValueError, StreamingTextFallback,
-    ValidationEvidence,
+    ProcessorValidationOutput, ReadAccessPattern, ReadContinuationCursor, ReadOutputKind,
+    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderIdentity, RegistryValueError,
+    StreamingTextFallback, ValidationEvidence,
 };
 
 pub(crate) fn declaration_fingerprint(declarations: &[FileMediaProviderDeclaration]) -> [u8; 32] {
@@ -435,7 +435,8 @@ pub(crate) struct WireReadRequest {
     validation: ValidationEvidence,
     metadata_json: String,
     view: String,
-    options: serde_json::Value,
+    options: Option<serde_json::Value>,
+    continuation: Option<String>,
 }
 
 impl From<&FileMediaProviderReadRequest> for WireReadRequest {
@@ -447,6 +448,10 @@ impl From<&FileMediaProviderReadRequest> for WireReadRequest {
             metadata_json: request.metadata.as_str().to_owned(),
             view: request.view.as_str().to_owned(),
             options: request.options.clone(),
+            continuation: request
+                .continuation
+                .as_ref()
+                .map(|cursor| cursor.as_str().to_owned()),
         }
     }
 }
@@ -463,6 +468,11 @@ impl TryFrom<WireReadRequest> for FileMediaProviderReadRequest {
             metadata: BoundedMetadata::try_new(&value.metadata_json).map_err(map_value_error)?,
             view: ReadViewName::try_new(value.view).map_err(map_value_error)?,
             options: value.options,
+            continuation: value
+                .continuation
+                .map(ReadContinuationCursor::try_new)
+                .transpose()
+                .map_err(map_value_error)?,
         })
     }
 }
