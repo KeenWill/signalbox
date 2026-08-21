@@ -4,7 +4,9 @@ The scheduler occupancy ceiling and metrics, daemon-owned ambiguous-call
 reconciliation, and outer slot-held watchdog coverage were verified against this
 PR (`agent/turn-lifecycle-hardening`). Automatic reconciliation of ambiguous
 tool attempts is verified against this PR
-(`agent/daemon-live-tool-recovery-reconcile`).
+(`agent/daemon-live-tool-recovery-reconcile`). The watchdog recovery transaction
+ceiling was re-verified against this PR
+(`agent/daemon-live-reconciliation-attempt-bound`).
 
 The expired-pass recovery operation and retry budgets were re-verified against
 this PR (`agent/daemon-live-recovery-attempt-budget`).
@@ -544,12 +546,13 @@ ledger and lap.
 
 A slot-held turn whose evidence remains unchanged for thirty minutes is handed
 to the existing startup-recovery transaction under the session scheduler lock.
-Each detached database attempt has a one-second wall-clock bound, so the
-sixty-four-turn fair window also bounds how long a fully stalled database can
-delay the next watchdog wake. A timeout is commit-ambiguous and leaves the
-unchanged durable evidence due for a later observation. That transaction
-reconstitutes and classifies the exact current durable shape; the watchdog
-invents no parallel terminal transition. This is the outer backstop for
+Each detached database attempt has a ten-second wall-clock bound. That admits
+ordinary serialization through the shared outbox frontier after the session lock
+while the sixty-four-turn fair window still bounds how long a fully stalled
+database can delay the next watchdog wake. A timeout is commit-ambiguous and
+leaves the unchanged durable evidence due for a later observation. That
+transaction reconstitutes and classifies the exact current durable shape; the
+watchdog invents no parallel terminal transition. This is the outer backstop for
 pass-expiry recovery whose bounded database attempts all failed and for a
 prior-process running turn that survives startup classification. The
 fifteen-minute scheduler-pass ceiling remains the tighter same-process bound.
@@ -762,11 +765,13 @@ a one-based attempt row. Failed attempts end with the typed outcome
 120, 240, 480, 960, then 1,800 seconds. If a daemon disappears while an attempt
 is `attempting`, its recorded deadline lets the next daemon classify it as an
 infrastructure failure before continuing. Every inventory or application
-transaction has the same one-second wall-clock bound; a timed-out claimed
-attempt remains durably `attempting` until that deadline makes it classifiable.
-An explicitly recorded fifth failure becomes exhausted on the next watchdog scan
-without waiting out that final ambiguity deadline; the deadline remains
-necessary when the daemon cannot tell whether the fifth attempt committed.
+transaction has the same ten-second wall-clock bound, long enough for its
+session-locked writes to serialize through the shared outbox frontier while
+remaining finite below the retry cadence. A timed-out claimed attempt remains
+durably `attempting` until that deadline makes it classifiable. An explicitly
+recorded fifth failure becomes exhausted on the next watchdog scan without
+waiting out that final ambiguity deadline; the deadline remains necessary when
+the daemon cannot tell whether the fifth attempt committed.
 
 The automatic budget is five attempts. Each attempt locks the same session
 scheduler row as the operator path, reconstitutes the complete scheduling
