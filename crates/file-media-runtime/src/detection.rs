@@ -1,8 +1,9 @@
 use std::{error::Error, fmt, future::Future, num::NonZeroU64, pin::Pin};
 
 use crate::{
-    BoundedMetadata, CanonicalMediaType, FileDigest, FileUse, ProbeStrength, ReadViewDeclaration,
-    ReadViewName, ReaderIdentity, ReasonCode, VisiblePartSelector,
+    BoundedMetadata, CanonicalMediaType, FileDigest, FileUse, ProbeStrength,
+    ReadContinuationCursor, ReadViewDeclaration, ReadViewName, ReaderIdentity, ReasonCode,
+    VisiblePartSelector,
 };
 
 /// Asynchronous exact-range read result from a verified blob source.
@@ -244,8 +245,10 @@ pub struct FileReadRequest {
     pub inspection: InspectionRequest,
     /// Exact provider-owned view name.
     pub view: ReadViewName,
-    /// Structured model-supplied options.
-    pub options: serde_json::Value,
+    /// Structured model-supplied options on an initial request.
+    pub options: Option<serde_json::Value>,
+    /// Prior processor cursor on a continuation request.
+    pub continuation: Option<ReadContinuationCursor>,
 }
 
 /// Sanitized continuation state for one typed read.
@@ -256,7 +259,7 @@ pub enum ReadContinuation {
     /// More complete semantic units remain.
     More {
         /// Opaque restart-ephemeral continuation.
-        cursor: String,
+        cursor: ReadContinuationCursor,
     },
 }
 

@@ -140,7 +140,11 @@ where
             let requested_digest = request.target().digest();
             let visible_part = request.target().visible_part().cloned();
             let view = request.view().clone();
-            let options = request.options().clone().into_iter().collect();
+            let options = request
+                .options()
+                .cloned()
+                .map(|options| serde_json::Value::Object(options.into_iter().collect()));
+            let continuation = request.continuation().cloned();
             let target =
                 FileInspectServiceRequest::from_parts(requested_digest, visible_part.clone());
             let resolved = self.resolver.resolve(target).await?;
@@ -157,7 +161,8 @@ where
                             visible_part,
                         },
                         view,
-                        options: serde_json::Value::Object(options),
+                        options,
+                        continuation,
                     },
                     &source,
                     &self.cancellation,

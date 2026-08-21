@@ -5,8 +5,9 @@ use crate::{
     FileMediaProcessor, FileMediaProviderDeclaration, FileMediaProviderReadRequest,
     FileMediaProviderValidationRequest, FileReadRequest, FileReadResult, InspectionRequest,
     ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadAccessPattern, ReadContinuation, ReadViewBounds, ReaderDeclaration, ReaderIdentity,
-    ReasonCode, StreamingTextFallback, ValidatedFile, ValidationEvidence, VerifiedBlobSource,
+    ReadAccessPattern, ReadContinuation, ReadContinuationCursor, ReadViewBounds, ReaderDeclaration,
+    ReaderIdentity, ReasonCode, StreamingTextFallback, ValidatedFile, ValidationEvidence,
+    VerifiedBlobSource,
 };
 
 // numeric-bound: ceiling - bounds process-lifetime provider inventory memory
@@ -29,9 +30,6 @@ const MAX_REGISTRY_SCHEMA_BYTES: usize = 16 * 1_024 * 1_024;
 const MAX_REASON_CODES_PER_READER: usize = 256;
 // numeric-bound: ceiling - bounds aggregate process-lifetime reason inventory memory
 const MAX_REGISTRY_REASON_CODES: usize = 4_096;
-// numeric-bound: ceiling - bounds retained untrusted continuation state
-const MAX_CURSOR_BYTES: usize = 1_024;
-
 /// Immutable process-lifetime registry snapshot.
 #[derive(Clone, Debug)]
 pub struct FileMediaRegistry {
@@ -190,7 +188,7 @@ impl FileMediaRegistry {
                 malformed.iter().map(|(kind, _)| kind.clone()).chain(
                     candidates
                         .iter()
-                        .filter(|candidate| candidate.strength == ProbeStrength::Strong)
+                        .filter(|candidate| recognized_probe_strength(candidate.strength))
                         .map(|candidate| candidate.media_type.clone()),
                 ),
             );
@@ -380,11 +378,25 @@ impl FileMediaRegistry {
                     reader.views().to_vec(),
                 )))
             }
+            SanitizedValidation::Malformed { .. }
+                if streaming_text_terminal_becomes_unknown(evidence) =>
+            {
+                Ok(FileInspection::Unknown {
+                    source: request.source,
+                })
+            }
             SanitizedValidation::Malformed { reason_code } => Ok(FileInspection::Malformed {
                 source: request.source,
                 media_type: candidate.media_type,
                 reason_code,
             }),
+            SanitizedValidation::EncryptedOrLocked
+                if streaming_text_terminal_becomes_unknown(evidence) =>
+            {
+                Ok(FileInspection::Unknown {
+                    source: request.source,
+                })
+            }
             SanitizedValidation::EncryptedOrLocked => Ok(FileInspection::EncryptedOrLocked {
                 source: request.source,
                 media_type: candidate.media_type,
@@ -409,7 +421,12 @@ impl FileMediaRegistry {
         source: &dyn VerifiedBlobSource,
         cancellation: &dyn crate::CancellationSignal,
     ) -> Result<FileReadResult, FileMediaFailure> {
-        if !request.options.is_object() {
+        let valid_request = match (&request.options, &request.continuation) {
+            (Some(options), None) => options.is_object(),
+            (None, Some(_)) => true,
+            (Some(_), Some(_)) | (None, None) => false,
+        };
+        if !valid_request {
             return Err(FileMediaFailure::InvalidViewArguments);
         }
         let inspection = self
@@ -454,6 +471,7 @@ impl FileMediaRegistry {
                     file: validated.clone(),
                     view: request.view,
                     options: request.options,
+                    continuation: request.continuation,
                 },
                 source,
                 cancellation,
@@ -468,6 +486,17 @@ struct Candidate {
     reader: ReaderIdentity,
     media_type: CanonicalMediaType,
     strength: ProbeStrength,
+}
+
+fn recognized_probe_strength(strength: ProbeStrength) -> bool {
+    matches!(
+        strength,
+        ProbeStrength::Strong | ProbeStrength::StructuralCandidate
+    )
+}
+
+fn streaming_text_terminal_becomes_unknown(evidence: ValidationEvidence) -> bool {
+    evidence == ValidationEvidence::StreamingTextValidation
 }
 
 enum SanitizedProbe {
@@ -720,13 +749,8 @@ fn sanitize_continuation(
     match (truncated, cursor) {
         (false, None) => Ok(ReadContinuation::Complete),
         (true, Some(cursor)) => {
-            if cursor.is_empty()
-                || cursor.len() > MAX_CURSOR_BYTES
-                || cursor.contains('\0')
-                || cursor.chars().any(char::is_control)
-            {
-                return Err(FileMediaFailure::ProcessorFailed);
-            }
+            let cursor = ReadContinuationCursor::try_new(cursor)
+                .map_err(|_| FileMediaFailure::ProcessorFailed)?;
             Ok(ReadContinuation::More { cursor })
         }
         (false, Some(_)) | (true, None) => Err(FileMediaFailure::ProcessorFailed),
@@ -942,3 +966,27 @@ impl fmt::Display for FileMediaRegistryConstructionError {
 }
 
 impl Error for FileMediaRegistryConstructionError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_ambiguity_includes_structural_and_strong_claims() {
+        assert!(recognized_probe_strength(
+            ProbeStrength::StructuralCandidate
+        ));
+        assert!(recognized_probe_strength(ProbeStrength::Strong));
+        assert!(!recognized_probe_strength(ProbeStrength::DeclaredCandidate));
+    }
+
+    #[test]
+    fn streaming_text_terminal_validation_becomes_unknown() {
+        assert!(streaming_text_terminal_becomes_unknown(
+            ValidationEvidence::StreamingTextValidation
+        ));
+        assert!(!streaming_text_terminal_becomes_unknown(
+            ValidationEvidence::StructuralValidation
+        ));
+    }
+}

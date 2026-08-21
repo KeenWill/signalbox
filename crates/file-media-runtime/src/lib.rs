@@ -36,8 +36,8 @@ pub use registry::{FileMediaRegistry, FileMediaRegistryConstructionError, Proces
 pub use value::{
     AttachmentKind, BoundedMetadata, CanonicalJsonObjectSchema, CanonicalMediaType,
     DeclaredMediaType, DisplayFilename, FileDigest, FileReaderName, FileReaderProviderName,
-    FileReaderRevision, FileUse, MediaTypeParseError, ReadViewName, ReaderIdentity, ReasonCode,
-    RegistryValueError, VisiblePartSelector,
+    FileReaderRevision, FileUse, MediaTypeParseError, ReadContinuationCursor, ReadViewName,
+    ReaderIdentity, ReasonCode, RegistryValueError, VisiblePartSelector,
 };
 
 /// Stable model-facing inspection tool name.

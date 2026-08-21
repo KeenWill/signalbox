@@ -3,8 +3,8 @@ use std::{error::Error, fmt, future::Future, pin::Pin};
 use crate::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileReaderName,
     FileReaderProviderName, FileReaderRevision, FileUse, ProcessorFailure, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode,
-    ValidatedFile, VerifiedBlobSource,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadContinuationCursor, ReadViewName,
+    ReaderIdentity, ReasonCode, ValidatedFile, VerifiedBlobSource,
 };
 
 // numeric-bound: ceiling - bounds retained model-facing view-description memory
@@ -396,8 +396,10 @@ pub struct FileMediaProviderReadRequest {
     pub file: ValidatedFile,
     /// Exact provider-owned view.
     pub view: ReadViewName,
-    /// Model-supplied options retained as structured data.
-    pub options: serde_json::Value,
+    /// Model-supplied options retained on an initial request.
+    pub options: Option<serde_json::Value>,
+    /// Checked opaque cursor retained on a continuation request.
+    pub continuation: Option<ReadContinuationCursor>,
 }
 
 /// Boxed adapter future used by isolated worker-side provider implementations.

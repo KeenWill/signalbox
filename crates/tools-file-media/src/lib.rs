@@ -17,8 +17,8 @@ use signalbox_domain::{
     ToolResultText,
 };
 use signalbox_file_media_runtime::{
-    AttachmentKind, FileDigest, FileInspection, FileMediaFailure, FileReadResult, ReadOutputKind,
-    ReadViewName, VisiblePartSelector,
+    AttachmentKind, FileDigest, FileInspection, FileMediaFailure, FileReadResult,
+    ReadContinuationCursor, ReadOutputKind, ReadViewName, VisiblePartSelector,
 };
 use signalbox_tool_contract::{
     ToolContract, ToolContractCompileError, compile_contract_definition,
@@ -28,8 +28,7 @@ pub use signalbox_file_media_runtime::{FILE_INSPECT_NAME, FILE_READ_NAME};
 
 const INVALID_INSPECT_ARGUMENTS: &str =
     "expected exactly a canonical digest and optional visible-part selector";
-const INVALID_READ_ARGUMENTS: &str =
-    "expected exactly a canonical digest, view, object options, and optional selector";
+const INVALID_READ_ARGUMENTS: &str = "expected a canonical digest, view, optional selector, and exactly one of object options or continuation";
 const RESULT_TOO_LARGE_DETAIL: &str = r#"{"status":"result_too_large"}"#;
 
 /// Checked service request for `file_inspect`.
@@ -64,7 +63,8 @@ impl FileInspectServiceRequest {
 pub struct FileReadServiceRequest {
     target: FileInspectServiceRequest,
     view: ReadViewName,
-    options: BTreeMap<String, Value>,
+    options: Option<BTreeMap<String, Value>>,
+    continuation: Option<ReadContinuationCursor>,
 }
 
 impl FileReadServiceRequest {
@@ -78,9 +78,14 @@ impl FileReadServiceRequest {
         &self.view
     }
 
-    /// Borrows structured model-supplied options.
-    pub const fn options(&self) -> &BTreeMap<String, Value> {
-        &self.options
+    /// Borrows structured model-supplied options on an initial request.
+    pub const fn options(&self) -> Option<&BTreeMap<String, Value>> {
+        self.options.as_ref()
+    }
+
+    /// Borrows the checked prior-page cursor on a continuation request.
+    pub const fn continuation(&self) -> Option<&ReadContinuationCursor> {
+        self.continuation.as_ref()
     }
 }
 
@@ -127,8 +132,10 @@ struct FileReadArguments {
     digest: String,
     /// Exact provider-owned view returned by file_inspect.
     view: String,
-    /// Object options validated by the selected view.
-    options: BTreeMap<String, Value>,
+    /// Object options validated by the selected view on an initial request.
+    options: Option<BTreeMap<String, Value>>,
+    /// Opaque cursor returned by the preceding file_read result.
+    continuation: Option<String>,
     /// Visible-part selector returned by attachment inspection.
     visible_part: Option<String>,
 }
@@ -281,6 +288,17 @@ fn decode_read(
 ) -> Result<FileReadServiceRequest, InvalidFileMediaArguments> {
     let decoded: FileReadArguments =
         serde_json::from_str(arguments.as_str()).map_err(|_| InvalidFileMediaArguments)?;
+    let continuation = decoded
+        .continuation
+        .map(ReadContinuationCursor::try_new)
+        .transpose()
+        .map_err(|_| InvalidFileMediaArguments)?;
+    if !matches!(
+        (&decoded.options, &continuation),
+        (Some(_), None) | (None, Some(_))
+    ) {
+        return Err(InvalidFileMediaArguments);
+    }
     Ok(FileReadServiceRequest {
         target: FileInspectServiceRequest {
             digest: FileDigest::from_str(&decoded.digest).map_err(|_| InvalidFileMediaArguments)?,
@@ -292,6 +310,7 @@ fn decode_read(
         },
         view: ReadViewName::try_new(decoded.view).map_err(|_| InvalidFileMediaArguments)?,
         options: decoded.options,
+        continuation,
     })
 }
 
@@ -456,7 +475,9 @@ fn continuation_cursor(
 ) -> Option<String> {
     match continuation {
         signalbox_file_media_runtime::ReadContinuation::Complete => None,
-        signalbox_file_media_runtime::ReadContinuation::More { cursor } => Some(cursor),
+        signalbox_file_media_runtime::ReadContinuation::More { cursor } => {
+            Some(cursor.into_string())
+        }
     }
 }
 
@@ -610,6 +631,26 @@ mod tests {
             outcome,
             Err(ToolCatalogValidationFailure::InvalidArguments { detail: Some(_) })
         ));
+    }
+
+    #[test]
+    fn read_arguments_accept_a_returned_continuation_without_options() {
+        let digest = FileDigest::from_bytes([0x22; 32]).to_string();
+        let supplied = format!(
+            r#"{{"digest":"{digest}","view":"body_text","continuation":"next-page","visible_part":null}}"#
+        );
+
+        let decoded = decode_read(&arguments(&supplied))
+            .expect("a checked prior-page cursor forms a continuation request");
+
+        assert!(decoded.options().is_none());
+        assert_eq!(
+            decoded
+                .continuation()
+                .expect("the continuation remains present")
+                .as_str(),
+            "next-page"
+        );
     }
 
     #[test]
