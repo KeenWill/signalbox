@@ -26,7 +26,9 @@ remain owned by [tool loop](tool-loop.md). Invariant tags cite
 [the invariant test index](../invariants.md).
 
 The connection-loss persistence transaction was verified against this PR
-(`agent/runner-loss-session-transaction`).
+(`agent/runner-loss-session-transaction`). Daemon paging of its durable cursors
+and startup resumption were verified against this PR
+(`agent/runner-loss-daemon-propagation`).
 
 The registration-only executable slice is verified through PR #376
 (`agent/runner-daemon`). It adds the dedicated local listener, durable
@@ -519,9 +521,10 @@ advertises and serves no operation provider.
 An unannounced transport close or protocol failure durably records `lost`; an
 epoch-targeted shutdown from either side durably records `shutdown`. On hub
 startup, every prior-process connection left `connected` or `suspect` is marked
-`lost` before the runner listener binds. The append-only event stream retains
-the epoch, within-epoch ordinal, closed state, and typed cause, so a dead runner
-does not remain observable as healthy after disconnect or restart.
+`lost`, and every pending loss cursor is propagated to affected sessions, before
+the runner listener binds. The append-only event stream retains the epoch,
+within-epoch ordinal, closed state, and typed cause, so a dead runner does not
+remain observable as healthy after disconnect or restart.
 
 Before closing an established stream for a rejected advertisement, the daemon
 records peer, authority, and policy rejection as `protocol_failure`, or durable

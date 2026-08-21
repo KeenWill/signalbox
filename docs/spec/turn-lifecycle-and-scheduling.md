@@ -8,7 +8,9 @@ The runner-recovery active-phase algebra, checked persistence reconstitution,
 and preserved interrupt/stop authority were verified against this PR
 (`agent/runner-awaiting-recovery-persistence`). The atomic persistence
 transition into runner recovery was verified against this PR
-(`agent/runner-loss-session-transaction`).
+(`agent/runner-loss-session-transaction`). Daemon invocation and startup
+resumption of that transition were verified against this PR
+(`agent/runner-loss-daemon-propagation`).
 
 The active-tail predecessor-steering correction was verified against this PR
 (`agent/daemon-ops-overnight`).
@@ -780,19 +782,20 @@ After configuration and database connection, signalboxd acquires the dedicated
 single-daemon advisory guard specified by
 [process-protocol](process-protocol.md). The registration-only startup order is
 embedded migrations, the generic startup scan to completion, prior-process
-runner connections marked lost, runner-socket bind, process-socket bind, then
-concurrent runner enrollment, client request admission, outbox dispatch, and
-scheduling. Runner admission cannot begin before the migration that creates
-durable request receipts, the generic scan, or connection-loss classification.
+runner connections marked lost and every pending runner-loss cursor completed,
+runner-socket bind, process-socket bind, then concurrent runner enrollment,
+client request admission, outbox dispatch, and scheduling. Runner admission
+cannot begin before the migration that creates durable request receipts, the
+generic scan, connection-loss classification, or session propagation.
 
 **Committed unimplemented functionality.** No present surface performs retained
-runner recovery. When recovery is implemented, startup must instead bind the
-runner socket in recovery-only mode after migrations, reconcile retained runner
-inventory, evidence, and nonterminal replacement commands, complete the generic
-startup scan, bind the process socket, and only then enable ordinary runner
-enrollment and scheduling. This compatibility constraint prevents generic
-recovery from terminalizing authority that retained runner evidence resolves
-(INV-034).
+runner reconnect or replacement recovery. When recovery is implemented, startup
+must instead bind the runner socket in recovery-only mode after migrations,
+reconcile retained runner inventory, evidence, and nonterminal replacement
+commands, complete the generic startup scan, bind the process socket, and only
+then enable ordinary runner enrollment and scheduling. This compatibility
+constraint prevents generic recovery from terminalizing authority that retained
+runner evidence resolves (INV-034).
 
 The runner recovery phase admits only `resume` for a recorded active or pending
 identity and frames needed to reconcile its bounded inventory; it creates no new
@@ -982,9 +985,11 @@ call is repeated merely to project runner loss. A queued turn remains queued and
 cannot activate while its placement is lost. An unpinned capability-class
 request names no selected runner and is unaffected until a live registration can
 satisfy it. Locking, page bounds, and crash recovery are owned by
-[persistence-protocol](persistence-protocol.md). **Committed unimplemented
-functionality.** No present daemon service pages pending losses or invokes that
-adapter, and no runner execution surface yet depends on the projected state.
+[persistence-protocol](persistence-protocol.md). The daemon invokes the bounded
+adapter after an applied terminal connection transition or an exact replay of
+its current lost state, and resumes every pending cursor during startup before
+runner admission. **Committed unimplemented functionality.** No runner execution
+surface yet depends on the projected state.
 
 Only two user commands consume that state. `ReplaceLostRunner` requires the
 expected current placement revision and either a different live exact runner,
