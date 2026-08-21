@@ -138,6 +138,9 @@ kbd {
   display: grid;
   gap: 0.15rem;
 }
+.imports-mobile-navigation {
+  display: none;
+}
 .imports-catalog,
 .import-inspector {
   display: grid;
@@ -421,6 +424,10 @@ kbd {
   }
   .imports-navigation {
     display: none;
+  }
+  .imports-mobile-navigation {
+    display: inline-grid;
+    flex: 0 0 auto;
   }
   .imports-workspace {
     grid-template-rows: 49px minmax(210px, 0.8fr) minmax(330px, 1.2fr);

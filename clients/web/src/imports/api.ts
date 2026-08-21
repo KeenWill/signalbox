@@ -45,6 +45,44 @@ export class ImportReceiptCorrelationError extends Error {
   }
 }
 
+export class ImportWindowCorrelationError extends Error {
+  constructor() {
+    super('imported entry window does not correlate with its request')
+    this.name = 'ImportWindowCorrelationError'
+  }
+}
+
+const correlateEntryWindow = (
+  importedConversationId: string,
+  request: WebImportEntryWindowRequest,
+  window: WebImportEntryWindow,
+): WebImportEntryWindow => {
+  const expectedAnchor =
+    request.anchor === 'first'
+      ? 1
+      : request.anchor === 'latest'
+        ? window.last_position
+        : request.position
+  const positionsCorrelate = window.items.every(
+    (entry, index) =>
+      entry.frontier.imported_conversation_id === importedConversationId &&
+      entry.frontier.position === window.first_position + index,
+  )
+  if (
+    expectedAnchor === undefined ||
+    window.items.length === 0 ||
+    window.anchor_position !== expectedAnchor ||
+    window.first_position > window.anchor_position ||
+    window.last_position < window.anchor_position ||
+    window.last_position - window.first_position + 1 !== window.items.length ||
+    !positionsCorrelate ||
+    !window.items.some((entry) => entry.frontier.position === window.anchor_position)
+  ) {
+    throw new ImportWindowCorrelationError()
+  }
+  return window
+}
+
 type Decoder<Value> = (value: unknown) => Value
 
 const decodeResponse = async <Value>(
@@ -90,7 +128,8 @@ export class HttpImportApi implements ImportApi {
       `/api/imports/${encodeURIComponent(importedConversationId)}/entries${queryString(request)}`,
       { signal },
     )
-    return decodeResponse(response, decodeWebImportEntryWindow)
+    const window = await decodeResponse(response, decodeWebImportEntryWindow)
+    return correlateEntryWindow(importedConversationId, request, window)
   }
 
   async continueImport(

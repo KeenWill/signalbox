@@ -617,18 +617,81 @@ fn checked_content_projection(
         return Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into());
     }
     match header[2] {
-        0 => Ok(ImportedEntryContentProjection::SourceEvent),
+        0 => {
+            checked_single_text_attestation(&header, total_bytes)?;
+            Ok(ImportedEntryContentProjection::SourceEvent)
+        }
         1 => checked_text_projection(&header, row, total_bytes, projected_bytes)
             .map(ImportedEntryContentProjection::Text),
-        2 => Ok(ImportedEntryContentProjection::ToolCall),
-        3 => Ok(ImportedEntryContentProjection::ToolResult),
-        4 => Ok(ImportedEntryContentProjection::Thinking),
-        5 => Ok(ImportedEntryContentProjection::RedactedThinking),
-        6 => Ok(ImportedEntryContentProjection::Document),
+        2 => {
+            checked_required_attestation_prefix(&header, total_bytes, 4)?;
+            Ok(ImportedEntryContentProjection::ToolCall)
+        }
+        3 => {
+            checked_required_attestation_prefix(&header, total_bytes, 3)?;
+            Ok(ImportedEntryContentProjection::ToolResult)
+        }
+        4 => {
+            checked_required_attestation_prefix(&header, total_bytes, 2)?;
+            Ok(ImportedEntryContentProjection::Thinking)
+        }
+        5 => {
+            checked_single_text_attestation(&header, total_bytes)?;
+            Ok(ImportedEntryContentProjection::RedactedThinking)
+        }
+        6 => {
+            checked_required_attestation_prefix(&header, total_bytes, 1)?;
+            Ok(ImportedEntryContentProjection::Document)
+        }
         7 if header.get(3).is_some_and(|tag| *tag <= 4) && total_bytes == 4 => {
             Ok(ImportedEntryContentProjection::MessageContentAbsent)
         }
-        8 => Ok(ImportedEntryContentProjection::SourceMessageBlock),
+        8 => {
+            checked_single_text_attestation(&header, total_bytes)?;
+            Ok(ImportedEntryContentProjection::SourceMessageBlock)
+        }
+        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
+    }
+}
+
+fn checked_required_attestation_prefix(
+    header: &[u8],
+    total_bytes: i64,
+    required_attestations: i64,
+) -> Result<(), ImportedConversationDiscoveryError> {
+    let minimum_bytes = 3_i64
+        .checked_add(required_attestations)
+        .ok_or(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
+    if total_bytes < minimum_bytes {
+        return Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into());
+    }
+    match header.get(3) {
+        Some(0 | 1) => Ok(()),
+        Some(2) if header.len() >= 5 => Ok(()),
+        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
+    }
+}
+
+fn checked_single_text_attestation(
+    header: &[u8],
+    total_bytes: i64,
+) -> Result<(), ImportedConversationDiscoveryError> {
+    match header.get(3) {
+        Some(0 | 1) if total_bytes == 4 => Ok(()),
+        Some(2) if header.len() == 12 => {
+            let declared_bytes = u64::from_be_bytes(
+                header[4..12]
+                    .try_into()
+                    .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?,
+            );
+            let declared_bytes = i64::try_from(declared_bytes)
+                .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
+            if total_bytes.checked_sub(12) == Some(declared_bytes) {
+                Ok(())
+            } else {
+                Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into())
+            }
+        }
         _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
     }
 }

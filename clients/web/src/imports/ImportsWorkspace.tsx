@@ -1,5 +1,6 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Menu } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   type CommandContext,
@@ -17,7 +18,7 @@ import type {
   WebImportFormat,
 } from '../generated/web-contract.mjs'
 import { ScenarioNavigation } from '../ScenarioNavigation'
-import { type DiagnosticSnapshot, OverlaySurfaces } from '../Surfaces'
+import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
 import { store } from '../state'
 import { type ImportApi, ImportApiError, ImportReceiptCorrelationError } from './api'
 import { ImportedEntries } from './ImportedEntries'
@@ -121,8 +122,8 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   )
 
   useEffect(() => {
-    setSelectedFrontier(anchorFrontier)
-  }, [anchorFrontier])
+    if (!hasRetainedCommand) setSelectedFrontier(anchorFrontier)
+  }, [anchorFrontier, hasRetainedCommand])
 
   const continuation = useMutation({
     mutationFn: (request: WebImportContinuationRequest) =>
@@ -132,14 +133,17 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       if (!isRetryableContinuationError(error)) setPendingCommand(null)
     },
   })
+  const resetContinuation = continuation.reset
   const selectImportEntry = useCallback(
     (id: string) => {
+      if (hasRetainedCommand) return
+      resetContinuation()
       setSelectedFrontier(
         entryWindow?.items.find((entry) => entry.frontier.imported_entry_id === id)?.frontier ??
           null,
       )
     },
-    [entryWindow?.items],
+    [entryWindow?.items, hasRetainedCommand, resetContinuation],
   )
   const commandContext = useMemo<CommandContext>(
     () => ({
@@ -212,12 +216,19 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   ])
 
   const resetCatalog = () => {
+    resetContinuation()
     setAfter(undefined)
     setSelectedImport(null)
   }
 
+  const showCatalogPage = (cursor: string | undefined) => {
+    resetContinuation()
+    setAfter(cursor)
+  }
+
   const showWindow = (request: WebImportEntryWindowRequest) => {
     if (hasRetainedCommand) return
+    resetContinuation()
     setWindowRequest(request)
     setSelectedFrontier(null)
   }
@@ -240,6 +251,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
 
   const selectImport = (importedConversationId: string) => {
     if (hasRetainedCommand) return
+    resetContinuation()
     setSelectedImport(importedConversationId)
     setWindowRequest({ anchor: 'first', before: 0, after: IMPORT_WINDOW_RADIUS })
     setSelectedFrontier(null)
@@ -272,6 +284,14 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
         </aside>
         <main className="imports-workspace">
           <header className="imports-header">
+            <IconCommand
+              id="navigation.open"
+              context={commandContext}
+              label="Open scenarios"
+              className="icon-button imports-mobile-navigation"
+            >
+              <Menu />
+            </IconCommand>
             <div>
               <span className="eyebrow">Immutable imported evidence</span>
               <h1>Imports</h1>
@@ -326,13 +346,13 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     }}
                   />
                 </label>
-                <button type="button" disabled={!after} onClick={() => setAfter(undefined)}>
+                <button type="button" disabled={!after} onClick={() => showCatalogPage(undefined)}>
                   First page
                 </button>
                 <button
                   type="button"
                   disabled={!imports?.next_cursor}
-                  onClick={() => setAfter(imports?.next_cursor ?? undefined)}
+                  onClick={() => showCatalogPage(imports?.next_cursor ?? undefined)}
                 >
                   Next page
                 </button>
@@ -530,13 +550,18 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                       ? 'Entry window unavailable'
                       : entryWindow
                         ? `${entryWindow.first_position.toLocaleString()}–${entryWindow.last_position.toLocaleString()} · ${entryWindow.items.length} loaded`
-                        : 'Loading window…'}
+                        : selectedImport === null
+                          ? 'No import selected'
+                          : 'Loading window…'}
                   </small>
                 </div>
                 {windowQuery.isError && (
                   <p className="imports-state" role="alert">
                     The selected imported-entry window could not be loaded.
                   </p>
+                )}
+                {selectedImport === null && (
+                  <p className="imports-state">Select an imported conversation to inspect.</p>
                 )}
                 {entryWindow && (
                   <ImportedEntries
