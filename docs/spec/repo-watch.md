@@ -57,9 +57,9 @@ while durable drain pages remain is verified against this PR
 (`agent/daemon-live-repeatable-webhook-preemption`). The approval-judge dispatch
 fence and unattended escalation release described below are verified against
 this PR (`agent/headless-approval-escalation`). The operator-commissioned
-dispatch fence and its unattended-escalation coverage are verified against this
-PR (`agent/commissioned-dispatch-fence`); its bounded goal reconciliation is
-verified against this PR (`agent/daemon-live-commissioned-escalation-resume`).
+dispatch fence is verified against this PR
+(`agent/commissioned-dispatch-fence`); its attended escalation park is verified
+against this PR (`agent/daemon-live-headless-approval-park`).
 
 ## Configuration and credential boundary
 
@@ -887,21 +887,14 @@ them is reported as a mismatched replay rather than answered with the recorded
 outcome — the same treatment a differing recommendation, rationale, usage, or
 continuation attempt already receives.
 
-**Implemented behavior.** The unattended escalation terminalization above also
-covers a session an operator-commissioned dispatch created. With the
-commissioned fence resolved, a completed escalate-to-human judged in the
-commissioned generation fails the turn and records its audit row in
-`commissioned_dispatch_headless_approval_escalation`, read with the judge
-rationale through `commissioned_dispatch_headless_approval_escalation_audit`.
-The steering exclusion and standing-authority rule apply unchanged. A prior
-commissioned escalation does not imply that an operator resumed the session,
-because goal mode may have resumed it automatically. A commissioned dispatch
-holds no batch, obligation, singleton, or independent requeue path, so the
-completion releases nothing and leaves a still-authoritative goal pursuing as a
-durable reconciliation hint. The ordinary goal disposition path then appends an
-execution-failure block, retries within its bounded automatic-resumption budget,
-and visibly parks only on exhaustion. Process loss between terminalization and
-that disposition is recovered by the durable eligibility sweep.
+**Implemented behavior.** An operator-commissioned dispatch has an attending
+operator and no independent redispatch path. With its recorded fence resolved, a
+completed escalate-to-human in the commissioned generation therefore leaves the
+active turn and exact request in `awaiting_tool_approval`. The completed judge
+call, recommendation, rationale, and usage are the durable typed record of the
+bounded automatic decision; no approval decision is invented. The operator can
+approve or deny that request through the ordinary command surface without a
+failed turn, a goal retry, or a second judge call.
 
 **Implemented behavior.** A pull-request close or merge durably records one
 lifecycle cutoff. When that lifecycle remains terminal, repository watch applies
