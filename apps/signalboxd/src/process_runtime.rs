@@ -633,6 +633,16 @@ async fn serve_connections(
                 .conversation_import_max_source_bytes(),
         ),
     );
+    #[cfg(feature = "test-support")]
+    let imported_conversations = if dependencies.blob_store_registry.is_none() {
+        ImportedConversationRepository::new(dependencies.pool.clone())
+    } else {
+        ImportedConversationRepository::with_blob_storage(
+            dependencies.pool.clone(),
+            imported_storage,
+        )
+    };
+    #[cfg(not(feature = "test-support"))]
     let imported_conversations = ImportedConversationRepository::with_blob_storage(
         dependencies.pool.clone(),
         imported_storage,
