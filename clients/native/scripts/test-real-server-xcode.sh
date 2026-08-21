@@ -36,6 +36,8 @@ for required_command in postgres createdb pg_isready python3 openssl xcodebuild 
 done
 
 TEMPORARY_ROOT="$(mktemp -d /tmp/sb-native-real.XXXXXX)"
+mkdir "$TEMPORARY_ROOT/blob-staging" "$TEMPORARY_ROOT/blobs"
+chmod 700 "$TEMPORARY_ROOT/blob-staging" "$TEMPORARY_ROOT/blobs"
 POSTGRES_PID=""
 DAEMON_PID=""
 POSTGRES_LOG="$TEMPORARY_ROOT/postgres.log"
@@ -203,6 +205,23 @@ prompt = "Synthetic real-server harness compaction prompt."
 
 [web_fetch]
 allowed_origins = []
+
+[blob_storage]
+version = 1
+staging_directory = "$TEMPORARY_ROOT/blob-staging"
+max_blob_bytes = 268435456
+
+[[blob_storage.stores]]
+name = "native-real"
+namespace_id = "5a100001-0000-4000-8000-000000000001"
+kind = "filesystem"
+root_directory = "$TEMPORARY_ROOT/blobs"
+
+[blob_storage.routes]
+user_attachment = "native-real"
+tool_artifact = "native-real"
+imported_source = "native-real"
+generated_artifact = "native-real"
 
 [[models]]
 selection_id = "10000000-0000-4000-8000-000000000001"
