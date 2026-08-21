@@ -20,10 +20,11 @@ exemption — the block an unattended repository-watch approval escalation appen
 parking of an operator-commissioned escalation is verified against this PR
 (`agent/daemon-live-headless-approval-park`). Restart reconciliation of pending
 automatic resumptions is verified against this PR
-(`agent/daemon-live-goal-resume-rearm`). Restart-caused failure accounting is
-verified against this PR (`agent/daemon-live-restart-recovery-accounting`).
-Identity and durable-command mechanics remain owned by
-[identity and commands](identity-and-commands.md), turn execution by
+(`agent/daemon-live-goal-resume-rearm`). Automatic-resume failure accounting and
+its twenty-attempt ceiling are verified against this PR
+(`agent/daemon-live-goal-resume-failure-budget`). Identity and durable-command
+mechanics remain owned by [identity and commands](identity-and-commands.md),
+turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
 by [tool loop](tool-loop.md), and framing by
 [process protocol](process-protocol.md). INV-048 is the lifecycle enforcement
@@ -204,33 +205,35 @@ and therefore independently eligible to continue.
 automatic resumption. The daemon derives from the goal event history how many
 consecutive automatic resumptions the current run has already spent: the run is
 the trailing alternation of execution-failure blocks and the resumptions that
-answered them, and every other event ends it. Below a budget of five consecutive
-attempts, the appended need text states that automatic resumption is scheduled
-and names the operator repair for a goal still blocked once resumption ends, and
-exactly one resume follows after a backoff of two minutes doubled per attempt
-already spent, to a thirty-minute maximum. At the budget the goal stays blocked,
-and its need text states that automatic resumption is exhausted and states the
-operator repair. All three bounds are fixed in source and no configuration reads
-them: an automatic resumption spends provider budget on a session no operator
-asked about, so its cadence and its end are product decisions rather than
-deployment ones. Every need text an execution-failure block carries names the
-operator repair, because an armed attempt can also fail to resume by being
-durably rejected, by losing its process, or by never reaching the database, and
-in each case that text is what an operator reads. Resumption does not bypass
-execution-failure blocking or make a failure a silent retry — the block is
-appended first, and every attempt is an ordinary recorded `resumed` event.
+answered them, and every other event ends it. Below a budget of twenty
+chargeable consecutive attempts, the appended need text states that automatic
+resumption is scheduled and names the operator repair for a goal still blocked
+once resumption ends, and exactly one resume follows after a backoff of two
+minutes doubled per attempt already spent, to a thirty-minute maximum. At the
+budget the goal stays blocked, and its need text states that automatic
+resumption is exhausted and states the operator repair. All three bounds are
+fixed in source and no configuration reads them: an automatic resumption spends
+provider budget on a session no operator asked about, so its cadence and its end
+are product decisions rather than deployment ones. Every need text an
+execution-failure block carries names the operator repair, because an armed
+attempt can also fail to resume by being durably rejected, by losing its
+process, or by never reaching the database, and in each case that text is what
+an operator reads. Resumption does not bypass execution-failure blocking or make
+a failure a silent retry — the block is appended first, and every attempt is an
+ordinary recorded `resumed` event.
 
-A resumed turn the daemon itself loses across restart does not spend that
-five-attempt goal budget. The lineage still records its ordinary resumed event
-and execution-failure block, while budget derivation associates that resumption
-with the turn it started and discounts it only when the turn's terminal attempt
-has an append-only startup-recovery origin and the exact model-call or
-tool-attempt automatic reconciliation is durably `reconciled`. The startup scan
-writes that origin in the transaction that creates the ambiguous wait; the live
-slot-held watchdog does not. Runtime boundary loss therefore remains chargeable.
-Typed records rather than a restart log line remain authority, and startup
-rearming can continue through repeated deploys without turning deployment count
-into goal-attempt exhaustion.
+A resumed turn does not spend that twenty-attempt goal budget when durable
+evidence attributes its failure outside the session: its exact model-call or
+tool-attempt automatic reconciliation is `reconciled`, whether startup or the
+live watchdog created the wait, or its terminal provider failure is
+`rate_limited`, `overloaded`, or `provider_internal`. The lineage still records
+the ordinary resumed event and execution-failure block, and budget derivation
+associates that resumption with the turn it started before applying the
+exemption. Credential, permission, invalid-request, target, request-size, quota,
+and unrecognized provider failures remain chargeable because they do not prove a
+transient provider-availability condition. Typed records rather than a log line
+remain authority, so deploys, reconciliation deadlines, and transient provider
+availability cannot exhaust work the session did not fail.
 
 **Implemented behavior.** An automatic resumption's durable command identity is
 derived from the session and the exact blocked event it answers rather than

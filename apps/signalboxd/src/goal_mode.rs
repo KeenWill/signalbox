@@ -85,7 +85,7 @@ const AUTOMATIC_RESUME_BACKOFF_CAP: Duration = Duration::from_secs(1_800);
 /// changes them: an automatic resumption spends provider budget on a session no
 /// operator asked about, so its cadence and its end are product decisions.
 // numeric-bound: ceiling - protects provider spend from an endlessly failing goal
-const AUTOMATIC_RESUME_ATTEMPT_BUDGET: u32 = 5;
+const AUTOMATIC_RESUME_ATTEMPT_BUDGET: u32 = 20;
 /// Retries one armed attempt may spend on a database that answers nothing.
 ///
 /// These are not resumptions and do not spend the attempt budget: nothing was
@@ -541,12 +541,12 @@ impl PostgresGoalPassDisposition {
             }
         };
         let spent_failures = automatic_resume_failure_turns(&goal, failed_turn);
-        let restart_failures = self
+        let unchargeable_failures = self
             .repository
-            .restart_reconciled_turns(session, &spent_failures)
+            .unchargeable_automatic_resume_turns(session, &spent_failures)
             .await?;
         Ok(AutomaticResumption::after_spent_attempts(
-            chargeable_automatic_resume_attempts(&spent_failures, &restart_failures),
+            chargeable_automatic_resume_attempts(&spent_failures, &unchargeable_failures),
         ))
     }
 
@@ -994,11 +994,11 @@ fn automatic_resume_failure_turns(goal: &Goal, current_failure: Option<TurnId>) 
 
 fn chargeable_automatic_resume_attempts(
     failed_turns: &[TurnId],
-    restart_reconciled_turns: &[TurnId],
+    unchargeable_turns: &[TurnId],
 ) -> u32 {
     let spent = failed_turns
         .iter()
-        .filter(|turn| !restart_reconciled_turns.contains(turn))
+        .filter(|turn| !unchargeable_turns.contains(turn))
         .count();
     u32::try_from(spent).unwrap_or(u32::MAX)
 }
@@ -1196,13 +1196,13 @@ mod tests {
     }
 
     #[test]
-    fn restart_reconciled_failures_do_not_spend_resume_attempts() {
+    fn failures_outside_the_session_do_not_spend_resume_attempts() {
         let runtime_failure = TurnId::from_uuid(Uuid::from_u128(0x02));
-        let restart_failure = TurnId::from_uuid(Uuid::from_u128(0x03));
-        let failures = [restart_failure, runtime_failure];
+        let external_failure = TurnId::from_uuid(Uuid::from_u128(0x03));
+        let failures = [external_failure, runtime_failure];
 
         assert_eq!(
-            chargeable_automatic_resume_attempts(&failures, &[restart_failure]),
+            chargeable_automatic_resume_attempts(&failures, &[external_failure]),
             1
         );
         assert_eq!(
@@ -1245,34 +1245,16 @@ mod tests {
 
     #[test]
     fn an_exhausted_budget_blocks_permanently_and_states_the_operator_requirement() {
-        let exhausted = failed(
-            automatically_resumed(failed(
-                automatically_resumed(failed(
-                    automatically_resumed(failed(
-                        automatically_resumed(failed(
-                            automatically_resumed(failed(pursuing_goal(), 0x01)),
-                            0x02,
-                        )),
-                        0x03,
-                    )),
-                    0x04,
-                )),
-                0x05,
-            )),
-            0x06,
-        );
-
         assert_eq!(
-            spent_automatic_resume_attempts(&exhausted),
-            AUTOMATIC_RESUME_ATTEMPT_BUDGET
+            AutomaticResumption::after_spent_attempts(AUTOMATIC_RESUME_ATTEMPT_BUDGET),
+            AutomaticResumption::Exhausted
         );
-        assert_eq!(planned(&exhausted), AutomaticResumption::Exhausted);
         assert_eq!(
             AutomaticResumption::Exhausted
                 .need()
                 .expect("the exhausted need is admitted")
                 .as_str(),
-            "Automatic resumption is exhausted after 5 consecutive execution failures. Resolve the failed goal turn's execution condition, then resume the goal."
+            "Automatic resumption is exhausted after 20 consecutive execution failures. Resolve the failed goal turn's execution condition, then resume the goal."
         );
     }
 

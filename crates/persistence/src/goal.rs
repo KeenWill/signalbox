@@ -517,14 +517,14 @@ impl GoalRepository {
         current_goal_turn(&mut connection, session, generation).await
     }
 
-    /// Selects failed turns whose automatic reconciliation followed restart.
+    /// Selects failed turns whose automatic resume does not spend its budget.
     ///
-    /// The startup scan records the restart origin in the same transaction
-    /// that creates an ambiguous operation wait. Requiring that origin and a
-    /// reconciled automatic-operation row keeps runtime liveness recovery
-    /// chargeable while discounting only work interrupted across a process
-    /// boundary.
-    pub async fn restart_reconciled_turns(
+    /// Reconciled ambiguity is infrastructure work whether it originated at
+    /// startup or from the live watchdog. A definitive provider response is
+    /// likewise external only for transient rate limiting, overload, or an
+    /// internal provider failure. Session-actionable provider failures remain
+    /// chargeable.
+    pub async fn unchargeable_automatic_resume_turns(
         &self,
         session: SessionId,
         turns: &[TurnId],
@@ -537,15 +537,21 @@ impl GoalRepository {
             .map(|turn| turn_id_to_uuid(*turn))
             .collect::<Vec<_>>();
         let rows = sqlx::query(
-            "SELECT recovery.turn_id
-               FROM automatic_reconciliation AS recovery
-               JOIN turn_restart_recovery_origin AS restart
-                 ON restart.turn_id = recovery.turn_id
-                AND restart.session_id = recovery.session_id
-              WHERE recovery.session_id = $1
-                AND recovery.turn_id = ANY($2::uuid[])
-                AND recovery.state_kind = 'reconciled'
-              ORDER BY recovery.turn_id",
+            "SELECT lifecycle.turn_id
+               FROM turn_lifecycle AS lifecycle
+               LEFT JOIN automatic_reconciliation AS recovery
+                 ON recovery.turn_id = lifecycle.turn_id
+                AND recovery.session_id = lifecycle.session_id
+               LEFT JOIN model_call AS terminal_call
+                 ON terminal_call.model_call_id = lifecycle.terminal_model_call_id
+                AND terminal_call.turn_id = lifecycle.turn_id
+                AND terminal_call.session_id = lifecycle.session_id
+              WHERE lifecycle.session_id = $1
+                AND lifecycle.turn_id = ANY($2::uuid[])
+                AND (recovery.state_kind = 'reconciled'
+                     OR terminal_call.terminal_provider_failure_cause IN
+                        ('rate_limited', 'overloaded', 'provider_internal'))
+              ORDER BY lifecycle.turn_id",
         )
         .bind(session_id_to_uuid(session))
         .bind(turn_ids)
