@@ -27,87 +27,29 @@ use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 use crate::{
     lock_inventory,
     mapping::{
-        DelegationPolicyStorageKind, DelegationUpdateStorageKind, DelegationWakeStorageKind,
-        accepted_input_id_to_uuid, bound_child_action_from_str, defaults_version_from_numeric,
-        defaults_version_to_numeric, delegation_outcome_kind_from_str,
-        delegation_outcome_reason_from_str, delegation_policy_kind_from_str,
-        delegation_update_kind_from_str, delegation_wait_mode_from_str,
-        delegation_wake_subject_from_str, dispatched_runner_state_from_str,
-        dispatched_runner_state_to_str, durable_command_id_from_uuid, input_position_from_numeric,
-        input_position_to_numeric, model_change_adjustments_from_json, model_settings_from_json,
-        model_settings_overlay_from_json, runner_sandbox_from_str, runner_sandbox_to_str,
-        session_id_from_uuid, session_id_to_uuid, turn_id_to_uuid,
+        CONTEXT_COMPACTED, DelegationPolicyStorageKind, DelegationUpdateStorageKind,
+        DelegationWakeStorageKind, GOAL_TURN_RETIRED, INPUT_ACCEPTED, MODEL_CALL_TRANSITION,
+        OutboxEventDiscriminator, RUNNER_STATE_TRANSITION, SESSION_CREATED,
+        SESSION_MODEL_SETTINGS_CHANGED, TOOL_APPROVAL_DECIDED, TOOL_BATCH_TRANSITION,
+        TURN_ACTIVATED, TURN_CANCELLED, TURN_COMPLETED, TURN_FAILED, TURN_MODEL_SETTINGS_RESOLVED,
+        TURN_RECONCILIATION_REQUIRED, TURN_REFUSED, accepted_input_id_to_uuid,
+        bound_child_action_from_str, defaults_version_from_numeric, defaults_version_to_numeric,
+        delegation_outcome_kind_from_str, delegation_outcome_reason_from_str,
+        delegation_policy_kind_from_str, delegation_update_kind_from_str,
+        delegation_wait_mode_from_str, delegation_wake_subject_from_str,
+        dispatched_runner_state_from_str, dispatched_runner_state_to_str,
+        durable_command_id_from_uuid, input_position_from_numeric, input_position_to_numeric,
+        model_change_adjustments_from_json, model_settings_from_json,
+        model_settings_overlay_from_json, outbox_event_discriminator_from_str,
+        runner_sandbox_from_str, runner_sandbox_to_str, session_id_from_uuid, session_id_to_uuid,
+        turn_id_to_uuid,
     },
 };
 
 #[cfg(feature = "postgres-integration")]
 use crate::runner_protocol::RunnerConnectionEpoch;
 
-const SESSION_CREATED: &str = "session_created";
-const SESSION_MODEL_SETTINGS_CHANGED: &str = "session_model_settings_changed";
-const TURN_MODEL_SETTINGS_RESOLVED: &str = "turn_model_settings_resolved";
-const INPUT_ACCEPTED: &str = "input_accepted";
-const GOAL_TURN_RETIRED: &str = "goal_turn_retired";
-const TURN_ACTIVATED: &str = "turn_activated";
-const TURN_FAILED: &str = "turn_failed";
-const MODEL_CALL_TRANSITION: &str = "model_call_transition";
-const TOOL_BATCH_TRANSITION: &str = "tool_batch_transition";
-const TOOL_APPROVAL_DECIDED: &str = "tool_approval_decided";
-const CONTEXT_COMPACTED: &str = "context_compacted";
-const TURN_COMPLETED: &str = "turn_completed";
-const TURN_REFUSED: &str = "turn_refused";
-const TURN_CANCELLED: &str = "turn_cancelled";
-const TURN_RECONCILIATION_REQUIRED: &str = "turn_reconciliation_required";
-const RUNNER_STATE_TRANSITION: &str = "runner_state_transition";
-const DELEGATION_UPDATE: &str = "delegation_update";
-const DELEGATION_WAKE: &str = "delegation_wake";
 const STORAGE_VERSION: i16 = 1;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum OutboxEventDiscriminator {
-    SessionCreated,
-    SessionModelSettingsChanged,
-    TurnModelSettingsResolved,
-    InputAccepted,
-    GoalTurnRetired,
-    TurnActivated,
-    TurnFailed,
-    ModelCallTransition,
-    ToolBatchTransition,
-    ToolApprovalDecided,
-    ContextCompacted,
-    TurnCompleted,
-    TurnRefused,
-    TurnCancelled,
-    TurnReconciliationRequired,
-    RunnerStateTransition,
-    DelegationUpdate,
-    DelegationWake,
-}
-
-pub(crate) fn outbox_event_discriminator_from_str(value: &str) -> Option<OutboxEventDiscriminator> {
-    Some(match value {
-        SESSION_CREATED => OutboxEventDiscriminator::SessionCreated,
-        SESSION_MODEL_SETTINGS_CHANGED => OutboxEventDiscriminator::SessionModelSettingsChanged,
-        TURN_MODEL_SETTINGS_RESOLVED => OutboxEventDiscriminator::TurnModelSettingsResolved,
-        INPUT_ACCEPTED => OutboxEventDiscriminator::InputAccepted,
-        GOAL_TURN_RETIRED => OutboxEventDiscriminator::GoalTurnRetired,
-        TURN_ACTIVATED => OutboxEventDiscriminator::TurnActivated,
-        TURN_FAILED => OutboxEventDiscriminator::TurnFailed,
-        MODEL_CALL_TRANSITION => OutboxEventDiscriminator::ModelCallTransition,
-        TOOL_BATCH_TRANSITION => OutboxEventDiscriminator::ToolBatchTransition,
-        TOOL_APPROVAL_DECIDED => OutboxEventDiscriminator::ToolApprovalDecided,
-        CONTEXT_COMPACTED => OutboxEventDiscriminator::ContextCompacted,
-        TURN_COMPLETED => OutboxEventDiscriminator::TurnCompleted,
-        TURN_REFUSED => OutboxEventDiscriminator::TurnRefused,
-        TURN_CANCELLED => OutboxEventDiscriminator::TurnCancelled,
-        TURN_RECONCILIATION_REQUIRED => OutboxEventDiscriminator::TurnReconciliationRequired,
-        RUNNER_STATE_TRANSITION => OutboxEventDiscriminator::RunnerStateTransition,
-        DELEGATION_UPDATE => OutboxEventDiscriminator::DelegationUpdate,
-        DELEGATION_WAKE => OutboxEventDiscriminator::DelegationWake,
-        _ => return None,
-    })
-}
 
 type OutboxSlotRow = (
     Decimal,

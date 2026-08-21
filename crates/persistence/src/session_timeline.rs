@@ -11,7 +11,7 @@ use signalbox_application::{
 use signalbox_domain::SessionId;
 use sqlx::{PgConnection, PgPool, Row};
 
-use crate::outbox::{OutboxEventDiscriminator, outbox_event_discriminator_from_str};
+use crate::mapping::{OutboxEventDiscriminator, outbox_event_discriminator_from_str};
 
 const PROJECTED_ITEM_ENVELOPE_BYTES: u32 = 64;
 

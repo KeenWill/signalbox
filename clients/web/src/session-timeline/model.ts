@@ -274,12 +274,18 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
               projected_structured_bytes: SCENARIO_ITEM_BYTES,
             }
           })
+    const firstItem = items[0]
+    const lastItem = items.at(-1)
     return decodeWebSessionTimelineWindow({
       session_id: sessionId,
       items,
       projected_structured_bytes: items.length * SCENARIO_ITEM_BYTES,
-      continuation_before: start > 1 ? { event_sequence: String(start) } : null,
-      continuation_after: end < SESSION_FOUNDATION_TOTAL ? { event_sequence: String(end) } : null,
+      continuation_before:
+        firstItem && start > 1 ? { event_sequence: firstItem.address.event_sequence } : null,
+      continuation_after:
+        lastItem && end < SESSION_FOUNDATION_TOTAL
+          ? { event_sequence: lastItem.address.event_sequence }
+          : null,
     })
   }
 }

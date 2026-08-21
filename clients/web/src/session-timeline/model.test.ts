@@ -88,6 +88,19 @@ describe('BoundedSessionHistory', () => {
     expect(window.projected_structured_bytes).toBeLessThanOrEqual(256)
   })
 
+  it('does not fabricate continuations for an empty scenario window', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const window = await scenario.readWindow(
+      sessionId,
+      { kind: 'after', eventSequence: String(SESSION_FOUNDATION_TOTAL) },
+      { maxItems: 1, maxBytes: 256 },
+    )
+
+    expect(window.items).toEqual([])
+    expect(window.continuation_before).toBeNull()
+    expect(window.continuation_after).toBeNull()
+  })
+
   it('decodes structured API errors before throwing', async () => {
     const request = async () =>
       new Response(
