@@ -312,23 +312,25 @@ mod tests {
 
     #[test]
     fn coderabbit_check_run_remains_gating() {
+        let name = String::from("CodeRabbit");
+        let failure = String::from("FAILURE");
         let evaluation = evaluate_pull_request_convergence(&facts(
             Some(sha('a')),
             0,
             MergeableState::Mergeable,
             vec![PullRequestCheck::new(
-                String::from("CodeRabbit"),
+                name.clone(),
                 PullRequestCheckState::CheckRun {
                     completed: true,
-                    conclusion: Some(String::from("FAILURE")),
+                    conclusion: Some(failure.clone()),
                 },
             )],
         ));
         assert_eq!(
             evaluation.blockers(),
             [PullRequestConvergenceBlocker::CheckNotGreen {
-                name: String::from("CodeRabbit"),
-                state: String::from("FAILURE"),
+                name,
+                state: failure,
             }]
         );
     }

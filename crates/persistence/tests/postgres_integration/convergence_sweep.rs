@@ -126,6 +126,15 @@ fn prepared_commission(
     )?)
 }
 
+fn dispatched(outcome: CommissionDispatchOutcome) -> (Uuid, SessionId) {
+    match outcome {
+        CommissionDispatchOutcome::Dispatched { dispatch, session } => {
+            (dispatch.into_uuid(), session)
+        }
+        other => panic!("fresh fixture must dispatch: {other:?}"),
+    }
+}
+
 fn dispatched_and_busy(
     first: CommissionDispatchOutcome,
     second: CommissionDispatchOutcome,
@@ -357,6 +366,90 @@ async fn racing_pull_request_commissions_skip_the_second_live_session() -> Resul
     let (dispatched, busy) = dispatched_and_busy(first?, second?);
 
     assert_eq!(busy, dispatched);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_new_target_censuses_an_existing_commissioned_dispatch() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
+    let sweep = PostgresConvergenceSweepStore::new(pool);
+    let outcome = commissioned
+        .commission(prepared_commission(0x89_203)?, |_| None)
+        .await?;
+    let (_, commissioned_session) = dispatched(outcome);
+
+    let state = sweep
+        .load_target(&repository()?, pull_request())
+        .await?
+        .expect("loading enrolls a configured target");
+
+    assert_eq!(
+        state
+            .latest_dispatch()
+            .expect("existing commissioned dispatch is visible")
+            .session_id(),
+        commissioned_session
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_committed_pending_dispatch_is_available_for_projection_repair()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
+    let sweep = PostgresConvergenceSweepStore::new(pool);
+    let repository = repository()?;
+    let observation = observation()?;
+    let command = 0x89_204;
+    sweep
+        .begin_commission(
+            &repository,
+            pull_request(),
+            &observation,
+            content_digest(FIRST_CONTENT_DIGEST_BYTE),
+            pending_command(command),
+        )
+        .await?;
+    let outcome = commissioned
+        .commission(prepared_commission(command)?, |_| None)
+        .await?;
+    let (dispatch, session) = dispatched(outcome);
+
+    let state = sweep
+        .load_target(&repository, pull_request())
+        .await?
+        .expect("pending target remains durable");
+    let pending = state
+        .pending_dispatch()
+        .expect("committed dispatch is linked to its pending command");
+
+    assert_eq!(pending.dispatch_id(), dispatch);
+    assert_eq!(pending.session_id(), session);
+    assert_eq!(state.pending_observation(), Some(&observation));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pull_request_dispatch_census_has_its_target_ordering_index() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND indexname = 'commissioned_dispatch_pull_request_target'",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(definition.contains(
+        "(target_kind, repository, pull_request_number, recorded_at DESC, dispatch_id DESC)"
+    ));
+    assert!(definition.contains("target_kind = 'pull_request'"));
     Ok(())
 }
 

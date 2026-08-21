@@ -6,6 +6,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use futures_util::{StreamExt, stream};
 use reqwest::{
     Client, StatusCode,
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue, USER_AGENT},
@@ -47,6 +48,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 // numeric-bound: ceiling - prevents one pathological PR from monopolizing a complete sweep
 const MAX_CONNECTION_PAGES: usize = 100;
+// numeric-bound: ceiling - prevents slow targets from serially delaying the complete target set
+const MAX_CONCURRENT_TARGETS: usize = 8;
+// numeric-bound: ceiling - bounds transport attempts for one idempotent GraphQL census request
+const MAX_REQUEST_ATTEMPTS: usize = 3;
+// numeric-bound: tunable - separates bounded transport retry attempts
+const REQUEST_RETRY_DELAY: Duration = Duration::from_millis(250);
 // numeric-bound: ceiling - bounds retained secret material and authorization header construction
 const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 // numeric-bound: tunable - separates a transient failure from its first automatic retry
@@ -100,17 +107,19 @@ query PullRequestConvergenceChecks(
   $namespace: String!, $name: String!, $number: Int!, $after: String!
 ) {
   repository(owner: $namespace, name: $name) {
-    commits(last: 1) { nodes { commit {
-      oid
-      statusCheckRollup { contexts(first: 100, after: $after) {
-        nodes {
-          __typename
-          ... on CheckRun { name status conclusion }
-          ... on StatusContext { context state }
-        }
-        pageInfo { hasNextPage endCursor }
-      } }
-    } } }
+    pullRequest(number: $number) {
+      commits(last: 1) { nodes { commit {
+        oid
+        statusCheckRollup { contexts(first: 100, after: $after) {
+          nodes {
+            __typename
+            ... on CheckRun { name status conclusion }
+            ... on StatusContext { context state }
+          }
+          pageInfo { hasNextPage endCursor }
+        } }
+      } } }
+    }
   }
 }
 "#;
@@ -227,7 +236,9 @@ impl ConvergenceSweepRuntime {
             return;
         }
         loop {
-            self.sweep_once().await;
+            if !self.sweep_once(&mut shutdown).await {
+                return;
+            }
             select! {
                 _ = sleep(self.interval) => {}
                 changed = shutdown.changed() => {
@@ -237,9 +248,17 @@ impl ConvergenceSweepRuntime {
         }
     }
 
-    async fn sweep_once(&self) {
-        for target in &self.targets {
-            self.reconcile_target(target).await;
+    async fn sweep_once(&self, shutdown: &mut watch::Receiver<bool>) -> bool {
+        let census = stream::iter(&self.targets)
+            .for_each_concurrent(Some(MAX_CONCURRENT_TARGETS), |target| {
+                self.reconcile_target(target)
+            });
+        tokio::pin!(census);
+        select! {
+            () = &mut census => true,
+            changed = shutdown.changed() => {
+                changed.is_ok() && !*shutdown.borrow()
+            }
         }
     }
 
@@ -264,6 +283,40 @@ impl ConvergenceSweepRuntime {
                 return;
             }
         };
+        if let Some((dispatch, observation)) = loaded
+            .as_ref()
+            .and_then(|state| state.pending_dispatch().zip(state.pending_observation()))
+        {
+            match self
+                .state
+                .record_dispatch(
+                    uuid::Uuid::now_v7(),
+                    &target.repository,
+                    target.pull_request,
+                    observation,
+                    dispatch.dispatch_id(),
+                    dispatch.session_id(),
+                )
+                .await
+            {
+                Ok(()) => {
+                    let _ = self.eligibility_nudge.nudge(dispatch.session_id());
+                }
+                Err(error) => {
+                    tracing::error!(repository = %target.repository.as_str(),
+                        pull_request = target.pull_request.get(), cause = %error,
+                        "convergence sweep could not repair a committed dispatch projection");
+                    self.record_failure(
+                        target,
+                        Some(observation),
+                        ConvergenceSweepFailureKind::StateAccess,
+                        CensusError::State,
+                    )
+                    .await;
+                }
+            }
+            return;
+        }
         if loaded
             .as_ref()
             .is_some_and(|state| state.is_parked() || !state.retry_ready())
@@ -555,12 +608,7 @@ impl ConvergenceSweepRuntime {
             return Err(CensusError::Shape);
         }
         let head_sha = commit_at(pull, "headRefOid")?;
-        let checked_head_sha = pull
-            .pointer("/commits/nodes/0/commit/oid")
-            .and_then(Value::as_str)
-            .map(|value| CommitSha::try_new(value.to_owned()))
-            .transpose()
-            .map_err(|_| CensusError::Shape)?;
+        let checked_head_sha = checked_head_at(pull)?;
         let mut unresolved = unresolved_threads(
             pull.pointer("/reviewThreads/nodes")
                 .and_then(Value::as_array)
@@ -605,8 +653,7 @@ impl ConvergenceSweepRuntime {
             let mut next = variables.clone();
             next["after"] = Value::String(check_page.cursor.ok_or(CensusError::Shape)?);
             let page = self.graphql(CHECKS_QUERY, next, &authorization).await?;
-            let connection = page.pointer("/data/repository/pullRequest/commits/nodes/0/commit/statusCheckRollup/contexts")
-                .ok_or(CensusError::Shape)?;
+            let connection = checks_page(&page, &head_sha)?;
             checks.extend(decode_checks(
                 connection
                     .get("nodes")
@@ -652,17 +699,34 @@ impl ConvergenceSweepRuntime {
     ) -> Result<Value, CensusError> {
         let body = serde_json::to_vec(&json!({"query": query, "variables": variables}))
             .map_err(|_| CensusError::Decode)?;
-        let mut response = self
-            .client
-            .post(GRAPHQL_URL)
-            .header(AUTHORIZATION, authorization.clone())
-            .header(ACCEPT, "application/vnd.github+json")
-            .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, USER_AGENT_VALUE)
-            .body(body)
-            .send()
-            .await
-            .map_err(|_| CensusError::Request)?;
+        let mut attempt = 0usize;
+        let mut response = loop {
+            attempt += 1;
+            let sent = self
+                .client
+                .post(GRAPHQL_URL)
+                .header(AUTHORIZATION, authorization.clone())
+                .header(ACCEPT, "application/vnd.github+json")
+                .header(CONTENT_TYPE, "application/json")
+                .header(USER_AGENT, USER_AGENT_VALUE)
+                .body(body.clone())
+                .send()
+                .await;
+            match sent {
+                Ok(response)
+                    if attempt < MAX_REQUEST_ATTEMPTS
+                        && (response.status().is_server_error()
+                            || response.status() == StatusCode::TOO_MANY_REQUESTS) =>
+                {
+                    sleep(REQUEST_RETRY_DELAY).await;
+                }
+                Ok(response) => break response,
+                Err(_) if attempt < MAX_REQUEST_ATTEMPTS => {
+                    sleep(REQUEST_RETRY_DELAY).await;
+                }
+                Err(_) => return Err(CensusError::Request),
+            }
+        };
         if response.status() != StatusCode::OK {
             return Err(CensusError::Response);
         }
@@ -729,6 +793,18 @@ fn unresolved_threads(values: &[Value]) -> Result<u64, CensusError> {
     })
 }
 
+fn checks_page<'a>(page: &'a Value, expected_head: &CommitSha) -> Result<&'a Value, CensusError> {
+    let commit = page
+        .pointer("/data/repository/pullRequest/commits/nodes/0/commit")
+        .ok_or(CensusError::Shape)?;
+    if commit_at(commit, "oid")? != *expected_head {
+        return Err(CensusError::Shape);
+    }
+    commit
+        .pointer("/statusCheckRollup/contexts")
+        .ok_or(CensusError::Shape)
+}
+
 fn decode_checks(values: &[Value]) -> Result<Vec<PullRequestCheck>, CensusError> {
     values
         .iter()
@@ -766,6 +842,16 @@ fn decode_checks(values: &[Value]) -> Result<Vec<PullRequestCheck>, CensusError>
             },
         )
         .collect()
+}
+
+fn checked_head_at(pull: &Value) -> Result<Option<CommitSha>, CensusError> {
+    pull.pointer("/commits/nodes/0/commit/statusCheckRollup")
+        .filter(|rollup| !rollup.is_null())
+        .and_then(|_| pull.pointer("/commits/nodes/0/commit/oid"))
+        .and_then(Value::as_str)
+        .map(|value| CommitSha::try_new(value.to_owned()))
+        .transpose()
+        .map_err(|_| CensusError::Shape)
 }
 
 fn commit_at(value: &Value, key: &str) -> Result<CommitSha, CensusError> {
@@ -849,6 +935,7 @@ fn commission_content(
         "pull_request": target.pull_request.get(),
         "head_sha": fetched.facts.head_sha().as_str(),
         "checked_head_sha": fetched.facts.checked_head_sha().map(CommitSha::as_str),
+        "head_repository": fetched.head_repository.as_str(),
         "base_branch": fetched.base_branch.as_str(),
         "head_branch": fetched.head_branch.as_str(),
         "draft": fetched.facts.draft(),
@@ -887,6 +974,10 @@ fn retry_delay(attempt: u32) -> Duration {
 mod tests {
     use super::*;
 
+    fn sha(value: char) -> CommitSha {
+        CommitSha::try_new(value.to_string().repeat(40)).expect("fixture SHA is valid")
+    }
+
     #[test]
     fn retry_delay_is_bounded() {
         assert_eq!(retry_delay(0), Duration::from_secs(60));
@@ -911,5 +1002,89 @@ mod tests {
         );
         assert!(status.is_non_gating());
         assert!(!run.is_non_gating());
+    }
+
+    #[test]
+    fn checks_query_is_scoped_to_the_requested_pull_request() {
+        assert!(CHECKS_QUERY.contains("pullRequest(number: $number)"));
+        assert!(CHECKS_QUERY.contains("commits(last: 1)"));
+    }
+
+    #[test]
+    fn absent_status_rollup_does_not_mark_checks_current() {
+        let pull = json!({
+            "commits": {
+                "nodes": [{"commit": {"oid": sha('a').as_str(), "statusCheckRollup": null}}]
+            }
+        });
+
+        assert_eq!(checked_head_at(&pull), Ok(None));
+    }
+
+    #[test]
+    fn a_second_checks_page_decodes_only_for_the_observed_head() {
+        let expected_head = sha('a');
+        let page = json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "commits": {
+                            "nodes": [{
+                                "commit": {
+                                    "oid": expected_head.as_str(),
+                                    "statusCheckRollup": {
+                                        "contexts": {
+                                            "nodes": [{
+                                                "__typename": "StatusContext",
+                                                "context": "test",
+                                                "state": "SUCCESS"
+                                            }],
+                                            "pageInfo": {
+                                                "hasNextPage": false,
+                                                "endCursor": null
+                                            }
+                                        }
+                                    }
+                                }
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+
+        let connection = checks_page(&page, &expected_head).expect("head-matched page decodes");
+        let checks = decode_checks(
+            connection
+                .get("nodes")
+                .and_then(Value::as_array)
+                .expect("fixture carries check nodes"),
+        )
+        .expect("second-page check shape is valid");
+
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name(), "test");
+    }
+
+    #[test]
+    fn a_checks_page_for_another_head_is_rejected() {
+        let page = json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "commits": {
+                            "nodes": [{
+                                "commit": {
+                                    "oid": sha('b').as_str(),
+                                    "statusCheckRollup": {"contexts": {}}
+                                }
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+
+        assert_eq!(checks_page(&page, &sha('a')), Err(CensusError::Shape));
     }
 }

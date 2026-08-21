@@ -1,6 +1,6 @@
 # Pull-request convergence reconciliation
 
-This page was verified against PR #1035 (`agent/daemon-convergence-sweep`). The
+This page was verified against this PR (`agent/daemon-convergence-sweep`). The
 daemon-native convergence sweep, predicate, fenced commission, durable retry and
 park records, and explicit configuration throttle are its implementation scope.
 

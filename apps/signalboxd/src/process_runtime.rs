@@ -8682,8 +8682,18 @@ where
             )
             .await
         }
+        Ok(CommissionDispatchOutcome::TargetBusy { session }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::CommissionTargetBusy {
+                    session_id: wire_uuid(session.into_uuid()),
+                }),
+            )
+            .await
+        }
         Ok(CommissionDispatchOutcome::ConflictingReuse)
-        | Ok(CommissionDispatchOutcome::TargetBusy { .. })
         | Err(CommissionedDispatchRepositoryError::SessionCreation(
             CreateSessionRepositoryError::DifferentCommandKind { .. },
         )) => {

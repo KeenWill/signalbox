@@ -1370,6 +1370,25 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
         .request(
             4,
             ClientRequest::CommissionSession {
+                command_id: command()?,
+                template_name: String::from("merge-forward"),
+                fence: fence.clone(),
+                statement: statement.clone(),
+                content: InputContent::new(String::from("Respond to the open review threads.")),
+            },
+        )
+        .await?;
+    let busy = response_within(&mut connection).await?.message().clone();
+    assert_eq!(protocol_error_code(&busy), ErrorCode::Rejected);
+    assert_eq!(
+        protocol_error_detail(&busy),
+        Some(RejectionDetail::CommissionTargetBusy { session_id })
+    );
+
+    connection
+        .request(
+            5,
+            ClientRequest::CommissionSession {
                 command_id: commission_command,
                 template_name: String::from("merge-forward"),
                 fence: CommissionedSessionFence::Branch {
@@ -1387,7 +1406,7 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
     };
     assert_eq!(code, ErrorCode::ConflictingReuse);
 
-    let history = read_goal_messages(&mut connection, 5, session_id).await?;
+    let history = read_goal_messages(&mut connection, 6, session_id).await?;
     assert_eq!(
         history.first(),
         Some(&ServerMessage::GoalHistoryStart {
@@ -1403,7 +1422,7 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
     // before the live template catalog is consulted.
     runtime.restart_without_templates().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
-    connection.request(6, request).await?;
+    connection.request(7, request).await?;
     let drift_replayed = response_within(&mut connection).await?.message().clone();
     assert_eq!(
         drift_replayed,
@@ -1417,7 +1436,7 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
     // replay of committed work survives configuration drift.
     connection
         .request(
-            7,
+            8,
             ClientRequest::CommissionSession {
                 command_id: command()?,
                 template_name: String::from("merge-forward"),

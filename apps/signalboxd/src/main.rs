@@ -1200,6 +1200,11 @@ async fn run_hub(
             })?;
         repository_watch
             .validate_template_contexts(&declarations)
+            .and_then(|()| {
+                repository_watch.validate_convergence_template(
+                    template_configuration.summaries().map(|(name, _)| name),
+                )
+            })
             .map_err(|error| {
                 erase_startup_cause(
                     RuntimePhase::Configuration,
@@ -1657,19 +1662,29 @@ async fn run_hub(
         None => None,
     };
     let convergence_sweep_runtime = match model_configuration.repository_watch() {
-        Some(configuration) => ConvergenceSweepRuntime::try_new(
+        Some(configuration) => match ConvergenceSweepRuntime::try_new(
             pool.clone(),
             configuration,
             template_configuration.clone(),
             model_configuration.clone(),
             eligibility_nudge.clone(),
-        )
-        .map_err(|_| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("convergence_sweep_transport_construction_failed"),
-            )
-        })?,
+        ) {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static(
+                        "convergence_sweep_transport_construction_failed",
+                    ),
+                );
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
+                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        },
         None => None,
     };
     // Every fallible construction above has succeeded, so the revisions this

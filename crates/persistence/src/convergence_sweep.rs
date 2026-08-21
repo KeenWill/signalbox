@@ -145,6 +145,7 @@ pub struct ConvergenceSweepTargetState {
     pending_observation: Option<ConvergenceSweepObservation>,
     last_observation: Option<ConvergenceSweepObservation>,
     last_dispatch_observation: Option<ConvergenceSweepObservation>,
+    pending_dispatch: Option<ConvergenceSweepDispatchState>,
     latest_dispatch: Option<ConvergenceSweepDispatchState>,
 }
 
@@ -172,6 +173,9 @@ impl ConvergenceSweepTargetState {
     }
     pub const fn last_dispatch_observation(&self) -> Option<&ConvergenceSweepObservation> {
         self.last_dispatch_observation.as_ref()
+    }
+    pub const fn pending_dispatch(&self) -> Option<&ConvergenceSweepDispatchState> {
+        self.pending_dispatch.as_ref()
     }
     pub const fn latest_dispatch(&self) -> Option<&ConvergenceSweepDispatchState> {
         self.latest_dispatch.as_ref()
@@ -236,6 +240,8 @@ impl PostgresConvergenceSweepStore {
         repository: &RepositorySlug,
         pull_request: PullRequestNumber,
     ) -> Result<Option<ConvergenceSweepTargetState>, ConvergenceSweepStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        ensure_target(&mut transaction, repository, pull_request).await?;
         let row = sqlx::query(
             "SELECT target.state_kind, target.failure_kind,
                     target.consecutive_failures,
@@ -246,9 +252,31 @@ impl PostgresConvergenceSweepStore {
                     target.last_head_sha, target.last_unresolved_threads,
                     target.last_dispatch_head_sha,
                     target.last_dispatch_unresolved_threads,
+                    pending.dispatch_id AS pending_dispatch_id,
+                    pending.session_id AS pending_session_id,
+                    pending.recorded_at AS pending_recorded_at,
+                    pending.live AS pending_live,
+                    pending.has_model_activity AS pending_has_model_activity,
                     latest.dispatch_id, latest.session_id, latest.recorded_at,
                     latest.live, latest.has_model_activity
                FROM convergence_sweep_target AS target
+               LEFT JOIN LATERAL (
+                    SELECT dispatch.dispatch_id, dispatch.session_id,
+                           dispatch.recorded_at,
+                           coalesce((
+                               SELECT event.event_kind IN ('commissioned', 'resumed', 'superseded')
+                                 FROM goal_event AS event
+                                WHERE event.session_id = dispatch.session_id
+                                ORDER BY event.event_ordinal DESC LIMIT 1
+                           ), false) AS live,
+                           EXISTS (
+                               SELECT 1 FROM model_call AS call
+                                WHERE call.session_id = dispatch.session_id
+                           ) AS has_model_activity
+                      FROM commissioned_dispatch AS dispatch
+                     WHERE dispatch.create_command_id = target.pending_command_id
+                     LIMIT 1
+               ) AS pending ON true
                LEFT JOIN LATERAL (
                     SELECT dispatch.dispatch_id, dispatch.session_id,
                            dispatch.recorded_at,
@@ -274,9 +302,11 @@ impl PostgresConvergenceSweepStore {
         )
         .bind(repository.as_str())
         .bind(Decimal::from(pull_request.get()))
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?;
-        row.map(decode_target_state).transpose()
+        let state = row.map(decode_target_state).transpose()?;
+        transaction.commit().await?;
+        Ok(state)
     }
 
     /// Installs or reuses the idempotency fence before commissioning.
@@ -605,32 +635,22 @@ fn decode_target_state(
     let pending_observation = decode_observation(pending_head, pending_threads)?;
     let last_observation = decode_observation(last_head, last_threads)?;
     let last_dispatch_observation = decode_observation(dispatch_head, dispatch_threads)?;
-    let dispatch_id: Option<Uuid> = row.try_get("dispatch_id")?;
-    let session_id: Option<Uuid> = row.try_get("session_id")?;
-    let recorded_at: Option<OffsetDateTime> = row.try_get("recorded_at")?;
-    let live: Option<bool> = row.try_get("live")?;
-    let activity: Option<bool> = row.try_get("has_model_activity")?;
-    let latest_dispatch = match (dispatch_id, session_id, recorded_at, live, activity) {
-        (
-            Some(dispatch_id),
-            Some(session_id),
-            Some(recorded_at),
-            Some(live),
-            Some(has_model_activity),
-        ) => Some(ConvergenceSweepDispatchState {
-            dispatch_id,
-            session_id: session_id_from_uuid(session_id),
-            dispatched_at: SystemTime::from(recorded_at),
-            live,
-            has_model_activity,
-        }),
-        (None, None, None, None, None) => None,
-        _ => {
-            return Err(ConvergenceSweepStoreError::Corruption(
-                "partial latest dispatch",
-            ));
-        }
-    };
+    let pending_dispatch = decode_dispatch_state(
+        row.try_get("pending_dispatch_id")?,
+        row.try_get("pending_session_id")?,
+        row.try_get("pending_recorded_at")?,
+        row.try_get("pending_live")?,
+        row.try_get("pending_has_model_activity")?,
+        "partial pending dispatch",
+    )?;
+    let latest_dispatch = decode_dispatch_state(
+        row.try_get("dispatch_id")?,
+        row.try_get("session_id")?,
+        row.try_get("recorded_at")?,
+        row.try_get("live")?,
+        row.try_get("has_model_activity")?,
+        "partial latest dispatch",
+    )?;
     Ok(ConvergenceSweepTargetState {
         parked: state == "parked",
         retry_ready: row.try_get("retry_ready")?,
@@ -641,8 +661,36 @@ fn decode_target_state(
         pending_observation,
         last_observation,
         last_dispatch_observation,
+        pending_dispatch,
         latest_dispatch,
     })
+}
+
+fn decode_dispatch_state(
+    dispatch_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    recorded_at: Option<OffsetDateTime>,
+    live: Option<bool>,
+    activity: Option<bool>,
+    partial: &'static str,
+) -> Result<Option<ConvergenceSweepDispatchState>, ConvergenceSweepStoreError> {
+    match (dispatch_id, session_id, recorded_at, live, activity) {
+        (
+            Some(dispatch_id),
+            Some(session_id),
+            Some(recorded_at),
+            Some(live),
+            Some(has_model_activity),
+        ) => Ok(Some(ConvergenceSweepDispatchState {
+            dispatch_id,
+            session_id: session_id_from_uuid(session_id),
+            dispatched_at: SystemTime::from(recorded_at),
+            live,
+            has_model_activity,
+        })),
+        (None, None, None, None, None) => Ok(None),
+        _ => Err(ConvergenceSweepStoreError::Corruption(partial)),
+    }
 }
 
 fn decode_observation(

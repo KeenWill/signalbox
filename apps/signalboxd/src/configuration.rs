@@ -654,6 +654,25 @@ impl RepositoryWatchConfiguration {
         self.convergence_sweep.as_ref()
     }
 
+    /// Validates the convergence template against the immutable session-template catalog.
+    pub fn validate_convergence_template<'a>(
+        &self,
+        templates: impl Iterator<Item = &'a SessionTemplateName>,
+    ) -> Result<(), HubModelConfigurationError> {
+        let Some(policy) = self.convergence_sweep() else {
+            return Ok(());
+        };
+        if templates.into_iter().any(|name| name == policy.template()) {
+            Ok(())
+        } else {
+            Err(
+                HubModelConfigurationError::UnknownConvergenceSweepTemplate {
+                    template: policy.template().as_str().to_owned(),
+                },
+            )
+        }
+    }
+
     /// Validates every rule against the immutable session-template catalog.
     pub fn validate_template_contexts(
         &self,
@@ -3528,6 +3547,11 @@ pub enum HubModelConfigurationError {
     InvalidWebFetchPolicy,
     /// The optional version-one repository-watch section was malformed.
     InvalidRepositoryWatchConfiguration,
+    /// The convergence sweep names no loaded session template.
+    UnknownConvergenceSweepTemplate {
+        /// Exact missing template name.
+        template: String,
+    },
     /// One structured repository-watch rule failed closed validation.
     InvalidRepositoryWatchRule {
         /// Stable operator-assigned rule identity.
@@ -3570,6 +3594,12 @@ impl fmt::Display for HubModelConfigurationError {
             return write!(
                 formatter,
                 "model configuration contains invalid repository-watch rule `{rule}`: {reason}"
+            );
+        }
+        if let Self::UnknownConvergenceSweepTemplate { template } = self {
+            return write!(
+                formatter,
+                "model configuration names unknown convergence template `{template}`"
             );
         }
         formatter.write_str(match self {
@@ -3719,6 +3749,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidRepositoryWatchConfiguration => {
                 "model configuration contains invalid repository-watch settings"
+            }
+            Self::UnknownConvergenceSweepTemplate { .. } => {
+                "model configuration names an unknown convergence template"
             }
             Self::InvalidRepositoryWatchRule { .. } => {
                 "model configuration contains an invalid repository-watch rule"
@@ -5035,6 +5068,26 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         assert_eq!(policy.interval(), MAX_CONVERGENCE_SWEEP_INTERVAL);
         assert_eq!(policy.cool_off(), MAX_CONVERGENCE_SWEEP_COOL_OFF);
         assert_eq!(repository.convergence_pull_requests(), [pull_request]);
+    }
+
+    #[test]
+    fn repository_watch_rejects_an_unknown_convergence_template() {
+        let configured = HubModelConfiguration::parse(&configuration_with_convergence_sweep())
+            .expect("convergence sweep fixture is valid");
+        let watch = configured
+            .repository_watch()
+            .expect("fixture configures repository watch");
+        let available = SessionTemplateName::try_new(String::from("another-template"))
+            .expect("available template fixture is valid");
+
+        assert_eq!(
+            watch.validate_convergence_template(std::iter::once(&available)),
+            Err(
+                HubModelConfigurationError::UnknownConvergenceSweepTemplate {
+                    template: String::from(WATCH_TEMPLATE),
+                }
+            )
+        );
     }
 
     #[test]

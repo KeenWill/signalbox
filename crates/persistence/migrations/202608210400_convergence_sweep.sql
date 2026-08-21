@@ -18,6 +18,12 @@ BEGIN
 END
 $$;
 
+CREATE INDEX commissioned_dispatch_pull_request_target
+    ON commissioned_dispatch (
+        target_kind, repository, pull_request_number, recorded_at DESC, dispatch_id DESC
+    )
+    WHERE target_kind = 'pull_request';
+
 CREATE TABLE convergence_sweep_target (
     repository text NOT NULL,
     pull_request_number numeric(20, 0) NOT NULL,
