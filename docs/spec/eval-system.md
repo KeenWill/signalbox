@@ -109,20 +109,20 @@ negative zero as `0`; its string escaping rules govern all JSON strings. Shared
 corpus admission rejects U+0000 in every case string because PostgreSQL JSONB
 cannot preserve it, keeping repository, disk, and database storage forms
 aligned. The versioned preimage below pins that algorithm for corpus format
-version one. The
-exact digest preimage is the UTF-8 bytes `signalbox-eval-corpus-v1` followed by
-one zero byte, the case count as an unsigned 64-bit big-endian integer, and
-then, for each case in that order, its canonical-JSON byte length as an unsigned
-64-bit big-endian integer followed by those bytes. Lengths count bytes, not
-characters. This aggregate framing is owned by this page rather than inferred
-from the program substrate's single-file preimages, so the same logical corpus
-computes the same identity whether loaded from repository files, an artifact, or
-rows, and a run verifies its corpus after the content moves between admitted
-storage forms. The checked-in corpus is only one manifest-backed fixture;
-neither the contract nor the database assumes that repository, one database, or
-one Signalbox instance. Per the [pre-alpha rule](../../AGENTS.md), no compatibility
-machinery attends any of this: corpus formats and storage may change freely
-until first durable deployment.
+version one. The exact digest preimage is the UTF-8 bytes
+`signalbox-eval-corpus-v1` followed by one zero byte, the case count as an
+unsigned 64-bit big-endian integer, and then, for each case in that order, its
+canonical-JSON byte length as an unsigned 64-bit big-endian integer followed by
+those bytes. Lengths count bytes, not characters. This aggregate framing is
+owned by this page rather than inferred from the program substrate's single-file
+preimages, so the same logical corpus computes the same identity whether loaded
+from repository files, an artifact, or rows, and a run verifies its corpus after
+the content moves between admitted storage forms. The checked-in corpus is only
+one manifest-backed fixture; neither the contract nor the database assumes that
+repository, one database, or one Signalbox instance. Per the
+[pre-alpha rule](../../AGENTS.md), no compatibility machinery attends any of
+this: corpus formats and storage may change freely until first durable
+deployment.
 
 **Committed unimplemented functionality.** No present corpus store loads case
 content through a blob binding. The portable reference and database registration
