@@ -13962,13 +13962,15 @@ where
             )
             .await
         }
-        Ok(GoalCommandHandlingOutcome::TargetBusy { session: owner }) => {
+        Ok(GoalCommandHandlingOutcome::TargetBusy {
+            session: blocking_session,
+        }) => {
             write_error(
                 writer,
                 version,
                 request_id,
                 ProtocolError::rejected(RejectionDetail::CommissionTargetBusy {
-                    session_id: CanonicalUuid::from_uuid(owner.into_uuid()),
+                    session_id: CanonicalUuid::from_uuid(blocking_session.into_uuid()),
                 }),
             )
             .await

@@ -608,10 +608,12 @@ impl PostgresGoalPassDisposition {
                 );
                 ResumeAttempt::Settled
             }
-            Ok(GoalCommandHandlingOutcome::TargetBusy { session: owner }) => {
+            Ok(GoalCommandHandlingOutcome::TargetBusy {
+                session: blocking_session,
+            }) => {
                 tracing::info!(
                     session = %session.into_uuid(),
-                    owner = %owner.into_uuid(),
+                    blocking_session = %blocking_session.into_uuid(),
                     event_ordinal = blocked.get(),
                     "automatic goal resumption deferred behind another commissioned session"
                 );
