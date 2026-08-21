@@ -64,8 +64,8 @@ receive only a placement-free `VerifiedBlobSource`, cooperative cancellation,
 and their checked request. Validation requests carry effective lowerable
 source-byte and exact-range ceilings for broker enforcement. They return raw
 processor outputs: the registry reparses and cross-checks every type, evidence
-claim, reason, metadata object,
-body, JSON tree, continuation, and bound before admitting it.
+claim, reason, metadata object, body, JSON tree, continuation, and bound before
+admitting it.
 
 ## Detection and validation
 
