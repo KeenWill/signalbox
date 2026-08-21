@@ -2512,6 +2512,36 @@ async fn fleet_terminal_call_count(pool: &PgPool) -> Result<i64, Box<dyn Error>>
     .await?)
 }
 
+async fn fleet_ambiguous_model_call_park_count(pool: &PgPool) -> Result<i64, Box<dyn Error>> {
+    Ok(sqlx::query_scalar(
+        "SELECT count(*)
+           FROM turn_lifecycle
+          WHERE state_kind = 'active'
+            AND active_phase_kind = 'awaiting_model_call_recovery'",
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn wait_for_fleet_ambiguous_model_call_park(
+    pool: &PgPool,
+    model: &FleetScriptedModel,
+    bound: Duration,
+) -> Result<(), Box<dyn Error>> {
+    timeout(bound, async {
+        loop {
+            let parked = fleet_ambiguous_model_call_park_count(pool).await?;
+            if parked == 1 && model.in_flight_hangs() == 0 {
+                return Ok::<(), Box<dyn Error>>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| io::Error::other("fleet model call did not reach its ambiguity park"))??;
+    Ok(())
+}
+
 async fn wait_for_fleet_lifecycle_counts(
     pool: &PgPool,
     expected: (i64, i64),
@@ -2564,7 +2594,7 @@ async fn wait_for_fleet_terminal_count(
 }
 
 /// Issue #1027: a post-acceptance model hang releases its authoritative pass
-/// and reaches a durable typed terminal record inside the occupancy bound.
+/// and reaches a durable typed ambiguity park inside the occupancy bound.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposition()
@@ -2589,14 +2619,10 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
     let occupancy_bound = SchedulerPassOccupancyBound::try_lowered(FLEET_OCCUPANCY_BOUND)?;
     let tasks = start_fleet_scheduler(&mut runtime, model.clone(), occupancy_bound)?;
     wait_for_hangs(&model, 1).await?;
-    wait_for_fleet_lifecycle_counts(
-        &runtime.pool,
-        (0, i64::try_from(FLEET_SESSION_COUNT)?),
-        FLEET_ASSERTION_BOUND,
-    )
-    .await?;
+    wait_for_fleet_ambiguous_model_call_park(&runtime.pool, &model, FLEET_ASSERTION_BOUND).await?;
     let (active, terminal) = fleet_lifecycle_counts(&runtime.pool).await?;
     let typed_terminal_calls = fleet_terminal_call_count(&runtime.pool).await?;
+    let ambiguity_parks = fleet_ambiguous_model_call_park_count(&runtime.pool).await?;
     let in_flight_hangs = model.in_flight_hangs();
     tasks.stop().await?;
     runtime.stop().await?;
@@ -2604,9 +2630,10 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
     assert_eq!(baseline_fleet.sessions.len(), FLEET_SESSION_COUNT - 1);
     assert_eq!(fault_fleet.sessions.len(), 1);
     assert_eq!(in_flight_hangs, 0, "hung call retained a pass slot");
-    assert_eq!(active, 0, "an active turn exceeded the watchdog bound");
-    assert_eq!(terminal, i64::try_from(FLEET_SESSION_COUNT)?);
+    assert_eq!(active, 1, "the ambiguous issued call lost its durable park");
+    assert_eq!(terminal, i64::try_from(FLEET_SESSION_COUNT - 1)?);
     assert_eq!(typed_terminal_calls, i64::try_from(FLEET_SESSION_COUNT)?);
+    assert_eq!(ambiguity_parks, 1);
     Ok(())
 }
 
