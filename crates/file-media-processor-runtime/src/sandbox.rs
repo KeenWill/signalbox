@@ -257,6 +257,7 @@ impl SandboxedFileMediaProcessor {
                 invocation,
                 expected,
                 source,
+                cancellation,
                 self.ceilings.frame_bytes(),
             );
             tokio::pin!(session);
@@ -467,6 +468,7 @@ async fn run_session(
     invocation: Invocation,
     expected: ExpectedOutput,
     source: &dyn VerifiedBlobSource,
+    cancellation: &dyn CancellationSignal,
     frame_bytes: usize,
 ) -> Result<CompletedOutput, ProcessorBoundaryFailure> {
     let envelope = invocation.envelope();
@@ -499,6 +501,9 @@ async fn run_session(
                 let length = broker
                     .admit(offset, length)
                     .map_err(|_| ProcessorFailure::Protocol)?;
+                if cancellation.is_cancelled() {
+                    return Err(ProcessorFailure::Cancelled.into());
+                }
                 let bytes = source.read_range(offset, length).await?;
                 if bytes.len()
                     != usize::try_from(length.get()).map_err(|_| ProcessorFailure::Protocol)?
