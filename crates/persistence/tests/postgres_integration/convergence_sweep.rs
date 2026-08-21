@@ -614,6 +614,85 @@ async fn configured_target_reenrollment_clears_a_durable_park() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn active_session_prevents_inactivity_parking() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
+    let store = PostgresConvergenceSweepStore::new(pool);
+    let repository = repository()?;
+    let observation = observation()?;
+    let (_, session) = dispatched(
+        commissioned
+            .commission(prepared_commission(0x89_208)?, |_| None)
+            .await?,
+    );
+
+    let disposition = store
+        .record_no_model_activity_failure(
+            Uuid::from_u128(0x89_217),
+            &repository,
+            pull_request(),
+            &observation,
+            session,
+        )
+        .await?;
+
+    assert_eq!(
+        disposition,
+        ConvergenceSweepFailureDisposition::ActivityObserved
+    );
+    assert!(
+        store
+            .load_target(&repository, pull_request())
+            .await?
+            .is_some_and(|state| !state.is_parked())
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn removed_targets_leave_the_parked_operator_view() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+    let observation = observation()?;
+    store
+        .record_failure(
+            Uuid::from_u128(0x89_218),
+            &repository,
+            inactive_pull_request(),
+            Some(&observation),
+            ConvergenceSweepFailureKind::NoModelActivity,
+            RETRY_DELAY_SECONDS,
+        )
+        .await?;
+
+    store.reconcile_configured_targets(&[]).await?;
+
+    let parked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM convergence_sweep_parked_target
+          WHERE repository = $1 AND pull_request_number = $2",
+    )
+    .bind(repository.as_str())
+    .bind(rust_decimal::Decimal::from(inactive_pull_request().get()))
+    .fetch_one(&pool)
+    .await?;
+    let retained_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM convergence_sweep_event
+          WHERE repository = $1 AND pull_request_number = $2",
+    )
+    .bind(repository.as_str())
+    .bind(rust_decimal::Decimal::from(inactive_pull_request().get()))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(parked, 0);
+    assert_eq!(retained_events, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_live_session_observation_is_retained_for_movement_detection()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;

@@ -40,6 +40,7 @@ use signalbox_model_runtime_anthropic::{
 };
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
 use signalbox_persistence::{
+    convergence_sweep::PostgresConvergenceSweepStore,
     conversation_import::backfill_imported_conversation_display_titles,
     migrate,
     model_execution::PostgresModelCallRepository,
@@ -1463,6 +1464,24 @@ async fn run_hub(
                     .map(|repository| repository.repository().clone())
                     .collect()
             });
+    let configured_convergence_targets =
+        model_configuration
+            .repository_watch()
+            .map_or_else(Vec::new, |configuration| {
+                if configuration.convergence_sweep().is_none() {
+                    return Vec::new();
+                }
+                configuration
+                    .repositories()
+                    .iter()
+                    .flat_map(|repository| {
+                        repository
+                            .convergence_pull_requests()
+                            .iter()
+                            .map(|pull_request| (repository.repository().clone(), *pull_request))
+                    })
+                    .collect()
+            });
     let repository_watch_store = PostgresRepoWatchDispatchStore::new(
         pool.clone(),
         model_configuration.session_credential_pin(),
@@ -1687,6 +1706,34 @@ async fn run_hub(
         },
         None => None,
     };
+    let convergence_sweep_store = PostgresConvergenceSweepStore::new(pool.clone());
+    let convergence_target_admission =
+        convergence_sweep_store.reconcile_configured_targets(&configured_convergence_targets);
+    match await_while_guarded(&mut database, convergence_target_admission).await {
+        GuardedAwait::Completed(Ok(())) => {}
+        GuardedAwait::Completed(Err(_)) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("convergence_target_admission_failed"),
+            );
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Err(failure);
+        }
+        GuardedAwait::GuardLost => {
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            if let Some(registry) = blob_store_registry.as_ref() {
+                registry.disarm_staging_sweep();
+            }
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
+    }
     // Every fallible construction above has succeeded, so the revisions this
     // consumes belong to a daemon that reaches its runtime. A startup that
     // failed earlier retired and activated nothing, leaving the previous

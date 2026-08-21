@@ -27,6 +27,7 @@ CREATE INDEX commissioned_dispatch_pull_request_target
 CREATE TABLE convergence_sweep_target (
     repository text NOT NULL,
     pull_request_number numeric(20, 0) NOT NULL,
+    enrolled boolean NOT NULL DEFAULT true,
     state_kind text NOT NULL DEFAULT 'observed',
     failure_kind text,
     consecutive_failures smallint NOT NULL DEFAULT 0,
@@ -245,4 +246,4 @@ SELECT repository,
        last_session_id,
        last_dispatched_at
   FROM convergence_sweep_target
- WHERE state_kind = 'parked';
+ WHERE enrolled AND state_kind = 'parked';

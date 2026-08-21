@@ -191,6 +191,7 @@ impl ConvergenceSweepTargetState {
 pub enum ConvergenceSweepFailureDisposition {
     RetryScheduled,
     Parked,
+    ActivityObserved,
 }
 
 /// Database or durable-shape failure in convergence sweep storage.
@@ -236,6 +237,22 @@ pub struct PostgresConvergenceSweepStore {
 impl PostgresConvergenceSweepStore {
     pub const fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Reconciles durable operator-visible membership with configured targets.
+    pub async fn reconcile_configured_targets(
+        &self,
+        configured: &[(RepositorySlug, PullRequestNumber)],
+    ) -> Result<(), ConvergenceSweepStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("UPDATE convergence_sweep_target SET enrolled = false")
+            .execute(&mut *transaction)
+            .await?;
+        for (repository, pull_request) in configured {
+            ensure_target(&mut transaction, repository, *pull_request).await?;
+        }
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Re-enrolls one configured target, making daemon restart its explicit recovery path.
@@ -347,7 +364,7 @@ impl PostgresConvergenceSweepStore {
                      WHERE dispatch.target_kind = 'pull_request'
                        AND dispatch.repository = target.repository
                        AND dispatch.pull_request_number = target.pull_request_number
-                     ORDER BY dispatch.recorded_at DESC, dispatch.dispatch_id DESC
+                     ORDER BY live DESC, dispatch.recorded_at DESC, dispatch.dispatch_id DESC
                      LIMIT 1
                ) AS latest ON true
               WHERE target.repository = $1
@@ -512,6 +529,53 @@ impl PostgresConvergenceSweepStore {
         failure: ConvergenceSweepFailureKind,
         retry_delay_seconds: u64,
     ) -> Result<ConvergenceSweepFailureDisposition, ConvergenceSweepStoreError> {
+        self.record_failure_guarded(
+            event_id,
+            repository,
+            pull_request,
+            observation,
+            failure,
+            retry_delay_seconds,
+            None,
+        )
+        .await
+    }
+
+    /// Parks an inactive session only after rechecking durable activity and liveness.
+    pub async fn record_no_model_activity_failure(
+        &self,
+        event_id: Uuid,
+        repository: &RepositorySlug,
+        pull_request: PullRequestNumber,
+        observation: &ConvergenceSweepObservation,
+        expected_session: SessionId,
+    ) -> Result<ConvergenceSweepFailureDisposition, ConvergenceSweepStoreError> {
+        self.record_failure_guarded(
+            event_id,
+            repository,
+            pull_request,
+            Some(observation),
+            ConvergenceSweepFailureKind::NoModelActivity,
+            0,
+            Some(expected_session),
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the durable failure transition carries its complete typed fence"
+    )]
+    async fn record_failure_guarded(
+        &self,
+        event_id: Uuid,
+        repository: &RepositorySlug,
+        pull_request: PullRequestNumber,
+        observation: Option<&ConvergenceSweepObservation>,
+        failure: ConvergenceSweepFailureKind,
+        retry_delay_seconds: u64,
+        expected_inactive_session: Option<SessionId>,
+    ) -> Result<ConvergenceSweepFailureDisposition, ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
         ensure_target(&mut transaction, repository, pull_request).await?;
         let budget: i16 = sqlx::query_scalar("SELECT convergence_sweep_retry_budget()")
@@ -525,8 +589,27 @@ impl PostgresConvergenceSweepStore {
                 )
             })
             .unwrap_or((None, None));
-        let (failures, parked): (i16, bool) = sqlx::query_as(
-            "UPDATE convergence_sweep_target
+        let updated: Option<(i16, bool)> = sqlx::query_as(
+            "WITH selected_dispatch AS (
+                SELECT dispatch.session_id,
+                       coalesce((
+                           SELECT event.event_kind IN ('commissioned', 'resumed', 'superseded')
+                             FROM goal_event AS event
+                            WHERE event.session_id = dispatch.session_id
+                            ORDER BY event.event_ordinal DESC LIMIT 1
+                       ), false) AS live,
+                       EXISTS (
+                           SELECT 1 FROM model_call AS call
+                            WHERE call.session_id = dispatch.session_id
+                       ) AS has_model_activity
+                  FROM commissioned_dispatch AS dispatch
+                 WHERE dispatch.target_kind = 'pull_request'
+                   AND dispatch.repository = $1
+                   AND dispatch.pull_request_number = $2
+                 ORDER BY live DESC, dispatch.recorded_at DESC, dispatch.dispatch_id DESC
+                 LIMIT 1
+             )
+             UPDATE convergence_sweep_target
                 SET state_kind = CASE WHEN
                         (CASE WHEN $4 THEN $5
                             WHEN failure_kind = $3
@@ -562,6 +645,12 @@ impl PostgresConvergenceSweepStore {
                     last_observed_at = CASE WHEN $8 IS NULL THEN last_observed_at
                         ELSE clock_timestamp() END
               WHERE repository = $1 AND pull_request_number = $2
+                AND ($10::uuid IS NULL OR EXISTS (
+                    SELECT 1 FROM selected_dispatch
+                     WHERE session_id = $10
+                       AND NOT live
+                       AND NOT has_model_activity
+                ))
           RETURNING consecutive_failures, state_kind = 'parked'",
         )
         .bind(repository.as_str())
@@ -573,8 +662,19 @@ impl PostgresConvergenceSweepStore {
         .bind(failure.need())
         .bind(head)
         .bind(threads)
-        .fetch_one(&mut *transaction)
+        .bind(expected_inactive_session.map(SessionId::into_uuid))
+        .fetch_optional(&mut *transaction)
         .await?;
+        let Some((failures, parked)) = updated else {
+            transaction.commit().await?;
+            return if expected_inactive_session.is_some() {
+                Ok(ConvergenceSweepFailureDisposition::ActivityObserved)
+            } else {
+                Err(ConvergenceSweepStoreError::Corruption(
+                    "target disappeared during failure recording",
+                ))
+            };
+        };
         insert_event(
             &mut transaction,
             event_id,
@@ -604,7 +704,9 @@ async fn ensure_target(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO convergence_sweep_target (repository, pull_request_number)
-         VALUES ($1, $2) ON CONFLICT DO NOTHING",
+         VALUES ($1, $2)
+         ON CONFLICT (repository, pull_request_number)
+         DO UPDATE SET enrolled = true",
     )
     .bind(repository.as_str())
     .bind(Decimal::from(pull_request.get()))

@@ -385,19 +385,36 @@ impl ConvergenceSweepRuntime {
             let cool_off_elapsed = loaded
                 .as_ref()
                 .is_some_and(|state| state.cool_off_elapsed());
-            if unchanged && !dispatch.has_model_activity() && cool_off_elapsed {
-                self.record_failure(
-                    target,
-                    Some(&observation),
-                    ConvergenceSweepFailureKind::NoModelActivity,
-                    CensusError::Shape,
-                )
-                .await;
-                return;
-            }
             if dispatch.is_live() {
                 self.record_decision(target, &observation, ConvergenceSweepDecision::LiveSession)
                     .await;
+                return;
+            }
+            if unchanged && !dispatch.has_model_activity() && cool_off_elapsed {
+                match self
+                    .state
+                    .record_no_model_activity_failure(
+                        uuid::Uuid::now_v7(),
+                        &target.repository,
+                        target.pull_request,
+                        &observation,
+                        dispatch.session_id(),
+                    )
+                    .await
+                {
+                    Ok(disposition) => tracing::warn!(
+                        repository = %target.repository.as_str(),
+                        pull_request = target.pull_request.get(),
+                        ?disposition,
+                        "convergence sweep evaluated inactive session"
+                    ),
+                    Err(error) => tracing::error!(
+                        repository = %target.repository.as_str(),
+                        pull_request = target.pull_request.get(),
+                        cause = %error,
+                        "convergence sweep inactivity decision could not be recorded"
+                    ),
+                }
                 return;
             }
             if !cool_off_elapsed {
