@@ -1647,7 +1647,7 @@ impl RepositoryWatchTask {
         // nothing but that head, which would otherwise leave every later
         // receipt permanently unreachable.
         let mut after_receipt: Option<NonZeroU64> = None;
-        loop {
+        'drain: loop {
             let deliveries = match self
                 .webhook_store
                 .load_pending(&self.repository, page_size, after_receipt)
@@ -1695,6 +1695,18 @@ impl RepositoryWatchTask {
                 {
                     Ok(()) => {}
                     Err(error) => {
+                        if error.stops_webhook_page() {
+                            tracing::warn!(
+                                repository = %self.repository.as_str(),
+                                hook_id = delivery.key().hook_id().get(),
+                                delivery_id = %delivery.key().delivery_id(),
+                                cause_code = error.cause_code(),
+                                "repository-wide webhook refresh failure stopped the current drain page"
+                            );
+                            first_failure.get_or_insert(error);
+                            chronological_first.get_or_insert(error);
+                            break 'drain;
+                        }
                         // A delivery whose targeted refresh cannot succeed stays
                         // the oldest pending row, so failing the whole drain on
                         // it would starve every later receipt sequence forever.
@@ -3115,6 +3127,7 @@ enum RepositoryWatchAttemptError {
     Credential,
     Request,
     Rejected,
+    ProviderUnavailable,
     ResponseTooLarge,
     InvalidResponse,
     InvalidEntityTag,
@@ -3139,6 +3152,7 @@ impl RepositoryWatchAttemptError {
             Self::Credential => "credential_unavailable",
             Self::Request => "github_request_failed",
             Self::Rejected => "github_request_rejected",
+            Self::ProviderUnavailable => "github_provider_unavailable",
             Self::ResponseTooLarge => "github_response_too_large",
             Self::InvalidResponse => "github_response_invalid",
             Self::InvalidEntityTag => "github_entity_tag_invalid",
@@ -3187,6 +3201,7 @@ impl RepositoryWatchAttemptError {
             Self::Credential
             | Self::Request
             | Self::Rejected
+            | Self::ProviderUnavailable
             | Self::ResponseTooLarge
             | Self::InvalidResponse
             | Self::InvalidEntityTag
@@ -3201,6 +3216,33 @@ impl RepositoryWatchAttemptError {
             | Self::WebhookDrainTimedOut
             | Self::WebhookAttemptTimedOut => false,
         }
+    }
+
+    /// Whether a delivery failure proves that later provider queries in this
+    /// page cannot make independent progress.
+    ///
+    /// Persistence and target-specific provider failures retain page isolation:
+    /// a poisoned receipt must not starve a healthy peer. Credential, transport,
+    /// throttling, and provider-outage failures are repository-wide, so issuing
+    /// the same doomed hydration for every peer only amplifies the outage.
+    const fn stops_webhook_page(self) -> bool {
+        matches!(
+            self,
+            Self::Credential | Self::Request | Self::ProviderUnavailable
+        )
+    }
+}
+
+fn rejected_response_error(status: StatusCode) -> RepositoryWatchAttemptError {
+    if status == StatusCode::UNAUTHORIZED {
+        RepositoryWatchAttemptError::Credential
+    } else if status == StatusCode::FORBIDDEN
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+    {
+        RepositoryWatchAttemptError::ProviderUnavailable
+    } else {
+        RepositoryWatchAttemptError::Rejected
     }
 }
 
@@ -4446,7 +4488,7 @@ impl GitHubRepositoryPoller {
             return Ok(accepted);
         }
         if response.status() != StatusCode::OK {
-            return Err(RepositoryWatchAttemptError::Rejected);
+            return Err(rejected_response_error(response.status()));
         }
         // The cached pair stays in place while this body is read and parsed.
         // Two open pull requests sharing a head SHA fetch the same check-suite
@@ -6211,6 +6253,19 @@ mod tests {
             }
         }
 
+        fn forbidden(target: RequestTarget) -> Self {
+            Self {
+                method: "GET",
+                target: target.0,
+                validator: None,
+                status: "403 Forbidden",
+                entity_tag: None,
+                link: None,
+                body: String::from("{}"),
+                delay: Duration::ZERO,
+            }
+        }
+
         fn not_modified(target: RequestTarget) -> Self {
             Self {
                 method: "GET",
@@ -7877,6 +7932,34 @@ mod tests {
         );
         assert!(!webhook_disposition_exists(&webhook_store, unservable.key()).await?);
         assert!(webhook_disposition_exists(&webhook_store, behind_it.key()).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_provider_wide_rejection_stops_the_page_and_preserves_its_durable_tail()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let throttled = synchronize_admission(THIRD_WEBHOOK_DELIVERY)?;
+        let tail = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&throttled).await?;
+        webhook_store.admit(&tail).await?;
+        let server = ScriptedServer::start(vec![ScriptedResponse::forbidden(RequestTarget(
+            PULL_DETAIL_TARGET.to_owned(),
+        ))])
+        .await;
+        let mut fixture = webhook_task_against(&pool, server.base_url.clone()).await?;
+
+        let attempt = fixture.task.process_webhook_deliveries().await;
+
+        server.finish().await;
+        assert_eq!(
+            attempt,
+            WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::ProviderUnavailable)
+        );
+        assert!(!webhook_disposition_exists(&webhook_store, throttled.key()).await?);
+        assert!(!webhook_disposition_exists(&webhook_store, tail.key()).await?);
         Ok(())
     }
 
