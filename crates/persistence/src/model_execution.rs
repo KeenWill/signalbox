@@ -83,6 +83,25 @@ pub struct ProspectiveModelCall {
     tool_entries: Box<[ResolvedToolConversationEntry]>,
 }
 
+/// Latest completed-call usage usable as a conservative next-call lower bound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompletedModelCallUsage {
+    usage: ProviderReportedTokenUsage,
+    input_includes_cache_tokens: bool,
+}
+
+impl CompletedModelCallUsage {
+    /// Returns the exact provider-reported fields retained for the call.
+    pub const fn usage(self) -> ProviderReportedTokenUsage {
+        self.usage
+    }
+
+    /// Whether the stored input field already includes the cache axes.
+    pub const fn input_includes_cache_tokens(self) -> bool {
+        self.input_includes_cache_tokens
+    }
+}
+
 impl ProspectiveModelCall {
     /// Applies the canonical application frontier renderer with the supplied tool catalog.
     pub fn render(
@@ -503,6 +522,83 @@ impl PostgresModelCallRepository {
     /// Borrows the shared pool for composition-owned adjacent transactions.
     pub const fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Reads the newest completed call with reported input usage for one exact target.
+    ///
+    /// A later failed call with no usage does not erase the last provider-confirmed
+    /// context size. Callers may use this only as a lower bound: later transcript
+    /// entries can make the next request larger, never smaller absent compaction.
+    pub async fn latest_completed_usage(
+        &self,
+        session: SessionId,
+        target: ResolvedProviderTarget,
+    ) -> Result<Option<CompletedModelCallUsage>, ModelCallRepositoryError> {
+        let row = sqlx::query(
+            "SELECT usage_input_includes_cache_tokens,
+                    usage_input_tokens, usage_output_tokens,
+                    usage_cache_creation_input_tokens,
+                    usage_cache_read_input_tokens
+               FROM model_call
+              WHERE session_id = $1
+                AND resolved_provider_model_identity_id = $2
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'completed'
+                AND usage_input_tokens IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM context_compaction AS latest
+                     WHERE latest.session_id = model_call.session_id
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM context_compaction AS successor
+                            WHERE successor.session_id = latest.session_id
+                              AND successor.predecessor_compaction_id =
+                                  latest.context_compaction_id
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM context_frontier_member AS member
+                            WHERE member.owning_session_id = model_call.session_id
+                              AND member.context_frontier_id =
+                                  model_call.context_frontier_id
+                              AND member.source_session_id = latest.session_id
+                              AND member.semantic_entry_id = latest.summary_entry_id
+                       )
+                )
+              ORDER BY model_call_id DESC
+              LIMIT 1",
+        )
+        .bind(session_id_to_uuid(session))
+        .bind(target.identity().into_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let decode = |field: &'static str| -> Result<Option<u64>, ModelCallRepositoryError> {
+            row.try_get::<Option<Decimal>, _>(field)?
+                .map(|value| {
+                    if !value.fract().is_zero() || value.is_sign_negative() {
+                        return Err(ModelCallCorruption::Inconsistent(
+                            "completed model-call token usage",
+                        )
+                        .into());
+                    }
+                    u64::try_from(value).map_err(|_| {
+                        ModelCallCorruption::Inconsistent("completed model-call token usage").into()
+                    })
+                })
+                .transpose()
+        };
+        Ok(Some(CompletedModelCallUsage {
+            usage: ProviderReportedTokenUsage::unreported()
+                .with_input_tokens(decode("usage_input_tokens")?)
+                .with_output_tokens(decode("usage_output_tokens")?)
+                .with_cache_creation_input_tokens(decode("usage_cache_creation_input_tokens")?)
+                .with_cache_read_input_tokens(decode("usage_cache_read_input_tokens")?),
+            input_includes_cache_tokens: row.try_get("usage_input_includes_cache_tokens")?,
+        }))
     }
 
     /// Resolves the credential currently pinned for one session and exact

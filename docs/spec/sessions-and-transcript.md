@@ -26,9 +26,11 @@ become verified only with its implementing child pull requests. The append-only
 context-compaction record and projection were verified through PR #312
 (`agent/context-compaction-core`); the command path and canonical visible-range
 selection were verified through PR #314 (`agent/context-compaction-protocol`).
-The runner placement-entry paragraphs are the foundation proposal at the bottom
-of their implementing stack and become verified only with those child pull
-requests. The imported-conversation record and converter are owned by
+The bounded automatic range and durable reported-usage trigger are verified
+against this PR (`agent/daemon-live-reported-usage-compaction`). The runner
+placement-entry paragraphs are the foundation proposal at the bottom of their
+implementing stack and become verified only with those child pull requests. The
+imported-conversation record and converter are owned by
 [conversation-import](conversation-import.md). Where a law is cited as
 `INV-NNN`, the generated [invariant test index](../invariants.md) resolves it;
 where mechanics owned by another contract are summarized, the owning sibling
@@ -768,10 +770,12 @@ order. This rule deliberately separates the frontier a call durably records from
 the ordered subset the selected model sees.
 
 Explicit compaction chooses an optional through position, defaulting to the
-latest safe boundary. The daemon also compacts before an ordinary model send
-when that call's rendered input plus its full configured output-token
-reservation would exceed the current selection's declared context window. Both
-paths use the required deployment-configured compaction prompt and the session's
+latest safe boundary. The daemon also compacts before activating queued work
+when the latest completed call's durable provider-reported usage proves that the
+next configured output-token reservation cannot fit in the current selection's
+declared context window. Automatic compaction selects a bounded safe prefix so
+its own summary request does not repeat the complete oversized input. Both paths
+use the required deployment-configured compaction prompt and the session's
 current direct selection. Trigger and configuration mechanics are owned by
 [model-call-execution](model-call-execution.md).
 

@@ -160,6 +160,34 @@ fn configured_usage_limit_excess(
         .then_some(ConfiguredUsageLimitExcess::Context)
 }
 
+/// Whether one completed call proves the next un-compacted call cannot retain
+/// the configured output reservation.
+///
+/// The completed output becomes part of the next input. Tool results, steering,
+/// and the next origin can only increase that input, so this is deliberately a
+/// lower-bound trigger rather than an estimate of the prospective request.
+pub(crate) fn completed_usage_requires_compaction(
+    usage: ProviderReportedTokenUsage,
+    input_includes_cache_tokens: bool,
+    max_output_tokens: u64,
+    context_window_tokens: u64,
+) -> bool {
+    let Some(input_tokens) = usage.input_tokens() else {
+        return false;
+    };
+    let input_tokens = if input_includes_cache_tokens {
+        input_tokens
+    } else {
+        input_tokens
+            .saturating_add(usage.cache_creation_input_tokens().unwrap_or(0))
+            .saturating_add(usage.cache_read_input_tokens().unwrap_or(0))
+    };
+    input_tokens
+        .saturating_add(usage.output_tokens().unwrap_or(0))
+        .saturating_add(max_output_tokens)
+        > context_window_tokens
+}
+
 /// Classifies dedicated-compaction usage against immutable model limits.
 pub fn context_compaction_usage_exceeds_configured_limits(
     configuration: &HubModelConfiguration,
@@ -299,7 +327,8 @@ mod tests {
 
     use super::{
         ConfiguredUsageLimitExcess, ConfiguredUsageLimits, UsageLimitedProviderError,
-        configured_usage_limit_excess, configured_usage_limits,
+        completed_usage_requires_compaction, configured_usage_limit_excess,
+        configured_usage_limits,
     };
 
     #[derive(Debug)]
@@ -442,6 +471,33 @@ mod tests {
         };
 
         assert_eq!(configured_usage_limit_excess(usage, limits), None);
+    }
+
+    #[test]
+    fn completed_usage_triggers_compaction_before_the_next_output_reservation() {
+        let usage = ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(80))
+            .with_output_tokens(Some(5));
+
+        assert!(completed_usage_requires_compaction(usage, true, 16, 100));
+    }
+
+    #[test]
+    fn completed_usage_trigger_uses_the_stored_cache_semantics() {
+        let usage = ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(60))
+            .with_output_tokens(Some(5))
+            .with_cache_read_input_tokens(Some(20));
+
+        assert!(!completed_usage_requires_compaction(usage, true, 15, 100));
+        assert!(completed_usage_requires_compaction(usage, false, 16, 100));
+    }
+
+    #[test]
+    fn completed_usage_trigger_does_not_invent_a_missing_input_count() {
+        let usage = ProviderReportedTokenUsage::unreported().with_output_tokens(Some(100));
+
+        assert!(!completed_usage_requires_compaction(usage, true, 100, 100));
     }
 
     #[test]
