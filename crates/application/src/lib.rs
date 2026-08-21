@@ -151,9 +151,9 @@ pub use session_metadata::{
 pub use session_timeline::{
     ReadSessionTimelineService, SessionTimelineBounds, SessionTimelineDescriptor,
     SessionTimelineEventKind, SessionTimelineItem, SessionTimelineReader, SessionTimelineSizeFacts,
-    SessionTimelineWindow, SessionWorkFacts, TimelineAddress, TimelineWindowAnchor,
-    TimelineWindowLimitError, TimelineWindowLimits, max_timeline_window_bytes,
-    max_timeline_window_items, min_timeline_window_bytes,
+    SessionTimelineWindow, SessionWorkFacts, TimelineAddress, TimelineContinuation,
+    TimelineWindowAnchor, TimelineWindowLimitError, TimelineWindowLimits,
+    max_timeline_window_bytes, max_timeline_window_items, min_timeline_window_bytes,
 };
 pub use start_eligible_turn::{
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,

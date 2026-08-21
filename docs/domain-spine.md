@@ -6446,12 +6446,16 @@ pub struct SessionTimelineDescriptor {
     pub work: SessionWorkFacts,
     pub observed_through: u64,
 }
+pub enum TimelineContinuation {
+    Exhausted,
+    MoreAt(TimelineAddress),
+}
 pub struct SessionTimelineWindow {
     pub session: SessionId,
     pub items: Vec<SessionTimelineItem>,
     pub projected_structured_bytes: u32,
-    pub has_more_before: bool,
-    pub has_more_after: bool,
+    pub continuation_before: TimelineContinuation,
+    pub continuation_after: TimelineContinuation,
 }
 
 pub trait SessionTimelineReader {
@@ -11186,7 +11190,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
-| application: session_timeline                      | 13 (+3 free fn) (incl. 1 trait)  |
+| application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 35 (incl. 8 traits)              |
 | application: tool_loop                             | 26 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
@@ -11205,4 +11209,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
 | application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **308 (+9 free fn)**             |
+| **signalbox-application total**                    | **309 (+9 free fn)**             |
