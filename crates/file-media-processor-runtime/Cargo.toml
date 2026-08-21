@@ -37,5 +37,15 @@ tokio = { version = "1.53.0", default-features = false, features = [
     "time",
 ] }
 
-[lints]
-workspace = true
+[lints.rust]
+# The pre-exec hook must install resource limits before bubblewrap can fork.
+unsafe_code = "allow"
+
+[lints.clippy]
+disallowed_methods = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+unwrap_used = "deny"

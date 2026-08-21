@@ -366,7 +366,6 @@ impl TryFrom<WireFileUse> for FileUse {
 #[serde(rename_all = "snake_case")]
 enum WireAttachmentKind {
     Image,
-    Audio,
     Document,
     File,
 }
@@ -375,7 +374,6 @@ impl From<AttachmentKind> for WireAttachmentKind {
     fn from(value: AttachmentKind) -> Self {
         match value {
             AttachmentKind::Image => Self::Image,
-            AttachmentKind::Audio => Self::Audio,
             AttachmentKind::Document => Self::Document,
             AttachmentKind::File => Self::File,
         }
@@ -386,7 +384,6 @@ impl From<WireAttachmentKind> for AttachmentKind {
     fn from(value: WireAttachmentKind) -> Self {
         match value {
             WireAttachmentKind::Image => Self::Image,
-            WireAttachmentKind::Audio => Self::Audio,
             WireAttachmentKind::Document => Self::Document,
             WireAttachmentKind::File => Self::File,
         }

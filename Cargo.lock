@@ -3792,7 +3792,7 @@ name = "signalbox-file-media-processor-runtime"
 version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
- "rustix",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",

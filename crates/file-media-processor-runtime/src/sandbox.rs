@@ -12,14 +12,14 @@ use std::{
 
 use rustix::{
     fd::AsFd as _,
-    process::{Resource, Rlimit, geteuid},
+    process::{Resource, Rlimit, geteuid, getuid},
 };
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProcessCeilings, FileMediaProcessor, FileMediaProcessorFuture,
     FileMediaProviderDeclaration, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    MAX_WORKER_TASKS, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReaderDeclaration, ReaderIdentity,
-    VerifiedBlobSource,
+    MAX_WORKER_TASKS, ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation,
+    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReaderDeclaration,
+    ReaderIdentity, VerifiedBlobSource,
 };
 use tokio::{
     io::AsyncReadExt as _,
@@ -89,7 +89,7 @@ impl SandboxedFileMediaProcessor {
         if !cfg!(target_os = "linux") || bindings.is_empty() {
             return Err(SandboxedFileMediaProcessorConstructionError::Unsupported);
         }
-        if !task_ceiling_is_enforceable(geteuid().as_raw()) {
+        if !task_ceiling_is_enforceable(getuid().as_raw(), geteuid().as_raw()) {
             return Err(SandboxedFileMediaProcessorConstructionError::TaskCeiling);
         }
         if !FileMediaProcessCeilings::version_one().admits(ceilings) {
@@ -149,7 +149,7 @@ impl SandboxedFileMediaProcessor {
     ) -> Result<(), ProcessorFailure> {
         let mut running = self.spawn(worker, true).await?;
         running.release_startup()?;
-        let mut stdout = running
+        let stdout = running
             .child
             .stdout
             .take()
@@ -168,7 +168,6 @@ impl SandboxedFileMediaProcessor {
                 .await
                 .map_err(|_| ProcessorFailure::Unavailable)?;
             let status = running
-                .child
                 .wait()
                 .await
                 .map_err(|_| ProcessorFailure::Unavailable)?;
@@ -206,7 +205,7 @@ impl SandboxedFileMediaProcessor {
         expected: ExpectedOutput,
         source: &dyn VerifiedBlobSource,
         cancellation: &dyn CancellationSignal,
-    ) -> Result<CompletedOutput, ProcessorFailure> {
+    ) -> Result<CompletedOutput, ProcessorBoundaryFailure> {
         if cancellation.is_cancelled()
             || invocation.source().digest() != source.digest()
             || invocation
@@ -219,7 +218,8 @@ impl SandboxedFileMediaProcessor {
                 ProcessorFailure::Cancelled
             } else {
                 ProcessorFailure::Protocol
-            });
+            }
+            .into());
         }
         let worker = match &invocation {
             Invocation::Probe { reader, .. }
@@ -251,7 +251,7 @@ impl SandboxedFileMediaProcessor {
         let mut stderr_task = tokio::spawn(read_and_discard_diagnostics(stderr, stderr_limit));
         let outcome = {
             let session = run_session(
-                &mut running.child,
+                &mut running,
                 stdin,
                 stdout,
                 invocation,
@@ -266,15 +266,17 @@ impl SandboxedFileMediaProcessor {
             loop {
                 tokio::select! {
                     biased;
-                    () = tokio::time::sleep_until(deadline) => break Err(ProcessorFailure::TimedOut),
+                    () = tokio::time::sleep_until(deadline) => {
+                        break Err(ProcessorFailure::TimedOut.into());
+                    }
                     _ = cancellation_poll.tick() => {
                         if cancellation.is_cancelled() {
-                            break Err(ProcessorFailure::Cancelled);
+                            break Err(ProcessorFailure::Cancelled.into());
                         }
                     }
                     result = &mut session => {
                         if Instant::now() >= deadline {
-                            break Err(ProcessorFailure::TimedOut);
+                            break Err(ProcessorFailure::TimedOut.into());
                         }
                         break result;
                     }
@@ -289,7 +291,7 @@ impl SandboxedFileMediaProcessor {
         match (outcome, diagnostics) {
             (Ok(output), Ok(())) => Ok(output),
             (Err(error), _) => Err(error),
-            (Ok(_), Err(())) => Err(ProcessorFailure::Protocol),
+            (Ok(_), Err(())) => Err(ProcessorFailure::Protocol.into()),
         }
     }
 
@@ -318,6 +320,8 @@ impl SandboxedFileMediaProcessor {
         let ceilings = self.ceilings;
         command.as_std_mut().process_group(0);
         unsafe {
+            // SAFETY: the closure performs only async-signal-safe setrlimit calls
+            // before exec, and captures the copy-only ceiling value.
             command
                 .as_std_mut()
                 .pre_exec(move || apply_process_limits(ceilings).map_err(std::io::Error::from));
@@ -332,16 +336,17 @@ impl SandboxedFileMediaProcessor {
             process_group: pid,
             startup: Some(block_write),
             _seccomp: seccomp,
+            armed: true,
         })
     }
 }
 
 fn admit_completed(
-    outcome: Result<CompletedOutput, ProcessorFailure>,
+    outcome: Result<CompletedOutput, ProcessorBoundaryFailure>,
     cancellation: &dyn CancellationSignal,
-) -> Result<CompletedOutput, ProcessorFailure> {
+) -> Result<CompletedOutput, ProcessorBoundaryFailure> {
     if cancellation.is_cancelled() {
-        Err(ProcessorFailure::Cancelled)
+        Err(ProcessorFailure::Cancelled.into())
     } else {
         outcome
     }
@@ -367,7 +372,7 @@ impl FileMediaProcessor for SandboxedFileMediaProcessor {
             {
                 CompletedOutput::Probe(output) => Ok(output),
                 CompletedOutput::Validation(_) | CompletedOutput::Read(_) => {
-                    Err(ProcessorFailure::Protocol)
+                    Err(ProcessorFailure::Protocol.into())
                 }
             }
         })
@@ -395,7 +400,7 @@ impl FileMediaProcessor for SandboxedFileMediaProcessor {
             {
                 CompletedOutput::Validation(output) => Ok(output),
                 CompletedOutput::Probe(_) | CompletedOutput::Read(_) => {
-                    Err(ProcessorFailure::Protocol)
+                    Err(ProcessorFailure::Protocol.into())
                 }
             }
         })
@@ -428,7 +433,7 @@ impl FileMediaProcessor for SandboxedFileMediaProcessor {
             {
                 CompletedOutput::Read(output) => Ok(output),
                 CompletedOutput::Probe(_) | CompletedOutput::Validation(_) => {
-                    Err(ProcessorFailure::Protocol)
+                    Err(ProcessorFailure::Protocol.into())
                 }
             }
         })
@@ -447,14 +452,14 @@ fn require_file_use_source(
 }
 
 async fn run_session(
-    child: &mut Child,
+    running: &mut RunningWorker,
     mut stdin: ChildStdin,
     mut stdout: ChildStdout,
     invocation: Invocation,
     expected: ExpectedOutput,
     source: &dyn VerifiedBlobSource,
     frame_bytes: usize,
-) -> Result<CompletedOutput, ProcessorFailure> {
+) -> Result<CompletedOutput, ProcessorBoundaryFailure> {
     let envelope = invocation.envelope();
     let source_length = invocation
         .source()
@@ -485,14 +490,11 @@ async fn run_session(
                 let length = broker
                     .admit(offset, length)
                     .map_err(|_| ProcessorFailure::Protocol)?;
-                let bytes = source
-                    .read_range(offset, length)
-                    .await
-                    .map_err(|_| ProcessorFailure::Failed)?;
+                let bytes = source.read_range(offset, length).await?;
                 if bytes.len()
                     != usize::try_from(length.get()).map_err(|_| ProcessorFailure::Protocol)?
                 {
-                    return Err(ProcessorFailure::Protocol);
+                    return Err(ProcessorFailure::Protocol.into());
                 }
                 write_frame_with_limit(
                     &mut stdin,
@@ -515,7 +517,7 @@ async fn run_session(
             }
             WorkerFrame::ProbeResult { .. }
             | WorkerFrame::ValidationResult { .. }
-            | WorkerFrame::ReadResult { .. } => return Err(ProcessorFailure::Protocol),
+            | WorkerFrame::ReadResult { .. } => return Err(ProcessorFailure::Protocol.into()),
         }
     };
     drop(stdin);
@@ -526,13 +528,13 @@ async fn run_session(
         .map_err(|_| ProcessorFailure::Protocol)?
         != 0
     {
-        return Err(ProcessorFailure::Protocol);
+        return Err(ProcessorFailure::Protocol.into());
     }
-    let status = child.wait().await.map_err(|_| ProcessorFailure::Failed)?;
+    let status = running.wait().await.map_err(|_| ProcessorFailure::Failed)?;
     if status.success() {
         Ok(completed)
     } else {
-        Err(ProcessorFailure::Failed)
+        Err(ProcessorFailure::Failed.into())
     }
 }
 
@@ -554,6 +556,7 @@ struct RunningWorker {
     process_group: rustix::process::Pid,
     startup: Option<rustix::fd::OwnedFd>,
     _seccomp: fs::File,
+    armed: bool,
 }
 
 impl RunningWorker {
@@ -564,6 +567,19 @@ impl RunningWorker {
     }
 
     async fn terminate(&mut self) {
+        self.kill_tree();
+        if let Ok(Ok(_)) = tokio::time::timeout(CLEANUP_TIMEOUT, self.child.wait()).await {
+            self.armed = false;
+        }
+    }
+
+    async fn wait(&mut self) -> Result<std::process::ExitStatus, std::io::Error> {
+        let status = self.child.wait().await?;
+        self.armed = false;
+        Ok(status)
+    }
+
+    fn kill_tree(&mut self) {
         let descendants = process_descendants(self.process_group);
         for descendant in descendants.iter().rev() {
             let _ = rustix::process::kill_process(*descendant, rustix::process::Signal::KILL);
@@ -571,7 +587,14 @@ impl RunningWorker {
         let _ =
             rustix::process::kill_process_group(self.process_group, rustix::process::Signal::KILL);
         let _ = self.child.start_kill();
-        let _ = tokio::time::timeout(CLEANUP_TIMEOUT, self.child.wait()).await;
+    }
+}
+
+impl Drop for RunningWorker {
+    fn drop(&mut self) {
+        if self.armed {
+            self.kill_tree();
+        }
     }
 }
 
@@ -738,8 +761,8 @@ const fn worker_memory_budget(memory_bytes: u64) -> WorkerMemoryBudget {
     }
 }
 
-const fn task_ceiling_is_enforceable(effective_uid: u32) -> bool {
-    effective_uid != 0
+const fn task_ceiling_is_enforceable(real_uid: u32, effective_uid: u32) -> bool {
+    real_uid != 0 && effective_uid != 0
 }
 
 fn process_creation_filter() -> Result<fs::File, std::io::Error> {
@@ -942,7 +965,9 @@ impl Error for SandboxedFileMediaProcessorConstructionError {}
 mod tests {
     use std::{ffi::OsStr, path::Path};
 
-    use signalbox_file_media_runtime::{CancellationSignal, ProcessorFailure};
+    use signalbox_file_media_runtime::{
+        CancellationSignal, ProcessorBoundaryFailure, ProcessorFailure,
+    };
 
     use super::{
         CompletedOutput, admit_completed, sandbox_arguments, seccomp_instructions,
@@ -1016,7 +1041,12 @@ mod tests {
             )),
             &Cancelled,
         );
-        assert!(matches!(outcome, Err(ProcessorFailure::Cancelled)));
+        assert!(matches!(
+            outcome,
+            Err(ProcessorBoundaryFailure::Processor(
+                ProcessorFailure::Cancelled
+            ))
+        ));
     }
 
     #[test]
@@ -1033,8 +1063,9 @@ mod tests {
 
     #[test]
     fn root_identity_cannot_claim_an_enforced_task_ceiling() {
-        assert!(!task_ceiling_is_enforceable(0));
-        assert!(task_ceiling_is_enforceable(1_000));
+        assert!(!task_ceiling_is_enforceable(0, 1_000));
+        assert!(!task_ceiling_is_enforceable(1_000, 0));
+        assert!(task_ceiling_is_enforceable(1_000, 1_000));
     }
 
     #[test]
