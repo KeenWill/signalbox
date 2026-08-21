@@ -1126,32 +1126,14 @@ impl RepositoryWatchTask {
                                 repository = %self.repository.as_str(),
                                 "repository-watch webhook work preempted a full poll"
                             );
-                            // One wake may preempt a due poll. Its resumed
-                            // attempt is deliberately not interruptible, so a
-                            // sustained valid webhook stream cannot starve the
-                            // complete reconciliation sweep. Any later wake
-                            // remains coalesced for the next scheduling pass.
-                            let resumed_drain = webhook_retry.poll_drain();
-                            // The preempting webhook attempt has already updated
-                            // retry state. Only a drain performed by the resumed
-                            // poll may disposition that state below.
-                            drained = None;
-                            trailing_failure = None;
-                            let Some(result) = run_until_shutdown(
-                                &mut shutdown,
-                                self.run_attempt(
-                                    resumed_drain,
-                                    &mut drained,
-                                    &mut trailing_failure,
-                                ),
-                            )
-                            .await
-                            else {
-                                self.poller.drain_fetches().await;
-                                self.poller.invalidate_freshness();
-                                return;
-                            };
-                            result
+                            // Return the still-due poll to the scheduler rather
+                            // than resuming it in an uninterruptible mode. A
+                            // bounded drain page re-arms its wake while backlog
+                            // remains, so each fresh attempt drains another page
+                            // before entering an interruptible provider sweep.
+                            // Once the page observes no remainder it stops
+                            // re-arming and the complete poll proceeds.
+                            continue;
                         }
                     };
                     let metrics = self.poller.attempt_metrics();
@@ -1348,6 +1330,7 @@ impl RepositoryWatchTask {
     /// cutoff and dispatch work that ran after that drain through
     /// `trailing_failure`, which the drain's outcome likewise cannot carry:
     /// nothing is left pending to wake a later attempt for it.
+    #[cfg(test)]
     async fn run_attempt(
         &mut self,
         drain: WebhookDrain,
@@ -7651,6 +7634,36 @@ mod tests {
         .await;
 
         assert!(matches!(outcome, PollAttemptWait::Webhook));
+    }
+
+    #[tokio::test]
+    async fn each_fresh_poll_can_be_preempted_while_the_drain_rearms() {
+        let (webhook_sender, webhook_receiver) = watch::channel(());
+        let mut webhook_work = Some(webhook_receiver);
+        let (_shutdown_sender, mut shutdown) = watch::channel(false);
+        let webhook_retry = WebhookDrainRetry::default();
+        webhook_sender.send_replace(());
+
+        let first = await_poll_or_interrupt(
+            std::future::pending::<()>(),
+            &mut shutdown,
+            &webhook_retry,
+            &mut webhook_work,
+            WebhookPollInterrupt::Enabled,
+        )
+        .await;
+        webhook_sender.send_replace(());
+        let second = await_poll_or_interrupt(
+            std::future::pending::<()>(),
+            &mut shutdown,
+            &webhook_retry,
+            &mut webhook_work,
+            WebhookPollInterrupt::Enabled,
+        )
+        .await;
+
+        assert!(matches!(first, PollAttemptWait::Webhook));
+        assert!(matches!(second, PollAttemptWait::Webhook));
     }
 
     #[tokio::test]
