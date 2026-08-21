@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use signalbox_model_runtime::DEFAULT_MODEL_EXCHANGE_TIMEOUT;
+
 /// Configuration for [`crate::AnthropicRuntime`].
 ///
 /// Carries no credential: the operation pins a non-secret
@@ -43,7 +45,7 @@ impl AnthropicConfig {
             base_url: "https://api.anthropic.com".to_string(),
             anthropic_version: "2023-06-01".to_string(),
             connect_timeout: None,
-            exchange_timeout: Duration::from_secs(10 * 60),
+            exchange_timeout: DEFAULT_MODEL_EXCHANGE_TIMEOUT,
             sse_record_limit: 8 * 1024 * 1024,
         }
     }

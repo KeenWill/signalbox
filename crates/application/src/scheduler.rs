@@ -52,7 +52,7 @@ const BASELINE_NUDGE_BUFFER_CAPACITY: usize = 1_024;
 const SCHEDULER_PASS_ADMISSION_CAP: usize = 16;
 /// Longest wall-clock tenure of one admitted authoritative pass.
 // numeric-bound: ceiling - bounds one authoritative pass's scheduler occupancy
-const SCHEDULER_PASS_OCCUPANCY_BOUND: Duration = Duration::from_secs(15 * 60);
+const SCHEDULER_PASS_OCCUPANCY_BOUND: Duration = Duration::from_secs(60 * 60);
 
 /// Returns the shared product cap for concurrent authoritative passes.
 pub const fn scheduler_pass_admission_cap() -> usize {
@@ -64,7 +64,7 @@ pub const fn scheduler_pass_admission_cap() -> usize {
 pub struct SchedulerPassOccupancyBound(Duration);
 
 impl SchedulerPassOccupancyBound {
-    /// Returns the compiled fifteen-minute ceiling.
+    /// Returns the compiled sixty-minute ceiling.
     pub const fn hard_ceiling() -> Self {
         Self(SCHEDULER_PASS_OCCUPANCY_BOUND)
     }
@@ -2041,14 +2041,14 @@ mod tests {
         assert_eq!(lowered.get(), Duration::from_secs(60));
         assert_eq!(
             SchedulerPassOccupancyBound::hard_ceiling().get(),
-            Duration::from_secs(900)
+            Duration::from_secs(3_600)
         );
         assert_eq!(
             SchedulerPassOccupancyBound::try_lowered(Duration::ZERO),
             Err(super::InvalidSchedulerPassOccupancyBound)
         );
         assert_eq!(
-            SchedulerPassOccupancyBound::try_lowered(Duration::from_secs(901)),
+            SchedulerPassOccupancyBound::try_lowered(Duration::from_secs(3_601)),
             Err(super::InvalidSchedulerPassOccupancyBound)
         );
         assert_eq!(

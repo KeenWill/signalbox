@@ -40,6 +40,16 @@
 //! remains a Layer-1 interface: application and domain crates neither import
 //! these types nor delegate lifecycle policy to them.
 
+use std::time::Duration;
+
+/// Default whole-exchange tenure for one model call.
+///
+/// Provider adapters share this value so composition roots can derive their
+/// shutdown drain from the longest model call they construct rather than from
+/// an unrelated scheduler bound.
+// numeric-bound: tunable - controls the default whole-model-exchange wait
+pub const DEFAULT_MODEL_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 mod capability;
 #[cfg(feature = "cli-process")]
 mod cli_process;

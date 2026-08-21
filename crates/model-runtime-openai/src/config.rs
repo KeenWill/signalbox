@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use signalbox_model_runtime::DEFAULT_MODEL_EXCHANGE_TIMEOUT;
+
 /// Configuration for [`crate::OpenAiRuntime`].
 ///
 /// Carries no credential: the operation pins a non-secret
@@ -38,7 +40,7 @@ impl OpenAiConfig {
             model_capabilities: signalbox_model_runtime::ModelCapabilityCatalog::empty(),
             base_url: "https://api.openai.com".to_string(),
             connect_timeout: None,
-            exchange_timeout: Duration::from_secs(10 * 60),
+            exchange_timeout: DEFAULT_MODEL_EXCHANGE_TIMEOUT,
             sse_record_limit: 8 * 1024 * 1024,
         }
     }

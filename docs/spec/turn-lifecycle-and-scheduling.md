@@ -12,7 +12,9 @@ claiming and shutdown-preemptible watchdog batches are verified against this PR
 draining is verified against this PR
 (`agent/daemon-live-graceful-shutdown-drain`). Suspension of admitted-pass
 occupancy deadlines during that bounded drain is verified against this PR
-(`agent/daemon-live-shutdown-pass-drain`).
+(`agent/daemon-live-shutdown-pass-drain`). The sixty-minute occupancy ceiling
+and model-exchange-derived shutdown drain are verified against this PR
+(`agent/daemon-live-runtime-bounds`).
 
 The expired-pass recovery lock classification and retry budgets were re-verified
 against this PR (`agent/daemon-live-reconciliation-lock-cadence`). Exact
@@ -572,7 +574,9 @@ transaction reconstitutes and classifies the exact current durable shape; the
 watchdog invents no parallel terminal transition. This is the outer backstop for
 pass-expiry recovery whose bounded database attempts all failed and for a
 prior-process running turn that survives startup classification. The
-fifteen-minute scheduler-pass ceiling remains the tighter same-process bound.
+sixty-minute scheduler-pass ceiling is a final same-process safety bound; the
+liveness watchdog remains responsible for reclaiming a wedged pass from
+unchanged durable evidence before that ceiling.
 
 **Staleness.** No lifecycle table stores an activity timestamp, and this page
 introduces none: a stored clock would be one more thing to keep true. Staleness
@@ -1320,7 +1324,7 @@ closed, the dispatcher stops starting transactions, the scheduler stops
 admitting passes, and the turn-liveness pass stops scanning. Finite request
 handlers, the current dispatcher transaction, in-flight scheduler passes, and an
 in-flight turn-liveness inventory read or terminalization share a bounded grace
-window equal to the fifteen-minute scheduler-pass occupancy ceiling plus thirty
+window equal to the configured longest expected model exchange plus thirty
 seconds for component cleanup. Once shutdown is observed, an admitted scheduler
 pass stops spending its ordinary occupancy deadline and may use the shared grace
 window to finish; the occupancy handler cannot cancel it during that drain. A
