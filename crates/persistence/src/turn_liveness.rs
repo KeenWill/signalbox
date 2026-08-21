@@ -567,6 +567,7 @@ const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
         AND tenure.end_disposition IS NULL
         AND (
             tenure.state_kind = 'stop_requested'
+            OR active.origin_kind = 'delegation'
             OR EXISTS (
                 SELECT 1
                   FROM model_call AS live
@@ -896,8 +897,8 @@ async fn terminalize_in_transaction(
 mod tests {
     use super::{
         ClassifyOperatorFailure, FetchedPage, QUIESCENT_INVENTORY_PAGE_SIZE,
-        QuiescentActiveTurnPage, RECOVERABLE_ACTIVE_TURN, TERMINALIZATION_LOCK_WAIT,
-        TERMINALIZATION_WRITE_LOCK_WAIT, TurnLivenessRepositoryError,
+        QuiescentActiveTurnPage, RECOVERABLE_ACTIVE_TURN, SLOT_HELD_ACTIVE_TURNS,
+        TERMINALIZATION_LOCK_WAIT, TERMINALIZATION_WRITE_LOCK_WAIT, TurnLivenessRepositoryError,
     };
     use signalbox_application::{StaleTurnCandidate, TurnLivenessEvidence};
     use signalbox_domain::{SessionId, TurnAttemptId, TurnId};
@@ -909,6 +910,11 @@ mod tests {
         assert!(RECOVERABLE_ACTIVE_TURN.contains("'prepared', 'running', 'stop_requested'"));
         assert!(!RECOVERABLE_ACTIVE_TURN.contains("EXISTS ("));
         assert!(!RECOVERABLE_ACTIVE_TURN.contains("active_tool_round_call_id IS NULL"));
+    }
+
+    #[test]
+    fn outer_watchdog_admits_quiescent_delegated_running_turns() {
+        assert!(SLOT_HELD_ACTIVE_TURNS.contains("active.origin_kind = 'delegation'"));
     }
 
     fn candidate(session: u128) -> StaleTurnCandidate {

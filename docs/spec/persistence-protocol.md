@@ -905,11 +905,17 @@ Locks per transaction, in acquisition order:
   capacity-row or cursor-row lock; or take a capacity-row lock while holding a
   cursor-row lock.
 
-- **Automatic model-call reconciliation**: discovery and abandoned-attempt
-  normalization take no explicit lock. Claiming locks at most 64 due recovery
-  rows `FOR UPDATE SKIP LOCKED`, increments their durable attempt ordinal, sets
-  the exact backoff deadline, and inserts the attempt rows in the same
-  transaction. Applying a claim then takes the session's `session_scheduler` row
+- **Automatic model-call reconciliation**: `claim_due` first locks the singleton
+  discovery-cursor row `FOR UPDATE` and retains it through discovery,
+  normalization, supersession maintenance, and claiming. Discovery may insert
+  recovery rows after that cursor lock. Supersession maintenance later locks its
+  own singleton cursor row `FOR UPDATE`, then examines and updates at most 64
+  recovery rows from one materialized keyset page. Claiming finally locks at
+  most 64 due recovery rows `FOR UPDATE SKIP LOCKED`, increments their durable
+  attempt ordinal, sets the exact backoff deadline, and inserts the attempt rows
+  in the same transaction. No reconciliation path may acquire either cursor row
+  while holding a recovery-row lock in the reverse of this order. Applying a
+  claim then takes the session's `session_scheduler` row
   `FOR UPDATE`, reconstitutes the complete scheduling projection, and uses the
   existing reconciliation-required write transaction. Operator reconciliation
   takes the session row before this same scheduler row; it can therefore win

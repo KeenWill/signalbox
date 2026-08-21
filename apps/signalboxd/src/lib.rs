@@ -199,6 +199,16 @@ pub trait ActivatedTurnExecution {
         std::future::ready(Ok(()))
     }
 
+    /// Reconciles a durable active turn while reporting its identity before
+    /// resumed execution begins.
+    fn resume_active_with_observer(
+        &self,
+        session: SessionId,
+        _observe_turn: std::sync::Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.resume_active(session)
+    }
+
     /// Reports whether a failed active-turn resume may require startup
     /// recovery rather than ordinary scheduler retry.
     ///
@@ -345,6 +355,22 @@ where
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let execution = self.execution.resume_active(session);
+        supervise_active_resume::<Execution, _>(
+            self.fatal_signal.clone(),
+            std::sync::Arc::clone(&self.bounded_expirations),
+            session,
+            execution,
+        )
+    }
+
+    fn resume_active_with_observer(
+        &self,
+        session: SessionId,
+        observe_turn: std::sync::Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self
+            .execution
+            .resume_active_with_observer(session, observe_turn);
         supervise_active_resume::<Execution, _>(
             self.fatal_signal.clone(),
             std::sync::Arc::clone(&self.bounded_expirations),
@@ -740,6 +766,29 @@ impl SchedulerPassOccupancyRecovery {
             .get(&session)
             .copied()
     }
+
+    fn resume_turn_observer(
+        &self,
+        session: SessionId,
+    ) -> (
+        SchedulerPassActiveTurnGuard,
+        std::sync::Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) {
+        let active_turns = std::sync::Arc::clone(&self.active_turns);
+        let observer = std::sync::Arc::new(move |turn| {
+            active_turns
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(session, turn);
+        });
+        (
+            SchedulerPassActiveTurnGuard {
+                active_turns: std::sync::Arc::clone(&self.active_turns),
+                session,
+            },
+            observer,
+        )
+    }
 }
 
 /// Attempts spent on daemon-owned recovery for one expired scheduler pass.
@@ -847,13 +896,22 @@ where
         let execution = self.execution.clone();
         let occupancy_recovery = self.occupancy_recovery.clone();
         async move {
-            execution.resume_active(session).await.map_err(|source| {
-                ActivatedTurnPassError::Execution {
+            let resume_tracking = occupancy_recovery
+                .as_ref()
+                .map(|recovery| recovery.resume_turn_observer(session));
+            let observe_turn = resume_tracking
+                .as_ref()
+                .map(|(_, observer)| std::sync::Arc::clone(observer))
+                .unwrap_or_else(|| std::sync::Arc::new(|_| {}));
+            execution
+                .resume_active_with_observer(session, observe_turn)
+                .await
+                .map_err(|source| ActivatedTurnPassError::Execution {
                     stage: TurnPassExecutionStage::ActiveTurnRecovery,
                     turn: Execution::active_resume_failure_turn(&source),
                     source,
-                }
-            })?;
+                })?;
+            drop(resume_tracking);
             let outcome = match activation.await {
                 Ok(outcome) => outcome,
                 Err(error) => {
@@ -1986,6 +2044,14 @@ where
         &self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.resume_active_with_observer(session, std::sync::Arc::new(|_| {}))
+    }
+
+    fn resume_active_with_observer(
+        &self,
+        session: SessionId,
+        observe_turn: std::sync::Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let tool_repository = self.tool_repository.clone();
         let execution = self.clone();
         async move {
@@ -1994,16 +2060,19 @@ where
                 .await
                 .map_err(PostgresProviderToolLoopExecutionError::ResumeLookup)?;
             match turn {
-                Some(turn) => execution
-                    .execute_scope(session, turn)
-                    .instrument(turn_work_span(session, turn))
-                    .await
-                    .map_err(
-                        |source| PostgresProviderToolLoopExecutionError::ResumeExecution {
-                            turn,
-                            source: Box::new(source),
-                        },
-                    ),
+                Some(turn) => {
+                    observe_turn(turn);
+                    execution
+                        .execute_scope(session, turn)
+                        .instrument(turn_work_span(session, turn))
+                        .await
+                        .map_err(
+                            |source| PostgresProviderToolLoopExecutionError::ResumeExecution {
+                                turn,
+                                source: Box::new(source),
+                            },
+                        )
+                }
                 None => Ok(()),
             }
         }
