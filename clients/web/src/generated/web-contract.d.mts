@@ -48,12 +48,12 @@ type WebSearchResult = {
   readonly address: WebTimelineAddress;
   readonly content_class: WebSearchContentClass;
   readonly highlights: ReadonlyArray<WebSearchHighlight>;
-  readonly owner: WebSearchResultOwner;
   readonly session_id: string;
   readonly snippet: string;
+  readonly source: WebSearchResultSource;
 };
 
-type WebSearchResultOwner = {
+type WebSearchResultSource = {
   readonly kind: "session";
   readonly session_id: string;
 } | {

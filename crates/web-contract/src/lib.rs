@@ -218,10 +218,10 @@ pub enum WebSearchContentClass {
     DerivedTextArtifact,
 }
 
-/// Typed durable owner of one browser search result.
+/// Typed durable source of one browser search result.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WebSearchResultOwner {
+pub enum WebSearchResultSource {
     Session {
         session_id: String,
     },
@@ -274,7 +274,7 @@ pub struct WebSearchCursor {
 pub struct WebSearchResult {
     pub session_id: String,
     pub address: WebTimelineAddress,
-    pub owner: WebSearchResultOwner,
+    pub source: WebSearchResultSource,
     pub content_class: WebSearchContentClass,
     pub snippet: String,
     pub highlights: Vec<WebSearchHighlight>,

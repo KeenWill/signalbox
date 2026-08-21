@@ -4,7 +4,7 @@ use std::error::Error;
 
 use signalbox_application::{
     SearchArtifactId, SearchArtifactProjection, SearchArtifactProjectionClass, SearchContentClass,
-    SearchPageLimit, SearchProjectionText, SearchQuery, SearchResultOwner, SearchScope,
+    SearchPageLimit, SearchProjectionText, SearchQuery, SearchResultSource, SearchScope,
     SearchStrategy, SearchText, TimelineAddress, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::{
@@ -65,7 +65,7 @@ async fn insert_generated_projections(
     sqlx::query(
         "INSERT INTO web_search_projection
             (source_kind, source_id, session_id, event_sequence,
-             owner_kind, owner_id, turn_id, content_class, content_text)
+             item_kind, item_id, turn_id, content_class, content_text)
          SELECT 'derived_artifact', md5($1 || generated::text)::uuid,
                 $2, created.event_sequence,
                 'derived_artifact', md5($1 || generated::text)::uuid,
@@ -171,8 +171,8 @@ async fn lexical_hit_outside_the_loaded_tail_reveals_its_exact_around_window()
     assert_ne!(latest.items[0].address, result.address);
     assert_eq!(around.items[0].address, result.address);
     assert_eq!(
-        result.owner,
-        SearchResultOwner::AcceptedInput { input, turn }
+        result.source,
+        SearchResultSource::AcceptedInput { input, turn }
     );
     assert_eq!(result.content_class, SearchContentClass::UserTranscript);
     assert!(!result.highlights.is_empty());
@@ -224,8 +224,8 @@ async fn derived_text_is_searchable_only_after_its_durable_publisher_runs()
         SearchContentClass::DerivedTextArtifact
     );
     assert_eq!(
-        after.results[0].owner,
-        SearchResultOwner::DerivedArtifact { artifact }
+        after.results[0].source,
+        SearchResultSource::DerivedArtifact { artifact }
     );
 
     pool.close().await;

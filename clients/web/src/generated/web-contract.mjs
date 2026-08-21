@@ -289,28 +289,28 @@ const schemas = {
             },
             "type": "array"
           },
-          "owner": {
-            "$ref": "#/$defs/WebSearchResultOwner"
-          },
           "session_id": {
             "type": "string"
           },
           "snippet": {
             "type": "string"
+          },
+          "source": {
+            "$ref": "#/$defs/WebSearchResultSource"
           }
         },
         "required": [
           "session_id",
           "address",
-          "owner",
+          "source",
           "content_class",
           "snippet",
           "highlights"
         ],
         "type": "object"
       },
-      "WebSearchResultOwner": {
-        "description": "Typed durable owner of one browser search result.",
+      "WebSearchResultSource": {
+        "description": "Typed durable source of one browser search result.",
         "oneOf": [
           {
             "additionalProperties": false,

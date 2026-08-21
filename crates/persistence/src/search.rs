@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 use signalbox_application::{
     SearchArtifactId, SearchArtifactProjection, SearchArtifactProjectionClass, SearchContentClass,
     SearchCursor, SearchHighlight, SearchPage, SearchProjectionWriter, SearchQuery, SearchReader,
-    SearchResult, SearchResultOwner, SearchScope, SearchStrategy, TimelineAddress,
+    SearchResult, SearchResultSource, SearchScope, SearchStrategy, TimelineAddress,
     max_search_snippet_bytes,
 };
 use signalbox_domain::{
@@ -19,7 +19,7 @@ const HEADLINE_START: &str = "\u{e000}";
 const HEADLINE_END: &str = "\u{e001}";
 
 const SEARCH_SQL: &str = "
-SELECT projection_id, session_id, event_sequence, owner_kind, owner_id,
+SELECT projection_id, session_id, event_sequence, item_kind, item_id,
        turn_id, content_class,
        left(
            ts_headline(
@@ -45,14 +45,14 @@ SELECT projection_id, session_id, event_sequence, owner_kind, owner_id,
 const PUBLISH_ARTIFACT_SQL: &str = "
 INSERT INTO web_search_projection (
     source_kind, source_id, session_id, event_sequence,
-    owner_kind, owner_id, turn_id, content_class, content_text
+    item_kind, item_id, turn_id, content_class, content_text
 ) VALUES ($1, $2, $3, $4, $1, $2, NULL, $5, $6)
 ON CONFLICT (source_kind, source_id, content_class) DO UPDATE
        SET content_text = web_search_projection.content_text
      WHERE web_search_projection.session_id = EXCLUDED.session_id
        AND web_search_projection.event_sequence = EXCLUDED.event_sequence
-       AND web_search_projection.owner_kind = EXCLUDED.owner_kind
-       AND web_search_projection.owner_id = EXCLUDED.owner_id
+       AND web_search_projection.item_kind = EXCLUDED.item_kind
+       AND web_search_projection.item_id = EXCLUDED.item_id
        AND web_search_projection.turn_id IS NOT DISTINCT FROM EXCLUDED.turn_id
        AND web_search_projection.content_text = EXCLUDED.content_text
 RETURNING projection_id";
@@ -69,8 +69,8 @@ pub enum SearchProjectionCorruption {
         /// Exact unsupported spelling.
         value: String,
     },
-    /// Stored owner fields contradicted the selected typed owner.
-    OwnerShape,
+    /// Stored source fields contradicted the selected typed source.
+    SourceShape,
 }
 
 impl fmt::Display for SearchProjectionCorruption {
@@ -80,7 +80,7 @@ impl fmt::Display for SearchProjectionCorruption {
             Self::Unsupported { field, value } => {
                 write!(formatter, "unsupported search projection {field}: {value}")
             }
-            Self::OwnerShape => formatter.write_str("search projection owner shape is invalid"),
+            Self::SourceShape => formatter.write_str("search projection source shape is invalid"),
         }
     }
 }
@@ -242,10 +242,10 @@ fn decode_row(row: PgRow) -> Result<(SearchCursor, SearchResult), SearchReposito
         .ok_or(SearchProjectionCorruption::Invalid("projection identity"))?;
     let address = required_address(row.try_get("event_sequence")?)?;
     let session = SessionId::from_uuid(row.try_get("session_id")?);
-    let owner_kind: String = row.try_get("owner_kind")?;
-    let owner_id: Uuid = row.try_get("owner_id")?;
+    let item_kind: String = row.try_get("item_kind")?;
+    let item_id: Uuid = row.try_get("item_id")?;
     let turn_id: Option<Uuid> = row.try_get("turn_id")?;
-    let owner = decode_owner(&owner_kind, owner_id, turn_id, session)?;
+    let source = decode_source(&item_kind, item_id, turn_id, session)?;
     let content_class = decode_content_class(row.try_get("content_class")?)?;
     let (snippet, highlights) = decode_headline(row.try_get("marked_snippet")?)?;
     Ok((
@@ -253,7 +253,7 @@ fn decode_row(row: PgRow) -> Result<(SearchCursor, SearchResult), SearchReposito
         SearchResult {
             session,
             address,
-            owner,
+            source,
             content_class,
             snippet,
             highlights,
@@ -261,48 +261,48 @@ fn decode_row(row: PgRow) -> Result<(SearchCursor, SearchResult), SearchReposito
     ))
 }
 
-fn decode_owner(
+fn decode_source(
     kind: &str,
-    owner: Uuid,
+    source: Uuid,
     turn: Option<Uuid>,
     session: SessionId,
-) -> Result<SearchResultOwner, SearchProjectionCorruption> {
+) -> Result<SearchResultSource, SearchProjectionCorruption> {
     match (kind, turn) {
-        ("session", None) if owner == session.into_uuid() => {
-            Ok(SearchResultOwner::Session(session))
+        ("session", None) if source == session.into_uuid() => {
+            Ok(SearchResultSource::Session(session))
         }
-        ("accepted_input", Some(turn)) => Ok(SearchResultOwner::AcceptedInput {
-            input: AcceptedInputId::from_uuid(owner),
+        ("accepted_input", Some(turn)) => Ok(SearchResultSource::AcceptedInput {
+            input: AcceptedInputId::from_uuid(source),
             turn: TurnId::from_uuid(turn),
         }),
-        ("transcript_entry", Some(turn)) => Ok(SearchResultOwner::TurnTranscriptEntry {
-            entry: SemanticTranscriptEntryId::from_uuid(owner),
+        ("transcript_entry", Some(turn)) => Ok(SearchResultSource::TurnTranscriptEntry {
+            entry: SemanticTranscriptEntryId::from_uuid(source),
             turn: TurnId::from_uuid(turn),
         }),
-        ("transcript_entry", None) => Ok(SearchResultOwner::SessionTranscriptEntry {
-            entry: SemanticTranscriptEntryId::from_uuid(owner),
+        ("transcript_entry", None) => Ok(SearchResultSource::SessionTranscriptEntry {
+            entry: SemanticTranscriptEntryId::from_uuid(source),
         }),
-        ("tool_request", Some(turn)) => Ok(SearchResultOwner::ToolRequest {
-            request: ToolRequestId::from_uuid(owner),
+        ("tool_request", Some(turn)) => Ok(SearchResultSource::ToolRequest {
+            request: ToolRequestId::from_uuid(source),
             turn: TurnId::from_uuid(turn),
         }),
-        ("tool_attempt", Some(turn)) => Ok(SearchResultOwner::ToolAttempt {
-            attempt: ToolAttemptId::from_uuid(owner),
+        ("tool_attempt", Some(turn)) => Ok(SearchResultSource::ToolAttempt {
+            attempt: ToolAttemptId::from_uuid(source),
             turn: TurnId::from_uuid(turn),
         }),
-        ("attachment", None) => Ok(SearchResultOwner::Attachment {
-            attachment: SearchArtifactId::from_uuid(owner),
+        ("attachment", None) => Ok(SearchResultSource::Attachment {
+            attachment: SearchArtifactId::from_uuid(source),
         }),
-        ("derived_artifact", None) => Ok(SearchResultOwner::DerivedArtifact {
-            artifact: SearchArtifactId::from_uuid(owner),
+        ("derived_artifact", None) => Ok(SearchResultSource::DerivedArtifact {
+            artifact: SearchArtifactId::from_uuid(source),
         }),
         (
             "session" | "accepted_input" | "tool_request" | "tool_attempt" | "attachment"
             | "derived_artifact",
             _,
-        ) => Err(SearchProjectionCorruption::OwnerShape),
+        ) => Err(SearchProjectionCorruption::SourceShape),
         _ => Err(SearchProjectionCorruption::Unsupported {
-            field: "owner kind",
+            field: "source kind",
             value: kind.to_owned(),
         }),
     }

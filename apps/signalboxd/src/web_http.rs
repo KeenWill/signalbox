@@ -28,8 +28,8 @@ use axum::{
 use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
-    SearchContentClass, SearchCursor, SearchPageLimit, SearchQuery, SearchResultOwner, SearchScope,
-    SearchStrategy, SearchText, SessionTimelineDescriptor, SessionTimelineEventKind,
+    SearchContentClass, SearchCursor, SearchPageLimit, SearchQuery, SearchResultSource,
+    SearchScope, SearchStrategy, SearchText, SessionTimelineDescriptor, SessionTimelineEventKind,
     SessionTimelineWindow, TimelineAddress, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::SessionId;
@@ -40,7 +40,7 @@ use signalbox_persistence::session_timeline::{
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
     WebContractBootstrap, WebContractExample, WebSearchContentClass, WebSearchCursor,
-    WebSearchHighlight, WebSearchPage, WebSearchResult, WebSearchResultOwner,
+    WebSearchHighlight, WebSearchPage, WebSearchResult, WebSearchResultSource,
     WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
     WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
 };
@@ -408,7 +408,7 @@ fn search_result_dto(result: signalbox_application::SearchResult) -> WebSearchRe
     WebSearchResult {
         session_id: result.session.into_uuid().to_string(),
         address: address_dto(result.address),
-        owner: search_owner_dto(result.owner),
+        source: search_source_dto(result.source),
         content_class: search_content_class_dto(result.content_class),
         snippet: result.snippet,
         highlights: result
@@ -422,40 +422,42 @@ fn search_result_dto(result: signalbox_application::SearchResult) -> WebSearchRe
     }
 }
 
-fn search_owner_dto(owner: SearchResultOwner) -> WebSearchResultOwner {
-    match owner {
-        SearchResultOwner::Session(session) => WebSearchResultOwner::Session {
+fn search_source_dto(source: SearchResultSource) -> WebSearchResultSource {
+    match source {
+        SearchResultSource::Session(session) => WebSearchResultSource::Session {
             session_id: session.into_uuid().to_string(),
         },
-        SearchResultOwner::AcceptedInput { input, turn } => WebSearchResultOwner::AcceptedInput {
+        SearchResultSource::AcceptedInput { input, turn } => WebSearchResultSource::AcceptedInput {
             accepted_input_id: input.into_uuid().to_string(),
             turn_id: turn.into_uuid().to_string(),
         },
-        SearchResultOwner::TurnTranscriptEntry { entry, turn } => {
-            WebSearchResultOwner::TurnTranscriptEntry {
+        SearchResultSource::TurnTranscriptEntry { entry, turn } => {
+            WebSearchResultSource::TurnTranscriptEntry {
                 semantic_entry_id: entry.into_uuid().to_string(),
                 turn_id: turn.into_uuid().to_string(),
             }
         }
-        SearchResultOwner::SessionTranscriptEntry { entry } => {
-            WebSearchResultOwner::SessionTranscriptEntry {
+        SearchResultSource::SessionTranscriptEntry { entry } => {
+            WebSearchResultSource::SessionTranscriptEntry {
                 semantic_entry_id: entry.into_uuid().to_string(),
             }
         }
-        SearchResultOwner::ToolRequest { request, turn } => WebSearchResultOwner::ToolRequest {
+        SearchResultSource::ToolRequest { request, turn } => WebSearchResultSource::ToolRequest {
             tool_request_id: request.into_uuid().to_string(),
             turn_id: turn.into_uuid().to_string(),
         },
-        SearchResultOwner::ToolAttempt { attempt, turn } => WebSearchResultOwner::ToolAttempt {
+        SearchResultSource::ToolAttempt { attempt, turn } => WebSearchResultSource::ToolAttempt {
             tool_attempt_id: attempt.into_uuid().to_string(),
             turn_id: turn.into_uuid().to_string(),
         },
-        SearchResultOwner::Attachment { attachment } => WebSearchResultOwner::Attachment {
+        SearchResultSource::Attachment { attachment } => WebSearchResultSource::Attachment {
             attachment_id: attachment.into_uuid().to_string(),
         },
-        SearchResultOwner::DerivedArtifact { artifact } => WebSearchResultOwner::DerivedArtifact {
-            artifact_id: artifact.into_uuid().to_string(),
-        },
+        SearchResultSource::DerivedArtifact { artifact } => {
+            WebSearchResultSource::DerivedArtifact {
+                artifact_id: artifact.into_uuid().to_string(),
+            }
+        }
     }
 }
 

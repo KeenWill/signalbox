@@ -6449,7 +6449,7 @@ pub struct SearchArtifactProjection {
     pub text: SearchProjectionText,
 }
 
-pub enum SearchResultOwner {
+pub enum SearchResultSource {
     Session(SessionId),
     AcceptedInput { input: AcceptedInputId, turn: TurnId },
     TurnTranscriptEntry { entry: SemanticTranscriptEntryId, turn: TurnId },
@@ -6464,7 +6464,7 @@ pub struct SearchHighlight { pub start_byte: u16, pub end_byte: u16 }
 pub struct SearchResult {
     pub session: SessionId,
     pub address: TimelineAddress,
-    pub owner: SearchResultOwner,
+    pub source: SearchResultSource,
     pub content_class: SearchContentClass,
     pub snippet: String,
     pub highlights: Vec<SearchHighlight>,

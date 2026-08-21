@@ -707,18 +707,18 @@ text, final assistant transcript text, model-visible tool arguments and results,
 current session title/tags/searchable attributes, explicitly published
 attachment filenames and media metadata, and durable derived text. Context
 summaries are the implemented transcript-owned derived-text producer. Attachment
-and other derivation owners publish only text their durable contract explicitly
-supplies, through the typed projection-writer port and after their own source
-exists. The projection performs no implicit attachment reading, OCR, text
-extraction, or model pass.
+and other derivation producers publish only text their durable contract
+explicitly supplies, through the typed projection-writer port and after their
+own source exists. The projection performs no implicit attachment reading, OCR,
+text extraction, or model pass.
 
 Every result carries its session, stable timeline address, typed owning
 session/input/turn transcript entry/tool request/tool attempt/attachment/derived
 artifact identity, closed content class, and a plain-text snippet with UTF-8
 byte highlight ranges. The address is directly usable with the timeline `around`
-read even when the matching region is not loaded. An unknown stored owner or
-content class, malformed identity, invalid address, or contradictory owner shape
-fails closed.
+read even when the matching region is not loaded. An unknown stored source or
+content class, malformed identity, invalid address, or contradictory source
+shape fails closed.
 
 Requests accept 1 through 100 results and at most 512 UTF-8 query bytes. Each
 returned snippet is at most 512 UTF-8 bytes. Results have a stable strict

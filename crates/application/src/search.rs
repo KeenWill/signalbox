@@ -306,7 +306,7 @@ pub trait SearchProjectionWriter {
 
 /// Typed durable item that owns one matched projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SearchResultOwner {
+pub enum SearchResultSource {
     /// Session-level metadata, anchored to the session timeline.
     Session(SessionId),
     /// Canonical user input and its origin turn.
@@ -370,8 +370,8 @@ pub struct SearchResult {
     pub session: SessionId,
     /// Stable address used by an `around` timeline read.
     pub address: super::TimelineAddress,
-    /// Typed durable owner rather than a storage record discriminator.
-    pub owner: SearchResultOwner,
+    /// Typed durable source rather than a storage record discriminator.
+    pub source: SearchResultSource,
     /// Projection whose text matched.
     pub content_class: SearchContentClass,
     /// Bounded plain-text context.

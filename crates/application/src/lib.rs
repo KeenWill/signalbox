@@ -145,7 +145,7 @@ pub use search::{
     SearchArtifactId, SearchArtifactProjection, SearchArtifactProjectionClass, SearchContentClass,
     SearchCursor, SearchHighlight, SearchPage, SearchPageLimit, SearchPageLimitError,
     SearchProjectionText, SearchProjectionTextError, SearchProjectionWriter, SearchQuery,
-    SearchReader, SearchResult, SearchResultOwner, SearchScope, SearchService, SearchStrategy,
+    SearchReader, SearchResult, SearchResultSource, SearchScope, SearchService, SearchStrategy,
     SearchText, SearchTextError, max_search_page_items, max_search_projection_text_bytes,
     max_search_query_bytes, max_search_snippet_bytes,
 };

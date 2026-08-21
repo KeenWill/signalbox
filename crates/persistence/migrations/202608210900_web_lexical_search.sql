@@ -4,12 +4,12 @@
 -- table's PostgreSQL representation is never part of the browser contract.
 CREATE TABLE web_search_projection (
     projection_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    source_kind text COLLATE "C" NOT NULL,
-    source_id uuid NOT NULL,
+    item_kind text COLLATE "C" NOT NULL,
+    item_id uuid NOT NULL,
     session_id uuid NOT NULL,
     event_sequence numeric(20, 0) NOT NULL,
-    owner_kind text COLLATE "C" NOT NULL,
-    owner_id uuid NOT NULL,
+    source_kind text COLLATE "C" NOT NULL,
+    source_id uuid NOT NULL,
     turn_id uuid,
     content_class text COLLATE "C" NOT NULL,
     content_text text NOT NULL,
@@ -24,22 +24,22 @@ CREATE TABLE web_search_projection (
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     CONSTRAINT web_search_projection_event_positive
         CHECK (event_sequence BETWEEN 1 AND 18446744073709551615),
+    CONSTRAINT web_search_projection_item_closed
+        CHECK (item_kind IN (
+            'session', 'accepted_input', 'transcript_entry',
+            'tool_request', 'tool_attempt', 'attachment', 'derived_artifact'
+        )),
     CONSTRAINT web_search_projection_source_closed
         CHECK (source_kind IN (
             'accepted_input', 'semantic_entry', 'tool_request', 'tool_attempt',
             'session_metadata', 'attachment', 'derived_artifact'
         )),
-    CONSTRAINT web_search_projection_owner_closed
-        CHECK (owner_kind IN (
-            'session', 'accepted_input', 'transcript_entry',
-            'tool_request', 'tool_attempt', 'attachment', 'derived_artifact'
-        )),
-    CONSTRAINT web_search_projection_owner_shape
+    CONSTRAINT web_search_projection_item_shape
         CHECK (
-            (owner_kind = 'session' AND owner_id = session_id AND turn_id IS NULL)
-            OR (owner_kind IN ('accepted_input', 'tool_request', 'tool_attempt')
+            (item_kind = 'session' AND item_id = session_id AND turn_id IS NULL)
+            OR (item_kind IN ('accepted_input', 'tool_request', 'tool_attempt')
                 AND turn_id IS NOT NULL)
-            OR owner_kind IN ('transcript_entry', 'attachment', 'derived_artifact')
+            OR item_kind IN ('transcript_entry', 'attachment', 'derived_artifact')
         ),
     CONSTRAINT web_search_projection_content_class_closed
         CHECK (content_class IN (
@@ -66,7 +66,7 @@ SET search_path FROM CURRENT AS $$
 BEGIN
     INSERT INTO web_search_projection (
         source_kind, source_id, session_id, event_sequence,
-        owner_kind, owner_id, turn_id, content_class, content_text
+        item_kind, item_id, turn_id, content_class, content_text
     )
     SELECT 'accepted_input', input.accepted_input_id, input.session_id,
            NEW.event_sequence, 'accepted_input', input.accepted_input_id,
@@ -92,7 +92,7 @@ BEGIN
     END IF;
     INSERT INTO web_search_projection (
         source_kind, source_id, session_id, event_sequence,
-        owner_kind, owner_id, turn_id, content_class, content_text
+        item_kind, item_id, turn_id, content_class, content_text
     )
     SELECT 'semantic_entry', entry.semantic_entry_id, entry.source_session_id,
            NEW.event_sequence, 'transcript_entry', entry.semantic_entry_id,
@@ -117,7 +117,7 @@ BEGIN
     IF NEW.transition_kind = 'proposed' THEN
         INSERT INTO web_search_projection (
             source_kind, source_id, session_id, event_sequence,
-            owner_kind, owner_id, turn_id, content_class, content_text
+            item_kind, item_id, turn_id, content_class, content_text
         )
         SELECT 'tool_request', request.request_id, request.session_id,
                NEW.event_sequence, 'tool_request', request.request_id,
@@ -128,7 +128,7 @@ BEGIN
     ELSIF NEW.transition_kind = 'results_projected' THEN
         INSERT INTO web_search_projection (
             source_kind, source_id, session_id, event_sequence,
-            owner_kind, owner_id, turn_id, content_class, content_text
+            item_kind, item_id, turn_id, content_class, content_text
         )
         SELECT 'tool_attempt', attempt.attempt_id, attempt.session_id,
                NEW.event_sequence, 'tool_attempt', attempt.attempt_id,
@@ -155,7 +155,7 @@ SET search_path FROM CURRENT AS $$
 BEGIN
     INSERT INTO web_search_projection (
         source_kind, source_id, session_id, event_sequence,
-        owner_kind, owner_id, turn_id, content_class, content_text
+        item_kind, item_id, turn_id, content_class, content_text
     )
     SELECT 'semantic_entry', entry.semantic_entry_id, entry.source_session_id,
            NEW.event_sequence, 'transcript_entry', entry.semantic_entry_id,
@@ -206,7 +206,7 @@ BEGIN
     END IF;
     INSERT INTO web_search_projection (
         source_kind, source_id, session_id, event_sequence,
-        owner_kind, owner_id, turn_id, content_class, content_text
+        item_kind, item_id, turn_id, content_class, content_text
     ) VALUES (
         'session_metadata', NEW.session_id, NEW.session_id, anchor_sequence,
         'session', NEW.session_id, NULL, 'session_metadata', projected_text
@@ -227,7 +227,7 @@ FOR EACH ROW EXECUTE FUNCTION project_web_search_session_metadata();
 -- result's stable reveal address.
 INSERT INTO web_search_projection (
     source_kind, source_id, session_id, event_sequence,
-    owner_kind, owner_id, turn_id, content_class, content_text
+    item_kind, item_id, turn_id, content_class, content_text
 )
 SELECT 'accepted_input', input.accepted_input_id, input.session_id,
        event.event_sequence, 'accepted_input', input.accepted_input_id,
@@ -238,7 +238,7 @@ SELECT 'accepted_input', input.accepted_input_id, input.session_id,
 
 INSERT INTO web_search_projection (
     source_kind, source_id, session_id, event_sequence,
-    owner_kind, owner_id, turn_id, content_class, content_text
+    item_kind, item_id, turn_id, content_class, content_text
 )
 SELECT 'semantic_entry', entry.semantic_entry_id, entry.source_session_id,
        event.event_sequence, 'transcript_entry', entry.semantic_entry_id,
@@ -252,7 +252,7 @@ SELECT 'semantic_entry', entry.semantic_entry_id, entry.source_session_id,
 
 INSERT INTO web_search_projection (
     source_kind, source_id, session_id, event_sequence,
-    owner_kind, owner_id, turn_id, content_class, content_text
+    item_kind, item_id, turn_id, content_class, content_text
 )
 SELECT 'tool_request', request.request_id, request.session_id,
        event.event_sequence, 'tool_request', request.request_id,
@@ -264,7 +264,7 @@ SELECT 'tool_request', request.request_id, request.session_id,
 
 INSERT INTO web_search_projection (
     source_kind, source_id, session_id, event_sequence,
-    owner_kind, owner_id, turn_id, content_class, content_text
+    item_kind, item_id, turn_id, content_class, content_text
 )
 SELECT 'tool_attempt', attempt.attempt_id, attempt.session_id,
        event.event_sequence, 'tool_attempt', attempt.attempt_id,
@@ -278,7 +278,7 @@ SELECT 'tool_attempt', attempt.attempt_id, attempt.session_id,
 
 INSERT INTO web_search_projection (
     source_kind, source_id, session_id, event_sequence,
-    owner_kind, owner_id, turn_id, content_class, content_text
+    item_kind, item_id, turn_id, content_class, content_text
 )
 SELECT 'semantic_entry', entry.semantic_entry_id, entry.source_session_id,
        event.event_sequence, 'transcript_entry', entry.semantic_entry_id,
@@ -290,7 +290,7 @@ SELECT 'semantic_entry', entry.semantic_entry_id, entry.source_session_id,
 
 INSERT INTO web_search_projection (
     source_kind, source_id, session_id, event_sequence,
-    owner_kind, owner_id, turn_id, content_class, content_text
+    item_kind, item_id, turn_id, content_class, content_text
 )
 SELECT 'session_metadata', metadata.session_id, metadata.session_id,
        created.event_sequence, 'session', metadata.session_id,
