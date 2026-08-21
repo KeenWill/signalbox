@@ -3333,15 +3333,34 @@ async fn require_live_execution(
     requested_session: SessionId,
     targets: &ModelTargetCatalog,
 ) -> Result<ModelCallExecution, ModelCallRepositoryError> {
-    require_live_execution_with_targets(connection, requested_session, Some(targets), None, None)
-        .await
+    // Boxed because a debug `async fn` frame carries every future it awaits
+    // inline: this one-line wrapper otherwise puts the whole reconstitution
+    // state machine on the caller stack.
+    Box::pin(require_live_execution_with_targets(
+        connection,
+        requested_session,
+        Some(targets),
+        None,
+        None,
+    ))
+    .await
 }
 
 pub(crate) async fn require_live_execution_for_restart(
     connection: &mut PgConnection,
     requested_session: SessionId,
 ) -> Result<ModelCallExecution, ModelCallRepositoryError> {
-    require_live_execution_with_targets(connection, requested_session, None, None, None).await
+    // Boxed because a debug `async fn` frame carries every future it awaits
+    // inline: this one-line wrapper otherwise puts the whole reconstitution
+    // state machine on the caller stack.
+    Box::pin(require_live_execution_with_targets(
+        connection,
+        requested_session,
+        None,
+        None,
+        None,
+    ))
+    .await
 }
 
 pub(crate) async fn load_delegated_runner_recovery_for_interrupt(
@@ -3381,7 +3400,10 @@ pub(crate) async fn load_delegated_runner_recovery_for_interrupt(
             return Err(ModelCallCorruption::CurrentSession(error).into());
         }
     };
-    let scheduling = load_scheduling_projection(connection, session)
+    // Boxed for the same reason: the scheduling projection reconstitutes the
+    // whole accepted-input order, and awaiting it inline places that frame on
+    // top of this one.
+    let scheduling = Box::pin(load_scheduling_projection(connection, session))
         .await
         .map_err(map_scheduling_error)?;
     Ok(
@@ -3411,7 +3433,10 @@ async fn require_live_execution_with_targets(
             return Err(ModelCallCorruption::CurrentSession(error).into());
         }
     };
-    let scheduling = load_scheduling_projection(connection, session)
+    // Boxed for the same reason: the scheduling projection reconstitutes the
+    // whole accepted-input order, and awaiting it inline places that frame on
+    // top of this one.
+    let scheduling = Box::pin(load_scheduling_projection(connection, session))
         .await
         .map_err(map_scheduling_error)?;
     let delegated = load_delegated_live_turn(connection, requested_session, &scheduling).await?;
