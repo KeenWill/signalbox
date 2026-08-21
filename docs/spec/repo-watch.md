@@ -215,7 +215,14 @@ request. A pull request absent from the open listing is never reused. Cached
 resources survive the same bounded number of untouched attempts, so reuse does
 not discard the validators that keep the following full fetch conditional. The
 freshness record is process-local, like the conditional-request cache, so a
-restarted daemon re-fetches every pull request.
+restarted daemon re-fetches every pull request at its next complete poll. A
+restart that finds a durable cursor schedules that poll at the configured
+cadence instead of immediately, while startup still drains durable webhook work
+before scheduling it. A first-ever watch with no cursor polls immediately to
+establish its baseline. This keeps operational restarts from multiplying the
+provider request budget independently of the configured cadence. Warm-restart
+poll scheduling is verified against this PR
+(`agent/daemon-live-warm-start-poll-cadence`).
 
 **Implemented behavior.** Check-suite and check-run requests explicitly select
 all attempts and follow bounded result pages. The complete paginated suite
@@ -1047,8 +1054,9 @@ minimal snapshot sufficient to reconstruct that resource's normalized
 contribution and the identities needed for nested fetches after restart. It does
 not persist raw provider JSON, credentials, or reactions from actors outside the
 configured signal-reviewer set. These snapshots remain transport state: rules
-and durable events cannot inspect them. Until this upgrade is built, every
-daemon restart deliberately pays one bounded complete repository poll.
+and durable events cannot inspect them. Until this upgrade is built, the first
+complete poll after a daemon restart re-fetches every pull request; the warm
+restart schedule above keeps that cost on the configured poll cadence.
 
 ## Webhook transport and shadow reconciliation
 

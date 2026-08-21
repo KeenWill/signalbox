@@ -796,6 +796,22 @@ fn next_cadence_deadline(previous: Instant, interval: Duration, now: Instant) ->
     }
 }
 
+/// Schedules a first-ever repository baseline immediately and a warm restart
+/// at the ordinary cadence.
+///
+/// Startup has already drained durable webhook work before reaching this
+/// decision. A durable cursor therefore remains an authoritative baseline
+/// until the next scheduled completeness sweep; paying that same sweep on
+/// every daemon restart would let operational restarts multiply provider quota
+/// independently of the configured poll interval.
+fn initial_poll_deadline(now: Instant, interval: Duration, durable_cursor_exists: bool) -> Instant {
+    if durable_cursor_exists {
+        now + interval
+    } else {
+        now
+    }
+}
+
 fn repository_reconciliation_quantum_exhausted(processed: usize) -> bool {
     processed >= REPOSITORY_RECONCILIATION_QUANTUM
 }
@@ -1035,7 +1051,21 @@ impl RepositoryWatchTask {
                 return;
             }
         }
-        let mut next_poll = Instant::now();
+        let poll_schedule_started = Instant::now();
+        let durable_cursor_exists = match self.store.load_cursor(&self.repository).await {
+            Ok(cursor) => cursor.is_some(),
+            Err(error) => {
+                tracing::warn!(
+                    repository = %self.repository.as_str(),
+                    cause_code = "repository_watch_startup_cursor_unavailable",
+                    error = ?error,
+                    "repository-watch startup could not inspect its durable cursor; an immediate full poll remains scheduled"
+                );
+                false
+            }
+        };
+        let mut next_poll =
+            initial_poll_deadline(poll_schedule_started, self.interval, durable_cursor_exists);
         loop {
             if *shutdown.borrow() {
                 return;
@@ -5353,7 +5383,7 @@ mod tests {
         WebhookDrain, WebhookDrainOutcome, WebhookDrainRetry, WebhookPayloadPurgeSchedule,
         WebhookPollInterrupt, WorkflowName, WorkflowResponse, await_poll_or_interrupt,
         commit_check_run_search_is_complete, derive_repo_watch_events, dispatch_context_json,
-        inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
+        initial_poll_deadline, inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
         normalize_checks_outcome, normalize_pull_request_context, object_id,
         observe_webhook_work_before_drain, owed_dispatch_context_json_parts,
         repository_reconciliation_quantum_exhausted, rule_activation_error, run_until_shutdown,
@@ -8830,6 +8860,23 @@ mod tests {
         assert!(repository_reconciliation_quantum_exhausted(
             REPOSITORY_RECONCILIATION_QUANTUM
         ));
+    }
+
+    #[test]
+    fn a_first_repository_baseline_polls_immediately() {
+        let now = Instant::now();
+
+        assert_eq!(initial_poll_deadline(now, POLL_INTERVAL, false), now);
+    }
+
+    #[test]
+    fn a_warm_restart_waits_for_the_repository_poll_cadence() {
+        let now = Instant::now();
+
+        assert_eq!(
+            initial_poll_deadline(now, POLL_INTERVAL, true),
+            now + POLL_INTERVAL
+        );
     }
 
     #[tokio::test]
