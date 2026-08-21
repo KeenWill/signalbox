@@ -6665,6 +6665,9 @@ fn placement_row_has_invalid_pre_pin_loss_facts(
     Ok(row
         .decode_column::<Option<String>>("loss_source_kind")?
         .is_some()
+        || row
+            .decode_column::<Option<Decimal>>("loss_registration_revision")?
+            .is_some()
         || placement_row_has_pinned_facts(row)?)
 }
 

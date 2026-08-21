@@ -206,12 +206,15 @@ SELECT registration.enrollment_id,
        CASE
            WHEN current_registration.registration_revision =
                 registration.registration_revision
+               AND enrollment.state_kind = 'active'
            THEN 'pending'
            ELSE 'completed'
        END
   FROM runner_registration AS registration
   JOIN runner_current_registration AS current_registration
     ON current_registration.enrollment_id = registration.enrollment_id
+  JOIN runner_enrollment AS enrollment
+    ON enrollment.enrollment_id = registration.enrollment_id
  WHERE registration.registration_revision > 1;
 
 CREATE FUNCTION guard_runner_registration_reconciliation_observation()

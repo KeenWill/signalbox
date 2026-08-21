@@ -3998,6 +3998,157 @@ async fn s31_inv042_inv044_registration_reconciliation_migration_backfills_curre
     Ok(())
 }
 
+/// INV-042 / INV-044: a revoked enrollment cannot authenticate reconciliation,
+/// so migration completes its historical current-registration cursor instead
+/// of leaving startup an undrainable pending row.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv042_inv044_registration_reconciliation_migration_completes_revoked_enrollment()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_REGISTRATION_RECONCILIATION_MIGRATION, &pool)
+        .await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    store
+        .register(
+            &expected_enrollment,
+            RunnerAdvertisement::new(
+                [class()],
+                [tool("inspect")],
+                [],
+                [],
+                [RunnerSandboxProfile::Ambient],
+                [],
+            ),
+        )
+        .await?;
+    insert_pre_reconciliation_registration_revision(&pool, expected_enrollment.enrollment())
+        .await?;
+    revoke_pre_reconciliation_enrollment(&pool, expected_enrollment.enrollment()).await?;
+    migrate(&pool).await?;
+
+    let pending = store.load_pending_registration_reconciliations().await?;
+    let state: String = sqlx::query_scalar(
+        "SELECT state_kind
+           FROM runner_registration_reconciliation
+          WHERE enrollment_id = $1 AND registration_revision = 2",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(pending.is_empty());
+    assert_eq!(state, "completed");
+    drop(pool);
+    Ok(())
+}
+
+async fn insert_pre_reconciliation_registration_revision(
+    pool: &PgPool,
+    enrollment: RunnerEnrollmentId,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_registration
+            (enrollment_id, registration_revision, runner_id,
+             authentication_reference_id, class_count, tool_count,
+             profile_count, workspace_count, repository_count, sandbox_count)
+         SELECT enrollment_id, 2, runner_id, authentication_reference_id,
+                class_count, tool_count, profile_count, workspace_count,
+                repository_count, sandbox_count
+           FROM runner_registration
+          WHERE enrollment_id = $1 AND registration_revision = 1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_registration_class
+            (enrollment_id, registration_revision, capability_class)
+         SELECT enrollment_id, 2, capability_class
+           FROM runner_registration_class
+          WHERE enrollment_id = $1 AND registration_revision = 1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_registration_tool
+            (enrollment_id, registration_revision, tool_name,
+             model_description, model_input_schema, permission_kind,
+             effect_class, loci_kind, selector_kind, selector_runner_id,
+             selector_capability_class)
+         SELECT enrollment_id, 2, tool_name, model_description,
+                model_input_schema, permission_kind, effect_class, loci_kind,
+                selector_kind, selector_runner_id, selector_capability_class
+           FROM runner_registration_tool
+          WHERE enrollment_id = $1 AND registration_revision = 1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_registration_sandbox
+            (enrollment_id, registration_revision, sandbox_profile)
+         SELECT enrollment_id, 2, sandbox_profile
+           FROM runner_registration_sandbox
+          WHERE enrollment_id = $1 AND registration_revision = 1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_registration
+            SET registration_revision = 2
+          WHERE enrollment_id = $1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
+}
+
+async fn revoke_pre_reconciliation_enrollment(
+    pool: &PgPool,
+    enrollment: RunnerEnrollmentId,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_enrollment_audit
+            (enrollment_id, revision, runner_id, authentication_reference_id,
+             allowed_class_count, state_kind)
+         SELECT enrollment_id, 2, runner_id, authentication_reference_id,
+                allowed_class_count, 'revoked'
+           FROM runner_enrollment
+          WHERE enrollment_id = $1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_enrollment_audit_allowed_class
+            (enrollment_id, revision, capability_class)
+         SELECT enrollment_id, 2, capability_class
+           FROM runner_enrollment_allowed_class
+          WHERE enrollment_id = $1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_enrollment
+            SET revision = 2, state_kind = 'revoked'
+          WHERE enrollment_id = $1",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
+}
+
 /// INV-044: a pre-enrollment exact selection remains in the affected set when
 /// its runner enrolls and is lost before the cursor migration.
 #[tokio::test]
@@ -8715,6 +8866,46 @@ async fn s32_inv044_runner_lost_before_pin_round_trips_exact_identity() -> Resul
     assert_eq!(loaded.placement(), &lost);
     assert_eq!(loaded.registration(), None);
     assert_eq!(loaded.grant(), None);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-002 / INV-044: a pre-pin loss cannot carry registration causality,
+/// because no pinned registration snapshot exists at that boundary.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv002_inv044_pre_pin_loss_rejects_registration_cause() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let runner = RunnerId::from_uuid(uuid(RUNNER));
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(runner),
+    );
+    store.store_placement(&placement, None, None).await?;
+    append_runner_lost_before_pin_projection(&pool, placement.session()).await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE runner_session_placement_record
+            SET loss_registration_revision = 1
+          WHERE session_id = $1 AND event_kind = 'runner_lost_before_pin'",
+    )
+    .bind(placement.session().into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE runner_session_placement_record ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+
+    let corrupted = store
+        .load_placement(placement.session())
+        .await
+        .expect_err("pre-pin loss cannot retain a registration cause");
+
+    assert_store_corruption(corrupted, RunnerProtocolCorruption::InvalidEncoding);
     drop(pool);
     Ok(())
 }
