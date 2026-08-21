@@ -780,8 +780,16 @@ where
             .map_err(|_| DaemonToolsConstructionError::WorkspaceRead)?;
         let workspace_mutation = WorkspaceMutationTools::try_new(filesystem.clone(), root)
             .map_err(|_| DaemonToolsConstructionError::WorkspaceMutation)?;
-        let local_git = LocalGitTools::try_new(filesystem, root, git_identity)
-            .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
+        let local_git =
+            LocalGitTools::try_new(filesystem, root, git_identity).map_err(|error| {
+                tracing::error!(
+                    cause = %error,
+                    cause_detail = ?error,
+                    workspace_root = %root.display(),
+                    "local Git tool suite rejected the configured workspace"
+                );
+                DaemonToolsConstructionError::LocalGit
+            })?;
         let git_object_format = local_git.object_format();
         let pinned_directories = local_git.pinned_directories();
         let sandboxed_exec = match cargo_registry_cache {
