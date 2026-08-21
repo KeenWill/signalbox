@@ -107,8 +107,13 @@ const ROTATION_CEILING_CAUSE: &str = "turn_liveness_rotation_ceiling_reached";
 // numeric-bound: ceiling - bounds one scan's reads against a non-converging rotation
 const QUIESCENT_ROTATION_PAGE_CEILING: usize = 4_096;
 /// Wall-clock bound for one detached durable recovery transaction.
+///
+/// Recovery writes serialize through the shared outbox frontier after taking
+/// the session scheduler lock. Ten seconds leaves that ordinary serialization
+/// room to complete while keeping every inventory read, recovery attempt, and
+/// ambiguous commit bounded well below the watchdog's retry cadence.
 // numeric-bound: ceiling - prevents one database operation from wedging liveness supervision
-const RECOVERY_ATTEMPT_BOUND: Duration = Duration::from_secs(1);
+const RECOVERY_ATTEMPT_BOUND: Duration = Duration::from_secs(10);
 
 /// What one scan's terminalization phase actually did.
 ///
@@ -1463,6 +1468,12 @@ mod tests {
 
         assert_eq!(lowered.get(), shortened);
         assert_eq!(StaleActiveTurnBound::hard_ceiling().as_secs(), 1_800);
-        assert_eq!(RECOVERY_ATTEMPT_BOUND, Duration::from_secs(1));
+    }
+
+    /// Recovery must have time to pass the shared durable-write serialization
+    /// point, while a lost database operation still has a hard outer bound.
+    #[test]
+    fn recovery_attempts_have_a_ten_second_hard_ceiling() {
+        assert_eq!(RECOVERY_ATTEMPT_BOUND, Duration::from_secs(10));
     }
 }
