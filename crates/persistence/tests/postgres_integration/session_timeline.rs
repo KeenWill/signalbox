@@ -107,7 +107,7 @@ async fn descriptor_and_windows_share_one_stable_creation_address() -> Result<()
     assert!(!first.has_more_before);
     assert!(!latest.has_more_after);
     assert!(after_latest.items.is_empty());
-    assert!(after_latest.has_more_before);
+    assert!(!after_latest.has_more_before);
     assert!(!after_latest.has_more_after);
 
     sqlx::query("DROP TRIGGER outbox_sequence_state_cannot_be_deleted ON outbox_sequence_state")
@@ -124,6 +124,34 @@ async fn descriptor_and_windows_share_one_stable_creation_address() -> Result<()
         error,
         SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::Missing(
             "observation cursor"
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn missing_projection_facts_are_corruption_not_session_absence() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x992);
+    create_session(&pool, identity).await?;
+    sqlx::query("DELETE FROM session_timeline_fact WHERE session_id = $1")
+        .bind(identity.into_uuid())
+        .execute(&pool)
+        .await?;
+    let error = SessionTimelineRepository::new(pool.clone())
+        .read_descriptor(identity)
+        .await
+        .expect_err("missing projection facts are durable corruption");
+
+    assert!(matches!(
+        error,
+        SessionTimelineRepositoryError::Corruption(SessionTimelineCorruption::Missing(
+            "projection facts"
         ))
     ));
 

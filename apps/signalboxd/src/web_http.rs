@@ -102,13 +102,18 @@ impl WebHttpConfiguration {
         })
     }
 
-    /// Creates explicit configuration for a deterministic or embedded server.
-    #[must_use]
-    pub fn new(bind_address: SocketAddr, asset_root: Option<PathBuf>) -> Self {
-        Self {
+    /// Creates explicit loopback configuration for an embedded production server.
+    pub fn new(
+        bind_address: SocketAddr,
+        asset_root: Option<PathBuf>,
+    ) -> Result<Self, WebHttpConfigurationError> {
+        if !bind_address.ip().is_loopback() {
+            return Err(WebHttpConfigurationError::NonLoopbackBindAddress);
+        }
+        Ok(Self {
             bind_address,
             asset_root,
-        }
+        })
     }
 
     /// Address the listener binds.
@@ -356,6 +361,20 @@ async fn session_timeline_window(
         Ok(query) => query,
         Err(_) => return invalid_timeline_query(),
     };
+    let limits = (|| {
+        let max_items = query
+            .max_items
+            .as_deref()
+            .and_then(|value| value.parse::<u16>().ok())?;
+        let max_bytes = query
+            .max_bytes
+            .as_deref()
+            .and_then(|value| value.parse::<u32>().ok())?;
+        TimelineWindowLimits::new(max_items, max_bytes).ok()
+    })();
+    let Some(limits) = limits else {
+        return invalid_timeline_query();
+    };
     let Some(repository) = state.timeline else {
         return application_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -371,29 +390,8 @@ async fn session_timeline_window(
         Ok(anchor) => anchor,
         Err(error) => return error.into_response(),
     };
-    let advertised = WebContractBootstrap::current().limits;
-    let limits = (|| {
-        let max_items = query
-            .max_items
-            .as_deref()
-            .map(str::parse::<u16>)
-            .transpose()
-            .ok()?
-            .unwrap_or(u16::try_from(advertised.max_timeline_window_items).ok()?);
-        let max_bytes = query
-            .max_bytes
-            .as_deref()
-            .map(str::parse::<u32>)
-            .transpose()
-            .ok()?
-            .unwrap_or(advertised.max_timeline_window_bytes);
-        TimelineWindowLimits::new(max_items, max_bytes).ok()
-    })();
-    let Some(limits) = limits else {
-        return invalid_timeline_query();
-    };
     match repository.read_window(session, anchor, limits).await {
-        Ok(Some(window)) => Json(window_dto(window, anchor)).into_response(),
+        Ok(Some(window)) => Json(window_dto(window)).into_response(),
         Ok(None) => application_error(
             StatusCode::NOT_FOUND,
             "session_not_found",
@@ -494,37 +492,14 @@ fn descriptor_dto(
     })
 }
 
-fn window_dto(
-    window: SessionTimelineWindow,
-    anchor: TimelineWindowAnchor,
-) -> WebSessionTimelineWindow {
-    let anchor_address = match anchor {
-        TimelineWindowAnchor::Before(address) | TimelineWindowAnchor::After(address) => {
-            Some(address_dto(address))
-        }
-        TimelineWindowAnchor::First
-        | TimelineWindowAnchor::Latest
-        | TimelineWindowAnchor::Around(_) => None,
-    };
+fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
     let continuation_before = window
         .has_more_before
-        .then(|| {
-            window
-                .items
-                .first()
-                .map(|item| address_dto(item.address))
-                .or_else(|| anchor_address.clone())
-        })
+        .then(|| window.items.first().map(|item| address_dto(item.address)))
         .flatten();
     let continuation_after = window
         .has_more_after
-        .then(|| {
-            window
-                .items
-                .last()
-                .map(|item| address_dto(item.address))
-                .or(anchor_address)
-        })
+        .then(|| window.items.last().map(|item| address_dto(item.address)))
         .flatten();
     WebSessionTimelineWindow {
         session_id: window.session.into_uuid().to_string(),
@@ -951,6 +926,17 @@ mod tests {
     }
 
     #[test]
+    fn explicit_non_loopback_configuration_is_rejected() {
+        let bind_address = "0.0.0.0:8080"
+            .parse()
+            .expect("the fixture address is valid");
+        let error = WebHttpConfiguration::new(bind_address, None)
+            .expect_err("every production configuration remains loopback-only");
+
+        assert_eq!(error, WebHttpConfigurationError::NonLoopbackBindAddress);
+    }
+
+    #[test]
     fn malformed_bind_address_fails_closed_without_echoing_the_value() {
         let error =
             WebHttpConfiguration::from_values(Some(OsString::from("not a socket address")), None)
@@ -1223,14 +1209,33 @@ mod tests {
         assert_eq!(body["error"]["code"], "invalid_timeline_limits");
     }
 
+    #[tokio::test]
+    async fn missing_timeline_ceiling_uses_the_structured_error_envelope() {
+        let request = Request::get(
+            "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?anchor=first&max_items=1",
+        )
+        .body(Body::empty())
+        .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_timeline_limits");
+    }
+
     #[test]
     fn timeline_addresses_require_canonical_positive_decimal() {
-        for address in ["+5", "05", "0", "-5", " 5", "5 "] {
-            assert!(
-                super::parse_window_anchor("after", Some(address)).is_err(),
-                "{address:?} must not be accepted as a canonical address"
-            );
-        }
+        assert!(super::parse_window_anchor("after", Some("+5")).is_err());
+        assert!(super::parse_window_anchor("after", Some("05")).is_err());
+        assert!(super::parse_window_anchor("after", Some("0")).is_err());
+        assert!(super::parse_window_anchor("after", Some("-5")).is_err());
+        assert!(super::parse_window_anchor("after", Some(" 5")).is_err());
+        assert!(super::parse_window_anchor("after", Some("5 ")).is_err());
         assert!(super::parse_window_anchor("after", Some("5")).is_ok());
     }
 

@@ -186,20 +186,12 @@ impl SessionTimelineRepository {
         items.sort_by_key(|item| item.address);
         let first = items.first().map(|item| item.address);
         let latest = items.last().map(|item| item.address);
-        let has_more_before = first.map_or_else(
-            || match (anchor, descriptor.bounds.first) {
-                (TimelineWindowAnchor::After(address), Some(bound)) => address >= bound,
-                _ => false,
-            },
-            |loaded| descriptor.bounds.first.is_some_and(|bound| loaded > bound),
-        );
-        let has_more_after = latest.map_or_else(
-            || match (anchor, descriptor.bounds.latest) {
-                (TimelineWindowAnchor::Before(address), Some(bound)) => address <= bound,
-                _ => false,
-            },
-            |loaded| descriptor.bounds.latest.is_some_and(|bound| loaded < bound),
-        );
+        let has_more_before = first
+            .zip(descriptor.bounds.first)
+            .is_some_and(|(loaded, bound)| loaded > bound);
+        let has_more_after = latest
+            .zip(descriptor.bounds.latest)
+            .is_some_and(|(loaded, bound)| loaded < bound);
         transaction.commit().await?;
 
         Ok(Some(SessionTimelineWindow {
@@ -233,14 +225,15 @@ impl SessionTimelineReader for SessionTimelineRepository {
 }
 
 const DESCRIPTOR_SQL: &str = r#"
-SELECT session.session_id, facts.item_count, facts.first_sequence,
+SELECT session.session_id, facts.session_id IS NOT NULL AS facts_present,
+       facts.item_count, facts.first_sequence,
        facts.latest_sequence,
        facts.item_count * $2 + facts.event_kind_bytes AS structured_bytes,
        facts.projected_text_bytes AS text_bytes,
        facts.active_turn_count AS active_count, facts.queued_turn_count AS queued_count,
        (SELECT last_sequence FROM outbox_sequence_state WHERE singleton) AS last_sequence
   FROM session
-  JOIN session_timeline_fact AS facts USING (session_id)
+  LEFT JOIN session_timeline_fact AS facts USING (session_id)
  WHERE session.session_id = $1
 "#;
 
@@ -311,6 +304,9 @@ async fn load_descriptor(
         .fetch_optional(connection)
         .await?;
     let Some(row) = row else { return Ok(None) };
+    if !row.try_get::<bool, _>("facts_present")? {
+        return Err(SessionTimelineCorruption::Missing("projection facts").into());
+    }
     let first = optional_address(row.try_get("first_sequence")?, "first address")?;
     let latest = optional_address(row.try_get("latest_sequence")?, "latest address")?;
     Ok(Some(SessionTimelineDescriptor {
