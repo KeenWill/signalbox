@@ -81,8 +81,8 @@ pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, ConvergenceSweepConfiguration,
     DaemonToolConfiguration, DerivedModelCallCost, FileCredentialAccess, HubModelConfiguration,
     HubModelConfigurationError, MAX_CONVERGENCE_SWEEP_COOL_OFF, MAX_CONVERGENCE_SWEEP_INTERVAL,
-    ModelAdapter, ModelBillingRates, OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration,
-    WatchedRepositoryConfiguration,
+    ModelAdapter, ModelBillingRates, NumericBoundsConfiguration, OPENAI_CREDENTIAL_REFERENCE,
+    RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
 };
 pub use context_guard::{
     ContextGuardedTurnPass, ContextGuardedTurnPassError, ReportedUsageCompaction,

@@ -667,7 +667,7 @@ mod tests {
     fn anthropic_debug_mode_rejects_a_configured_codex_route() {
         let selection =
             DirectModelSelection::from_uuid(Uuid::from_u128(0x10000000000040008000000000000001));
-        let configuration = HubModelConfiguration::parse(
+        let configuration = parse_model_configuration(
             r#"
 version = 1
 
@@ -704,8 +704,7 @@ provider_model = "gpt-example"
 max_output_tokens = 20
 context_window_tokens = 100
 "#,
-        )
-        .expect("Codex debug fixture configuration is valid");
+        );
 
         assert_eq!(
             require_anthropic_selection(&configuration, selection),
@@ -723,5 +722,17 @@ context_window_tokens = 100
         );
         failure.wait().await;
         assert!(failure.is_triggered());
+    }
+
+    fn parse_model_configuration(content: &str) -> HubModelConfiguration {
+        let example = include_str!("../../../../config/signalboxd.example.toml");
+        let (_, numeric_bounds_and_after) = example
+            .split_once("[numeric_bounds]")
+            .expect("the example declares numeric bounds");
+        let (numeric_bounds, _) = numeric_bounds_and_after
+            .split_once("\n# Omit this table")
+            .expect("the example terminates numeric bounds");
+        HubModelConfiguration::parse(&format!("{content}\n[numeric_bounds]{numeric_bounds}\n"))
+            .expect("the model configuration fixture is valid")
     }
 }

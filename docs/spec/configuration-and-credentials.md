@@ -9,6 +9,9 @@ bootstrap are verified against this PR (`agent/web-http-transport`).
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
 
+The required numeric-bound configuration grammar is verified against this PR
+(`agent/bounds-required-config-schema`).
+
 The delegated tool-approval posture, judge selection, and daemon composition are
 verified against the implementing stack through this PR
 (`agent/approval-judge-daemon`). The posture values `unsandboxed_exec` accepts,
@@ -575,6 +578,14 @@ fail-closed:
   this branch installs the grammar in the parser and updates that file in the
   same change, so it declares `adapter` and `delivery` on every profile and maps
   each family through a `[[credential_pools]]` entry.
+- The `[numeric_bounds]` table is required and contains every deployment-owned
+  numeric policy listed in `config/signalboxd.example.toml`. Integer policies
+  use nonnegative TOML integers and duration policies use an unsigned integer
+  followed by `ms` or `s`. Every field also accepts the single exact string
+  `"none"` for an unbounded deployment policy. Missing fields are one typed
+  startup failure whose sanitized message lists every absent field in schema
+  order; mistyped values, alternate spellings of `"none"`, and unknown fields
+  fail startup. The loader supplies no default for any member of this table.
 - At least one `[[models]]` entry is required: an absent, mistyped, or empty
   models array is rejected (`MissingModels`), so a document containing only
   `version = 1` fails startup.

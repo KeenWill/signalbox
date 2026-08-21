@@ -950,7 +950,7 @@ mod tests {
     ];
 
     fn models() -> HubModelConfiguration {
-        HubModelConfiguration::parse(&format!(
+        HubModelConfiguration::parse_test_fixture(&format!(
             r#"
 version = 1
 
@@ -1013,7 +1013,7 @@ selection_id = "{SELECTION_ID}"
     }
 
     fn models_with_global_reasoning() -> GlobalReasoningModels {
-        let configuration = HubModelConfiguration::parse(&format!(
+        let configuration = HubModelConfiguration::parse_test_fixture(&format!(
             r#"
 version = 1
 

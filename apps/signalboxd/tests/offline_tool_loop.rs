@@ -4,6 +4,8 @@
     reason = "the standalone integration tests use assertion panics and explicit fixture expectations"
 )]
 
+mod support;
+
 use std::{
     error::Error,
     fmt, fs,
@@ -171,7 +173,7 @@ context_window_tokens = 200000
 "#;
 
 fn approval_judge_model_configuration() -> HubModelConfiguration {
-    HubModelConfiguration::parse(&format!(
+    support::parse_model_configuration(&format!(
         r#"
 version = 1
 
@@ -4176,7 +4178,7 @@ async fn submit_frame_through_process(
         fixture.pool.clone(),
         eligibility_nudge,
         fixture.tool_dispatch_gate.clone(),
-        HubModelConfiguration::parse(PROCESS_MODEL_CONFIGURATION)?,
+        support::parse_model_configuration(PROCESS_MODEL_CONFIGURATION)?,
     );
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let runtime_task = tokio::spawn(runtime.run(shutdown_receiver));

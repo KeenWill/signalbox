@@ -4,6 +4,8 @@
     reason = "the standalone integration test uses assertion panics and explicit fixture expectations"
 )]
 
+mod support;
+
 use std::{error::Error, process::Command, time::Duration};
 
 use signalbox_application::{
@@ -45,8 +47,8 @@ use signalbox_persistence::{
 };
 use signalbox_test_bin::test_bin_path;
 use signalboxd::{
-    ActivatedTurnPass, FatalExecutionSupervisor, HubModelConfiguration,
-    PostgresGoalPassDisposition, PostgresProviderModelExecution,
+    ActivatedTurnPass, FatalExecutionSupervisor, PostgresGoalPassDisposition,
+    PostgresProviderModelExecution,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -521,7 +523,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
 async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_retry()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let configuration = HubModelConfiguration::parse(GOAL_MODEL_CONFIGURATION)?;
+    let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
     let mut create = CreateSessionService::new(
         UuidV7SessionIdGenerator,

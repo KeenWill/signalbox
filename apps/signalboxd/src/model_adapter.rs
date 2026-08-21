@@ -347,7 +347,7 @@ mod tests {
     fn alternate_fast_target_projects_as_declared_runtime_lineage() {
         let standard_model = "claude-standard-fixture";
         let fast_model = "claude-fast-fixture";
-        let configuration = HubModelConfiguration::parse(&format!(
+        let configuration = HubModelConfiguration::parse_test_fixture(&format!(
             r#"
 version = 1
 
@@ -414,7 +414,7 @@ context_window_tokens = 200000
     #[tokio::test]
     async fn anthropic_mapping_executes_the_existing_runtime_path_unchanged() {
         let expected_completion = "unchanged Anthropic";
-        let configuration = HubModelConfiguration::parse(
+        let configuration = HubModelConfiguration::parse_test_fixture(
             r#"
 version = 1
 
@@ -567,7 +567,7 @@ service_tiers = ["priority"]
     #[tokio::test]
     async fn openai_mapping_executes_through_its_own_configured_runtime() {
         let expected_completion = "routed through OpenAI";
-        let configuration = HubModelConfiguration::parse(OPENAI_CONFIGURATION)
+        let configuration = HubModelConfiguration::parse_test_fixture(OPENAI_CONFIGURATION)
             .expect("the OpenAI mapping and model are valid");
         let openai = ScriptedModel::single(Script::delivering(scripted_completion(
             expected_completion,
@@ -603,7 +603,7 @@ service_tiers = ["priority"]
     /// defect, never a silent fallback onto another provider.
     #[tokio::test]
     async fn openai_route_without_its_adapter_is_a_composition_defect() {
-        let configuration = HubModelConfiguration::parse(OPENAI_CONFIGURATION)
+        let configuration = HubModelConfiguration::parse_test_fixture(OPENAI_CONFIGURATION)
             .expect("the OpenAI mapping and model are valid");
         let runtime = ConfiguredModelRuntime::new(
             None::<ScriptedModel<String>>,
@@ -660,7 +660,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
         std::fs::set_permissions(&executable, permissions)
             .expect("fake Claude executable permissions are set");
         std::fs::write(&bridge, "#!/bin/sh\nexit 0\n").expect("fake MCP bridge is writable");
-        let configuration = HubModelConfiguration::parse(&format!(
+        let configuration = HubModelConfiguration::parse_test_fixture(&format!(
             r#"
 version = 1
 
@@ -790,7 +790,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":8,"cached_input_
         permissions.set_mode(0o700);
         std::fs::set_permissions(&executable, permissions)
             .expect("fake Codex executable permissions are set");
-        let configuration = HubModelConfiguration::parse(&format!(
+        let configuration = HubModelConfiguration::parse_test_fixture(&format!(
             r#"
 version = 1
 
