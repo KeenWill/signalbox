@@ -23,9 +23,9 @@ of pending automatic resumptions is verified against this PR
 (`agent/daemon-live-goal-resume-rearm`). Restart-caused failure accounting is
 verified against this PR (`agent/daemon-live-restart-recovery-accounting`).
 Identity and durable-command mechanics remain owned by
-[identity and commands](identity-and-commands.md), turn
-execution by [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md),
-tool dispatch by [tool loop](tool-loop.md), and framing by
+[identity and commands](identity-and-commands.md), turn execution by
+[turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
+by [tool loop](tool-loop.md), and framing by
 [process protocol](process-protocol.md). INV-048 is the lifecycle enforcement
 family indexed by [the invariant test index](../invariants.md).
 
@@ -227,10 +227,10 @@ with the turn it started and discounts it only when the turn's terminal attempt
 has an append-only startup-recovery origin and the exact model-call or
 tool-attempt automatic reconciliation is durably `reconciled`. The startup scan
 writes that origin in the transaction that creates the ambiguous wait; the live
-slot-held watchdog does not. Runtime boundary loss therefore remains
-chargeable. Typed records rather than a restart log line remain authority, and
-startup rearming can continue through repeated deploys without turning
-deployment count into goal-attempt exhaustion.
+slot-held watchdog does not. Runtime boundary loss therefore remains chargeable.
+Typed records rather than a restart log line remain authority, and startup
+rearming can continue through repeated deploys without turning deployment count
+into goal-attempt exhaustion.
 
 **Implemented behavior.** An automatic resumption's durable command identity is
 derived from the session and the exact blocked event it answers rather than

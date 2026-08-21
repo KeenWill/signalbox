@@ -6,9 +6,9 @@ PR (`agent/turn-lifecycle-hardening`). Automatic reconciliation of ambiguous
 tool attempts is verified against this PR
 (`agent/daemon-live-tool-recovery-reconcile`). The watchdog recovery transaction
 ceiling was re-verified against this PR
-(`agent/daemon-live-reconciliation-attempt-bound`).
-Just-in-time recovery claiming and shutdown-preemptible watchdog batches are
-verified against this PR (`agent/daemon-live-restart-recovery-accounting`).
+(`agent/daemon-live-reconciliation-attempt-bound`). Just-in-time recovery
+claiming and shutdown-preemptible watchdog batches are verified against this PR
+(`agent/daemon-live-restart-recovery-accounting`).
 
 The expired-pass recovery operation and retry budgets were re-verified against
 this PR (`agent/daemon-live-recovery-attempt-budget`).
@@ -760,12 +760,12 @@ durably distinguishable from a restart-recovered one.
 
 **Ambiguous-operation reconciliation.** Every watchdog wake also discovers
 active `awaiting_model_call_recovery` and `awaiting_tool_recovery` turns and
-drains at most 64 due attempts. It durably claims exactly one attempt immediately
-before starting that attempt's transaction, then returns to the durable
-inventory for the next; no claimed attempt spends its deadline queued behind
-another session's locked transaction. The recovery row binds the exact session,
-turn, and one ambiguous model call or tool attempt; each claim inserts a
-one-based attempt row. Failed attempts end with the typed outcome
+drains at most 64 due attempts. It durably claims exactly one attempt
+immediately before starting that attempt's transaction, then returns to the
+durable inventory for the next; no claimed attempt spends its deadline queued
+behind another session's locked transaction. The recovery row binds the exact
+session, turn, and one ambiguous model call or tool attempt; each claim inserts
+a one-based attempt row. Failed attempts end with the typed outcome
 `infrastructure_failure` or `integrity_failure`, and recovery becomes due after
 120, 240, 480, 960, then 1,800 seconds. If a daemon disappears while an attempt
 is `attempting`, its recorded deadline lets the next daemon classify it as an
