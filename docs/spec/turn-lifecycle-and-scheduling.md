@@ -12,8 +12,8 @@ claiming and shutdown-preemptible watchdog batches are verified against this PR
 draining is verified against this PR
 (`agent/daemon-live-graceful-shutdown-drain`).
 
-The expired-pass recovery operation and retry budgets were re-verified against
-this PR (`agent/daemon-live-recovery-attempt-budget`).
+The expired-pass recovery lock classification and retry budgets were re-verified
+against this PR (`agent/daemon-live-reconciliation-lock-cadence`).
 
 The runner-recovery active-phase algebra, checked persistence reconstitution,
 and preserved interrupt/stop authority were verified against this PR
@@ -460,13 +460,15 @@ the sweep (INV-007).
   unrelated failure, and invokes the existing startup-recovery transaction
   immediately. Each operation has a three-second ceiling, which is wider than
   the repository's ordered connection, scheduler-row, and write-lock budgets so
-  those can return typed failures instead of being masked by the wrapper.
-  Nonambiguous infrastructure refusals retry after 50 milliseconds, allowing a
-  canceled pass to release its database resources; an ambiguous or other-class
-  failure retains the two-minute cadence. Three retries bound the detached work,
-  and the outer watchdog below remains responsible if all attempts fail.
-  Stateful pass data, including identity generators, is never cloned per
-  admitted pass; only the detached expiry handler is cloned.
+  those can return typed failures instead of being masked by the wrapper. A lock
+  refusal is preserved as its typed turn-liveness cause even when the shared
+  startup transition raises it from its nested session or turn work. It retries
+  after six seconds, spacing the four attempts across tens-of-seconds commit
+  handoffs under outbox contention. Any other database, ambiguous, or
+  non-infrastructure failure retains the two-minute cadence. Three retries bound
+  the detached work, and the outer watchdog below remains responsible if all
+  attempts fail. Stateful pass data, including identity generators, is never
+  cloned per admitted pass; only the detached expiry handler is cloned.
 
   With Prometheus export enabled, the loop publishes the scheduler occupancy
   observations owned by
