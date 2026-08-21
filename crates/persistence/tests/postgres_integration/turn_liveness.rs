@@ -3,7 +3,8 @@
 use crate::*;
 
 use signalbox_application::{
-    StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence, UuidV7StartupScanIdGenerator,
+    ClassifyOperatorFailure, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
+    UuidV7StartupScanIdGenerator,
 };
 use signalbox_persistence::turn_liveness::PostgresTurnLivenessRepository;
 
@@ -259,6 +260,49 @@ async fn s10_slot_held_recovery_declines_changed_progress_evidence() -> Result<(
     assert_eq!(outcome, None);
     assert_eq!(state, "active");
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S10: a lock refusal raised by the shared startup transition remains the
+/// typed contention outcome that the detached scheduler recovery can retry.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_slot_held_recovery_preserves_later_lock_refusal() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = activated_watchdog_session(&pool, 0x12_700).await?;
+    checkpoint_model_call(&pool, &fixture, 0x12_700).await?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone());
+    let observed = repository
+        .observed_slot_held_turn(fixture.session)
+        .await?
+        .expect("the checkpointed provider call holds the session slot");
+    let mut blocker = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR UPDATE")
+        .bind(fixture.session.into_uuid())
+        .execute(&mut *blocker)
+        .await?;
+    let mut ids = UuidV7StartupScanIdGenerator;
+
+    let error = repository
+        .recover_observed_slot_held_turn(
+            observed,
+            AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x12_800)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x12_801)),
+            ),
+            &mut ids,
+        )
+        .await
+        .expect_err("the session row remains locked past the recovery budget");
+
+    assert_eq!(
+        error.operator_failure_cause_code(),
+        "turn_liveness_terminalization_lock_unavailable"
+    );
+
+    blocker.rollback().await?;
     pool.close().await;
     drop(container);
     Ok(())

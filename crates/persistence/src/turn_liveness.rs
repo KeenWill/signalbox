@@ -95,7 +95,7 @@ const TERMINALIZATION_WRITE_LOCK_WAIT: &str = "1s";
 pub enum TurnLivenessRepositoryError {
     /// Reading the quiescent active-turn inventory failed.
     Inventory(sqlx::Error),
-    /// The session's scheduler row stayed locked past the attempt's wait.
+    /// A required terminalization row stayed locked past the attempt's wait.
     TerminalizationLockUnavailable(sqlx::Error),
     /// A database operation on the terminalization path failed.
     TerminalizationDatabase {
@@ -119,10 +119,9 @@ impl TurnLivenessRepositoryError {
 
     /// Classifies a failure of the statement that takes the scheduler row.
     ///
-    /// Only this site can report a refused lock, rather than any statement that
-    /// happens to raise the code: a refusal means "someone else is working on
-    /// this session", which is true of the row this statement waits for and of
-    /// nothing else the transaction goes on to touch.
+    /// The shared transition conversion applies the same classification to a
+    /// refusal from a later guarded lock site. This direct constructor keeps a
+    /// different driver failure on the scheduler statement ordinary.
     fn terminalization_lock(error: sqlx::Error) -> Self {
         if lock_wait_expired(&error) {
             return Self::TerminalizationLockUnavailable(error);
@@ -143,7 +142,7 @@ impl fmt::Display for TurnLivenessRepositoryError {
             Self::TerminalizationLockUnavailable(source) => {
                 write!(
                     formatter,
-                    "stale-turn terminalization could not lock the session scheduler row: {source}"
+                    "stale-turn terminalization could not acquire a required row lock: {source}"
                 )
             }
             Self::TerminalizationDatabase { source, .. } => {
@@ -197,7 +196,13 @@ impl ClassifyOperatorFailure for TurnLivenessRepositoryError {
 
 impl From<StartupScanRepositoryError> for TurnLivenessRepositoryError {
     fn from(error: StartupScanRepositoryError) -> Self {
-        Self::Terminalization(error)
+        match error {
+            StartupScanRepositoryError::Database {
+                source,
+                commit_ambiguous: false,
+            } if lock_wait_expired(&source) => Self::TerminalizationLockUnavailable(source),
+            error => Self::Terminalization(error),
+        }
     }
 }
 
@@ -919,10 +924,10 @@ mod tests {
         assert_ne!(TERMINALIZATION_LOCK_WAIT, TERMINALIZATION_WRITE_LOCK_WAIT);
     }
 
-    /// Only the statement taking the scheduler row reports contention, so a
-    /// failure raised anywhere else is an ordinary one whatever it carries.
+    /// Only PostgreSQL's lock-refusal code reports contention, so a different
+    /// driver failure remains ordinary infrastructure.
     #[test]
-    fn a_failure_away_from_the_lock_site_is_an_ordinary_one() {
+    fn a_non_lock_driver_failure_is_an_ordinary_one() {
         let failure = TurnLivenessRepositoryError::terminalization(sqlx::Error::PoolTimedOut);
 
         assert!(matches!(
