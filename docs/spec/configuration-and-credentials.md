@@ -26,6 +26,10 @@ The process core's pinned projection of runner `read_only_paths` into the
 runner-restricted bubblewrap request is verified against this PR
 (`agent/runner-strict-sandbox-profile`).
 
+The runner's dispatch-scoped credential-file resolver, restricted-environment
+projection, and exact-value text scrubber are verified against this PR
+(`agent/runner-credential-resolution`).
+
 The daemon web-tool composition, Brave credential channel, and shipped human
 postures are verified against PR #433 (`agent/web-search-wiring`).
 
@@ -439,8 +443,9 @@ exact owner/repository path with an optional terminal `.git`. Its named
 credential profile, when present, must exist. Absence means that the entry
 admits anonymous HTTPS access only; it never asks the runner or daemon to select
 a credential. Any repository requires `github.com` in the effective network
-list. Environment names use `[A-Z_][A-Z0-9_]*`, cannot name runner control,
-model-provider, or dynamic-loader variables, and are unique. Absolute paths are
+list. Environment names use `[A-Z_][A-Z0-9_]*`, are at most 4,096 UTF-8 bytes,
+cannot name runner control, model-provider, or dynamic-loader variables, and are
+unique. Absolute paths are
 canonicalized without following a final credential symlink; duplicate, nested,
 writable/read-only-overlapping, or runner-root-overlapping allowlist paths fail
 closed. Configuration may narrow network entries but cannot add a hostname.
@@ -2803,12 +2808,31 @@ and resolved only by `signalbox-runner`. The daemon, client, database,
 transcript, workspace manifest, and runner wire never receive a runner
 credential path or value (INV-035, INV-045).
 
-### Committed unimplemented functionality — runner credential execution
+`signalbox-runner` provides one call-scoped resolver for a caller-selected
+checked profile. Each call reopens that profile's configured path without
+following symlinks, requires a regular file owned by the effective user with
+exact `0600` mode, reads at most 65,536 bytes, and drops trailing `\n` and `\r`
+bytes while retaining all others. Empty, NUL-containing, unreadable, oversized,
+wrong-user-ID, wrong-mode, non-UTF-8, or nonregular values are one sanitized
+unavailable failure. The resolved carrier is non-cloneable and debug-redacted.
+It projects the value only into the reusable restricted environment channel and
+scrubs the exact value and its JSON-string-escaped form from complete captured
+text. Because every resolution reopens the configured path, atomic file
+replacement rotates the value between calls.
 
-No present runner surface admits a lease, provisions a workspace, reads a
-credential file for execution, or injects credential bytes. The remaining
-paragraphs in this section constrain that future execution surface; they do not
-describe behavior available from the registration-only daemon.
+The checked configuration rejects the five fixed sandbox environment names
+`HOME`, `HTTPS_PROXY`, `LANG`, `LC_ALL`, and `PATH`, in addition to its existing
+runner, model-provider, and dynamic-loader namespaces. A configured credential
+therefore cannot advertise a name that the restricted environment channel would
+later refuse.
+
+### Committed unimplemented functionality — runner credential execution composition
+
+No present lease-admission, workspace-provisioning, or tool-dispatch surface
+invokes the credential resolver, injects the projected value, or applies its
+scrubber to captured output. The remaining paragraphs in this section constrain
+that future composition; they do not describe an available credential-bearing
+execution path.
 
 A session may hold no credential at all, and no boundary infers one. When the
 placement selected no profile the daemon issues no grant, the lease carries no
@@ -2821,16 +2845,11 @@ repository and no workspace, because the credential is scoped to that session's
 dispatches rather than to a clone
 ([runner protocol and placement](runner-protocol.md#session-composition)).
 
-At lease admission the runner requires the exact granted name in its startup
-configuration; absence rejects the claim before any executable capability is
-issued. Immediately before each provisioning or tool dispatch, it opens the
-configured path without following symlinks, requires a regular file owned by the
-effective user with exact `0600` mode, reads at most 65,536 bytes, and drops
-trailing `\n` and `\r` bytes while retaining all others. Empty, containing a NUL
-byte, unreadable, oversized, wrong-owner, wrong-mode, or
-replaced-with-nonregular files are typed unavailable failures. The value is
-scoped to that dispatch and never cached, so atomic file replacement rotates it
-between operations.
+At lease admission the runner will require the exact granted name in its startup
+configuration; absence will reject the claim before any executable capability is
+issued. Immediately before each provisioning or tool dispatch, the composed path
+will invoke the implemented resolver rather than retain its value between
+operations.
 
 The value is supplied only under the configured environment name inside the
 bubblewrap namespace. It does not appear in command arguments, Git remote URLs,
@@ -2854,11 +2873,10 @@ Binding the helper to the provisioned workspace would also leave the operation
 that introduces a session's first repository unauthorizable, because a clone
 runs in a writable root whose manifest names no repository key at all
 ([runner protocol and placement](runner-protocol.md#workspace-provisioning-and-recovery)).
-The runner scrubs the exact value and its JSON-string-escaped form from admitted
-stdout, stderr, and result text before forwarding. This reduces accidental echo;
-it cannot prevent model-controlled code from transforming or using the value
-within its granted repository scope, which is an accepted restricted-profile
-cost.
+The runner will apply the implemented scrubber to admitted stdout, stderr, and
+result text before forwarding. This reduces accidental echo; it cannot prevent
+model-controlled code from transforming or using the value within its granted
+repository scope, which is an accepted restricted-profile cost.
 
 Unknown profiles fail before lease claim. A credential failure after a claimed
 dispatch is a fixed `ExecutionFailed` observation naming only the profile and

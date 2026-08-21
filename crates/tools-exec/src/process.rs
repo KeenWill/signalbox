@@ -68,8 +68,10 @@ const MAX_ARGUMENT_BYTES: usize = MAX_ARGUMENT_CHARACTERS * 4;
 const MAX_TOTAL_ARGUMENT_BYTES: usize = 64 * 1024;
 const MAX_WORKING_DIRECTORY_CHARACTERS: usize = 4096;
 const MAX_WORKING_DIRECTORY_BYTES: usize = MAX_WORKING_DIRECTORY_CHARACTERS * 4;
-const MAX_SANDBOX_ENVIRONMENT_NAME_BYTES: usize = 4096;
-const MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES: usize = 64 * 1024;
+/// Maximum UTF-8 byte length accepted for a restricted environment name.
+pub const MAX_SANDBOX_ENVIRONMENT_NAME_BYTES: usize = 4096;
+/// Maximum UTF-8 byte length admitted for one restricted environment value.
+pub const MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES: usize = 64 * 1024;
 pub(crate) const EXEC_CAPTURE_BYTES: usize = 64 * 1024;
 const PROCESS_CAPTURE_BYTES_LIMIT: usize = 1024 * 1024;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded direct-command arguments";
