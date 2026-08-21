@@ -969,6 +969,10 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                     .cargo_registry_identity
                     .as_ref()
                     .map(CargoRegistryIdentity::descriptor),
+                #[cfg(target_os = "linux")]
+                git_administration_bind_descriptor: None,
+                #[cfg(target_os = "linux")]
+                git_administration_relative_path: None,
                 #[cfg(not(target_os = "linux"))]
                 cargo_registry_bind_source: self.cargo_registry.as_deref(),
             },
@@ -1028,6 +1032,15 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                         }
                     }
                 };
+                #[cfg(target_os = "linux")]
+                let git_administration =
+                    working_directory_identity.as_ref().and_then(|directory| {
+                        pin_linked_worktree_administration(
+                            &self.workspace_identity,
+                            directory,
+                            &arguments.program,
+                        )
+                    });
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
                     return ExecResult {
@@ -1061,6 +1074,16 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                             .cargo_registry_identity
                             .as_ref()
                             .map(CargoRegistryIdentity::descriptor),
+                        #[cfg(target_os = "linux")]
+                        git_administration_bind_descriptor: git_administration.as_ref().map(
+                            |administration| {
+                                rustix::fd::AsRawFd::as_raw_fd(&administration.directory._directory)
+                            },
+                        ),
+                        #[cfg(target_os = "linux")]
+                        git_administration_relative_path: git_administration
+                            .as_ref()
+                            .map(|administration| administration.relative_path.as_path()),
                         #[cfg(not(target_os = "linux"))]
                         working_directory_bind_source: None,
                         #[cfg(not(target_os = "linux"))]
@@ -1234,6 +1257,13 @@ struct WorkspaceDirectoryIdentity {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct PinnedLinkedWorktreeAdministration {
+    relative_path: PathBuf,
+    directory: WorkspaceDirectoryIdentity,
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Clone, Debug)]
 struct CargoRegistryIdentity {
     device: u64,
@@ -1401,7 +1431,7 @@ impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner
             EXEC_CAPTURE_BYTES,
         );
         #[cfg(target_os = "linux")]
-        let git_administration = pin_sandbox_linked_worktree_administration(
+        let git_administration = pin_linked_worktree_administration(
             &self.workspace_identity,
             &execution_directory,
             &arguments.program,
@@ -1410,7 +1440,7 @@ impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner
         if let Some(administration) = &git_administration {
             request.environment.insert(
                 OsString::from("GIT_DIR"),
-                administration.bind_source.as_os_str().to_owned(),
+                administration.directory.bind_source.as_os_str().to_owned(),
             );
             request.environment.insert(
                 OsString::from("GIT_WORK_TREE"),
@@ -1425,11 +1455,11 @@ impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner
 }
 
 #[cfg(target_os = "linux")]
-fn pin_sandbox_linked_worktree_administration(
+fn pin_linked_worktree_administration(
     workspace: &WorkspaceIdentity,
     working_directory: &WorkspaceDirectoryIdentity,
     program: &str,
-) -> Option<WorkspaceDirectoryIdentity> {
+) -> Option<PinnedLinkedWorktreeAdministration> {
     if Path::new(program).file_name()? != "git" {
         return None;
     }
@@ -1446,12 +1476,20 @@ fn pin_sandbox_linked_worktree_administration(
     if target.contains('\r') || target.contains('\n') {
         return None;
     }
-    let relative = Path::new(target).strip_prefix(SANDBOX_WORKSPACE).ok()?;
+    let target = Path::new(target);
+    let relative = target
+        .strip_prefix(SANDBOX_WORKSPACE)
+        .ok()
+        .or_else(|| target.strip_prefix(&workspace.canonical_path).ok())?;
     let relative = relative.to_str()?;
-    workspace
+    let directory = workspace
         .pin_relative_directory(relative)
         .and_then(WorkspaceDirectoryIdentity::inherit)
-        .ok()
+        .ok()?;
+    Some(PinnedLinkedWorktreeAdministration {
+        relative_path: PathBuf::from(relative),
+        directory,
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1546,6 +1584,10 @@ struct SandboxLaunchContext<'a> {
     working_directory_bind_descriptor: Option<i32>,
     #[cfg(target_os = "linux")]
     cargo_registry_bind_descriptor: Option<i32>,
+    #[cfg(target_os = "linux")]
+    git_administration_bind_descriptor: Option<i32>,
+    #[cfg(target_os = "linux")]
+    git_administration_relative_path: Option<&'a Path>,
     #[cfg(not(target_os = "linux"))]
     cargo_registry_bind_source: Option<&'a Path>,
 }
@@ -1569,6 +1611,10 @@ fn bwrap_request(
     } else {
         format!("{SANDBOX_WORKSPACE}/{working_directory}")
     };
+    #[cfg(target_os = "linux")]
+    let sandbox_git_directory = context
+        .git_administration_relative_path
+        .map(|relative| format!("{SANDBOX_WORKSPACE}/{}", relative.display()));
     // The leading flags are this profile's whole namespace isolation. A deletion
     // or reordering here fails
     // `sandboxed_request_opens_with_the_user_pid_ipc_uts_and_network_unshare_prefix`,
@@ -1673,6 +1719,17 @@ fn bwrap_request(
             OsString::from(&sandbox_directory),
         ]);
     }
+    #[cfg(target_os = "linux")]
+    if let Some((administration_descriptor, administration_destination)) = context
+        .git_administration_bind_descriptor
+        .zip(sandbox_git_directory.as_ref())
+    {
+        bwrap_arguments.extend([
+            OsString::from("--bind"),
+            descriptor_path(administration_descriptor).into_os_string(),
+            OsString::from(administration_destination),
+        ]);
+    }
     #[cfg(not(target_os = "linux"))]
     if let Some(working_directory_bind_source) = context.working_directory_bind_source {
         bwrap_arguments.extend([
@@ -1719,7 +1776,7 @@ fn bwrap_request(
     ]);
     bwrap_arguments.extend([
         OsString::from("--chdir"),
-        OsString::from(sandbox_directory),
+        OsString::from(&sandbox_directory),
         OsString::from("--setenv"),
         OsString::from("HOME"),
         OsString::from(SANDBOX_WORKSPACE),
@@ -1729,6 +1786,17 @@ fn bwrap_request(
             OsString::from("--setenv"),
             OsString::from("CARGO_HOME"),
             OsString::from(SANDBOX_CARGO_HOME),
+        ]);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(administration) = sandbox_git_directory {
+        bwrap_arguments.extend([
+            OsString::from("--setenv"),
+            OsString::from("GIT_DIR"),
+            OsString::from(administration),
+            OsString::from("--setenv"),
+            OsString::from("GIT_WORK_TREE"),
+            OsString::from(&sandbox_directory),
         ]);
     }
     bwrap_arguments.extend([
@@ -4378,6 +4446,95 @@ mod tests {
         Ok(())
     }
 
+    /// A linked worktree created by the host records the host workspace path in
+    /// its `.git` marker. The sandbox maps that administration directory back
+    /// below `/workspace` and gives Git matching administration and worktree
+    /// paths, so the marker never needs rewriting.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandboxed_git_maps_a_host_linked_worktree_marker() -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let worktree = workspace.path.join(SANDBOX_LINKED_WORKTREE_DIRECTORY);
+        let administration = workspace.path.join(SANDBOX_LINKED_ADMINISTRATION_RELATIVE);
+        std::fs::create_dir_all(&worktree)?;
+        std::fs::create_dir_all(&administration)?;
+        std::fs::write(
+            worktree.join(GIT_ADMINISTRATION_MARKER),
+            format!(
+                "{GIT_DIRECTORY_MARKER_PREFIX}{}\n",
+                administration.display()
+            ),
+        )?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(b"complete"),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new(runner, &workspace.path)?;
+        let arguments = ExecArguments {
+            program: String::from("/usr/bin/git"),
+            arguments: vec![String::from("status")],
+            working_directory: String::from(SANDBOX_LINKED_WORKTREE_DIRECTORY),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.execute(arguments).await;
+
+        let requests = observation.recorded_requests();
+        let request = requests
+            .last()
+            .ok_or_else(|| std::io::Error::other("one sandbox process request"))?;
+        let administration_destination = OsString::from(format!(
+            "{SANDBOX_WORKSPACE}/{SANDBOX_LINKED_ADMINISTRATION_RELATIVE}"
+        ));
+        let administration_bind = request
+            .arguments
+            .iter()
+            .position(|argument| argument == &administration_destination)
+            .and_then(|destination| destination.checked_sub(2))
+            .ok_or_else(|| std::io::Error::other("linked administration bind"))?;
+        let git_directory = [
+            OsString::from("--setenv"),
+            OsString::from("GIT_DIR"),
+            administration_destination,
+        ];
+        let git_worktree = [
+            OsString::from("--setenv"),
+            OsString::from("GIT_WORK_TREE"),
+            OsString::from(format!(
+                "{SANDBOX_WORKSPACE}/{SANDBOX_LINKED_WORKTREE_DIRECTORY}"
+            )),
+        ];
+
+        assert_eq!(
+            result.outcome,
+            successful_sandbox_process(b"complete").outcome
+        );
+        assert_eq!(
+            request.arguments.get(administration_bind),
+            Some(&OsString::from("--bind"))
+        );
+        assert!(
+            request
+                .arguments
+                .get(administration_bind + 1)
+                .is_some_and(|source| source.to_string_lossy().starts_with("/proc/self/fd/"))
+        );
+        assert!(
+            request
+                .arguments
+                .windows(git_directory.len())
+                .any(|arguments| arguments == git_directory)
+        );
+        assert!(
+            request
+                .arguments
+                .windows(git_worktree.len())
+                .any(|arguments| arguments == git_worktree)
+        );
+        Ok(())
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn unsandboxed_runner_rejects_a_symlinked_working_directory_before_dispatch()
@@ -4544,6 +4701,10 @@ mod tests {
             working_directory_bind_descriptor: None,
             #[cfg(target_os = "linux")]
             cargo_registry_bind_descriptor: None,
+            #[cfg(target_os = "linux")]
+            git_administration_bind_descriptor: None,
+            #[cfg(target_os = "linux")]
+            git_administration_relative_path: None,
             #[cfg(not(target_os = "linux"))]
             cargo_registry_bind_source: None,
         }
