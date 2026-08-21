@@ -22,6 +22,7 @@ required-features = ["test-worker"]
 
 [dependencies]
 base64 = "0.22.1"
+libc = "0.2.186"
 rustix = { version = "1.1.4", default-features = false, features = [
     "fs",
     "pipe",
@@ -41,6 +42,9 @@ tokio = { version = "1.53.0", default-features = false, features = [
     "sync",
     "time",
 ] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
 
 [lints]
 workspace = true

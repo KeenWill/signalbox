@@ -3,7 +3,13 @@ use std::{
     error::Error,
     fmt, fs,
     io::{Seek as _, SeekFrom, Write as _},
-    os::{fd::AsRawFd as _, unix::fs::PermissionsExt as _, unix::process::CommandExt as _},
+    os::{
+        fd::AsRawFd as _,
+        unix::{
+            fs::{MetadataExt as _, PermissionsExt as _},
+            process::CommandExt as _,
+        },
+    },
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -45,8 +51,23 @@ const WRITABLE_TMPFS_BUDGET_DIVISOR: u64 = 2;
 /// One checked mapping from a provider declaration to its worker executable.
 #[derive(Clone, Debug)]
 pub struct WorkerBinding {
-    program: PathBuf,
+    source: PathBuf,
+    program: Arc<PinnedExecutable>,
     declaration: FileMediaProviderDeclaration,
+}
+
+#[derive(Debug)]
+struct PinnedExecutable {
+    _file: fs::File,
+    proc_path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl PinnedExecutable {
+    fn same_file(&self, other: &Self) -> bool {
+        self.device == other.device && self.inode == other.inode
+    }
 }
 
 impl WorkerBinding {
@@ -55,9 +76,10 @@ impl WorkerBinding {
         program: impl Into<PathBuf>,
         declaration: FileMediaProviderDeclaration,
     ) -> Result<Self, SandboxedFileMediaProcessorConstructionError> {
-        let program = program.into();
-        validate_executable(&program, ConstructionTarget::Worker)?;
+        let source = program.into();
+        let program = Arc::new(open_worker_executable(&source)?);
         Ok(Self {
+            source,
             program,
             declaration,
         })
@@ -73,8 +95,9 @@ impl WorkerBinding {
 #[derive(Clone, Debug)]
 pub struct SandboxedFileMediaProcessor {
     bubblewrap: PathBuf,
-    workers: Arc<BTreeMap<signalbox_file_media_runtime::FileReaderProviderName, PathBuf>>,
-    worker_declarations: Arc<BTreeMap<PathBuf, Vec<FileMediaProviderDeclaration>>>,
+    workers:
+        Arc<BTreeMap<signalbox_file_media_runtime::FileReaderProviderName, Arc<PinnedExecutable>>>,
+    worker_declarations: Arc<Vec<(Arc<PinnedExecutable>, Vec<FileMediaProviderDeclaration>)>>,
     readers: Arc<BTreeMap<ReaderIdentity, ReaderDeclaration>>,
     ceilings: FileMediaProcessCeilings,
 }
@@ -98,11 +121,18 @@ impl SandboxedFileMediaProcessor {
         let bubblewrap = bubblewrap.into();
         validate_executable(&bubblewrap, ConstructionTarget::Bubblewrap)?;
         let mut workers = BTreeMap::new();
-        let mut worker_declarations = BTreeMap::<PathBuf, Vec<FileMediaProviderDeclaration>>::new();
+        let mut worker_declarations =
+            BTreeMap::<PathBuf, (Arc<PinnedExecutable>, Vec<FileMediaProviderDeclaration>)>::new();
         let mut readers = BTreeMap::new();
         for binding in bindings {
             let provider = binding.declaration.provider().clone();
-            if workers.insert(provider, binding.program.clone()).is_some() {
+            let group = worker_declarations
+                .entry(binding.source)
+                .or_insert_with(|| (binding.program.clone(), Vec::new()));
+            if !group.0.same_file(&binding.program) {
+                return Err(SandboxedFileMediaProcessorConstructionError::Worker);
+            }
+            if workers.insert(provider, group.0.clone()).is_some() {
                 return Err(SandboxedFileMediaProcessorConstructionError::DuplicateProvider);
             }
             for reader in binding.declaration.readers() {
@@ -113,15 +143,12 @@ impl SandboxedFileMediaProcessor {
                     return Err(SandboxedFileMediaProcessorConstructionError::DuplicateReader);
                 }
             }
-            worker_declarations
-                .entry(binding.program)
-                .or_default()
-                .push(binding.declaration);
+            group.1.push(binding.declaration);
         }
         Ok(Self {
             bubblewrap,
             workers: Arc::new(workers),
-            worker_declarations: Arc::new(worker_declarations),
+            worker_declarations: Arc::new(worker_declarations.into_values().collect()),
             readers: Arc::new(readers),
             ceilings,
         })
@@ -144,7 +171,7 @@ impl SandboxedFileMediaProcessor {
 
     async fn run_probe(
         &self,
-        worker: &Path,
+        worker: &PinnedExecutable,
         declarations: &[FileMediaProviderDeclaration],
     ) -> Result<(), ProcessorFailure> {
         let mut running = self.spawn(worker, Some(declarations)).await?;
@@ -192,10 +219,10 @@ impl SandboxedFileMediaProcessor {
         self.readers.get(identity).ok_or(ProcessorFailure::Protocol)
     }
 
-    fn worker(&self, identity: &ReaderIdentity) -> Result<&Path, ProcessorFailure> {
+    fn worker(&self, identity: &ReaderIdentity) -> Result<&PinnedExecutable, ProcessorFailure> {
         self.workers
             .get(identity.provider())
-            .map(PathBuf::as_path)
+            .map(Arc::as_ref)
             .ok_or(ProcessorFailure::Unavailable)
     }
 
@@ -227,10 +254,10 @@ impl SandboxedFileMediaProcessor {
             | Invocation::Read { reader, .. } => {
                 let identity = ReaderIdentity::try_from(reader.clone())
                     .map_err(|_| ProcessorFailure::Protocol)?;
-                self.worker(&identity)?.to_owned()
+                self.worker(&identity)?
             }
         };
-        let mut running = self.spawn(&worker, None).await?;
+        let mut running = self.spawn(worker, None).await?;
         running.release_startup()?;
         let stdin = running
             .child
@@ -298,7 +325,7 @@ impl SandboxedFileMediaProcessor {
     #[allow(unsafe_code)]
     async fn spawn(
         &self,
-        worker: &Path,
+        worker: &PinnedExecutable,
         probe_declarations: Option<&[FileMediaProviderDeclaration]>,
     ) -> Result<RunningWorker, ProcessorFailure> {
         let seccomp = process_creation_filter().map_err(|_| ProcessorFailure::Unavailable)?;
@@ -307,7 +334,7 @@ impl SandboxedFileMediaProcessor {
         rustix::io::fcntl_setfd(block_write.as_fd(), rustix::io::FdFlags::CLOEXEC)
             .map_err(|_| ProcessorFailure::Unavailable)?;
         let profile = sandbox_arguments(
-            worker,
+            &worker.proc_path,
             seccomp.as_raw_fd(),
             block_read.as_raw_fd(),
             self.ceilings.memory_bytes(),
@@ -326,11 +353,11 @@ impl SandboxedFileMediaProcessor {
         let ceilings = self.ceilings;
         command.as_std_mut().process_group(0);
         unsafe {
-            // SAFETY: the closure performs only async-signal-safe setrlimit calls
-            // before exec, and captures the copy-only ceiling value.
+            // SAFETY: the closure performs direct setrlimit and keyctl syscalls
+            // before exec, and captures only the copy-only ceiling value.
             command
                 .as_std_mut()
-                .pre_exec(move || apply_process_limits(ceilings).map_err(std::io::Error::from));
+                .pre_exec(move || prepare_sandbox_process(ceilings));
         }
         let child = command.spawn().map_err(|_| ProcessorFailure::Unavailable)?;
         drop(block_read);
@@ -675,6 +702,33 @@ fn apply_process_limits(ceilings: FileMediaProcessCeilings) -> Result<(), rustix
     set_limit(Resource::Nofile, ceilings.file_descriptors())
 }
 
+fn prepare_sandbox_process(ceilings: FileMediaProcessCeilings) -> Result<(), std::io::Error> {
+    apply_process_limits(ceilings).map_err(std::io::Error::from)?;
+    detach_session_keyring()
+}
+
+#[allow(unsafe_code)]
+fn detach_session_keyring() -> Result<(), std::io::Error> {
+    const KEYCTL_JOIN_SESSION_KEYRING: libc::c_long = 1;
+    // SAFETY: keyctl is invoked with JOIN_SESSION_KEYRING and a null name,
+    // which creates and joins a fresh anonymous session keyring.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_keyctl,
+            KEYCTL_JOIN_SESSION_KEYRING,
+            std::ptr::null::<libc::c_char>(),
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+        )
+    };
+    if result < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 fn set_limit(resource: Resource, value: u64) -> Result<(), rustix::io::Errno> {
     rustix::process::setrlimit(
         resource,
@@ -828,7 +882,20 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
     #[cfg(not(target_arch = "x86_64"))]
     const X32_SYSCALL_BIT: Option<u32> = None;
     #[cfg(target_arch = "x86_64")]
-    let (audit_arch, clone, clone3, fork, vfork, memfd_create, shmget, msgget) = (
+    let (
+        audit_arch,
+        clone,
+        clone3,
+        fork,
+        vfork,
+        memfd_create,
+        shmget,
+        msgget,
+        semget,
+        add_key,
+        request_key,
+        keyctl,
+    ) = (
         0xc000_003e,
         56_u32,
         435_u32,
@@ -837,9 +904,26 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         319_u32,
         29_u32,
         68_u32,
+        64_u32,
+        248_u32,
+        249_u32,
+        250_u32,
     );
     #[cfg(target_arch = "aarch64")]
-    let (audit_arch, clone, clone3, fork, vfork, memfd_create, shmget, msgget) = (
+    let (
+        audit_arch,
+        clone,
+        clone3,
+        fork,
+        vfork,
+        memfd_create,
+        shmget,
+        msgget,
+        semget,
+        add_key,
+        request_key,
+        keyctl,
+    ) = (
         0xc000_00b7,
         220_u32,
         435_u32,
@@ -848,13 +932,25 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         279_u32,
         194_u32,
         186_u32,
+        190_u32,
+        217_u32,
+        218_u32,
+        219_u32,
     );
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     return Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "unsupported seccomp architecture",
     ));
-    let mut syscall_denials = vec![memfd_create, shmget, msgget];
+    let mut syscall_denials = vec![
+        memfd_create,
+        shmget,
+        msgget,
+        semget,
+        add_key,
+        request_key,
+        keyctl,
+    ];
     if let Some(fork) = fork {
         syscall_denials.push(fork);
     }
@@ -951,15 +1047,40 @@ fn validate_executable(
             ConstructionTarget::Bubblewrap => {
                 SandboxedFileMediaProcessorConstructionError::Bubblewrap
             }
-            ConstructionTarget::Worker => SandboxedFileMediaProcessorConstructionError::Worker,
         })
     }
+}
+
+fn open_worker_executable(
+    path: &Path,
+) -> Result<PinnedExecutable, SandboxedFileMediaProcessorConstructionError> {
+    if !path.is_absolute() {
+        return Err(SandboxedFileMediaProcessorConstructionError::Worker);
+    }
+    let file =
+        fs::File::open(path).map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| SandboxedFileMediaProcessorConstructionError::Worker)?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err(SandboxedFileMediaProcessorConstructionError::Worker);
+    }
+    let proc_path = PathBuf::from(format!(
+        "/proc/{}/fd/{}",
+        std::process::id(),
+        file.as_raw_fd()
+    ));
+    Ok(PinnedExecutable {
+        _file: file,
+        proc_path,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
 }
 
 #[derive(Clone, Copy)]
 enum ConstructionTarget {
     Bubblewrap,
-    Worker,
 }
 
 /// Checked sandbox configuration could not be constructed.
@@ -999,15 +1120,15 @@ impl Error for SandboxedFileMediaProcessorConstructionError {}
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, path::Path};
+    use std::{ffi::OsStr, fs, os::unix::fs::PermissionsExt as _, path::Path};
 
     use signalbox_file_media_runtime::{
         CancellationSignal, ProcessorBoundaryFailure, ProcessorFailure,
     };
 
     use super::{
-        CompletedOutput, admit_completed, sandbox_arguments, seccomp_instructions,
-        task_ceiling_is_enforceable, worker_memory_budget,
+        CompletedOutput, admit_completed, open_worker_executable, sandbox_arguments,
+        seccomp_instructions, task_ceiling_is_enforceable, worker_memory_budget,
     };
 
     struct Cancelled;
@@ -1170,6 +1291,71 @@ mod tests {
         assert_eq!(
             program.get(denial).map(|entry| entry.value),
             Some(0x0005_0001)
+        );
+    }
+
+    #[test]
+    fn descendant_filter_denies_persistent_system_v_semaphores() {
+        let program = seccomp_instructions().expect("the test architecture is supported");
+        #[cfg(target_arch = "x86_64")]
+        let semget = 64_u32;
+        #[cfg(target_arch = "aarch64")]
+        let semget = 190_u32;
+        let (index, check) = program
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.value == semget)
+            .expect("semget is checked");
+        assert_eq!(check.code, 0x15);
+        let denial = index + 1 + usize::from(check.jump_true);
+        assert_eq!(
+            program.get(denial).map(|entry| entry.value),
+            Some(0x0005_0001)
+        );
+    }
+
+    #[test]
+    fn descendant_filter_denies_kernel_key_management() {
+        let program = seccomp_instructions().expect("the test architecture is supported");
+        #[cfg(target_arch = "x86_64")]
+        let key_syscalls = [248_u32, 249_u32, 250_u32];
+        #[cfg(target_arch = "aarch64")]
+        let key_syscalls = [217_u32, 218_u32, 219_u32];
+        for syscall in key_syscalls {
+            let (index, check) = program
+                .iter()
+                .enumerate()
+                .find(|(_, entry)| entry.value == syscall)
+                .expect("key-management syscall is checked");
+            assert_eq!(check.code, 0x15);
+            let denial = index + 1 + usize::from(check.jump_true);
+            assert_eq!(
+                program.get(denial).map(|entry| entry.value),
+                Some(0x0005_0001)
+            );
+        }
+    }
+
+    #[test]
+    fn worker_executable_remains_pinned_after_path_replacement() {
+        let directory = tempfile::tempdir().expect("temporary directory is available");
+        let worker = directory.path().join("worker");
+        fs::write(&worker, b"original").expect("fixture worker is written");
+        fs::set_permissions(&worker, fs::Permissions::from_mode(0o700))
+            .expect("fixture worker is executable");
+        let pinned = open_worker_executable(&worker).expect("worker is pinned");
+        let replacement = directory.path().join("replacement");
+        fs::write(&replacement, b"replacement").expect("replacement is written");
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o700))
+            .expect("replacement is executable");
+        fs::rename(&replacement, &worker).expect("worker path is atomically replaced");
+        assert_eq!(
+            fs::read(&pinned.proc_path).expect("pinned handle remains readable"),
+            b"original"
+        );
+        assert_eq!(
+            fs::read(worker).expect("replacement path is readable"),
+            b"replacement"
         );
     }
 
