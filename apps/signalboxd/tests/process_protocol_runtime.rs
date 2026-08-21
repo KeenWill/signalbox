@@ -2425,9 +2425,11 @@ async fn abort_fleet_scheduler(
 ) -> Result<(), Box<dyn Error>> {
     scheduler.abort();
     let stopped = scheduler.await;
-    if !matches!(&stopped, Err(error) if error.is_cancelled()) {
+    if !matches!(&stopped, Ok(SchedulerLoopExit::Shutdown))
+        && !matches!(&stopped, Err(error) if error.is_cancelled())
+    {
         return Err(io::Error::other(format!(
-            "the fleet scheduler must stop by cancellation: {stopped:?}"
+            "the fleet scheduler must stop by cancellation or fatal-driven shutdown: {stopped:?}"
         ))
         .into());
     }
