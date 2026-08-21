@@ -77,9 +77,7 @@ impl WebHttpConfiguration {
                 .parse()
                 .map_err(|_| WebHttpConfigurationError::InvalidBindAddress)?,
         };
-        if !bind_address.ip().is_loopback() {
-            return Err(WebHttpConfigurationError::NonLoopbackBindUnsupported);
-        }
+        validate_loopback_bind_address(bind_address)?;
         let asset_root = match asset_root {
             None => None,
             Some(value) if value.is_empty() => {
@@ -93,13 +91,16 @@ impl WebHttpConfiguration {
         })
     }
 
-    /// Creates explicit configuration for a deterministic or embedded server.
-    #[must_use]
-    pub fn new(bind_address: SocketAddr, asset_root: Option<PathBuf>) -> Self {
-        Self {
+    /// Creates explicit loopback-only configuration for a deterministic or embedded server.
+    pub fn new(
+        bind_address: SocketAddr,
+        asset_root: Option<PathBuf>,
+    ) -> Result<Self, WebHttpConfigurationError> {
+        validate_loopback_bind_address(bind_address)?;
+        Ok(Self {
             bind_address,
             asset_root,
-        }
+        })
     }
 
     /// Address the listener binds.
@@ -112,6 +113,16 @@ impl WebHttpConfiguration {
     #[must_use]
     pub fn asset_root(&self) -> Option<&PathBuf> {
         self.asset_root.as_ref()
+    }
+}
+
+fn validate_loopback_bind_address(
+    bind_address: SocketAddr,
+) -> Result<(), WebHttpConfigurationError> {
+    if bind_address.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(WebHttpConfigurationError::NonLoopbackBindUnsupported)
     }
 }
 
@@ -253,14 +264,15 @@ fn bootstrap_only_router(asset_root: Option<PathBuf>) -> Router {
 
 fn same_origin_router(asset_root: Option<PathBuf>, api: Router) -> Router {
     let router = Router::new().nest("/api", api);
-    match asset_root {
+    let router = match asset_root {
         Some(root) => router.fallback_service(
             ServeDir::new(root.clone())
                 .append_index_html_on_directories(true)
                 .fallback(ServeFile::new(root.join("index.html"))),
         ),
         None => router.fallback(static_assets_not_configured),
-    }
+    };
+    router.layer(middleware::from_fn(validate_loopback_host))
 }
 
 /// Builds an in-memory deterministic server with no persistence dependency.
@@ -471,6 +483,33 @@ pub(crate) async fn validate_json_mutation(request: Request, next: Next) -> Resp
     next.run(request).await
 }
 
+async fn validate_loopback_host(request: Request, next: Next) -> Response {
+    if !has_literal_loopback_host(request.headers()) {
+        return transport_error(
+            StatusCode::FORBIDDEN,
+            "loopback_host_required",
+            "browser requests require a literal loopback host",
+        );
+    }
+    next.run(request).await
+}
+
+fn has_literal_loopback_host(headers: &HeaderMap) -> bool {
+    headers
+        .get(HOST)
+        .and_then(|host| host.to_str().ok())
+        .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
+        .and_then(|authority| {
+            authority
+                .host()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<IpAddr>()
+                .ok()
+        })
+        .is_some_and(|address| address.is_loopback())
+}
+
 fn has_json_content_type(headers: &HeaderMap) -> bool {
     headers
         .get(CONTENT_TYPE)
@@ -640,6 +679,17 @@ mod tests {
             error.to_string(),
             "setting SIGNALBOX_WEB_BIND must use a loopback address"
         );
+    }
+
+    #[test]
+    fn explicit_constructor_rejects_non_loopback_bind() {
+        let bind_address: SocketAddr = "0.0.0.0:8080"
+            .parse()
+            .expect("the fixture address is valid");
+        let error = WebHttpConfiguration::new(bind_address, None)
+            .expect_err("every production configuration path remains loopback-only");
+
+        assert_eq!(error, WebHttpConfigurationError::NonLoopbackBindUnsupported);
     }
 
     #[test]
@@ -881,6 +931,7 @@ mod tests {
         std::fs::write(assets.path().join("index.html"), "static fallback")
             .expect("the static index exists");
         let request = Request::get("/api/not-a-route")
+            .header(header::HOST, "127.0.0.1")
             .body(Body::empty())
             .expect("the request is valid");
         let response = bootstrap_only_router(Some(assets.path().to_path_buf()))
@@ -893,6 +944,24 @@ mod tests {
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"]["code"], "api_route_not_found");
+    }
+
+    #[tokio::test]
+    async fn production_router_rejects_non_loopback_hostnames() {
+        let request = Request::get("/api/bootstrap")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = bootstrap_only_router(None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value =
+            serde_json::from_slice(&response_body(response).await).expect("the rejection is JSON");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "loopback_host_required");
     }
 
     #[tokio::test]

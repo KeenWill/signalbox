@@ -39,6 +39,11 @@ const formatOptions: ReadonlyArray<{ value: FormatFilter; label: string }> = [
   { value: 'codex_rollout_jsonl_v1', label: 'Codex rollout · converter 1' },
 ]
 
+const isRetryableContinuationError = (error: unknown): boolean =>
+  !(error instanceof ImportReceiptCorrelationError) &&
+  (!(error instanceof ImportApiError) ||
+    ['continuation_commit_ambiguous', 'continuation_unavailable'].includes(error.detail.error.code))
+
 const byteLabel = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
@@ -64,6 +69,8 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   const [modelKind, setModelKind] = useState<ModelKind>('direct')
   const [modelSelectionId, setModelSelectionId] = useState(scenario ? SCENARIO_MODEL_SELECTION : '')
   const [pendingCommand, setPendingCommand] = useState<WebImportContinuationRequest | null>(null)
+  const queryScope = scenario ? 'scenario' : 'production'
+  const hasRetainedCommand = pendingCommand !== null
 
   const listRequest = useMemo(
     () => ({
@@ -75,7 +82,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     [after, format, sourceSession, sourceSessionFilterEnabled],
   )
   const importsQuery = useQuery({
-    queryKey: ['imports', 'catalog', listRequest],
+    queryKey: ['imports', queryScope, 'catalog', listRequest],
     queryFn: ({ signal }) => api.list(listRequest, signal),
   })
   const imports = importsQuery.data
@@ -83,41 +90,47 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
 
   useEffect(() => {
     if (
-      !selectedImport ||
-      !imports?.items.some((item) => item.imported_conversation_id === selectedImport)
+      !hasRetainedCommand &&
+      (!selectedImport ||
+        !imports?.items.some((item) => item.imported_conversation_id === selectedImport))
     ) {
       setSelectedImport(firstImport)
       setWindowRequest({ anchor: 'first', before: 0, after: IMPORT_WINDOW_RADIUS })
       setSelectedFrontier(null)
       setPositionInput('')
     }
-  }, [firstImport, imports?.items, selectedImport])
+  }, [firstImport, hasRetainedCommand, imports?.items, selectedImport])
 
   const descriptorQuery = useQuery({
-    queryKey: ['imports', selectedImport, 'descriptor'],
+    queryKey: ['imports', queryScope, selectedImport, 'descriptor'],
     queryFn: ({ signal }) => api.descriptor(selectedImport ?? '', signal),
     enabled: selectedImport !== null,
   })
   const windowQuery = useQuery({
-    queryKey: ['imports', selectedImport, 'entries', windowRequest],
+    queryKey: ['imports', queryScope, selectedImport, 'entries', windowRequest],
     queryFn: ({ signal }) => api.entries(selectedImport ?? '', windowRequest, signal),
     enabled: selectedImport !== null,
   })
   const entryWindow = windowQuery.data
-  const firstFrontier = entryWindow?.items[0]?.frontier ?? null
+  const anchorFrontier =
+    entryWindow?.items.find((entry) => entry.frontier.position === entryWindow.anchor_position)
+      ?.frontier ?? null
   const importEntryIds = useMemo(
     () => entryWindow?.items.map((entry) => entry.frontier.imported_entry_id) ?? [],
     [entryWindow?.items],
   )
 
   useEffect(() => {
-    setSelectedFrontier(firstFrontier)
-  }, [firstFrontier])
+    setSelectedFrontier(anchorFrontier)
+  }, [anchorFrontier])
 
   const continuation = useMutation({
     mutationFn: (request: WebImportContinuationRequest) =>
       api.continueImport(request.frontier.imported_conversation_id, request),
     onSuccess: () => setPendingCommand(null),
+    onError: (error) => {
+      if (!isRetryableContinuationError(error)) setPendingCommand(null)
+    },
   })
   const selectImportEntry = useCallback(
     (id: string) => {
@@ -204,6 +217,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   }
 
   const showWindow = (request: WebImportEntryWindowRequest) => {
+    if (hasRetainedCommand) return
     setWindowRequest(request)
     setSelectedFrontier(null)
   }
@@ -225,6 +239,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   }
 
   const selectImport = (importedConversationId: string) => {
+    if (hasRetainedCommand) return
     setSelectedImport(importedConversationId)
     setWindowRequest({ anchor: 'first', before: 0, after: IMPORT_WINDOW_RADIUS })
     setSelectedFrontier(null)
@@ -232,12 +247,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   }
 
   const retryableContinuationFailure =
-    continuation.isError &&
-    !(continuation.error instanceof ImportReceiptCorrelationError) &&
-    (!(continuation.error instanceof ImportApiError) ||
-      ['continuation_commit_ambiguous', 'continuation_unavailable'].includes(
-        continuation.error.detail.error.code,
-      ))
+    continuation.isError && isRetryableContinuationError(continuation.error)
 
   const continueAt = (relationship: WebImportedSessionRelationship) => {
     if (!selectedFrontier || modelSelectionId.trim().length === 0) return
@@ -464,26 +474,40 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     <button
                       type="button"
                       onClick={() => continueAt('resume')}
-                      disabled={!selectedFrontier || continuation.isPending}
+                      disabled={!selectedFrontier || continuation.isPending || hasRetainedCommand}
                     >
                       Resume
                     </button>
                     <button
                       type="button"
                       onClick={() => continueAt('fork')}
-                      disabled={!selectedFrontier || continuation.isPending}
+                      disabled={!selectedFrontier || continuation.isPending || hasRetainedCommand}
                     >
                       Fork
                     </button>
                     {retryableContinuationFailure && pendingCommand && (
-                      <button type="button" onClick={() => continuation.mutate(pendingCommand)}>
-                        Retry exact command
-                      </button>
+                      <>
+                        <button type="button" onClick={() => continuation.mutate(pendingCommand)}>
+                          Retry exact command
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPendingCommand(null)
+                            continuation.reset()
+                          }}
+                        >
+                          Abandon exact retry
+                        </button>
+                      </>
                     )}
                   </div>
-                  {retryableContinuationFailure && (
+                  {retryableContinuationFailure && pendingCommand && (
                     <p role="alert">
-                      The command identity and payload are retained for an exact retry.
+                      The exact command for import{' '}
+                      {pendingCommand.frontier.imported_conversation_id}, position{' '}
+                      {pendingCommand.frontier.position.toLocaleString()}, is retained for retry.
+                      Abandon it before selecting another import or frontier.
                     </p>
                   )}
                   {continuation.isError && !retryableContinuationFailure && (

@@ -17,16 +17,16 @@ use signalbox_application::{
 use signalbox_domain::{
     DirectModelSelection, DurableCommandId, ImportedConversationFormat, ImportedConversationId,
     ImportedSessionRelationship, ImportedSourceAttestation, ImportedSpeaker,
-    ImportedTranscriptContent, ImportedTranscriptEntryId, ImportedTranscriptFrontier,
-    ImportedTranscriptPosition, ModelAlias, ModelSelectionRequest, SessionConfigurationDefaults,
+    ImportedTranscriptEntryId, ImportedTranscriptFrontier, ImportedTranscriptPosition, ModelAlias,
+    ModelSelectionRequest, SessionConfigurationDefaults,
 };
 use signalbox_persistence::{
     conversation_import_discovery::{
         ImportedContinuationReference, ImportedConversationDescriptor,
         ImportedConversationDiscoveryError, ImportedConversationDiscoveryRepository,
         ImportedConversationDiscoveryRequestError, ImportedConversationPageRequest,
-        ImportedConversationSummary, ImportedEntryProjection, ImportedEntryWindow,
-        ImportedEntryWindowAnchor,
+        ImportedConversationSummary, ImportedEntryContentProjection, ImportedEntryProjection,
+        ImportedEntryWindow, ImportedEntryWindowAnchor, ImportedTextProjection,
     },
     create_session_from_imported_frontier::{
         ImportedSessionRepository, ImportedSessionRepositoryError,
@@ -94,10 +94,14 @@ async fn list_imports(
         Ok(after) => after.map(ImportedConversationId::from_uuid),
         Err(message) => return invalid_request(message),
     };
+    let Some(source_session_maximum_bytes) = source_session_maximum_bytes() else {
+        return invalid_import_contract();
+    };
     let query = ImportedConversationPageRequest {
         after,
         format: request.format.map(domain_format),
         source_session_id: request.source_session_id.map(String::into_bytes),
+        source_session_maximum_bytes,
         limit,
     };
     match ImportedConversationDiscoveryRepository::new(state.pool)
@@ -121,8 +125,11 @@ async fn read_descriptor(
         Ok(conversation) => conversation,
         Err(message) => return invalid_request(message),
     };
+    let Some(source_session_maximum_bytes) = source_session_maximum_bytes() else {
+        return invalid_import_contract();
+    };
     match ImportedConversationDiscoveryRepository::new(state.pool)
-        .descriptor(conversation)
+        .descriptor(conversation, source_session_maximum_bytes)
         .await
     {
         Ok(Some(descriptor)) => Json(web_descriptor(descriptor)).into_response(),
@@ -166,8 +173,21 @@ async fn read_entry_window(
             "imported entry-window contract is invalid",
         );
     };
+    let Some(maximum_text_bytes) = u32::try_from(MAX_IMPORT_TEXT_PREVIEW_BYTES)
+        .ok()
+        .and_then(NonZeroU32::new)
+    else {
+        return invalid_import_contract();
+    };
     match ImportedConversationDiscoveryRepository::new(state.pool)
-        .entry_window(conversation, anchor, before, after, maximum_items)
+        .entry_window(
+            conversation,
+            anchor,
+            before,
+            after,
+            maximum_items,
+            maximum_text_bytes,
+        )
         .await
     {
         Ok(Some(window)) => Json(web_entry_window(window)).into_response(),
@@ -327,7 +347,7 @@ fn web_summary(summary: ImportedConversationSummary) -> WebImportSummary {
         imported_conversation_id: summary.conversation.into_uuid().to_string(),
         display_title: summary.display_title.map(|title| title.into_string()),
         format: web_format(summary.format),
-        source_session_id: summary.source_session_id.map(bounded_source_session),
+        source_session_id: summary.source_session_id.map(web_source_session),
         entry_count: summary.entry_count,
     }
 }
@@ -341,7 +361,7 @@ fn web_descriptor(descriptor: ImportedConversationDescriptor) -> WebImportDescri
         source: WebImportSourceEvidence {
             format: web_format(descriptor.format),
             source_digest_sha256: lowercase_hex(&descriptor.source_digest),
-            source_session_id: descriptor.source_session_id.map(bounded_source_session),
+            source_session_id: descriptor.source_session_id.map(web_source_session),
         },
         sizes: WebImportSizeFacts {
             raw_source_bytes: descriptor.sizes.raw_source_bytes,
@@ -388,64 +408,50 @@ fn web_entry(entry: ImportedEntryProjection) -> WebImportedEntry {
 }
 
 fn web_content(
-    content: &ImportedTranscriptContent,
+    content: &ImportedEntryContentProjection,
 ) -> (WebImportedContentKind, Option<WebImportTextEvidence>) {
     match content {
-        ImportedTranscriptContent::SourceEvent { .. } => {
-            (WebImportedContentKind::SourceEvent, None)
-        }
-        ImportedTranscriptContent::SourceMessageBlock { .. } => {
+        ImportedEntryContentProjection::SourceEvent => (WebImportedContentKind::SourceEvent, None),
+        ImportedEntryContentProjection::SourceMessageBlock => {
             (WebImportedContentKind::SourceMessageBlock, None)
         }
-        ImportedTranscriptContent::Text(text) => (
+        ImportedEntryContentProjection::Text(text) => (
             WebImportedContentKind::Text,
             Some(match text {
                 ImportedSourceAttestation::NotAttested => WebImportTextEvidence::NotAttested,
                 ImportedSourceAttestation::AttestedAbsent => WebImportTextEvidence::AttestedAbsent,
-                ImportedSourceAttestation::Attested(text) => {
-                    let (leading_text, completeness) = bounded_text(text.as_str());
-                    WebImportTextEvidence::Attested {
-                        leading_text,
-                        completeness,
-                    }
-                }
+                ImportedSourceAttestation::Attested(text) => WebImportTextEvidence::Attested {
+                    leading_text: text.leading_text.clone(),
+                    completeness: web_completeness(text.complete),
+                },
             }),
         ),
-        ImportedTranscriptContent::ToolCall { .. } => (WebImportedContentKind::ToolCall, None),
-        ImportedTranscriptContent::ToolResult { .. } => (WebImportedContentKind::ToolResult, None),
-        ImportedTranscriptContent::Thinking { .. } => (WebImportedContentKind::Thinking, None),
-        ImportedTranscriptContent::RedactedThinking { .. } => {
+        ImportedEntryContentProjection::ToolCall => (WebImportedContentKind::ToolCall, None),
+        ImportedEntryContentProjection::ToolResult => (WebImportedContentKind::ToolResult, None),
+        ImportedEntryContentProjection::Thinking => (WebImportedContentKind::Thinking, None),
+        ImportedEntryContentProjection::RedactedThinking => {
             (WebImportedContentKind::RedactedThinking, None)
         }
-        ImportedTranscriptContent::Document { .. } => (WebImportedContentKind::Document, None),
-        ImportedTranscriptContent::MessageContentAbsent(_) => {
+        ImportedEntryContentProjection::Document => (WebImportedContentKind::Document, None),
+        ImportedEntryContentProjection::MessageContentAbsent => {
             (WebImportedContentKind::MessageContentAbsent, None)
         }
     }
 }
 
-fn bounded_text(text: &str) -> (String, WebImportTextCompleteness) {
-    bounded_utf8(text, MAX_IMPORT_TEXT_PREVIEW_BYTES)
-}
-
-fn bounded_source_session(source_session_id: String) -> WebImportSourceSessionEvidence {
-    let (leading_text, completeness) =
-        bounded_utf8(&source_session_id, MAX_IMPORT_SOURCE_SESSION_BYTES);
+fn web_source_session(source_session_id: ImportedTextProjection) -> WebImportSourceSessionEvidence {
     WebImportSourceSessionEvidence {
-        leading_text,
-        completeness,
+        leading_text: source_session_id.leading_text,
+        completeness: web_completeness(source_session_id.complete),
     }
 }
 
-fn bounded_utf8(text: &str, maximum_bytes: usize) -> (String, WebImportTextCompleteness) {
-    if text.len() <= maximum_bytes {
-        return (text.to_owned(), WebImportTextCompleteness::Complete);
+fn web_completeness(complete: bool) -> WebImportTextCompleteness {
+    if complete {
+        WebImportTextCompleteness::Complete
+    } else {
+        WebImportTextCompleteness::Truncated
     }
-    let mut end = maximum_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (text[..end].to_owned(), WebImportTextCompleteness::Truncated)
 }
 
 fn web_frontier(frontier: ImportedContinuationReference) -> WebImportContinuationReference {
@@ -584,6 +590,20 @@ fn imported_session_error(error: ImportedSessionRepositoryError) -> Response {
     }
 }
 
+fn source_session_maximum_bytes() -> Option<NonZeroU32> {
+    u32::try_from(MAX_IMPORT_SOURCE_SESSION_BYTES)
+        .ok()
+        .and_then(NonZeroU32::new)
+}
+
+fn invalid_import_contract() -> Response {
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "invalid_import_contract",
+        "imported discovery contract is invalid",
+    )
+}
+
 fn invalid_request(message: &'static str) -> Response {
     transport_error(StatusCode::BAD_REQUEST, "invalid_import_request", message)
 }
@@ -609,32 +629,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn imported_text_preview_truncates_on_a_utf8_scalar_boundary() {
+    fn imported_text_projection_preserves_truncated_utf8_evidence() {
         let expected = "€".repeat(MAX_IMPORT_TEXT_PREVIEW_BYTES / "€".len());
-        let source = "€".repeat(MAX_IMPORT_TEXT_PREVIEW_BYTES);
+        let content = ImportedEntryContentProjection::Text(ImportedSourceAttestation::Attested(
+            ImportedTextProjection {
+                leading_text: expected.clone(),
+                complete: false,
+            },
+        ));
 
         assert_eq!(
-            bounded_text(&source),
-            (expected, WebImportTextCompleteness::Truncated)
+            web_content(&content),
+            (
+                WebImportedContentKind::Text,
+                Some(WebImportTextEvidence::Attested {
+                    leading_text: expected,
+                    completeness: WebImportTextCompleteness::Truncated,
+                }),
+            )
         );
     }
 
     #[test]
-    fn imported_text_preview_marks_a_complete_value() {
+    fn imported_text_projection_marks_a_complete_value() {
         let source = "complete imported text";
+        let content = ImportedEntryContentProjection::Text(ImportedSourceAttestation::Attested(
+            ImportedTextProjection {
+                leading_text: source.to_owned(),
+                complete: true,
+            },
+        ));
 
         assert_eq!(
-            bounded_text(source),
-            (source.to_owned(), WebImportTextCompleteness::Complete)
+            web_content(&content),
+            (
+                WebImportedContentKind::Text,
+                Some(WebImportTextEvidence::Attested {
+                    leading_text: source.to_owned(),
+                    completeness: WebImportTextCompleteness::Complete,
+                }),
+            )
         );
     }
 
     #[test]
-    fn source_session_preview_is_bounded_on_a_utf8_scalar_boundary() {
-        let source = "€".repeat(MAX_IMPORT_SOURCE_SESSION_BYTES);
-        let evidence = bounded_source_session(source);
+    fn source_session_projection_preserves_bounded_evidence() {
+        let leading_text = "€".repeat(MAX_IMPORT_SOURCE_SESSION_BYTES / "€".len());
+        let evidence = web_source_session(ImportedTextProjection {
+            leading_text: leading_text.clone(),
+            complete: false,
+        });
 
-        assert!(evidence.leading_text.len() <= MAX_IMPORT_SOURCE_SESSION_BYTES);
+        assert_eq!(evidence.leading_text, leading_text);
         assert_eq!(evidence.completeness, WebImportTextCompleteness::Truncated);
     }
 

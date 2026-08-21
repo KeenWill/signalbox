@@ -2378,6 +2378,8 @@ async fn imported_discovery_pages_stay_stable_under_concurrent_additions()
             after: None,
             format: None,
             source_session_id: None,
+            source_session_maximum_bytes: NonZeroU32::new(512)
+                .ok_or("source-session fixture bound must be nonzero")?,
             limit: page_limit,
         })
         .await?;
@@ -2398,6 +2400,8 @@ async fn imported_discovery_pages_stay_stable_under_concurrent_additions()
             after: first_page.next_after,
             format: None,
             source_session_id: None,
+            source_session_maximum_bytes: NonZeroU32::new(512)
+                .ok_or("source-session fixture bound must be nonzero")?,
             limit: page_limit,
         })
         .await?;
@@ -2437,13 +2441,19 @@ async fn imported_discovery_describes_and_windows_without_complete_reconstitutio
     importer.execute(source.as_bytes()).await?;
     let discovery = ImportedConversationDiscoveryRepository::new(pool.clone());
     let descriptor = discovery
-        .descriptor(conversation)
+        .descriptor(
+            conversation,
+            NonZeroU32::new(512).ok_or("source-session fixture bound must be nonzero")?,
+        )
         .await?
         .ok_or("descriptor fixture import must exist")?;
 
     assert_eq!(descriptor.conversation, conversation);
     assert_eq!(
-        descriptor.source_session_id.as_deref(),
+        descriptor
+            .source_session_id
+            .as_ref()
+            .map(|evidence| evidence.leading_text.as_str()),
         Some("discovery-source")
     );
     assert_eq!(descriptor.raw_record_count, 3);
@@ -2465,6 +2475,7 @@ async fn imported_discovery_describes_and_windows_without_complete_reconstitutio
             1,
             1,
             maximum_items,
+            NonZeroU32::new(512).ok_or("entry-text fixture bound must be nonzero")?,
         )
         .await?
         .ok_or("window fixture import must exist")?;

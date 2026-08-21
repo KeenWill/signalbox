@@ -8,17 +8,13 @@ use std::{error::Error, fmt, num::NonZeroU32};
 use rust_decimal::Decimal;
 use signalbox_domain::{
     ImportedConversationDisplayTitle, ImportedConversationFormat, ImportedConversationId,
-    ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptContent,
-    ImportedTranscriptEntryId,
+    ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptEntryId,
 };
 use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid};
 
-use crate::{
-    conversation_import::{
-        DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING, DISPLAY_TITLE_STATE_UNDERIVABLE,
-        decode_format, decode_source_speaker, encode_format, positive_u64,
-    },
-    conversation_import_codec::decode_content,
+use crate::conversation_import::{
+    DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING, DISPLAY_TITLE_STATE_UNDERIVABLE,
+    decode_format, decode_source_speaker, encode_format, positive_u64,
 };
 
 /// Exact filters and exclusive keyset position for one imports page.
@@ -30,8 +26,19 @@ pub struct ImportedConversationPageRequest {
     pub format: Option<ImportedConversationFormat>,
     /// Exact converter-attested source-session identifier bytes.
     pub source_session_id: Option<Vec<u8>>,
+    /// Maximum source-session evidence bytes projected per returned row.
+    pub source_session_maximum_bytes: NonZeroU32,
     /// Requested nonzero row count.
     pub limit: NonZeroU32,
+}
+
+/// One byte-bounded UTF-8 evidence projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportedTextProjection {
+    /// Leading complete UTF-8 scalar values within the requested byte bound.
+    pub leading_text: String,
+    /// Whether the projection contains the complete stored value.
+    pub complete: bool,
 }
 
 /// One row in a bounded imports page.
@@ -43,8 +50,8 @@ pub struct ImportedConversationSummary {
     pub display_title: Option<ImportedConversationDisplayTitle>,
     /// Exact source/converter interpretation.
     pub format: ImportedConversationFormat,
-    /// Exact consistent source-session evidence.
-    pub source_session_id: Option<String>,
+    /// Byte-bounded consistent source-session evidence.
+    pub source_session_id: Option<ImportedTextProjection>,
     /// Declared normalized entry count.
     pub entry_count: u64,
 }
@@ -91,8 +98,8 @@ pub struct ImportedConversationDescriptor {
     pub format: ImportedConversationFormat,
     /// SHA-256 source digest.
     pub source_digest: [u8; 32],
-    /// Exact consistent source-session evidence.
-    pub source_session_id: Option<String>,
+    /// Byte-bounded consistent source-session evidence.
+    pub source_session_id: Option<ImportedTextProjection>,
     /// Declared raw-record count.
     pub raw_record_count: u64,
     /// Declared normalized entry count.
@@ -127,8 +134,31 @@ pub struct ImportedEntryProjection {
     pub record_entry_position: u64,
     /// Source speaker evidence.
     pub source_speaker: ImportedSourceAttestation<ImportedSpeaker>,
-    /// Source-neutral normalized content.
-    pub content: ImportedTranscriptContent,
+    /// Byte-bounded browser discovery content facts.
+    pub content: ImportedEntryContentProjection,
+}
+
+/// Browser discovery facts decoded from a byte-bounded stored-content projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ImportedEntryContentProjection {
+    /// A source event whose potentially large details are not projected.
+    SourceEvent,
+    /// Text attestation with a byte-bounded UTF-8 projection.
+    Text(ImportedSourceAttestation<ImportedTextProjection>),
+    /// A tool call whose potentially large details are not projected.
+    ToolCall,
+    /// A tool result whose potentially large details are not projected.
+    ToolResult,
+    /// Thinking whose potentially large details are not projected.
+    Thinking,
+    /// Redacted thinking whose potentially large details are not projected.
+    RedactedThinking,
+    /// A document whose potentially large details are not projected.
+    Document,
+    /// An explicit message-content absence.
+    MessageContentAbsent,
+    /// A source message block whose potentially large details are not projected.
+    SourceMessageBlock,
 }
 
 /// One bounded imported-entry window.
@@ -288,8 +318,10 @@ impl ImportedConversationDiscoveryRepository {
             });
         let rows = sqlx::query(
             "SELECT imported_conversation_id, source_format, converter_version,
-                    source_session_id, declared_entry_count,
-                    display_title, display_title_state
+                    substring(source_session_id FROM 1 FOR $6) AS source_session_prefix,
+                    octet_length(source_session_id)::bigint AS source_session_bytes,
+                    $6::bigint AS source_session_maximum_bytes,
+                    declared_entry_count, display_title, display_title_state
                FROM imported_conversation
               WHERE ($1::uuid IS NULL OR imported_conversation_id > $1)
                 AND ($2::text IS NULL OR source_format = $2)
@@ -303,6 +335,7 @@ impl ImportedConversationDiscoveryRepository {
         .bind(converter_version)
         .bind(request.source_session_id)
         .bind(i64::from(request.limit.get()) + 1)
+        .bind(i64::from(request.source_session_maximum_bytes.get()) + 3)
         .fetch_all(&self.pool)
         .await?;
         let mut items = rows
@@ -325,11 +358,16 @@ impl ImportedConversationDiscoveryRepository {
     pub async fn descriptor(
         &self,
         conversation: ImportedConversationId,
+        source_session_maximum_bytes: NonZeroU32,
     ) -> Result<Option<ImportedConversationDescriptor>, ImportedConversationDiscoveryError> {
         let row = sqlx::query(
             "SELECT imported.imported_conversation_id, imported.source_format,
                     imported.converter_version, imported.source_digest,
-                    imported.source_session_id, imported.declared_raw_record_count,
+                    substring(imported.source_session_id FROM 1 FOR $2)
+                        AS source_session_prefix,
+                    octet_length(imported.source_session_id)::bigint AS source_session_bytes,
+                    $2::bigint AS source_session_maximum_bytes,
+                    imported.declared_raw_record_count,
                     imported.declared_entry_count, imported.display_title,
                     imported.display_title_state,
                     (SELECT COALESCE(SUM(octet_length(blob.raw_bytes)), 0)::numeric
@@ -371,6 +409,7 @@ impl ImportedConversationDiscoveryRepository {
               WHERE imported.imported_conversation_id = $1",
         )
         .bind(conversation.into_uuid())
+        .bind(i64::from(source_session_maximum_bytes.get()) + 3)
         .fetch_optional(&self.pool)
         .await?;
         row.map(|row| decode_descriptor(&row)).transpose()
@@ -384,6 +423,7 @@ impl ImportedConversationDiscoveryRepository {
         before: u32,
         after: u32,
         maximum_items: NonZeroU32,
+        maximum_text_bytes: NonZeroU32,
     ) -> Result<Option<ImportedEntryWindow>, ImportedConversationDiscoveryError> {
         let count: Option<Decimal> = sqlx::query_scalar(
             "SELECT declared_entry_count
@@ -415,8 +455,14 @@ impl ImportedConversationDiscoveryRepository {
         }
         let rows = sqlx::query(
             "SELECT imported_entry_position, imported_transcript_entry_id,
-                    raw_record_position, record_entry_position,
-                    source_speaker_kind, content_encoding
+                    raw_record_position, record_entry_position, source_speaker_kind,
+                    substring(content_encoding FROM 1 FOR 12) AS content_header,
+                    CASE WHEN get_byte(content_encoding, 2) = 1
+                              AND get_byte(content_encoding, 3) = 2
+                         THEN substring(content_encoding FROM 13 FOR $4) END
+                         AS content_text_prefix,
+                    octet_length(content_encoding)::bigint AS content_bytes,
+                    $4::bigint AS content_projected_bytes
                FROM imported_transcript_entry
               WHERE imported_conversation_id = $1
                 AND imported_entry_position BETWEEN $2 AND $3
@@ -425,6 +471,7 @@ impl ImportedConversationDiscoveryRepository {
         .bind(conversation.into_uuid())
         .bind(Decimal::from(first_position))
         .bind(Decimal::from(last_position))
+        .bind(i64::from(maximum_text_bytes.get()) + 3)
         .fetch_all(&self.pool)
         .await?;
         let items = rows
@@ -541,9 +588,7 @@ fn decode_entry(
     let source_speaker_kind: String = row.try_get("source_speaker_kind")?;
     let source_speaker = decode_source_speaker(&source_speaker_kind)
         .map_err(|_| ImportedConversationDiscoveryCorruption::Unsupported("source speaker"))?;
-    let content_encoding: Vec<u8> = row.try_get("content_encoding")?;
-    let content = decode_content(&content_encoding)
-        .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
+    let content = checked_content_projection(row)?;
     Ok(ImportedEntryProjection {
         frontier: ImportedContinuationReference {
             conversation,
@@ -560,6 +605,60 @@ fn decode_entry(
         source_speaker,
         content,
     })
+}
+
+fn checked_content_projection(
+    row: &PgRow,
+) -> Result<ImportedEntryContentProjection, ImportedConversationDiscoveryError> {
+    let header: Vec<u8> = row.try_get("content_header")?;
+    let total_bytes: i64 = row.try_get("content_bytes")?;
+    let projected_bytes: i64 = row.try_get("content_projected_bytes")?;
+    if header.len() < 3 || !matches!(header[0], 1 | 2) || header[1] != 1 || total_bytes < 3 {
+        return Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into());
+    }
+    match header[2] {
+        0 => Ok(ImportedEntryContentProjection::SourceEvent),
+        1 => checked_text_projection(&header, row, total_bytes, projected_bytes)
+            .map(ImportedEntryContentProjection::Text),
+        2 => Ok(ImportedEntryContentProjection::ToolCall),
+        3 => Ok(ImportedEntryContentProjection::ToolResult),
+        4 => Ok(ImportedEntryContentProjection::Thinking),
+        5 => Ok(ImportedEntryContentProjection::RedactedThinking),
+        6 => Ok(ImportedEntryContentProjection::Document),
+        7 if header.get(3).is_some_and(|tag| *tag <= 4) && total_bytes == 4 => {
+            Ok(ImportedEntryContentProjection::MessageContentAbsent)
+        }
+        8 => Ok(ImportedEntryContentProjection::SourceMessageBlock),
+        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
+    }
+}
+
+fn checked_text_projection(
+    header: &[u8],
+    row: &PgRow,
+    total_bytes: i64,
+    projected_bytes: i64,
+) -> Result<ImportedSourceAttestation<ImportedTextProjection>, ImportedConversationDiscoveryError> {
+    match header.get(3) {
+        Some(0) if total_bytes == 4 => Ok(ImportedSourceAttestation::NotAttested),
+        Some(1) if total_bytes == 4 => Ok(ImportedSourceAttestation::AttestedAbsent),
+        Some(2) if header.len() == 12 => {
+            let declared_bytes = u64::from_be_bytes(
+                header[4..12]
+                    .try_into()
+                    .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?,
+            );
+            let declared_bytes = i64::try_from(declared_bytes)
+                .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
+            if total_bytes.checked_sub(12) != Some(declared_bytes) {
+                return Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into());
+            }
+            let prefix: Vec<u8> = row.try_get("content_text_prefix")?;
+            bounded_utf8_projection(prefix, declared_bytes, projected_bytes, "entry text")
+                .map(ImportedSourceAttestation::Attested)
+        }
+        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
+    }
 }
 
 fn checked_format(
@@ -594,12 +693,55 @@ fn checked_display_title(
 
 fn checked_source_session_id(
     row: &PgRow,
-) -> Result<Option<String>, ImportedConversationDiscoveryError> {
-    let value: Option<Vec<u8>> = row.try_get("source_session_id")?;
-    value
-        .map(String::from_utf8)
-        .transpose()
-        .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidUtf8("source session").into())
+) -> Result<Option<ImportedTextProjection>, ImportedConversationDiscoveryError> {
+    let prefix: Option<Vec<u8>> = row.try_get("source_session_prefix")?;
+    let total_bytes: Option<i64> = row.try_get("source_session_bytes")?;
+    let projected_bytes: i64 = row.try_get("source_session_maximum_bytes")?;
+    match (prefix, total_bytes) {
+        (None, None) => Ok(None),
+        (Some(prefix), Some(total_bytes)) => {
+            bounded_utf8_projection(prefix, total_bytes, projected_bytes, "source session")
+                .map(Some)
+        }
+        _ => Err(ImportedConversationDiscoveryCorruption::Inconsistent(
+            "source-session projection",
+        )
+        .into()),
+    }
+}
+
+fn bounded_utf8_projection(
+    prefix: Vec<u8>,
+    total_bytes: i64,
+    projected_bytes: i64,
+    field: &'static str,
+) -> Result<ImportedTextProjection, ImportedConversationDiscoveryError> {
+    let total_bytes = usize::try_from(total_bytes)
+        .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidOrdinal(field))?;
+    let projected_bytes = usize::try_from(projected_bytes)
+        .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidOrdinal(field))?;
+    let maximum_bytes = projected_bytes.checked_sub(3).ok_or(
+        ImportedConversationDiscoveryCorruption::InvalidOrdinal(field),
+    )?;
+    if prefix.len() < total_bytes.min(projected_bytes) {
+        return Err(ImportedConversationDiscoveryCorruption::Inconsistent(
+            "bounded UTF-8 projection",
+        )
+        .into());
+    }
+    let candidate = &prefix[..prefix.len().min(maximum_bytes)];
+    let end = match std::str::from_utf8(candidate) {
+        Ok(_) => candidate.len(),
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        Err(_) => return Err(ImportedConversationDiscoveryCorruption::InvalidUtf8(field).into()),
+    };
+    let leading_text = std::str::from_utf8(&candidate[..end])
+        .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidUtf8(field))?
+        .to_owned();
+    Ok(ImportedTextProjection {
+        leading_text,
+        complete: total_bytes <= maximum_bytes,
+    })
 }
 
 fn positive(

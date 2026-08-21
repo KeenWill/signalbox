@@ -425,9 +425,19 @@ kbd {
   .imports-workspace {
     grid-template-rows: 49px minmax(210px, 0.8fr) minmax(330px, 1.2fr);
   }
-  .imports-filters label,
-  .window-controls label {
-    display: none;
+  .imports-catalog,
+  .import-inspector {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .imports-catalog-header,
+  .import-inspector-header {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 0.45rem 0.55rem;
+  }
+  .imports-filters,
+  .window-controls {
+    flex-wrap: wrap;
   }
   .import-inspector-body {
     grid-template-columns: minmax(0, 1fr);
