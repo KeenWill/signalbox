@@ -58,6 +58,12 @@ impl FileMediaRegistry {
         if !providers.is_empty() && isolation == ProcessorIsolation::Unavailable {
             return Err(FileMediaRegistryConstructionError::IsolationUnavailable);
         }
+        if providers
+            .iter()
+            .any(|provider| provider.readers().len() > MAX_READERS_PER_PROVIDER)
+        {
+            return Err(FileMediaRegistryConstructionError::Inventory);
+        }
         providers.sort_by(|left, right| left.provider().cmp(right.provider()));
         for provider in &mut providers {
             provider.sort_readers();
@@ -73,9 +79,6 @@ impl FileMediaRegistry {
         let mut media_readers = BTreeMap::new();
         let mut streaming_text_reader = None;
         for provider in &providers {
-            if provider.readers().len() > MAX_READERS_PER_PROVIDER {
-                return Err(FileMediaRegistryConstructionError::Inventory);
-            }
             for reader in provider.readers() {
                 validate_reader(reader, ceilings)?;
                 let identity = reader.identity().clone();

@@ -571,6 +571,32 @@ fn provider_reader_inventory_is_canonically_sorted() {
 }
 
 #[test]
+fn oversized_provider_reader_inventory_is_rejected() {
+    let provider =
+        FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
+    let readers = (0..257)
+        .map(|index| {
+            let reader = format!("reader-{index:03}");
+            let owned_media_type = format!("application/x-synthetic-{index:03}");
+            reader_declaration(&provider, &reader, &owned_media_type)
+        })
+        .collect();
+    let declaration = FileMediaProviderDeclaration::try_new(provider, readers)
+        .expect("the provider constructor defers inventory limits to the registry");
+
+    let outcome = FileMediaRegistry::try_new(
+        vec![declaration],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    );
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::Inventory)
+    ));
+}
+
+#[test]
 fn read_view_source_work_above_the_compiled_ceiling_is_rejected() {
     let ceilings = FileMediaCeilings::version_one();
     let source_bytes = ceilings
