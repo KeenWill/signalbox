@@ -352,11 +352,21 @@ impl ImportedConversationDiscoveryRepository {
                       WHERE first_entry.imported_conversation_id =
                             imported.imported_conversation_id
                       ORDER BY imported_entry_position ASC LIMIT 1) AS first_entry_id,
+                    (SELECT imported_entry_position
+                       FROM imported_transcript_entry AS first_entry
+                      WHERE first_entry.imported_conversation_id =
+                            imported.imported_conversation_id
+                      ORDER BY imported_entry_position ASC LIMIT 1) AS first_entry_position,
                     (SELECT imported_transcript_entry_id
                        FROM imported_transcript_entry AS latest_entry
                       WHERE latest_entry.imported_conversation_id =
                             imported.imported_conversation_id
-                      ORDER BY imported_entry_position DESC LIMIT 1) AS latest_entry_id
+                      ORDER BY imported_entry_position DESC LIMIT 1) AS latest_entry_id,
+                    (SELECT imported_entry_position
+                       FROM imported_transcript_entry AS latest_entry
+                      WHERE latest_entry.imported_conversation_id =
+                            imported.imported_conversation_id
+                      ORDER BY imported_entry_position DESC LIMIT 1) AS latest_entry_position
                FROM imported_conversation AS imported
               WHERE imported.imported_conversation_id = $1",
         )
@@ -461,6 +471,26 @@ fn decode_descriptor(
     let entry_count = positive(row.try_get("declared_entry_count")?, "declared entry count")?;
     let first_entry: Option<Uuid> = row.try_get("first_entry_id")?;
     let latest_entry: Option<Uuid> = row.try_get("latest_entry_id")?;
+    let first_position: Option<Decimal> = row.try_get("first_entry_position")?;
+    let latest_position: Option<Decimal> = row.try_get("latest_entry_position")?;
+    let first_position = positive(
+        first_position.ok_or(ImportedConversationDiscoveryCorruption::Missing(
+            "first entry position",
+        ))?,
+        "first entry position",
+    )?;
+    let latest_position = positive(
+        latest_position.ok_or(ImportedConversationDiscoveryCorruption::Missing(
+            "latest entry position",
+        ))?,
+        "latest entry position",
+    )?;
+    if first_position != 1 || latest_position != entry_count {
+        return Err(ImportedConversationDiscoveryCorruption::Inconsistent(
+            "descriptor frontier positions",
+        )
+        .into());
+    }
     let source_digest: Vec<u8> = row.try_get("source_digest")?;
     let source_digest = source_digest
         .try_into()
@@ -492,14 +522,14 @@ fn decode_descriptor(
             entry: ImportedTranscriptEntryId::from_uuid(first_entry.ok_or(
                 ImportedConversationDiscoveryCorruption::Missing("first entry"),
             )?),
-            position: 1,
+            position: first_position,
         },
         latest: ImportedContinuationReference {
             conversation,
             entry: ImportedTranscriptEntryId::from_uuid(latest_entry.ok_or(
                 ImportedConversationDiscoveryCorruption::Missing("latest entry"),
             )?),
-            position: entry_count,
+            position: latest_position,
         },
     })
 }

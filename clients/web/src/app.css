@@ -189,6 +189,14 @@ kbd {
   width: 90px;
   min-width: 0;
 }
+.imports-filters .source-session-filter-toggle {
+  align-items: center;
+}
+.imports-filters .source-session-filter-toggle input {
+  width: 28px;
+  min-width: 28px;
+  margin: 0;
+}
 .imports-filters button,
 .window-controls button,
 .continuation-actions button {
@@ -423,9 +431,13 @@ kbd {
   }
   .import-inspector-body {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(180px, auto) minmax(260px, 1fr);
   }
   .import-evidence {
-    display: none;
+    display: block;
+    max-height: 42dvh;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
   }
   .imports-table-header,
   .imports-table-row {

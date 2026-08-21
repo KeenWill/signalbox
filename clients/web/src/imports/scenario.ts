@@ -44,7 +44,9 @@ const summaryAt = (index: number): WebImportSummary => ({
   imported_conversation_id: fixtureUuid(index + 1),
   display_title: index % 5 === 0 ? undefined : `Imported investigation ${index + 1}`,
   format: formatAt(index),
-  source_session_id: sourceSessionAt(index),
+  source_session_id: sourceSessionAt(index)
+    ? { leading_text: sourceSessionAt(index) ?? '', completeness: 'complete' }
+    : undefined,
   entry_count: index === 0 ? SCENARIO_ENTRY_TOTAL : 120 + (index % 8_000),
 })
 
@@ -60,7 +62,7 @@ const matchesFilters = (summary: WebImportSummary, request: WebImportListRequest
   (request.format === undefined || request.format === null || summary.format === request.format) &&
   (request.source_session_id === undefined ||
     request.source_session_id === null ||
-    summary.source_session_id === request.source_session_id)
+    summary.source_session_id?.leading_text === request.source_session_id)
 
 const contentKindAt = (position: number): WebImportedContentKind => {
   if (position % 17 === 0) return 'source_event'
@@ -109,7 +111,7 @@ export class ScenarioImportApi implements ImportApi {
     const requested = request.limit ?? SCENARIO_IMPORT_LIST_ITEMS
     const limit = Math.min(Math.max(Math.trunc(requested), 1), SCENARIO_IMPORT_LIST_ITEMS)
     const sourceSessionMatch = /^source-session-(\d+)$/.exec(request.source_session_id ?? '')
-    if (request.source_session_id !== undefined) {
+    if (request.source_session_id !== undefined && request.source_session_id !== null) {
       const sourceIndex = sourceSessionMatch?.[1] ? Number(sourceSessionMatch[1]) * 4 : -1
       const candidate = sourceIndex >= 0 ? summaryAt(sourceIndex) : undefined
       const afterIndex = cursorIndex(request.after)

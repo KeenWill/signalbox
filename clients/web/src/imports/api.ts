@@ -15,11 +15,12 @@ import {
 } from '../generated/web-contract.mjs'
 
 export interface ImportApi {
-  list(request: WebImportListRequest): Promise<WebImportListPage>
-  descriptor(importedConversationId: string): Promise<WebImportDescriptor>
+  list(request: WebImportListRequest, signal?: AbortSignal): Promise<WebImportListPage>
+  descriptor(importedConversationId: string, signal?: AbortSignal): Promise<WebImportDescriptor>
   entries(
     importedConversationId: string,
     request: WebImportEntryWindowRequest,
+    signal?: AbortSignal,
   ): Promise<WebImportEntryWindow>
   continueImport(
     importedConversationId: string,
@@ -34,6 +35,13 @@ export class ImportApiError extends Error {
     super(detail.error.message)
     this.name = 'ImportApiError'
     this.detail = detail
+  }
+}
+
+export class ImportReceiptCorrelationError extends Error {
+  constructor() {
+    super('continuation receipt does not correlate with its request')
+    this.name = 'ImportReceiptCorrelationError'
   }
 }
 
@@ -58,22 +66,29 @@ const queryString = (request: WebImportListRequest | WebImportEntryWindowRequest
 }
 
 export class HttpImportApi implements ImportApi {
-  async list(request: WebImportListRequest): Promise<WebImportListPage> {
-    const response = await fetch(`/api/imports/${queryString(request)}`)
+  async list(request: WebImportListRequest, signal?: AbortSignal): Promise<WebImportListPage> {
+    const response = await fetch(`/api/imports/${queryString(request)}`, { signal })
     return decodeResponse(response, decodeWebImportListPage)
   }
 
-  async descriptor(importedConversationId: string): Promise<WebImportDescriptor> {
-    const response = await fetch(`/api/imports/${encodeURIComponent(importedConversationId)}`)
+  async descriptor(
+    importedConversationId: string,
+    signal?: AbortSignal,
+  ): Promise<WebImportDescriptor> {
+    const response = await fetch(`/api/imports/${encodeURIComponent(importedConversationId)}`, {
+      signal,
+    })
     return decodeResponse(response, decodeWebImportDescriptor)
   }
 
   async entries(
     importedConversationId: string,
     request: WebImportEntryWindowRequest,
+    signal?: AbortSignal,
   ): Promise<WebImportEntryWindow> {
     const response = await fetch(
       `/api/imports/${encodeURIComponent(importedConversationId)}/entries${queryString(request)}`,
+      { signal },
     )
     return decodeResponse(response, decodeWebImportEntryWindow)
   }
@@ -90,6 +105,16 @@ export class HttpImportApi implements ImportApi {
         body: JSON.stringify(request),
       },
     )
-    return decodeResponse(response, decodeWebImportContinuationResponse)
+    const receipt = await decodeResponse(response, decodeWebImportContinuationResponse)
+    if (
+      receipt.command_id !== request.command_id ||
+      receipt.relationship !== request.relationship ||
+      receipt.frontier.imported_conversation_id !== request.frontier.imported_conversation_id ||
+      receipt.frontier.imported_entry_id !== request.frontier.imported_entry_id ||
+      receipt.frontier.position !== request.frontier.position
+    ) {
+      throw new ImportReceiptCorrelationError()
+    }
+    return receipt
   }
 }

@@ -155,7 +155,9 @@ stated where each is owned.
   configuration failure. Otherwise the runner socket uses the same private-node
   discipline but has an independent lock, identity, vocabulary, and listener.
 - `SIGNALBOX_WEB_BIND` — optional browser HTTP socket address. Absence binds
-  `127.0.0.1:37231`, keeping the listener on loopback; an explicit valid socket
+  `127.0.0.1:37231`, keeping the listener on loopback; an explicit socket must
+  also use a loopback address because this browser surface has no application
+  authentication. A non-loopback value fails configuration. A valid loopback socket
   address is the deployment's opt-in override. An invalid or non-Unicode value
   fails the `Configuration` phase without logging the value.
 - `SIGNALBOX_WEB_ASSET_ROOT` — optional path to a static production web build.

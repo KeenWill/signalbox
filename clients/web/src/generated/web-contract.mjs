@@ -466,11 +466,15 @@ const schemas = {
             "type": "string"
           },
           "source_session_id": {
-            "description": "Exact converter-attested source-session identifier, when consistent.",
-            "type": [
-              "string",
-              "null"
-            ]
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebImportSourceSessionEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Bounded converter-attested source-session evidence, when consistent."
           }
         },
         "required": [
@@ -478,6 +482,40 @@ const schemas = {
           "source_digest_sha256"
         ],
         "type": "object"
+      },
+      "WebImportSourceSessionEvidence": {
+        "additionalProperties": false,
+        "description": "Bounded projection of exact converter-attested source-session evidence.",
+        "properties": {
+          "completeness": {
+            "$ref": "#/$defs/WebImportTextCompleteness",
+            "description": "Whether the projection contains the complete identifier."
+          },
+          "leading_text": {
+            "description": "Exact leading UTF-8 text within the response ceiling.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "leading_text",
+          "completeness"
+        ],
+        "type": "object"
+      },
+      "WebImportTextCompleteness": {
+        "description": "Completeness of a bounded attested-text preview.",
+        "oneOf": [
+          {
+            "const": "complete",
+            "description": "The exact attested text fits the preview bound.",
+            "type": "string"
+          },
+          {
+            "const": "truncated",
+            "description": "Only the leading UTF-8 prefix fits the preview bound.",
+            "type": "string"
+          }
+        ]
       },
       "WebImportTimelineBounds": {
         "additionalProperties": false,
@@ -915,6 +953,25 @@ const schemas = {
           }
         ]
       },
+      "WebImportSourceSessionEvidence": {
+        "additionalProperties": false,
+        "description": "Bounded projection of exact converter-attested source-session evidence.",
+        "properties": {
+          "completeness": {
+            "$ref": "#/$defs/WebImportTextCompleteness",
+            "description": "Whether the projection contains the complete identifier."
+          },
+          "leading_text": {
+            "description": "Exact leading UTF-8 text within the response ceiling.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "leading_text",
+          "completeness"
+        ],
+        "type": "object"
+      },
       "WebImportSummary": {
         "additionalProperties": false,
         "description": "One bounded imports catalog row.",
@@ -941,11 +998,15 @@ const schemas = {
             "type": "string"
           },
           "source_session_id": {
-            "description": "Exact converter-attested source-session identifier, when consistent.",
-            "type": [
-              "string",
-              "null"
-            ]
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebImportSourceSessionEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Bounded converter-attested source-session evidence, when consistent."
           }
         },
         "required": [
@@ -954,6 +1015,21 @@ const schemas = {
           "entry_count"
         ],
         "type": "object"
+      },
+      "WebImportTextCompleteness": {
+        "description": "Completeness of a bounded attested-text preview.",
+        "oneOf": [
+          {
+            "const": "complete",
+            "description": "The exact attested text fits the preview bound.",
+            "type": "string"
+          },
+          {
+            "const": "truncated",
+            "description": "Only the leading UTF-8 prefix fits the preview bound.",
+            "type": "string"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",

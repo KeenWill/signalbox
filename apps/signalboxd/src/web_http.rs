@@ -77,6 +77,9 @@ impl WebHttpConfiguration {
                 .parse()
                 .map_err(|_| WebHttpConfigurationError::InvalidBindAddress)?,
         };
+        if !bind_address.ip().is_loopback() {
+            return Err(WebHttpConfigurationError::NonLoopbackBindUnsupported);
+        }
         let asset_root = match asset_root {
             None => None,
             Some(value) if value.is_empty() => {
@@ -119,6 +122,8 @@ pub enum WebHttpConfigurationError {
     BindAddressNotUnicode,
     /// Explicit listener setting was not a socket address.
     InvalidBindAddress,
+    /// Explicit listener setting exposed the unauthenticated browser surface.
+    NonLoopbackBindUnsupported,
     /// Explicit production asset root was empty.
     EmptyAssetRoot,
 }
@@ -138,6 +143,10 @@ impl fmt::Display for WebHttpConfigurationError {
                     "setting {WEB_BIND_ENVIRONMENT} is not a socket address"
                 )
             }
+            Self::NonLoopbackBindUnsupported => write!(
+                formatter,
+                "setting {WEB_BIND_ENVIRONMENT} must use a loopback address"
+            ),
             Self::EmptyAssetRoot => {
                 write!(formatter, "setting {WEB_ASSET_ROOT_ENVIRONMENT} is empty")
             }
@@ -606,8 +615,8 @@ mod tests {
     }
 
     #[test]
-    fn explicit_deployment_configuration_is_admitted() {
-        let bind_address: SocketAddr = "0.0.0.0:8080"
+    fn explicit_loopback_deployment_configuration_is_admitted() {
+        let bind_address: SocketAddr = "127.0.0.1:8080"
             .parse()
             .expect("the fixture address is valid");
         let asset_root = PathBuf::from("web-dist");
@@ -619,6 +628,18 @@ mod tests {
 
         assert_eq!(configuration.bind_address(), bind_address);
         assert_eq!(configuration.asset_root(), Some(&asset_root));
+    }
+
+    #[test]
+    fn non_loopback_bind_fails_closed() {
+        let error = WebHttpConfiguration::from_values(Some(OsString::from("0.0.0.0:8080")), None)
+            .expect_err("the unauthenticated browser surface remains loopback-only");
+
+        assert_eq!(error, WebHttpConfigurationError::NonLoopbackBindUnsupported);
+        assert_eq!(
+            error.to_string(),
+            "setting SIGNALBOX_WEB_BIND must use a loopback address"
+        );
     }
 
     #[test]

@@ -44,7 +44,12 @@ export type WebImportSizeFacts = {
 export type WebImportSourceEvidence = {
   readonly format: WebImportFormat;
   readonly source_digest_sha256: string;
-  readonly source_session_id?: string | null;
+  readonly source_session_id?: WebImportSourceSessionEvidence | null;
+};
+
+export type WebImportSourceSessionEvidence = {
+  readonly completeness: WebImportTextCompleteness;
+  readonly leading_text: string;
 };
 
 export type WebImportSummary = {
@@ -52,7 +57,7 @@ export type WebImportSummary = {
   readonly entry_count: number;
   readonly format: WebImportFormat;
   readonly imported_conversation_id: string;
-  readonly source_session_id?: string | null;
+  readonly source_session_id?: WebImportSourceSessionEvidence | null;
 };
 
 export type WebImportTextCompleteness = "complete" | "truncated";

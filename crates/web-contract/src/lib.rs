@@ -108,6 +108,8 @@ pub const MAX_IMPORT_LIST_ITEMS: u32 = 100;
 pub const MAX_IMPORT_ENTRY_WINDOW_ITEMS: u32 = 101;
 /// Hard safety ceiling protecting one imported text preview in UTF-8 bytes.
 pub const MAX_IMPORT_TEXT_PREVIEW_BYTES: usize = 512;
+/// Hard safety ceiling protecting source-session evidence in catalog responses.
+pub const MAX_IMPORT_SOURCE_SESSION_BYTES: usize = 512;
 
 /// Exact source format and converter interpretation for one import.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -145,10 +147,20 @@ pub struct WebImportSummary {
     pub display_title: Option<String>,
     /// Exact source format and converter interpretation.
     pub format: WebImportFormat,
-    /// Exact converter-attested source-session identifier, when consistent.
-    pub source_session_id: Option<String>,
+    /// Bounded converter-attested source-session evidence, when consistent.
+    pub source_session_id: Option<WebImportSourceSessionEvidence>,
     /// Number of normalized imported entries.
     pub entry_count: u64,
+}
+
+/// Bounded projection of exact converter-attested source-session evidence.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebImportSourceSessionEvidence {
+    /// Exact leading UTF-8 text within the response ceiling.
+    pub leading_text: String,
+    /// Whether the projection contains the complete identifier.
+    pub completeness: WebImportTextCompleteness,
 }
 
 /// One keyset page of imports.
@@ -169,8 +181,8 @@ pub struct WebImportSourceEvidence {
     pub format: WebImportFormat,
     /// SHA-256 digest of the exact ordered source records.
     pub source_digest_sha256: String,
-    /// Exact converter-attested source-session identifier, when consistent.
-    pub source_session_id: Option<String>,
+    /// Bounded converter-attested source-session evidence, when consistent.
+    pub source_session_id: Option<WebImportSourceSessionEvidence>,
 }
 
 /// Byte facts projected from immutable stored import members.

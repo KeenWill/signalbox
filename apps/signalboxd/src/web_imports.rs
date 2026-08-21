@@ -17,11 +17,10 @@ use signalbox_application::{
 use signalbox_domain::{
     DirectModelSelection, DurableCommandId, ImportedConversationFormat, ImportedConversationId,
     ImportedSessionRelationship, ImportedSourceAttestation, ImportedSpeaker,
-    ImportedTranscriptContent, ImportedTranscriptEntryId, ImportedTranscriptPosition, ModelAlias,
-    ModelSelectionRequest, SessionConfigurationDefaults,
+    ImportedTranscriptContent, ImportedTranscriptEntryId, ImportedTranscriptFrontier,
+    ImportedTranscriptPosition, ModelAlias, ModelSelectionRequest, SessionConfigurationDefaults,
 };
 use signalbox_persistence::{
-    conversation_import::{ImportedConversationRepository, ImportedConversationRepositoryError},
     conversation_import_discovery::{
         ImportedContinuationReference, ImportedConversationDescriptor,
         ImportedConversationDiscoveryError, ImportedConversationDiscoveryRepository,
@@ -34,11 +33,12 @@ use signalbox_persistence::{
     },
 };
 use signalbox_web_contract::{
-    MAX_IMPORT_ENTRY_WINDOW_ITEMS, MAX_IMPORT_LIST_ITEMS, MAX_IMPORT_TEXT_PREVIEW_BYTES,
-    WebImportContinuationReference, WebImportContinuationRequest, WebImportContinuationResponse,
-    WebImportDescriptor, WebImportEntryWindow, WebImportEntryWindowRequest, WebImportFormat,
-    WebImportListPage, WebImportListRequest, WebImportSizeFacts, WebImportSourceEvidence,
-    WebImportSummary, WebImportTextCompleteness, WebImportTextEvidence, WebImportTimelineBounds,
+    MAX_IMPORT_ENTRY_WINDOW_ITEMS, MAX_IMPORT_LIST_ITEMS, MAX_IMPORT_SOURCE_SESSION_BYTES,
+    MAX_IMPORT_TEXT_PREVIEW_BYTES, WebImportContinuationReference, WebImportContinuationRequest,
+    WebImportContinuationResponse, WebImportDescriptor, WebImportEntryWindow,
+    WebImportEntryWindowRequest, WebImportFormat, WebImportListPage, WebImportListRequest,
+    WebImportSizeFacts, WebImportSourceEvidence, WebImportSourceSessionEvidence, WebImportSummary,
+    WebImportTextCompleteness, WebImportTextEvidence, WebImportTimelineBounds,
     WebImportWindowAnchor, WebImportedContentKind, WebImportedEntry,
     WebImportedSessionRelationship, WebImportedSpeakerEvidence, WebModelSelection,
 };
@@ -280,23 +280,11 @@ async fn execute_continuation(
         }
         Err(error) => return imported_session_error(error),
     }
-    let conversation = match ImportedConversationRepository::new(state.pool.clone())
-        .load(request.conversation)
-        .await
-    {
-        Ok(Some(conversation)) => conversation,
-        Ok(None) => return import_not_found(),
-        Err(error) => return imported_conversation_error(error),
-    };
-    let Some(frontier) = conversation
-        .frontiers()
-        .find(|frontier| frontier.through_position() == request.position)
-    else {
-        return invalid_request("selected imported frontier no longer resolves");
-    };
-    if frontier.through_entry() != request.entry {
-        return invalid_request("selected imported entry identity does not match its position");
-    }
+    let frontier = ImportedTranscriptFrontier::from_parts(
+        request.conversation,
+        request.entry,
+        request.position,
+    );
     if state
         .model_configuration
         .resolve_session_model(request.model_selection)
@@ -339,7 +327,7 @@ fn web_summary(summary: ImportedConversationSummary) -> WebImportSummary {
         imported_conversation_id: summary.conversation.into_uuid().to_string(),
         display_title: summary.display_title.map(|title| title.into_string()),
         format: web_format(summary.format),
-        source_session_id: summary.source_session_id,
+        source_session_id: summary.source_session_id.map(bounded_source_session),
         entry_count: summary.entry_count,
     }
 }
@@ -353,7 +341,7 @@ fn web_descriptor(descriptor: ImportedConversationDescriptor) -> WebImportDescri
         source: WebImportSourceEvidence {
             format: web_format(descriptor.format),
             source_digest_sha256: lowercase_hex(&descriptor.source_digest),
-            source_session_id: descriptor.source_session_id,
+            source_session_id: descriptor.source_session_id.map(bounded_source_session),
         },
         sizes: WebImportSizeFacts {
             raw_source_bytes: descriptor.sizes.raw_source_bytes,
@@ -437,10 +425,23 @@ fn web_content(
 }
 
 fn bounded_text(text: &str) -> (String, WebImportTextCompleteness) {
-    if text.len() <= MAX_IMPORT_TEXT_PREVIEW_BYTES {
+    bounded_utf8(text, MAX_IMPORT_TEXT_PREVIEW_BYTES)
+}
+
+fn bounded_source_session(source_session_id: String) -> WebImportSourceSessionEvidence {
+    let (leading_text, completeness) =
+        bounded_utf8(&source_session_id, MAX_IMPORT_SOURCE_SESSION_BYTES);
+    WebImportSourceSessionEvidence {
+        leading_text,
+        completeness,
+    }
+}
+
+fn bounded_utf8(text: &str, maximum_bytes: usize) -> (String, WebImportTextCompleteness) {
+    if text.len() <= maximum_bytes {
         return (text.to_owned(), WebImportTextCompleteness::Complete);
     }
-    let mut end = MAX_IMPORT_TEXT_PREVIEW_BYTES;
+    let mut end = maximum_bytes;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
@@ -560,22 +561,6 @@ fn discovery_error(error: ImportedConversationDiscoveryError) -> Response {
     }
 }
 
-fn imported_conversation_error(error: ImportedConversationRepositoryError) -> Response {
-    match error {
-        ImportedConversationRepositoryError::Database(_) => application_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "imports_unavailable",
-            "imported conversation is temporarily unavailable",
-        ),
-        ImportedConversationRepositoryError::IdentityCollision(_)
-        | ImportedConversationRepositoryError::Corruption(_) => application_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "import_corrupt",
-            "stored imported conversation failed closed validation",
-        ),
-    }
-}
-
 fn imported_session_error(error: ImportedSessionRepositoryError) -> Response {
     match error {
         ImportedSessionRepositoryError::CommitAmbiguous(_) => application_error(
@@ -642,6 +627,15 @@ mod tests {
             bounded_text(source),
             (source.to_owned(), WebImportTextCompleteness::Complete)
         );
+    }
+
+    #[test]
+    fn source_session_preview_is_bounded_on_a_utf8_scalar_boundary() {
+        let source = "€".repeat(MAX_IMPORT_SOURCE_SESSION_BYTES);
+        let evidence = bounded_source_session(source);
+
+        assert!(evidence.leading_text.len() <= MAX_IMPORT_SOURCE_SESSION_BYTES);
+        assert_eq!(evidence.completeness, WebImportTextCompleteness::Truncated);
     }
 
     #[test]

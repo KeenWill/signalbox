@@ -56,6 +56,13 @@ describe('ScenarioImportApi', () => {
     expect(descriptor.entry_count).toBe(SCENARIO_ENTRY_TOTAL)
     expect(descriptor.timeline.first.position).toBe(1)
     expect(descriptor.timeline.latest.position).toBe(descriptor.entry_count)
-    expect(descriptor.source.source_session_id).toBe('source-session-0')
+    expect(descriptor.source.source_session_id?.leading_text).toBe('source-session-0')
+  })
+
+  it('treats a null source-session filter as no filter', async () => {
+    const api = new ScenarioImportApi()
+    const page = await api.list({ source_session_id: null, limit: 2 })
+
+    expect(page.items).toHaveLength(2)
   })
 })

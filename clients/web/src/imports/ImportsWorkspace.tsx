@@ -19,7 +19,7 @@ import type {
 import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, OverlaySurfaces } from '../Surfaces'
 import { store } from '../state'
-import type { ImportApi } from './api'
+import { type ImportApi, ImportApiError, ImportReceiptCorrelationError } from './api'
 import { ImportedEntries } from './ImportedEntries'
 import { ImportsTable } from './ImportsTable'
 import { SCENARIO_IMPORT_TOTAL } from './scenario'
@@ -49,6 +49,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   const queryClient = useQueryClient()
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
   const [sourceSession, setSourceSession] = useState('')
+  const [sourceSessionFilterEnabled, setSourceSessionFilterEnabled] = useState(false)
   const [after, setAfter] = useState<string | undefined>()
   const [selectedImport, setSelectedImport] = useState<string | null>(null)
   const [windowRequest, setWindowRequest] = useState<WebImportEntryWindowRequest>({
@@ -69,13 +70,13 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       after,
       limit: IMPORT_PAGE_ITEMS,
       format: format || undefined,
-      source_session_id: sourceSession.trim() || undefined,
+      source_session_id: sourceSessionFilterEnabled ? sourceSession : undefined,
     }),
-    [after, format, sourceSession],
+    [after, format, sourceSession, sourceSessionFilterEnabled],
   )
   const importsQuery = useQuery({
     queryKey: ['imports', 'catalog', listRequest],
-    queryFn: () => api.list(listRequest),
+    queryFn: ({ signal }) => api.list(listRequest, signal),
   })
   const imports = importsQuery.data
   const firstImport = imports?.items[0]?.imported_conversation_id ?? null
@@ -86,17 +87,20 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       !imports?.items.some((item) => item.imported_conversation_id === selectedImport)
     ) {
       setSelectedImport(firstImport)
+      setWindowRequest({ anchor: 'first', before: 0, after: IMPORT_WINDOW_RADIUS })
+      setSelectedFrontier(null)
+      setPositionInput('')
     }
   }, [firstImport, imports?.items, selectedImport])
 
   const descriptorQuery = useQuery({
     queryKey: ['imports', selectedImport, 'descriptor'],
-    queryFn: () => api.descriptor(selectedImport ?? ''),
+    queryFn: ({ signal }) => api.descriptor(selectedImport ?? '', signal),
     enabled: selectedImport !== null,
   })
   const windowQuery = useQuery({
     queryKey: ['imports', selectedImport, 'entries', windowRequest],
-    queryFn: () => api.entries(selectedImport ?? '', windowRequest),
+    queryFn: ({ signal }) => api.entries(selectedImport ?? '', windowRequest, signal),
     enabled: selectedImport !== null,
   })
   const entryWindow = windowQuery.data
@@ -206,7 +210,12 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
 
   const showPosition = () => {
     const position = Number(positionInput)
-    if (!Number.isSafeInteger(position) || position <= 0) return
+    if (
+      !Number.isSafeInteger(position) ||
+      position <= 0 ||
+      position > (descriptorQuery.data?.entry_count ?? 0)
+    )
+      return
     showWindow({
       anchor: 'position',
       position,
@@ -214,6 +223,21 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       after: Math.floor(IMPORT_WINDOW_RADIUS / 2),
     })
   }
+
+  const selectImport = (importedConversationId: string) => {
+    setSelectedImport(importedConversationId)
+    setWindowRequest({ anchor: 'first', before: 0, after: IMPORT_WINDOW_RADIUS })
+    setSelectedFrontier(null)
+    setPositionInput('')
+  }
+
+  const retryableContinuationFailure =
+    continuation.isError &&
+    !(continuation.error instanceof ImportReceiptCorrelationError) &&
+    (!(continuation.error instanceof ImportApiError) ||
+      ['continuation_commit_ambiguous', 'continuation_unavailable'].includes(
+        continuation.error.detail.error.code,
+      ))
 
   const continueAt = (relationship: WebImportedSessionRelationship) => {
     if (!selectedFrontier || modelSelectionId.trim().length === 0) return
@@ -280,6 +304,18 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     }}
                   />
                 </label>
+                <label className="source-session-filter-toggle">
+                  <span>Exact filter</span>
+                  <input
+                    aria-label="Use exact source session filter"
+                    type="checkbox"
+                    checked={sourceSessionFilterEnabled}
+                    onChange={(event) => {
+                      setSourceSessionFilterEnabled(event.target.checked)
+                      resetCatalog()
+                    }}
+                  />
+                </label>
                 <button type="button" disabled={!after} onClick={() => setAfter(undefined)}>
                   First page
                 </button>
@@ -302,7 +338,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
               <ImportsTable
                 rows={imports.items}
                 selectedId={selectedImport}
-                onSelect={setSelectedImport}
+                onSelect={selectImport}
               />
             )}
           </section>
@@ -359,7 +395,16 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     </div>
                     <div>
                       <dt>Source session</dt>
-                      <dd>{descriptorQuery.data.source.source_session_id ?? 'Not attested'}</dd>
+                      <dd>
+                        {descriptorQuery.data.source.source_session_id
+                          ? `${descriptorQuery.data.source.source_session_id.leading_text}${
+                              descriptorQuery.data.source.source_session_id.completeness ===
+                              'truncated'
+                                ? '…'
+                                : ''
+                            }`
+                          : 'Not attested'}
+                      </dd>
                     </div>
                     <div>
                       <dt>Source digest</dt>
@@ -430,15 +475,20 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     >
                       Fork
                     </button>
-                    {continuation.isError && pendingCommand && (
+                    {retryableContinuationFailure && pendingCommand && (
                       <button type="button" onClick={() => continuation.mutate(pendingCommand)}>
                         Retry exact command
                       </button>
                     )}
                   </div>
-                  {continuation.isError && (
+                  {retryableContinuationFailure && (
                     <p role="alert">
                       The command identity and payload are retained for an exact retry.
+                    </p>
+                  )}
+                  {continuation.isError && !retryableContinuationFailure && (
+                    <p role="alert">
+                      The continuation request was rejected and cannot be retried unchanged.
                     </p>
                   )}
                   {continuation.data && (
@@ -452,11 +502,18 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                 <div className="import-window-summary">
                   <span>Imported source evidence</span>
                   <small>
-                    {entryWindow
-                      ? `${entryWindow.first_position.toLocaleString()}–${entryWindow.last_position.toLocaleString()} · ${entryWindow.items.length} loaded`
-                      : 'Loading window…'}
+                    {windowQuery.isError
+                      ? 'Entry window unavailable'
+                      : entryWindow
+                        ? `${entryWindow.first_position.toLocaleString()}–${entryWindow.last_position.toLocaleString()} · ${entryWindow.items.length} loaded`
+                        : 'Loading window…'}
                   </small>
                 </div>
+                {windowQuery.isError && (
+                  <p className="imports-state" role="alert">
+                    The selected imported-entry window could not be loaded.
+                  </p>
+                )}
                 {entryWindow && (
                   <ImportedEntries
                     entries={entryWindow.items}

@@ -2353,7 +2353,13 @@ async fn imported_discovery_pages_stay_stable_under_concurrent_additions()
     let ahead_of_cursor = ImportedConversationId::from_uuid(Uuid::from_u128(0x400));
     let page_limit = NonZeroU32::new(2).ok_or("page fixture limit must be nonzero")?;
     let mut importer = ImportConversationService::new(
-        FixedIds::new(&[0x100, 0x300, 0x500, 0x200, 0x400], 0x1000..0x1005),
+        FixedIds::for_conversations([
+            first_conversation,
+            second_conversation,
+            third_conversation,
+            behind_cursor,
+            ahead_of_cursor,
+        ]),
         ClaudeCodeJsonlConverter,
         ImportedConversationRepository::new(pool.clone()),
     );
@@ -2424,7 +2430,7 @@ async fn imported_discovery_describes_and_windows_without_complete_reconstitutio
          {{\"sessionId\":\"discovery-source\",\"type\":\"user\",\"message\":{{\"content\":\"{THIRD_TEXT}\"}}}}"
     );
     let mut importer = ImportConversationService::new(
-        FixedIds::new(&[0x900], 0x901..0x904),
+        FixedIds::for_conversations([conversation]),
         ClaudeCodeJsonlConverter,
         ImportedConversationRepository::new(pool.clone()),
     );
