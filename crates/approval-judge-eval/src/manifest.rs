@@ -7,7 +7,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -27,21 +27,99 @@ const MAX_PORTABLE_PATH_COMPONENT_UNITS: usize = 255;
 const MAX_BLOB_STORE_BYTES: usize = 64;
 
 /// A self-describing, portable corpus registration document.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CorpusManifest {
     /// Manifest representation version.
-    pub manifest_version: u32,
+    manifest_version: u32,
     /// Stable suite name.
-    pub name: String,
+    name: String,
     /// Corpus release chosen by its author.
-    pub version: String,
+    version: String,
     /// Version of the referenced case representation.
-    pub corpus_format_version: u32,
+    corpus_format_version: u32,
     /// Location and origin of the case content.
-    pub case_source: ManifestCaseSource,
+    case_source: ManifestCaseSource,
     /// Digests that bind the manifest to its logical and serialized content.
-    pub integrity: CorpusIntegrity,
+    integrity: CorpusIntegrity,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCorpusManifest {
+    manifest_version: u32,
+    name: String,
+    version: String,
+    corpus_format_version: u32,
+    case_source: ManifestCaseSource,
+    integrity: CorpusIntegrity,
+}
+
+impl<'de> Deserialize<'de> for CorpusManifest {
+    fn deserialize<DeserializerType>(
+        deserializer: DeserializerType,
+    ) -> Result<Self, DeserializerType::Error>
+    where
+        DeserializerType: Deserializer<'de>,
+    {
+        let raw = RawCorpusManifest::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(de::Error::custom)
+    }
+}
+
+impl TryFrom<RawCorpusManifest> for CorpusManifest {
+    type Error = ManifestError;
+
+    fn try_from(raw: RawCorpusManifest) -> Result<Self, Self::Error> {
+        let manifest = Self {
+            manifest_version: raw.manifest_version,
+            name: raw.name,
+            version: raw.version,
+            corpus_format_version: raw.corpus_format_version,
+            case_source: raw.case_source,
+            integrity: raw.integrity,
+        };
+        validate_manifest_header(&manifest)?;
+        Ok(manifest)
+    }
+}
+
+impl CorpusManifest {
+    /// Returns the manifest representation version.
+    #[must_use]
+    pub const fn manifest_version(&self) -> u32 {
+        self.manifest_version
+    }
+
+    /// Returns the stable suite name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the author-chosen corpus release.
+    #[must_use]
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// Returns the referenced case-representation version.
+    #[must_use]
+    pub const fn corpus_format_version(&self) -> u32 {
+        self.corpus_format_version
+    }
+
+    /// Returns the admitted case source.
+    #[must_use]
+    pub const fn case_source(&self) -> &ManifestCaseSource {
+        &self.case_source
+    }
+
+    /// Returns the admitted integrity material.
+    #[must_use]
+    pub const fn integrity(&self) -> &CorpusIntegrity {
+        &self.integrity
+    }
 }
 
 /// Case content forms a portable manifest can name.
@@ -106,9 +184,8 @@ pub struct LoadedManifestCorpus {
 
 /// Decodes and structurally validates a portable manifest.
 pub fn decode_manifest(bytes: &[u8]) -> Result<CorpusManifest, ManifestError> {
-    let manifest: CorpusManifest = serde_json::from_slice(bytes).map_err(ManifestError::Json)?;
-    validate_manifest_header(&manifest)?;
-    Ok(manifest)
+    let raw: RawCorpusManifest = serde_json::from_slice(bytes).map_err(ManifestError::Json)?;
+    CorpusManifest::try_from(raw)
 }
 
 /// Reads a manifest and resolves its repository or embedded case source.
@@ -129,10 +206,12 @@ pub fn load_manifest_corpus(path: impl AsRef<Path>) -> Result<LoadedManifestCorp
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .join(relative_path);
-            let source_bytes = fs::read(&source_path).map_err(|source| ManifestError::Read {
-                path: source_path.clone(),
-                source,
-            })?;
+            let resolved_source_path = resolved_repository_source(path, &source_path)?;
+            let source_bytes =
+                fs::read(&resolved_source_path).map_err(|source| ManifestError::Read {
+                    path: resolved_source_path,
+                    source,
+                })?;
             let observed = digest_bytes(&source_bytes);
             let expected = manifest
                 .integrity
@@ -380,6 +459,30 @@ fn repository_relative_path(
     Ok(portable)
 }
 
+fn resolved_repository_source(
+    manifest_path: &Path,
+    source_path: &Path,
+) -> Result<PathBuf, ManifestError> {
+    let checkout_root = manifest_path
+        .ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())
+        .ok_or_else(|| ManifestError::RepositoryRootUnavailable(manifest_path.to_path_buf()))?;
+    let resolved_root = fs::canonicalize(checkout_root).map_err(|source| ManifestError::Read {
+        path: checkout_root.to_path_buf(),
+        source,
+    })?;
+    let resolved_source = fs::canonicalize(source_path).map_err(|source| ManifestError::Read {
+        path: source_path.to_path_buf(),
+        source,
+    })?;
+    if !resolved_source.starts_with(&resolved_root) {
+        return Err(ManifestError::RepositorySourceOutsideCheckout(
+            source_path.to_path_buf(),
+        ));
+    }
+    Ok(resolved_source)
+}
+
 fn portable_path_component(component: &str) -> bool {
     let component_is_bounded = component.len() <= MAX_PORTABLE_PATH_COMPONENT_UNITS
         && component.encode_utf16().count() <= MAX_PORTABLE_PATH_COMPONENT_UNITS;
@@ -484,6 +587,8 @@ pub enum ManifestError {
     NonPortablePath(String),
     /// The repository checkout root could not be retained in durable provenance.
     RepositoryRootUnavailable(PathBuf),
+    /// A repository source resolved outside its checkout root.
+    RepositorySourceOutsideCheckout(PathBuf),
     /// A repository source omitted its exact-byte digest.
     MissingSourceDigest,
     /// A non-file source supplied an inapplicable exact-byte digest.
@@ -544,6 +649,11 @@ impl fmt::Display for ManifestError {
                 "could not determine repository root for manifest {}",
                 path.display()
             ),
+            Self::RepositorySourceOutsideCheckout(path) => write!(
+                formatter,
+                "repository case source {} resolves outside the checkout",
+                path.display()
+            ),
             Self::MissingSourceDigest => {
                 formatter.write_str("repository case source requires source_sha256")
             }
@@ -597,7 +707,7 @@ impl Error for ManifestError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{fs, path::Path};
 
     use super::{
         CORPUS_MANIFEST_VERSION, CorpusManifest, ManifestCaseSource, case_integrity, corpus_digest,
@@ -696,6 +806,47 @@ mod tests {
             .expect_err("a blob source cannot carry repository byte integrity");
 
         assert!(error.to_string().contains("must not carry source_sha256"));
+    }
+
+    #[test]
+    fn direct_manifest_deserialization_runs_admission() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        manifest["manifest_version"] = serde_json::json!(CORPUS_MANIFEST_VERSION + 1);
+        let encoded = serde_json::to_vec(&manifest).expect("the invalid manifest serializes");
+
+        let error = serde_json::from_slice::<CorpusManifest>(&encoded)
+            .expect_err("direct deserialization rejects an unsupported manifest version");
+
+        assert!(error.to_string().contains("manifest version"));
+        assert!(error.to_string().contains("unsupported"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_source_symlink_must_remain_inside_checkout() {
+        use std::os::unix::fs::symlink;
+
+        let fixture =
+            std::env::temp_dir().join(format!("signalbox-corpus-symlink-{}", std::process::id()));
+        let checkout = fixture.join("checkout");
+        let outside = fixture.join("outside.json");
+        fs::create_dir_all(checkout.join(".git")).expect("the synthetic checkout is created");
+        fs::write(&outside, b"{}").expect("the external source is created");
+        symlink(&outside, checkout.join("cases.json"))
+            .expect("the escaping source symlink is created");
+
+        let error = super::resolved_repository_source(
+            &checkout.join("corpus.manifest.json"),
+            &checkout.join("cases.json"),
+        )
+        .expect_err("a source resolving outside the checkout is rejected");
+
+        assert!(matches!(
+            error,
+            super::ManifestError::RepositorySourceOutsideCheckout(_)
+        ));
+        fs::remove_dir_all(&fixture).expect("the synthetic checkout is removed");
     }
 
     #[test]

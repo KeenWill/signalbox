@@ -9,8 +9,8 @@ use std::{error::Error, path::Path};
 
 use signalbox_approval_judge_eval::{
     ApprovalDisposition, ApprovalJudgeCorpus, CorpusKey, CorpusRegistration,
-    CorpusSourceDescriptor, CorpusStore, DatabaseCorpusStore, DiskCorpusStore, Sha256Digest,
-    score_corpus,
+    CorpusSourceDescriptor, CorpusStore, CorpusStoreCorruption, CorpusStoreError,
+    DatabaseCorpusStore, DiskCorpusStore, Sha256Digest, score_corpus,
 };
 use signalbox_domain::{
     DirectModelSelection, ModelCallId, ProviderModelIdentity, ResolvedProviderTarget,
@@ -142,7 +142,10 @@ async fn repository_import_conflicts_on_changed_source_identity() -> Result<(), 
         .await
         .expect_err("a different durable source identity conflicts");
 
-    assert!(error.to_string().contains("conflicts"));
+    assert!(matches!(
+        error,
+        CorpusStoreError::CorruptRegistration(CorpusStoreCorruption::RegistrationConflict)
+    ));
 
     pool.close().await;
     drop(container);

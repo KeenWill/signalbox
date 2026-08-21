@@ -37,7 +37,7 @@ impl DatabaseCorpusStore {
         manifest_path: impl AsRef<Path>,
     ) -> Result<CorpusRegistration, CorpusStoreError> {
         let loaded = load_manifest_corpus(manifest_path).map_err(CorpusStoreError::Manifest)?;
-        let source_sha256 = loaded.manifest.integrity.source_sha256;
+        let source_sha256 = loaded.manifest.integrity().source_sha256;
         self.put_verified(loaded.registration, &loaded.corpus, source_sha256)
             .await
     }
