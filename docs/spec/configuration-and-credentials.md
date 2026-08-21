@@ -30,7 +30,9 @@ profile does and does not provide are verified against this PR
 variant is verified against this PR (`agent/kubernetes-bwrap-proc`).
 
 Direct unsandboxed Git execution from sandbox-created linked worktrees is
-verified against this PR (`agent/unsandboxed-worktree-gitdir`).
+verified against this PR (`agent/unsandboxed-worktree-gitdir`). Sandboxed Git
+execution from host-created linked worktrees is verified against this PR
+(`agent/daemon-live-sandbox-linked-worktree-git`).
 
 The explicit read-only Cargo registry cache is verified against this PR
 (`agent/daemon-live-sandbox-provisioning`).
@@ -1004,11 +1006,19 @@ resolved posture; family composition itself does not.
 
 On Linux, `unsandboxed_exec` pins the requested host working directory before
 launch. When the direct program is Git and that directory is a linked worktree
-whose `.git` marker names an administration directory below the sandbox-only
-`/workspace` path, execution pins the corresponding directory below the injected
-workspace root and supplies the pinned administration and worktree paths through
-Git's environment. Other programs and other `.git` marker shapes receive no
-Git-specific environment.
+whose `.git` marker names an administration directory below either the
+sandbox-only `/workspace` path or the injected host workspace root, execution
+pins the corresponding directory below that root and supplies the pinned
+administration and worktree paths through Git's environment. Other programs and
+other `.git` marker shapes receive no Git-specific environment.
+
+On Linux, direct Git through `sandboxed_exec` recognizes the same host- and
+sandbox-rooted linked-worktree markers. It pins the administration directory,
+binds it over its corresponding path below `/workspace`, and supplies that path
+and the requested `/workspace` worktree through Git's environment. The marker
+therefore stays valid without granting another host path or rewriting repository
+state. Other sandboxed programs and marker shapes receive no Git-specific mount
+or environment.
 
 `sandboxed_exec` and `cargo_diagnostics` share one daemon-local bubblewrap
 profile. Its name claims more than it delivers, so this page recites the launch
