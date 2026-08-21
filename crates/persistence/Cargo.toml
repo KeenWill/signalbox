@@ -70,6 +70,11 @@ path = "tests/conversation_listing_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]
+name = "convergence_sweep_postgres"
+path = "tests/convergence_sweep_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
 name = "git_remote_authority_postgres"
 path = "tests/git_remote_authority_postgres.rs"
 required-features = ["postgres-integration"]

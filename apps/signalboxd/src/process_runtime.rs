@@ -8683,6 +8683,7 @@ where
             .await
         }
         Ok(CommissionDispatchOutcome::ConflictingReuse)
+        | Ok(CommissionDispatchOutcome::TargetBusy { .. })
         | Err(CommissionedDispatchRepositoryError::SessionCreation(
             CreateSessionRepositoryError::DifferentCommandKind { .. },
         )) => {

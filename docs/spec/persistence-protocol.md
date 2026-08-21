@@ -156,8 +156,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — ninety files, `202607180001` through
-`202608200001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — ninety-two files, `202607180001` through
+`202608210400` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -218,6 +218,17 @@ prefix and churn-renumber each time a sibling merges.
 Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing loudly when Docker is absent) exercise the real constraints,
 triggers, locks, and races described below against a pinned Postgres image.
+
+Migration `202608210400_convergence_sweep.sql` uses the reserved `2026082104xx`
+block to add the mutable `convergence_sweep_target` scheduler projection, the
+append-only `convergence_sweep_event` audit, and the
+`convergence_sweep_parked_target` operator view. Closed checks bind retry and
+park shapes to the five-attempt `convergence_sweep_retry_budget()` ceiling, bind
+each failure outcome to its typed cause and operator need, and prevent partial
+observation, command-fence, or commissioned-dispatch identities. The function
+pins the restore-safe schema search path. The cross-component behavior using
+these records is owned by
+[pull-request convergence reconciliation](convergence-reconciliation.md).
 
 ## Relational representation
 

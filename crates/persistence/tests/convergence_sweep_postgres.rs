@@ -1,0 +1,333 @@
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
+)]
+
+use std::{error::Error, num::NonZeroU64};
+
+use signalbox_application::{
+    CommissionDispatchRequest, CommissionedDispatchFence, UuidV7CommissionedDispatchIdGenerator,
+};
+use signalbox_domain::{
+    BranchName, CommitSha, DangerousToolAutoApproval, DirectModelSelection, DurableCommandId,
+    GoalStatement, ModelSelectionRequest, PullRequestNumber, RepositorySlug,
+    SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
+    SessionTemplateName, SessionTemplateProvenance, UserContent,
+};
+use signalbox_persistence::{
+    SessionCredentialPin, SessionModelCredential,
+    commissioned_dispatch::{CommissionDispatchOutcome, PostgresCommissionedDispatchStore},
+    convergence_sweep::{
+        ConvergenceSweepDecision, ConvergenceSweepFailureDisposition, ConvergenceSweepFailureKind,
+        ConvergenceSweepObservation, PostgresConvergenceSweepStore,
+    },
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_test_container_labels, local_test_connection_options, migrate,
+};
+use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
+use testcontainers_modules::{
+    postgres::Postgres,
+    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
+};
+
+const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+const DATABASE_NAME: &str = "signalbox_convergence_sweep";
+const DATABASE_USER: &str = "signalbox";
+const DATABASE_PASSWORD: &str = "signalbox-test-only";
+const REPOSITORY: &str = "signalbox/repository";
+const HEAD_REPOSITORY: &str = "contributor/repository";
+const HEAD_SHA: &str = "1111111111111111111111111111111111111111";
+const BASE_BRANCH: &str = "main";
+const HEAD_BRANCH: &str = "agent/convergence";
+const TEMPLATE: &str = "review-response";
+const PULL_REQUEST: u64 = 892;
+const INACTIVE_PULL_REQUEST: u64 = 893;
+const UNRESOLVED_THREADS: u64 = 3;
+const RETRY_DELAY_SECONDS: u64 = 60;
+const RETRY_BUDGET: i16 = 5;
+const MODEL_SELECTION_ID: u128 = 0x89_200;
+const CREDENTIAL_REFERENCE: &str = "fixture-credential";
+
+async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(DATABASE_NAME)
+        .with_user(DATABASE_USER)
+        .with_password(DATABASE_PASSWORD)
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url =
+        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    migrate(&pool).await?;
+    Ok((container, pool))
+}
+
+fn repository() -> Result<RepositorySlug, Box<dyn Error>> {
+    Ok(RepositorySlug::try_new(REPOSITORY.to_owned())?)
+}
+
+fn pull_request() -> PullRequestNumber {
+    PullRequestNumber::new(NonZeroU64::new(PULL_REQUEST).expect("fixture number is positive"))
+}
+
+fn inactive_pull_request() -> PullRequestNumber {
+    PullRequestNumber::new(
+        NonZeroU64::new(INACTIVE_PULL_REQUEST).expect("fixture number is positive"),
+    )
+}
+
+fn observation() -> Result<ConvergenceSweepObservation, Box<dyn Error>> {
+    Ok(ConvergenceSweepObservation::new(
+        CommitSha::try_new(HEAD_SHA.to_owned())?,
+        UNRESOLVED_THREADS,
+    ))
+}
+
+fn credential_pin() -> SessionCredentialPin {
+    SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+        "fixture-family",
+        CREDENTIAL_REFERENCE,
+    )])
+    .expect("fixture credential pin is valid")
+}
+
+fn template() -> Result<(SessionTemplateProvenance, SessionConfigurationDefaults), Box<dyn Error>> {
+    Ok((
+        SessionTemplateProvenance::new(
+            SessionTemplateName::try_new(TEMPLATE.to_owned())?,
+            SessionTemplateContentDigest::from_bytes([7; 32]),
+        ),
+        SessionConfigurationDefaults::complete(
+            ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(
+                MODEL_SELECTION_ID,
+            ))),
+            DangerousToolAutoApproval::Disabled,
+            Some(SessionSystemPrompt::try_new(
+                "Respond to review findings.".to_owned(),
+            )?),
+        ),
+    ))
+}
+
+fn prepared_commission(
+    command: u128,
+) -> Result<signalbox_application::PreparedCommissionedDispatch, Box<dyn Error>> {
+    let request = CommissionDispatchRequest::try_new(
+        DurableCommandId::from_uuid(Uuid::from_u128(command)),
+        SessionTemplateName::try_new(TEMPLATE.to_owned())?,
+        CommissionedDispatchFence::PullRequest {
+            repository: repository()?,
+            pull_request: pull_request(),
+            head_sha: CommitSha::try_new(HEAD_SHA.to_owned())?,
+            head_repository: RepositorySlug::try_new(HEAD_REPOSITORY.to_owned())?,
+            head_branch: BranchName::try_new(HEAD_BRANCH.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+        },
+        GoalStatement::try_new("Converge the pull request.".to_owned())?,
+        UserContent::try_text("Respond to the review.".to_owned())
+            .expect("fixture content is admitted"),
+    )?;
+    let (provenance, defaults) = template()?;
+    Ok(request.prepare(
+        &mut UuidV7CommissionedDispatchIdGenerator,
+        provenance,
+        defaults,
+    )?)
+}
+
+fn dispatched_and_busy(
+    first: CommissionDispatchOutcome,
+    second: CommissionDispatchOutcome,
+) -> (SessionId, SessionId) {
+    match (first, second) {
+        (
+            CommissionDispatchOutcome::Dispatched { session, .. },
+            CommissionDispatchOutcome::TargetBusy {
+                session: busy_session,
+            },
+        )
+        | (
+            CommissionDispatchOutcome::TargetBusy {
+                session: busy_session,
+            },
+            CommissionDispatchOutcome::Dispatched { session, .. },
+        ) => (session, busy_session),
+        outcomes => panic!("one racing commission must dispatch and one must skip: {outcomes:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+    let observation = observation()?;
+
+    let first = store
+        .record_failure(
+            Uuid::from_u128(1),
+            &repository,
+            pull_request(),
+            Some(&observation),
+            ConvergenceSweepFailureKind::FactsFetch,
+            RETRY_DELAY_SECONDS,
+        )
+        .await?;
+    let second = store
+        .record_failure(
+            Uuid::from_u128(2),
+            &repository,
+            pull_request(),
+            Some(&observation),
+            ConvergenceSweepFailureKind::FactsFetch,
+            RETRY_DELAY_SECONDS,
+        )
+        .await?;
+    let third = store
+        .record_failure(
+            Uuid::from_u128(3),
+            &repository,
+            pull_request(),
+            Some(&observation),
+            ConvergenceSweepFailureKind::FactsFetch,
+            RETRY_DELAY_SECONDS,
+        )
+        .await?;
+    let fourth = store
+        .record_failure(
+            Uuid::from_u128(4),
+            &repository,
+            pull_request(),
+            Some(&observation),
+            ConvergenceSweepFailureKind::FactsFetch,
+            RETRY_DELAY_SECONDS,
+        )
+        .await?;
+    let fifth = store
+        .record_failure(
+            Uuid::from_u128(5),
+            &repository,
+            pull_request(),
+            Some(&observation),
+            ConvergenceSweepFailureKind::FactsFetch,
+            RETRY_DELAY_SECONDS,
+        )
+        .await?;
+    let parked: (String, i16, String) = sqlx::query_as("SELECT failure_kind, consecutive_failures, operator_need FROM convergence_sweep_parked_target WHERE repository = $1 AND pull_request_number = $2")
+        .bind(repository.as_str())
+        .bind(rust_decimal::Decimal::from(pull_request().get()))
+        .fetch_one(&pool)
+        .await?;
+
+    assert_eq!(first, ConvergenceSweepFailureDisposition::RetryScheduled);
+    assert_eq!(second, ConvergenceSweepFailureDisposition::RetryScheduled);
+    assert_eq!(third, ConvergenceSweepFailureDisposition::RetryScheduled);
+    assert_eq!(fourth, ConvergenceSweepFailureDisposition::RetryScheduled);
+    assert_eq!(fifth, ConvergenceSweepFailureDisposition::Parked);
+    assert_eq!(
+        parked,
+        (
+            String::from("facts_fetch"),
+            RETRY_BUDGET,
+            String::from("repair_facts_fetch")
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn racing_pull_request_commissions_skip_the_second_live_session() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresCommissionedDispatchStore::new(pool, credential_pin());
+    let first = prepared_commission(0x89_201)?;
+    let second = prepared_commission(0x89_202)?;
+
+    let (first, second) = tokio::join!(
+        store.commission(first, |_| None),
+        store.commission(second, |_| None),
+    );
+    let (dispatched, busy) = dispatched_and_busy(first?, second?);
+
+    assert_eq!(busy, dispatched);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn no_model_activity_parks_immediately_with_its_typed_need()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+    let observation = observation()?;
+
+    let disposition = store
+        .record_failure(
+            Uuid::from_u128(7),
+            &repository,
+            inactive_pull_request(),
+            Some(&observation),
+            ConvergenceSweepFailureKind::NoModelActivity,
+            RETRY_DELAY_SECONDS,
+        )
+        .await?;
+    let parked: (String, String) = sqlx::query_as(
+        "SELECT failure_kind, operator_need
+           FROM convergence_sweep_parked_target
+          WHERE repository = $1 AND pull_request_number = $2",
+    )
+    .bind(repository.as_str())
+    .bind(rust_decimal::Decimal::from(inactive_pull_request().get()))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(disposition, ConvergenceSweepFailureDisposition::Parked);
+    assert_eq!(
+        parked,
+        (
+            String::from("no_model_activity"),
+            String::from("inspect_inactive_session")
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_live_session_observation_is_retained_for_movement_detection()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool);
+    let repository = repository()?;
+    let observation = observation()?;
+
+    store
+        .record_decision(
+            Uuid::from_u128(6),
+            &repository,
+            pull_request(),
+            &observation,
+            ConvergenceSweepDecision::LiveSession,
+        )
+        .await?;
+    let state = store
+        .load_target(&repository, pull_request())
+        .await?
+        .expect("the observed target is durable");
+
+    assert_eq!(state.last_observation(), Some(&observation));
+    Ok(())
+}
