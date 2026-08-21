@@ -51,9 +51,10 @@ use signalbox_application::{
     SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolAttemptAuthorizationStatus, ToolCatalog, ToolDefinition,
-    ToolInputSchema,
+    SubmitInputService, ToolAttemptAuthorizationOutcome, ToolAttemptAuthorizationStatus,
+    ToolCatalog, ToolDefinition, ToolInputSchema, ToolPreauthorization,
 };
+use signalbox_blob_store::{BlobObjectKey, BlobStoreName, ExpectedBlob};
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities,
     AcceptedInputTurnFailureIdentities, ActivatedAcceptedInputTurn, ActiveTurnPhase,
@@ -95,6 +96,7 @@ use signalbox_persistence::{
         AuthorizeApprovalJudgeOutcome, AuthorizedApprovalJudge, CompleteApprovalJudgeOutcome,
         FailedApprovalJudgeDisposition, PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
     },
+    blob::{BlobCatalogRepository, BlobReplicaRecord, BlobStoreBindingRecord},
     create_session::{
         CreateSessionCorruption, CreateSessionHandlingOutcome, CreateSessionRepository,
         CreateSessionRepositoryError,

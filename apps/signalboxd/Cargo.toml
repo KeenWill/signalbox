@@ -15,6 +15,7 @@ test-support = [
 ]
 
 [dependencies]
+base64 = "0.22.1"
 opentelemetry = { version = "0.32.0", default-features = false, features = [
     "trace",
 ] }
@@ -65,6 +66,8 @@ signalbox-tools-plan = { path = "../../crates/tools-plan" }
 signalbox-tools-sessions = { path = "../../crates/tools-sessions" }
 signalbox-tools-web = { path = "../../crates/tools-web" }
 signalbox-tools-workspace = { path = "../../crates/tools-workspace" }
+signalbox-tool-contract = { path = "../../crates/tool-contract" }
+signalbox-tool-schema-derive = { path = "../../crates/tool-schema-derive" }
 rustix = { version = "1.1.4", default-features = false, features = [
     "fs",
     "net",

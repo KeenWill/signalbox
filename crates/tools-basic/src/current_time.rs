@@ -528,9 +528,12 @@ mod tests {
             _session: SessionId,
             _turn: TurnId,
             attempt: signalbox_domain::ToolAttemptId,
-        ) -> Result<signalbox_domain::ToolDispatchAuthority, Self::Error> {
+            _preauthorization: signalbox_application::ToolPreauthorization,
+        ) -> Result<signalbox_application::ToolAttemptAuthorizationOutcome, Self::Error> {
             self.batch
                 .authorize_dispatch(attempt)
+                .map(Box::new)
+                .map(signalbox_application::ToolAttemptAuthorizationOutcome::Authorized)
                 .map_err(|_| CurrentTimeExecutorError::ArgumentValidationDrift)
         }
 

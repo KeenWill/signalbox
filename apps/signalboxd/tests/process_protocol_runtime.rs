@@ -3980,25 +3980,32 @@ async fn process_runtime_rejects_oversized_submitted_input() -> Result<(), Box<d
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
 
-    connection
-        .request(
-            2,
-            ClientRequest::SubmitInput {
-                command_id: command()?,
-                session_id,
-                content: UserInputContent::text("x".repeat(OVERSIZED_SUBMITTED_INPUT_BYTES)),
-                expected_defaults_version: Some(CanonicalU64::new(1)),
-                model_settings: ModelSettingsOverlay::inherit_all(),
-                delivery: None,
+    let frame = serde_json::json!({
+        "version": 1,
+        "request_id": "2",
+        "request": {
+            "type": "submit_input",
+            "command_id": command()?,
+            "session_id": session_id,
+            "content": [{
+                "type": "text",
+                "text": "x".repeat(OVERSIZED_SUBMITTED_INPUT_BYTES),
+            }],
+            "expected_defaults_version": "1",
+            "model_settings": {
+                "reasoning_level": { "kind": "inherit" },
+                "fast_mode": { "kind": "inherit" },
+                "service_tier": { "kind": "inherit" },
             },
-        )
-        .await?;
+        },
+    });
+    connection.raw_request(&format!("{frame}\n")).await?;
 
     let response = response_within(&mut connection).await?;
     assert!(matches!(
         response.message(),
         ServerMessage::Error {
-            code: ErrorCode::InvalidRequest,
+            code: ErrorCode::MalformedFrame,
             ..
         }
     ));

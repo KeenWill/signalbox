@@ -52,6 +52,10 @@ Provider-neutral ordered attachment stubs and immutable catalog-length
 projection are verified against this implementing change
 (`agent/blob-storage-attachment-rendering`).
 
+The text-only blob-read family, frontier-derived digest authorization, and
+durable per-request and per-turn admission counters are verified against this
+implementing change (`agent/blob-storage-read-tools`).
+
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
 configuration and routing, the ingest and read lifecycle, the blob wire

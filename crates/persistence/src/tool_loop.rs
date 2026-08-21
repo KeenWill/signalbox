@@ -15,8 +15,9 @@ use rust_decimal::Decimal;
 use signalbox_application::{
     ClassifyOperatorFailure, CorrelatedDurableChildWait, DecideToolRequestTransaction,
     ModelCallCredentialReference, OperatorFailureClass, PrepareToolContinuationOutcome,
-    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationOutcome,
+    ToolAttemptAuthorizationStatus, ToolContinuationIdentities, ToolCrashClosureIdentities,
+    ToolExecutionTransaction, ToolPreauthorization,
 };
 use signalbox_domain::{
     ActiveTurnPhase, CorrelatedToolAttemptObservation, CurrentToolAttempt, CurrentToolAttemptState,
@@ -37,7 +38,7 @@ use signalbox_domain::{
     ToolName, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent,
     ToolResultText, TurnId,
 };
-use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::{
     command_registry::{
@@ -47,8 +48,8 @@ use crate::{
     mapping::{
         ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
         dangerous_tool_auto_approval_from_str, durable_command_id_from_uuid,
-        durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
-        tool_approval_decision_source_from_str, tool_approval_posture_from_str,
+        durable_command_id_to_uuid, positive_u64_from_numeric, session_id_from_uuid,
+        session_id_to_uuid, tool_approval_decision_source_from_str, tool_approval_posture_from_str,
         tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
         tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
@@ -59,6 +60,10 @@ use crate::{
     },
     outbox::{self, OutboxEvent, ToolBatchOutboxState},
 };
+
+const MAX_BLOB_READ_TOOL_BYTES: u64 = 524_288;
+const MAX_BLOB_READ_TURN_BYTES: u64 = 2_097_152;
+const MAX_BLOB_READ_REQUESTS_PER_TURN: i64 = 64;
 
 const STORAGE_VERSION: i16 = 1;
 
@@ -602,6 +607,30 @@ impl PostgresToolLoopRepository {
         turn: TurnId,
         attempt: ToolAttemptId,
     ) -> Result<ToolDispatchAuthority, ToolLoopRepositoryError> {
+        match self
+            .authorize_attempt_with_preauthorization(
+                session,
+                turn,
+                attempt,
+                ToolPreauthorization::Unmetered,
+            )
+            .await?
+        {
+            ToolAttemptAuthorizationOutcome::Authorized(authorized) => Ok(*authorized),
+            ToolAttemptAuthorizationOutcome::PreauthorizationRejected => {
+                Err(ToolLoopCorruption::Inconsistent("unmetered tool preauthorization").into())
+            }
+        }
+    }
+
+    /// Atomically charges typed resources and authorizes one prepared attempt.
+    pub async fn authorize_attempt_with_preauthorization(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        preauthorization: ToolPreauthorization,
+    ) -> Result<ToolAttemptAuthorizationOutcome, ToolLoopRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_tool_session(&mut transaction, session).await?;
@@ -611,6 +640,17 @@ impl PostgresToolLoopRepository {
             let authorized = batch.authorize_dispatch(attempt).map_err(|_| {
                 ToolLoopRepositoryError::InvalidTransition("tool attempt is not prepared")
             })?;
+            if !admit_tool_preauthorization(
+                &mut transaction,
+                session,
+                turn,
+                authorized.attempt().request(),
+                preauthorization,
+            )
+            .await?
+            {
+                return Ok(ToolAttemptAuthorizationOutcome::PreauthorizationRejected);
+            }
             mark_issuing_turn_attempt_running(&mut transaction, authorized.attempt()).await?;
             let rows = sqlx::query(
                 "UPDATE tool_attempt
@@ -633,7 +673,9 @@ impl PostgresToolLoopRepository {
             .await?
             .rows_affected();
             require_single(rows, "tool attempt authorization")?;
-            Ok(authorized)
+            Ok(ToolAttemptAuthorizationOutcome::Authorized(Box::new(
+                authorized,
+            )))
         }
         .await;
         finish_commit(transaction, result).await
@@ -1226,8 +1268,16 @@ impl ToolExecutionTransaction for PostgresToolLoopRepository {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> Result<ToolDispatchAuthority, Self::Error> {
-        PostgresToolLoopRepository::authorize_attempt(self, session, turn, attempt).await
+        preauthorization: ToolPreauthorization,
+    ) -> Result<ToolAttemptAuthorizationOutcome, Self::Error> {
+        PostgresToolLoopRepository::authorize_attempt_with_preauthorization(
+            self,
+            session,
+            turn,
+            attempt,
+            preauthorization,
+        )
+        .await
     }
 
     async fn reread_ambiguous_authorization(
@@ -2613,6 +2663,7 @@ fn decode_error_kind(value: &str) -> Result<ToolExecutionErrorKind, ToolLoopRepo
     match value {
         "unknown_tool" => Ok(ToolExecutionErrorKind::UnknownTool),
         "invalid_arguments" => Ok(ToolExecutionErrorKind::InvalidArguments),
+        "preauthorization_rejected" => Ok(ToolExecutionErrorKind::PreauthorizationRejected),
         "execution_failed" => Ok(ToolExecutionErrorKind::ExecutionFailed),
         "result_too_large" => Ok(ToolExecutionErrorKind::ResultTooLarge),
         "crash_lost" => Ok(ToolExecutionErrorKind::CrashLost),
@@ -2813,6 +2864,7 @@ const fn encode_error_kind(value: ToolExecutionErrorKind) -> &'static str {
     match value {
         ToolExecutionErrorKind::UnknownTool => "unknown_tool",
         ToolExecutionErrorKind::InvalidArguments => "invalid_arguments",
+        ToolExecutionErrorKind::PreauthorizationRejected => "preauthorization_rejected",
         ToolExecutionErrorKind::ExecutionFailed => "execution_failed",
         ToolExecutionErrorKind::ResultTooLarge => "result_too_large",
         ToolExecutionErrorKind::CrashLost => "crash_lost",
@@ -3493,6 +3545,122 @@ pub(crate) async fn lock_tool_session(
     }
 }
 
+async fn admit_tool_preauthorization(
+    transaction: &mut Transaction<'_, Postgres>,
+    session: SessionId,
+    turn: TurnId,
+    request: ToolRequestId,
+    preauthorization: ToolPreauthorization,
+) -> Result<bool, ToolLoopRepositoryError> {
+    let (digest, decoded_bytes) = match preauthorization {
+        ToolPreauthorization::Unmetered => return Ok(true),
+        ToolPreauthorization::BlobMetadata { digest } => (digest, None),
+        ToolPreauthorization::BlobRead {
+            digest,
+            decoded_bytes,
+        } => (digest, Some(decoded_bytes)),
+    };
+    let visible: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM tool_request AS request
+              JOIN model_call AS call
+                ON call.model_call_id = request.producing_model_call_id
+               AND call.session_id = request.session_id
+              JOIN context_frontier_member AS member
+                ON member.owning_session_id = call.session_id
+               AND member.context_frontier_id = call.context_frontier_id
+              JOIN semantic_transcript_entry AS entry
+                ON entry.source_session_id = member.source_session_id
+               AND entry.semantic_entry_id = member.semantic_entry_id
+              JOIN accepted_input_content_part AS part
+                ON part.accepted_input_id = entry.origin_accepted_input_id
+             WHERE request.request_id = $1
+               AND part.part_kind = 'attachment'
+               AND part.blob_digest = $2
+        )",
+    )
+    .bind(tool_request_id_to_uuid(request))
+    .bind(digest.as_bytes().as_slice())
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !visible {
+        return Ok(false);
+    }
+    let Some(decoded_bytes) = decoded_bytes else {
+        return Ok(true);
+    };
+    if decoded_bytes.get() > MAX_BLOB_READ_TOOL_BYTES {
+        return Err(ToolLoopCorruption::Inconsistent("blob read request byte bound").into());
+    }
+
+    let existing = sqlx::query(
+        "SELECT session_id, turn_id, blob_digest, decoded_byte_count, admitted
+           FROM blob_read_tool_charge
+          WHERE request_id = $1",
+    )
+    .bind(tool_request_id_to_uuid(request))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if let Some(row) = existing {
+        let recorded_bytes = positive_u64_from_numeric(required(&row, "decoded_byte_count")?)
+            .map_err(|_| ToolLoopCorruption::Inconsistent("blob read charged byte count"))?;
+        if required::<Uuid>(&row, "session_id")? != session_id_to_uuid(session)
+            || required::<Uuid>(&row, "turn_id")? != turn_id_to_uuid(turn)
+            || required::<Vec<u8>>(&row, "blob_digest")? != digest.as_bytes().as_slice()
+            || recorded_bytes != decoded_bytes.get()
+        {
+            return Err(ToolLoopCorruption::Inconsistent("blob read request charge").into());
+        }
+        return required(&row, "admitted");
+    }
+
+    let totals = sqlx::query(
+        "SELECT count(*) AS request_count,
+                COALESCE(sum(decoded_byte_count), 0) AS decoded_bytes
+           FROM blob_read_tool_charge
+          WHERE turn_id = $1 AND admitted",
+    )
+    .bind(turn_id_to_uuid(turn))
+    .fetch_one(&mut **transaction)
+    .await?;
+    let request_count: i64 = required(&totals, "request_count")?;
+    let decoded_total: Decimal = required(&totals, "decoded_bytes")?;
+    if request_count < 0 || !decoded_total.fract().is_zero() || decoded_total.is_sign_negative() {
+        return Err(ToolLoopCorruption::Inconsistent("blob read turn charge totals").into());
+    }
+    let decoded_total = u64::try_from(decoded_total)
+        .map_err(|_| ToolLoopCorruption::Inconsistent("blob read turn charged bytes"))?;
+    let admitted = blob_read_charge_admitted(request_count, decoded_total, decoded_bytes);
+    let rows = sqlx::query(
+        "INSERT INTO blob_read_tool_charge
+            (request_id, session_id, turn_id, blob_digest, decoded_byte_count, admitted)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(tool_request_id_to_uuid(request))
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(digest.as_bytes().as_slice())
+    .bind(Decimal::from(decoded_bytes.get()))
+    .bind(admitted)
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    require_single(rows, "blob read request charge")?;
+    Ok(admitted)
+}
+
+fn blob_read_charge_admitted(
+    request_count: i64,
+    decoded_total: u64,
+    requested: NonZeroU64,
+) -> bool {
+    request_count < MAX_BLOB_READ_REQUESTS_PER_TURN
+        && decoded_total
+            .checked_add(requested.get())
+            .is_some_and(|total| total <= MAX_BLOB_READ_TURN_BYTES)
+}
+
 fn required<T>(row: &PgRow, column: &'static str) -> Result<T, ToolLoopRepositoryError>
 where
     for<'value> T: sqlx::Decode<'value, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
@@ -3528,5 +3696,37 @@ async fn finish_commit<T>(
             transaction.rollback().await?;
             Err(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod blob_read_budget_tests {
+    use super::*;
+
+    #[test]
+    fn exact_blob_read_turn_byte_bound_is_admitted() {
+        assert!(blob_read_charge_admitted(
+            3,
+            MAX_BLOB_READ_TURN_BYTES - MAX_BLOB_READ_TOOL_BYTES,
+            NonZeroU64::new(MAX_BLOB_READ_TOOL_BYTES).expect("the tool bound is positive"),
+        ));
+    }
+
+    #[test]
+    fn blob_read_turn_byte_overflow_is_rejected() {
+        assert!(!blob_read_charge_admitted(
+            4,
+            MAX_BLOB_READ_TURN_BYTES,
+            NonZeroU64::new(1).expect("one is positive"),
+        ));
+    }
+
+    #[test]
+    fn blob_read_turn_request_count_bound_is_rejected() {
+        assert!(!blob_read_charge_admitted(
+            MAX_BLOB_READ_REQUESTS_PER_TURN,
+            0,
+            NonZeroU64::new(1).expect("one is positive"),
+        ));
     }
 }
