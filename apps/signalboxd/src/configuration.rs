@@ -431,6 +431,7 @@ pub struct DaemonToolConfiguration {
     workspace_root: PathBuf,
     git_identity: GitIdentity,
     exec_supervisor_executable: PathBuf,
+    cargo_registry_cache: Option<PathBuf>,
 }
 
 impl DaemonToolConfiguration {
@@ -447,6 +448,11 @@ impl DaemonToolConfiguration {
     /// Absolute existing path of the separately packaged exec supervisor.
     pub fn exec_supervisor_executable(&self) -> &Path {
         &self.exec_supervisor_executable
+    }
+
+    /// Optional host Cargo registry pinned read-only into sandboxed execution.
+    pub fn cargo_registry_cache(&self) -> Option<&Path> {
+        self.cargo_registry_cache.as_deref()
     }
 
     /// Fixed public-GitHub-only egress policy selected by the tool registry.
@@ -2592,7 +2598,7 @@ fn divide_product_factor(left: &mut u128, right: &mut u128, factor: u128) -> Opt
 fn parse_tool_mappings(
     item: Option<&Item>,
     git_identity: Option<GitIdentity>,
-    exec_supervisor_executable: Option<PathBuf>,
+    daemon_tool_settings: Option<DaemonToolSettings>,
 ) -> Result<Option<DaemonToolConfiguration>, HubModelConfigurationError> {
     let Some(item) = item else {
         return Ok(None);
@@ -2640,26 +2646,37 @@ fn parse_tool_mappings(
     {
         return Err(HubModelConfigurationError::InvalidToolMappings);
     }
+    let settings =
+        daemon_tool_settings.ok_or(HubModelConfigurationError::MissingDaemonToolSettings)?;
     Ok(Some(DaemonToolConfiguration {
         workspace_root: workspace_root.ok_or(HubModelConfigurationError::InvalidToolMappings)?,
         git_identity: git_identity
             .ok_or(HubModelConfigurationError::MissingGitIdentityConfiguration)?,
-        exec_supervisor_executable: exec_supervisor_executable
-            .ok_or(HubModelConfigurationError::MissingDaemonToolSettings)?,
+        exec_supervisor_executable: settings.exec_supervisor_executable,
+        cargo_registry_cache: settings.cargo_registry_cache,
     }))
+}
+
+#[derive(Clone, Debug)]
+struct DaemonToolSettings {
+    exec_supervisor_executable: PathBuf,
+    cargo_registry_cache: Option<PathBuf>,
 }
 
 fn parse_daemon_tool_settings(
     item: Option<&Item>,
-) -> Result<Option<PathBuf>, HubModelConfigurationError> {
+) -> Result<Option<DaemonToolSettings>, HubModelConfigurationError> {
     let Some(item) = item else {
         return Ok(None);
     };
     let table = item
         .as_table()
         .ok_or(HubModelConfigurationError::InvalidDaemonToolSettings)?;
-    reject_unknown_fields(table, &["exec_supervisor_executable"])
-        .map_err(|_| HubModelConfigurationError::InvalidDaemonToolSettings)?;
+    reject_unknown_fields(
+        table,
+        &["exec_supervisor_executable", "cargo_registry_cache"],
+    )
+    .map_err(|_| HubModelConfigurationError::InvalidDaemonToolSettings)?;
     let executable = PathBuf::from(
         required_string(table, "exec_supervisor_executable")
             .map_err(|_| HubModelConfigurationError::InvalidDaemonToolSettings)?,
@@ -2672,7 +2689,28 @@ fn parse_daemon_tool_settings(
     if !executable.is_file() {
         return Err(HubModelConfigurationError::InvalidDaemonToolSettings);
     }
-    Ok(Some(executable))
+    let cargo_registry_cache = table
+        .get("cargo_registry_cache")
+        .map(|_| {
+            let path = PathBuf::from(
+                required_string(table, "cargo_registry_cache")
+                    .map_err(|_| HubModelConfigurationError::InvalidDaemonToolSettings)?,
+            );
+            if !path.is_absolute() {
+                return Err(HubModelConfigurationError::InvalidDaemonToolSettings);
+            }
+            let canonical = fs::canonicalize(path)
+                .map_err(|_| HubModelConfigurationError::InvalidDaemonToolSettings)?;
+            if !canonical.is_dir() {
+                return Err(HubModelConfigurationError::InvalidDaemonToolSettings);
+            }
+            Ok(canonical)
+        })
+        .transpose()?;
+    Ok(Some(DaemonToolSettings {
+        exec_supervisor_executable: executable,
+        cargo_registry_cache,
+    }))
 }
 
 fn parse_scheduler_max_in_flight_passes(
@@ -5977,6 +6015,33 @@ context_window_tokens = 200000
                 .expect("mapped fixture has daemon tool settings")
                 .exec_supervisor_executable(),
             expected
+        );
+    }
+
+    #[test]
+    fn daemon_tool_process_settings_admit_a_canonical_cargo_registry_cache() {
+        let temporary = tempfile::tempdir().expect("fixture directory is available");
+        let registry = temporary.path().join("registry");
+        std::fs::create_dir(&registry).expect("fixture registry exists");
+        let configured = CONFIGURATION.replace(
+            &format!("exec_supervisor_executable = \"{EXEC_SUPERVISOR_EXECUTABLE}\""),
+            &format!(
+                "exec_supervisor_executable = \"{EXEC_SUPERVISOR_EXECUTABLE}\"\ncargo_registry_cache = \"{}\"",
+                registry.display()
+            ),
+        );
+        let expected =
+            std::fs::canonicalize(&registry).expect("fixture registry has a canonical directory");
+
+        let configuration = HubModelConfiguration::parse(&configured)
+            .expect("an absolute Cargo registry directory is valid");
+
+        assert_eq!(
+            configuration
+                .daemon_tools()
+                .expect("mapped fixture has daemon tool settings")
+                .cargo_registry_cache(),
+            Some(expected.as_path())
         );
     }
 
