@@ -5,17 +5,17 @@
 //! fresh execution invocation; concrete provider selection remains an
 //! injected composition choice.
 
-use std::{error::Error, fmt, future::Future};
+use std::{collections::HashMap, error::Error, fmt, future::Future};
 
 use signalbox_application::{
     ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority, ClassifyOperatorFailure,
-    EligibilityPass, InProcessAttemptDispatchGate, InProcessToolDispatchGate,
+    EligibilityNudge, EligibilityPass, InProcessAttemptDispatchGate, InProcessToolDispatchGate,
     ModelCallExecutionError, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelCallProvider, OperatorFailureClass, ScriptedModelCallError, ScriptedModelCallProvider,
-    ScriptedModelCallStep, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartEligibleTurnTransaction, ToolCatalog, ToolExecutionService,
-    ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor,
-    UuidV7ModelCallExecutionIdGenerator, UuidV7ToolLoopIdGenerator,
+    ModelCallProvider, OperatorFailureClass, SchedulerPassExpiryHandler, ScriptedModelCallError,
+    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnIdGenerator,
+    StartEligibleTurnOutcome, StartEligibleTurnService, StartEligibleTurnTransaction, ToolCatalog,
+    ToolExecutionService, ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor,
+    UuidV7ModelCallExecutionIdGenerator, UuidV7StartupScanIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
     ActivatedTurn, AssistantText, ContextFrontierId, DirectModelSelection, ModelCallId,
@@ -35,7 +35,13 @@ use signalbox_persistence::model_execution::{
     ModelCallRepositoryError, PostgresModelCallRepository,
 };
 use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError};
-use tokio::sync::watch;
+use signalbox_persistence::turn_liveness::{
+    PostgresTurnLivenessRepository, TurnLivenessRepositoryError,
+};
+use tokio::{
+    sync::watch,
+    time::{sleep, timeout},
+};
 
 use tracing::Instrument;
 pub mod approval_judge_eval;
@@ -214,6 +220,11 @@ pub trait ActivatedTurnExecution {
 
     /// Reports that durable activation may require startup recovery.
     fn report_post_activation_failure(&self) {}
+
+    /// Captures a synchronous marker applied before bounded cancellation.
+    fn occupancy_expiry_handler(&self) -> Option<std::sync::Arc<dyn SchedulerPassExpiryHandler>> {
+        None
+    }
 }
 
 /// Cheap-clone handle that raises the daemon's fatal recovery signal.
@@ -265,6 +276,7 @@ impl FatalExecutionSignal {
 pub struct FatalExecutionSupervisor<Execution> {
     execution: Execution,
     fatal_signal: watch::Sender<bool>,
+    bounded_expirations: std::sync::Arc<std::sync::Mutex<FatalExecutionGuardState>>,
 }
 
 impl<Execution> FatalExecutionSupervisor<Execution> {
@@ -282,9 +294,29 @@ impl<Execution> FatalExecutionSupervisor<Execution> {
             Self {
                 execution,
                 fatal_signal,
+                bounded_expirations: std::sync::Arc::new(std::sync::Mutex::new(
+                    FatalExecutionGuardState::default(),
+                )),
             },
             FatalExecutionSignal { triggered },
         )
+    }
+}
+
+#[derive(Clone, Debug)]
+struct FatalExecutionOccupancyExpiry {
+    bounded_expirations: std::sync::Arc<std::sync::Mutex<FatalExecutionGuardState>>,
+}
+
+impl SchedulerPassExpiryHandler for FatalExecutionOccupancyExpiry {
+    fn occupancy_expired(&self, session: SessionId) {
+        let mut state = self
+            .bounded_expirations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.active_sessions.contains(&session) {
+            state.bounded_expirations.insert(session);
+        }
     }
 }
 
@@ -299,8 +331,14 @@ where
         &self,
         activated: Box<ActivatedTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let session = activated.session();
         let execution = self.execution.execute(activated);
-        supervise_execution(self.fatal_signal.clone(), execution)
+        supervise_execution_for_session(
+            self.fatal_signal.clone(),
+            std::sync::Arc::clone(&self.bounded_expirations),
+            session,
+            execution,
+        )
     }
 
     fn resume_active(
@@ -308,7 +346,12 @@ where
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let execution = self.execution.resume_active(session);
-        supervise_active_resume::<Execution, _>(self.fatal_signal.clone(), execution)
+        supervise_active_resume::<Execution, _>(
+            self.fatal_signal.clone(),
+            std::sync::Arc::clone(&self.bounded_expirations),
+            session,
+            execution,
+        )
     }
 
     fn active_resume_failure_requires_recovery(error: &Self::Error) -> bool {
@@ -322,16 +365,24 @@ where
     fn report_post_activation_failure(&self) {
         self.recovery_reporter().report_recovery_required();
     }
+
+    fn occupancy_expiry_handler(&self) -> Option<std::sync::Arc<dyn SchedulerPassExpiryHandler>> {
+        Some(std::sync::Arc::new(FatalExecutionOccupancyExpiry {
+            bounded_expirations: std::sync::Arc::clone(&self.bounded_expirations),
+        }))
+    }
 }
 
-async fn supervise_execution<Execution, ExecutionError>(
+async fn supervise_execution_for_session<Execution, ExecutionError>(
     fatal_signal: watch::Sender<bool>,
+    bounded_expirations: std::sync::Arc<std::sync::Mutex<FatalExecutionGuardState>>,
+    session: SessionId,
     execution: Execution,
 ) -> Result<(), ExecutionError>
 where
     Execution: Future<Output = Result<(), ExecutionError>>,
 {
-    let fatal_on_drop = FatalOnIncompleteExecution(Some(fatal_signal));
+    let fatal_on_drop = FatalOnIncompleteExecution::new(fatal_signal, bounded_expirations, session);
     let result = execution.await;
     if result.is_ok() {
         fatal_on_drop.disarm();
@@ -339,15 +390,34 @@ where
     result
 }
 
+#[cfg(test)]
+async fn supervise_execution<Execution, ExecutionError>(
+    fatal_signal: watch::Sender<bool>,
+    execution: Execution,
+) -> Result<(), ExecutionError>
+where
+    Execution: Future<Output = Result<(), ExecutionError>>,
+{
+    supervise_execution_for_session(
+        fatal_signal,
+        std::sync::Arc::new(std::sync::Mutex::new(FatalExecutionGuardState::default())),
+        SessionId::from_uuid(uuid::Uuid::from_u128(1)),
+        execution,
+    )
+    .await
+}
+
 async fn supervise_active_resume<Execution, Resume>(
     fatal_signal: watch::Sender<bool>,
+    bounded_expirations: std::sync::Arc<std::sync::Mutex<FatalExecutionGuardState>>,
+    session: SessionId,
     resume: Resume,
 ) -> Result<(), Execution::Error>
 where
     Execution: ActivatedTurnExecution,
     Resume: Future<Output = Result<(), Execution::Error>>,
 {
-    let fatal_on_drop = FatalOnIncompleteExecution(Some(fatal_signal));
+    let fatal_on_drop = FatalOnIncompleteExecution::new(fatal_signal, bounded_expirations, session);
     let result = resume.await;
     let requires_recovery = match &result {
         Ok(()) => false,
@@ -480,17 +550,50 @@ const fn is_fatal_failure_class(failure: OperatorFailureClass) -> bool {
     )
 }
 
-struct FatalOnIncompleteExecution(Option<watch::Sender<bool>>);
+#[derive(Debug, Default)]
+struct FatalExecutionGuardState {
+    active_sessions: std::collections::HashSet<SessionId>,
+    bounded_expirations: std::collections::HashSet<SessionId>,
+}
+
+struct FatalOnIncompleteExecution {
+    fatal_signal: Option<watch::Sender<bool>>,
+    bounded_expirations: std::sync::Arc<std::sync::Mutex<FatalExecutionGuardState>>,
+    session: SessionId,
+}
 
 impl FatalOnIncompleteExecution {
+    fn new(
+        fatal_signal: watch::Sender<bool>,
+        bounded_expirations: std::sync::Arc<std::sync::Mutex<FatalExecutionGuardState>>,
+        session: SessionId,
+    ) -> Self {
+        bounded_expirations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_sessions
+            .insert(session);
+        Self {
+            fatal_signal: Some(fatal_signal),
+            bounded_expirations,
+            session,
+        }
+    }
+
     fn disarm(mut self) {
-        self.0 = None;
+        self.fatal_signal = None;
     }
 }
 
 impl Drop for FatalOnIncompleteExecution {
     fn drop(&mut self) {
-        if let Some(fatal_signal) = self.0.take() {
+        let mut state = self
+            .bounded_expirations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active_sessions.remove(&self.session);
+        let bounded = state.bounded_expirations.remove(&self.session);
+        if !bounded && let Some(fatal_signal) = self.fatal_signal.take() {
             fatal_signal.send_replace(true);
         }
     }
@@ -593,6 +696,69 @@ where
 pub struct ActivatedTurnPass<Generator, Transaction, Execution> {
     activation: StartEligibleTurnService<Generator, Transaction>,
     execution: Execution,
+    occupancy_recovery: Option<SchedulerPassOccupancyRecovery>,
+}
+
+#[derive(Clone, Debug)]
+struct SchedulerPassOccupancyRecovery {
+    pool: sqlx::PgPool,
+    eligibility_nudge: signalbox_application::InProcessEligibilityNudge,
+    execution_expiry: Option<std::sync::Arc<dyn SchedulerPassExpiryHandler>>,
+    expected_turns: std::sync::Arc<std::sync::Mutex<HashMap<SessionId, TurnId>>>,
+}
+
+impl SchedulerPassOccupancyRecovery {
+    fn expect_turn(&self, session: SessionId, turn: TurnId) {
+        self.expected_turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session, turn);
+    }
+
+    fn clear_turn(&self, session: SessionId) {
+        self.expected_turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&session);
+    }
+
+    async fn capture_resumed_turn(&self, session: SessionId) {
+        let repository = PostgresTurnLivenessRepository::new(self.pool.clone());
+        if let Ok(Ok(Some(candidate))) = timeout(
+            EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND,
+            repository.observed_slot_held_turn(session),
+        )
+        .await
+        {
+            self.expect_turn(session, candidate.turn());
+        }
+    }
+}
+
+impl SchedulerPassExpiryHandler for SchedulerPassOccupancyRecovery {
+    fn occupancy_expired(&self, session: SessionId) {
+        if let Some(execution_expiry) = &self.execution_expiry {
+            execution_expiry.occupancy_expired(session);
+        }
+        let expected_turn = self
+            .expected_turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&session);
+        if let Some(expected_turn) = expected_turn {
+            drop(tokio::spawn(recover_expired_scheduler_pass(
+                self.clone(),
+                session,
+                expected_turn,
+            )));
+        } else {
+            tracing::warn!(
+                cause_code = "scheduler_pass_occupancy_recovery_uncorrelated",
+                session_id = %session.as_uuid(),
+                "scheduler pass expired before an exact active turn could be captured; the turn-liveness watchdog remains responsible"
+            );
+        }
+    }
 }
 
 impl<Generator, Transaction, Execution> ActivatedTurnPass<Generator, Transaction, Execution> {
@@ -604,7 +770,26 @@ impl<Generator, Transaction, Execution> ActivatedTurnPass<Generator, Transaction
         Self {
             activation,
             execution,
+            occupancy_recovery: None,
         }
+    }
+
+    /// Installs daemon-owned recovery for passes ended by the occupancy bound.
+    pub fn with_occupancy_recovery(
+        mut self,
+        pool: sqlx::PgPool,
+        eligibility_nudge: signalbox_application::InProcessEligibilityNudge,
+    ) -> Self
+    where
+        Execution: ActivatedTurnExecution,
+    {
+        self.occupancy_recovery = Some(SchedulerPassOccupancyRecovery {
+            pool,
+            eligibility_nudge,
+            execution_expiry: self.execution.occupancy_expiry_handler(),
+            expected_turns: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        });
+        self
     }
 
     /// Returns both owned composition roles.
@@ -639,35 +824,62 @@ where
         }
     }
 
+    fn occupancy_expiry_handler(&self) -> Option<std::sync::Arc<dyn SchedulerPassExpiryHandler>> {
+        self.occupancy_recovery
+            .clone()
+            .map(|recovery| std::sync::Arc::new(recovery) as _)
+    }
+
     fn run(
         &mut self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let activation = self.activation.execute_with_cloned_transaction(session);
         let execution = self.execution.clone();
+        let occupancy_recovery = self.occupancy_recovery.clone();
         async move {
-            execution.resume_active(session).await.map_err(|source| {
-                ActivatedTurnPassError::Execution {
+            if let Some(recovery) = &occupancy_recovery {
+                recovery.capture_resumed_turn(session).await;
+            }
+            if let Err(source) = execution.resume_active(session).await {
+                if let Some(recovery) = &occupancy_recovery {
+                    recovery.clear_turn(session);
+                }
+                return Err(ActivatedTurnPassError::Execution {
                     stage: TurnPassExecutionStage::ActiveTurnRecovery,
                     turn: Execution::active_resume_failure_turn(&source),
                     source,
-                }
-            })?;
+                });
+            }
             let outcome = match activation.await {
                 Ok(outcome) => outcome,
                 Err(error) => {
+                    if let Some(recovery) = &occupancy_recovery {
+                        recovery.clear_turn(session);
+                    }
                     report_ambiguous_commit(&execution, &error);
                     return Err(ActivatedTurnPassError::Activation(error));
                 }
             };
             match outcome {
-                StartEligibleTurnOutcome::NoEligibleTurn => Ok(()),
+                StartEligibleTurnOutcome::NoEligibleTurn => {
+                    if let Some(recovery) = &occupancy_recovery {
+                        recovery.clear_turn(session);
+                    }
+                    Ok(())
+                }
                 StartEligibleTurnOutcome::Activated(activated) => {
                     let turn = activated.turn();
+                    if let Some(recovery) = &occupancy_recovery {
+                        recovery.expect_turn(session, turn);
+                    }
                     if !activation_session_matches(&execution, session, activated.session()) {
+                        if let Some(recovery) = &occupancy_recovery {
+                            recovery.clear_turn(session);
+                        }
                         return Err(ActivatedTurnPassError::ActivationSessionMismatch);
                     }
-                    execution
+                    let result = execution
                         .execute(activated)
                         .instrument(turn_work_span(session, turn))
                         .await
@@ -675,11 +887,147 @@ where
                             stage: TurnPassExecutionStage::Execution,
                             turn: Some(turn),
                             source,
-                        })
+                        });
+                    if let Some(recovery) = &occupancy_recovery {
+                        recovery.clear_turn(session);
+                    }
+                    result
                 }
             }
         }
     }
+}
+
+/// Attempts spent on daemon-owned recovery for one expired scheduler pass.
+// numeric-bound: ceiling - bounds detached recovery work for one expired pass
+const EXPIRED_PASS_RECOVERY_ATTEMPTS: u32 = 4;
+/// Wall-clock bound for each detached database operation.
+// numeric-bound: ceiling - prevents one database operation from wedging recovery
+const EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
+/// Delay between failed expired-pass recovery attempts.
+// numeric-bound: interval - spends a database outage without busy retrying
+const EXPIRED_PASS_RECOVERY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(120);
+
+async fn recover_expired_scheduler_pass(
+    recovery: SchedulerPassOccupancyRecovery,
+    session: SessionId,
+    expected_turn: TurnId,
+) {
+    // The first attempt is immediate. A database outage spends three bounded
+    // retries while the independent liveness scan remains the durable
+    // backstop for the still-active turn.
+    let repository = PostgresTurnLivenessRepository::new(recovery.pool.clone());
+    let candidate = match timeout(
+        EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND,
+        repository.observed_slot_held_turn(session),
+    )
+    .await
+    {
+        Ok(Ok(Some(candidate))) if candidate.turn() == expected_turn => candidate,
+        Ok(Ok(_)) => {
+            tracing::info!(
+                cause_code = "scheduler_pass_occupancy_recovery_superseded",
+                session_id = %session.as_uuid(),
+                turn_id = %expected_turn.as_uuid(),
+                "expired scheduler pass no longer owns the exact active turn and was left alone"
+            );
+            return;
+        }
+        Ok(Err(error)) => {
+            report_scheduler_pass_recovery_failure(session, expected_turn, 0, &error);
+            return;
+        }
+        Err(_) => {
+            tracing::error!(
+                cause_code = "scheduler_pass_occupancy_observation_timed_out",
+                session_id = %session.as_uuid(),
+                turn_id = %expected_turn.as_uuid(),
+                attempt_bound_seconds = EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND.as_secs(),
+                "scheduler pass expiry observation exceeded its bound; the turn-liveness watchdog remains responsible"
+            );
+            return;
+        }
+    };
+    for attempt in 1_u32..=EXPIRED_PASS_RECOVERY_ATTEMPTS {
+        let mut ids = UuidV7StartupScanIdGenerator;
+        let identities = signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+            SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
+            ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
+        );
+        match timeout(
+            EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND,
+            repository.recover_observed_slot_held_turn(candidate, identities, &mut ids),
+        )
+        .await
+        {
+            Ok(Ok(Some(outcome))) => {
+                let _ = recovery.eligibility_nudge.nudge(session);
+                tracing::warn!(
+                    cause_code = "scheduler_pass_occupancy_recovered",
+                    session_id = %session.as_uuid(),
+                    turn_id = %expected_turn.as_uuid(),
+                    attempt,
+                    recovery_outcome = ?outcome,
+                    "scheduler pass occupancy expiry was reconciled durably"
+                );
+                return;
+            }
+            Ok(Ok(None)) => {
+                tracing::info!(
+                    cause_code = "scheduler_pass_occupancy_recovery_superseded",
+                    session_id = %session.as_uuid(),
+                    turn_id = %expected_turn.as_uuid(),
+                    attempt,
+                    "expired scheduler pass turn or progress evidence changed under the lock and was left alone"
+                );
+                return;
+            }
+            Ok(Err(error)) => {
+                report_scheduler_pass_recovery_failure(session, expected_turn, attempt, &error);
+                if attempt < EXPIRED_PASS_RECOVERY_ATTEMPTS {
+                    sleep(EXPIRED_PASS_RECOVERY_RETRY_DELAY).await;
+                }
+            }
+            Err(_) => {
+                tracing::error!(
+                    failure_class = ?signalbox_application::OperatorFailureClass::Infrastructure { commit_ambiguous: true },
+                    cause_code = "scheduler_pass_occupancy_recovery_timed_out",
+                    session_id = %session.as_uuid(),
+                    turn_id = %expected_turn.as_uuid(),
+                    attempt,
+                    attempt_bound_seconds = EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND.as_secs(),
+                    "scheduler pass expiry recovery attempt exceeded its bound"
+                );
+                if attempt < EXPIRED_PASS_RECOVERY_ATTEMPTS {
+                    sleep(EXPIRED_PASS_RECOVERY_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+    tracing::error!(
+        cause_code = "scheduler_pass_occupancy_recovery_exhausted",
+        session_id = %session.as_uuid(),
+        turn_id = %expected_turn.as_uuid(),
+        attempts = EXPIRED_PASS_RECOVERY_ATTEMPTS,
+        "scheduler pass expiry recovery exhausted; the turn-liveness watchdog remains responsible"
+    );
+}
+
+fn report_scheduler_pass_recovery_failure(
+    session: SessionId,
+    turn: TurnId,
+    attempt: u32,
+    error: &TurnLivenessRepositoryError,
+) {
+    let failure_class = error.operator_failure_class();
+    tracing::error!(
+        ?failure_class,
+        cause_code = "scheduler_pass_occupancy_recovery_failed",
+        session_id = %session.as_uuid(),
+        turn_id = %turn.as_uuid(),
+        attempt,
+        "scheduler pass expiry recovery attempt failed"
+    );
 }
 /// Creates one turn child span beneath the scheduler's session span.
 ///
@@ -1774,8 +2122,8 @@ mod tests {
         ApprovalJudgeBranchAuthority, ApprovalJudgeBranchAuthorityInput,
         ApprovalJudgeDispatchAuthority, ApprovalJudgePullRequestAuthority,
         ApprovalJudgePullRequestAuthorityInput, ClassifyOperatorFailure, EligibilityPass,
-        OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
-        StartEligibleTurnService, StartEligibleTurnTransaction,
+        OperatorFailureClass, SchedulerPassExpiryHandler, StartEligibleTurnIdGenerator,
+        StartEligibleTurnOutcome, StartEligibleTurnService, StartEligibleTurnTransaction,
     };
     use signalbox_domain::{
         AcceptedInputTurnActivationIdentities, ActivatedTurn, ContextFrontierId,
@@ -1787,10 +2135,11 @@ mod tests {
     use super::{
         APPROVAL_JUDGE_SYSTEM_PROMPT, ActivatedTurnExecution, ActivatedTurnPass,
         ActivatedTurnPassError, ApprovalJudgeModelError, FailedApprovalJudgeDisposition,
-        FatalExecutionSignal, FatalExecutionSupervisor, JudgeRequestFields,
-        MAX_QUOTED_CONTEXT_BYTES, SessionAuthorityContext, TokenUsage, TurnPassExecutionStage,
-        activation_session_matches, reconcile_retained_once, render_dispatch_authority,
-        render_judge_request_payload, render_session_authority_context, supervise_execution,
+        FatalExecutionGuardState, FatalExecutionOccupancyExpiry, FatalExecutionSignal,
+        FatalExecutionSupervisor, JudgeRequestFields, MAX_QUOTED_CONTEXT_BYTES,
+        SessionAuthorityContext, TokenUsage, TurnPassExecutionStage, activation_session_matches,
+        reconcile_retained_once, render_dispatch_authority, render_judge_request_payload,
+        render_session_authority_context, supervise_execution, supervise_execution_for_session,
     };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2298,6 +2647,75 @@ mod tests {
             execution
                 .await
                 .expect_err("the execution task is cancelled")
+                .is_cancelled()
+        );
+        signal.wait().await;
+        assert!(signal.is_triggered());
+    }
+
+    #[tokio::test]
+    async fn bounded_scheduler_expiry_does_not_raise_the_fatal_signal() {
+        let (fatal_signal, triggered) = watch::channel(false);
+        let signal = FatalExecutionSignal { triggered };
+        let bounded_expirations =
+            Arc::new(std::sync::Mutex::new(FatalExecutionGuardState::default()));
+        let selected = SessionId::from_uuid(Uuid::from_u128(41));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let execution_entered = Arc::clone(&entered);
+        let execution = tokio::spawn(supervise_execution_for_session(
+            fatal_signal,
+            Arc::clone(&bounded_expirations),
+            selected,
+            async move {
+                execution_entered.notify_one();
+                pending::<Result<(), ExecutionFailure>>().await
+            },
+        ));
+        entered.notified().await;
+        FatalExecutionOccupancyExpiry {
+            bounded_expirations,
+        }
+        .occupancy_expired(selected);
+
+        execution.abort();
+        assert!(
+            execution
+                .await
+                .expect_err("the bounded execution task is cancelled")
+                .is_cancelled()
+        );
+        assert!(!signal.is_triggered());
+    }
+
+    #[tokio::test]
+    async fn expiry_outside_guarded_execution_does_not_suppress_later_failure() {
+        let (fatal_signal, triggered) = watch::channel(false);
+        let signal = FatalExecutionSignal { triggered };
+        let bounded_expirations =
+            Arc::new(std::sync::Mutex::new(FatalExecutionGuardState::default()));
+        let selected = SessionId::from_uuid(Uuid::from_u128(42));
+        FatalExecutionOccupancyExpiry {
+            bounded_expirations: Arc::clone(&bounded_expirations),
+        }
+        .occupancy_expired(selected);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let execution_entered = Arc::clone(&entered);
+        let execution = tokio::spawn(supervise_execution_for_session(
+            fatal_signal,
+            bounded_expirations,
+            selected,
+            async move {
+                execution_entered.notify_one();
+                pending::<Result<(), ExecutionFailure>>().await
+            },
+        ));
+        entered.notified().await;
+
+        execution.abort();
+        assert!(
+            execution
+                .await
+                .expect_err("the later execution task is cancelled")
                 .is_cancelled()
         );
         signal.wait().await;

@@ -2140,7 +2140,7 @@ fn report_turn_parked_for_reconciliation(session: SessionId, turn: TurnId) {
     tracing::warn!(
         session_id = %session.into_uuid(),
         turn_id = %turn.into_uuid(),
-        "turn parked awaiting user reconciliation"
+        "turn parked awaiting bounded reconciliation"
     );
 }
 

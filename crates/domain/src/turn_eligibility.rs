@@ -121,8 +121,8 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
         /// The exact ambiguous physical call.
         ambiguous_call: crate::ModelCallId,
-        /// The later or already-applied interrupt that requires reconciliation.
-        interrupt: AppliedInterruptCommandResult,
+        /// The exact durable authority that requires reconciliation.
+        authority: ModelCallReconciliationAuthority,
         /// The equal-content terminal frontier identifying the turn boundary.
         terminal_frontier: ContextFrontierId,
     },
@@ -143,6 +143,18 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         interrupt: AppliedInterruptCommandResult,
         /// The exact proposal-ordered result-suffix terminal frontier.
         terminal_frontier: ContextFrontierId,
+    },
+}
+
+/// Durable authority for one model-call reconciliation terminal boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelCallReconciliationAuthority {
+    /// A later or already-applied interrupt left the call ambiguous.
+    AppliedInterrupt(AppliedInterruptCommandResult),
+    /// The daemon exhausted one recorded automatic recovery attempt.
+    AutomaticRecovery {
+        /// The one-based durable recovery attempt that terminalized the turn.
+        attempt: std::num::NonZeroU32,
     },
 }
 
@@ -2417,6 +2429,29 @@ impl AcceptedInputSchedulingProjection {
             recovery.attempt,
             recovery.source_snapshot,
             interrupt,
+            identities,
+        )
+    }
+
+    /// Closes the active model-call recovery wait under a daemon-owned durable
+    /// attempt while preserving its exact ambiguity set.
+    pub fn apply_automatic_model_call_reconciliation(
+        self,
+        attempt: std::num::NonZeroU32,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredModelCallTurn, crate::ModelCallClosureError> {
+        let active_turn = self
+            .active_turn_execution()
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        let recovery = self
+            .active_model_call_recovery
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        crate::model_execution::apply_automatic_model_call_reconciliation(
+            active_turn.into(),
+            recovery.call,
+            recovery.attempt,
+            recovery.source_snapshot,
+            attempt,
             identities,
         )
     }
@@ -6462,7 +6497,7 @@ fn reconstitute_inner(
                 reconciling_attempt,
                 reconciling_attempt_end,
                 ambiguous_call,
-                interrupt,
+                authority,
                 terminal_frontier,
             } => {
                 if active.is_some() || queued_seen {
@@ -6472,31 +6507,46 @@ fn reconstitute_inner(
                         },
                     );
                 }
-                let attempt_end_matches = match reconciling_attempt_end.end() {
-                    AttemptEnd::WithoutStop {
-                        disposition:
-                            UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost,
-                    } => reconciling_attempt_end.interrupt().is_none(),
-                    AttemptEnd::AfterCancellation {
-                        cause,
-                        disposition:
-                            CancellationStopDisposition::Ambiguous | CancellationStopDisposition::Lost,
-                    } => {
-                        *cause == interrupt.proof()
-                            && reconciling_attempt_end.interrupt() == Some(*interrupt)
+                let authority_matches = match authority {
+                    ModelCallReconciliationAuthority::AppliedInterrupt(interrupt) => {
+                        let attempt_end_matches = match reconciling_attempt_end.end() {
+                            AttemptEnd::WithoutStop {
+                                disposition:
+                                    UnstoppedAttemptDisposition::Ambiguous
+                                    | UnstoppedAttemptDisposition::Lost,
+                            } => reconciling_attempt_end.interrupt().is_none(),
+                            AttemptEnd::AfterCancellation {
+                                cause,
+                                disposition:
+                                    CancellationStopDisposition::Ambiguous
+                                    | CancellationStopDisposition::Lost,
+                            } => {
+                                *cause == interrupt.proof()
+                                    && reconciling_attempt_end.interrupt() == Some(*interrupt)
+                            }
+                            _ => false,
+                        };
+                        let successor = records_by_turn.get(&interrupt.successor());
+                        interrupt.session() == session
+                            && interrupt.proof().predecessor() == turn
+                            && attempt_end_matches
+                            && successor.is_some_and(|successor| {
+                                successor.stored_session == session
+                                    && successor.accepted_input.id() == interrupt.accepted_input()
+                                    && successor.order == interrupt.successor_order()
+                            })
                     }
-                    _ => false,
+                    ModelCallReconciliationAuthority::AutomaticRecovery { .. } => {
+                        matches!(
+                            reconciling_attempt_end.end(),
+                            AttemptEnd::WithoutStop {
+                                disposition: UnstoppedAttemptDisposition::Ambiguous
+                                    | UnstoppedAttemptDisposition::Lost,
+                            }
+                        ) && reconciling_attempt_end.interrupt().is_none()
+                    }
                 };
-                let successor = records_by_turn.get(&interrupt.successor());
-                if interrupt.session() != session
-                    || interrupt.proof().predecessor() != turn
-                    || !attempt_end_matches
-                    || successor.is_none_or(|successor| {
-                        successor.stored_session != session
-                            || successor.accepted_input.id() != interrupt.accepted_input()
-                            || successor.order != interrupt.successor_order()
-                    })
-                    || attempt_owners.insert(*reconciling_attempt, turn).is_some()
+                if !authority_matches || attempt_owners.insert(*reconciling_attempt, turn).is_some()
                 {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalAttemptEndMismatch {
@@ -7223,10 +7273,13 @@ fn terminal_record_interrupt(
             terminal_execution, ..
         } => Some(terminal_execution.interrupt),
         AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
-            interrupt,
+            authority,
             ..
-        }
-        | AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
+        } => match authority {
+            ModelCallReconciliationAuthority::AppliedInterrupt(interrupt) => Some(*interrupt),
+            ModelCallReconciliationAuthority::AutomaticRecovery { .. } => None,
+        },
+        AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
             interrupt,
             ..
         } => Some(*interrupt),
@@ -12309,7 +12362,7 @@ mod tests {
                     interrupt,
                 ),
                 ambiguous_call: continuation_call,
-                interrupt,
+                authority: ModelCallReconciliationAuthority::AppliedInterrupt(interrupt),
                 terminal_frontier: terminal_frontier.id(),
             },
         );

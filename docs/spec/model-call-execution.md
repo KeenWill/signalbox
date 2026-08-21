@@ -1,5 +1,8 @@
 # Model-call execution
 
+The daemon-owned terminal treatment of a restart-ambiguous model call is
+verified against this PR (`agent/turn-lifecycle-hardening`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -943,6 +946,12 @@ persistence commits it atomically with its outbox rows
   its ended attempt remains the original `WithoutStop(Ambiguous|Lost)` evidence.
   The exact later interrupt proof is carried by the turn's reconciliation marker
   and correlated accepted successor instead of rewriting that evidence.
+  Independently, the turn-liveness runtime can spend one durably claimed
+  automatic recovery attempt on an unstopped wait. After revalidating that the
+  exact call and ended attempt still own it, the aggregate uses
+  `AutomaticModelCallRecovery { attempt }` as its typed reason and commits the
+  same equal-content frontier and reconciliation outbox record. This treatment
+  does not claim a provider result; the call remains terminal `Ambiguous`.
 
 Completion and refusal races against `StopRequested` end through their typed
 `AfterCancellation` dispositions while retaining their ordinary turn outcomes.
@@ -1009,7 +1018,8 @@ per-session locked transaction as the general scan (INV-034):
   retries preparation of that same unsent call;
 - a durable unstopped `InFlight` call with no surviving evidence ends
   `Ambiguous`, the abandoned attempt ends `Lost`, and the turn parks in
-  `awaiting_model_call_recovery`;
+  `awaiting_model_call_recovery`, where the independent bounded reconciliation
+  runtime takes responsibility after startup;
 - a durable `CancellationRequested` call reconstructs its applied interrupt,
   ends the attempt `AfterCancellation(Lost)`, and terminalizes
   `ReconciliationRequired` with that call as the exact ambiguity set.

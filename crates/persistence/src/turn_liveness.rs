@@ -13,7 +13,7 @@ use std::{error::Error, fmt, time::Duration};
 
 use signalbox_application::{
     ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StaleTurnOutcome,
-    TurnLivenessEvidence,
+    StartupScanSessionOutcome, TurnLivenessEvidence,
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, SessionId, TurnAttemptId,
@@ -27,7 +27,8 @@ use crate::mapping::{
 use crate::session::{SessionRepositoryError, load_session_from_connection};
 use crate::startup::{
     StartupScanCorruption, StartupScanIdentityCollision, StartupScanRepositoryError,
-    insert_prepared_failure, map_scheduling_error,
+    TransactionDecision, insert_prepared_failure, map_scheduling_error,
+    recover_observed_slot_held_in_transaction,
 };
 use crate::submit_input::load_scheduling_projection;
 
@@ -232,6 +233,92 @@ impl PostgresTurnLivenessRepository {
             .await
             .map_err(TurnLivenessRepositoryError::Inventory)?;
         Ok(QuiescentActiveTurnPage::new(fetched))
+    }
+
+    /// Reads one bounded page of running turns regardless of their currently
+    /// live operation, for the outer slot-held staleness watchdog.
+    pub async fn slot_held_active_turns(
+        &self,
+        after: Option<SessionId>,
+    ) -> Result<QuiescentActiveTurnPage, TurnLivenessRepositoryError> {
+        let mut connection = self
+            .pool
+            .acquire()
+            .await
+            .map_err(TurnLivenessRepositoryError::Inventory)?;
+        let fetched = read_slot_held_active_turns(&mut connection, None, after)
+            .await
+            .map_err(TurnLivenessRepositoryError::Inventory)?;
+        Ok(QuiescentActiveTurnPage::new(fetched))
+    }
+
+    /// Reads the current slot-held observation for one exact session.
+    pub async fn observed_slot_held_turn(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<StaleTurnCandidate>, TurnLivenessRepositoryError> {
+        let mut connection = self
+            .pool
+            .acquire()
+            .await
+            .map_err(TurnLivenessRepositoryError::Inventory)?;
+        read_exact_slot_held_candidate(&mut connection, session)
+            .await
+            .map_err(TurnLivenessRepositoryError::Inventory)
+    }
+
+    /// Reconciles one exact slot-held observation under the session locks.
+    ///
+    /// `None` means the turn or its progress evidence changed before the lock
+    /// was acquired. That is an ordinary supersession, never authority to
+    /// recover whichever turn happens to be active now.
+    pub async fn recover_observed_slot_held_turn<Generator>(
+        &self,
+        candidate: StaleTurnCandidate,
+        identities: AcceptedInputTurnFailureIdentities,
+        ids: &mut Generator,
+    ) -> Result<Option<StartupScanSessionOutcome>, TurnLivenessRepositoryError>
+    where
+        Generator: signalbox_application::StartupScanIdGenerator + Send,
+    {
+        let mut transaction = timeout(TERMINALIZATION_ACQUIRE_WAIT, self.pool.begin())
+            .await
+            .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(TERMINALIZATION_LOCK_WAIT)
+            .execute(&mut *transaction)
+            .await
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        let decision =
+            recover_observed_slot_held_in_transaction(&mut transaction, candidate, identities, ids)
+                .await
+                .map_err(TurnLivenessRepositoryError::from)?;
+        match decision {
+            None => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(TurnLivenessRepositoryError::terminalization)?;
+                Ok(None)
+            }
+            Some(TransactionDecision::Commit(outcome)) => {
+                transaction.commit().await.map_err(|error| {
+                    TurnLivenessRepositoryError::TerminalizationDatabase {
+                        commit_ambiguous: crate::commit_failure_is_ambiguous(&error),
+                        source: error,
+                    }
+                })?;
+                Ok(Some(outcome))
+            }
+            Some(TransactionDecision::Rollback(outcome)) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(TurnLivenessRepositoryError::terminalization)?;
+                Ok(Some(outcome))
+            }
+        }
     }
 
     /// Terminalizes one observed-stale turn as failed under the session locks.
@@ -475,6 +562,64 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
       ORDER BY active.session_id
       LIMIT $3";
 
+/// Outer watchdog inventory for a pass that still holds an active running
+/// turn after every component deadline should have ended. Approval and other
+/// durable waits are excluded by the phase predicate; live calls and tools are
+/// intentionally retained because their containing pass has its own tighter
+/// occupancy ceiling.
+const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
+            active.turn_id,
+            active.current_attempt_id,
+            (SELECT newest.event_sequence
+               FROM outbox_event AS newest
+              WHERE newest.session_id = active.session_id
+                AND newest.event_kind NOT IN (
+                    'session_created',
+                    'session_model_settings_changed',
+                    'turn_model_settings_resolved',
+                    'input_accepted',
+                    'goal_turn_retired',
+                    'runner_state_transition'
+                )
+              ORDER BY newest.event_sequence DESC
+              LIMIT 1) AS outbox_frontier
+       FROM turn_lifecycle AS active
+       JOIN turn_attempt AS tenure
+         ON tenure.turn_attempt_id = active.current_attempt_id
+        AND tenure.turn_id = active.turn_id
+        AND tenure.session_id = active.session_id
+      WHERE active.state_kind = 'active'
+        AND NOT active.delegation_runtime_terminal
+        AND active.active_phase_kind = 'running'
+        AND tenure.state_kind IN ('prepared', 'running', 'stop_requested')
+        AND tenure.end_variant IS NULL
+        AND tenure.end_disposition IS NULL
+        AND (
+            tenure.state_kind = 'stop_requested'
+            OR EXISTS (
+                SELECT 1
+                  FROM model_call AS live
+                 WHERE live.session_id = active.session_id
+                   AND live.state_kind <> 'terminal'
+            )
+            OR EXISTS (
+                SELECT 1
+                  FROM context_compaction_model_call AS live
+                 WHERE live.session_id = active.session_id
+                   AND live.state_kind <> 'terminal'
+            )
+            OR EXISTS (
+                SELECT 1
+                  FROM tool_attempt AS live
+                 WHERE live.session_id = active.session_id
+                   AND live.state_kind <> 'terminal'
+            )
+        )
+        AND ($1::uuid IS NULL OR active.session_id = $1)
+        AND ($2::uuid IS NULL OR active.session_id > $2)
+      ORDER BY active.session_id
+      LIMIT $3";
+
 /// Reads one page, leaving classification of any failure to the caller.
 ///
 /// The same statement serves the periodic scan and the locked revalidation, so
@@ -502,6 +647,10 @@ async fn read_quiescent_active_turns(
         .bind(QUIESCENT_INVENTORY_PAGE_SIZE)
         .fetch_all(connection)
         .await?;
+    decode_candidate_page(rows)
+}
+
+fn decode_candidate_page(rows: Vec<sqlx::postgres::PgRow>) -> Result<FetchedPage, sqlx::Error> {
     let fetched_rows = rows.len();
     let mut furthest_session = None;
     let mut candidates = Vec::with_capacity(fetched_rows);
@@ -539,6 +688,28 @@ async fn read_quiescent_active_turns(
         rows: fetched_rows,
         furthest_session,
     })
+}
+
+async fn read_slot_held_active_turns(
+    connection: &mut PgConnection,
+    session: Option<SessionId>,
+    after: Option<SessionId>,
+) -> Result<FetchedPage, sqlx::Error> {
+    let rows = sqlx::query(SLOT_HELD_ACTIVE_TURNS)
+        .bind(session.map(session_id_to_uuid))
+        .bind(after.map(session_id_to_uuid))
+        .bind(QUIESCENT_INVENTORY_PAGE_SIZE)
+        .fetch_all(connection)
+        .await?;
+    decode_candidate_page(rows)
+}
+
+pub(crate) async fn read_exact_slot_held_candidate(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<Option<StaleTurnCandidate>, sqlx::Error> {
+    let page = read_slot_held_active_turns(connection, Some(session), None).await?;
+    Ok(page.candidates.first().copied())
 }
 
 /// Reads one outbox sequence as the token the ledger compares, or nothing if

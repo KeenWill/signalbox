@@ -1,7 +1,11 @@
 //! Atomic PostgreSQL persistence and replay for durable input acceptance.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::{
+    error::Error,
+    fmt,
+    num::{NonZeroU32, NonZeroU64},
+};
 
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -24,9 +28,9 @@ use signalbox_domain::{
     DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
     FrozenModelSelection, GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput,
     GoalTurnSource, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
-    ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-    ModelCallTerminalOutcome, ModelCapabilityCatalog, ModelSelectionOverride,
-    ModelSelectionRequest, NonAcceptedTurnPredecessorReconstitutionInput,
+    ModelCallInterruptOutcome, ModelCallReconciliationAuthority, ModelCallReconstitutionInput,
+    ModelCallReconstitutionState, ModelCallTerminalOutcome, ModelCapabilityCatalog,
+    ModelSelectionOverride, ModelSelectionRequest, NonAcceptedTurnPredecessorReconstitutionInput,
     NonEmptyUnicodeTextFailure, OriginConfiguration, OriginConfigurationReconstitutionInput,
     OriginModelSettingsError, PerInputConfigurationChoices,
     PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
@@ -39,7 +43,9 @@ use signalbox_domain::{
     SessionInputPosition, SteeringBinding, SteeringContinuationRoundReconstitutionInput,
     SteeringReclassificationReason, SubmitInput,
     SubmitInputAppliedPendingSteeringReconstitutionInput, SubmitInputAppliedResult,
-    SubmitInputAppliedTurnOriginReconstitutionInput, SubmitInputDirectTurnOriginConstructionInput,
+    SubmitInputAppliedTurnOriginReconstitutionInput,
+    SubmitInputAutomaticModelCallReconciliationConstructionInput,
+    SubmitInputDirectTurnOriginConstructionInput,
     SubmitInputInterruptedModelCallReconciliationConstructionInput,
     SubmitInputInterruptedToolReconciliationConstructionInput, SubmitInputPreparationFailure,
     SubmitInputReclassifiedTurnOriginConstructionInput, SubmitInputReconstitutionFailure,
@@ -155,9 +161,15 @@ enum StoredTerminalTurnDisposition {
         interrupt_command: DurableCommandId,
     },
     ReconciliationRequired {
-        interrupt_command: DurableCommandId,
+        authority: StoredModelCallReconciliationAuthority,
         ambiguous_operation: IssuedOperationRef,
     },
+}
+
+#[derive(Clone, Copy)]
+enum StoredModelCallReconciliationAuthority {
+    AppliedInterrupt(DurableCommandId),
+    AutomaticRecovery(NonZeroU32),
 }
 
 impl StoredTerminalTurnDisposition {
@@ -2337,6 +2349,12 @@ pub(crate) async fn load_scheduling_projection(
             turn.terminal_model_call_id,
             turn.terminal_tool_attempt_id,
             turn.terminal_disposition_kind,
+            automatic_reconciliation.model_call_id
+                AS automatic_reconciliation_model_call_id,
+            automatic_reconciliation.state_kind
+                AS automatic_reconciliation_state_kind,
+            automatic_reconciliation.attempt_count
+                AS automatic_reconciliation_attempt_count,
             (
                 SELECT call.model_call_id
                   FROM model_call AS call
@@ -2375,6 +2393,9 @@ pub(crate) async fn load_scheduling_projection(
                 turn.current_attempt_id,
                 turn.terminal_attempt_id
               )
+         LEFT JOIN automatic_model_call_reconciliation AS automatic_reconciliation
+           ON automatic_reconciliation.turn_id = turn.turn_id
+          AND automatic_reconciliation.session_id = turn.session_id
          LEFT JOIN turn_runner_recovery_interrupt_effect AS runner_recovery_effect
            ON runner_recovery_effect.turn_id = turn.turn_id
           AND runner_recovery_effect.session_id = turn.session_id
@@ -2599,6 +2620,12 @@ pub(crate) async fn load_scheduling_projection(
         let terminal_model_call: Option<Uuid> = row.try_get("terminal_model_call_id")?;
         let terminal_tool_attempt: Option<Uuid> = row.try_get("terminal_tool_attempt_id")?;
         let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
+        let automatic_reconciliation_model_call: Option<Uuid> =
+            row.try_get("automatic_reconciliation_model_call_id")?;
+        let automatic_reconciliation_state: Option<String> =
+            row.try_get("automatic_reconciliation_state_kind")?;
+        let automatic_reconciliation_attempt_count: Option<i32> =
+            row.try_get("automatic_reconciliation_attempt_count")?;
         if active_phase.as_deref() != Some("awaiting_runner_recovery")
             && (runner_recovery_runner.is_some()
                 || runner_recovery_revision.is_some()
@@ -2607,6 +2634,20 @@ pub(crate) async fn load_scheduling_projection(
             return Err(
                 SubmitInputCorruption::Inconsistent("runner recovery lifecycle payload").into(),
             );
+        }
+        let automatic_reconciliation_present = automatic_reconciliation_model_call.is_some()
+            || automatic_reconciliation_state.is_some()
+            || automatic_reconciliation_attempt_count.is_some();
+        if automatic_reconciliation_present
+            && !(state_kind == "active"
+                && active_phase.as_deref() == Some("awaiting_model_call_recovery")
+                || state_kind == "terminal"
+                    && terminal_disposition.as_deref() == Some("reconciliation_required"))
+        {
+            return Err(SubmitInputCorruption::Inconsistent(
+                "automatic model-call reconciliation lifecycle phase",
+            )
+            .into());
         }
         let state = match state_kind.as_str() {
             "queued" => {
@@ -3348,28 +3389,72 @@ pub(crate) async fn load_scheduling_projection(
                             )
                             .into());
                         }
-                        let (interrupt, reconciling_attempt_end) = match (
+                        let automatic_authority = match (
+                            automatic_reconciliation_model_call,
+                            automatic_reconciliation_state.as_deref(),
+                            automatic_reconciliation_attempt_count,
+                        ) {
+                            (None, None, None) => None,
+                            (Some(call), Some("reconciled"), Some(attempts))
+                                if Some(call) == terminal_model_call =>
+                            {
+                                let attempt = u32::try_from(attempts)
+                                    .ok()
+                                    .and_then(NonZeroU32::new)
+                                    .filter(|attempt| attempt.get() <= 5)
+                                    .ok_or(SubmitInputCorruption::Inconsistent(
+                                        "automatic model-call reconciliation attempt",
+                                    ))?;
+                                Some(ModelCallReconciliationAuthority::AutomaticRecovery {
+                                    attempt,
+                                })
+                            }
+                            (Some(call), Some("superseded"), Some(attempts))
+                                if Some(call) == terminal_model_call
+                                    && u32::try_from(attempts)
+                                        .is_ok_and(|attempts| attempts <= 5) =>
+                            {
+                                None
+                            }
+                            _ => {
+                                return Err(SubmitInputCorruption::Inconsistent(
+                                    "automatic model-call reconciliation authority",
+                                )
+                                .into());
+                            }
+                        };
+                        let (model_authority, tool_interrupt, reconciling_attempt_end) = match (
                             end_variant.as_deref(),
                             end_disposition.as_deref(),
                         ) {
-                            (Some("without_stop"), Some("ambiguous")) => (
-                                require_applied_interrupt_for_turn(
-                                    lifecycle_turn,
-                                    &recorded_commands,
-                                )?,
-                                TerminalAttemptEndReconstitutionInput::without_stop(
-                                    UnstoppedAttemptDisposition::Ambiguous,
-                                ),
-                            ),
-                            (Some("without_stop"), Some("lost")) => (
-                                require_applied_interrupt_for_turn(
-                                    lifecycle_turn,
-                                    &recorded_commands,
-                                )?,
-                                TerminalAttemptEndReconstitutionInput::without_stop(
-                                    UnstoppedAttemptDisposition::Lost,
-                                ),
-                            ),
+                            (Some("without_stop"), Some(disposition @ ("ambiguous" | "lost"))) => {
+                                let interrupt =
+                                    applied_interrupt_for_turn(lifecycle_turn, &recorded_commands)?;
+                                let authority = match (interrupt, automatic_authority) {
+                                    (Some(interrupt), _) => {
+                                        ModelCallReconciliationAuthority::AppliedInterrupt(
+                                            interrupt,
+                                        )
+                                    }
+                                    (None, Some(authority)) => authority,
+                                    (None, None) => {
+                                        return Err(SubmitInputCorruption::Missing(
+                                            "model-call reconciliation authority",
+                                        )
+                                        .into());
+                                    }
+                                };
+                                let attempt_end = if disposition == "ambiguous" {
+                                    TerminalAttemptEndReconstitutionInput::without_stop(
+                                        UnstoppedAttemptDisposition::Ambiguous,
+                                    )
+                                } else {
+                                    TerminalAttemptEndReconstitutionInput::without_stop(
+                                        UnstoppedAttemptDisposition::Lost,
+                                    )
+                                };
+                                (Some(authority), interrupt, attempt_end)
+                            }
                             (Some("after_cancellation"), Some("ambiguous")) => {
                                 let interrupt = require_applied_interrupt_from_attempt(
                                     &row,
@@ -3377,7 +3462,10 @@ pub(crate) async fn load_scheduling_projection(
                                     &recorded_commands,
                                 )?;
                                 (
-                                    interrupt,
+                                    Some(ModelCallReconciliationAuthority::AppliedInterrupt(
+                                        interrupt,
+                                    )),
+                                    Some(interrupt),
                                     TerminalAttemptEndReconstitutionInput::after_cancellation(
                                         CancellationStopDisposition::Ambiguous,
                                         interrupt,
@@ -3391,7 +3479,10 @@ pub(crate) async fn load_scheduling_projection(
                                     &recorded_commands,
                                 )?;
                                 (
-                                    interrupt,
+                                    Some(ModelCallReconciliationAuthority::AppliedInterrupt(
+                                        interrupt,
+                                    )),
+                                    Some(interrupt),
                                     TerminalAttemptEndReconstitutionInput::after_cancellation(
                                         CancellationStopDisposition::Lost,
                                         interrupt,
@@ -3399,6 +3490,12 @@ pub(crate) async fn load_scheduling_projection(
                                 )
                             }
                             (Some("without_stop"), Some("yielded_to_durable_wait")) => {
+                                if automatic_authority.is_some() {
+                                    return Err(SubmitInputCorruption::Inconsistent(
+                                        "automatic authority with runner recovery attempt",
+                                    )
+                                    .into());
+                                }
                                 let interrupt = require_applied_runner_recovery_interrupt(
                                     &row,
                                     lifecycle_turn,
@@ -3407,11 +3504,12 @@ pub(crate) async fn load_scheduling_projection(
                                     &recorded_commands,
                                 )?;
                                 (
+                                    None,
+                                    Some(interrupt),
+                                    TerminalAttemptEndReconstitutionInput::yielded_to_runner_recovery(
                                         interrupt,
-                                        TerminalAttemptEndReconstitutionInput::yielded_to_runner_recovery(
-                                            interrupt,
-                                        ),
-                                    )
+                                    ),
+                                )
                             }
                             _ => {
                                 return Err(SubmitInputCorruption::Inconsistent(
@@ -3422,6 +3520,10 @@ pub(crate) async fn load_scheduling_projection(
                         };
                         match (terminal_model_call, terminal_tool_attempt) {
                             (Some(terminal_call), None) => {
+                                let authority =
+                                    model_authority.ok_or(SubmitInputCorruption::Missing(
+                                        "model-call reconciliation authority",
+                                    ))?;
                                 required_model_calls.insert(terminal_call);
                                 named_continuation_gate_calls.insert(terminal_call);
                                 AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
@@ -3430,11 +3532,15 @@ pub(crate) async fn load_scheduling_projection(
                                     reconciling_attempt: stored_attempt_id,
                                     reconciling_attempt_end,
                                     ambiguous_call: ModelCallId::from_uuid(terminal_call),
-                                    interrupt,
+                                    authority,
                                     terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
                                 }
                             }
                             (None, Some(terminal_tool_attempt)) => {
+                                let interrupt =
+                                    tool_interrupt.ok_or(SubmitInputCorruption::Missing(
+                                        "tool reconciliation interrupt authority",
+                                    ))?;
                                 let batch = load_recovery_batch_by_attempt(
                                     connection,
                                     lifecycle_session,
@@ -5370,10 +5476,10 @@ fn require_applied_interrupt_from_attempt(
         .ok_or_else(|| SubmitInputCorruption::Inconsistent("attempt interrupt authority").into())
 }
 
-fn require_applied_interrupt_for_turn(
+fn applied_interrupt_for_turn(
     owning_turn: TurnId,
     recorded_commands: &BTreeMap<DurableCommandId, ReconstitutedSubmitInput>,
-) -> Result<AppliedInterruptCommandResult, SubmitInputRepositoryError> {
+) -> Result<Option<AppliedInterruptCommandResult>, SubmitInputRepositoryError> {
     let mut matches = recorded_commands.values().filter_map(|receipt| {
         let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) =
             receipt.result()
@@ -5385,9 +5491,7 @@ fn require_applied_interrupt_for_turn(
             .copied()
             .filter(|interrupt| interrupt.proof().predecessor() == owning_turn)
     });
-    let interrupt = matches
-        .next()
-        .ok_or(SubmitInputCorruption::Missing("applied interrupt command"))?;
+    let interrupt = matches.next();
     if matches.next().is_some() {
         return Err(
             SubmitInputCorruption::Inconsistent("multiple applied interrupt commands").into(),
@@ -6888,6 +6992,12 @@ pub(crate) async fn load_turn_origin_graph(
             source.terminal_disposition_kind AS source_terminal_disposition_kind,
             source.terminal_model_call_id AS source_terminal_model_call_id,
             source.terminal_tool_attempt_id AS source_terminal_tool_attempt_id,
+            source_automatic.model_call_id
+                AS source_automatic_reconciliation_model_call_id,
+            source_automatic.state_kind
+                AS source_automatic_reconciliation_state_kind,
+            source_automatic.attempt_count
+                AS source_automatic_reconciliation_attempt_count,
             COALESCE(
                 source_attempt.interrupt_command_id,
                 source_interrupt.command_id
@@ -6921,6 +7031,9 @@ pub(crate) async fn load_turn_origin_graph(
             ON source_attempt.turn_attempt_id = source.terminal_attempt_id
            AND source_attempt.turn_id = source.turn_id
            AND source_attempt.session_id = source.session_id
+          LEFT JOIN automatic_model_call_reconciliation AS source_automatic
+            ON source_automatic.turn_id = source.turn_id
+           AND source_automatic.session_id = source.session_id
           LEFT JOIN LATERAL (
                 SELECT interrupt.command_id
                   FROM submit_input_command AS interrupt
@@ -7061,15 +7174,6 @@ pub(crate) async fn load_turn_origin_graph(
                             }
                         }
                         Some("reconciliation_required") => {
-                            let command = durable_command_id_from_uuid(required(
-                                &row,
-                                "source_interrupt_command_id",
-                            )?)
-                            .map_err(|_| {
-                                SubmitInputCorruption::Inconsistent(
-                                    "reconciliation source interrupt command",
-                                )
-                            })?;
                             let model_call: Option<Uuid> =
                                 row.try_get("source_terminal_model_call_id")?;
                             let tool_attempt: Option<Uuid> =
@@ -7088,8 +7192,57 @@ pub(crate) async fn load_turn_origin_graph(
                                     .into());
                                 }
                             };
+                            let command: Option<Uuid> =
+                                row.try_get("source_interrupt_command_id")?;
+                            let automatic_call: Option<Uuid> =
+                                row.try_get("source_automatic_reconciliation_model_call_id")?;
+                            let automatic_state: Option<String> =
+                                row.try_get("source_automatic_reconciliation_state_kind")?;
+                            let automatic_attempts: Option<i32> =
+                                row.try_get("source_automatic_reconciliation_attempt_count")?;
+                            let authority = if let Some(command) = command {
+                                StoredModelCallReconciliationAuthority::AppliedInterrupt(
+                                    durable_command_id_from_uuid(command).map_err(|_| {
+                                        SubmitInputCorruption::Inconsistent(
+                                            "reconciliation source interrupt command",
+                                        )
+                                    })?,
+                                )
+                            } else {
+                                let (
+                                    IssuedOperationRef::ModelCall(ambiguous_call),
+                                    Some(call),
+                                    Some("reconciled"),
+                                    Some(attempts),
+                                ) = (
+                                    ambiguous_operation,
+                                    automatic_call,
+                                    automatic_state.as_deref(),
+                                    automatic_attempts,
+                                )
+                                else {
+                                    return Err(SubmitInputCorruption::Missing(
+                                        "reconciliation source authority",
+                                    )
+                                    .into());
+                                };
+                                if ambiguous_call.into_uuid() != call {
+                                    return Err(SubmitInputCorruption::Inconsistent(
+                                        "reconciliation source automatic model call",
+                                    )
+                                    .into());
+                                }
+                                let attempt = u32::try_from(attempts)
+                                    .ok()
+                                    .and_then(NonZeroU32::new)
+                                    .filter(|attempt| attempt.get() <= 5)
+                                    .ok_or(SubmitInputCorruption::Inconsistent(
+                                        "reconciliation source automatic attempt",
+                                    ))?;
+                                StoredModelCallReconciliationAuthority::AutomaticRecovery(attempt)
+                            };
                             StoredTerminalTurnDisposition::ReconciliationRequired {
-                                interrupt_command: command,
+                                authority,
                                 ambiguous_operation,
                             }
                         }
@@ -7369,45 +7522,48 @@ pub(crate) async fn load_turn_origin_graph(
                         )
                     }
                     StoredTerminalTurnDisposition::ReconciliationRequired {
-                        interrupt_command,
+                        authority,
                         ambiguous_operation,
-                    } => {
-                        let interrupt_uuid = durable_command_id_to_uuid(interrupt_command);
-                        let mut interrupt_rows =
-                            load_complete_rows(connection, &[interrupt_uuid]).await?;
-                        let interrupt_row =
-                            interrupt_rows.pop().ok_or(SubmitInputCorruption::Missing(
-                                "reconciliation source interrupt command",
-                            ))?;
-                        if !interrupt_rows.is_empty() {
-                            return Err(SubmitInputCorruption::Inconsistent(
-                                "duplicate reconciliation source interrupt command",
-                            )
-                            .into());
-                        }
-                        let interrupt_receipt = decode_complete(
-                            interrupt_row,
+                    } => match authority {
+                        StoredModelCallReconciliationAuthority::AppliedInterrupt(
                             interrupt_command,
-                            Some(source_origin.clone()),
-                            None,
-                            None,
-                        )?;
-                        let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
-                            interrupt_origin,
-                        )) = interrupt_receipt.result()
-                        else {
-                            return Err(SubmitInputCorruption::Inconsistent(
-                                "reconciliation source interrupt result",
-                            )
-                            .into());
-                        };
-                        let interrupt = interrupt_origin
-                            .applied_interrupt()
-                            .ok_or(SubmitInputCorruption::Inconsistent(
-                                "reconciliation source interrupt authority",
-                            ))?
-                            .proof();
-                        match ambiguous_operation {
+                        ) => {
+                            let interrupt_uuid = durable_command_id_to_uuid(interrupt_command);
+                            let mut interrupt_rows =
+                                load_complete_rows(connection, &[interrupt_uuid]).await?;
+                            let interrupt_row =
+                                interrupt_rows.pop().ok_or(SubmitInputCorruption::Missing(
+                                    "reconciliation source interrupt command",
+                                ))?;
+                            if !interrupt_rows.is_empty() {
+                                return Err(SubmitInputCorruption::Inconsistent(
+                                    "duplicate reconciliation source interrupt command",
+                                )
+                                .into());
+                            }
+                            let interrupt_receipt = decode_complete(
+                                interrupt_row,
+                                interrupt_command,
+                                Some(source_origin.clone()),
+                                None,
+                                None,
+                            )?;
+                            let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
+                                interrupt_origin,
+                            )) = interrupt_receipt.result()
+                            else {
+                                return Err(SubmitInputCorruption::Inconsistent(
+                                    "reconciliation source interrupt result",
+                                )
+                                .into());
+                            };
+                            let interrupt = interrupt_origin
+                                .applied_interrupt()
+                                .ok_or(SubmitInputCorruption::Inconsistent(
+                                    "reconciliation source interrupt authority",
+                                ))?
+                                .proof();
+                            match ambiguous_operation {
                             IssuedOperationRef::ModelCall(ambiguous_call) => {
                                 SubmitInputTerminalSourceReconstitutionInput::
                                     interrupted_model_call_reconciliation(
@@ -7430,8 +7586,27 @@ pub(crate) async fn load_turn_origin_graph(
                                         },
                                     )
                             }
+                            }
                         }
-                    }
+                        StoredModelCallReconciliationAuthority::AutomaticRecovery(attempt) => {
+                            let IssuedOperationRef::ModelCall(ambiguous_call) = ambiguous_operation
+                            else {
+                                return Err(SubmitInputCorruption::Inconsistent(
+                                    "automatic tool reconciliation source",
+                                )
+                                .into());
+                            };
+                            SubmitInputTerminalSourceReconstitutionInput::
+                                automatic_model_call_reconciliation(
+                                    SubmitInputAutomaticModelCallReconciliationConstructionInput {
+                                        origin: source_origin.clone(),
+                                        turn: source_turn,
+                                        ambiguous_call,
+                                        attempt,
+                                    },
+                                )
+                        }
+                    },
                 };
                 SubmitInputTurnOriginReconstitutionInput::reclassified(
                     SubmitInputReclassifiedTurnOriginConstructionInput {

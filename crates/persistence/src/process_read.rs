@@ -8,6 +8,7 @@ use std::{collections::VecDeque, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use serde_json::Value;
+use signalbox_application::ModelCallReconciliationAttempt;
 use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, CredentialProfileName, DelegationMessageId,
     DirectModelSelection, FrozenAliasDefinition, FrozenModelSelection, ImportedConversationId,
@@ -590,6 +591,10 @@ pub enum ProcessTurnState {
         ended_attempt: TurnAttemptId,
         /// Ambiguous call awaiting recovery.
         recovery_call: ModelCallId,
+        /// Durable automatic attempts already claimed.
+        automatic_reconciliation_attempts: u32,
+        /// True only after the automatic attempt budget is exhausted.
+        operator_action_required: bool,
     },
     /// The yielded tool batch is parked on a user decision.
     ActiveAwaitingToolApproval {
@@ -2843,6 +2848,12 @@ async fn load_next_transcript_turn(
             current_call.state_kind AS current_model_call_state_kind,
             current_call.context_frontier_id AS current_model_call_frontier_id,
             recovery_call.context_frontier_id AS recovery_model_call_frontier_id,
+            automatic_reconciliation.state_kind
+                AS automatic_reconciliation_state_kind,
+            automatic_reconciliation.attempt_count
+                AS automatic_reconciliation_attempt_count,
+            automatic_reconciliation.model_call_id
+                AS automatic_reconciliation_model_call_id,
             active_tool_round.boundary_frontier_id AS active_tool_round_frontier_id,
             logical_terminal.spawning_tool_request_id
                 AS logical_terminal_spawning_request_id,
@@ -2918,6 +2929,9 @@ async fn load_next_transcript_turn(
             AND recovery_call.turn_id = turn.turn_id
             AND recovery_call.session_id = turn.session_id
             AND recovery_call.state_kind = 'terminal'
+           LEFT JOIN automatic_model_call_reconciliation AS automatic_reconciliation
+             ON automatic_reconciliation.turn_id = turn.turn_id
+            AND automatic_reconciliation.session_id = turn.session_id
            LEFT JOIN model_call AS terminal_call
              ON terminal_call.model_call_id = turn.terminal_model_call_id
             AND terminal_call.turn_attempt_id = turn.terminal_attempt_id
@@ -3384,6 +3398,12 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         row.try_get("current_model_call_frontier_id")?;
     let recovery_model_call_frontier: Option<Uuid> =
         row.try_get("recovery_model_call_frontier_id")?;
+    let automatic_reconciliation_state: Option<String> =
+        row.try_get("automatic_reconciliation_state_kind")?;
+    let automatic_reconciliation_attempts: Option<i32> =
+        row.try_get("automatic_reconciliation_attempt_count")?;
+    let automatic_reconciliation_model_call: Option<Uuid> =
+        row.try_get("automatic_reconciliation_model_call_id")?;
     let active_tool_round_frontier: Option<Uuid> = row.try_get("active_tool_round_frontier_id")?;
 
     if !matches!(state_kind.as_str(), "queued" | "active" | "terminal") {
@@ -3409,6 +3429,45 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             value: value.to_owned(),
         }
         .into());
+    }
+    let automatic_reconciliation_present = automatic_reconciliation_state.is_some()
+        || automatic_reconciliation_attempts.is_some()
+        || automatic_reconciliation_model_call.is_some();
+    let terminal_reconciliation = state_kind == "terminal"
+        && terminal_disposition.as_deref() == Some("reconciliation_required");
+    if automatic_reconciliation_present {
+        if active_phase.as_deref() != Some("awaiting_model_call_recovery")
+            && !terminal_reconciliation
+        {
+            return Err(ProcessReadCorruption::Inconsistent(
+                "automatic model-call reconciliation outside recovery wait",
+            )
+            .into());
+        }
+        if terminal_reconciliation {
+            let valid_terminal_automatic = matches!(
+                (
+                    automatic_reconciliation_state.as_deref(),
+                    automatic_reconciliation_attempts,
+                    automatic_reconciliation_model_call,
+                ),
+                (
+                    Some("reconciled" | "superseded"),
+                    Some(attempts),
+                    Some(call),
+                ) if attempts >= 0
+                    && u32::try_from(attempts).is_ok_and(|attempts| {
+                        attempts <= ModelCallReconciliationAttempt::budget()
+                    })
+                    && Some(call) == terminal_call
+            );
+            if !valid_terminal_automatic {
+                return Err(ProcessReadCorruption::Inconsistent(
+                    "terminal automatic model-call reconciliation state",
+                )
+                .into());
+            }
+        }
     }
     if let Some(value) = terminal_disposition.as_deref()
         && !matches!(
@@ -3847,13 +3906,66 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             None,
             None,
         ) => {
+            if automatic_reconciliation_model_call.is_some_and(|stored| stored != call) {
+                return Err(ProcessReadCorruption::Inconsistent(
+                    "automatic model-call reconciliation call identity",
+                )
+                .into());
+            }
             let call_frontier = recovery_model_call_frontier.ok_or(
                 ProcessReadCorruption::Inconsistent("recovery model call frontier"),
             )?;
+            let (automatic_reconciliation_attempts, operator_action_required) = match (
+                automatic_reconciliation_state.as_deref(),
+                automatic_reconciliation_attempts,
+                automatic_reconciliation_model_call,
+            ) {
+                (None, None, None) => (0, false),
+                (Some("scheduled" | "attempting"), Some(attempts), Some(_)) => (
+                    u32::try_from(attempts)
+                        .map_err(|_| {
+                            ProcessReadCorruption::Inconsistent(
+                                "automatic model-call reconciliation attempt count",
+                            )
+                        })
+                        .and_then(|attempts| {
+                            (attempts <= ModelCallReconciliationAttempt::budget())
+                                .then_some(attempts)
+                                .ok_or(ProcessReadCorruption::Inconsistent(
+                                    "automatic model-call reconciliation attempt budget",
+                                ))
+                        })?,
+                    false,
+                ),
+                (Some("exhausted"), Some(attempts), Some(_)) => (
+                    u32::try_from(attempts)
+                        .map_err(|_| {
+                            ProcessReadCorruption::Inconsistent(
+                                "exhausted model-call reconciliation attempt count",
+                            )
+                        })
+                        .and_then(|attempts| {
+                            (attempts == ModelCallReconciliationAttempt::budget())
+                                .then_some(attempts)
+                                .ok_or(ProcessReadCorruption::Inconsistent(
+                                    "exhausted model-call reconciliation attempt budget",
+                                ))
+                        })?,
+                    true,
+                ),
+                _ => {
+                    return Err(ProcessReadCorruption::Inconsistent(
+                        "active automatic model-call reconciliation state",
+                    )
+                    .into());
+                }
+            };
             (
                 ProcessTurnState::ActiveAwaitingModelCallRecovery {
                     ended_attempt: TurnAttemptId::from_uuid(attempt),
                     recovery_call: ModelCallId::from_uuid(call),
+                    automatic_reconciliation_attempts,
+                    operator_action_required,
                 },
                 Some(call_frontier),
             )

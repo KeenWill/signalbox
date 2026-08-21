@@ -6768,6 +6768,8 @@ mod tests {
         let state = TurnState::ActiveAwaitingModelCallRecovery {
             ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
             recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            automatic_reconciliation_attempts: CanonicalU64::new(0),
+            operator_action_required: false,
         };
 
         assert!(matches!(
@@ -6970,6 +6972,8 @@ mod tests {
                 TurnState::ActiveAwaitingModelCallRecovery {
                     ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(8)),
                     recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(9)),
+                    automatic_reconciliation_attempts: CanonicalU64::new(0),
+                    operator_action_required: false,
                 },
             )?;
             refresh_writer.write_all(&refreshed).await?;

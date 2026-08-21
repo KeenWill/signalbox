@@ -12,6 +12,7 @@ use std::{
     future::{Future, ready},
     num::NonZeroUsize,
     pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
@@ -46,10 +47,91 @@ const BASELINE_NUDGE_BUFFER_CAPACITY: usize = 1_024;
 /// configuration may lower or pause admission but cannot raise this cap.
 // numeric-bound: tunable - controls concurrent authoritative scheduler passes
 const SCHEDULER_PASS_ADMISSION_CAP: usize = 16;
+/// Longest wall-clock tenure of one admitted authoritative pass.
+// numeric-bound: ceiling - bounds one authoritative pass's scheduler occupancy
+const SCHEDULER_PASS_OCCUPANCY_BOUND: Duration = Duration::from_secs(15 * 60);
 
 /// Returns the shared product cap for concurrent authoritative passes.
 pub const fn scheduler_pass_admission_cap() -> usize {
     SCHEDULER_PASS_ADMISSION_CAP
+}
+
+/// The hard product ceiling on one authoritative pass's occupancy.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SchedulerPassOccupancyBound(Duration);
+
+impl SchedulerPassOccupancyBound {
+    /// Returns the compiled fifteen-minute ceiling.
+    pub const fn hard_ceiling() -> Self {
+        Self(SCHEDULER_PASS_OCCUPANCY_BOUND)
+    }
+
+    /// Accepts a nonzero whole-second lowering of the product ceiling.
+    pub fn try_lowered(bound: Duration) -> Result<Self, InvalidSchedulerPassOccupancyBound> {
+        if bound.is_zero() || bound > SCHEDULER_PASS_OCCUPANCY_BOUND || bound.subsec_nanos() != 0 {
+            Err(InvalidSchedulerPassOccupancyBound)
+        } else {
+            Ok(Self(bound))
+        }
+    }
+
+    /// Returns the enforced duration.
+    pub const fn get(self) -> Duration {
+        self.0
+    }
+}
+
+/// A proposed scheduler-pass occupancy bound was not a valid lowering.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidSchedulerPassOccupancyBound;
+
+impl fmt::Display for InvalidSchedulerPassOccupancyBound {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "scheduler pass occupancy bound must be a nonzero whole-second duration at or below the compiled ceiling",
+        )
+    }
+}
+
+impl Error for InvalidSchedulerPassOccupancyBound {}
+
+/// Oldest-pass identity and start time retained by occupancy telemetry.
+#[derive(Clone, Copy, Debug)]
+pub struct SchedulerOldestInFlightPass {
+    session: SessionId,
+    started_at: Instant,
+}
+
+impl SchedulerOldestInFlightPass {
+    /// Records the oldest admitted pass.
+    pub const fn new(session: SessionId, started_at: Instant) -> Self {
+        Self {
+            session,
+            started_at,
+        }
+    }
+
+    /// Returns the pass's session identity.
+    pub const fn session(self) -> SessionId {
+        self.session
+    }
+
+    /// Returns its age at observation time.
+    pub fn age(self) -> Duration {
+        self.started_at.elapsed()
+    }
+}
+
+/// Synchronous, content-free scheduler occupancy telemetry sink.
+pub trait SchedulerOccupancyObserver: Send + Sync + 'static {
+    /// Replaces the current occupancy snapshot.
+    fn observe(&self, occupancy: usize, oldest: Option<SchedulerOldestInFlightPass>);
+}
+
+/// Synchronous handoff for a scheduler pass ended by its occupancy bound.
+pub trait SchedulerPassExpiryHandler: fmt::Debug + Send + Sync + 'static {
+    /// Starts daemon-owned recovery before the pass future is dropped.
+    fn occupancy_expired(&self, session: SessionId);
 }
 
 /// A validated nonzero reconciliation-sweep interval.
@@ -169,6 +251,15 @@ pub trait EligibilityPass {
 
     /// Returns the affected turn when the pass had selected one before failing.
     fn failure_turn(_error: &Self::Error) -> Option<TurnId> {
+        None
+    }
+
+    /// Captures the handoff invoked if this pass exceeds its occupancy bound.
+    ///
+    /// The returned callback is independent of mutable pass state so identity
+    /// generators remain shared across concurrent passes. Implementations
+    /// spawn any required durable work from its synchronous callback.
+    fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>> {
         None
     }
 
@@ -345,6 +436,10 @@ where
             GoalAwareEligibilityPassError::Pass { source, .. } => Pass::failure_turn(source),
             GoalAwareEligibilityPassError::Reconciliation(_) => None,
         }
+    }
+
+    fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>> {
+        self.pass.occupancy_expiry_handler()
     }
 
     fn run(
@@ -625,11 +720,12 @@ pub enum SchedulerLoopExit {
 }
 
 /// Drives authoritative per-session passes from nonauthoritative work hints.
-#[derive(Debug)]
 pub struct SchedulerLoop<WorkSource, Pass> {
     work_source: WorkSource,
     pass: Pass,
     max_in_flight_passes: usize,
+    occupancy_bound: SchedulerPassOccupancyBound,
+    occupancy_observer: Option<Arc<dyn SchedulerOccupancyObserver>>,
 }
 
 impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
@@ -639,6 +735,8 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
             work_source,
             pass,
             max_in_flight_passes: SCHEDULER_PASS_ADMISSION_CAP,
+            occupancy_bound: SchedulerPassOccupancyBound::hard_ceiling(),
+            occupancy_observer: None,
         }
     }
 
@@ -659,6 +757,8 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
             work_source,
             pass,
             max_in_flight_passes,
+            occupancy_bound: SchedulerPassOccupancyBound::hard_ceiling(),
+            occupancy_observer: None,
         }
     }
 
@@ -668,7 +768,24 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
             work_source,
             pass,
             max_in_flight_passes: 0,
+            occupancy_bound: SchedulerPassOccupancyBound::hard_ceiling(),
+            occupancy_observer: None,
         }
+    }
+
+    /// Lowers the pass-occupancy ceiling for this loop.
+    pub fn with_occupancy_bound(mut self, bound: SchedulerPassOccupancyBound) -> Self {
+        self.occupancy_bound = bound;
+        self
+    }
+
+    /// Installs the content-free occupancy observer.
+    pub fn with_occupancy_observer(
+        mut self,
+        observer: Arc<dyn SchedulerOccupancyObserver>,
+    ) -> Self {
+        self.occupancy_observer = Some(observer);
+        self
     }
 
     /// Returns both ports, primarily for explicit ownership handoff.
@@ -687,8 +804,8 @@ where
     /// Runs until shutdown, retrying source and pass failures on later hints.
     ///
     /// The loop admits no new pass once it observes shutdown. A pass already
-    /// in progress is allowed to return so its authoritative transaction can
-    /// commit or abort; the composition root owns the outer bounded window.
+    /// in progress remains subject to the scheduler occupancy bound while the
+    /// composition root owns the shorter shutdown grace window.
     pub async fn run_until<Shutdown>(&mut self, shutdown: Shutdown) -> SchedulerLoopExit
     where
         Shutdown: Future<Output = ()> + Send,
@@ -703,6 +820,7 @@ where
         let mut in_flight_sessions = HashSet::new();
         let mut pending_hints = VecDeque::new();
         let mut pending_reruns = HashSet::new();
+        observe_occupancy(&self.occupancy_observer, &task_sessions);
 
         'scheduler: loop {
             if task_sessions.len() == self.max_in_flight_passes {
@@ -716,6 +834,7 @@ where
                                 completed,
                                 &mut task_sessions,
                                 &mut in_flight_sessions,
+                                &self.occupancy_observer,
                             )
                             && pending_reruns.remove(&session)
                         {
@@ -742,9 +861,14 @@ where
                     () = &mut shutdown => break,
                     () = ready(()) => {
                         if in_flight_sessions.insert(session) {
-                            let task = passes
-                                .spawn(self.pass.run(session).instrument(session_work_span(session)));
-                            task_sessions.insert(task.id(), session);
+                            spawn_pass(
+                                &mut passes,
+                                &mut self.pass,
+                                session,
+                                self.occupancy_bound,
+                                &mut task_sessions,
+                                &self.occupancy_observer,
+                            );
                         } else {
                             pending_reruns.insert(session);
                         }
@@ -772,6 +896,7 @@ where
                                 completed,
                                 &mut task_sessions,
                                 &mut in_flight_sessions,
+                                &self.occupancy_observer,
                             )
                             && pending_reruns.remove(&session)
                         {
@@ -789,12 +914,14 @@ where
             match hint {
                 Ok(session) => {
                     if in_flight_sessions.insert(session) {
-                        let task = passes.spawn(
-                            self.pass
-                                .run(session)
-                                .instrument(session_work_span(session)),
+                        spawn_pass(
+                            &mut passes,
+                            &mut self.pass,
+                            session,
+                            self.occupancy_bound,
+                            &mut task_sessions,
+                            &self.occupancy_observer,
                         );
-                        task_sessions.insert(task.id(), session);
                     } else {
                         pending_reruns.insert(session);
                     }
@@ -804,10 +931,81 @@ where
         }
 
         while let Some(completed) = passes.join_next_with_id().await {
-            observe_pass_completion::<Pass>(completed, &mut task_sessions, &mut in_flight_sessions);
+            observe_pass_completion::<Pass>(
+                completed,
+                &mut task_sessions,
+                &mut in_flight_sessions,
+                &self.occupancy_observer,
+            );
         }
         SchedulerLoopExit::Shutdown
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InFlightPass {
+    session: SessionId,
+    started_at: Instant,
+}
+
+enum PassTaskOutcome<PassError> {
+    Completed(Result<(), PassError>),
+    OccupancyExpired { bound: SchedulerPassOccupancyBound },
+}
+
+fn spawn_pass<Pass>(
+    passes: &mut JoinSet<PassTaskOutcome<Pass::Error>>,
+    pass: &mut Pass,
+    session: SessionId,
+    bound: SchedulerPassOccupancyBound,
+    task_sessions: &mut HashMap<Id, InFlightPass>,
+    observer: &Option<Arc<dyn SchedulerOccupancyObserver>>,
+) where
+    Pass: EligibilityPass + Send,
+    Pass::Error: Send + 'static,
+{
+    let expiry_handler = pass.occupancy_expiry_handler();
+    let execution = pass.run(session);
+    let task = passes.spawn(
+        async move {
+            pin!(execution);
+            let deadline = time::sleep(bound.get());
+            pin!(deadline);
+            select! {
+                biased;
+                result = &mut execution => PassTaskOutcome::Completed(result),
+                () = &mut deadline => {
+                    if let Some(handler) = expiry_handler {
+                        handler.occupancy_expired(session);
+                    }
+                    PassTaskOutcome::OccupancyExpired { bound }
+                }
+            }
+        }
+        .instrument(session_work_span(session)),
+    );
+    task_sessions.insert(
+        task.id(),
+        InFlightPass {
+            session,
+            started_at: Instant::now(),
+        },
+    );
+    observe_occupancy(observer, task_sessions);
+}
+
+fn observe_occupancy(
+    observer: &Option<Arc<dyn SchedulerOccupancyObserver>>,
+    passes: &HashMap<Id, InFlightPass>,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    let oldest = passes
+        .values()
+        .min_by_key(|pass| pass.started_at)
+        .map(|pass| SchedulerOldestInFlightPass::new(pass.session, pass.started_at));
+    observer.observe(passes.len(), oldest);
 }
 
 /// Retires one pass's scheduler correlation and records classified failure.
@@ -819,9 +1017,10 @@ where
 /// scheduler-retryable failures and failures that stop the daemon for startup
 /// recovery.
 fn observe_pass_completion<Pass>(
-    completed: Result<(Id, Result<(), Pass::Error>), JoinError>,
-    task_sessions: &mut HashMap<Id, SessionId>,
+    completed: Result<(Id, PassTaskOutcome<Pass::Error>), JoinError>,
+    task_sessions: &mut HashMap<Id, InFlightPass>,
     in_flight_sessions: &mut HashSet<SessionId>,
+    observer: &Option<Arc<dyn SchedulerOccupancyObserver>>,
 ) -> Option<SessionId>
 where
     Pass: EligibilityPass,
@@ -831,18 +1030,20 @@ where
         Ok((task, _)) => *task,
         Err(error) => error.id(),
     };
-    let Some(session) = task_sessions.remove(&task) else {
+    let Some(in_flight) = task_sessions.remove(&task) else {
         tracing::error!(
             failure_class = ?crate::OperatorFailureClass::CallerOrHubBug,
             "eligibility-pass task completed without its session correlation"
         );
         return None;
     };
+    let session = in_flight.session;
     in_flight_sessions.remove(&session);
+    observe_occupancy(observer, task_sessions);
 
     match completed {
-        Ok((_, Ok(()))) => {}
-        Ok((_, Err(error))) => {
+        Ok((_, PassTaskOutcome::Completed(Ok(())))) => {}
+        Ok((_, PassTaskOutcome::Completed(Err(error)))) => {
             let failure_class = error.operator_failure_class();
             let cause_code = error.operator_failure_cause_code();
             let stage = Pass::failure_stage(&error);
@@ -865,6 +1066,14 @@ where
                 ),
             };
         }
+        Ok((_, PassTaskOutcome::OccupancyExpired { bound })) => tracing::error!(
+            failure_class = ?crate::OperatorFailureClass::Infrastructure { commit_ambiguous: true },
+            cause_code = "scheduler_pass_occupancy_expired",
+            stage = "occupancy",
+            session_id = %session.as_uuid(),
+            occupancy_bound_seconds = bound.get().as_secs(),
+            "authoritative eligibility pass exceeded its occupancy bound and released its slot"
+        ),
         Err(_) => {
             tracing::error!(
                 failure_class = ?crate::OperatorFailureClass::CallerOrHubBug,
@@ -940,6 +1149,7 @@ mod tests {
         GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityWorkSource,
         InvalidReconciliationSweepInterval, ReconciliationSweepInterval,
         SCHEDULER_PASS_ADMISSION_CAP, SchedulerLoop, SchedulerLoopExit,
+        SchedulerPassOccupancyBound,
     };
     use crate::{
         OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
@@ -1604,6 +1814,86 @@ mod tests {
         assert!(observed.contains(&second));
     }
 
+    #[derive(Clone, Debug)]
+    struct OccupancyExpiryPass {
+        started: Arc<Notify>,
+        expired: Arc<Notify>,
+        expiration_count: Arc<AtomicUsize>,
+    }
+
+    impl super::SchedulerPassExpiryHandler for OccupancyExpiryPass {
+        fn occupancy_expired(&self, _session: SessionId) {
+            self.expiration_count.fetch_add(1, Ordering::SeqCst);
+            self.expired.notify_one();
+        }
+    }
+
+    impl EligibilityPass for OccupancyExpiryPass {
+        type Error = FakeSweepError;
+
+        fn occupancy_expiry_handler(&self) -> Option<Arc<dyn super::SchedulerPassExpiryHandler>> {
+            Some(Arc::new(self.clone()))
+        }
+
+        fn run(
+            &mut self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let started = Arc::clone(&self.started);
+            async move {
+                started.notify_one();
+                pending().await
+            }
+        }
+    }
+
+    /// S10 / INV-007: a provider future that never returns cannot retain a
+    /// scheduler admission slot past the compiled-or-lowered occupancy bound.
+    #[tokio::test(start_paused = true)]
+    async fn inv007_scheduler_expires_a_stalled_pass_and_calls_recovery() {
+        capture_telemetry_for_this_thread();
+        let selected = session(51);
+        let started = Arc::new(Notify::new());
+        let expired = Arc::new(Notify::new());
+        let expiration_count = Arc::new(AtomicUsize::new(0));
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let bound = SchedulerPassOccupancyBound::try_lowered(Duration::from_secs(1))
+            .expect("one second lowers the production ceiling");
+        let scheduler = SchedulerLoop::new(
+            FakeWorkSource {
+                hints: VecDeque::from([Ok(selected)]),
+            },
+            OccupancyExpiryPass {
+                started: Arc::clone(&started),
+                expired: Arc::clone(&expired),
+                expiration_count: Arc::clone(&expiration_count),
+            },
+        )
+        .with_occupancy_bound(bound);
+        let runtime = tokio::spawn(async move {
+            let mut scheduler = scheduler;
+            scheduler
+                .run_until(async {
+                    shutdown_receiver.await.expect("the test requests shutdown");
+                })
+                .await
+        });
+
+        started.notified().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        expired.notified().await;
+        shutdown_sender
+            .send(())
+            .expect("the scheduler still listens for shutdown");
+        let exit = runtime.await.expect("scheduler task completes");
+        let encoded = captured_telemetry();
+
+        assert_eq!(expiration_count.load(Ordering::SeqCst), 1);
+        assert_eq!(exit, SchedulerLoopExit::Shutdown);
+        assert!(encoded.contains("scheduler_pass_occupancy_expired"));
+        assert!(encoded.contains("occupancy_bound_seconds=1"));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn inv007_paused_scheduler_admits_no_authoritative_passes() {
         let selected = session(50);
@@ -1645,6 +1935,30 @@ mod tests {
         assert_eq!(scheduler.max_in_flight_passes, SCHEDULER_PASS_ADMISSION_CAP);
     }
 
+    #[test]
+    fn scheduler_occupancy_bound_only_accepts_whole_second_lowerings() {
+        let lowered = SchedulerPassOccupancyBound::try_lowered(Duration::from_secs(60))
+            .expect("one minute lowers the product ceiling");
+
+        assert_eq!(lowered.get(), Duration::from_secs(60));
+        assert_eq!(
+            SchedulerPassOccupancyBound::hard_ceiling().get(),
+            Duration::from_secs(900)
+        );
+        assert_eq!(
+            SchedulerPassOccupancyBound::try_lowered(Duration::ZERO),
+            Err(super::InvalidSchedulerPassOccupancyBound)
+        );
+        assert_eq!(
+            SchedulerPassOccupancyBound::try_lowered(Duration::from_secs(901)),
+            Err(super::InvalidSchedulerPassOccupancyBound)
+        );
+        assert_eq!(
+            SchedulerPassOccupancyBound::try_lowered(Duration::from_millis(500)),
+            Err(super::InvalidSchedulerPassOccupancyBound)
+        );
+    }
+
     #[tokio::test]
     async fn failed_pass_event_does_not_promise_scheduler_retry() {
         capture_telemetry_for_this_thread();
@@ -1672,7 +1986,7 @@ mod tests {
         assert!(!encoded.contains("a later nudge or sweep will retry"));
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct StatefulActivationIds {
         next: u128,
     }

@@ -1551,6 +1551,19 @@ pub struct SubmitInputInterruptedModelCallReconciliationConstructionInput {
     pub interrupt: crate::AppliedInterruptProof,
 }
 
+/// Named facts for an automatically reconciled ambiguous model-call source.
+#[derive(Clone, Debug)]
+pub struct SubmitInputAutomaticModelCallReconciliationConstructionInput {
+    /// The canonical origin facts owned by the terminal source turn.
+    pub origin: SubmitInputTurnOriginReconstitutionInput,
+    /// The terminal source turn identity.
+    pub turn: TurnId,
+    /// The unresolved model call requiring reconciliation.
+    pub ambiguous_call: crate::ModelCallId,
+    /// The one-based durable automatic recovery attempt.
+    pub attempt: std::num::NonZeroU32,
+}
+
 /// Named facts for an interrupted ambiguous tool-attempt reconciliation source.
 #[derive(Clone, Debug)]
 pub struct SubmitInputInterruptedToolReconciliationConstructionInput {
@@ -1601,6 +1614,32 @@ impl SubmitInputTerminalSourceReconstitutionInput {
                 marker: crate::ReconciliationMarker::from_interrupt_ambiguity(
                     ambiguous_operations,
                     interrupt,
+                ),
+            },
+        })
+    }
+
+    /// Supplies a terminal source whose exact ambiguous model call remained
+    /// unresolved after one daemon-owned durable recovery attempt.
+    pub fn automatic_model_call_reconciliation(
+        input: SubmitInputAutomaticModelCallReconciliationConstructionInput,
+    ) -> Self {
+        let SubmitInputAutomaticModelCallReconciliationConstructionInput {
+            origin,
+            turn,
+            ambiguous_call,
+            attempt,
+        } = input;
+        let ambiguous_operations = crate::NonEmptyIssuedOperationRefs::singleton(
+            crate::IssuedOperationRef::ModelCall(ambiguous_call),
+        );
+        Self::new(SubmitInputTerminalSourceConstructionInput {
+            origin,
+            turn,
+            disposition: TurnDisposition::ReconciliationRequired {
+                marker: crate::ReconciliationMarker::from_automatic_model_call_recovery(
+                    ambiguous_operations,
+                    attempt,
                 ),
             },
         })
@@ -3483,6 +3522,7 @@ fn terminal_disposition_command(disposition: &TurnDisposition) -> Option<Durable
                     AppliedInterruptState::Applied { proof } => Some(proof.command()),
                 }
             }
+            ReconciliationReason::AutomaticModelCallRecovery { .. } => None,
         },
     }
 }
@@ -3502,6 +3542,7 @@ fn terminal_disposition_matches_turn(disposition: &TurnDisposition, turn: TurnId
                     AppliedInterruptState::Applied { proof } => proof.predecessor() == turn,
                 }
             }
+            ReconciliationReason::AutomaticModelCallRecovery { .. } => true,
         },
     }
 }
