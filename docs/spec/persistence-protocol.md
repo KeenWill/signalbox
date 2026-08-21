@@ -383,7 +383,8 @@ Representation rules, all enforced in the schema:
   equal-content identities) without changing any frontier identity or resolved
   sequence. Deferred completeness checks reject missing prefixes, cycles,
   inherited duplicates, gaps, and a resolved count different from the header.
-  Prefix-preservation checks materialize the compared recursive memberships once
+  High-frequency model-call, continuation, turn-start, and terminal-frontier
+  prefix-preservation checks materialize the compared recursive memberships once
   each before matching their ordered members. Why: append-derived histories
   store and load each immutable suffix once while preserving the
   complete-snapshot contract.

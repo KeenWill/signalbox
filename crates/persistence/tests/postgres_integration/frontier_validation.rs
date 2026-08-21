@@ -150,8 +150,34 @@ async fn insert_deep_frontier_fixture(
 async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let (session, prefix, checked, divergent) = insert_deep_frontier_fixture(&pool).await?;
+    let compaction = Uuid::from_u128(0xf605_0001);
+    sqlx::raw_sql("ALTER TABLE context_compaction DISABLE TRIGGER ALL;")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO context_compaction
+            (context_compaction_id, session_id, predecessor_compaction_id,
+             source_frontier_id, result_frontier_id, producing_call_id,
+             first_source_session_id, first_entry_id,
+             through_source_session_id, through_entry_id, summary_entry_id)
+         VALUES (
+            $1, $2, NULL, $3, $4, $5,
+            $2, md5('entry-1')::uuid,
+            $2, md5('entry-900')::uuid, md5('entry-1')::uuid
+         )",
+    )
+    .bind(compaction)
+    .bind(session)
+    .bind(divergent)
+    .bind(checked)
+    .bind(Uuid::from_u128(0xf605_0002))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE context_compaction ENABLE TRIGGER ALL;")
+        .execute(&pool)
+        .await?;
     let mut connection = pool.acquire().await?;
-    let validator_shape: (bool, bool, bool) = sqlx::query_as(
+    let validator_shape: (bool, bool, bool, bool, bool) = sqlx::query_as(
         "SELECT
             position(
                 'context_frontier_preserves_prefix'
@@ -169,6 +195,18 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
                 'delegation_result'
                 IN pg_get_functiondef(
                     'continuation_frontier_closes_predecessor_tool_round(uuid,uuid,uuid,uuid)'::regprocedure
+                )
+            ) > 0,
+            position(
+                'context_frontier_preserves_prefix'
+                IN pg_get_functiondef(
+                    'turn_start_effective_predecessor_frontier(uuid,uuid)'::regprocedure
+                )
+            ) > 0,
+            position(
+                'context_frontier_preserves_prefix'
+                IN pg_get_functiondef(
+                    'assert_terminal_started_turn_common_final_state(uuid)'::regprocedure
                 )
             ) > 0",
     )
@@ -191,9 +229,43 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
         .bind(divergent)
         .fetch_one(&mut *connection)
         .await?;
+    let effective_preserved: Uuid = sqlx::query_scalar(
+        "SELECT context_frontier_id
+           FROM turn_start_effective_predecessor_frontier($1, $2)",
+    )
+    .bind(session)
+    .bind(prefix)
+    .fetch_one(&mut *connection)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE context_compaction DISABLE TRIGGER ALL;")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "UPDATE context_compaction
+            SET source_frontier_id = $2, result_frontier_id = $3
+          WHERE context_compaction_id = $1",
+    )
+    .bind(compaction)
+    .bind(checked)
+    .bind(divergent)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::raw_sql("ALTER TABLE context_compaction ENABLE TRIGGER ALL;")
+        .execute(&mut *connection)
+        .await?;
+    let effective_rejected: Uuid = sqlx::query_scalar(
+        "SELECT context_frontier_id
+           FROM turn_start_effective_predecessor_frontier($1, $2)",
+    )
+    .bind(session)
+    .bind(prefix)
+    .fetch_one(&mut *connection)
+    .await?;
 
-    assert_eq!(validator_shape, (true, true, true));
+    assert_eq!(validator_shape, (true, true, true, true, true));
     assert_eq!((preserved, rejected), (true, false));
+    assert_eq!(effective_preserved, checked);
+    assert_eq!(effective_rejected, prefix);
 
     drop(connection);
     pool.close().await;
