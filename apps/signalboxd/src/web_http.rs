@@ -51,7 +51,7 @@ use url::Url;
 
 use crate::{
     WebBlobRuntime, WebImageDerivativeKind,
-    blob_read_runtime::{open_recorded_blob_range, read_blob_chunk},
+    blob_read_runtime::{open_recorded_blob_range, open_recorded_blob_verified},
     web_blob_runtime::WebBlobRuntimeError,
 };
 
@@ -621,7 +621,7 @@ async fn serve_blob(
         }
     };
     let method = request.method().clone();
-    if exceeds_web_blob_range_limit(&method, partial, length) {
+    if exceeds_web_blob_range_limit(partial, length) {
         return range_not_satisfiable(total, &etag);
     }
     let body = if method == Method::HEAD {
@@ -646,8 +646,8 @@ async fn serve_blob(
                 };
             reader_body(reader, length.get(), permit)
         } else {
-            match verified_full_blob_body(runtime, entry, length.get(), permit).await {
-                Ok(body) => body,
+            match open_recorded_blob_verified(runtime.registry(), &entry).await {
+                Ok(reader) => reader_body(reader, length.get(), permit),
                 Err(error) => return blob_read_error_response(error),
             }
         }
@@ -678,8 +678,8 @@ fn try_acquire_web_blob_read_permit(budget: Arc<Semaphore>) -> Option<OwnedSemap
     budget.try_acquire_owned().ok()
 }
 
-fn exceeds_web_blob_range_limit(method: &Method, partial: bool, length: u64) -> bool {
-    method != Method::HEAD && partial && length > MAX_BLOB_RANGE_BYTES
+fn exceeds_web_blob_range_limit(partial: bool, length: u64) -> bool {
+    partial && length > MAX_BLOB_RANGE_BYTES
 }
 
 fn reader_body(
@@ -711,41 +711,6 @@ fn reader_body(
         },
     );
     Body::from_stream(source)
-}
-
-async fn verified_full_blob_body(
-    runtime: WebBlobRuntime,
-    entry: signalbox_persistence::blob::BlobCatalogEntry,
-    total: u64,
-    permit: OwnedSemaphorePermit,
-) -> Result<Body, crate::blob_read_runtime::BlobReadError> {
-    let first_length = NonZeroU64::new(total.min(MAX_BLOB_RANGE_BYTES))
-        .ok_or(crate::blob_read_runtime::BlobReadError::Integrity)?;
-    let first = read_blob_chunk(runtime.registry(), &entry, 0, first_length).await?;
-    let source = stream::try_unfold(
-        (runtime, entry, 0_u64, total, Some(first), permit),
-        |(runtime, entry, offset, total, first, permit)| async move {
-            if offset == total {
-                return Ok::<_, io::Error>(None);
-            }
-            let bytes = if let Some(first) = first {
-                first
-            } else {
-                let length = NonZeroU64::new((total - offset).min(MAX_BLOB_RANGE_BYTES))
-                    .ok_or_else(|| io::Error::other("blob response length is invalid"))?;
-                read_blob_chunk(runtime.registry(), &entry, offset, length)
-                    .await
-                    .map_err(|_| io::Error::other("verified blob chunk is unavailable"))?
-            };
-            let read = u64::try_from(bytes.len())
-                .map_err(|_| io::Error::other("blob response chunk is invalid"))?;
-            Ok(Some((
-                Bytes::from(bytes),
-                (runtime, entry, offset + read, total, None, permit),
-            )))
-        },
-    );
-    Ok(Body::from_stream(source))
 }
 
 fn parse_byte_range(value: &HeaderValue, total: u64) -> Result<(u64, u64, bool), ()> {
@@ -795,9 +760,10 @@ fn single_range_header(headers: &HeaderMap) -> Result<Option<&HeaderValue>, ()> 
 
 fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
     headers
-        .get(IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
+        .get_all(IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| {
             value.split(',').any(|candidate| {
                 let candidate = candidate.trim();
                 candidate == "*" || candidate == etag || candidate.strip_prefix("W/") == Some(etag)
@@ -1177,7 +1143,7 @@ mod tests {
 
     use axum::{
         body::{Body, Bytes},
-        http::{Method, Request, StatusCode, header},
+        http::{Request, StatusCode, header},
     };
     use http_body_util::BodyExt as _;
     use signalbox_blob_store::MAX_BLOB_RANGE_BYTES;
@@ -1191,8 +1157,8 @@ mod tests {
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, MAX_CONCURRENT_WEB_BLOB_READS, WebHttpConfiguration,
         WebHttpConfigurationError, WebHttpRuntime, content_disposition, deterministic_test_router,
-        exceeds_web_blob_range_limit, ndjson_response, parse_byte_range, production_router,
-        single_range_header, try_acquire_web_blob_read_permit,
+        exceeds_web_blob_range_limit, if_none_match, ndjson_response, parse_byte_range,
+        production_router, single_range_header, try_acquire_web_blob_read_permit,
     };
 
     fn loopback_ephemeral() -> SocketAddr {
@@ -1236,17 +1202,23 @@ mod tests {
     fn full_downloads_are_not_subject_to_the_partial_range_ceiling() {
         let oversized = MAX_BLOB_RANGE_BYTES + 1;
 
-        assert!(!exceeds_web_blob_range_limit(
-            &Method::GET,
-            false,
-            oversized
-        ));
-        assert!(exceeds_web_blob_range_limit(&Method::GET, true, oversized));
-        assert!(!exceeds_web_blob_range_limit(
-            &Method::HEAD,
-            true,
-            oversized
-        ));
+        assert!(!exceeds_web_blob_range_limit(false, oversized));
+        assert!(exceeds_web_blob_range_limit(true, oversized));
+    }
+
+    #[test]
+    fn repeated_if_none_match_fields_are_all_evaluated() {
+        let mut headers = header::HeaderMap::new();
+        headers.append(
+            header::IF_NONE_MATCH,
+            header::HeaderValue::from_static("\"other\""),
+        );
+        headers.append(
+            header::IF_NONE_MATCH,
+            header::HeaderValue::from_static("W/\"matching\""),
+        );
+
+        assert!(if_none_match(&headers, "\"matching\""));
     }
 
     #[test]

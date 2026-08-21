@@ -149,6 +149,44 @@ pub(crate) async fn open_recorded_blob_range(
     Ok(Box::new(Cursor::new(bytes)))
 }
 
+/// Opens one generation-pinned stream after a single complete-object verification pass.
+pub(crate) async fn open_recorded_blob_verified(
+    registry: &BlobStoreRegistry,
+    entry: &BlobCatalogEntry,
+) -> Result<signalbox_blob_store::BlobReader, BlobReadError> {
+    let mut saw_missing = false;
+    let mut saw_corrupt = false;
+    let mut saw_unavailable = false;
+    for replica in entry.replicas() {
+        let Some(store) = registry.recorded_store(replica.store()) else {
+            return Err(BlobReadError::Integrity);
+        };
+        match store
+            .open_verified(entry.expected(), replica.object_key())
+            .await
+        {
+            Ok(opened) if opened.byte_length() == entry.expected().byte_length() => {
+                return Ok(opened.into_reader());
+            }
+            Ok(_) => saw_corrupt = true,
+            Err(error) => match error.kind() {
+                BlobStoreFailureKind::NotFound => saw_missing = true,
+                BlobStoreFailureKind::VerificationFailed => saw_corrupt = true,
+                BlobStoreFailureKind::Unavailable => saw_unavailable = true,
+            },
+        }
+    }
+    if saw_unavailable {
+        Err(BlobReadError::Unavailable)
+    } else if saw_corrupt {
+        Err(BlobReadError::Corrupt)
+    } else if saw_missing {
+        Err(BlobReadError::Missing)
+    } else {
+        Err(BlobReadError::Integrity)
+    }
+}
+
 fn map_catalog_error(error: BlobCatalogRepositoryError) -> BlobReadError {
     match error {
         BlobCatalogRepositoryError::Database(_)

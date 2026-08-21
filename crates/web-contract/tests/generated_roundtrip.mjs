@@ -62,6 +62,13 @@ test("generated blob decoder accepts capability-projected views", () => {
     display_filename: ["capture.png"],
     available_views: [
       {
+        kind: "download",
+        content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+        media_type: "image/png",
+        byte_length: "94371840",
+        derivations: [],
+      },
+      {
         kind: "thumbnail",
         content_url: `/api/blobs/${digest}/content/image-png`,
         media_type: "image/png",
@@ -85,7 +92,7 @@ test("generated blob decoder accepts capability-projected views", () => {
     ],
   });
 
-  assert.equal(descriptor.available_views[0].kind, "thumbnail");
+  assert.equal(descriptor.available_views[1].kind, "thumbnail");
   assert.equal(descriptor.byte_length, "94371840");
 });
 
@@ -268,6 +275,109 @@ test("generated blob decoder rejects an absolute sentinel-origin URL", () => {
         ],
       }),
     /root-relative blob API path/,
+  );
+});
+
+test("generated blob decoder rejects noncanonical transformation parameters", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        digest,
+        byte_length: "1",
+        declared_media_type: "image/png",
+        display_filename: [],
+        available_views: [
+          {
+            kind: "download",
+            content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+            media_type: "image/png",
+            byte_length: "1",
+            derivations: [],
+          },
+          {
+            kind: "preview",
+            content_url: `/api/blobs/${digest}/content/image-png`,
+            media_type: "image/png",
+            byte_length: "1",
+            derivations: [
+              {
+                derivation_id: "01990f5f-55c0-7000-8000-000000000001",
+                input_digests: [digest],
+                output_digests: [digest],
+                transformation_name: "image.preview",
+                transformation_version: 1,
+                parameters_json: '{"z":1,"a":2}',
+                producer: {
+                  class: "deterministic",
+                  implementation_digest: digest,
+                  cache_key: digest,
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    /parameters_json must be canonical JSON/,
+  );
+});
+
+test("generated blob decoder requires exactly one download view", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const download = {
+    kind: "download",
+    content_url: `/api/blobs/${digest}/download?media_type=application%2Foctet-stream`,
+    media_type: "application/octet-stream",
+    byte_length: "1",
+    derivations: [],
+  };
+  const descriptor = {
+    digest,
+    byte_length: "1",
+    declared_media_type: "application/octet-stream",
+    display_filename: [],
+    available_views: [],
+  };
+
+  assert.throws(
+    () => decodeWebBlobDescriptor(descriptor),
+    /available_views must be exactly one download view/,
+  );
+  assert.throws(
+    () => decodeWebBlobDescriptor({ ...descriptor, available_views: [download, download] }),
+    /available_views must be exactly one download view/,
+  );
+});
+
+test("generated blob decoder rejects zero-length descriptors and views", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const download = {
+    kind: "download",
+    content_url: `/api/blobs/${digest}/download?media_type=application%2Foctet-stream`,
+    media_type: "application/octet-stream",
+    byte_length: "1",
+    derivations: [],
+  };
+  const descriptor = {
+    digest,
+    byte_length: "0",
+    declared_media_type: "application/octet-stream",
+    display_filename: [],
+    available_views: [download],
+  };
+
+  assert.throws(
+    () => decodeWebBlobDescriptor(descriptor),
+    /byte_length must be a positive canonical/,
+  );
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        ...descriptor,
+        byte_length: "1",
+        available_views: [{ ...download, byte_length: "0" }],
+      }),
+    /byte_length must be a positive canonical/,
   );
 });
 

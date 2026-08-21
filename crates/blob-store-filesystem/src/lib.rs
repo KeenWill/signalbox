@@ -637,6 +637,24 @@ impl FilesystemBlobStore {
         Ok(OpenedBlob::new(byte_length, Box::new(file)))
     }
 
+    async fn open_verified_inner(
+        &self,
+        expected: ExpectedBlob,
+        key: &BlobObjectKey,
+    ) -> Result<OpenedBlob, BlobStoreError> {
+        if !filesystem_key_is_admitted(key) {
+            return Err(BlobStoreError::unavailable("reject reserved object key"));
+        }
+        let (mut file, byte_length) =
+            open_private_regular_file(self.root.clone(), key.clone(), "open verified object")
+                .await?;
+        verify_opened_file(&mut file, expected, "verify opened object").await?;
+        file.seek(std::io::SeekFrom::Start(0))
+            .await
+            .map_err(|source| BlobStoreError::io("rewind verified object", source))?;
+        Ok(OpenedBlob::new(byte_length, Box::new(file)))
+    }
+
     async fn open_range_inner(
         &self,
         expected: ExpectedBlob,
@@ -676,6 +694,14 @@ impl BlobStore for FilesystemBlobStore {
 
     fn open<'a>(&'a self, key: &'a BlobObjectKey) -> BlobStoreFuture<'a, OpenedBlob> {
         Box::pin(self.open_inner(key))
+    }
+
+    fn open_verified<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        key: &'a BlobObjectKey,
+    ) -> BlobStoreFuture<'a, OpenedBlob> {
+        Box::pin(self.open_verified_inner(expected, key))
     }
 
     fn open_range<'a>(

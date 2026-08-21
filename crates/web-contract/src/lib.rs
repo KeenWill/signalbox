@@ -459,8 +459,35 @@ export function decodeWebApiErrorResponse(value) {{
 }}
 
 function assertCanonicalU64(value, path) {{
-  if (!/^(0|[1-9][0-9]{{0,19}})$/.test(value) || BigInt(value) > 18446744073709551615n) {{
-    fail(path, "a canonical decimal u64 string");
+  if (!/^[1-9][0-9]{{0,19}}$/.test(value) || BigInt(value) > 18446744073709551615n) {{
+    fail(path, "a positive canonical decimal u64 string");
+  }}
+}}
+
+function canonicalJson(value) {{
+  if (Array.isArray(value)) {{
+    return value.map(canonicalJson);
+  }}
+  if (value !== null && typeof value === "object") {{
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, canonicalJson(value[key])]),
+    );
+  }}
+  return value;
+}}
+
+function assertCanonicalParametersJson(value, path) {{
+  if (new TextEncoder().encode(value).length > 4096) {{
+    fail(path, "canonical JSON of at most 4096 UTF-8 bytes");
+  }}
+  let parsed;
+  try {{
+    parsed = JSON.parse(value);
+  }} catch {{
+    fail(path, "canonical JSON");
+  }}
+  if (JSON.stringify(canonicalJson(parsed)) !== value) {{
+    fail(path, "canonical JSON");
   }}
 }}
 
@@ -496,6 +523,7 @@ export function decodeWebBlobDescriptor(value) {{
     assertSameOriginBlobUrl(view.content_url, `blob_descriptor.available_views[${{index}}].content_url`);
     view.derivations.forEach((derivation, derivationIndex) => {{
       const path = `blob_descriptor.available_views[${{index}}].derivations[${{derivationIndex}}]`;
+      assertCanonicalParametersJson(derivation.parameters_json, `${{path}}.parameters_json`);
       assertUuid(derivation.derivation_id, `${{path}}.derivation_id`);
       derivation.input_digests.forEach((digest, digestIndex) =>
         assertBlobDigest(digest, `${{path}}.input_digests[${{digestIndex}}]`));
@@ -512,6 +540,10 @@ export function decodeWebBlobDescriptor(value) {{
       }}
     }});
   }});
+  const downloadViews = value.available_views.filter((view) => view.kind === "download");
+  if (downloadViews.length !== 1) {{
+    fail("blob_descriptor.available_views", "exactly one download view");
+  }}
   return value;
 }}
 "##,
