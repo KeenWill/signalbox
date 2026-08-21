@@ -51,7 +51,17 @@ const byteLabel = (bytes: number): string => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
 }
 
-export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: boolean }) {
+export function ImportsWorkspace({
+  api,
+  scenario,
+  presentation = 'standalone',
+  onCommandContext,
+}: {
+  api: ImportApi
+  scenario: boolean
+  presentation?: 'standalone' | 'product'
+  onCommandContext?: (context: CommandContext | null) => void
+}) {
   const queryClient = useQueryClient()
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
   const [sourceSession, setSourceSession] = useState('')
@@ -158,14 +168,23 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     }),
     [importEntryIds, selectImportEntry, selectedFrontier?.imported_entry_id],
   )
+  useEffect(() => {
+    onCommandContext?.(commandContext)
+    return () => onCommandContext?.(null)
+  }, [commandContext, onCommandContext])
   useHotkeys(
-    [...surfaceHotkeyBindings, ...importHotkeyBindings].map((binding) => ({
-      hotkey: binding.hotkey,
-      callback: () => invokeCommand(binding.commandId, commandContext),
-    })),
+    [...(presentation === 'standalone' ? surfaceHotkeyBindings : []), ...importHotkeyBindings].map(
+      (binding) => ({
+        hotkey: binding.hotkey,
+        callback: () => invokeCommand(binding.commandId, commandContext),
+      }),
+    ),
   )
   useHotkeySequences(
-    [...surfaceHotkeySequenceBindings, ...importHotkeySequenceBindings].map((binding) => ({
+    [
+      ...(presentation === 'standalone' ? surfaceHotkeySequenceBindings : []),
+      ...importHotkeySequenceBindings,
+    ].map((binding) => ({
       sequence: binding.sequence,
       callback: () => invokeCommand(binding.commandId, commandContext),
     })),
@@ -278,26 +297,33 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
 
   return (
     <>
-      <div className="imports-shell">
-        <aside className="navigation-pane imports-navigation">
-          <ScenarioNavigation activeId="imports" />
-        </aside>
-        <main className="imports-workspace">
-          <header className="imports-header">
-            <IconCommand
-              id="navigation.open"
-              context={commandContext}
-              label="Open scenarios"
-              className="icon-button imports-mobile-navigation"
-            >
-              <Menu />
-            </IconCommand>
-            <div>
-              <span className="eyebrow">Immutable imported evidence</span>
-              <h1>Imports</h1>
-            </div>
-            <span className="window-count">100-row keyset pages · 101-entry windows</span>
-          </header>
+      <div className={`imports-shell imports-shell-${presentation}`}>
+        {presentation === 'standalone' && (
+          <aside className="navigation-pane imports-navigation">
+            <ScenarioNavigation activeId="imports" />
+          </aside>
+        )}
+        <div
+          className={`imports-workspace imports-workspace-${presentation}`}
+          role={presentation === 'standalone' ? 'main' : undefined}
+        >
+          {presentation === 'standalone' && (
+            <header className="imports-header">
+              <IconCommand
+                id="navigation.open"
+                context={commandContext}
+                label="Open scenarios"
+                className="icon-button imports-mobile-navigation"
+              >
+                <Menu />
+              </IconCommand>
+              <div>
+                <span className="eyebrow">Immutable imported evidence</span>
+                <h1>Imports</h1>
+              </div>
+              <span className="window-count">100-row keyset pages · 101-entry windows</span>
+            </header>
+          )}
           <section className="imports-catalog" aria-labelledby="imports-catalog-heading">
             <header className="section-header imports-catalog-header">
               <div>
@@ -576,9 +602,11 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
               </div>
             </div>
           </section>
-        </main>
+        </div>
       </div>
-      <OverlaySurfaces context={commandContext} activeId="imports" />
+      {presentation === 'standalone' && (
+        <OverlaySurfaces context={commandContext} activeId="imports" />
+      )}
     </>
   )
 }

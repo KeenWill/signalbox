@@ -13,13 +13,15 @@ import {
   Sun,
   X,
 } from 'lucide-react'
-import { type CSSProperties, useEffect, useMemo, useRef } from 'react'
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   type CommandContext,
   commandRegistry,
   globalHotkeyBindings,
   invokeCommand,
 } from './commands'
+import { HttpImportApi } from './imports/api'
+import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import {
   type ProductRouteId,
   productRoutes,
@@ -28,6 +30,8 @@ import {
 } from './product'
 import { SettingsSurface } from './SettingsSurface'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
+
+const productImportApi = new HttpImportApi()
 
 const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
   attention: {
@@ -290,21 +294,27 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
+  const [importsCommandContext, setImportsCommandContext] = useState<CommandContext | null>(null)
+  const updateImportsCommandContext = useCallback(
+    (nextContext: CommandContext | null) => setImportsCommandContext(nextContext),
+    [],
+  )
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
     staleTime: Number.POSITIVE_INFINITY,
   })
-  const context = useMemo<CommandContext>(
-    () => ({
+  const context = useMemo<CommandContext>(() => {
+    const surfaceContext = surface === 'imports' ? importsCommandContext : null
+    return {
+      ...surfaceContext,
       dispatch,
       getState: store.getState,
-      timelineIds: [],
-      focusTimeline: () => primaryRef.current?.focus(),
+      timelineIds: surfaceContext?.timelineIds ?? [],
+      focusTimeline: surfaceContext?.focusTimeline ?? (() => primaryRef.current?.focus()),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
-    }),
-    [dispatch, navigate],
-  )
+    }
+  }, [dispatch, importsCommandContext, navigate, surface])
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
@@ -325,6 +335,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <SessionsSurface />
     ) : surface === 'settings' ? (
       <SettingsSurface />
+    ) : surface === 'imports' ? (
+      <ImportsWorkspace
+        api={productImportApi}
+        scenario={false}
+        presentation="product"
+        onCommandContext={updateImportsCommandContext}
+      />
     ) : (
       <DeferredSurface surface={surface} />
     )
@@ -339,7 +356,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <aside className="product-navigation-pane">
         <ProductNavigation active={surface} />
       </aside>
-      <main className="product-main" tabIndex={-1} ref={primaryRef}>
+      <main className={`product-main product-main-${surface}`} tabIndex={-1} ref={primaryRef}>
         <header className="product-header">
           <div>
             <span className="eyebrow">{copy.eyebrow}</span>

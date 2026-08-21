@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { productRoutes, productSurfaceStates, SameOriginProductTransport } from './product'
 
 const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
+  contract: { name: 'signalbox.web-http', version: '2' },
   capabilities: {
     bounded_json: true,
+    import_discovery: true,
+    imported_continuations: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
@@ -63,6 +65,14 @@ describe('product surface availability', () => {
     expect(productSurfaceStates.settings).toEqual({
       kind: 'browser-local',
       authority: 'browser preferences',
+    })
+  })
+
+  it('marks only the available import discovery facts as server-backed', () => {
+    expect(productSurfaceStates.imports).toEqual({
+      kind: 'server-backed',
+      owningTrack: '#995 discovery reads',
+      facts: ['bounded import catalog', 'descriptor and imported-entry windows', 'continuation'],
     })
   })
 })

@@ -1,4 +1,5 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { useDeterministicImportApi } from './import-api-fixture'
 
 interface RouteEvidence {
   path: string
@@ -7,9 +8,11 @@ interface RouteEvidence {
 }
 
 const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
+  contract: { name: 'signalbox.web-http', version: '2' },
   capabilities: {
     bounded_json: true,
+    import_discovery: true,
+    imported_continuations: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
@@ -48,6 +51,7 @@ const watchBrowser = (page: Page) => {
 const captureRouteEvidence = async (page: Page, evidence: RouteEvidence) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(evidence.path)
   await expect(page.getByRole('heading', { name: evidence.title, level: 1 })).toBeVisible()
@@ -62,6 +66,9 @@ const captureRouteEvidence = async (page: Page, evidence: RouteEvidence) => {
 
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
+  await page.locator('.product-main').evaluate((element) => {
+    element.scrollTop = 0
+  })
   await expect(page).toHaveScreenshot(`${evidence.snapshot}-mobile-light.png`, {
     animations: 'disabled',
   })

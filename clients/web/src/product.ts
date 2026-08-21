@@ -16,6 +16,7 @@ export type ProductRouteId = (typeof productRoutes)[number]['id']
 
 export type ProductSurfaceState =
   | { kind: 'browser-local'; authority: 'browser preferences' }
+  | { kind: 'server-backed'; owningTrack: string; facts: readonly string[] }
   | {
       kind: 'committed-unimplemented'
       owningTrack: string
@@ -54,9 +55,9 @@ export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> =
     facts: ['review discovery reads'],
   },
   imports: {
-    kind: 'committed-unimplemented',
+    kind: 'server-backed',
     owningTrack: '#995 discovery reads',
-    facts: ['import discovery reads'],
+    facts: ['bounded import catalog', 'descriptor and imported-entry windows', 'continuation'],
   },
   usage: {
     kind: 'committed-unimplemented',
