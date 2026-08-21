@@ -3928,7 +3928,7 @@ async fn yield_turn_to_runner_recovery_without_lease(
             AND attempt.request_id = request.request_id
             AND attempt.turn_id = request.turn_id
             AND attempt.session_id = request.session_id
-            AND attempt.state_kind = 'prepared'
+            AND attempt.state_kind IN ('prepared', 'in_flight')
             AND placement_head.session_id = lifecycle.session_id
             AND required.session_id = placement_head.session_id
             AND required.event_ordinal = placement_head.event_ordinal

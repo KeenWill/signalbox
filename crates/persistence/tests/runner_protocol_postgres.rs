@@ -5543,6 +5543,7 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_created_placement()
     MIGRATOR
         .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
         .await?;
+    migrate(&pool).await?;
     let loaded = RunnerProtocolStore::new(pool.clone(), catalog())
         .load_placement(expected.session())
         .await?
@@ -5702,6 +5703,7 @@ async fn s32_inv044_runner_loss_migration_preserves_valid_pinned_placement()
     MIGRATOR
         .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
         .await?;
+    migrate(&pool).await?;
     let loaded = RunnerProtocolStore::new(pool.clone(), catalog())
         .load_placement(pin.placement.session())
         .await?
