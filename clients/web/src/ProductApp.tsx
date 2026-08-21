@@ -13,73 +13,67 @@ import {
   Sun,
   X,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef } from 'react'
+import { type CSSProperties, useEffect, useMemo, useRef } from 'react'
 import {
   type CommandContext,
   commandRegistry,
   globalHotkeyBindings,
   invokeCommand,
 } from './commands'
-import { type ProductRouteId, productRoutes, productTransport } from './product'
+import {
+  type ProductRouteId,
+  productRoutes,
+  productSurfaceStates,
+  productTransport,
+} from './product'
+import { SettingsSurface } from './SettingsSurface'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
-const surfaceCopy: Record<
-  ProductRouteId,
-  { eyebrow: string; title: string; question: string; track: string }
-> = {
+const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
   attention: {
     eyebrow: 'Operator overview',
     title: 'Attention',
     question: 'What needs intervention now?',
-    track: '#992 attention projections',
   },
   sessions: {
     eyebrow: 'Conversation index',
     title: 'Sessions',
     question: 'Where is work active, blocked, or recently settled?',
-    track: '#991 session projections',
   },
   search: {
     eyebrow: 'Corpus navigation',
     title: 'Search',
     question: 'Where does this fact occur?',
-    track: '#994 search reads',
   },
   activity: {
     eyebrow: 'Repository operations',
     title: 'Activity',
     question: 'What entered the system and how was it handled?',
-    track: '#995 discovery reads',
   },
   runners: {
     eyebrow: 'Execution fleet',
     title: 'Runners',
     question: 'Which runners are available, occupied, or lost?',
-    track: '#995 runner discovery',
   },
   reviews: {
     eyebrow: 'Convergence',
     title: 'Reviews',
     question: 'Which pull requests still need work?',
-    track: '#995 review discovery',
   },
   imports: {
     eyebrow: 'Conversation intake',
     title: 'Imports',
     question: 'Which imports completed, failed, or need inspection?',
-    track: '#995 import discovery',
   },
   usage: {
     eyebrow: 'Accounting',
     title: 'Usage',
     question: 'Where are tokens and cost accumulating?',
-    track: '#994 usage reads',
   },
   settings: {
     eyebrow: 'Local preferences',
     title: 'Settings',
     question: 'How should this workstation present information?',
-    track: 'Web track H slice 2',
   },
 }
 
@@ -171,18 +165,25 @@ function CommandPalette({ context }: { context: CommandContext }) {
 }
 
 function SurfaceUnavailable({ surface }: { surface: ProductRouteId }) {
-  const copy = surfaceCopy[surface]
+  const state = productSurfaceStates[surface]
+  if (state.kind !== 'committed-unimplemented') return null
   return (
-    <section className="surface-empty" aria-labelledby="surface-unavailable-heading">
+    <section className="surface-empty" aria-labelledby={`${surface}-unavailable-heading`}>
       <AlertTriangle aria-hidden="true" />
       <div>
-        <h2 id="surface-unavailable-heading">
+        <span className="availability-tag">Committed · unavailable</span>
+        <h2 id={`${surface}-unavailable-heading`}>
           Operational data is not exposed by this daemon contract
         </h2>
         <p>
-          The product route is ready, but {copy.track} has not supplied a production read on this
-          branch. Signalbox will not infer or fabricate these facts.
+          {state.owningTrack} is committed, but no present production surface provides the required
+          facts on this branch. Signalbox will not infer or fabricate them.
         </p>
+        <ul>
+          {state.facts.map((fact) => (
+            <li key={fact}>{fact}</li>
+          ))}
+        </ul>
       </div>
     </section>
   )
@@ -216,9 +217,6 @@ function SessionsSurface() {
             disabled
           />
         </label>
-        <button type="button" disabled>
-          New session
-        </button>
       </div>
       <div className="session-columns" aria-hidden="true">
         <span>Session</span>
@@ -325,12 +323,19 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <AttentionSurface />
     ) : surface === 'sessions' ? (
       <SessionsSurface />
+    ) : surface === 'settings' ? (
+      <SettingsSurface />
     ) : (
       <DeferredSurface surface={surface} />
     )
 
+  const shellStyle = {
+    '--product-navigation-width': `${app.paneSizes.navigation}px`,
+    '--product-inspector-width': `${app.paneSizes.inspector}px`,
+  } as CSSProperties
+
   return (
-    <div className={`product-shell layout-${app.layout}`}>
+    <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
       <aside className="product-navigation-pane">
         <ProductNavigation active={surface} />
       </aside>
@@ -368,11 +373,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </div>
             <div>
               <dt>Authority</dt>
-              <dd>Daemon</dd>
+              <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
             </div>
             <div>
               <dt>Cache</dt>
-              <dd>Bounded query</dd>
+              <dd>{surface === 'settings' ? 'Local settings' : 'Bounded query'}</dd>
             </div>
           </dl>
         </aside>

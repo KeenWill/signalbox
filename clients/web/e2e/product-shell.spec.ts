@@ -10,6 +10,13 @@ const bootstrapFixture = {
   limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
 } as const
 
+const settingsPreferenceFixture = {
+  path: '/settings',
+  changedTheme: 'Light',
+  defaultTheme: 'Dark',
+  restoreAction: 'Restore defaults',
+} as const
+
 const useDeterministicBootstrap = (page: Page) =>
   page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
 
@@ -79,5 +86,26 @@ test('uses a navigation sheet on a phone viewport and unwinds it with Escape', a
   await page.keyboard.press('Escape')
   await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeHidden()
   await expect(openNavigation).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('changes and restores a Settings preference without a mouse', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto(settingsPreferenceFixture.path)
+
+  const lightTheme = page.getByRole('radio', { name: settingsPreferenceFixture.changedTheme })
+  await lightTheme.focus()
+  await page.keyboard.press('Space')
+  await expect(lightTheme).toBeChecked()
+  await page.reload()
+  await expect(
+    page.getByRole('radio', { name: settingsPreferenceFixture.changedTheme }),
+  ).toBeChecked()
+  await page.getByRole('button', { name: settingsPreferenceFixture.restoreAction }).focus()
+  await page.keyboard.press('Enter')
+  await expect(
+    page.getByRole('radio', { name: settingsPreferenceFixture.defaultTheme }),
+  ).toBeChecked()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
