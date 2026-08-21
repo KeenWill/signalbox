@@ -4,17 +4,18 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-use std::{error::Error, num::NonZeroU64};
+use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use super::migrated_postgres;
 use signalbox_application::{
     CommissionDispatchRequest, CommissionedDispatchFence, UuidV7CommissionedDispatchIdGenerator,
 };
 use signalbox_domain::{
-    BranchName, CommitSha, DangerousToolAutoApproval, DirectModelSelection, DurableCommandId,
-    GoalStatement, ModelSelectionRequest, PullRequestNumber, RepositorySlug,
-    SessionConfigurationDefaults, SessionId, SessionSystemPrompt, SessionTemplateContentDigest,
-    SessionTemplateName, SessionTemplateProvenance, UserContent,
+    BranchName, CommitSha, DangerousToolAutoApproval, DescendantTerminationScope,
+    DirectModelSelection, DurableCommandId, GoalStatement, GoalUserAction, GoalUserCommand,
+    ModelSelectionRequest, PullRequestNumber, RepositorySlug, SessionConfigurationDefaults,
+    SessionId, SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
+    SessionTemplateProvenance, UserContent,
 };
 use signalbox_persistence::{
     SessionCredentialPin, SessionModelCredential,
@@ -23,6 +24,7 @@ use signalbox_persistence::{
         ConvergenceSweepDecision, ConvergenceSweepFailureDisposition, ConvergenceSweepFailureKind,
         ConvergenceSweepObservation, PostgresConvergenceSweepStore,
     },
+    goal::{GoalCommandHandlingOutcome, GoalRepository},
 };
 use sqlx::types::Uuid;
 
@@ -371,6 +373,49 @@ async fn racing_pull_request_commissions_skip_the_second_live_session() -> Resul
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn locked_admission_rejects_a_recent_terminal_dispatch_during_cool_off()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let store = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
+    let (_, first_session) = dispatched(
+        store
+            .commission(prepared_commission(0x89_205)?, |_| None)
+            .await?,
+    );
+    let stopped = GoalRepository::new(pool)
+        .handle_user_command(
+            GoalUserCommand::new(
+                pending_command(0x89_214),
+                first_session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    assert!(matches!(stopped, GoalCommandHandlingOutcome::Recorded(_)));
+
+    let second = store
+        .commission_after_cool_off(
+            prepared_commission(0x89_206)?,
+            Duration::from_secs(60),
+            |_| None,
+        )
+        .await?;
+
+    assert_eq!(
+        second,
+        CommissionDispatchOutcome::TargetCoolingOff {
+            session: first_session
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_new_target_censuses_an_existing_commissioned_dispatch() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
@@ -379,6 +424,16 @@ async fn a_new_target_censuses_an_existing_commissioned_dispatch() -> Result<(),
         .commission(prepared_commission(0x89_203)?, |_| None)
         .await?;
     let (_, commissioned_session) = dispatched(outcome);
+    let observed_after_dispatch = observation()?;
+    sweep
+        .record_decision(
+            Uuid::from_u128(0x89_213),
+            &repository()?,
+            pull_request(),
+            &observed_after_dispatch,
+            ConvergenceSweepDecision::LiveSession,
+        )
+        .await?;
 
     let state = sweep
         .load_target(&repository()?, pull_request())
@@ -391,6 +446,11 @@ async fn a_new_target_censuses_an_existing_commissioned_dispatch() -> Result<(),
             .expect("existing commissioned dispatch is visible")
             .session_id(),
         commissioned_session
+    );
+    assert_eq!(
+        state.latest_dispatch_observation(),
+        None,
+        "a later sweep observation must not be treated as an external dispatch baseline"
     );
     Ok(())
 }
@@ -489,6 +549,38 @@ async fn no_model_activity_parks_immediately_with_its_typed_need() -> Result<(),
             String::from("inspect_inactive_session")
         )
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn configured_target_reenrollment_clears_a_durable_park() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool);
+    let repository = repository()?;
+    let observation = observation()?;
+
+    store
+        .record_failure(
+            Uuid::from_u128(0x89_215),
+            &repository,
+            inactive_pull_request(),
+            Some(&observation),
+            ConvergenceSweepFailureKind::NoModelActivity,
+            RETRY_DELAY_SECONDS,
+        )
+        .await?;
+    store
+        .reenroll_target(&repository, inactive_pull_request())
+        .await?;
+    let state = store
+        .load_target(&repository, inactive_pull_request())
+        .await?
+        .expect("re-enrolled target remains durable");
+
+    assert!(!state.is_parked());
+    assert_eq!(state.failure_kind(), None);
+    assert_eq!(state.consecutive_failures(), 0);
     Ok(())
 }
 

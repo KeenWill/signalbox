@@ -144,7 +144,7 @@ pub struct ConvergenceSweepTargetState {
     pending_command: Option<DurableCommandId>,
     pending_observation: Option<ConvergenceSweepObservation>,
     last_observation: Option<ConvergenceSweepObservation>,
-    last_dispatch_observation: Option<ConvergenceSweepObservation>,
+    latest_dispatch_observation: Option<ConvergenceSweepObservation>,
     pending_dispatch: Option<ConvergenceSweepDispatchState>,
     latest_dispatch: Option<ConvergenceSweepDispatchState>,
 }
@@ -171,8 +171,8 @@ impl ConvergenceSweepTargetState {
     pub const fn last_observation(&self) -> Option<&ConvergenceSweepObservation> {
         self.last_observation.as_ref()
     }
-    pub const fn last_dispatch_observation(&self) -> Option<&ConvergenceSweepObservation> {
-        self.last_dispatch_observation.as_ref()
+    pub const fn latest_dispatch_observation(&self) -> Option<&ConvergenceSweepObservation> {
+        self.latest_dispatch_observation.as_ref()
     }
     pub const fn pending_dispatch(&self) -> Option<&ConvergenceSweepDispatchState> {
         self.pending_dispatch.as_ref()
@@ -234,6 +234,30 @@ impl PostgresConvergenceSweepStore {
         Self { pool }
     }
 
+    /// Re-enrolls one configured target, making daemon restart its explicit recovery path.
+    pub async fn reenroll_target(
+        &self,
+        repository: &RepositorySlug,
+        pull_request: PullRequestNumber,
+    ) -> Result<(), ConvergenceSweepStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        ensure_target(&mut transaction, repository, pull_request).await?;
+        sqlx::query(
+            "UPDATE convergence_sweep_target
+                SET state_kind = 'observed', failure_kind = NULL,
+                    consecutive_failures = 0, retry_not_before = NULL,
+                    parked_at = NULL, operator_need = NULL
+              WHERE repository = $1 AND pull_request_number = $2
+                AND state_kind = 'parked'",
+        )
+        .bind(repository.as_str())
+        .bind(Decimal::from(pull_request.get()))
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Loads retry/park state and the latest globally commissioned session.
     pub async fn load_target(
         &self,
@@ -250,8 +274,18 @@ impl PostgresConvergenceSweepStore {
                     target.pending_command_id, target.pending_head_sha,
                     target.pending_unresolved_threads,
                     target.last_head_sha, target.last_unresolved_threads,
-                    target.last_dispatch_head_sha,
-                    target.last_dispatch_unresolved_threads,
+                    CASE
+                      WHEN latest.dispatch_id = target.last_dispatch_id
+                        THEN target.last_dispatch_head_sha
+                      WHEN latest.dispatch_id = pending.dispatch_id
+                        THEN target.pending_head_sha
+                    END AS latest_dispatch_head_sha,
+                    CASE
+                      WHEN latest.dispatch_id = target.last_dispatch_id
+                        THEN target.last_dispatch_unresolved_threads
+                      WHEN latest.dispatch_id = pending.dispatch_id
+                        THEN target.pending_unresolved_threads
+                    END AS latest_dispatch_unresolved_threads,
                     pending.dispatch_id AS pending_dispatch_id,
                     pending.session_id AS pending_session_id,
                     pending.recorded_at AS pending_recorded_at,
@@ -630,11 +664,11 @@ fn decode_target_state(
     let pending_threads: Option<Decimal> = row.try_get("pending_unresolved_threads")?;
     let last_head: Option<String> = row.try_get("last_head_sha")?;
     let last_threads: Option<Decimal> = row.try_get("last_unresolved_threads")?;
-    let dispatch_head: Option<String> = row.try_get("last_dispatch_head_sha")?;
-    let dispatch_threads: Option<Decimal> = row.try_get("last_dispatch_unresolved_threads")?;
+    let dispatch_head: Option<String> = row.try_get("latest_dispatch_head_sha")?;
+    let dispatch_threads: Option<Decimal> = row.try_get("latest_dispatch_unresolved_threads")?;
     let pending_observation = decode_observation(pending_head, pending_threads)?;
     let last_observation = decode_observation(last_head, last_threads)?;
-    let last_dispatch_observation = decode_observation(dispatch_head, dispatch_threads)?;
+    let latest_dispatch_observation = decode_observation(dispatch_head, dispatch_threads)?;
     let pending_dispatch = decode_dispatch_state(
         row.try_get("pending_dispatch_id")?,
         row.try_get("pending_session_id")?,
@@ -660,7 +694,7 @@ fn decode_target_state(
         pending_command: pending_command.map(DurableCommandId::from_uuid),
         pending_observation,
         last_observation,
-        last_dispatch_observation,
+        latest_dispatch_observation,
         pending_dispatch,
         latest_dispatch,
     })

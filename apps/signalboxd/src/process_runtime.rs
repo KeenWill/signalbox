@@ -8682,7 +8682,8 @@ where
             )
             .await
         }
-        Ok(CommissionDispatchOutcome::TargetBusy { session }) => {
+        Ok(CommissionDispatchOutcome::TargetBusy { session })
+        | Ok(CommissionDispatchOutcome::TargetCoolingOff { session }) => {
             write_error(
                 writer,
                 version,
@@ -13958,6 +13959,17 @@ where
                 version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Ok(GoalCommandHandlingOutcome::TargetBusy { session: owner }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::CommissionTargetBusy {
+                    session_id: CanonicalUuid::from_uuid(owner.into_uuid()),
+                }),
             )
             .await
         }

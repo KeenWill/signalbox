@@ -48,8 +48,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 // numeric-bound: ceiling - prevents one pathological PR from monopolizing a complete sweep
 const MAX_CONNECTION_PAGES: usize = 100;
-// numeric-bound: ceiling - prevents slow targets from serially delaying the complete target set
-const MAX_CONCURRENT_TARGETS: usize = 8;
 // numeric-bound: ceiling - bounds transport attempts for one idempotent GraphQL census request
 const MAX_REQUEST_ATTEMPTS: usize = 3;
 // numeric-bound: tunable - separates bounded transport retry attempts
@@ -93,6 +91,7 @@ query PullRequestConvergenceThreads(
 ) {
   repository(owner: $namespace, name: $name) {
     pullRequest(number: $number) {
+      headRefOid
       reviewThreads(first: 100, after: $after) {
         nodes { isResolved }
         pageInfo { hasNextPage endCursor }
@@ -231,35 +230,45 @@ impl ConvergenceSweepRuntime {
     }
 
     /// Runs complete censuses until shutdown; one target failure never halts siblings.
-    pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
-        if *shutdown.borrow() {
-            return;
-        }
-        loop {
-            if !self.sweep_once(&mut shutdown).await {
-                return;
-            }
-            select! {
-                _ = sleep(self.interval) => {}
-                changed = shutdown.changed() => {
-                    if changed.is_err() || *shutdown.borrow() { return; }
+    pub async fn run(self, shutdown: watch::Receiver<bool>) {
+        let runtime = &self;
+        stream::iter(&self.targets)
+            .for_each_concurrent(None, |target| {
+                let mut shutdown = shutdown.clone();
+                async move {
+                    if *shutdown.borrow() {
+                        return;
+                    }
+                    if let Err(error) = runtime
+                        .state
+                        .reenroll_target(&target.repository, target.pull_request)
+                        .await
+                    {
+                        tracing::error!(
+                            repository = %target.repository.as_str(),
+                            pull_request = target.pull_request.get(),
+                            cause = %error,
+                            "convergence sweep target re-enrollment failed"
+                        );
+                    }
+                    loop {
+                        select! {
+                            () = runtime.reconcile_target(target) => {}
+                            changed = shutdown.changed() => {
+                                if changed.is_err() || *shutdown.borrow() { return; }
+                                continue;
+                            }
+                        }
+                        select! {
+                            _ = sleep(self.interval) => {}
+                            changed = shutdown.changed() => {
+                                if changed.is_err() || *shutdown.borrow() { return; }
+                            }
+                        }
+                    }
                 }
-            }
-        }
-    }
-
-    async fn sweep_once(&self, shutdown: &mut watch::Receiver<bool>) -> bool {
-        let census = stream::iter(&self.targets)
-            .for_each_concurrent(Some(MAX_CONCURRENT_TARGETS), |target| {
-                self.reconcile_target(target)
-            });
-        tokio::pin!(census);
-        select! {
-            () = &mut census => true,
-            changed = shutdown.changed() => {
-                changed.is_ok() && !*shutdown.borrow()
-            }
-        }
+            })
+            .await;
     }
 
     async fn reconcile_target(&self, target: &SweepTarget) {
@@ -342,12 +351,9 @@ impl ConvergenceSweepRuntime {
             return;
         }
         if let Some(dispatch) = loaded.as_ref().and_then(|state| state.latest_dispatch()) {
-            let dispatch_observation = loaded.as_ref().and_then(|state| {
-                state
-                    .last_dispatch_observation()
-                    .or_else(|| state.pending_observation())
-                    .or_else(|| state.last_observation())
-            });
+            let dispatch_observation = loaded
+                .as_ref()
+                .and_then(|state| state.latest_dispatch_observation());
             let unchanged = dispatch_observation == Some(&observation);
             let cool_off_elapsed = SystemTime::now()
                 .duration_since(dispatch.dispatched_at())
@@ -457,7 +463,9 @@ impl ConvergenceSweepRuntime {
         };
         match self
             .commissioned
-            .commission(prepared, |alias| self.models.resolve_alias(alias))
+            .commission_after_cool_off(prepared, self.cool_off, |alias| {
+                self.models.resolve_alias(alias)
+            })
             .await
         {
             Ok(
@@ -491,6 +499,10 @@ impl ConvergenceSweepRuntime {
             }
             Ok(CommissionDispatchOutcome::TargetBusy { .. }) => {
                 self.record_decision(target, &observation, ConvergenceSweepDecision::LiveSession)
+                    .await;
+            }
+            Ok(CommissionDispatchOutcome::TargetCoolingOff { .. }) => {
+                self.record_decision(target, &observation, ConvergenceSweepDecision::CoolingOff)
                     .await;
             }
             Ok(CommissionDispatchOutcome::ConflictingReuse) | Err(_) => {
@@ -625,18 +637,16 @@ impl ConvergenceSweepRuntime {
                 Some(value) => page_info(Some(value))?,
                 None => PageInfo::done(),
             };
-        let mut pages = 1usize;
+        let mut thread_pages = 1usize;
         while thread_page.has_next {
-            pages += 1;
-            if pages > MAX_CONNECTION_PAGES {
+            thread_pages += 1;
+            if thread_pages > MAX_CONNECTION_PAGES {
                 return Err(CensusError::Pagination);
             }
             let mut next = variables.clone();
             next["after"] = Value::String(thread_page.cursor.ok_or(CensusError::Shape)?);
             let page = self.graphql(THREADS_QUERY, next, &authorization).await?;
-            let connection = page
-                .pointer("/data/repository/pullRequest/reviewThreads")
-                .ok_or(CensusError::Shape)?;
+            let connection = threads_page(&page, &head_sha)?;
             unresolved += unresolved_threads(
                 connection
                     .get("nodes")
@@ -645,9 +655,10 @@ impl ConvergenceSweepRuntime {
             )?;
             thread_page = page_info(connection.get("pageInfo"))?;
         }
+        let mut check_pages = 1usize;
         while check_page.has_next {
-            pages += 1;
-            if pages > MAX_CONNECTION_PAGES {
+            check_pages += 1;
+            if check_pages > MAX_CONNECTION_PAGES {
                 return Err(CensusError::Pagination);
             }
             let mut next = variables.clone();
@@ -700,7 +711,7 @@ impl ConvergenceSweepRuntime {
         let body = serde_json::to_vec(&json!({"query": query, "variables": variables}))
             .map_err(|_| CensusError::Decode)?;
         let mut attempt = 0usize;
-        let mut response = loop {
+        let bytes = 'attempts: loop {
             attempt += 1;
             let sent = self
                 .client
@@ -720,27 +731,38 @@ impl ConvergenceSweepRuntime {
                 {
                     sleep(REQUEST_RETRY_DELAY).await;
                 }
-                Ok(response) => break response,
+                Ok(mut response) => {
+                    if response.status() != StatusCode::OK {
+                        return Err(CensusError::Response);
+                    }
+                    let mut bytes = Vec::new();
+                    loop {
+                        match response.chunk().await {
+                            Ok(Some(chunk)) => {
+                                let next = bytes
+                                    .len()
+                                    .checked_add(chunk.len())
+                                    .ok_or(CensusError::Response)?;
+                                if next > MAX_RESPONSE_BYTES {
+                                    return Err(CensusError::Response);
+                                }
+                                bytes.extend_from_slice(&chunk);
+                            }
+                            Ok(None) => break 'attempts bytes,
+                            Err(_) if attempt < MAX_REQUEST_ATTEMPTS => {
+                                sleep(REQUEST_RETRY_DELAY).await;
+                                continue 'attempts;
+                            }
+                            Err(_) => return Err(CensusError::Response),
+                        }
+                    }
+                }
                 Err(_) if attempt < MAX_REQUEST_ATTEMPTS => {
                     sleep(REQUEST_RETRY_DELAY).await;
                 }
                 Err(_) => return Err(CensusError::Request),
             }
         };
-        if response.status() != StatusCode::OK {
-            return Err(CensusError::Response);
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| CensusError::Response)? {
-            let next = bytes
-                .len()
-                .checked_add(chunk.len())
-                .ok_or(CensusError::Response)?;
-            if next > MAX_RESPONSE_BYTES {
-                return Err(CensusError::Response);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
         let value: Value = serde_json::from_slice(&bytes).map_err(|_| CensusError::Decode)?;
         if value.get("errors").is_some() {
             return Err(CensusError::Response);
@@ -803,6 +825,16 @@ fn checks_page<'a>(page: &'a Value, expected_head: &CommitSha) -> Result<&'a Val
     commit
         .pointer("/statusCheckRollup/contexts")
         .ok_or(CensusError::Shape)
+}
+
+fn threads_page<'a>(page: &'a Value, expected_head: &CommitSha) -> Result<&'a Value, CensusError> {
+    let pull = page
+        .pointer("/data/repository/pullRequest")
+        .ok_or(CensusError::Shape)?;
+    if commit_at(pull, "headRefOid")? != *expected_head {
+        return Err(CensusError::Shape);
+    }
+    pull.get("reviewThreads").ok_or(CensusError::Shape)
 }
 
 fn decode_checks(values: &[Value]) -> Result<Vec<PullRequestCheck>, CensusError> {
@@ -1086,5 +1118,35 @@ mod tests {
         });
 
         assert_eq!(checks_page(&page, &sha('a')), Err(CensusError::Shape));
+    }
+
+    #[test]
+    fn a_thread_page_for_the_observed_head_decodes() {
+        let expected_head = sha('a');
+        let page = json!({
+            "data": {"repository": {"pullRequest": {
+                "headRefOid": expected_head.as_str(),
+                "reviewThreads": {"nodes": [{"isResolved": false}]}
+            }}}
+        });
+        let connection = threads_page(&page, &expected_head).expect("head-matched page decodes");
+        let nodes = connection
+            .get("nodes")
+            .and_then(Value::as_array)
+            .expect("fixture carries thread nodes");
+
+        assert_eq!(unresolved_threads(nodes), Ok(1));
+    }
+
+    #[test]
+    fn a_thread_page_for_another_head_is_rejected() {
+        let page = json!({
+            "data": {"repository": {"pullRequest": {
+                "headRefOid": sha('b').as_str(),
+                "reviewThreads": {}
+            }}}
+        });
+
+        assert_eq!(threads_page(&page, &sha('a')), Err(CensusError::Shape));
     }
 }

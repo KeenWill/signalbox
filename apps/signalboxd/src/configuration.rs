@@ -2054,6 +2054,7 @@ fn parse_convergence_pull_requests(
             .as_integer()
             .and_then(|value| u64::try_from(value).ok())
             .and_then(NonZeroU64::new)
+            .filter(|value| value.get() <= i32::MAX as u64)
             .map(PullRequestNumber::new)
             .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
         if parsed.contains(&number) {
@@ -5153,6 +5154,19 @@ cool_off_seconds = {}
                 "cool_off_seconds = {}",
                 MAX_CONVERGENCE_SWEEP_COOL_OFF.as_secs() + 1
             ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_convergence_pull_request_above_graphql_int() {
+        let configured = configuration_with_convergence_sweep().replace(
+            &format!("convergence_pull_requests = [{CONVERGENCE_PULL_REQUEST}]"),
+            &format!("convergence_pull_requests = [{}]", i64::from(i32::MAX) + 1),
         );
 
         assert_eq!(
