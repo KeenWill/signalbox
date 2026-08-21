@@ -5,10 +5,16 @@ const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '1' },
   capabilities: {
     bounded_json: true,
+    bounded_session_timeline: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
+  limits: {
+    max_json_body_bytes: 65_536,
+    max_ndjson_item_bytes: 262_144,
+    max_timeline_window_items: 256,
+    max_timeline_window_bytes: 65_536,
+  },
 } as const
 
 afterEach(() => vi.unstubAllGlobals())
@@ -63,6 +69,14 @@ describe('product surface availability', () => {
     expect(productSurfaceStates.settings).toEqual({
       kind: 'browser-local',
       authority: 'browser preferences',
+    })
+  })
+
+  it('marks the available Session timeline facts as server-backed', () => {
+    expect(productSurfaceStates.sessions).toEqual({
+      kind: 'server-backed',
+      owningTrack: '#991 session projections',
+      facts: ['bounded session descriptors', 'stable-address timeline windows'],
     })
   })
 })

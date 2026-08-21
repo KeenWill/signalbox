@@ -16,6 +16,7 @@ export type ProductRouteId = (typeof productRoutes)[number]['id']
 
 export type ProductSurfaceState =
   | { kind: 'browser-local'; authority: 'browser preferences' }
+  | { kind: 'server-backed'; owningTrack: string; facts: readonly string[] }
   | {
       kind: 'committed-unimplemented'
       owningTrack: string
@@ -29,9 +30,9 @@ export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> =
     facts: ['prioritized attention reads'],
   },
   sessions: {
-    kind: 'committed-unimplemented',
+    kind: 'server-backed',
     owningTrack: '#991 session projections',
-    facts: ['bounded session index reads', 'session creation and lifecycle operations'],
+    facts: ['bounded session descriptors', 'stable-address timeline windows'],
   },
   search: {
     kind: 'committed-unimplemented',
