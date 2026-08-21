@@ -248,6 +248,57 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool);
+    let repository = repository()?;
+    let observation = observation()?;
+
+    store
+        .record_failure(
+            Uuid::from_u128(8),
+            &repository,
+            pull_request(),
+            Some(&observation),
+            ConvergenceSweepFailureKind::FactsFetch,
+            RETRY_DELAY_SECONDS,
+        )
+        .await?;
+    store
+        .record_failure(
+            Uuid::from_u128(9),
+            &repository,
+            pull_request(),
+            Some(&observation),
+            ConvergenceSweepFailureKind::FactsFetch,
+            RETRY_DELAY_SECONDS,
+        )
+        .await?;
+    store
+        .record_failure(
+            Uuid::from_u128(10),
+            &repository,
+            pull_request(),
+            Some(&observation),
+            ConvergenceSweepFailureKind::CommissionRefused,
+            RETRY_DELAY_SECONDS,
+        )
+        .await?;
+    let state = store
+        .load_target(&repository, pull_request())
+        .await?
+        .expect("the failed target is durable");
+
+    assert_eq!(
+        state.failure_kind(),
+        Some(ConvergenceSweepFailureKind::CommissionRefused)
+    );
+    assert_eq!(state.consecutive_failures(), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn racing_pull_request_commissions_skip_the_second_live_session() -> Result<(), Box<dyn Error>>
 {
     let (_container, pool) = migrated_postgres().await?;
@@ -267,8 +318,7 @@ async fn racing_pull_request_commissions_skip_the_second_live_session() -> Resul
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn no_model_activity_parks_immediately_with_its_typed_need()
--> Result<(), Box<dyn Error>> {
+async fn no_model_activity_parks_immediately_with_its_typed_need() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = PostgresConvergenceSweepStore::new(pool.clone());
     let repository = repository()?;

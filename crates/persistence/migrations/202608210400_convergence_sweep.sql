@@ -50,7 +50,7 @@ CREATE TABLE convergence_sweep_target (
     CHECK (
         failure_kind IS NULL OR failure_kind IN (
             'facts_fetch', 'commission_refused', 'template_drift',
-            'no_model_activity'
+            'no_model_activity', 'state_access'
         )
     ),
     CHECK (
@@ -59,7 +59,7 @@ CREATE TABLE convergence_sweep_target (
     CHECK (
         operator_need IS NULL OR operator_need IN (
             'repair_facts_fetch', 'repair_commission', 'repair_template',
-            'inspect_inactive_session'
+            'inspect_inactive_session', 'repair_sweep_state'
         )
     ),
     CHECK (last_head_sha IS NULL OR last_head_sha COLLATE "C" ~ '^[0-9a-f]{40}$'),
@@ -161,13 +161,13 @@ CREATE TABLE convergence_sweep_event (
         outcome_kind IN (
             'converged', 'cooling_off', 'live_session', 'dispatched',
             'facts_fetch_failed', 'commission_refused', 'template_drift',
-            'no_model_activity'
+            'no_model_activity', 'state_access_failed'
         )
     ),
     CHECK (
         failure_kind IS NULL OR failure_kind IN (
             'facts_fetch', 'commission_refused', 'template_drift',
-            'no_model_activity'
+            'no_model_activity', 'state_access'
         )
     ),
     CHECK (head_sha IS NULL OR head_sha COLLATE "C" ~ '^[0-9a-f]{40}$'),
@@ -178,7 +178,7 @@ CREATE TABLE convergence_sweep_event (
     CHECK (
         operator_need IS NULL OR operator_need IN (
             'repair_facts_fetch', 'repair_commission', 'repair_template',
-            'inspect_inactive_session'
+            'inspect_inactive_session', 'repair_sweep_state'
         )
     ),
     CHECK ((dispatch_id IS NULL) = (session_id IS NULL)),
@@ -200,6 +200,9 @@ CREATE TABLE convergence_sweep_event (
         OR
         (outcome_kind = 'no_model_activity'
             AND failure_kind = 'no_model_activity')
+        OR
+        (outcome_kind = 'state_access_failed'
+            AND failure_kind = 'state_access')
     ),
     CHECK (
         failure_kind IS NULL

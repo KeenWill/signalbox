@@ -224,10 +224,10 @@ block to add the mutable `convergence_sweep_target` scheduler projection, the
 append-only `convergence_sweep_event` audit, and the
 `convergence_sweep_parked_target` operator view. Closed checks bind retry and
 park shapes to the five-attempt `convergence_sweep_retry_budget()` ceiling, bind
-each failure outcome to its typed cause and operator need, and prevent partial
-observation, command-fence, or commissioned-dispatch identities. The function
-pins the restore-safe schema search path. The cross-component behavior using
-these records is owned by
+each provider, commission, template, or state-access failure outcome to its
+typed cause and operator need, and prevent partial observation, command-fence,
+or commissioned-dispatch identities. The function pins the restore-safe schema
+search path. The cross-component behavior using these records is owned by
 [pull-request convergence reconciliation](convergence-reconciliation.md).
 
 ## Relational representation

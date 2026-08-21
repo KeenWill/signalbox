@@ -58,21 +58,25 @@ advisory lock for the repository and pull-request identity and refuses with the
 existing live session when any commissioned dispatch for that target has a live
 goal. This final guard covers races after the sweep's earlier liveness read.
 
-Facts-fetch failure, commission refusal, and template drift each append a typed
-event and advance an independent consecutive-failure lineage. Automatic retry
-uses exponential delays from a 60-second base under a 900-second ceiling. The
-fifth consecutive failure parks the target and exposes an operator need through
+Facts-fetch failure, commission refusal, template drift, and recoverable sweep
+state-access failure each append a typed event and advance an independent
+consecutive-failure lineage. Automatic retry uses exponential delays from a
+60-second base under a 900-second ceiling. The fifth consecutive failure parks
+the target and exposes an operator need through
 `convergence_sweep_parked_target`; a successful observation resets a transient
-lineage. The target row is a mutable scheduler projection, while its event rows
-are append-only audit facts.
+lineage. A storage outage that also prevents the failure record is logged and
+retried at the next census because no system can durably record through an
+unavailable durable authority. The target row is a mutable scheduler projection,
+while its event rows are append-only audit facts.
 
-A live commissioned session suppresses another commission. Once its cool-off has
-elapsed, repeated sweeps with unchanged head SHA and unresolved-thread count and
-no recorded model call park immediately as typed `no_model_activity`, with the
-operator need `inspect_inactive_session`. A terminal commissioned session also
-suppresses re-dispatch until its cool-off expires. Skip decisions are recorded
-as converged, cooling-off, or live-session events rather than silently
-re-entering the queue.
+A live commissioned session suppresses another commission. Once the latest
+commissioned session's cool-off has elapsed, repeated sweeps with unchanged head
+SHA and unresolved-thread count and no recorded model call park immediately as
+typed `no_model_activity`, whether that session remains live or is terminal,
+with the operator need `inspect_inactive_session`. A terminal commissioned
+session that recorded model activity suppresses re-dispatch until its cool-off
+expires. Skip decisions are recorded as converged, cooling-off, or live-session
+events rather than silently re-entering the queue.
 
 ## Open edges
 

@@ -42,6 +42,7 @@ pub enum ConvergenceSweepFailureKind {
     CommissionRefused,
     TemplateDrift,
     NoModelActivity,
+    StateAccess,
 }
 
 impl ConvergenceSweepFailureKind {
@@ -51,6 +52,7 @@ impl ConvergenceSweepFailureKind {
             Self::CommissionRefused => "commission_refused",
             Self::TemplateDrift => "template_drift",
             Self::NoModelActivity => "no_model_activity",
+            Self::StateAccess => "state_access",
         }
     }
 
@@ -60,6 +62,7 @@ impl ConvergenceSweepFailureKind {
             Self::CommissionRefused => "commission_refused",
             Self::TemplateDrift => "template_drift",
             Self::NoModelActivity => "no_model_activity",
+            Self::StateAccess => "state_access_failed",
         }
     }
 
@@ -69,6 +72,18 @@ impl ConvergenceSweepFailureKind {
             Self::CommissionRefused => "repair_commission",
             Self::TemplateDrift => "repair_template",
             Self::NoModelActivity => "inspect_inactive_session",
+            Self::StateAccess => "repair_sweep_state",
+        }
+    }
+
+    fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "facts_fetch" => Some(Self::FactsFetch),
+            "commission_refused" => Some(Self::CommissionRefused),
+            "template_drift" => Some(Self::TemplateDrift),
+            "no_model_activity" => Some(Self::NoModelActivity),
+            "state_access" => Some(Self::StateAccess),
+            _ => None,
         }
     }
 }
@@ -124,6 +139,7 @@ impl ConvergenceSweepDispatchState {
 pub struct ConvergenceSweepTargetState {
     parked: bool,
     retry_ready: bool,
+    failure_kind: Option<ConvergenceSweepFailureKind>,
     consecutive_failures: u16,
     pending_command: Option<DurableCommandId>,
     pending_observation: Option<ConvergenceSweepObservation>,
@@ -138,6 +154,9 @@ impl ConvergenceSweepTargetState {
     }
     pub const fn retry_ready(&self) -> bool {
         self.retry_ready
+    }
+    pub const fn failure_kind(&self) -> Option<ConvergenceSweepFailureKind> {
+        self.failure_kind
     }
     pub const fn consecutive_failures(&self) -> u16 {
         self.consecutive_failures
@@ -218,7 +237,8 @@ impl PostgresConvergenceSweepStore {
         pull_request: PullRequestNumber,
     ) -> Result<Option<ConvergenceSweepTargetState>, ConvergenceSweepStoreError> {
         let row = sqlx::query(
-            "SELECT target.state_kind, target.consecutive_failures,
+            "SELECT target.state_kind, target.failure_kind,
+                    target.consecutive_failures,
                     target.retry_not_before IS NULL
                       OR target.retry_not_before <= clock_timestamp() AS retry_ready,
                     target.pending_command_id, target.pending_head_sha,
@@ -575,6 +595,14 @@ fn decode_target_state(
     row: sqlx::postgres::PgRow,
 ) -> Result<ConvergenceSweepTargetState, ConvergenceSweepStoreError> {
     let state: String = row.try_get("state_kind")?;
+    let failure_kind = row
+        .try_get::<Option<String>, _>("failure_kind")?
+        .map(|value| {
+            ConvergenceSweepFailureKind::from_storage(&value).ok_or(
+                ConvergenceSweepStoreError::Corruption("invalid failure kind"),
+            )
+        })
+        .transpose()?;
     let pending_command: Option<Uuid> = row.try_get("pending_command_id")?;
     let pending_head: Option<String> = row.try_get("pending_head_sha")?;
     let pending_threads: Option<Decimal> = row.try_get("pending_unresolved_threads")?;
@@ -614,6 +642,7 @@ fn decode_target_state(
     Ok(ConvergenceSweepTargetState {
         parked: state == "parked",
         retry_ready: row.try_get("retry_ready")?,
+        failure_kind,
         consecutive_failures: u16::try_from(row.try_get::<i16, _>("consecutive_failures")?)
             .map_err(|_| ConvergenceSweepStoreError::Corruption("invalid failure count"))?,
         pending_command: pending_command.map(DurableCommandId::from_uuid),

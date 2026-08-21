@@ -135,6 +135,7 @@ enum CensusError {
     Decode,
     Shape,
     Pagination,
+    State,
 }
 
 #[derive(Clone)]
@@ -252,7 +253,14 @@ impl ConvergenceSweepRuntime {
             Err(error) => {
                 tracing::error!(repository = %target.repository.as_str(),
                     pull_request = target.pull_request.get(), cause = %error,
-                    "convergence sweep state read failed; target will retry next census");
+                    "convergence sweep state read failed");
+                self.record_failure(
+                    target,
+                    None,
+                    ConvergenceSweepFailureKind::StateAccess,
+                    CensusError::State,
+                )
+                .await;
                 return;
             }
         };
@@ -290,24 +298,20 @@ impl ConvergenceSweepRuntime {
             let unchanged = dispatch_observation == Some(&observation);
             let cool_off_elapsed = SystemTime::now()
                 .duration_since(dispatch.dispatched_at())
-                .map_or(false, |elapsed| elapsed >= self.cool_off);
+                .is_ok_and(|elapsed| elapsed >= self.cool_off);
+            if unchanged && !dispatch.has_model_activity() && cool_off_elapsed {
+                self.record_failure(
+                    target,
+                    Some(&observation),
+                    ConvergenceSweepFailureKind::NoModelActivity,
+                    CensusError::Shape,
+                )
+                .await;
+                return;
+            }
             if dispatch.is_live() {
-                if unchanged && !dispatch.has_model_activity() && cool_off_elapsed {
-                    self.record_failure(
-                        target,
-                        Some(&observation),
-                        ConvergenceSweepFailureKind::NoModelActivity,
-                        CensusError::Shape,
-                    )
+                self.record_decision(target, &observation, ConvergenceSweepDecision::LiveSession)
                     .await;
-                } else {
-                    self.record_decision(
-                        target,
-                        &observation,
-                        ConvergenceSweepDecision::LiveSession,
-                    )
-                    .await;
-                }
                 return;
             }
             if !cool_off_elapsed {
@@ -357,6 +361,13 @@ impl ConvergenceSweepRuntime {
                 tracing::error!(repository = %target.repository.as_str(),
                     pull_request = target.pull_request.get(), cause = %error,
                     "convergence sweep commission fence could not be recorded");
+                self.record_failure(
+                    target,
+                    Some(&observation),
+                    ConvergenceSweepFailureKind::StateAccess,
+                    CensusError::State,
+                )
+                .await;
                 return;
             }
         };
@@ -415,6 +426,13 @@ impl ConvergenceSweepRuntime {
                     tracing::error!(repository = %target.repository.as_str(),
                         pull_request = target.pull_request.get(), cause = %error,
                         "convergence sweep committed a session but could not record its local projection");
+                    self.record_failure(
+                        target,
+                        Some(&observation),
+                        ConvergenceSweepFailureKind::StateAccess,
+                        CensusError::State,
+                    )
+                    .await;
                 }
                 let _ = self.eligibility_nudge.nudge(session);
             }
@@ -454,6 +472,13 @@ impl ConvergenceSweepRuntime {
             tracing::error!(repository = %target.repository.as_str(),
                 pull_request = target.pull_request.get(), cause = %error,
                 "convergence sweep decision could not be recorded");
+            self.record_failure(
+                target,
+                Some(observation),
+                ConvergenceSweepFailureKind::StateAccess,
+                CensusError::State,
+            )
+            .await;
         }
     }
 
@@ -472,6 +497,7 @@ impl ConvergenceSweepRuntime {
             .flatten();
         let attempt = prior
             .as_ref()
+            .filter(|state| state.failure_kind() == Some(failure))
             .map_or(0, |state| u32::from(state.consecutive_failures()));
         let delay = retry_delay(attempt);
         match self
@@ -641,11 +667,7 @@ impl ConvergenceSweepRuntime {
             return Err(CensusError::Response);
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| CensusError::Response)?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(|_| CensusError::Response)? {
             let next = bytes
                 .len()
                 .checked_add(chunk.len())
