@@ -7405,7 +7405,7 @@ mod tests {
                 model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
-                    content: InputContent::new(String::from("queued selected input")),
+                    content: UserInputContent::text(String::from("queued selected input")),
                 },
             }],
         )
