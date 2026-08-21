@@ -1654,13 +1654,16 @@ async fn spend_automatic_reconciliation_budget(
     pool: &PgPool,
 ) -> Result<(), Box<dyn Error>> {
     for expected_attempt in 1_u32..=5 {
-        let batch = repository.claim_due().await?;
+        let batch = repository
+            .claim_due(std::time::Duration::from_secs(10))
+            .await?;
         assert_eq!(batch.claimed().len(), 1);
         assert_eq!(batch.claimed()[0].attempt().get(), expected_attempt);
         repository
             .record_failure(
                 batch.claimed()[0],
                 AutomaticReconciliationFailureKind::Infrastructure,
+                std::time::Duration::from_secs(10),
             )
             .await?;
         sqlx::query(
@@ -1703,9 +1706,13 @@ async fn s04_automatic_reconciliation_records_the_operator_transition() -> Resul
         )
         .await?;
 
-    let batch = repository.claim_due().await?;
+    let batch = repository
+        .claim_due(std::time::Duration::from_secs(10))
+        .await?;
     let claimed = batch.claimed()[0];
-    let outcome = repository.reconcile(claimed).await?;
+    let outcome = repository
+        .reconcile(claimed, std::time::Duration::from_secs(10))
+        .await?;
     let unchargeable = GoalRepository::new(pool.clone())
         .unchargeable_automatic_resume_turns(parked.session, &[parked.turn])
         .await?;
@@ -1797,6 +1804,78 @@ async fn s04_automatic_reconciliation_records_the_operator_transition() -> Resul
     Ok(())
 }
 
+/// S04: PostgreSQL, rather than a dropped client future, ends a recovery
+/// transaction that cannot reach the commit-ordered outbox allocator. The
+/// failed attempt therefore leaves no backend queued behind that allocator.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_automatic_reconciliation_server_bound_releases_its_database_work()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let parked = park_restart_ambiguity(&pool, 0xC500).await?;
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
+    let batch = repository
+        .claim_due(std::time::Duration::from_secs(10))
+        .await?;
+    let claimed = batch.claimed()[0];
+    let mut allocator_holder = pool.begin().await?;
+    let _: bool = sqlx::query_scalar(
+        "SELECT singleton
+           FROM outbox_sequence_state
+          WHERE singleton
+          FOR UPDATE",
+    )
+    .fetch_one(&mut *allocator_holder)
+    .await?;
+    let bounded_repository = repository.clone();
+    let started = tokio::time::Instant::now();
+    let reconciliation = tokio::spawn(async move {
+        bounded_repository
+            .reconcile(claimed, std::time::Duration::from_secs(2))
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let waiting_before_timeout: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND wait_event_type = 'Lock'
+            AND query LIKE '%INSERT INTO outbox_event%'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let error = reconciliation
+        .await?
+        .expect_err("the server transaction bound ends the blocked recovery");
+    let elapsed = started.elapsed();
+    let waiting_after_timeout: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND wait_event_type = 'Lock'
+            AND query LIKE '%INSERT INTO outbox_event%'",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(batch.claimed().len(), 1);
+    assert_eq!(claimed.session(), parked.session);
+    assert_eq!(waiting_before_timeout, 1);
+    assert_eq!(
+        error.operator_failure_class(),
+        OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        }
+    );
+    assert!(elapsed < std::time::Duration::from_secs(5));
+    assert_eq!(waiting_after_timeout, 0);
+
+    allocator_holder.rollback().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S04 / S10: the existing operator reconciliation may win after an automatic
 /// attempt is claimed; that attempt records supersession and never applies a
 /// second terminal transition.
@@ -1808,7 +1887,9 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
     let seed = 0xE100;
     let parked = park_restart_ambiguity(&pool, seed).await?;
     let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
-    let batch = repository.claim_due().await?;
+    let batch = repository
+        .claim_due(std::time::Duration::from_secs(10))
+        .await?;
     let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x203));
 
     let operator = SubmitInputRepository::new(pool.clone())
@@ -1827,7 +1908,9 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
             Some(successor),
         )
         .await?;
-    let automatic = repository.claim_due().await?;
+    let automatic = repository
+        .claim_due(std::time::Duration::from_secs(10))
+        .await?;
     let durable: (String, String, i64) = sqlx::query_as(
         "SELECT recovery.state_kind,
                 attempt.outcome_kind,
@@ -1879,7 +1962,9 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
     let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
     spend_automatic_reconciliation_budget(&repository, &pool).await?;
 
-    let exhaustion = repository.claim_due().await?;
+    let exhaustion = repository
+        .claim_due(std::time::Duration::from_secs(10))
+        .await?;
     let snapshot = ProcessReadRepository::new(pool.clone())
         .read_transcript(parked.session)
         .await?

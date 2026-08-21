@@ -114,6 +114,16 @@ const QUIESCENT_ROTATION_PAGE_CEILING: usize = 4_096;
 /// ambiguous commit bounded well below the watchdog's retry cadence.
 // numeric-bound: ceiling - prevents one database operation from wedging liveness supervision
 const RECOVERY_ATTEMPT_BOUND: Duration = Duration::from_secs(10);
+/// Client-side observation bound after PostgreSQL has been told to terminate
+/// the recovery transaction at the supplied server bound.
+///
+/// The second interval is only transport grace. If it expires, PostgreSQL has
+/// already had a full transaction bound in which to terminate the backend, so
+/// dropping the client future cannot leave live database work accumulating
+/// behind the outbox allocator.
+fn recovery_client_observation_bound(server_bound: Duration) -> Duration {
+    server_bound.saturating_add(server_bound)
+}
 
 /// Just-in-time automatic reconciliation claims one scan may drain.
 ///
@@ -419,7 +429,7 @@ async fn run_ambiguous_operation_watchdog(
         match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
             TurnLivenessWake::Shutdown => return,
             TurnLivenessWake::Scan => {
-                reconcile_ambiguous_operations(&repository, &mut shutdown).await;
+                reconcile_ambiguous_operations(&repository).await;
             }
         }
     }
@@ -543,15 +553,16 @@ fn report_slot_held_recovery_failure(
 }
 
 /// Claims and applies one bounded window of durable ambiguous-call work.
-async fn reconcile_ambiguous_operations(
-    repository: &PostgresAutomaticReconciliationRepository,
-    shutdown: &mut watch::Receiver<bool>,
-) {
+async fn reconcile_ambiguous_operations(repository: &PostgresAutomaticReconciliationRepository) {
     for _ in 0..AUTOMATIC_RECONCILIATIONS_PER_SCAN {
-        let claim = timeout(RECOVERY_ATTEMPT_BOUND, repository.claim_due());
-        let Some(claim_outcome) = complete_before_shutdown(shutdown, claim).await else {
-            return;
-        };
+        let claim = timeout(
+            recovery_client_observation_bound(RECOVERY_ATTEMPT_BOUND),
+            repository.claim_due(RECOVERY_ATTEMPT_BOUND),
+        );
+        // Once PostgreSQL has begun a bounded transaction, shutdown lets that
+        // transaction reach its server-enforced outcome instead of dropping
+        // its client driver and leaving the backend running during the drain.
+        let claim_outcome = claim.await;
         let batch = match claim_outcome {
             Ok(Ok(batch)) => batch,
             Ok(Err(error)) => {
@@ -579,10 +590,11 @@ async fn reconcile_ambiguous_operations(
             return;
         };
         let (operation_kind, operation_id) = operation_log_fields(claimed.operation());
-        let attempt = timeout(RECOVERY_ATTEMPT_BOUND, repository.reconcile(claimed));
-        let Some(attempt_outcome) = complete_before_shutdown(shutdown, attempt).await else {
-            return;
-        };
+        let attempt = timeout(
+            recovery_client_observation_bound(RECOVERY_ATTEMPT_BOUND),
+            repository.reconcile(claimed, RECOVERY_ATTEMPT_BOUND),
+        );
+        let attempt_outcome = attempt.await;
         match attempt_outcome {
             Ok(Ok(AutomaticReconciliationOutcome::Reconciled)) => tracing::warn!(
                 cause_code = "model_call_automatically_reconciled",
@@ -611,14 +623,14 @@ async fn reconcile_ambiguous_operations(
                     }
                 ) {
                     let record_failure = timeout(
-                        RECOVERY_ATTEMPT_BOUND,
-                        repository.record_failure(claimed, error.failure_kind()),
+                        recovery_client_observation_bound(RECOVERY_ATTEMPT_BOUND),
+                        repository.record_failure(
+                            claimed,
+                            error.failure_kind(),
+                            RECOVERY_ATTEMPT_BOUND,
+                        ),
                     );
-                    let Some(record_outcome) =
-                        complete_before_shutdown(shutdown, record_failure).await
-                    else {
-                        return;
-                    };
+                    let record_outcome = record_failure.await;
                     match record_outcome {
                         Ok(Ok(())) => {}
                         Ok(Err(record_error)) => report_automatic_reconciliation_failure(
@@ -658,7 +670,7 @@ fn report_automatic_reconciliation_timeout(
             operation_kind,
             operation_id = %operation_id,
             attempt = claimed.attempt().get(),
-            attempt_bound_seconds = RECOVERY_ATTEMPT_BOUND.as_secs(),
+            attempt_bound_seconds = recovery_client_observation_bound(RECOVERY_ATTEMPT_BOUND).as_secs(),
             "automatic operation reconciliation exceeded its bound; the durable attempt remains recoverable"
             )
         }
@@ -666,7 +678,7 @@ fn report_automatic_reconciliation_timeout(
             failure_class = ?signalbox_application::OperatorFailureClass::Infrastructure { commit_ambiguous: true },
             cause_code = "automatic_reconciliation_timed_out",
             stage,
-            attempt_bound_seconds = RECOVERY_ATTEMPT_BOUND.as_secs(),
+            attempt_bound_seconds = recovery_client_observation_bound(RECOVERY_ATTEMPT_BOUND).as_secs(),
             "automatic operation reconciliation inventory exceeded its bound"
         ),
     }
@@ -1000,6 +1012,7 @@ mod tests {
         StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE, TERMINALIZATIONS_PER_SCAN,
         TerminalizationWindow, TurnLivenessWake, complete_before_shutdown,
         drain_quiescent_rotation, next_turn_liveness_wake, reconcile_turn_liveness,
+        recovery_client_observation_bound,
     };
     use signalbox_application::{
         StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
@@ -1532,11 +1545,15 @@ mod tests {
         assert_eq!(StaleActiveTurnBound::hard_ceiling().as_secs(), 1_800);
     }
 
-    /// Recovery must have time to pass the shared durable-write serialization
-    /// point, while a lost database operation still has a hard outer bound.
+    /// PostgreSQL ends the transaction before the client may abandon its
+    /// driver, leaving one full server-bound interval for the result to arrive.
     #[test]
-    fn recovery_attempts_have_a_ten_second_hard_ceiling() {
+    fn recovery_attempts_end_in_the_server_before_the_client_ceiling() {
         assert_eq!(RECOVERY_ATTEMPT_BOUND, Duration::from_secs(10));
+        assert_eq!(
+            recovery_client_observation_bound(RECOVERY_ATTEMPT_BOUND),
+            Duration::from_secs(20)
+        );
     }
 
     #[test]

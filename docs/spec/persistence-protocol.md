@@ -4,7 +4,9 @@ The durable automatic model-call reconciliation state, attempt history, and
 final-state authority were verified against this PR
 (`agent/turn-lifecycle-hardening`). Their generalization to exact model-call or
 tool-attempt operations is verified against this PR
-(`agent/daemon-live-tool-recovery-reconcile`).
+(`agent/daemon-live-tool-recovery-reconcile`). The server-enforced
+automatic-reconciliation transaction deadline is verified against this PR
+(`agent/daemon-live-server-bounded-reconciliation`).
 
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
@@ -917,16 +919,20 @@ Locks per transaction, in acquisition order:
   capacity-row or cursor-row lock; or take a capacity-row lock while holding a
   cursor-row lock.
 
-- **Automatic model-call reconciliation**: discovery and abandoned-attempt
+- **Automatic operation reconciliation**: discovery and abandoned-attempt
   normalization take no explicit lock. Claiming locks at most 64 due recovery
   rows `FOR UPDATE SKIP LOCKED`, increments their durable attempt ordinal, sets
   the exact backoff deadline, and inserts the attempt rows in the same
   transaction. Applying a claim then takes the session's `session_scheduler` row
   `FOR UPDATE`, reconstitutes the complete scheduling projection, and uses the
-  existing reconciliation-required write transaction. Operator reconciliation
-  takes the session row before this same scheduler row; it can therefore win
-  before the automatic lock is taken, while the automatic path itself never
-  acquires the session row and introduces no reversed pair.
+  existing reconciliation-required write transaction. Every daemon-owned claim,
+  application, and failure-record transaction installs the attempt's wall-clock
+  bound as PostgreSQL's local `transaction_timeout`; a bounded client
+  observation may therefore stop waiting only after PostgreSQL has already had
+  that full interval to terminate the transaction and release its locks.
+  Operator reconciliation takes the session row before this same scheduler row;
+  it can therefore win before the automatic lock is taken, while the automatic
+  path itself never acquires the session row and introduces no reversed pair.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
