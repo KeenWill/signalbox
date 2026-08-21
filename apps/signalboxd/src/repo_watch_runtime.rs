@@ -119,7 +119,7 @@ const WEBHOOK_DRAIN_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 // room for an in-flight bounded provider request while ensuring a task wedge
 // becomes an operator-visible error well before the next full poll.
 const WEBHOOK_DRAIN_STALL_THRESHOLD: Duration = Duration::from_secs(60);
-// The serialized repository owner must return to its scheduler even when one
+// The serialized repository drain task must return to its scheduler even when one
 // drain step never does. Individual provider requests have their own deadline,
 // but a drain can perform many requests and database operations; without this
 // outer bound, admission wakes and retries remain coalesced behind it forever.
@@ -127,7 +127,7 @@ const WEBHOOK_DRAIN_STALL_THRESHOLD: Duration = Duration::from_secs(60);
 // work for the existing bounded backoff path to retry.
 const WEBHOOK_DRAIN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 // Reconciliation before or after the drain is durable and replayable, but it
-// shares the same serialized owner. Give the drain deadline and its bounded
+// shares the same serialized task. Give the drain deadline and its bounded
 // child cleanup room to report before the enclosing attempt is cancelled.
 const WEBHOOK_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(70);
 const WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
