@@ -100,7 +100,7 @@ const MAX_POLL_WIRE_BYTES: usize = 768 * 1024 * 1024;
 // raised with the per-attempt bound: transfer is transient, retention is not.
 const MAX_CACHED_WIRE_BYTES: usize = 64 * 1024 * 1024;
 const WEBHOOK_PENDING_PAGE_SIZE: NonZeroU16 =
-    NonZeroU16::new(100).expect("webhook pending page size is positive");
+    NonZeroU16::new(25).expect("webhook pending page size is positive");
 const WEBHOOK_DRAIN_RETRY_DELAY: Duration = Duration::from_secs(5);
 // Consecutive drain failures double the retry delay up to this ceiling. A
 // delivery whose projection cannot succeed while it stays pending would
@@ -138,11 +138,14 @@ const WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 // under the stall threshold, so a bounded failure is reported within the
 // cadence rather than displacing the report it exists to produce.
 const WEBHOOK_DRAIN_MONITOR_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
-// One webhook drain visits at most this many pending pages before returning to
-// the scheduler. Webhook wakes accelerate reconciliation and must never crowd
-// out the full poll that performs it, so a sustained stream re-arms its own wake
-// instead of holding the worker across poll deadlines.
-const WEBHOOK_DRAIN_PAGE_LIMIT: usize = 2;
+// One webhook drain visits one 25-delivery page before returning to the
+// scheduler. A full 100-delivery storage page repeatedly exceeded the outer
+// deadline under admitted dogfood bursts even though receipts were progressing,
+// turning saturation into failure and exponential backoff. Webhook wakes
+// accelerate reconciliation and must never crowd out the full poll that
+// performs it, so remaining work re-arms its own wake after this bounded
+// quantum instead of holding the worker across poll deadlines.
+const WEBHOOK_DRAIN_PAGE_LIMIT: usize = 1;
 // How many times one terminal record may be re-attempted while PostgreSQL keeps
 // losing its commit result. Each attempt is settled by a read, so this bounds a
 // flapping connection rather than a genuinely undecided outcome.
@@ -5289,13 +5292,14 @@ mod tests {
         RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
         RepositoryWatchWake, ResourceKey, ReviewState, TargetedPollOutcome, TargetedPullRequest,
         Url, UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY,
-        WEBHOOK_DRAIN_RETRY_MAX_DELAY, WebhookAttemptOutcome, WebhookDrain, WebhookDrainOutcome,
-        WebhookDrainRetry, WebhookPayloadPurgeSchedule, WebhookPollInterrupt, WorkflowName,
-        WorkflowResponse, await_poll_or_interrupt, derive_repo_watch_events, dispatch_context_json,
-        inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
-        normalize_checks_outcome, normalize_pull_request_context, object_id,
-        observe_webhook_work_before_drain, owed_dispatch_context_json_parts, rule_activation_error,
-        run_until_shutdown, supervise_repository_tasks, targeted_pull_requests,
+        WEBHOOK_DRAIN_RETRY_MAX_DELAY, WEBHOOK_PENDING_PAGE_SIZE, WebhookAttemptOutcome,
+        WebhookDrain, WebhookDrainOutcome, WebhookDrainRetry, WebhookPayloadPurgeSchedule,
+        WebhookPollInterrupt, WorkflowName, WorkflowResponse, await_poll_or_interrupt,
+        derive_repo_watch_events, dispatch_context_json, inspect_webhook_drain,
+        next_cadence_deadline, next_repository_wake, normalize_checks_outcome,
+        normalize_pull_request_context, object_id, observe_webhook_work_before_drain,
+        owed_dispatch_context_json_parts, rule_activation_error, run_until_shutdown,
+        supervise_repository_tasks, targeted_pull_requests,
     };
     use signalbox_application::{
         InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
@@ -5686,6 +5690,22 @@ mod tests {
         key: RepoWatchWebhookDeliveryKey,
     ) -> Result<bool, Box<dyn Error>> {
         Ok(store.load_disposition(key).await?.is_some())
+    }
+
+    async fn admit_submitted_review_burst(
+        store: &PostgresRepoWatchWebhookStore,
+        count: u16,
+    ) -> Result<(), Box<dyn Error>> {
+        const DELIVERY_BASE: u128 = 0x8a00;
+        const REVIEW_BASE: u64 = 0x9a00;
+        for offset in 0..count {
+            let admission = submitted_review_admission(
+                DELIVERY_BASE + u128::from(offset),
+                REVIEW_BASE + u64::from(offset),
+            )?;
+            store.admit(&admission).await?;
+        }
+        Ok(())
     }
 
     fn pulls_with_one() -> String {
@@ -7720,6 +7740,33 @@ mod tests {
 
         assert_eq!(retried, WebhookDrainOutcome::Drained);
         assert!(webhook_disposition_exists(&webhook_store, retained.key()).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_backlogged_drain_yields_after_one_page_and_rearms_its_wake()
+    -> Result<(), Box<dyn Error>> {
+        const BURST_SIZE: u16 = WEBHOOK_PENDING_PAGE_SIZE.get() + 1;
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        admit_submitted_review_burst(&webhook_store, BURST_SIZE).await?;
+        let (sender, receiver) = watch::channel(());
+        let mut fixture = webhook_task(&pool).await?;
+        fixture.task.webhook_nudge = Some(Arc::new(sender));
+
+        let outcome = fixture.task.process_webhook_deliveries().await;
+
+        let disposition_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM repo_watch_webhook_disposition")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(outcome, WebhookDrainOutcome::Drained);
+        assert_eq!(
+            disposition_count,
+            i64::from(WEBHOOK_PENDING_PAGE_SIZE.get())
+        );
+        assert!(receiver.has_changed()?);
         Ok(())
     }
 
