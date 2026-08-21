@@ -185,6 +185,33 @@ async fn blob_source_constraint_requires_byte_length() -> Result<(), Box<dyn Err
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn blob_source_constraint_requires_canonical_store_binding() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let corpus_digest = [0_u8; 32];
+    let replay_digest = [0_u8; 32];
+    let blob_digest = [0_u8; 32];
+
+    sqlx::query(
+        "INSERT INTO evaluation_corpus (
+            corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
+            source_kind, source_blob_store, source_blob_digest, source_blob_byte_length
+         ) VALUES ('invalid-blob-store', 'v1', 1, $1, $2, 1,
+                   'blob_reference', 'UPPER', $3, 1)",
+    )
+    .bind(corpus_digest.as_slice())
+    .bind(replay_digest.as_slice())
+    .bind(blob_digest.as_slice())
+    .execute(&pool)
+    .await
+    .expect_err("a noncanonical durable blob-store binding is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn corpus_registration_requires_positive_case_count() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let corpus_digest = [0_u8; 32];

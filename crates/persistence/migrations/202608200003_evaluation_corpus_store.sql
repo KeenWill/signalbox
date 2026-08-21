@@ -81,7 +81,10 @@ CREATE TABLE evaluation_corpus (
                 AND source_sha256 IS NULL
                 AND (
                     source_blob_store IS NULL
-                    OR octet_length(source_blob_store) BETWEEN 1 AND 64
+                    OR (
+                        octet_length(source_blob_store) BETWEEN 1 AND 64
+                        AND source_blob_store ~ '^[a-z][a-z0-9_-]*$'
+                    )
                 )
                 AND source_blob_digest IS NOT NULL
                 AND octet_length(source_blob_digest) = 32
