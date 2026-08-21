@@ -1510,7 +1510,7 @@ async fn provider_failure_cause_round_trips_through_persistence_and_process_read
     let observation = authorized
         .observation_correlation()
         .bind_provider_failure_observation_with_usage(
-            ProviderModelCallFailureCause::QuotaExhausted,
+            ProviderModelCallFailureCause::RateLimited,
             ProviderReportedTokenUsage::unreported(),
         );
     repository
@@ -1532,7 +1532,14 @@ async fn provider_failure_cause_round_trips_through_persistence_and_process_read
     .bind(fixture.call.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(stored_cause.as_deref(), Some("quota_exhausted"));
+    assert_eq!(stored_cause.as_deref(), Some("rate_limited"));
+    assert_eq!(
+        GoalRepository::new(pool.clone())
+            .unchargeable_automatic_resume_turns(fixture.session, &[fixture.turn])
+            .await?
+            .as_ref(),
+        &[fixture.turn]
+    );
     assert_eq!(
         repository
             .reread_terminal_observation(fixture.session, &observation)
@@ -1552,7 +1559,7 @@ async fn provider_failure_cause_round_trips_through_persistence_and_process_read
     };
     assert_eq!(
         terminal_call.provider_failure_cause(),
-        Some(ProcessProviderModelCallFailureCause::QuotaExhausted)
+        Some(ProcessProviderModelCallFailureCause::RateLimited)
     );
 
     pool.close().await;
