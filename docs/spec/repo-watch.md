@@ -45,7 +45,9 @@ workflow-run branch symmetry below are verified against PR #891
 (`agent/webhook-event-mapping`). Webhook drain liveness and stall reporting are
 verified against PR #896 (`agent/webhook-projection-drain`); the drain attempt
 deadline is verified against this PR
-(`agent/daemon-live-webhook-drain-deadline`). Webhook preemption of slow
+(`agent/daemon-live-webhook-drain-deadline`), and the enclosing webhook-attempt
+deadline is verified against this PR
+(`agent/daemon-live-webhook-attempt-deadline`). Webhook preemption of slow
 complete reconciliation is verified against PR #926
 (`agent/webhook-projection-preemption-review`). The approval-judge dispatch
 fence and unattended escalation release described below are verified against
@@ -1107,23 +1109,30 @@ deliveries pending, invalidates partial provider freshness, emits the closed
 `webhook_projection_drain_timed_out` cause, and enters the same bounded
 projection backoff as another retryable drain failure; the serialized owner is
 therefore returned to its scheduler even when an inner operation never returns.
-A terminal commit whose result is lost in transit is resolved by reading whether
-the row is already terminal, which cannot itself be ambiguous: if it is, the
-delivery counts as recorded and the shadow advances; if it is not, the record is
-re-attempted a bounded number of times before the delivery is left pending for
-the next drain. If every settling read is itself unavailable, the shadow is
-discarded rather than trusted, because a disposition may have landed without
-being reflected in that baseline. A durable disposition the shadow never
-accounted for is what this avoids. A delivery whose processing fails is deferred
-for the rest of that drain rather than failing it, so one persistently
-unprocessable receipt cannot pin the head of the queue and starve every later
-one; the attempt still reports the first such failure. A signature-valid
-delivery whose event or action is outside the mapped set, including a broadly
-subscribed `workflow_job`, is still acknowledged successfully and is cheaply
-logged and recorded as ignored rather than treated as an intake failure. A
-webhook-enabled shadow wake may also preempt the read-only provider sweep of an
-in-flight complete poll, without resetting that poll's deadline, so the durable
-delivery drains before bounded reconciliation resumes.
+The enclosing webhook attempt has a seventy-second deadline so activation,
+lifecycle cutoffs, and dispatch reconciliation surrounding the drain cannot hold
+that owner indefinitely either. Its cancellation drains child provider fetches
+for at most five seconds, invalidates partial freshness, emits the closed
+`webhook_attempt_timed_out` cause, and enters the same retry backoff. A cleanup
+that exceeds its own bound emits `webhook_cancelled_fetch_drain_timed_out`
+instead of preventing that retry from being scheduled. A terminal commit whose
+result is lost in transit is resolved by reading whether the row is already
+terminal, which cannot itself be ambiguous: if it is, the delivery counts as
+recorded and the shadow advances; if it is not, the record is re-attempted a
+bounded number of times before the delivery is left pending for the next drain.
+If every settling read is itself unavailable, the shadow is discarded rather
+than trusted, because a disposition may have landed without being reflected in
+that baseline. A durable disposition the shadow never accounted for is what this
+avoids. A delivery whose processing fails is deferred for the rest of that drain
+rather than failing it, so one persistently unprocessable receipt cannot pin the
+head of the queue and starve every later one; the attempt still reports the
+first such failure. A signature-valid delivery whose event or action is outside
+the mapped set, including a broadly subscribed `workflow_job`, is still
+acknowledged successfully and is cheaply logged and recorded as ignored rather
+than treated as an intake failure. A webhook-enabled shadow wake may also
+preempt the read-only provider sweep of an in-flight complete poll, without
+resetting that poll's deadline, so the durable delivery drains before bounded
+reconciliation resumes.
 
 **Implemented behavior.** A drain page attempts every loaded delivery even when
 one delivery fails. Each failure is logged at warning level with the delivery

@@ -126,6 +126,11 @@ const WEBHOOK_DRAIN_STALL_THRESHOLD: Duration = Duration::from_secs(60);
 // Pending delivery records are durable, so cancellation leaves the unfinished
 // work for the existing bounded backoff path to retry.
 const WEBHOOK_DRAIN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
+// Reconciliation before or after the drain is durable and replayable, but it
+// shares the same serialized owner. Give the drain deadline and its bounded
+// child cleanup room to report before the enclosing attempt is cancelled.
+const WEBHOOK_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(70);
+const WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 // The monitor reads through the shared daemon pool, whose connections wedged
 // repositories can hold all of. An unbounded acquisition would leave the
 // observer silent during exactly the degradation it exists to expose, so the
@@ -1190,7 +1195,11 @@ impl RepositoryWatchTask {
         &mut self,
         shutdown: &mut watch::Receiver<bool>,
     ) -> Option<WebhookAttemptOutcome> {
-        run_until_shutdown(shutdown, self.run_webhook_attempt()).await
+        run_until_shutdown(
+            shutdown,
+            self.run_webhook_attempt_with_deadline(WEBHOOK_ATTEMPT_TIMEOUT),
+        )
+        .await
     }
 
     /// Applies one attempt's outcome to the drain backoff and reports it.
@@ -1582,6 +1591,44 @@ impl RepositoryWatchTask {
         outcome
     }
 
+    async fn run_webhook_attempt_with_deadline(
+        &mut self,
+        deadline: Duration,
+    ) -> WebhookAttemptOutcome {
+        match timeout(deadline, self.run_webhook_attempt()).await {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                self.finish_cancelled_webhook_attempt().await;
+                let error = RepositoryWatchAttemptError::WebhookAttemptTimedOut;
+                tracing::error!(
+                    repository = %self.repository.as_str(),
+                    timeout_seconds = deadline.as_secs(),
+                    cause_code = error.cause_code(),
+                    "repository-watch webhook attempt exceeded its deadline"
+                );
+                WebhookAttemptOutcome::DrainFailed(error)
+            }
+        }
+    }
+
+    async fn finish_cancelled_webhook_attempt(&self) {
+        if timeout(
+            WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT,
+            self.poller.drain_fetches(),
+        )
+        .await
+        .is_err()
+        {
+            tracing::error!(
+                repository = %self.repository.as_str(),
+                timeout_seconds = WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT.as_secs(),
+                cause_code = "webhook_cancelled_fetch_drain_timed_out",
+                "repository-watch cancelled fetch cleanup exceeded its deadline"
+            );
+        }
+        self.poller.invalidate_freshness();
+    }
+
     async fn process_webhook_deliveries(&mut self) -> WebhookDrainOutcome {
         let Ok(page_size) = RepoWatchWebhookPendingPageSize::try_new(WEBHOOK_PENDING_PAGE_SIZE)
         else {
@@ -1719,8 +1766,7 @@ impl RepositoryWatchTask {
                 // A future implementation may use the poller's bounded child
                 // fetch set while hydrating a delivery. Join anything the
                 // cancelled drain owned before the next attempt can begin.
-                self.poller.drain_fetches().await;
-                self.poller.invalidate_freshness();
+                self.finish_cancelled_webhook_attempt().await;
                 let error = RepositoryWatchAttemptError::WebhookDrainTimedOut;
                 tracing::error!(
                     repository = %self.repository.as_str(),
@@ -3081,6 +3127,7 @@ enum RepositoryWatchAttemptError {
     Dispatch,
     Persistence,
     WebhookDrainTimedOut,
+    WebhookAttemptTimedOut,
     RetiredRuleIdentity,
     ChangedRuleIdentity,
     RegressedRuleVersion,
@@ -3104,6 +3151,7 @@ impl RepositoryWatchAttemptError {
             Self::Dispatch => "repository_dispatch_failed",
             Self::Persistence => "repository_watch_persistence_failed",
             Self::WebhookDrainTimedOut => "webhook_projection_drain_timed_out",
+            Self::WebhookAttemptTimedOut => "webhook_attempt_timed_out",
             Self::RetiredRuleIdentity => "repository_watch_rule_identity_retired",
             Self::ChangedRuleIdentity => "repository_watch_rule_identity_changed",
             Self::RegressedRuleVersion => "repository_watch_rule_version_regressed",
@@ -3150,7 +3198,8 @@ impl RepositoryWatchAttemptError {
             | Self::IdentityFrontier
             | Self::Dispatch
             | Self::Persistence
-            | Self::WebhookDrainTimedOut => false,
+            | Self::WebhookDrainTimedOut
+            | Self::WebhookAttemptTimedOut => false,
         }
     }
 }
@@ -5164,9 +5213,9 @@ mod tests {
         RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
         RepositoryWatchWake, ResourceKey, ReviewState, TargetedPollOutcome, TargetedPullRequest,
         Url, UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY,
-        WEBHOOK_DRAIN_RETRY_MAX_DELAY, WebhookDrain, WebhookDrainOutcome, WebhookDrainRetry,
-        WebhookPayloadPurgeSchedule, WebhookPollInterrupt, WorkflowName, WorkflowResponse,
-        await_poll_or_interrupt, derive_repo_watch_events, dispatch_context_json,
+        WEBHOOK_DRAIN_RETRY_MAX_DELAY, WebhookAttemptOutcome, WebhookDrain, WebhookDrainOutcome,
+        WebhookDrainRetry, WebhookPayloadPurgeSchedule, WebhookPollInterrupt, WorkflowName,
+        WorkflowResponse, await_poll_or_interrupt, derive_repo_watch_events, dispatch_context_json,
         inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
         normalize_checks_outcome, normalize_pull_request_context, object_id,
         observe_webhook_work_before_drain, owed_dispatch_context_json_parts, rule_activation_error,
@@ -7633,6 +7682,53 @@ mod tests {
 
         assert!(unlocked, "the fixture releases its deliberate drain wedge");
         assert_eq!(retried, WebhookDrainOutcome::Drained);
+        assert!(webhook_disposition_exists(&webhook_store, admission.key()).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_webhook_attempt_deadline_cancels_any_wedged_phase_and_retries()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let admission = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&admission).await?;
+        webhook_store
+            .inject_projection_wedge(admission.key(), WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .await?;
+        let mut blocker = pool.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .execute(&mut *blocker)
+            .await?;
+        let mut fixture = webhook_task(&pool).await?;
+
+        let timed_out = fixture
+            .task
+            .run_webhook_attempt_with_deadline(Duration::from_millis(50))
+            .await;
+
+        assert_eq!(
+            timed_out,
+            WebhookAttemptOutcome::DrainFailed(RepositoryWatchAttemptError::WebhookAttemptTimedOut)
+        );
+        assert!(!webhook_disposition_exists(&webhook_store, admission.key()).await?);
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+            .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .fetch_one(&mut *blocker)
+            .await?;
+
+        let retried = fixture
+            .task
+            .run_webhook_attempt_with_deadline(Duration::from_secs(5))
+            .await;
+
+        assert!(
+            unlocked,
+            "the fixture releases its deliberate attempt wedge"
+        );
+        assert_eq!(retried, WebhookAttemptOutcome::Completed);
         assert!(webhook_disposition_exists(&webhook_store, admission.key()).await?);
         Ok(())
     }
