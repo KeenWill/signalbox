@@ -1108,11 +1108,11 @@ full poll. Every drain call also has a sixty-second outer deadline spanning its
 provider and database work. Expiry cancels that attempt, leaves unfinished
 deliveries pending, invalidates partial provider freshness, emits the closed
 `webhook_projection_drain_timed_out` cause, and enters the same bounded
-projection backoff as another retryable drain failure; the serialized owner is
+projection backoff as another retryable drain failure; the serialized task is
 therefore returned to its scheduler even when an inner operation never returns.
 The enclosing webhook attempt has a seventy-second deadline so activation,
 lifecycle cutoffs, and dispatch reconciliation surrounding the drain cannot hold
-that owner indefinitely either. Its cancellation drains child provider fetches
+that task indefinitely either. Its cancellation drains child provider fetches
 for at most five seconds, invalidates partial freshness, emits the closed
 `webhook_attempt_timed_out` cause, and enters the same retry backoff. A cleanup
 that exceeds its own bound emits `webhook_cancelled_fetch_drain_timed_out`
