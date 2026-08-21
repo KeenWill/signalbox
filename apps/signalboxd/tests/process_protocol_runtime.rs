@@ -2460,7 +2460,7 @@ fn assert_restarted_fleet_outcome(active: i64, terminal: i64) -> Result<(), Box<
 /// occupancy bound. Enforcement mode asserts the intended inverse.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_owner()
+async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposition()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let fleet = commission_fleet(&runtime).await?;
