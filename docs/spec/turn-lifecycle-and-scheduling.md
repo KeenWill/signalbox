@@ -13,7 +13,9 @@ draining is verified against this PR
 (`agent/daemon-live-graceful-shutdown-drain`).
 
 The expired-pass recovery lock classification and retry budgets were re-verified
-against this PR (`agent/daemon-live-reconciliation-lock-cadence`).
+against this PR (`agent/daemon-live-reconciliation-lock-cadence`). Exact
+resumed-turn correlation and the scheduler-expiry handoff were re-verified
+against this PR (`agent/daemon-live-occupancy-expiry-handoff`).
 
 The runner-recovery active-phase algebra, checked persistence reconstitution,
 and preserved interrupt/stop authority were verified against this PR
@@ -455,20 +457,27 @@ the sweep (INV-007).
   minutes. A checked application bound may lower that compiled ceiling but
   cannot raise it or admit zero or subsecond values. Expiry invokes a detached
   daemon recovery handoff before dropping the pass future, then immediately
-  releases the admission slot. The handoff marks the correlated cancellation so
-  fatal supervision does not mistake the scheduler's bounded drop for an
-  unrelated failure, and invokes the existing startup-recovery transaction
-  immediately. Each operation has a three-second ceiling, which is wider than
-  the repository's ordered connection, scheduler-row, and write-lock budgets so
-  those can return typed failures instead of being masked by the wrapper. A lock
-  refusal is preserved as its typed turn-liveness cause even when the shared
-  startup transition raises it from its nested session or turn work. It retries
+  releases the admission slot. Active-turn execution reports the exact turn
+  after its resumable-work lookup and before driving that work, so a pass that
+  begins between operations still gives the handoff the identity of any model
+  call or tool attempt it later starts. The handoff marks the correlated
+  cancellation so fatal supervision does not mistake the scheduler's bounded
+  drop for an unrelated failure, and invokes the existing startup-recovery
+  transaction immediately. Each operation has a three-second ceiling, which is
+  wider than the repository's ordered connection, scheduler-row, and write-lock
+  budgets so those can return typed failures instead of being masked by the
+  wrapper. A lock refusal is preserved as its typed turn-liveness cause even
+  when the shared startup transition raises it from its nested session or turn
+  work. When a fresh observation proves that the same exact turn still owns a
+  live operation, the refusal is a concurrent live owner and the handoff leaves
+  it alone rather than spending recovery attempts. Other lock refusals retry
   after six seconds, spacing the four attempts across tens-of-seconds commit
   handoffs under outbox contention. Any other database, ambiguous, or
   non-infrastructure failure retains the two-minute cadence. Three retries bound
   the detached work, and the outer watchdog below remains responsible if all
-  attempts fail. Stateful pass data, including identity generators, is never
-  cloned per admitted pass; only the detached expiry handler is cloned.
+  attempts fail. Every terminal handoff nudges the session back into eligibility
+  admission. Stateful pass data, including identity generators, is never cloned
+  per admitted pass; only the detached expiry handler is cloned.
 
   With Prometheus export enabled, the loop publishes the scheduler occupancy
   observations owned by
