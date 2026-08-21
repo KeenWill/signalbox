@@ -1,10 +1,6 @@
 //! Periodic convergence reconciliation for explicitly selected watched pull requests.
 
-use std::{
-    error::Error,
-    fmt,
-    time::{Duration, SystemTime},
-};
+use std::{error::Error, fmt, sync::Arc, time::Duration};
 
 use futures_util::{StreamExt, stream};
 use reqwest::{
@@ -33,7 +29,11 @@ use signalbox_persistence::{
     },
 };
 use sqlx::PgPool;
-use tokio::{select, sync::watch, time::sleep};
+use tokio::{
+    select,
+    sync::{Semaphore, watch},
+    time::{MissedTickBehavior, interval, sleep},
+};
 
 use crate::{
     FileCredentialAccess, HubModelConfiguration, RepositoryWatchConfiguration,
@@ -58,6 +58,8 @@ const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 const RETRY_BACKOFF_BASE: Duration = Duration::from_secs(60);
 // numeric-bound: ceiling - prevents exhausted transient work from backing off beyond useful operator visibility
 const RETRY_BACKOFF_CAP: Duration = Duration::from_secs(15 * 60);
+// numeric-bound: ceiling - protects the shared database pool and provider from target bursts
+const MAX_CONCURRENT_TARGETS: usize = 8;
 
 const DETAILS_QUERY: &str = r#"
 query PullRequestConvergence($namespace: String!, $name: String!, $number: Int!) {
@@ -186,7 +188,6 @@ impl ConvergenceSweepRuntime {
             .tls_version_min(reqwest::tls::Version::TLS_1_2)
             .tls_danger_accept_invalid_certs(false)
             .tls_danger_accept_invalid_hostnames(false)
-            .no_proxy()
             .redirect(Policy::none())
             .retry(reqwest::retry::never())
             .timeout(REQUEST_TIMEOUT)
@@ -232,39 +233,64 @@ impl ConvergenceSweepRuntime {
     /// Runs complete censuses until shutdown; one target failure never halts siblings.
     pub async fn run(self, shutdown: watch::Receiver<bool>) {
         let runtime = &self;
+        let active_targets = Arc::new(Semaphore::new(MAX_CONCURRENT_TARGETS));
         stream::iter(&self.targets)
             .for_each_concurrent(None, |target| {
                 let mut shutdown = shutdown.clone();
+                let active_targets = Arc::clone(&active_targets);
                 async move {
                     if *shutdown.borrow() {
                         return;
                     }
-                    if let Err(error) = runtime
-                        .state
-                        .reenroll_target(&target.repository, target.pull_request)
-                        .await
-                    {
-                        tracing::error!(
-                            repository = %target.repository.as_str(),
-                            pull_request = target.pull_request.get(),
-                            cause = %error,
-                            "convergence sweep target re-enrollment failed"
-                        );
-                    }
+                    let mut ticks = interval(runtime.interval);
+                    ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                    let mut reenrolled = false;
                     loop {
                         select! {
-                            () = runtime.reconcile_target(target) => {}
+                            _ = ticks.tick() => {}
                             changed = shutdown.changed() => {
                                 if changed.is_err() || *shutdown.borrow() { return; }
                                 continue;
                             }
                         }
+                        let permit = select! {
+                            permit = active_targets.acquire() => {
+                                match permit {
+                                    Ok(permit) => permit,
+                                    Err(_) => return,
+                                }
+                            }
+                            changed = shutdown.changed() => {
+                                if changed.is_err() || *shutdown.borrow() { return; }
+                                continue;
+                            }
+                        };
+                        if !reenrolled {
+                            match runtime
+                                .state
+                                .reenroll_target(&target.repository, target.pull_request)
+                                .await
+                            {
+                                Ok(()) => reenrolled = true,
+                                Err(error) => {
+                                    tracing::error!(
+                                        repository = %target.repository.as_str(),
+                                        pull_request = target.pull_request.get(),
+                                        cause = %error,
+                                        "convergence sweep target re-enrollment failed; retrying on the next tick"
+                                    );
+                                    drop(permit);
+                                    continue;
+                                }
+                            }
+                        }
                         select! {
-                            _ = sleep(self.interval) => {}
+                            () = runtime.reconcile_target(target) => {}
                             changed = shutdown.changed() => {
                                 if changed.is_err() || *shutdown.borrow() { return; }
                             }
                         }
+                        drop(permit);
                     }
                 }
             })
@@ -274,7 +300,7 @@ impl ConvergenceSweepRuntime {
     async fn reconcile_target(&self, target: &SweepTarget) {
         let loaded = match self
             .state
-            .load_target(&target.repository, target.pull_request)
+            .load_target_with_cool_off(&target.repository, target.pull_request, self.cool_off)
             .await
         {
             Ok(state) => state,
@@ -292,6 +318,12 @@ impl ConvergenceSweepRuntime {
                 return;
             }
         };
+        if loaded
+            .as_ref()
+            .is_some_and(|state| state.is_parked() || !state.retry_ready())
+        {
+            return;
+        }
         if let Some((dispatch, observation)) = loaded
             .as_ref()
             .and_then(|state| state.pending_dispatch().zip(state.pending_observation()))
@@ -326,12 +358,6 @@ impl ConvergenceSweepRuntime {
             }
             return;
         }
-        if loaded
-            .as_ref()
-            .is_some_and(|state| state.is_parked() || !state.retry_ready())
-        {
-            return;
-        }
         let fetched = match self.fetch(target).await {
             Ok(fetched) => fetched,
             Err(cause) => {
@@ -355,9 +381,9 @@ impl ConvergenceSweepRuntime {
                 .as_ref()
                 .and_then(|state| state.latest_dispatch_observation());
             let unchanged = dispatch_observation == Some(&observation);
-            let cool_off_elapsed = SystemTime::now()
-                .duration_since(dispatch.dispatched_at())
-                .is_ok_and(|elapsed| elapsed >= self.cool_off);
+            let cool_off_elapsed = loaded
+                .as_ref()
+                .is_some_and(|state| state.cool_off_elapsed());
             if unchanged && !dispatch.has_model_activity() && cool_off_elapsed {
                 self.record_failure(
                     target,
@@ -626,17 +652,8 @@ impl ConvergenceSweepRuntime {
                 .and_then(Value::as_array)
                 .ok_or(CensusError::Shape)?,
         )?;
-        let initial_checks = pull
-            .pointer("/commits/nodes/0/commit/statusCheckRollup/contexts/nodes")
-            .and_then(Value::as_array)
-            .map_or(&[][..], Vec::as_slice);
-        let mut checks = decode_checks(initial_checks)?;
+        let (mut checks, mut check_page) = initial_checks(pull)?;
         let mut thread_page = page_info(pull.pointer("/reviewThreads/pageInfo"))?;
-        let mut check_page =
-            match pull.pointer("/commits/nodes/0/commit/statusCheckRollup/contexts/pageInfo") {
-                Some(value) => page_info(Some(value))?,
-                None => PageInfo::done(),
-            };
         let mut thread_pages = 1usize;
         while thread_page.has_next {
             thread_pages += 1;
@@ -877,13 +894,33 @@ fn decode_checks(values: &[Value]) -> Result<Vec<PullRequestCheck>, CensusError>
 }
 
 fn checked_head_at(pull: &Value) -> Result<Option<CommitSha>, CensusError> {
-    pull.pointer("/commits/nodes/0/commit/statusCheckRollup")
-        .filter(|rollup| !rollup.is_null())
-        .and_then(|_| pull.pointer("/commits/nodes/0/commit/oid"))
-        .and_then(Value::as_str)
-        .map(|value| CommitSha::try_new(value.to_owned()))
-        .transpose()
-        .map_err(|_| CensusError::Shape)
+    let rollup = pull
+        .pointer("/commits/nodes/0/commit/statusCheckRollup")
+        .ok_or(CensusError::Shape)?;
+    if rollup.is_null() {
+        return Ok(None);
+    }
+    commit_at(
+        pull.pointer("/commits/nodes/0/commit")
+            .ok_or(CensusError::Shape)?,
+        "oid",
+    )
+    .map(Some)
+}
+
+fn initial_checks(pull: &Value) -> Result<(Vec<PullRequestCheck>, PageInfo), CensusError> {
+    let rollup = pull
+        .pointer("/commits/nodes/0/commit/statusCheckRollup")
+        .ok_or(CensusError::Shape)?;
+    if rollup.is_null() {
+        return Ok((Vec::new(), PageInfo::done()));
+    }
+    let contexts = rollup.get("contexts").ok_or(CensusError::Shape)?;
+    let nodes = contexts
+        .get("nodes")
+        .and_then(Value::as_array)
+        .ok_or(CensusError::Shape)?;
+    Ok((decode_checks(nodes)?, page_info(contexts.get("pageInfo"))?))
 }
 
 fn commit_at(value: &Value, key: &str) -> Result<CommitSha, CensusError> {
@@ -1051,6 +1088,42 @@ mod tests {
         });
 
         assert_eq!(checked_head_at(&pull), Ok(None));
+        let (checks, page) = initial_checks(&pull).expect("a null rollup is a complete absence");
+        assert!(checks.is_empty());
+        assert!(!page.has_next);
+    }
+
+    #[test]
+    fn a_partial_initial_status_rollup_is_rejected() {
+        let missing_nodes = json!({
+            "commits": {
+                "nodes": [{"commit": {
+                    "oid": sha('a').as_str(),
+                    "statusCheckRollup": {
+                        "contexts": {
+                            "pageInfo": {"hasNextPage": false, "endCursor": null}
+                        }
+                    }
+                }}]
+            }
+        });
+        let missing_page_info = json!({
+            "commits": {
+                "nodes": [{"commit": {
+                    "oid": sha('a').as_str(),
+                    "statusCheckRollup": {"contexts": {"nodes": []}}
+                }}]
+            }
+        });
+
+        assert!(matches!(
+            initial_checks(&missing_nodes),
+            Err(CensusError::Shape)
+        ));
+        assert!(matches!(
+            initial_checks(&missing_page_info),
+            Err(CensusError::Shape)
+        ));
     }
 
     #[test]

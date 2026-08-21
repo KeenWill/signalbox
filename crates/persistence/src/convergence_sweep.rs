@@ -139,6 +139,7 @@ impl ConvergenceSweepDispatchState {
 pub struct ConvergenceSweepTargetState {
     parked: bool,
     retry_ready: bool,
+    cool_off_elapsed: bool,
     failure_kind: Option<ConvergenceSweepFailureKind>,
     consecutive_failures: u16,
     pending_command: Option<DurableCommandId>,
@@ -155,6 +156,9 @@ impl ConvergenceSweepTargetState {
     }
     pub const fn retry_ready(&self) -> bool {
         self.retry_ready
+    }
+    pub const fn cool_off_elapsed(&self) -> bool {
+        self.cool_off_elapsed
     }
     pub const fn failure_kind(&self) -> Option<ConvergenceSweepFailureKind> {
         self.failure_kind
@@ -264,6 +268,17 @@ impl PostgresConvergenceSweepStore {
         repository: &RepositorySlug,
         pull_request: PullRequestNumber,
     ) -> Result<Option<ConvergenceSweepTargetState>, ConvergenceSweepStoreError> {
+        self.load_target_with_cool_off(repository, pull_request, std::time::Duration::ZERO)
+            .await
+    }
+
+    /// Loads target state while evaluating dispatch cool-off on the database clock.
+    pub async fn load_target_with_cool_off(
+        &self,
+        repository: &RepositorySlug,
+        pull_request: PullRequestNumber,
+        cool_off: std::time::Duration,
+    ) -> Result<Option<ConvergenceSweepTargetState>, ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
         ensure_target(&mut transaction, repository, pull_request).await?;
         let row = sqlx::query(
@@ -271,6 +286,10 @@ impl PostgresConvergenceSweepStore {
                     target.consecutive_failures,
                     target.retry_not_before IS NULL
                       OR target.retry_not_before <= clock_timestamp() AS retry_ready,
+                    coalesce(
+                        latest.recorded_at + $3 * interval '1 second' <= clock_timestamp(),
+                        true
+                    ) AS cool_off_elapsed,
                     target.pending_command_id, target.pending_head_sha,
                     target.pending_unresolved_threads,
                     target.last_head_sha, target.last_unresolved_threads,
@@ -336,6 +355,7 @@ impl PostgresConvergenceSweepStore {
         )
         .bind(repository.as_str())
         .bind(Decimal::from(pull_request.get()))
+        .bind(i64::try_from(cool_off.as_secs()).unwrap_or(i64::MAX))
         .fetch_optional(&mut *transaction)
         .await?;
         let state = row.map(decode_target_state).transpose()?;
@@ -688,6 +708,7 @@ fn decode_target_state(
     Ok(ConvergenceSweepTargetState {
         parked: state == "parked",
         retry_ready: row.try_get("retry_ready")?,
+        cool_off_elapsed: row.try_get("cool_off_elapsed")?,
         failure_kind,
         consecutive_failures: u16::try_from(row.try_get::<i16, _>("consecutive_failures")?)
             .map_err(|_| ConvergenceSweepStoreError::Corruption("invalid failure count"))?,

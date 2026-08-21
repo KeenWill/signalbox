@@ -416,6 +416,41 @@ async fn locked_admission_rejects_a_recent_terminal_dispatch_during_cool_off()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn target_cool_off_uses_the_database_clock() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
+    let sweep = PostgresConvergenceSweepStore::new(pool.clone());
+    let (dispatch, _) = dispatched(
+        commissioned
+            .commission(prepared_commission(0x89_207)?, |_| None)
+            .await?,
+    );
+
+    let recent = sweep
+        .load_target_with_cool_off(&repository()?, pull_request(), Duration::from_secs(60))
+        .await?
+        .expect("loading enrolls the target");
+    assert!(!recent.cool_off_elapsed());
+
+    sqlx::query(
+        "UPDATE commissioned_dispatch
+            SET recorded_at = clock_timestamp() - interval '2 minutes'
+          WHERE dispatch_id = $1",
+    )
+    .bind(dispatch)
+    .execute(&pool)
+    .await?;
+    let elapsed = sweep
+        .load_target_with_cool_off(&repository()?, pull_request(), Duration::from_secs(60))
+        .await?
+        .expect("the target remains enrolled");
+
+    assert!(elapsed.cool_off_elapsed());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_new_target_censuses_an_existing_commissioned_dispatch() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let commissioned = PostgresCommissionedDispatchStore::new(pool.clone(), credential_pin());
