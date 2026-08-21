@@ -8,9 +8,9 @@
 //! needed. The assertion derives the reachable set from the dependency
 //! catalogue — the functions that check constraints and indexes record in
 //! `pg_depend`, the implementation functions of any operators they record,
-//! plus one hop of body references from those functions — rather than
-//! matching rendered definition text, so a function reached only through a
-//! user-defined operator is still found, and a migration that adds an
+//! plus body references followed transitively from those functions — rather
+//! than matching rendered definition text, so a function reached only through
+//! a user-defined operator is still found, and a migration that adds an
 //! unpinned reachable function fails here instead of failing the next
 //! restore. Each pin must carry the canonical value — the migration-selected
 //! schema, then `pg_catalog`, then `pg_temp` — because a pin that omits the
@@ -108,18 +108,44 @@ const RESTORE_REACHABLE_FUNCTIONS: &str = "
      ORDER BY proname
 ";
 
-const SYNTHETIC_TRANSITIVE_CHAIN: [&str; 4] = [
-    "CREATE FUNCTION restore_probe_tail() RETURNS boolean
-        LANGUAGE sql IMMUTABLE AS 'SELECT true'",
-    "CREATE FUNCTION restore_probe_middle() RETURNS boolean
-        LANGUAGE sql IMMUTABLE AS 'SELECT restore_probe_tail()'",
-    "CREATE FUNCTION restore_probe_head(value text) RETURNS boolean
-        LANGUAGE sql IMMUTABLE AS 'SELECT restore_probe_middle()'",
-    "CREATE TABLE restore_probe (
-        value text,
-        CONSTRAINT restore_probe_reaches_functions CHECK (restore_probe_head(value))
-    )",
-];
+const RESTORE_PROBE_HEAD: &str = "restore_probe_head";
+const RESTORE_PROBE_MIDDLE: &str = "restore_probe_middle";
+const RESTORE_PROBE_TAIL: &str = "restore_probe_tail";
+
+/// DDL for a three-deep call chain behind a check constraint, rendered from
+/// the probe-name constants so the assertion can never drift from the fixture.
+/// The fields are named because the statements must run in tail-to-table
+/// dependency order; a positional collection would let a fixture edit
+/// silently reorder them.
+struct SyntheticTransitiveChain {
+    create_tail: String,
+    create_middle: String,
+    create_head: String,
+    create_probe_table: String,
+}
+
+fn synthetic_transitive_chain() -> SyntheticTransitiveChain {
+    SyntheticTransitiveChain {
+        create_tail: format!(
+            "CREATE FUNCTION {RESTORE_PROBE_TAIL}() RETURNS boolean
+                LANGUAGE sql IMMUTABLE AS 'SELECT true'"
+        ),
+        create_middle: format!(
+            "CREATE FUNCTION {RESTORE_PROBE_MIDDLE}() RETURNS boolean
+                LANGUAGE sql IMMUTABLE AS 'SELECT {RESTORE_PROBE_TAIL}()'"
+        ),
+        create_head: format!(
+            "CREATE FUNCTION {RESTORE_PROBE_HEAD}(value text) RETURNS boolean
+                LANGUAGE sql IMMUTABLE AS 'SELECT {RESTORE_PROBE_MIDDLE}()'"
+        ),
+        create_probe_table: format!(
+            "CREATE TABLE restore_probe (
+                value text,
+                CONSTRAINT restore_probe_reaches_functions CHECK ({RESTORE_PROBE_HEAD}(value))
+            )"
+        ),
+    }
+}
 
 /// Names of covered functions that lack the canonical pin.
 fn unpinned_names(covered: &[(String, bool)]) -> Vec<&str> {
@@ -197,16 +223,17 @@ async fn transitive_body_references_close_to_a_fixed_point() -> Result<(), Box<d
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
     migrate(&pool).await?;
-    sqlx::query(SYNTHETIC_TRANSITIVE_CHAIN[0])
+    let chain = synthetic_transitive_chain();
+    sqlx::query(sqlx::AssertSqlSafe(chain.create_tail.as_str()))
         .execute(&pool)
         .await?;
-    sqlx::query(SYNTHETIC_TRANSITIVE_CHAIN[1])
+    sqlx::query(sqlx::AssertSqlSafe(chain.create_middle.as_str()))
         .execute(&pool)
         .await?;
-    sqlx::query(SYNTHETIC_TRANSITIVE_CHAIN[2])
+    sqlx::query(sqlx::AssertSqlSafe(chain.create_head.as_str()))
         .execute(&pool)
         .await?;
-    sqlx::query(SYNTHETIC_TRANSITIVE_CHAIN[3])
+    sqlx::query(sqlx::AssertSqlSafe(chain.create_probe_table.as_str()))
         .execute(&pool)
         .await?;
 
@@ -215,11 +242,7 @@ async fn transitive_body_references_close_to_a_fixed_point() -> Result<(), Box<d
         .await?;
     assert_eq!(
         unpinned_names(&covered),
-        [
-            "restore_probe_head",
-            "restore_probe_middle",
-            "restore_probe_tail"
-        ],
+        [RESTORE_PROBE_HEAD, RESTORE_PROBE_MIDDLE, RESTORE_PROBE_TAIL],
         "the probe chain must surface: head directly, middle one body hop deep, \
          and tail two hops deep, which only a transitive closure reaches"
     );
