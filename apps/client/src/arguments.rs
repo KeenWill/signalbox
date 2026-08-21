@@ -6,7 +6,7 @@ use clap::{
 use signalbox_process_protocol::{
     BoundChildAction, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, CommandId,
     ConversationCursor, ConversationImportFormat, ConversationOrigin, ConversationOriginFilter,
-    DelegationPolicy, DelegationWaitMode, ImportedSessionRelationship,
+    DelegationPolicy, DelegationWaitMode, ImportedSessionRelationship, MAX_BLOB_READ_BYTES,
     MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
     MAX_SESSION_METADATA_TOTAL_UTF8_BYTES, ModelSelection, ReviewConcernTerminalOutcome,
     ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput,
@@ -22,6 +22,22 @@ use crate::{
 
 /// The specification's ordinary default metadata page size.
 const DEFAULT_SEARCH_RESULT_LIMIT: &str = "50";
+
+fn blob_read_length_help() -> String {
+    let digits = MAX_BLOB_READ_BYTES.to_string();
+    let first_group = digits.len() % 3;
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    if first_group != 0 {
+        grouped.push_str(&digits[..first_group]);
+    }
+    for group_start in (first_group..digits.len()).step_by(3) {
+        if !grouped.is_empty() {
+            grouped.push(',');
+        }
+        grouped.push_str(&digits[group_start..group_start + 3]);
+    }
+    format!("Positive byte count, at most {grouped}.")
+}
 
 #[derive(Debug)]
 pub(crate) struct Arguments {
@@ -485,8 +501,11 @@ struct BlobReadArguments {
     /// Zero-based byte offset.
     #[arg(long = "offset", value_name = "DECIMAL")]
     offset_bytes: u64,
-    /// Positive byte count, at most 4,194,304.
-    #[arg(long = "length", value_name = "DECIMAL")]
+    #[arg(
+        long = "length",
+        value_name = "DECIMAL",
+        help = blob_read_length_help()
+    )]
     length_bytes: u64,
     /// New file that receives only the verified range bytes.
     #[arg(long, value_name = "FILE")]
@@ -2528,6 +2547,7 @@ fn delegation_text_argument(
 }
 
 fn template_name(value: &str) -> Result<String, String> {
+    // numeric-bound: tunable - mirrors the canonical session-template name grammar
     const MAX_UTF8_BYTES: usize = 128;
 
     let first_is_admitted = value
@@ -2633,6 +2653,7 @@ fn review_line_number(value: &str) -> Result<CanonicalU64, String> {
 }
 
 fn review_confidence(value: &str) -> Result<CanonicalU64, String> {
+    // numeric-bound: not-a-bound - fixed full-scale basis-point representation
     const MAXIMUM_REVIEW_CONFIDENCE_BASIS_POINTS: u64 = 10_000;
 
     let parsed = canonical_u64(value)?;
