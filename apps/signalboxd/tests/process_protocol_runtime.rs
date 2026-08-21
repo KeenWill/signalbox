@@ -2487,13 +2487,17 @@ fn assert_hung_fleet_outcome(
     let typed_terminal_calls = census.terminal_model_calls();
     if enforce_liveness {
         if model.in_flight_hangs() != 0
-            || active != 0
-            || terminal != i64::try_from(FLEET_SESSION_COUNT)?
+            || active != 1
+            || terminal != i64::try_from(FLEET_SESSION_COUNT - 1)?
             || typed_terminal_calls != i64::try_from(FLEET_SESSION_COUNT)?
+            || census.awaiting_model_call_recovery_turns() != 1
+            || census.ambiguous_model_calls() != 1
         {
             return Err(io::Error::other(format!(
-                "fleet liveness failed: hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}",
-                model.in_flight_hangs()
+                "fleet liveness failed: hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}, recovery_parks={}, ambiguous_calls={}",
+                model.in_flight_hangs(),
+                census.awaiting_model_call_recovery_turns(),
+                census.ambiguous_model_calls()
             ))
             .into());
         }
@@ -2513,6 +2517,7 @@ fn assert_hung_fleet_outcome(
 
 fn assert_restarted_fleet_outcome(
     census: FleetSoakCensus,
+    original_model: &FleetScriptedModel,
     replacement_model: &FleetScriptedModel,
 ) -> Result<(), Box<dyn Error>> {
     if census.active_turns() != i64::try_from(FLEET_SESSION_COUNT)?
@@ -2520,11 +2525,13 @@ fn assert_restarted_fleet_outcome(
         || census.awaiting_model_call_recovery_turns() != i64::try_from(FLEET_SESSION_COUNT)?
         || census.terminal_model_calls() != i64::try_from(FLEET_SESSION_COUNT)?
         || census.ambiguous_model_calls() != i64::try_from(FLEET_SESSION_COUNT)?
+        || original_model.in_flight_hangs() != 0
         || replacement_model.in_flight_hangs() != 0
         || !replacement_model.completed_call_ids().is_empty()
     {
         return Err(io::Error::other(format!(
-            "restart must preserve the ambiguity park without replacement execution: census={census:?}, replacement_hangs={}, replacement_completions={}",
+            "restart must preserve the ambiguity park after releasing original executions and without replacement execution: census={census:?}, original_hangs={}, replacement_hangs={}, replacement_completions={}",
+            original_model.in_flight_hangs(),
             replacement_model.in_flight_hangs(),
             replacement_model.completed_call_ids().len()
         ))
@@ -2614,6 +2621,7 @@ async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), 
                 .expect("the first fleet scheduler was installed"),
         )
         .await?;
+        wait_for_hangs(&hanging_model, 0).await?;
         let _recovered = runtime.kill_and_restart().await?;
         let replacement_model = FleetScriptedModel::new(0, FLEET_SESSION_COUNT);
         scheduler = Some(start_fleet_scheduler(
@@ -2631,7 +2639,7 @@ async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), 
             ))
             .into());
         }
-        assert_restarted_fleet_outcome(census, &replacement_model)
+        assert_restarted_fleet_outcome(census, &hanging_model, &replacement_model)
     })
     .catch_unwind()
     .await;
