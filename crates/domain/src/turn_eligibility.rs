@@ -2421,6 +2421,29 @@ impl AcceptedInputSchedulingProjection {
         )
     }
 
+    /// Closes the active model-call recovery wait under a daemon-owned durable
+    /// attempt while preserving its exact ambiguity set.
+    pub fn apply_automatic_model_call_reconciliation(
+        self,
+        attempt: std::num::NonZeroU32,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredModelCallTurn, crate::ModelCallClosureError> {
+        let active_turn = self
+            .active_turn_execution()
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        let recovery = self
+            .active_model_call_recovery
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        crate::model_execution::apply_automatic_model_call_reconciliation(
+            active_turn.into(),
+            recovery.call,
+            recovery.attempt,
+            recovery.source_snapshot,
+            attempt,
+            identities,
+        )
+    }
+
     /// Cancels a turn parked on runner loss without claiming that any retained
     /// runner effect failed. The supplied source is the latest already-durable
     /// semantic boundary; runner-loss evidence remains on the placement.

@@ -111,6 +111,43 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
                    AND NOT delegation_runtime_terminal
             )";
 
+pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_CLAIM: &str = "WITH due AS (
+                SELECT turn_id
+                  FROM automatic_model_call_reconciliation
+                 WHERE state_kind = 'scheduled'
+                   AND attempt_count < 5
+                   AND next_attempt_at <= statement_timestamp()
+                 ORDER BY next_attempt_at, turn_id
+                 LIMIT $1
+                 FOR UPDATE SKIP LOCKED
+             ), claimed AS (
+                UPDATE automatic_model_call_reconciliation AS recovery
+                   SET attempt_count = recovery.attempt_count + 1,
+                       state_kind = 'attempting',
+                       next_attempt_at = statement_timestamp()
+                           + (CASE recovery.attempt_count + 1
+                                WHEN 1 THEN 120
+                                WHEN 2 THEN 240
+                                WHEN 3 THEN 480
+                                WHEN 4 THEN 960
+                                ELSE 1800
+                              END * interval '1 second')
+                  FROM due
+                 WHERE recovery.turn_id = due.turn_id
+             RETURNING recovery.session_id, recovery.turn_id,
+                       recovery.model_call_id, recovery.attempt_count
+             ), recorded AS (
+                INSERT INTO automatic_model_call_reconciliation_attempt
+                    (turn_id, attempt_ordinal)
+                SELECT turn_id, attempt_count FROM claimed
+                RETURNING turn_id
+             )
+             SELECT claimed.session_id, claimed.turn_id,
+                    claimed.model_call_id, claimed.attempt_count
+               FROM claimed
+               JOIN recorded USING (turn_id)
+              ORDER BY claimed.turn_id";
+
 pub(crate) const CONTEXT_COMPACTION_SCHEDULER: &str = "SELECT
             EXISTS (
                 SELECT 1

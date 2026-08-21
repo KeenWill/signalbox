@@ -137,7 +137,9 @@ pub use scheduler::{
     EligibilitySweepBatch, EligibilityWorkSource, GoalAwareEligibilityPass,
     GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityNudge,
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
-    ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit, scheduler_pass_admission_cap,
+    InvalidSchedulerPassOccupancyBound, ReconciliationSweepInterval, SchedulerLoop,
+    SchedulerLoopExit, SchedulerOccupancyObserver, SchedulerOldestInFlightPass,
+    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_pass_admission_cap,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{
@@ -181,8 +183,11 @@ pub use tool_loop_ports::{
     ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
 };
 pub use turn_liveness::{
-    StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessBoundError,
-    TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
+    ClaimedModelCallReconciliation, ExhaustedModelCallReconciliation,
+    ModelCallReconciliationAttempt, ModelCallReconciliationBatch,
+    ModelCallReconciliationFailureKind, ModelCallReconciliationOutcome, StaleActiveTurnBound,
+    StaleTurnCandidate, StaleTurnOutcome, TurnLivenessBoundError, TurnLivenessEvidence,
+    TurnLivenessLedger, TurnLivenessScanInterval,
 };
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,

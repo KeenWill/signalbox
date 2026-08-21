@@ -4882,6 +4882,10 @@ pub enum TurnState {
         ended_attempt_id: CanonicalUuid,
         /// Ambiguous call awaiting recovery.
         recovery_model_call_id: CanonicalUuid,
+        /// Durable automatic reconciliation attempts already claimed.
+        automatic_reconciliation_attempts: CanonicalU64,
+        /// True only when the automatic attempt budget is exhausted.
+        operator_action_required: bool,
     },
     /// The turn is parked on a user decision for a tool request.
     ActiveAwaitingToolApproval {
@@ -5002,6 +5006,8 @@ enum RawTurnState {
     ActiveAwaitingModelCallRecovery {
         ended_attempt_id: CanonicalUuid,
         recovery_model_call_id: CanonicalUuid,
+        automatic_reconciliation_attempts: CanonicalU64,
+        operator_action_required: bool,
     },
     ActiveAwaitingToolApproval {
         tool_request_id: CanonicalUuid,
@@ -5126,9 +5132,13 @@ impl<'de> Deserialize<'de> for TurnState {
             RawTurnState::ActiveAwaitingModelCallRecovery {
                 ended_attempt_id,
                 recovery_model_call_id,
+                automatic_reconciliation_attempts,
+                operator_action_required,
             } => Self::ActiveAwaitingModelCallRecovery {
                 ended_attempt_id,
                 recovery_model_call_id,
+                automatic_reconciliation_attempts,
+                operator_action_required,
             },
             RawTurnState::ActiveAwaitingToolApproval { tool_request_id } => {
                 Self::ActiveAwaitingToolApproval { tool_request_id }

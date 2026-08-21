@@ -4402,6 +4402,63 @@ pub(crate) fn apply_interrupt_to_recovery_wait(
     })
 }
 
+pub(crate) fn apply_automatic_model_call_reconciliation(
+    active_turn: ActivatedTurn,
+    call: EndedModelCall,
+    attempt: EndedTurnAttempt,
+    source_snapshot: ResolvedContextFrontierSnapshot,
+    recovery_attempt: std::num::NonZeroU32,
+    identities: AmbiguousModelCallTurnIdentities,
+) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError> {
+    let ActiveTurnPhase::AwaitingRecoveryDecision {
+        ambiguous_operations,
+        applied_interrupt,
+    } = active_turn.phase()
+    else {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    };
+    if ambiguous_operations.operation_count() != 1
+        || !ambiguous_operations.contains(crate::IssuedOperationRef::ModelCall(call.id()))
+        || call.turn() != active_turn.turn()
+        || call.attempt() != attempt.id()
+        || call.disposition() != ModelCallDisposition::Ambiguous
+        || call.frontier() != source_snapshot.frontier()
+    {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+    let reclassified_pending_steering =
+        reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
+    let terminal_snapshot = source_snapshot
+        .derive_appending_candidate(identities.terminal_frontier, Vec::new())
+        .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+    if !matches!(
+        attempt.end(),
+        AttemptEnd::WithoutStop {
+            disposition: UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost,
+        }
+    ) {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    }
+    let marker = match applied_interrupt {
+        Some(proof) => {
+            ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations.clone(), *proof)
+        }
+        None => ReconciliationMarker::from_automatic_model_call_recovery(
+            ambiguous_operations.clone(),
+            recovery_attempt,
+        ),
+    };
+    Ok(ReconciliationRequiredModelCallTurn {
+        session: active_turn.session(),
+        turn: active_turn.turn(),
+        call,
+        attempt,
+        disposition: TurnDisposition::ReconciliationRequired { marker },
+        terminal_snapshot,
+        reclassified_pending_steering,
+    })
+}
+
 pub(crate) fn apply_interrupt_to_runner_recovery_wait(
     active_turn: ActivatedTurn,
     starting_snapshot: ResolvedContextFrontierSnapshot,

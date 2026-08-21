@@ -1,5 +1,8 @@
 # Configuration and credentials
 
+The model-call recovery telemetry vocabulary is re-verified against this PR
+(`agent/turn-lifecycle-hardening`).
+
 The browser HTTP listener, same-origin static assets, and generated contract
 bootstrap are verified against this PR (`agent/web-http-transport`).
 
@@ -415,7 +418,7 @@ The complete OTLP record inventory is:
   not added.
 - Event name `turn activated`, with `session_id` and `turn_id`;
   `turn terminalized`, with those ids and the closed `terminal_outcome`;
-  `turn parked awaiting user reconciliation`, with those ids;
+  `turn parked awaiting bounded reconciliation`, with those ids;
   `model call dispatched`, with `session_id`, `turn_id`, `model_call_id`, and
   `turn_attempt_id`; and the event names
   `model runtime reported a trustworthy capability-preparation failure`,
