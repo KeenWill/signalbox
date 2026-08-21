@@ -828,7 +828,7 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
     #[cfg(not(target_arch = "x86_64"))]
     const X32_SYSCALL_BIT: Option<u32> = None;
     #[cfg(target_arch = "x86_64")]
-    let (audit_arch, clone, clone3, fork, vfork, memfd_create, shmget) = (
+    let (audit_arch, clone, clone3, fork, vfork, memfd_create, shmget, msgget) = (
         0xc000_003e,
         56_u32,
         435_u32,
@@ -836,16 +836,25 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         Some(58_u32),
         319_u32,
         29_u32,
+        68_u32,
     );
     #[cfg(target_arch = "aarch64")]
-    let (audit_arch, clone, clone3, fork, vfork, memfd_create, shmget) =
-        (0xc000_00b7, 220_u32, 435_u32, None, None, 279_u32, 194_u32);
+    let (audit_arch, clone, clone3, fork, vfork, memfd_create, shmget, msgget) = (
+        0xc000_00b7,
+        220_u32,
+        435_u32,
+        None,
+        None,
+        279_u32,
+        194_u32,
+        186_u32,
+    );
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     return Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "unsupported seccomp architecture",
     ));
-    let mut syscall_denials = vec![memfd_create, shmget];
+    let mut syscall_denials = vec![memfd_create, shmget, msgget];
     if let Some(fork) = fork {
         syscall_denials.push(fork);
     }
@@ -1136,6 +1145,26 @@ mod tests {
             .enumerate()
             .find(|(_, entry)| entry.value == shmget)
             .expect("shmget is checked");
+        assert_eq!(check.code, 0x15);
+        let denial = index + 1 + usize::from(check.jump_true);
+        assert_eq!(
+            program.get(denial).map(|entry| entry.value),
+            Some(0x0005_0001)
+        );
+    }
+
+    #[test]
+    fn descendant_filter_denies_system_v_message_queue_creation() {
+        let program = seccomp_instructions().expect("the test architecture is supported");
+        #[cfg(target_arch = "x86_64")]
+        let msgget = 68_u32;
+        #[cfg(target_arch = "aarch64")]
+        let msgget = 186_u32;
+        let (index, check) = program
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| entry.value == msgget)
+            .expect("msgget is checked");
         assert_eq!(check.code, 0x15);
         let denial = index + 1 + usize::from(check.jump_true);
         assert_eq!(
