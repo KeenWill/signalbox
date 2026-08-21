@@ -10,7 +10,9 @@ ceiling was re-verified against this PR
 claiming and shutdown-preemptible watchdog batches are verified against this PR
 (`agent/daemon-live-restart-recovery-accounting`). Signal-driven scheduler
 draining is verified against this PR
-(`agent/daemon-live-graceful-shutdown-drain`).
+(`agent/daemon-live-graceful-shutdown-drain`). Suspension of admitted-pass
+occupancy deadlines during that bounded drain is verified against this PR
+(`agent/daemon-live-shutdown-pass-drain`).
 
 The expired-pass recovery lock classification and retry budgets were re-verified
 against this PR (`agent/daemon-live-reconciliation-lock-cadence`). Exact
@@ -1319,9 +1321,10 @@ admitting passes, and the turn-liveness pass stops scanning. Finite request
 handlers, the current dispatcher transaction, in-flight scheduler passes, and an
 in-flight turn-liveness inventory read or terminalization share a bounded grace
 window equal to the fifteen-minute scheduler-pass occupancy ceiling plus thirty
-seconds for component cleanup. This lets every admitted pass finish or reach its
-ordinary occupancy terminalization before shutdown may abort it. A clean exit
-closes the fenced pool, waits on the guard session's exclusive
+seconds for component cleanup. Once shutdown is observed, an admitted scheduler
+pass stops spending its ordinary occupancy deadline and may use the shared grace
+window to finish; the occupancy handler cannot cancel it during that drain. A
+clean exit closes the fenced pool, waits on the guard session's exclusive
 current-generation fence so even detached pool sessions have ended, removes only
 this daemon's identity-pinned and revalidated socket, and releases the advisory
 locks by closing its dedicated guard connection. Window expiry abandons

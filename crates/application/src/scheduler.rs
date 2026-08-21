@@ -19,9 +19,12 @@ use std::{
 use signalbox_domain::{SessionId, TurnId};
 use tokio::{
     pin, select,
-    sync::mpsc::{
-        self,
-        error::{TryRecvError, TrySendError},
+    sync::{
+        mpsc::{
+            self,
+            error::{TryRecvError, TrySendError},
+        },
+        watch,
     },
     task::{Id, JoinError, JoinSet},
     time::{self, Instant, Interval, MissedTickBehavior},
@@ -804,8 +807,8 @@ where
     /// Runs until shutdown, retrying source and pass failures on later hints.
     ///
     /// The loop admits no new pass once it observes shutdown. A pass already
-    /// in progress remains subject to the scheduler occupancy bound while the
-    /// composition root owns the shorter shutdown grace window.
+    /// in progress stops spending its ordinary occupancy deadline and drains
+    /// under the composition root's shutdown grace window instead.
     pub async fn run_until<Shutdown>(&mut self, shutdown: Shutdown) -> SchedulerLoopExit
     where
         Shutdown: Future<Output = ()> + Send,
@@ -820,6 +823,7 @@ where
         let mut in_flight_sessions = HashSet::new();
         let mut pending_hints = VecDeque::new();
         let mut pending_reruns = HashSet::new();
+        let (shutdown_drain, shutdown_drain_receiver) = watch::channel(false);
         observe_occupancy(&self.occupancy_observer, &task_sessions);
 
         'scheduler: loop {
@@ -866,6 +870,7 @@ where
                                 &mut self.pass,
                                 session,
                                 self.occupancy_bound,
+                                shutdown_drain_receiver.clone(),
                                 &mut task_sessions,
                                 &self.occupancy_observer,
                             );
@@ -919,6 +924,7 @@ where
                             &mut self.pass,
                             session,
                             self.occupancy_bound,
+                            shutdown_drain_receiver.clone(),
                             &mut task_sessions,
                             &self.occupancy_observer,
                         );
@@ -930,6 +936,7 @@ where
             }
         }
 
+        shutdown_drain.send_replace(true);
         while let Some(completed) = passes.join_next_with_id().await {
             observe_pass_completion::<Pass>(
                 completed,
@@ -958,6 +965,7 @@ fn spawn_pass<Pass>(
     pass: &mut Pass,
     session: SessionId,
     bound: SchedulerPassOccupancyBound,
+    mut shutdown_drain: watch::Receiver<bool>,
     task_sessions: &mut HashMap<Id, InFlightPass>,
     observer: &Option<Arc<dyn SchedulerOccupancyObserver>>,
 ) where
@@ -971,9 +979,16 @@ fn spawn_pass<Pass>(
             pin!(execution);
             let deadline = time::sleep(bound.get());
             pin!(deadline);
+            let drain_requested = async move {
+                let _ = shutdown_drain.changed().await;
+            };
+            pin!(drain_requested);
             select! {
                 biased;
                 result = &mut execution => PassTaskOutcome::Completed(result),
+                _ = &mut drain_requested => {
+                    PassTaskOutcome::Completed(execution.as_mut().await)
+                }
                 () = &mut deadline => {
                     if let Some(handler) = expiry_handler {
                         handler.occupancy_expired(session);
@@ -1892,6 +1907,89 @@ mod tests {
         assert_eq!(exit, SchedulerLoopExit::Shutdown);
         assert!(encoded.contains("scheduler_pass_occupancy_expired"));
         assert!(encoded.contains("occupancy_bound_seconds=1"));
+    }
+
+    #[derive(Clone, Debug)]
+    struct ShutdownDrainPass {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        expiration_count: Arc<AtomicUsize>,
+    }
+
+    impl super::SchedulerPassExpiryHandler for ShutdownDrainPass {
+        fn occupancy_expired(&self, _session: SessionId) {
+            self.expiration_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl EligibilityPass for ShutdownDrainPass {
+        type Error = FakeSweepError;
+
+        fn occupancy_expiry_handler(&self) -> Option<Arc<dyn super::SchedulerPassExpiryHandler>> {
+            Some(Arc::new(self.clone()))
+        }
+
+        fn run(
+            &mut self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
+            async move {
+                started.notify_one();
+                release.notified().await;
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_drain_suspends_the_admitted_pass_occupancy_deadline() {
+        let selected = session(52);
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let shutdown_observed = Arc::new(Notify::new());
+        let expiration_count = Arc::new(AtomicUsize::new(0));
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let bound = SchedulerPassOccupancyBound::try_lowered(Duration::from_secs(1))
+            .expect("one second lowers the production ceiling");
+        let scheduler = SchedulerLoop::new(
+            FakeWorkSource {
+                hints: VecDeque::from([Ok(selected)]),
+            },
+            ShutdownDrainPass {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+                expiration_count: Arc::clone(&expiration_count),
+            },
+        )
+        .with_occupancy_bound(bound);
+        let observed = Arc::clone(&shutdown_observed);
+        let runtime = tokio::spawn(async move {
+            let mut scheduler = scheduler;
+            scheduler
+                .run_until(async {
+                    shutdown_receiver.await.expect("the test requests shutdown");
+                    observed.notify_one();
+                })
+                .await
+        });
+
+        started.notified().await;
+        shutdown_sender
+            .send(())
+            .expect("the scheduler still listens for shutdown");
+        shutdown_observed.notified().await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        assert_eq!(expiration_count.load(Ordering::SeqCst), 0);
+
+        release.notify_one();
+        assert_eq!(
+            runtime.await.expect("scheduler task completes"),
+            SchedulerLoopExit::Shutdown
+        );
     }
 
     #[tokio::test(start_paused = true)]
