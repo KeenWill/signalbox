@@ -279,11 +279,19 @@ jobs:
       - name: Enable unprivileged user namespaces for Bubblewrap
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Cache Rust dependencies
+        id: rust-cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
           shared-key: rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # A prefix restore can retain a native build-script fingerprint after its
+      # static archive was omitted from the cache, making Cargo skip the script
+      # and then fail at link time. Keep registry downloads but rebuild target
+      # artifacts whenever the dependency key is not an exact match.
+      - name: Discard target artifacts from a prefix cache restore
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: cargo clean
       - name: Run tests
         env:
           SIGNALBOX_RUN_BWRAP_INTEGRATION: "1"
