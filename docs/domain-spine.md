@@ -9045,6 +9045,7 @@ pub enum RunnerDomainError {
     InvalidHex,
     InvalidBranchName,
     InvalidRelativePath,
+    InvalidAbsolutePath,
     InvalidToolInputSchema,
     DuplicateCapabilityClass(RunnerCapabilityClass),
     DuplicateTool(ToolName),
@@ -9102,6 +9103,7 @@ impl CredentialProfileName {
 }
 impl RunnerWorkingDirectory {
     pub fn try_new(value: String) -> Result<Self, RunnerDomainError>;
+    pub fn try_new_absolute(value: String) -> Result<Self, RunnerDomainError>;
     // accessor: as_str()
 }
 impl WorkspaceRepositoryKey {

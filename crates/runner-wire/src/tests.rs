@@ -646,6 +646,49 @@ fn ready_frame_rejects_manifest_digest_disagreement() {
 }
 
 #[test]
+fn ready_manifest_serialization_pins_the_version_two_shape() {
+    let manifest = manifest();
+    let manifest_digest = workspace_manifest_digest(&manifest)
+        .unwrap_or_else(|error| panic!("ready manifest digests: {error}"));
+    let ready = ReadyManifest::try_new(
+        manifest,
+        manifest_digest,
+        working_directory("/runner/sessions/ready/repo"),
+    )
+    .unwrap_or_else(|error| panic!("ready manifest is valid: {error}"));
+    let encoded = serde_json::to_string(&ready)
+        .unwrap_or_else(|error| panic!("ready manifest serializes: {error}"));
+
+    let mut expected = concat!(
+        r#"{"manifest":{"lifecycle":"ready","manifest_id":"00000000-0000-4000-8000-000000000008","#,
+        r#""session":"00000000-0000-4000-8000-000000000002","placement_revision":3,"#,
+        r#""runner":"00000000-0000-4000-8000-000000000003","repository":"primary","#,
+        r#""canonical_clone_url_digest":"1a65f9f5977dc0dcfaae9165099f5639eaa3562991fa3242153f363c868ce930","#
+    )
+    .as_bytes()
+    .to_vec();
+    expected.extend_from_slice(&[
+        34, 99, 114, 101, 100, 101, 110, 116, 105, 97, 108, 95, 112, 114, 111, 102, 105, 108, 101,
+        34, 58, 34, 99, 111, 100, 101, 95, 104, 111, 115, 116,
+    ]);
+    expected.extend_from_slice(
+        concat!(
+            r#"","sandbox_profile":"workspace_restricted","#,
+            r#""relative_path":"sessions/00000000-0000-4000-8000-000000000002/3/repo","#,
+            r#""recovery":{"kind":"branch","name":"main","#,
+            r#""revision":"0123456789abcdef0123456789abcdef01234567"}},"#,
+            r#""manifest_digest":"3eb9e28c4ff2c0bc069a3064a8eebe4a1ab8b1169bb3c8b3ed388ba7d232e3ef","#,
+            r#""execution_directory":"/runner/sessions/ready/repo"}"#
+        )
+        .as_bytes(),
+    );
+    assert_eq!(encoded.as_bytes(), expected);
+    let decoded: ReadyManifest = serde_json::from_str(&encoded)
+        .unwrap_or_else(|error| panic!("pinned ready manifest decodes: {error}"));
+    assert_eq!(decoded, ready);
+}
+
+#[test]
 fn ready_manifest_deserialization_rejects_manifest_digest_disagreement() {
     let encoded = serde_json::json!({
         "manifest": manifest(),
