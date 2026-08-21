@@ -383,6 +383,7 @@ fn repository_relative_path(
 fn portable_path_component(component: &str) -> bool {
     let component_is_bounded = component.len() <= MAX_PORTABLE_PATH_COMPONENT_UNITS
         && component.encode_utf16().count() <= MAX_PORTABLE_PATH_COMPONENT_UNITS;
+    let has_control_character = component.chars().any(char::is_control);
     let has_invalid_character = component
         .bytes()
         .any(|byte| matches!(byte, b'<' | b'>' | b':' | b'\"' | b'|' | b'?' | b'*'));
@@ -397,6 +398,7 @@ fn portable_path_component(component: &str) -> bool {
         });
     !component.is_empty()
         && component_is_bounded
+        && !has_control_character
         && !component.ends_with(['.', ' '])
         && !has_invalid_character
         && !is_reserved_device
@@ -887,6 +889,12 @@ mod tests {
             .expect_err("a component exceeding the portable byte ceiling is rejected");
 
         assert!(error.to_string().contains("not a portable relative path"));
+    }
+
+    #[test]
+    fn repository_manifest_rejects_control_characters_in_path_components() {
+        assert!(!super::portable_path_component("cases\n.json"));
+        assert!(!super::portable_path_component("cases\0.json"));
     }
 
     #[test]

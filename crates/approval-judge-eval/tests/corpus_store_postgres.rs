@@ -88,7 +88,6 @@ async fn manifest_import_conforms_with_disk_and_scores_identically() -> Result<(
         .clone();
     let database = DatabaseCorpusStore::new(pool.clone());
     let imported = database.import_manifest(seed_manifest_path()).await?;
-    let repeated_import = database.import_manifest(seed_manifest_path()).await?;
     let disk_observation = observe_store(&disk, &key).await?;
     let database_observation = observe_store(&database, &key).await?;
     let (disk_model, disk_binding) = fixture_model();
@@ -98,9 +97,24 @@ async fn manifest_import_conforms_with_disk_and_scores_identically() -> Result<(
         score_corpus(&database_model, &database_binding, &database_observation.1).await?;
 
     assert_eq!(imported, disk_observation.0[0]);
-    assert_eq!(repeated_import, imported);
     assert_eq!(database_observation, disk_observation);
     assert_eq!(database_score, disk_score);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repeated_manifest_import_is_idempotent() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let database = DatabaseCorpusStore::new(pool.clone());
+
+    let imported = database.import_manifest(seed_manifest_path()).await?;
+    let repeated_import = database.import_manifest(seed_manifest_path()).await?;
+
+    assert_eq!(repeated_import, imported);
 
     pool.close().await;
     drop(container);
