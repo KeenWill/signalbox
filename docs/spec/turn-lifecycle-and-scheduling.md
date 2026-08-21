@@ -8,7 +8,9 @@ tool attempts is verified against this PR
 ceiling was re-verified against this PR
 (`agent/daemon-live-reconciliation-attempt-bound`). Just-in-time recovery
 claiming and shutdown-preemptible watchdog batches are verified against this PR
-(`agent/daemon-live-restart-recovery-accounting`).
+(`agent/daemon-live-restart-recovery-accounting`). Signal-driven scheduler
+draining is verified against this PR
+(`agent/daemon-live-graceful-shutdown-drain`).
 
 The expired-pass recovery operation and retry budgets were re-verified against
 this PR (`agent/daemon-live-recovery-attempt-budget`).
@@ -1304,9 +1306,11 @@ On SIGINT/SIGTERM the listener stops accepting requests, follow streams are
 closed, the dispatcher stops starting transactions, the scheduler stops
 admitting passes, and the turn-liveness pass stops scanning. Finite request
 handlers, the current dispatcher transaction, in-flight scheduler passes, and an
-in-flight turn-liveness inventory read or terminalization share the bounded
-30-second grace window to let authoritative transactions commit or abort. A
-clean exit closes the fenced pool, waits on the guard session's exclusive
+in-flight turn-liveness inventory read or terminalization share a bounded grace
+window equal to the fifteen-minute scheduler-pass occupancy ceiling plus thirty
+seconds for component cleanup. This lets every admitted pass finish or reach its
+ordinary occupancy terminalization before shutdown may abort it. A clean exit
+closes the fenced pool, waits on the guard session's exclusive
 current-generation fence so even detached pool sessions have ended, removes only
 this daemon's identity-pinned and revalidated socket, and releases the advisory
 locks by closing its dedicated guard connection. Window expiry abandons
