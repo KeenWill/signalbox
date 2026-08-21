@@ -43,8 +43,10 @@ refresh behavior are verified against this PR
 pull-request issue-comment behavior, per-page hydration coalescing, and
 workflow-run branch symmetry below are verified against PR #891
 (`agent/webhook-event-mapping`). Webhook drain liveness and stall reporting are
-verified against PR #896 (`agent/webhook-projection-drain`). Webhook preemption
-of slow complete reconciliation is verified against this PR
+verified against PR #896 (`agent/webhook-projection-drain`); the drain attempt
+deadline is verified against this PR
+(`agent/daemon-live-webhook-drain-deadline`). Webhook preemption of slow
+complete reconciliation is verified against PR #926
 (`agent/webhook-projection-preemption-review`). The approval-judge dispatch
 fence and unattended escalation release described below are verified against
 this PR (`agent/headless-approval-escalation`). The operator-commissioned
@@ -1099,13 +1101,19 @@ at the admission ceiling still drains, and every later body is discarded rather
 than allowed to overshoot, so a page retains no more than that ceiling. One
 drain visits a bounded number of pending pages and then re-arms that same wake,
 so a sustained stream is accelerated without holding the worker past an overdue
-full poll. A terminal commit whose result is lost in transit is resolved by
-reading whether the row is already terminal, which cannot itself be ambiguous:
-if it is, the delivery counts as recorded and the shadow advances; if it is not,
-the record is re-attempted a bounded number of times before the delivery is left
-pending for the next drain. If every settling read is itself unavailable, the
-shadow is discarded rather than trusted, because a disposition may have landed
-without being reflected in that baseline. A durable disposition the shadow never
+full poll. Every drain call also has a sixty-second outer deadline spanning its
+provider and database work. Expiry cancels that attempt, leaves unfinished
+deliveries pending, invalidates partial provider freshness, emits the closed
+`webhook_projection_drain_timed_out` cause, and enters the same bounded
+projection backoff as another retryable drain failure; the serialized owner is
+therefore returned to its scheduler even when an inner operation never returns.
+A terminal commit whose result is lost in transit is resolved by reading whether
+the row is already terminal, which cannot itself be ambiguous: if it is, the
+delivery counts as recorded and the shadow advances; if it is not, the record is
+re-attempted a bounded number of times before the delivery is left pending for
+the next drain. If every settling read is itself unavailable, the shadow is
+discarded rather than trusted, because a disposition may have landed without
+being reflected in that baseline. A durable disposition the shadow never
 accounted for is what this avoids. A delivery whose processing fails is deferred
 for the rest of that drain rather than failing it, so one persistently
 unprocessable receipt cannot pin the head of the queue and starve every later
