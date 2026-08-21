@@ -38,6 +38,11 @@ const UNRESOLVED_THREADS: u64 = 3;
 const RETRY_DELAY_SECONDS: u64 = 60;
 const RETRY_BUDGET: i16 = 5;
 const MODEL_SELECTION_ID: u128 = 0x89_200;
+const FIRST_PENDING_COMMAND: u128 = 0x89_210;
+const SECOND_PENDING_COMMAND: u128 = 0x89_211;
+const THIRD_PENDING_COMMAND: u128 = 0x89_212;
+const FIRST_CONTENT_DIGEST_BYTE: u8 = 17;
+const SECOND_CONTENT_DIGEST_BYTE: u8 = 18;
 const CREDENTIAL_REFERENCE: &str = "fixture-credential";
 
 fn repository() -> Result<RepositorySlug, Box<dyn Error>> {
@@ -59,6 +64,14 @@ fn observation() -> Result<ConvergenceSweepObservation, Box<dyn Error>> {
         CommitSha::try_new(HEAD_SHA.to_owned())?,
         UNRESOLVED_THREADS,
     ))
+}
+
+fn pending_command(value: u128) -> DurableCommandId {
+    DurableCommandId::from_uuid(Uuid::from_u128(value))
+}
+
+fn content_digest(value: u8) -> [u8; 32] {
+    [value; 32]
 }
 
 fn credential_pin() -> SessionCredentialPin {
@@ -132,6 +145,69 @@ fn dispatched_and_busy(
         ) => (session, busy_session),
         outcomes => panic!("one racing commission must dispatch and one must skip: {outcomes:?}"),
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pending_commission_reuses_only_the_same_observation_and_content()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool);
+    let repository = repository()?;
+    let observation = observation()?;
+
+    let installed = store
+        .begin_commission(
+            &repository,
+            pull_request(),
+            &observation,
+            content_digest(FIRST_CONTENT_DIGEST_BYTE),
+            pending_command(FIRST_PENDING_COMMAND),
+        )
+        .await?;
+    let reused = store
+        .begin_commission(
+            &repository,
+            pull_request(),
+            &observation,
+            content_digest(FIRST_CONTENT_DIGEST_BYTE),
+            pending_command(SECOND_PENDING_COMMAND),
+        )
+        .await?;
+    let replaced_for_content = store
+        .begin_commission(
+            &repository,
+            pull_request(),
+            &observation,
+            content_digest(SECOND_CONTENT_DIGEST_BYTE),
+            pending_command(SECOND_PENDING_COMMAND),
+        )
+        .await?;
+    let moved_observation = ConvergenceSweepObservation::new(
+        observation.head_sha().clone(),
+        observation.unresolved_threads() + 1,
+    );
+    let replaced_for_observation = store
+        .begin_commission(
+            &repository,
+            pull_request(),
+            &moved_observation,
+            content_digest(SECOND_CONTENT_DIGEST_BYTE),
+            pending_command(THIRD_PENDING_COMMAND),
+        )
+        .await?;
+
+    assert_eq!(installed, pending_command(FIRST_PENDING_COMMAND));
+    assert_eq!(reused, pending_command(FIRST_PENDING_COMMAND));
+    assert_eq!(
+        replaced_for_content,
+        pending_command(SECOND_PENDING_COMMAND)
+    );
+    assert_eq!(
+        replaced_for_observation,
+        pending_command(THIRD_PENDING_COMMAND)
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]

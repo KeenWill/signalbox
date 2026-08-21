@@ -290,52 +290,36 @@ impl PostgresConvergenceSweepStore {
     ) -> Result<DurableCommandId, ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
         ensure_target(&mut transaction, repository, pull_request).await?;
-        let row = sqlx::query(
-            "SELECT pending_command_id, pending_head_sha, pending_unresolved_threads,
-                    pending_content_digest
-               FROM convergence_sweep_target
+        let command: Uuid = sqlx::query_scalar(
+            "UPDATE convergence_sweep_target
+                SET pending_command_id = CASE
+                        WHEN pending_command_id IS NOT NULL
+                         AND pending_head_sha = $4
+                         AND pending_unresolved_threads = $5
+                         AND pending_content_digest = $6
+                        THEN pending_command_id ELSE $3 END,
+                    pending_head_sha = $4,
+                    pending_unresolved_threads = $5,
+                    pending_content_digest = $6,
+                    pending_started_at = CASE
+                        WHEN pending_command_id IS NOT NULL
+                         AND pending_head_sha = $4
+                         AND pending_unresolved_threads = $5
+                         AND pending_content_digest = $6
+                        THEN pending_started_at ELSE clock_timestamp() END
               WHERE repository = $1 AND pull_request_number = $2
-              FOR UPDATE",
+          RETURNING pending_command_id",
         )
         .bind(repository.as_str())
         .bind(Decimal::from(pull_request.get()))
+        .bind(proposed_command.as_uuid())
+        .bind(observation.head_sha().as_str())
+        .bind(Decimal::from(observation.unresolved_threads()))
+        .bind(content_digest.to_vec())
         .fetch_one(&mut *transaction)
         .await?;
-        let pending_command: Option<Uuid> = row.try_get("pending_command_id")?;
-        let pending_head: Option<String> = row.try_get("pending_head_sha")?;
-        let pending_threads: Option<Decimal> = row.try_get("pending_unresolved_threads")?;
-        let pending_digest: Option<Vec<u8>> = row.try_get("pending_content_digest")?;
-        let reuse = pending_command
-            .zip(pending_head)
-            .zip(pending_threads)
-            .zip(pending_digest)
-            .and_then(|(((command, head), threads), digest)| {
-                (head == observation.head_sha().as_str()
-                    && threads.to_u64() == Some(observation.unresolved_threads())
-                    && digest == content_digest)
-                    .then_some(DurableCommandId::from_uuid(command))
-            });
-        let command = reuse.unwrap_or(proposed_command);
-        if reuse.is_none() {
-            sqlx::query(
-                "UPDATE convergence_sweep_target
-                    SET pending_command_id = $3, pending_head_sha = $4,
-                        pending_unresolved_threads = $5,
-                        pending_content_digest = $6,
-                        pending_started_at = clock_timestamp()
-                  WHERE repository = $1 AND pull_request_number = $2",
-            )
-            .bind(repository.as_str())
-            .bind(Decimal::from(pull_request.get()))
-            .bind(command.as_uuid())
-            .bind(observation.head_sha().as_str())
-            .bind(Decimal::from(observation.unresolved_threads()))
-            .bind(content_digest.to_vec())
-            .execute(&mut *transaction)
-            .await?;
-        }
         transaction.commit().await?;
-        Ok(command)
+        Ok(DurableCommandId::from_uuid(command))
     }
 
     /// Records a committed or replayed atomic commissioned dispatch.
@@ -446,26 +430,9 @@ impl PostgresConvergenceSweepStore {
     ) -> Result<ConvergenceSweepFailureDisposition, ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
         ensure_target(&mut transaction, repository, pull_request).await?;
-        let prior: i16 = sqlx::query_scalar(
-            "SELECT CASE WHEN failure_kind = $3
-                         THEN consecutive_failures ELSE 0::smallint END
-               FROM convergence_sweep_target
-              WHERE repository = $1 AND pull_request_number = $2 FOR UPDATE",
-        )
-        .bind(repository.as_str())
-        .bind(Decimal::from(pull_request.get()))
-        .bind(failure.storage())
-        .fetch_one(&mut *transaction)
-        .await?;
         let budget: i16 = sqlx::query_scalar("SELECT convergence_sweep_retry_budget()")
             .fetch_one(&mut *transaction)
             .await?;
-        let failures = if failure == ConvergenceSweepFailureKind::NoModelActivity {
-            budget
-        } else {
-            prior.saturating_add(1).min(budget)
-        };
-        let parked = failures >= budget;
         let (head, threads) = observation
             .map(|value| {
                 (
@@ -474,30 +441,55 @@ impl PostgresConvergenceSweepStore {
                 )
             })
             .unwrap_or((None, None));
-        sqlx::query(
+        let (failures, parked): (i16, bool) = sqlx::query_as(
             "UPDATE convergence_sweep_target
-                SET state_kind = CASE WHEN $5 THEN 'parked' ELSE 'retry_wait' END,
-                    failure_kind = $3, consecutive_failures = $4,
-                    retry_not_before = CASE WHEN $5 THEN NULL
+                SET state_kind = CASE WHEN
+                        (CASE WHEN $4 THEN $5
+                            WHEN failure_kind = $3
+                                THEN least(consecutive_failures + 1, $5)
+                            ELSE 1::smallint END) >= $5
+                        THEN 'parked' ELSE 'retry_wait' END,
+                    failure_kind = $3,
+                    consecutive_failures = CASE WHEN $4 THEN $5
+                        WHEN failure_kind = $3
+                            THEN least(consecutive_failures + 1, $5)
+                        ELSE 1::smallint END,
+                    retry_not_before = CASE WHEN
+                        (CASE WHEN $4 THEN $5
+                            WHEN failure_kind = $3
+                                THEN least(consecutive_failures + 1, $5)
+                            ELSE 1::smallint END) >= $5
+                        THEN NULL
                         ELSE clock_timestamp() + $6 * interval '1 second' END,
-                    parked_at = CASE WHEN $5 THEN clock_timestamp() ELSE NULL END,
-                    operator_need = CASE WHEN $5 THEN $7 ELSE NULL END,
+                    parked_at = CASE WHEN
+                        (CASE WHEN $4 THEN $5
+                            WHEN failure_kind = $3
+                                THEN least(consecutive_failures + 1, $5)
+                            ELSE 1::smallint END) >= $5
+                        THEN clock_timestamp() ELSE NULL END,
+                    operator_need = CASE WHEN
+                        (CASE WHEN $4 THEN $5
+                            WHEN failure_kind = $3
+                                THEN least(consecutive_failures + 1, $5)
+                            ELSE 1::smallint END) >= $5
+                        THEN $7 ELSE NULL END,
                     last_head_sha = coalesce($8, last_head_sha),
                     last_unresolved_threads = coalesce($9, last_unresolved_threads),
                     last_observed_at = CASE WHEN $8 IS NULL THEN last_observed_at
                         ELSE clock_timestamp() END
-              WHERE repository = $1 AND pull_request_number = $2",
+              WHERE repository = $1 AND pull_request_number = $2
+          RETURNING consecutive_failures, state_kind = 'parked'",
         )
         .bind(repository.as_str())
         .bind(Decimal::from(pull_request.get()))
         .bind(failure.storage())
-        .bind(failures)
-        .bind(parked)
+        .bind(failure == ConvergenceSweepFailureKind::NoModelActivity)
+        .bind(budget)
         .bind(i64::try_from(retry_delay_seconds).unwrap_or(i64::MAX))
         .bind(failure.need())
         .bind(head)
         .bind(threads)
-        .execute(&mut *transaction)
+        .fetch_one(&mut *transaction)
         .await?;
         insert_event(
             &mut transaction,
