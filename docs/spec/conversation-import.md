@@ -435,11 +435,11 @@ returns at most 100 summaries in ascending `ImportedConversationId` order. An
 optional `after` identity is an exclusive keyset cursor; the response includes a
 next cursor only when a bounded lookahead finds another row. Exact
 format/converter and exact attested source-session filters compose with that
-cursor. Source-session filters retain the complete exact request value, including
-empty text and edge whitespace. Catalog and descriptor responses project at most
-512 UTF-8 bytes of source-session evidence with explicit complete/truncated
-classification. The response deliberately has no total count and never
-reconstructs a complete imported aggregate.
+cursor. Source-session filters retain the complete exact request value,
+including empty text and edge whitespace. Catalog and descriptor responses
+project at most 512 UTF-8 bytes of source-session evidence with explicit
+complete/truncated classification. The response deliberately has no total count
+and never reconstructs a complete imported aggregate.
 
 `GET /api/imports/{imported-conversation-id}` returns the immutable identity,
 evidence-derived display title, raw-record and normalized-entry counts, exact
@@ -470,15 +470,15 @@ Signalbox acceptance, turn, call, tool, or result evidence through projection.
 
 `POST /api/imports/{imported-conversation-id}/continuations` creates a native
 session from one selected frontier, whose durable semantics are owned by
-[sessions-and-transcript](sessions-and-transcript.md), with `resume` or `fork`, one exact direct
-model-selection or model-alias identity, and provider defaults. The client mints
-and retains the durable command identity before I/O. Exact replay returns the
-recorded session, conflicting reuse is rejected, and an ambiguous commit
-instructs the client to retry the same command and payload. The server verifies
-that the immutable entry identity and position still agree before applying the
-existing imported-frontier session-creation command. The response returns the
-new session identity and selected frontier; session timeline navigation is the
-separate browser timeline address contract.
+[sessions-and-transcript](sessions-and-transcript.md), with `resume` or `fork`,
+one exact direct model-selection or model-alias identity, and provider defaults.
+The client mints and retains the durable command identity before I/O. Exact
+replay returns the recorded session, conflicting reuse is rejected, and an
+ambiguous commit instructs the client to retry the same command and payload. The
+server verifies that the immutable entry identity and position still agree
+before applying the existing imported-frontier session-creation command. The
+response returns the new session identity and selected frontier; session
+timeline navigation is the separate browser timeline address contract.
 
 ## Claude Code session JSONL versions 1 and 2
 
