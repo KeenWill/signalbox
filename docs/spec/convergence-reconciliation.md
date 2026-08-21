@@ -1,9 +1,10 @@
 # Pull-request convergence reconciliation
 
 This page is verified against PR #1056
-(`agent/daemon-live-commissioned-escalation-resume`). The daemon-native
-convergence sweep, predicate, fenced commission, durable retry and park records,
-and explicit configuration throttle are its implementation scope.
+(`agent/daemon-live-commissioned-escalation-resume`; via PR #1057
+`agent/daemon-live-lock-inventory-checksum`). The daemon-native convergence
+sweep, predicate, fenced commission, durable retry and park records, and
+explicit configuration throttle are its implementation scope.
 
 ## Authority and target selection
 
