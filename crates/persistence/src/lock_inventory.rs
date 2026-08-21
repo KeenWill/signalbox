@@ -111,9 +111,9 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
                    AND NOT delegation_runtime_terminal
             )";
 
-pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_CLAIM: &str = "WITH due AS (
+pub(crate) const AUTOMATIC_RECONCILIATION_CLAIM: &str = "WITH due AS (
                 SELECT turn_id
-                  FROM automatic_model_call_reconciliation
+                  FROM automatic_reconciliation
                  WHERE state_kind = 'scheduled'
                    AND attempt_count < 5
                    AND next_attempt_at <= statement_timestamp()
@@ -121,7 +121,7 @@ pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_CLAIM: &str = "WITH due AS 
                  LIMIT $1
                  FOR UPDATE SKIP LOCKED
              ), claimed AS (
-                UPDATE automatic_model_call_reconciliation AS recovery
+                UPDATE automatic_reconciliation AS recovery
                    SET attempt_count = recovery.attempt_count + 1,
                        state_kind = 'attempting',
                        next_attempt_at = statement_timestamp()
@@ -135,15 +135,17 @@ pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_CLAIM: &str = "WITH due AS 
                   FROM due
                  WHERE recovery.turn_id = due.turn_id
              RETURNING recovery.session_id, recovery.turn_id,
-                       recovery.model_call_id, recovery.attempt_count
+                       recovery.model_call_id, recovery.tool_attempt_id,
+                       recovery.attempt_count
              ), recorded AS (
-                INSERT INTO automatic_model_call_reconciliation_attempt
+                INSERT INTO automatic_reconciliation_attempt
                     (turn_id, attempt_ordinal)
                 SELECT turn_id, attempt_count FROM claimed
                 RETURNING turn_id
              )
              SELECT claimed.session_id, claimed.turn_id,
-                    claimed.model_call_id, claimed.attempt_count
+                    claimed.model_call_id, claimed.tool_attempt_id,
+                    claimed.attempt_count
                FROM claimed
                JOIN recorded USING (turn_id)
               ORDER BY claimed.turn_id";

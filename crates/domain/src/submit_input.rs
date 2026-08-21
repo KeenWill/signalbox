@@ -1551,15 +1551,15 @@ pub struct SubmitInputInterruptedModelCallReconciliationConstructionInput {
     pub interrupt: crate::AppliedInterruptProof,
 }
 
-/// Named facts for an automatically reconciled ambiguous model-call source.
+/// Named facts for an automatically reconciled ambiguous-operation source.
 #[derive(Clone, Debug)]
-pub struct SubmitInputAutomaticModelCallReconciliationConstructionInput {
+pub struct SubmitInputAutomaticReconciliationConstructionInput {
     /// The canonical origin facts owned by the terminal source turn.
     pub origin: SubmitInputTurnOriginReconstitutionInput,
     /// The terminal source turn identity.
     pub turn: TurnId,
-    /// The unresolved model call requiring reconciliation.
-    pub ambiguous_call: crate::ModelCallId,
+    /// The unresolved physical operation requiring reconciliation.
+    pub ambiguous_operation: crate::IssuedOperationRef,
     /// The one-based durable automatic recovery attempt.
     pub attempt: std::num::NonZeroU32,
 }
@@ -1619,25 +1619,24 @@ impl SubmitInputTerminalSourceReconstitutionInput {
         })
     }
 
-    /// Supplies a terminal source whose exact ambiguous model call remained
+    /// Supplies a terminal source whose exact ambiguous operation remained
     /// unresolved after one daemon-owned durable recovery attempt.
-    pub fn automatic_model_call_reconciliation(
-        input: SubmitInputAutomaticModelCallReconciliationConstructionInput,
+    pub fn automatic_reconciliation(
+        input: SubmitInputAutomaticReconciliationConstructionInput,
     ) -> Self {
-        let SubmitInputAutomaticModelCallReconciliationConstructionInput {
+        let SubmitInputAutomaticReconciliationConstructionInput {
             origin,
             turn,
-            ambiguous_call,
+            ambiguous_operation,
             attempt,
         } = input;
-        let ambiguous_operations = crate::NonEmptyIssuedOperationRefs::singleton(
-            crate::IssuedOperationRef::ModelCall(ambiguous_call),
-        );
+        let ambiguous_operations =
+            crate::NonEmptyIssuedOperationRefs::singleton(ambiguous_operation);
         Self::new(SubmitInputTerminalSourceConstructionInput {
             origin,
             turn,
             disposition: TurnDisposition::ReconciliationRequired {
-                marker: crate::ReconciliationMarker::from_automatic_model_call_recovery(
+                marker: crate::ReconciliationMarker::from_automatic_recovery(
                     ambiguous_operations,
                     attempt,
                 ),
@@ -3522,7 +3521,7 @@ fn terminal_disposition_command(disposition: &TurnDisposition) -> Option<Durable
                     AppliedInterruptState::Applied { proof } => Some(proof.command()),
                 }
             }
-            ReconciliationReason::AutomaticModelCallRecovery { .. } => None,
+            ReconciliationReason::AutomaticRecovery { .. } => None,
         },
     }
 }
@@ -3542,7 +3541,7 @@ fn terminal_disposition_matches_turn(disposition: &TurnDisposition, turn: TurnId
                     AppliedInterruptState::Applied { proof } => proof.predecessor() == turn,
                 }
             }
-            ReconciliationReason::AutomaticModelCallRecovery { .. } => true,
+            ReconciliationReason::AutomaticRecovery { .. } => true,
         },
     }
 }

@@ -1512,6 +1512,106 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
     Ok(())
 }
 
+/// INV-006 / INV-025 / INV-029 / INV-037: the daemon's bounded recovery
+/// ledger terminalizes an exact tool ambiguity without inventing a user
+/// interrupt or erasing the physical outcome.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv006_inv025_inv029_inv037_automatic_tool_reconciliation_releases_the_slot()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x74d0;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "external-tool", "{}").await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let issuing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 23));
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 24)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || issuing_attempt,
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 25));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    let mut recovery_ids = FixedStartupScanIds::new([], []);
+    assert_ambiguous_tool_recovery(
+        PostgresStartupScanRepository::new(pool.clone())
+            .recover(
+                fixture.session,
+                signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 27)),
+                ),
+                &mut recovery_ids,
+            )
+            .await?,
+    );
+
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
+    let batch = repository.claim_due().await?;
+    assert_eq!(batch.claimed().len(), 1);
+    assert_eq!(
+        batch.claimed()[0].operation(),
+        AutomaticReconciliationOperation::ToolAttempt(tool_attempt)
+    );
+    assert_eq!(
+        repository.reconcile(batch.claimed()[0]).await?,
+        AutomaticReconciliationOutcome::Reconciled
+    );
+    let durable: (String, String, i32, i64) = sqlx::query_as(
+        "SELECT lifecycle.terminal_disposition_kind,
+                recovery.state_kind,
+                recovery.attempt_count,
+                (SELECT count(*)
+                   FROM automatic_reconciliation_attempt AS attempt
+                  WHERE attempt.turn_id = recovery.turn_id
+                    AND attempt.outcome_kind = 'reconciled')
+           FROM turn_lifecycle AS lifecycle
+           JOIN automatic_reconciliation AS recovery
+             ON recovery.turn_id = lifecycle.turn_id
+          WHERE lifecycle.turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        durable,
+        (
+            String::from("reconciliation_required"),
+            String::from("reconciled"),
+            1,
+            1
+        )
+    );
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("automatically reconciled tool ambiguity remains readable");
+    assert_eq!(
+        process_tool_reconciliation_operation(snapshot.turns()[0].state()),
+        (issuing_attempt, tool_attempt)
+    );
+    assert_eq!(closed_tool_request(snapshot.entries()), request);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-006 / INV-025 / INV-029 / INV-037: eligibility replays pending
 /// steering reclassified behind an interrupted ambiguous tool attempt without
 /// requiring that reconciliation predecessor to own a model call.
@@ -2039,7 +2139,11 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         ProcessTurnState::ActiveAwaitingToolRecovery {
             ended_attempt,
             recovery_attempt,
+            automatic_reconciliation_attempts,
+            operator_action_required,
         } if *ended_attempt == crash_continuation && *recovery_attempt == crash_attempt
+            && *automatic_reconciliation_attempts == 0
+            && !operator_action_required
     ));
     let pending_ambiguous_disposition: String = sqlx::query_scalar(
         "SELECT disposition_kind

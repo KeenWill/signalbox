@@ -11,6 +11,9 @@ version cross-link was re-verified through this PR
 The executor-failure containment contract is verified against this PR
 (`agent/executor-failure-turn-containment`).
 
+Bounded daemon-owned reconciliation of an ambiguous tool attempt is verified
+against this PR (`agent/daemon-live-tool-recovery-reconcile`).
+
 The session-delegation scheduling executor and daemon catalog composition are
 verified against PR #462 (`agent/delegation-runtime-daemon-v2`).
 
@@ -607,6 +610,15 @@ therefore leaves a provider-renderable conversation while the typed lifecycle
 and outbox boundaries retain the physical tool-attempt uncertainty instead of
 fabricating a model call or an execution result (INV-005, INV-006, INV-025,
 INV-029, INV-037).
+
+Without an interrupt, the daemon durably claims the same exact tool-attempt
+ambiguity through the automatic-reconciliation ledger. Under the session
+scheduler lock it rebuilds the complete batch, projects the same
+proposal-ordered result suffix, and terminalizes through the same tool
+reconciliation-required boundary. A concurrent authoritative transition wins and
+supersedes the claim. Infrastructure or integrity failures are recorded and
+retried with bounded backoff; after five attempts the wait stays visible with
+operator action required.
 
 The schema independently enforces no live tool attempt while the lifecycle is
 `awaiting_tool_approval`, at most one nonterminal tool attempt per turn,

@@ -13253,9 +13253,15 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
         ProcessTurnState::ActiveAwaitingToolRecovery {
             ended_attempt,
             recovery_attempt,
+            automatic_reconciliation_attempts,
+            operator_action_required,
         } => TurnState::ActiveAwaitingToolRecovery {
             ended_attempt_id: wire_uuid(ended_attempt.into_uuid()),
             recovery_tool_attempt_id: wire_uuid(recovery_attempt.into_uuid()),
+            automatic_reconciliation_attempts: CanonicalU64::new(u64::from(
+                *automatic_reconciliation_attempts,
+            )),
+            operator_action_required: *operator_action_required,
         },
         ProcessTurnState::ActiveAwaitingRunnerRecovery {
             runner,

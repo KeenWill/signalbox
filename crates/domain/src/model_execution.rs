@@ -4403,7 +4403,7 @@ pub(crate) fn apply_interrupt_to_recovery_wait(
     })
 }
 
-pub(crate) fn apply_automatic_model_call_reconciliation(
+pub(crate) fn apply_automatic_reconciliation(
     active_turn: ActivatedTurn,
     call: EndedModelCall,
     attempt: EndedTurnAttempt,
@@ -4445,7 +4445,7 @@ pub(crate) fn apply_automatic_model_call_reconciliation(
         Some(proof) => {
             ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations.clone(), *proof)
         }
-        None => ReconciliationMarker::from_automatic_model_call_recovery(
+        None => ReconciliationMarker::from_automatic_recovery(
             ambiguous_operations.clone(),
             recovery_attempt,
         ),
@@ -4754,6 +4754,88 @@ pub(crate) fn apply_interrupt_to_tool_recovery_wait(
     let (tool_result_entries, terminal_snapshot) = result_projection.into_parts();
     let marker =
         ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations.clone(), proof);
+    Ok(ReconciliationRequiredToolTurn {
+        session: active_turn.session(),
+        turn: active_turn.turn(),
+        tool_attempt,
+        attempt,
+        disposition: TurnDisposition::ReconciliationRequired { marker },
+        tool_result_entries,
+        terminal_snapshot,
+        reclassified_pending_steering,
+    })
+}
+
+pub(crate) fn apply_automatic_tool_reconciliation(
+    active_turn: ActivatedTurn,
+    wait: AwaitingToolRecovery,
+    tool_attempt: EndedToolAttempt,
+    attempt: EndedTurnAttempt,
+    result_projection: PreparedToolResultProjection,
+    recovery_attempt: std::num::NonZeroU32,
+    identities: AmbiguousModelCallTurnIdentities,
+) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError> {
+    let ActiveTurnPhase::AwaitingRecoveryDecision {
+        ambiguous_operations,
+        applied_interrupt,
+    } = active_turn.phase()
+    else {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    };
+    let attempt_end_matches = match attempt.end() {
+        AttemptEnd::WithoutStop { disposition } => {
+            applied_interrupt.is_none()
+                && matches!(
+                    disposition,
+                    UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost
+                )
+        }
+        AttemptEnd::AfterCancellation { cause, disposition } => {
+            applied_interrupt == &Some(*cause)
+                && matches!(
+                    disposition,
+                    CancellationStopDisposition::Ambiguous | CancellationStopDisposition::Lost
+                )
+        }
+        AttemptEnd::AfterFatalMismatch { .. } => false,
+    };
+    if ambiguous_operations.operation_count() != 1
+        || !ambiguous_operations.contains(crate::IssuedOperationRef::ToolAttempt(wait.attempt()))
+        || wait.session() != active_turn.session()
+        || wait.turn() != active_turn.turn()
+        || wait.producing_call() != result_projection.producing_call()
+        || wait.issuing_attempt() != attempt.id()
+        || wait.attempt() != tool_attempt.attempt()
+        || result_projection.turn() != active_turn.turn()
+        || wait.yielded_frontier() != result_projection.source_frontier()
+        || result_projection.snapshot().frontier().owning_session() != active_turn.session()
+        || result_projection.snapshot().frontier().snapshot() != identities.terminal_frontier
+        || !result_projection.entries().iter().any(|entry| {
+            entry.payload()
+                == &SemanticTranscriptEntryPayload::ToolClosed {
+                    request: tool_attempt.request(),
+                }
+        })
+        || tool_attempt.session() != active_turn.session()
+        || tool_attempt.turn() != active_turn.turn()
+        || tool_attempt.issuing_attempt() != attempt.id()
+        || tool_attempt.end() != &crate::ToolAttemptEnd::Ambiguous
+        || !attempt_end_matches
+    {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+    let reclassified_pending_steering =
+        reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
+    let (tool_result_entries, terminal_snapshot) = result_projection.into_parts();
+    let marker = match applied_interrupt {
+        Some(proof) => {
+            ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations.clone(), *proof)
+        }
+        None => ReconciliationMarker::from_automatic_recovery(
+            ambiguous_operations.clone(),
+            recovery_attempt,
+        ),
+    };
     Ok(ReconciliationRequiredToolTurn {
         session: active_turn.session(),
         turn: active_turn.turn(),

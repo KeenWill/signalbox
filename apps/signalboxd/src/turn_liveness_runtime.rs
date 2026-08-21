@@ -9,16 +9,17 @@
 use std::{collections::VecDeque, future::Future};
 
 use signalbox_application::{
-    ClaimedModelCallReconciliation, ClassifyOperatorFailure, ModelCallReconciliationOutcome,
-    StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessLedger,
-    TurnLivenessScanInterval, UuidV7StartupScanIdGenerator,
+    AutomaticReconciliationOperation, AutomaticReconciliationOutcome,
+    ClaimedAutomaticReconciliation, ClassifyOperatorFailure, StaleActiveTurnBound,
+    StaleTurnCandidate, StaleTurnOutcome, TurnLivenessLedger, TurnLivenessScanInterval,
+    UuidV7StartupScanIdGenerator,
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureIdentities, ContextFrontierId, SemanticTranscriptEntryId, SessionId,
 };
 use signalbox_persistence::{
-    model_call_reconciliation::{
-        ModelCallReconciliationRepositoryError, PostgresModelCallReconciliationRepository,
+    automatic_reconciliation::{
+        AutomaticReconciliationRepositoryError, PostgresAutomaticReconciliationRepository,
     },
     turn_liveness::{PostgresTurnLivenessRepository, TurnLivenessRepositoryError},
 };
@@ -294,7 +295,7 @@ enum TurnLivenessWake {
 #[derive(Clone, Debug)]
 pub struct TurnLivenessRuntime {
     repository: PostgresTurnLivenessRepository,
-    model_call_reconciliation: PostgresModelCallReconciliationRepository,
+    automatic_reconciliation: PostgresAutomaticReconciliationRepository,
     staleness_bound: StaleActiveTurnBound,
     scan_interval: TurnLivenessScanInterval,
 }
@@ -312,7 +313,7 @@ impl TurnLivenessRuntime {
     ) -> Self {
         Self {
             repository: PostgresTurnLivenessRepository::new(pool.clone()),
-            model_call_reconciliation: PostgresModelCallReconciliationRepository::new(pool.clone()),
+            automatic_reconciliation: PostgresAutomaticReconciliationRepository::new(pool.clone()),
             staleness_bound,
             scan_interval,
         }
@@ -342,12 +343,12 @@ impl TurnLivenessRuntime {
             self.scan_interval,
             slot_held_shutdown,
         );
-        let ambiguous_calls = run_ambiguous_model_call_watchdog(
-            self.model_call_reconciliation,
+        let ambiguous_operations = run_ambiguous_operation_watchdog(
+            self.automatic_reconciliation,
             self.scan_interval,
             shutdown,
         );
-        tokio::join!(quiescent, slot_held, ambiguous_calls);
+        tokio::join!(quiescent, slot_held, ambiguous_operations);
     }
 }
 
@@ -393,8 +394,8 @@ async fn run_slot_held_watchdog(
     }
 }
 
-async fn run_ambiguous_model_call_watchdog(
-    repository: PostgresModelCallReconciliationRepository,
+async fn run_ambiguous_operation_watchdog(
+    repository: PostgresAutomaticReconciliationRepository,
     scan_interval: TurnLivenessScanInterval,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -403,7 +404,7 @@ async fn run_ambiguous_model_call_watchdog(
     loop {
         match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
             TurnLivenessWake::Shutdown => return,
-            TurnLivenessWake::Scan => reconcile_ambiguous_model_calls(&repository).await,
+            TurnLivenessWake::Scan => reconcile_ambiguous_operations(&repository).await,
         }
     }
 }
@@ -523,48 +524,53 @@ fn report_slot_held_recovery_failure(
 }
 
 /// Claims and applies one bounded window of durable ambiguous-call work.
-async fn reconcile_ambiguous_model_calls(repository: &PostgresModelCallReconciliationRepository) {
+async fn reconcile_ambiguous_operations(repository: &PostgresAutomaticReconciliationRepository) {
     let batch = match timeout(RECOVERY_ATTEMPT_BOUND, repository.claim_due()).await {
         Ok(Ok(batch)) => batch,
         Ok(Err(error)) => {
-            report_model_call_reconciliation_failure("inventory", None, &error);
+            report_automatic_reconciliation_failure("inventory", None, &error);
             return;
         }
         Err(_) => {
-            report_model_call_reconciliation_timeout("inventory", None);
+            report_automatic_reconciliation_timeout("inventory", None);
             return;
         }
     };
     for exhausted in batch.exhausted() {
+        let (operation_kind, operation_id) = operation_log_fields(exhausted.operation());
         tracing::warn!(
-            cause_code = "model_call_reconciliation_exhausted",
+            cause_code = "automatic_reconciliation_exhausted",
             session_id = %exhausted.session().as_uuid(),
             turn_id = %exhausted.turn().as_uuid(),
-            model_call_id = %exhausted.call().as_uuid(),
-            attempt_budget = signalbox_application::ModelCallReconciliationAttempt::budget(),
-            "automatic model-call reconciliation exhausted; the turn remains visibly parked for an operator"
+            operation_kind,
+            operation_id = %operation_id,
+            attempt_budget = signalbox_application::AutomaticReconciliationAttempt::budget(),
+            "automatic operation reconciliation exhausted; the turn remains visibly parked for an operator"
         );
     }
     for claimed in batch.claimed() {
+        let (operation_kind, operation_id) = operation_log_fields(claimed.operation());
         match timeout(RECOVERY_ATTEMPT_BOUND, repository.reconcile(*claimed)).await {
-            Ok(Ok(ModelCallReconciliationOutcome::Reconciled)) => tracing::warn!(
+            Ok(Ok(AutomaticReconciliationOutcome::Reconciled)) => tracing::warn!(
                 cause_code = "model_call_automatically_reconciled",
                 session_id = %claimed.session().as_uuid(),
                 turn_id = %claimed.turn().as_uuid(),
-                model_call_id = %claimed.call().as_uuid(),
+                operation_kind,
+                operation_id = %operation_id,
                 attempt = claimed.attempt().get(),
-                "ambiguous model-call turn terminalized through automatic reconciliation"
+                "ambiguous-operation turn terminalized through automatic reconciliation"
             ),
-            Ok(Ok(ModelCallReconciliationOutcome::Superseded)) => tracing::info!(
-                cause_code = "model_call_reconciliation_superseded",
+            Ok(Ok(AutomaticReconciliationOutcome::Superseded)) => tracing::info!(
+                cause_code = "automatic_reconciliation_superseded",
                 session_id = %claimed.session().as_uuid(),
                 turn_id = %claimed.turn().as_uuid(),
-                model_call_id = %claimed.call().as_uuid(),
+                operation_kind,
+                operation_id = %operation_id,
                 attempt = claimed.attempt().get(),
                 "automatic reconciliation found that the ambiguity had moved on"
             ),
             Ok(Err(error)) => {
-                report_model_call_reconciliation_failure("attempt", Some(*claimed), &error);
+                report_automatic_reconciliation_failure("attempt", Some(*claimed), &error);
                 if !matches!(
                     error.operator_failure_class(),
                     signalbox_application::OperatorFailureClass::Infrastructure {
@@ -578,73 +584,90 @@ async fn reconcile_ambiguous_model_calls(repository: &PostgresModelCallReconcili
                     .await
                     {
                         Ok(Ok(())) => {}
-                        Ok(Err(record_error)) => report_model_call_reconciliation_failure(
+                        Ok(Err(record_error)) => report_automatic_reconciliation_failure(
                             "failure_record",
                             Some(*claimed),
                             &record_error,
                         ),
-                        Err(_) => report_model_call_reconciliation_timeout(
+                        Err(_) => report_automatic_reconciliation_timeout(
                             "failure_record",
                             Some(*claimed),
                         ),
                     }
                 }
             }
-            Err(_) => report_model_call_reconciliation_timeout("attempt", Some(*claimed)),
+            Err(_) => report_automatic_reconciliation_timeout("attempt", Some(*claimed)),
         }
     }
 }
 
-fn report_model_call_reconciliation_timeout(
+fn report_automatic_reconciliation_timeout(
     stage: &'static str,
-    claimed: Option<ClaimedModelCallReconciliation>,
+    claimed: Option<ClaimedAutomaticReconciliation>,
 ) {
     match claimed {
-        Some(claimed) => tracing::error!(
+        Some(claimed) => {
+            let (operation_kind, operation_id) = operation_log_fields(claimed.operation());
+            tracing::error!(
             failure_class = ?signalbox_application::OperatorFailureClass::Infrastructure { commit_ambiguous: true },
-            cause_code = "model_call_reconciliation_timed_out",
+            cause_code = "automatic_reconciliation_timed_out",
             stage,
             session_id = %claimed.session().as_uuid(),
             turn_id = %claimed.turn().as_uuid(),
-            model_call_id = %claimed.call().as_uuid(),
+            operation_kind,
+            operation_id = %operation_id,
             attempt = claimed.attempt().get(),
             attempt_bound_seconds = RECOVERY_ATTEMPT_BOUND.as_secs(),
-            "automatic model-call reconciliation exceeded its bound; the durable attempt remains recoverable"
-        ),
+            "automatic operation reconciliation exceeded its bound; the durable attempt remains recoverable"
+            )
+        }
         None => tracing::error!(
             failure_class = ?signalbox_application::OperatorFailureClass::Infrastructure { commit_ambiguous: true },
-            cause_code = "model_call_reconciliation_timed_out",
+            cause_code = "automatic_reconciliation_timed_out",
             stage,
             attempt_bound_seconds = RECOVERY_ATTEMPT_BOUND.as_secs(),
-            "automatic model-call reconciliation inventory exceeded its bound"
+            "automatic operation reconciliation inventory exceeded its bound"
         ),
     }
 }
 
-fn report_model_call_reconciliation_failure(
+fn report_automatic_reconciliation_failure(
     stage: &'static str,
-    claimed: Option<ClaimedModelCallReconciliation>,
-    error: &ModelCallReconciliationRepositoryError,
+    claimed: Option<ClaimedAutomaticReconciliation>,
+    error: &AutomaticReconciliationRepositoryError,
 ) {
     let failure_class = error.operator_failure_class();
     let cause_code = error.operator_failure_cause_code();
     match claimed {
-        Some(claimed) => tracing::error!(
+        Some(claimed) => {
+            let (operation_kind, operation_id) = operation_log_fields(claimed.operation());
+            tracing::error!(
             ?failure_class,
             cause_code,
             stage,
             session_id = %claimed.session().as_uuid(),
             turn_id = %claimed.turn().as_uuid(),
-            model_call_id = %claimed.call().as_uuid(),
+            operation_kind,
+            operation_id = %operation_id,
             attempt = claimed.attempt().get(),
-            "automatic model-call reconciliation failed; durable backoff remains authoritative"
-        ),
+            "automatic operation reconciliation failed; durable backoff remains authoritative"
+            )
+        }
         None => tracing::error!(
             ?failure_class,
             cause_code,
             stage,
-            "automatic model-call reconciliation inventory failed; the next watchdog scan retries"
+            "automatic operation reconciliation inventory failed; the next watchdog scan retries"
         ),
+    }
+}
+
+fn operation_log_fields(operation: AutomaticReconciliationOperation) -> (&'static str, Uuid) {
+    match operation {
+        AutomaticReconciliationOperation::ModelCall(call) => ("model_call", *call.as_uuid()),
+        AutomaticReconciliationOperation::ToolAttempt(attempt) => {
+            ("tool_attempt", *attempt.as_uuid())
+        }
     }
 }
 

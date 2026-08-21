@@ -1,7 +1,9 @@
 # Process protocol
 
 The bounded automatic model-call recovery status projected on active turns is
-verified against this PR (`agent/turn-lifecycle-hardening`).
+verified against this PR (`agent/turn-lifecycle-hardening`). Its tool-attempt
+counterpart is verified against this PR
+(`agent/daemon-live-tool-recovery-reconcile`).
 
 The typed runner-state session event, daemon outbox projection, authoritative
 session-summary and transcript-snapshot runner projections, and the runner
@@ -1823,8 +1825,9 @@ Each `transcript_turn` has `turn_id` and one of these closed `state` objects:
 
 The tool-bearing vocabulary adds
 `active_awaiting_tool_approval { tool_request_id }`,
-`active_awaiting_tool_recovery { ended_attempt_id, recovery_tool_attempt_id }`,
-and
+`active_awaiting_tool_recovery { ended_attempt_id, recovery_tool_attempt_id, automatic_reconciliation_attempts, operator_action_required }`,
+where the attempt count and operator flag have the same durable five-attempt
+meaning as the model-call recovery variant, and
 `tool_reconciliation_required { terminal_frontier_id, terminal_attempt_id, terminal_tool_attempt_id }`.
 The distinct tool variant avoids changing the older `reconciliation_required`
 object. The runner-bearing vocabulary additionally admits
@@ -2332,14 +2335,16 @@ lost-runner diagnostic naming replacement or `stop_turn` before abandonment. A
 model-call recovery wait is completed by bounded daemon reconciliation using the
 same terminal transition as `reconcile_turn`; the operator verb remains
 available to win that race and becomes required only when the projected
-`operator_action_required` field is true. A runner recovery wait has
-`stop_turn`, which terminalizes the parked turn as cancelled or
-reconciliation-required while preserving any tool ambiguity; the tool recovery
-wait still has no writer. An `active_awaiting_tool_approval` turn remains an
-ordinary nonterminal wait that `send` keeps waiting through;
-`decide_tool_request` is its resolving writer, issued from a second connection
-while the waiting client's transcript names the pending request and its
-proposing tool. A client disconnect never cancels model or tool work.
+`operator_action_required` field is true. A tool recovery wait uses the same
+durable budget and terminalizes through its proposal-ordered tool-reconciliation
+boundary; it becomes an operator park only after exhaustion. A runner recovery
+wait has `stop_turn`, which terminalizes the parked turn as cancelled or
+reconciliation-required while preserving any tool ambiguity. An
+`active_awaiting_tool_approval` turn remains an ordinary nonterminal wait that
+`send` keeps waiting through; `decide_tool_request` is its resolving writer,
+issued from a second connection while the waiting client's transcript names the
+pending request and its proposing tool. A client disconnect never cancels model
+or tool work.
 
 An `active_awaiting_child` turn is likewise a nonterminal wait. Its three
 identifiers are required together, and clients keep waiting until the delivered

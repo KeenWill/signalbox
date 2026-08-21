@@ -10,7 +10,7 @@
 
 use std::{collections::HashMap, error::Error, fmt, num::NonZeroU32, time::Duration};
 
-use signalbox_domain::{ModelCallId, SessionId, TurnAttemptId, TurnId};
+use signalbox_domain::{ModelCallId, SessionId, ToolAttemptId, TurnAttemptId, TurnId};
 use tokio::time::Instant;
 
 /// How long a turn's durable evidence may stand still before the turn is
@@ -25,21 +25,21 @@ const STALE_ACTIVE_TURN_BOUND: Duration = Duration::from_secs(30 * 60);
 /// How often turn liveness is reconsidered.
 // numeric-bound: tunable - controls the turn-liveness reconsideration cadence
 const BASELINE_TURN_LIVENESS_SCAN_INTERVAL: Duration = Duration::from_secs(60);
-/// Delay before a daemon first retries an ambiguous model-call reconciliation.
+/// Delay before a daemon first retries an ambiguous-operation reconciliation.
 // numeric-bound: tunable - controls the first automatic reconciliation retry delay
-const MODEL_CALL_RECONCILIATION_BASE_BACKOFF: Duration = Duration::from_secs(120);
-/// Longest delay between automatic ambiguous-call reconciliation attempts.
+const AUTOMATIC_RECONCILIATION_BASE_BACKOFF: Duration = Duration::from_secs(120);
+/// Longest delay between automatic ambiguous-operation reconciliation attempts.
 // numeric-bound: ceiling - bounds automatic reconciliation latency growth
-const MODEL_CALL_RECONCILIATION_BACKOFF_CAP: Duration = Duration::from_secs(1_800);
-/// Durable attempts one ambiguous model-call wait may spend automatically.
-// numeric-bound: ceiling - bounds automatic reconciliation work per ambiguous call
-const MODEL_CALL_RECONCILIATION_ATTEMPT_BUDGET: u32 = 5;
+const AUTOMATIC_RECONCILIATION_BACKOFF_CAP: Duration = Duration::from_secs(1_800);
+/// Durable attempts one ambiguous-operation wait may spend automatically.
+// numeric-bound: ceiling - bounds automatic reconciliation work per ambiguous operation
+const AUTOMATIC_RECONCILIATION_ATTEMPT_BUDGET: u32 = 5;
 
 /// One durable automatic reconciliation attempt.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ModelCallReconciliationAttempt(NonZeroU32);
+pub struct AutomaticReconciliationAttempt(NonZeroU32);
 
-impl ModelCallReconciliationAttempt {
+impl AutomaticReconciliationAttempt {
     /// Returns the first attempt.
     pub const fn first() -> Self {
         Self(NonZeroU32::MIN)
@@ -48,7 +48,7 @@ impl ModelCallReconciliationAttempt {
     /// Reconstitutes an admitted attempt ordinal.
     pub const fn try_from_u32(value: u32) -> Option<Self> {
         match NonZeroU32::new(value) {
-            Some(value) if value.get() <= MODEL_CALL_RECONCILIATION_ATTEMPT_BUDGET => {
+            Some(value) if value.get() <= AUTOMATIC_RECONCILIATION_ATTEMPT_BUDGET => {
                 Some(Self(value))
             }
             Some(_) | None => None,
@@ -62,9 +62,9 @@ impl ModelCallReconciliationAttempt {
 
     /// Returns the delay after this failed attempt before another is due.
     pub fn retry_backoff(self) -> Duration {
-        MODEL_CALL_RECONCILIATION_BASE_BACKOFF
+        AUTOMATIC_RECONCILIATION_BASE_BACKOFF
             .saturating_mul(2_u32.saturating_pow(self.get() - 1))
-            .min(MODEL_CALL_RECONCILIATION_BACKOFF_CAP)
+            .min(AUTOMATIC_RECONCILIATION_BACKOFF_CAP)
     }
 
     /// Returns the next admitted attempt, or `None` at the product budget.
@@ -74,34 +74,47 @@ impl ModelCallReconciliationAttempt {
 
     /// Returns the hard product attempt budget.
     pub const fn budget() -> u32 {
-        MODEL_CALL_RECONCILIATION_ATTEMPT_BUDGET
+        AUTOMATIC_RECONCILIATION_ATTEMPT_BUDGET
     }
+}
+
+/// The exact physical operation whose ambiguity owns a durable wait.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum AutomaticReconciliationOperation {
+    /// One physical provider call.
+    ModelCall(ModelCallId),
+    /// One physical tool attempt.
+    ToolAttempt(ToolAttemptId),
 }
 
 /// One claimed durable ambiguity reconciliation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ClaimedModelCallReconciliation {
+pub struct ClaimedAutomaticReconciliation {
     session: SessionId,
     turn: TurnId,
-    call: ModelCallId,
-    attempt: ModelCallReconciliationAttempt,
+    operation: AutomaticReconciliationOperation,
+    attempt: AutomaticReconciliationAttempt,
 }
 
 /// One ambiguity whose automatic attempt budget has just been exhausted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ExhaustedModelCallReconciliation {
+pub struct ExhaustedAutomaticReconciliation {
     session: SessionId,
     turn: TurnId,
-    call: ModelCallId,
+    operation: AutomaticReconciliationOperation,
 }
 
-impl ExhaustedModelCallReconciliation {
+impl ExhaustedAutomaticReconciliation {
     /// Records the exact exhausted wait.
-    pub const fn new(session: SessionId, turn: TurnId, call: ModelCallId) -> Self {
+    pub const fn new(
+        session: SessionId,
+        turn: TurnId,
+        operation: AutomaticReconciliationOperation,
+    ) -> Self {
         Self {
             session,
             turn,
-            call,
+            operation,
         }
     }
 
@@ -115,42 +128,42 @@ impl ExhaustedModelCallReconciliation {
         self.turn
     }
 
-    /// Returns the exact ambiguous call.
-    pub const fn call(self) -> ModelCallId {
-        self.call
+    /// Returns the exact ambiguous operation.
+    pub const fn operation(self) -> AutomaticReconciliationOperation {
+        self.operation
     }
 }
 
 /// One bounded discovery pass's claimed attempts and newly exhausted waits.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ModelCallReconciliationBatch {
-    claimed: Box<[ClaimedModelCallReconciliation]>,
-    exhausted: Box<[ExhaustedModelCallReconciliation]>,
+pub struct AutomaticReconciliationBatch {
+    claimed: Box<[ClaimedAutomaticReconciliation]>,
+    exhausted: Box<[ExhaustedAutomaticReconciliation]>,
 }
 
-impl ModelCallReconciliationBatch {
+impl AutomaticReconciliationBatch {
     /// Combines the durable outcomes of one discovery transaction.
     pub fn new(
-        claimed: Box<[ClaimedModelCallReconciliation]>,
-        exhausted: Box<[ExhaustedModelCallReconciliation]>,
+        claimed: Box<[ClaimedAutomaticReconciliation]>,
+        exhausted: Box<[ExhaustedAutomaticReconciliation]>,
     ) -> Self {
         Self { claimed, exhausted }
     }
 
     /// Borrows claimed attempts.
-    pub fn claimed(&self) -> &[ClaimedModelCallReconciliation] {
+    pub fn claimed(&self) -> &[ClaimedAutomaticReconciliation] {
         &self.claimed
     }
 
     /// Borrows waits newly parked for operator action.
-    pub fn exhausted(&self) -> &[ExhaustedModelCallReconciliation] {
+    pub fn exhausted(&self) -> &[ExhaustedAutomaticReconciliation] {
         &self.exhausted
     }
 }
 
 /// Closed durable failure class for one automatic reconciliation attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ModelCallReconciliationFailureKind {
+pub enum AutomaticReconciliationFailureKind {
     /// PostgreSQL prevented the attempt from reaching a durable decision.
     Infrastructure,
     /// Durable rows could not reconstruct the expected ambiguity exactly.
@@ -159,14 +172,14 @@ pub enum ModelCallReconciliationFailureKind {
 
 /// Durable result of applying one claimed automatic reconciliation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ModelCallReconciliationOutcome {
+pub enum AutomaticReconciliationOutcome {
     /// The exact ambiguous wait terminalized as reconciliation-required.
     Reconciled,
     /// Another authoritative transition changed or ended the wait first.
     Superseded,
 }
 
-impl ModelCallReconciliationFailureKind {
+impl AutomaticReconciliationFailureKind {
     /// Returns the closed storage token.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -176,18 +189,18 @@ impl ModelCallReconciliationFailureKind {
     }
 }
 
-impl ClaimedModelCallReconciliation {
+impl ClaimedAutomaticReconciliation {
     /// Reconstitutes one repository-claimed attempt.
     pub const fn new(
         session: SessionId,
         turn: TurnId,
-        call: ModelCallId,
-        attempt: ModelCallReconciliationAttempt,
+        operation: AutomaticReconciliationOperation,
+        attempt: AutomaticReconciliationAttempt,
     ) -> Self {
         Self {
             session,
             turn,
-            call,
+            operation,
             attempt,
         }
     }
@@ -202,13 +215,13 @@ impl ClaimedModelCallReconciliation {
         self.turn
     }
 
-    /// Returns the exact ambiguous model call.
-    pub const fn call(self) -> ModelCallId {
-        self.call
+    /// Returns the exact ambiguous operation.
+    pub const fn operation(self) -> AutomaticReconciliationOperation {
+        self.operation
     }
 
     /// Returns the durable attempt ordinal.
-    pub const fn attempt(self) -> ModelCallReconciliationAttempt {
+    pub const fn attempt(self) -> AutomaticReconciliationAttempt {
         self.attempt
     }
 }
@@ -487,7 +500,7 @@ impl TurnLivenessLedger {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelCallReconciliationAttempt, StaleActiveTurnBound, StaleTurnCandidate,
+        AutomaticReconciliationAttempt, StaleActiveTurnBound, StaleTurnCandidate,
         TurnLivenessBoundError, TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
     };
     use signalbox_domain::{SessionId, TurnAttemptId, TurnId};
@@ -564,21 +577,21 @@ mod tests {
     /// applies exponential backoff without exceeding the thirty-minute cap.
     #[test]
     fn ambiguous_model_call_reconciliation_has_a_bounded_retry_schedule() {
-        let first = ModelCallReconciliationAttempt::first();
+        let first = AutomaticReconciliationAttempt::first();
         let second = first.next().expect("the second attempt is admitted");
         let third = second.next().expect("the third attempt is admitted");
         let fourth = third.next().expect("the fourth attempt is admitted");
         let fifth = fourth.next().expect("the fifth attempt is admitted");
 
-        assert_eq!(ModelCallReconciliationAttempt::budget(), 5);
+        assert_eq!(AutomaticReconciliationAttempt::budget(), 5);
         assert_eq!(first.retry_backoff(), Duration::from_secs(120));
         assert_eq!(second.retry_backoff(), Duration::from_secs(240));
         assert_eq!(third.retry_backoff(), Duration::from_secs(480));
         assert_eq!(fourth.retry_backoff(), Duration::from_secs(960));
         assert_eq!(fifth.retry_backoff(), Duration::from_secs(1_800));
         assert_eq!(fifth.next(), None);
-        assert_eq!(ModelCallReconciliationAttempt::try_from_u32(0), None);
-        assert_eq!(ModelCallReconciliationAttempt::try_from_u32(6), None);
+        assert_eq!(AutomaticReconciliationAttempt::try_from_u32(0), None);
+        assert_eq!(AutomaticReconciliationAttempt::try_from_u32(6), None);
     }
 
     /// A turn seen for the first time is never due, however long the daemon

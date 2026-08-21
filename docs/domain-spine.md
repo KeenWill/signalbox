@@ -2515,8 +2515,8 @@ pub struct SubmitInputTerminalSourceConstructionInput {
 pub struct SubmitInputInterruptedModelCallReconciliationConstructionInput {
     /* public named canonical origin, turn, ambiguous call, and interrupt facts */
 }
-pub struct SubmitInputAutomaticModelCallReconciliationConstructionInput {
-    /* public named canonical origin, turn, ambiguous call, and recovery-attempt facts */
+pub struct SubmitInputAutomaticReconciliationConstructionInput {
+    /* public named canonical origin, turn, ambiguous operation, and recovery-attempt facts */
 }
 pub struct SubmitInputInterruptedToolReconciliationConstructionInput {
     /* public named canonical origin, turn, ambiguous attempt, and interrupt facts */
@@ -2526,8 +2526,8 @@ impl SubmitInputTerminalSourceReconstitutionInput {
     pub fn interrupted_model_call_reconciliation(
         input: SubmitInputInterruptedModelCallReconciliationConstructionInput,
     ) -> Self;
-    pub fn automatic_model_call_reconciliation(
-        input: SubmitInputAutomaticModelCallReconciliationConstructionInput,
+    pub fn automatic_reconciliation(
+        input: SubmitInputAutomaticReconciliationConstructionInput,
     ) -> Self;
     pub fn interrupted_tool_reconciliation(
         input: SubmitInputInterruptedToolReconciliationConstructionInput,
@@ -2817,7 +2817,7 @@ pub enum ReconciliationReason {
     UserChoseReconciliation { decision: AppliedStopForReconciliationProof },
     InterruptRequiresReconciliation { interrupt: AppliedInterruptProof },
     FatalMismatchRequiresReconciliation { causes: FatalMismatchStopCauses },
-    AutomaticModelCallRecovery { attempt: NonZeroU32 },
+    AutomaticRecovery { attempt: NonZeroU32 },
 }
 
 pub struct ReconciliationMarker { /* private */ }
@@ -2898,7 +2898,7 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         reconciling_attempt: TurnAttemptId,
         reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
         ambiguous_call: ModelCallId,
-        authority: ModelCallReconciliationAuthority,
+        authority: AutomaticReconciliationAuthority,
         terminal_frontier: ContextFrontierId,
     },
     TerminalToolReconciliationRequired {
@@ -2906,13 +2906,13 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         starting_frontier: ContextFrontierId,
         reconciling_attempt: TurnAttemptId,
         reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
-        ambiguous_tool: AwaitingToolRecovery,
-        interrupt: AppliedInterruptCommandResult,
+        tool_batch: ToolBatch,
+        authority: AutomaticReconciliationAuthority,
         terminal_frontier: ContextFrontierId,
     },
 }
 
-pub enum ModelCallReconciliationAuthority {
+pub enum AutomaticReconciliationAuthority {
     AppliedInterrupt(AppliedInterruptCommandResult),
     AutomaticRecovery { attempt: NonZeroU32 },
 }
@@ -3415,11 +3415,19 @@ impl AcceptedInputSchedulingProjection {
         interrupt: AppliedInterruptCommandResult,
         identities: AmbiguousModelCallTurnIdentities,
     ) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
-    pub fn apply_automatic_model_call_reconciliation(
+    pub fn apply_automatic_reconciliation(
         self,
         attempt: NonZeroU32,
         identities: AmbiguousModelCallTurnIdentities,
     ) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
+    pub fn apply_automatic_tool_reconciliation(
+        self,
+        wait: AwaitingToolRecovery,
+        tool_attempt: EndedToolAttempt,
+        result_projection: PreparedToolResultProjection,
+        recovery_attempt: NonZeroU32,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
     pub fn apply_interrupt_to_runner_recovery(
         self,
         source_snapshot: ResolvedContextFrontierSnapshot,
@@ -8948,8 +8956,8 @@ pub trait ToolExecutionTransaction {
 ## application: turn_liveness
 
 ```rust
-pub struct ModelCallReconciliationAttempt(/* private */);
-impl ModelCallReconciliationAttempt {
+pub struct AutomaticReconciliationAttempt(/* private */);
+impl AutomaticReconciliationAttempt {
     pub const fn first() -> Self;
     pub const fn try_from_u32(value: u32) -> Option<Self>;
     pub const fn get(self) -> u32;
@@ -8958,42 +8966,51 @@ impl ModelCallReconciliationAttempt {
     pub const fn budget() -> u32;
 }
 
-pub struct ClaimedModelCallReconciliation { /* private */ }
-impl ClaimedModelCallReconciliation {
+pub enum AutomaticReconciliationOperation {
+    ModelCall(ModelCallId),
+    ToolAttempt(ToolAttemptId),
+}
+
+pub struct ClaimedAutomaticReconciliation { /* private */ }
+impl ClaimedAutomaticReconciliation {
     pub const fn new(
         session: SessionId,
         turn: TurnId,
-        call: ModelCallId,
-        attempt: ModelCallReconciliationAttempt,
+        operation: AutomaticReconciliationOperation,
+        attempt: AutomaticReconciliationAttempt,
     ) -> Self;
-    // accessors: session(), turn(), call(), attempt()
+    // accessors: session(), turn(), operation(), attempt()
 }
 
-pub struct ExhaustedModelCallReconciliation { /* private */ }
-impl ExhaustedModelCallReconciliation {
-    pub const fn new(session: SessionId, turn: TurnId, call: ModelCallId) -> Self;
-    // accessors: session(), turn(), call()
+pub struct ExhaustedAutomaticReconciliation { /* private */ }
+impl ExhaustedAutomaticReconciliation {
+    pub const fn new(
+        session: SessionId,
+        turn: TurnId,
+        operation: AutomaticReconciliationOperation,
+    ) -> Self;
+    // accessors: session(), turn(), operation()
 }
 
-pub struct ModelCallReconciliationBatch { /* private */ }
-impl ModelCallReconciliationBatch {
+pub struct AutomaticReconciliationBatch { /* private */ }
+impl AutomaticReconciliationBatch {
     pub fn new(
-        claimed: Box<[ClaimedModelCallReconciliation]>,
-        exhausted: Box<[ExhaustedModelCallReconciliation]>,
+        claimed: Box<[ClaimedAutomaticReconciliation]>,
+        exhausted: Box<[ExhaustedAutomaticReconciliation]>,
     ) -> Self;
-    pub fn claimed(&self) -> &[ClaimedModelCallReconciliation];
-    pub fn exhausted(&self) -> &[ExhaustedModelCallReconciliation];
+    pub fn claimed(&self) -> &[ClaimedAutomaticReconciliation];
+    pub fn exhausted(&self) -> &[ExhaustedAutomaticReconciliation];
 }
 
-pub enum ModelCallReconciliationFailureKind {
+pub enum AutomaticReconciliationFailureKind {
     Infrastructure,
     Integrity,
 }
-impl ModelCallReconciliationFailureKind {
+impl AutomaticReconciliationFailureKind {
     pub const fn as_str(self) -> &'static str;
 }
 
-pub enum ModelCallReconciliationOutcome {
+pub enum AutomaticReconciliationOutcome {
     Reconciled,
     Superseded,
 }
@@ -11183,5 +11200,5 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
-| application: turn_liveness                         | 13                               |
-| **signalbox-application total**                    | **306 (+6 free fn)**             |
+| application: turn_liveness                         | 14                               |
+| **signalbox-application total**                    | **307 (+6 free fn)**             |
