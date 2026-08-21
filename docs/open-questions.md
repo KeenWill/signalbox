@@ -87,8 +87,9 @@ also require owner rulings:
   Retention and deletion of observations admitted to the approval corpus remain
   owned by Corpus governance above.
 
-- **Configuration actor audit.** Whether source-control and deployment audit are
-  sufficient provenance for threshold changes, or Signalbox needs an
+- **Configuration actor audit.** If trusted outcome derivation introduces
+  mutable threshold configuration, whether source-control and deployment audit
+  are sufficient provenance for changes to it, or Signalbox needs an
   authenticated configuration-change command, remains open.
 
 ### Further projection and summarization
