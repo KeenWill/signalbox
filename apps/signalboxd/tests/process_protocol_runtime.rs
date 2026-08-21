@@ -2222,6 +2222,8 @@ fn completed_script(provider_model: &str, text: &str, usage: TokenUsage) -> Scri
 const FLEET_SESSION_COUNT: usize = 16;
 // numeric-bound: test deadline - keeps each fault probe inside one CI minute
 const FLEET_ASSERTION_BOUND: Duration = Duration::from_secs(2);
+// numeric-bound: test setup - admits contended CI scheduling without weakening assertions
+const FLEET_SETUP_BOUND: Duration = Duration::from_secs(60);
 const FLEET_ENFORCEMENT_ENV: &str = "SIGNALBOX_ENFORCE_FLEET_LIVENESS";
 
 struct FleetPrepared {
@@ -2386,7 +2388,7 @@ fn start_fleet_scheduler(
 }
 
 async fn wait_for_hangs(model: &FleetScriptedModel, expected: usize) -> Result<(), Box<dyn Error>> {
-    timeout(FLEET_ASSERTION_BOUND, async {
+    timeout(FLEET_SETUP_BOUND, async {
         while model.in_flight_hangs() != expected {
             tokio::task::yield_now().await;
         }
