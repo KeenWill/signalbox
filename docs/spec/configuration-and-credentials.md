@@ -1,7 +1,9 @@
 # Configuration and credentials
 
 The browser HTTP listener, same-origin static assets, and generated contract
-bootstrap are verified against this PR (`agent/web-http-transport`).
+bootstrap are verified against this PR (`agent/web-http-transport`). The
+fleet-attention snapshot and monitor stream are verified against this PR
+(`agent/web-attention-projections`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -177,6 +179,32 @@ capabilities, and the effective 65,536-byte JSON-body and NDJSON-item hard
 ceilings. The generated browser decoder rejects an unknown field, wrong shape,
 different family, or different version rather than interpreting it as the local
 process protocol. No process-protocol frame is a browser DTO.
+
+`GET /api/attention` returns at most 64 session summaries from one read-only
+repeatable-read snapshot, ordered by session identity. A continuation names the
+last session identity and opens the next keyset page; it is not a count-based or
+fixed-tail feed. Each summary carries the current turn classification, exact
+operator action when one is owed, a typed blocked-goal reason and a need summary
+of at most 128 Unicode scalar values, approval-judge outcome counts, and the
+last transaction-timestamped durable activity fact. Exact blocked-goal need text
+remains available from the session detail read rather than entering the hot
+fleet page.
+
+Runner loss, recovery ambiguity, reconciliation, approval wait, blocked goal,
+active, queued, and idle remain distinct states. The projection uses one set
+query over the selected identities and never constructs the fleet by following
+individual sessions.
+
+`GET /api/attention/follow` begins with the first coherent attention page and
+its durable change-journal cursor, then emits summary replacements only for
+changed session identities. One incremental read examines at most 128 journal
+records. A larger cursor gap emits `resync_required` with the current cursor and
+ends that stream; it never skips records or continues from a partial gap. The
+HTTP producer retains only the item currently being encoded and waits between
+empty polls. An initial projection failure returns a typed HTTP error before
+streaming begins. The append-only change journal timestamps commits explicitly;
+historical creation is seeded only from the durable command claim time and never
+inferred from UUID bits.
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and
