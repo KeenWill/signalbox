@@ -70,6 +70,12 @@ const MAX_WORKING_DIRECTORY_CHARACTERS: usize = 4096;
 const MAX_WORKING_DIRECTORY_BYTES: usize = MAX_WORKING_DIRECTORY_CHARACTERS * 4;
 const MAX_SANDBOX_ENVIRONMENT_NAME_BYTES: usize = 4096;
 const MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES: usize = 64 * 1024;
+#[cfg(target_os = "linux")]
+const MIN_LINUX_ARG_MAX_BYTES: usize = 128 * 1024;
+#[cfg(target_os = "linux")]
+const SANDBOX_ENVIRONMENT_PROBE_NAME: &str = "SIGNALBOX_ENVIRONMENT_PROBE";
+#[cfg(target_os = "linux")]
+const SANDBOX_ENVIRONMENT_PROBE_VALUE: &str = "probe";
 pub(crate) const EXEC_CAPTURE_BYTES: usize = 64 * 1024;
 const PROCESS_CAPTURE_BYTES_LIMIT: usize = 1024 * 1024;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded direct-command arguments";
@@ -201,7 +207,7 @@ impl Error for InvalidSandboxEnvironmentVariable {}
 /// Refusal before an explicit environment value can reach a restricted run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SandboxEnvironmentRunError {
-    /// The direct-command arguments are outside their fixed bounds.
+    /// The direct-command arguments or combined launch payload exceed their bounds.
     Arguments,
     /// Explicit environment delivery was requested for a non-runner profile.
     UnsupportedProfile,
@@ -668,6 +674,14 @@ impl SandboxEnvironmentDelivery {
         Ok(Self {
             name: environment.name,
             descriptor,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn try_probe() -> Result<Self, ()> {
+        Self::try_new(SandboxEnvironmentVariable {
+            name: OsString::from(SANDBOX_ENVIRONMENT_PROBE_NAME),
+            value: OsString::from(SANDBOX_ENVIRONMENT_PROBE_VALUE),
         })
     }
 
@@ -1188,10 +1202,36 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         ) {
             return Err(SandboxEnvironmentRunError::UnsupportedProfile);
         }
+        #[cfg(target_os = "linux")]
+        if !sandbox_environment_fits_linux_arg_max(
+            &arguments,
+            &environment,
+            &self.mount_profile.executable_path(&self.workspace_root),
+            matches!(
+                self.mount_profile.as_ref(),
+                SandboxMountProfile::RunnerRestricted {
+                    https_broker: Some(_),
+                    ..
+                }
+            ),
+        ) {
+            return Err(SandboxEnvironmentRunError::Arguments);
+        }
         let environment = SandboxEnvironmentDelivery::try_new(environment)
             .map_err(|()| SandboxEnvironmentRunError::Delivery)?;
+        #[cfg(target_os = "linux")]
+        let probe_environment = SandboxEnvironmentDelivery::try_probe()
+            .map_err(|()| SandboxEnvironmentRunError::Delivery)?;
         Ok(self
-            .run_with_capture_environment(arguments, EXEC_CAPTURE_BYTES, Some(&environment))
+            .run_with_capture_environment(
+                arguments,
+                EXEC_CAPTURE_BYTES,
+                Some(&environment),
+                #[cfg(target_os = "linux")]
+                Some(&probe_environment),
+                #[cfg(not(target_os = "linux"))]
+                None,
+            )
             .await)
     }
 
@@ -1222,8 +1262,14 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         requested_timeout: Duration,
         capture_bytes: usize,
     ) -> ExecResult {
-        self.run_with_capture_environment_timeout(arguments, requested_timeout, capture_bytes, None)
-            .await
+        self.run_with_capture_environment_timeout(
+            arguments,
+            requested_timeout,
+            capture_bytes,
+            None,
+            None,
+        )
+        .await
     }
 
     async fn run_with_capture_environment(
@@ -1231,6 +1277,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         arguments: ExecArguments,
         capture_bytes: usize,
         environment: Option<&SandboxEnvironmentDelivery>,
+        probe_environment: Option<&SandboxEnvironmentDelivery>,
     ) -> ExecResult {
         let requested_timeout = Duration::from_secs(arguments.timeout_seconds);
         self.run_with_capture_environment_timeout(
@@ -1238,6 +1285,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
             requested_timeout,
             capture_bytes,
             environment,
+            probe_environment,
         )
         .await
     }
@@ -1248,6 +1296,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         requested_timeout: Duration,
         capture_bytes: usize,
         environment: Option<&SandboxEnvironmentDelivery>,
+        probe_environment: Option<&SandboxEnvironmentDelivery>,
     ) -> ExecResult {
         let deadline = tokio::time::Instant::now() + requested_timeout;
         if !self.mount_profile.identities_are_current() {
@@ -1313,7 +1362,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 working_directory: ".",
                 timeout: probe_timeout,
                 capture_bytes: 8 * 1024,
-                environment: None,
+                environment: probe_environment,
             },
             SandboxRequestProfile {
                 mounts: &self.mount_profile,
@@ -1808,6 +1857,64 @@ impl<Runner: ProcessRunner> CommandExecution for SandboxedCommandRunner<Runner> 
     async fn execute(&mut self, arguments: ExecArguments) -> ExecResult {
         self.run_with_capture(arguments, EXEC_CAPTURE_BYTES).await
     }
+}
+
+#[cfg(target_os = "linux")]
+fn sandbox_environment_fits_linux_arg_max(
+    arguments: &ExecArguments,
+    environment: &SandboxEnvironmentVariable,
+    executable_path: &std::ffi::OsStr,
+    https_broker: bool,
+) -> bool {
+    fn string_bytes(value: &[u8]) -> usize {
+        value.len().saturating_add(1)
+    }
+
+    fn environment_bytes(name: &[u8], value: &[u8]) -> usize {
+        name.len()
+            .saturating_add(1)
+            .saturating_add(value.len())
+            .saturating_add(1)
+    }
+
+    let argument_strings = string_bytes(arguments.program.as_bytes()).saturating_add(
+        arguments
+            .arguments
+            .iter()
+            .map(|argument| string_bytes(argument.as_bytes()))
+            .sum::<usize>(),
+    );
+    let mut environment_strings = environment_bytes(b"HOME", SANDBOX_WORKSPACE.as_bytes())
+        .saturating_add(environment_bytes(b"LANG", b"C.UTF-8"))
+        .saturating_add(environment_bytes(b"LC_ALL", b"C.UTF-8"))
+        .saturating_add(environment_bytes(b"PATH", executable_path.as_bytes()))
+        .saturating_add(environment_bytes(
+            environment.name.as_bytes(),
+            environment.value.as_bytes(),
+        ));
+    let mut environment_count = 5_usize;
+    if https_broker {
+        environment_strings = environment_strings
+            .saturating_add(environment_bytes(
+                b"HTTPS_PROXY",
+                SANDBOX_HTTPS_PROXY.as_bytes(),
+            ))
+            .saturating_add(environment_bytes(
+                b"https_proxy",
+                SANDBOX_HTTPS_PROXY.as_bytes(),
+            ));
+        environment_count = environment_count.saturating_add(2);
+    }
+    let pointer_bytes = (1_usize
+        .saturating_add(arguments.arguments.len())
+        .saturating_add(environment_count)
+        .saturating_add(2))
+    .saturating_mul(std::mem::size_of::<usize>());
+
+    argument_strings
+        .saturating_add(environment_strings)
+        .saturating_add(pointer_bytes)
+        < MIN_LINUX_ARG_MAX_BYTES
 }
 
 /// Unsandboxed command service reusable by its tool executor.
@@ -5074,6 +5181,78 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    async fn runner_environment_probe_uses_a_non_secret_private_file() -> Result<(), Box<dyn Error>>
+    {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new_runner_restricted(
+            runner,
+            workspace.path(),
+            &[read_only.path().to_owned()],
+        )?;
+        let arguments = ExecArguments {
+            program: String::from("fixture-program"),
+            arguments: Vec::new(),
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let environment = SandboxEnvironmentVariable::try_new(
+            String::from(SYNTHETIC_ENVIRONMENT_NAME),
+            String::from(SYNTHETIC_ENVIRONMENT_VALUE),
+        )?;
+        let private_file_prefix = [
+            OsString::from("--perms"),
+            OsString::from("0600"),
+            OsString::from("--file"),
+        ];
+
+        command_runner
+            .try_run_with_environment(arguments, environment)
+            .await?;
+        let probes = observation.recorded_probes();
+        let probe = probes
+            .first()
+            .ok_or_else(|| std::io::Error::other("one sandbox probe"))?;
+        let private_file_arguments = probe
+            .arguments
+            .windows(5)
+            .find(|arguments| {
+                arguments.starts_with(&private_file_prefix)
+                    && arguments[4] == SANDBOX_ENVIRONMENT_FILE
+            })
+            .ok_or_else(|| std::io::Error::other("one probe environment file"))?;
+
+        assert!(
+            private_file_arguments[3]
+                .to_string_lossy()
+                .parse::<i32>()
+                .is_ok()
+        );
+        assert!(
+            probe
+                .arguments
+                .contains(&OsString::from(SANDBOX_ENVIRONMENT_PROBE_NAME))
+        );
+        assert!(
+            !probe
+                .arguments
+                .contains(&OsString::from(SYNTHETIC_ENVIRONMENT_NAME))
+        );
+        assert!(
+            !probe
+                .arguments
+                .contains(&OsString::from(SYNTHETIC_ENVIRONMENT_VALUE))
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
     async fn daemon_local_profile_cannot_receive_an_explicit_environment_value()
     -> Result<(), Box<dyn Error>> {
         let workspace = ReplacementWorkspace::new()?;
@@ -5143,6 +5322,44 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn runner_environment_rejects_an_oversized_launch_payload_before_the_probe()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let read_only = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(SANDBOXED_STDOUT.as_bytes()),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new_runner_restricted(
+            runner,
+            workspace.path(),
+            &[read_only.path().to_owned()],
+        )?;
+        let arguments = ExecArguments {
+            program: "🦀".repeat(MAX_PROGRAM_CHARACTERS),
+            arguments: vec!["🦀".repeat(MAX_ARGUMENT_CHARACTERS); MAX_ARGUMENTS],
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+        let environment = SandboxEnvironmentVariable::try_new(
+            "A".repeat(MAX_SANDBOX_ENVIRONMENT_NAME_BYTES),
+            "s".repeat(MAX_SANDBOX_ENVIRONMENT_VALUE_BYTES),
+        )?;
+
+        let error = command_runner
+            .try_run_with_environment(arguments, environment)
+            .await
+            .expect_err("an oversized launch payload cannot reach the sandbox probe");
+
+        assert_eq!(error, SandboxEnvironmentRunError::Arguments);
+        assert_eq!(observation.recorded_probes(), Vec::new());
+        assert_eq!(observation.recorded_requests(), Vec::new());
+        Ok(())
+    }
+
     #[test]
     fn sandbox_environment_debug_output_redacts_the_value() {
         let environment = SandboxEnvironmentVariable::try_new(
@@ -5205,6 +5422,18 @@ mod tests {
             String::from("PATH"),
             String::from(SYNTHETIC_ENVIRONMENT_VALUE),
         );
+        assert_eq!(home, Err(InvalidSandboxEnvironmentVariable::ReservedName));
+        assert_eq!(
+            https_proxy,
+            Err(InvalidSandboxEnvironmentVariable::ReservedName)
+        );
+        assert_eq!(lang, Err(InvalidSandboxEnvironmentVariable::ReservedName));
+        assert_eq!(locale, Err(InvalidSandboxEnvironmentVariable::ReservedName));
+        assert_eq!(path, Err(InvalidSandboxEnvironmentVariable::ReservedName));
+    }
+
+    #[test]
+    fn sandbox_environment_rejects_loader_control_names() {
         let loader_preload = SandboxEnvironmentVariable::try_new(
             String::from("LD_PRELOAD"),
             String::from(SYNTHETIC_ENVIRONMENT_VALUE),
@@ -5214,14 +5443,6 @@ mod tests {
             String::from(SYNTHETIC_ENVIRONMENT_VALUE),
         );
 
-        assert_eq!(home, Err(InvalidSandboxEnvironmentVariable::ReservedName));
-        assert_eq!(
-            https_proxy,
-            Err(InvalidSandboxEnvironmentVariable::ReservedName)
-        );
-        assert_eq!(lang, Err(InvalidSandboxEnvironmentVariable::ReservedName));
-        assert_eq!(locale, Err(InvalidSandboxEnvironmentVariable::ReservedName));
-        assert_eq!(path, Err(InvalidSandboxEnvironmentVariable::ReservedName));
         assert_eq!(
             loader_preload,
             Err(InvalidSandboxEnvironmentVariable::ReservedName)
