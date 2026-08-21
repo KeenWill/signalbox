@@ -10,6 +10,7 @@ CREATE TABLE evaluation_corpus (
     source_kind text COLLATE "C" NOT NULL,
     source_repository text,
     source_path text,
+    source_sha256 bytea,
     source_blob_store text COLLATE "C",
     source_blob_digest bytea,
     source_blob_byte_length numeric(20, 0),
@@ -39,6 +40,8 @@ CREATE TABLE evaluation_corpus (
                 AND octet_length(source_repository) BETWEEN 1 AND 2048
                 AND source_path IS NOT NULL
                 AND octet_length(source_path) BETWEEN 1 AND 1024
+                AND source_sha256 IS NOT NULL
+                AND octet_length(source_sha256) = 32
                 AND source_blob_store IS NULL
                 AND source_blob_digest IS NULL
                 AND source_blob_byte_length IS NULL
@@ -47,6 +50,7 @@ CREATE TABLE evaluation_corpus (
                 source_kind = 'database_native'
                 AND source_repository IS NULL
                 AND source_path IS NULL
+                AND source_sha256 IS NULL
                 AND source_blob_store IS NULL
                 AND source_blob_digest IS NULL
                 AND source_blob_byte_length IS NULL
@@ -55,6 +59,7 @@ CREATE TABLE evaluation_corpus (
                 source_kind = 'blob_reference'
                 AND source_repository IS NULL
                 AND source_path IS NULL
+                AND source_sha256 IS NULL
                 AND (
                     source_blob_store IS NULL
                     OR octet_length(source_blob_store) BETWEEN 1 AND 64

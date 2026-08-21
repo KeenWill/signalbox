@@ -123,6 +123,34 @@ async fn repeated_manifest_import_is_idempotent() -> Result<(), Box<dyn Error>> 
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_import_conflicts_on_changed_source_identity() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let database = DatabaseCorpusStore::new(pool.clone());
+    let imported = database.import_manifest(seed_manifest_path()).await?;
+    sqlx::query(
+        "UPDATE evaluation_corpus
+            SET source_sha256 = decode(repeat('00', 32), 'hex')
+          WHERE corpus_name = $1 AND corpus_version = $2",
+    )
+    .bind(&imported.key().name)
+    .bind(&imported.key().version)
+    .execute(&pool)
+    .await?;
+
+    let error = database
+        .import_manifest(seed_manifest_path())
+        .await
+        .expect_err("a different durable source identity conflicts");
+
+    assert!(error.to_string().contains("conflicts"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn blob_source_constraint_requires_digest() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
 

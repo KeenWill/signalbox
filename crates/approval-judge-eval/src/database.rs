@@ -37,7 +37,9 @@ impl DatabaseCorpusStore {
         manifest_path: impl AsRef<Path>,
     ) -> Result<CorpusRegistration, CorpusStoreError> {
         let loaded = load_manifest_corpus(manifest_path).map_err(CorpusStoreError::Manifest)?;
-        self.put_verified(loaded.registration, &loaded.corpus).await
+        let source_sha256 = loaded.manifest.integrity.source_sha256;
+        self.put_verified(loaded.registration, &loaded.corpus, source_sha256)
+            .await
     }
 
     /// Stores database-native cases and their registration metadata atomically.
@@ -55,13 +57,14 @@ impl DatabaseCorpusStore {
                 return Err(CorpusStoreError::BlobBackendUnavailable);
             }
         }
-        self.put_verified(registration, corpus).await
+        self.put_verified(registration, corpus, None).await
     }
 
     async fn put_verified(
         &self,
         registration: CorpusRegistration,
         corpus: &ApprovalJudgeCorpus,
+        source_sha256: Option<Sha256Digest>,
     ) -> Result<CorpusRegistration, CorpusStoreError> {
         validate_registration(&registration, corpus)?;
         let replay_sha256 = replay_digest(corpus)?;
@@ -77,9 +80,9 @@ impl DatabaseCorpusStore {
         let inserted = sqlx::query(
             "INSERT INTO evaluation_corpus (
                 corpus_name, corpus_version, format_version, corpus_digest, replay_digest,
-                case_count, source_kind, source_repository, source_path, source_blob_store,
-                source_blob_digest, source_blob_byte_length
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::numeric)
+                case_count, source_kind, source_repository, source_path, source_sha256,
+                source_blob_store, source_blob_digest, source_blob_byte_length
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::numeric)
              ON CONFLICT (corpus_name, corpus_version) DO NOTHING",
         )
         .bind(&registration.key().name)
@@ -91,6 +94,7 @@ impl DatabaseCorpusStore {
         .bind(source_kind)
         .bind(repository)
         .bind(path)
+        .bind(source_sha256.map(|digest| digest.as_bytes().to_vec()))
         .bind(blob_store)
         .bind(blob_digest)
         .bind(blob_byte_length)
@@ -100,6 +104,11 @@ impl DatabaseCorpusStore {
 
         if inserted == 0 {
             transaction.rollback().await?;
+            if self.source_sha256(registration.key()).await? != source_sha256 {
+                return Err(CorpusStoreError::CorruptRegistration(
+                    CorpusStoreCorruption::RegistrationConflict,
+                ));
+            }
             let existing = self.registration(registration.key()).await?;
             if existing == registration {
                 let loaded = self.load_owned(registration.key()).await?;
@@ -133,6 +142,23 @@ impl DatabaseCorpusStore {
         }
         transaction.commit().await?;
         Ok(registration)
+    }
+
+    async fn source_sha256(
+        &self,
+        key: &CorpusKey,
+    ) -> Result<Option<Sha256Digest>, CorpusStoreError> {
+        let bytes: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT source_sha256
+               FROM evaluation_corpus
+              WHERE corpus_name = $1 AND corpus_version = $2",
+        )
+        .bind(&key.name)
+        .bind(&key.version)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+        bytes.as_deref().map(decode_digest).transpose()
     }
 
     /// Returns one registration or a typed not-found result.
