@@ -4,6 +4,7 @@
 //! depending inward on `signalbox-domain`.
 
 mod approval_judge;
+mod commissioned_dispatch;
 mod conversation_import;
 mod create_session;
 mod create_session_from_imported_frontier;
@@ -27,9 +28,20 @@ mod tool_dispatch_gate;
 mod tool_execution_test_support;
 mod tool_loop;
 mod tool_loop_ports;
+mod turn_liveness;
 mod update_session_placement;
 
-pub use approval_judge::ApprovalJudgeAuthorization;
+pub use approval_judge::{
+    ApprovalJudgeAuthorization, ApprovalJudgeBranchAuthority, ApprovalJudgeBranchAuthorityInput,
+    ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
+    ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority,
+    ApprovalJudgePullRequestAuthorityInput,
+};
+pub use commissioned_dispatch::{
+    CommissionDispatchPreparationError, CommissionDispatchRequest, CommissionedDispatchFence,
+    CommissionedDispatchIdGenerator, PreparedCommissionedDispatch,
+    UuidV7CommissionedDispatchIdGenerator,
+};
 pub use conversation_import::{
     ImportConversationError, ImportConversationOutcome, ImportConversationReport,
     ImportConversationService, ImportedConversationConversionReport, ImportedConversationConverter,
@@ -167,6 +179,10 @@ pub use tool_loop_ports::{
     DecideToolRequestTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
     RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
     ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+};
+pub use turn_liveness::{
+    StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessBoundError,
+    TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
 };
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,

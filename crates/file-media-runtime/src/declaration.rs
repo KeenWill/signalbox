@@ -7,6 +7,9 @@ use crate::{
     VerifiedBlobSource,
 };
 
+// numeric-bound: ceiling - bounds retained model-facing view-description memory
+const MAX_VIEW_DESCRIPTION_BYTES: usize = 512;
+
 /// Strength of one byte-derived probe candidate.
 #[derive(
     Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize,
@@ -205,7 +208,7 @@ impl ReadViewDeclaration {
         bounds: ReadViewBounds,
     ) -> Result<Self, RegistryDeclarationError> {
         if description.is_empty()
-            || description.len() > 512
+            || description.len() > MAX_VIEW_DESCRIPTION_BYTES
             || description.contains('\0')
             || description.chars().any(char::is_control)
         {

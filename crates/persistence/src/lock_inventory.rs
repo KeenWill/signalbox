@@ -31,10 +31,47 @@ pub(crate) const PROGRAM_JOURNAL_SEQUENCE: &str = "SELECT
   FOR UPDATE";
 
 pub(crate) const REPO_WATCH_DISPATCH_OBLIGATION: &str =
-    "SELECT latest_event_id, settled_kind, settled_dispatch_id
+    "SELECT latest_event_id, settled_kind, settled_dispatch_id,
+            parked_at IS NOT NULL AS parked
        FROM repo_watch_dispatch_obligation
       WHERE obligation_id = $1
       FOR UPDATE";
+
+pub(crate) const REPO_WATCH_ACTIVE_DISPATCH_OBLIGATION: &str = "SELECT obligation.obligation_id
+           FROM repo_watch_dispatch_obligation AS obligation
+          WHERE obligation.rule_id = $1
+            AND obligation.rule_version = $2
+            AND obligation.singleton_scope = $3
+            AND obligation.singleton_repository IS NOT DISTINCT FROM $4
+            AND obligation.singleton_pull_request_number IS NOT DISTINCT FROM $5
+            AND obligation.singleton_stack_root_pull_request_number
+                 IS NOT DISTINCT FROM $6
+            AND obligation.settled_kind IS NULL
+            FOR UPDATE";
+
+pub(crate) const REPO_WATCH_TERMINAL_TARGET_OBLIGATIONS: &str = "SELECT obligation.obligation_id
+           FROM repo_watch_dispatch_obligation AS obligation
+          WHERE obligation.settled_kind IS NULL
+            AND obligation.parked_state_event_id IS DISTINCT FROM $3
+            AND (
+                EXISTS (
+                    SELECT 1
+                      FROM repo_watch_event AS event
+                     WHERE event.event_id = obligation.latest_event_id
+                       AND event.repository = $1
+                       AND event.pull_request_number = $2
+                       AND event.event_id <> $3
+                )
+                OR EXISTS (
+                    SELECT 1
+                      FROM repo_watch_event AS parked_state
+                     WHERE parked_state.event_id = obligation.parked_state_event_id
+                       AND parked_state.repository = $1
+                       AND parked_state.pull_request_number = $2
+                )
+            )
+          ORDER BY obligation.obligation_id
+            FOR UPDATE";
 
 pub(crate) const REPO_WATCH_WEBHOOK_DELIVERY: &str = "SELECT receipt_sequence
        FROM repo_watch_webhook_delivery

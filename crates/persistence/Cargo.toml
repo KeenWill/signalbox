@@ -90,6 +90,11 @@ path = "tests/imported_conversation_e2e_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]
+name = "search_path_postgres"
+path = "tests/search_path_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
 name = "outbox_decode_postgres"
 path = "tests/outbox_decode_postgres.rs"
 required-features = ["postgres-integration"]

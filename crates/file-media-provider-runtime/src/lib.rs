@@ -116,7 +116,7 @@ where
             let resolved = self.resolver.resolve(request).await?;
             let (file_use, source) = resolved.into_parts();
             if file_use.digest() != requested_digest {
-                return Err(FileMediaFailure::BlobNotVisible);
+                return Err(FileMediaFailure::ProcessorFailed);
             }
             self.registry
                 .inspect(
@@ -146,7 +146,7 @@ where
             let resolved = self.resolver.resolve(target).await?;
             let (file_use, source) = resolved.into_parts();
             if file_use.digest() != requested_digest {
-                return Err(FileMediaFailure::BlobNotVisible);
+                return Err(FileMediaFailure::ProcessorFailed);
             }
             self.registry
                 .read(
