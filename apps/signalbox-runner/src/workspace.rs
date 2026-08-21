@@ -29,7 +29,7 @@ use uuid::Uuid;
 const DIRECTORY_MODE: u32 = 0o700;
 const DOCUMENT_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;
-const MANIFEST_DOCUMENT_VERSION: u64 = 1;
+const MANIFEST_DOCUMENT_VERSION: u64 = 2;
 const MANIFEST_FILE: &str = "workspace-manifest.json";
 const MAXIMUM_MANIFEST_BYTES: u64 = 16 * 1024;
 const SESSIONS_DIRECTORY: &str = "sessions";
@@ -192,6 +192,7 @@ impl RunnerWorkspaceStore {
 struct ManifestDocument {
     version: u64,
     manifest: WorkspaceManifest,
+    execution_directory: WorkingDirectory,
 }
 
 fn create_private_workspace(
@@ -210,12 +211,16 @@ fn create_private_workspace(
     )
     .map_err(rustix_io)?;
     let staging = open_created_directory(session, &staging_name)?;
-    let mut manifest = private_manifest(ManifestLifecycle::Staging, manifest_id, request);
-    write_manifest(&staging, &manifest)?;
+    let mut document = ManifestDocument {
+        version: MANIFEST_DOCUMENT_VERSION,
+        manifest: private_manifest(ManifestLifecycle::Staging, manifest_id, request),
+        execution_directory: execution_directory.clone(),
+    };
+    write_manifest(&staging, &document)?;
     let work = open_or_create_directory(&staging, PRIVATE_WORKSPACE_DIRECTORY)?;
     work.sync_all().map_err(RunnerWorkspaceError::Io)?;
-    manifest.lifecycle = ManifestLifecycle::Ready;
-    write_manifest(&staging, &manifest)?;
+    document.manifest.lifecycle = ManifestLifecycle::Ready;
+    write_manifest(&staging, &document)?;
     staging.sync_all().map_err(RunnerWorkspaceError::Io)?;
     if !path_names_directory(&staging, PRIVATE_WORKSPACE_DIRECTORY, &work)?
         || !path_names_directory(session, &staging_name, &staging)?
@@ -273,18 +278,19 @@ fn read_ready_private_workspace(
     request: &PrivateWorkspaceRequest,
     execution_path: &Path,
 ) -> Result<ReadyManifest, RunnerWorkspaceError> {
-    let manifest = read_manifest(placement)?;
+    let document = read_manifest(placement)?;
+    let manifest = document.manifest;
     let expected = private_manifest(ManifestLifecycle::Ready, manifest.manifest_id, request);
     if manifest != expected {
         return Err(RunnerWorkspaceError::ManifestConflict);
     }
     let work = open_directory(placement, PRIVATE_WORKSPACE_DIRECTORY)
         .map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
-    let execution_directory = checked_execution_directory(execution_path, &work)
+    checked_execution_directory(execution_path, &work)
         .map_err(commit_ambiguous_after_publication)?;
     let manifest_digest =
         workspace_manifest_digest(&manifest).map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
-    ReadyManifest::try_new(manifest, manifest_digest, execution_directory)
+    ReadyManifest::try_new(manifest, manifest_digest, document.execution_directory)
         .map_err(|_| RunnerWorkspaceError::CorruptManifest)
 }
 
@@ -346,9 +352,9 @@ fn release_published_private_workspace(
     placement: File,
     correlation: &signalbox_runner_wire::ReleaseCorrelation,
 ) -> Result<(), RunnerWorkspaceError> {
-    let mut manifest = read_private_release_manifest(&placement, correlation)?;
-    manifest.lifecycle = ManifestLifecycle::Releasing;
-    write_manifest(&placement, &manifest)?;
+    let mut document = read_private_release_manifest(&placement, correlation)?;
+    document.manifest.lifecycle = ManifestLifecycle::Releasing;
+    write_manifest(&placement, &document)?;
     let placement_name = correlation.placement_revision.get().to_string();
     if !path_names_directory(session, &placement_name, &placement)? {
         return Err(RunnerWorkspaceError::ManifestConflict);
@@ -379,8 +385,8 @@ fn finish_private_workspace_deletion(
     placement: File,
     correlation: &signalbox_runner_wire::ReleaseCorrelation,
 ) -> Result<(), RunnerWorkspaceError> {
-    let manifest = read_private_release_manifest(&placement, correlation)?;
-    if manifest.lifecycle != ManifestLifecycle::Releasing
+    let document = read_private_release_manifest(&placement, correlation)?;
+    if document.manifest.lifecycle != ManifestLifecycle::Releasing
         || !path_names_directory(trash, trash_name, &placement)?
     {
         return Err(RunnerWorkspaceError::ManifestConflict);
@@ -394,8 +400,9 @@ fn finish_private_workspace_deletion(
 fn read_private_release_manifest(
     placement: &File,
     correlation: &signalbox_runner_wire::ReleaseCorrelation,
-) -> Result<WorkspaceManifest, RunnerWorkspaceError> {
-    let manifest = read_manifest(placement)?;
+) -> Result<ManifestDocument, RunnerWorkspaceError> {
+    let document = read_manifest(placement)?;
+    let manifest = &document.manifest;
     if !matches!(
         manifest.lifecycle,
         ManifestLifecycle::Ready | ManifestLifecycle::Active | ManifestLifecycle::Releasing
@@ -409,10 +416,10 @@ fn read_private_release_manifest(
         manifest.sandbox_profile,
     );
     let expected = private_manifest(manifest.lifecycle, correlation.manifest_id, &request);
-    if manifest != expected {
+    if manifest != &expected {
         return Err(RunnerWorkspaceError::ManifestConflict);
     }
-    Ok(manifest)
+    Ok(document)
 }
 
 fn open_or_create_directory(parent: &File, name: &str) -> Result<File, RunnerWorkspaceError> {
@@ -603,7 +610,7 @@ fn push_directory_entries(
     Ok(())
 }
 
-fn read_manifest(directory: &File) -> Result<WorkspaceManifest, RunnerWorkspaceError> {
+fn read_manifest(directory: &File) -> Result<ManifestDocument, RunnerWorkspaceError> {
     let descriptor = openat(
         directory,
         MANIFEST_FILE,
@@ -635,22 +642,22 @@ fn read_manifest(directory: &File) -> Result<WorkspaceManifest, RunnerWorkspaceE
     if document.version != MANIFEST_DOCUMENT_VERSION || document.manifest.validate().is_err() {
         return Err(RunnerWorkspaceError::CorruptManifest);
     }
-    Ok(document.manifest)
+    Ok(document)
 }
 
 fn write_manifest(
     directory: &File,
-    manifest: &WorkspaceManifest,
+    document: &ManifestDocument,
 ) -> Result<(), RunnerWorkspaceError> {
-    manifest
+    document
+        .manifest
         .validate()
         .map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
-    let document = ManifestDocument {
-        version: MANIFEST_DOCUMENT_VERSION,
-        manifest: manifest.clone(),
-    };
+    if document.version != MANIFEST_DOCUMENT_VERSION {
+        return Err(RunnerWorkspaceError::CorruptManifest);
+    }
     let mut encoded =
-        serde_json::to_vec(&document).map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
+        serde_json::to_vec(document).map_err(|_| RunnerWorkspaceError::CorruptManifest)?;
     encoded.push(b'\n');
     if encoded.len() as u64 > MAXIMUM_MANIFEST_BYTES {
         return Err(RunnerWorkspaceError::ManifestTooLarge);
@@ -828,6 +835,29 @@ mod tests {
             .expect("the reopened root forms a workspace store")
             .prepare_private_root(&request(RUNNER))
             .expect("the durable private workspace replays");
+
+        assert_eq!(replay, first);
+    }
+
+    #[test]
+    fn private_root_reopen_after_root_rename_preserves_the_authored_path() {
+        let (parent, state) = fixture_root();
+        let first = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_private_root(&request(RUNNER))
+            .expect("the private workspace publishes");
+        drop(state);
+        let original_root = parent.path().join("runner-state");
+        let moved_root = parent.path().join("moved-runner-state");
+        fs::rename(&original_root, &moved_root).expect("the runner root moves between processes");
+        let reopened = RunnerStateRoot::open(&moved_root)
+            .expect("the runner root reopens at its new configured path");
+        let replay = reopened
+            .workspace_store()
+            .expect("the reopened root forms a workspace store")
+            .prepare_private_root(&request(RUNNER))
+            .expect("the moved private workspace replays");
 
         assert_eq!(replay, first);
     }
@@ -1115,10 +1145,10 @@ mod tests {
             &expected.placement_revision().get().to_string(),
         )
         .expect("the placement fixture opens");
-        let mut manifest = super::read_manifest(&placement_descriptor)
+        let mut document = super::read_manifest(&placement_descriptor)
             .expect("the ready manifest fixture is readable");
-        manifest.lifecycle = ManifestLifecycle::Releasing;
-        super::write_manifest(&placement_descriptor, &manifest)
+        document.manifest.lifecycle = ManifestLifecycle::Releasing;
+        super::write_manifest(&placement_descriptor, &document)
             .expect("the releasing manifest fixture is durable");
         let trashed = trash.join(correlation.manifest_id.to_string());
         fs::rename(&placement, &trashed).expect("the accepted release fixture reaches trash");
