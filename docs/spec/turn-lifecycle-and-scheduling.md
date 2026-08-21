@@ -14,7 +14,8 @@ draining is verified against this PR
 occupancy deadlines during that bounded drain is verified against this PR
 (`agent/daemon-live-shutdown-pass-drain`). The sixty-minute occupancy ceiling
 and model-exchange-derived shutdown drain are verified against this PR
-(`agent/daemon-live-runtime-bounds`).
+(`agent/daemon-live-runtime-bounds`). Operation-boundary shutdown checkpointing
+is verified against this PR (`agent/daemon-live-shutdown-checkpoint`).
 
 The expired-pass recovery lock classification and retry budgets were re-verified
 against this PR (`agent/daemon-live-reconciliation-lock-cadence`). Exact
@@ -1327,15 +1328,18 @@ in-flight turn-liveness inventory read or terminalization share a bounded grace
 window equal to the configured longest expected model exchange plus thirty
 seconds for component cleanup. Once shutdown is observed, an admitted scheduler
 pass stops spending its ordinary occupancy deadline and may use the shared grace
-window to finish; the occupancy handler cannot cancel it during that drain. A
-clean exit closes the fenced pool, waits on the guard session's exclusive
-current-generation fence so even detached pool sessions have ended, removes only
-this daemon's identity-pinned and revalidated socket, and releases the advisory
-locks by closing its dedicated guard connection. Window expiry abandons
-remaining tasks, warns, and skips the unbounded pool drain; process exit
-releases its sessions. Why signal-driven shutdown is polish, not correctness:
-abrupt exit at any point is safe because durable rows plus the next guarded
-startup scan recover work and the durable outbox cursor redelivers an
+window to finish the model or tool operation it has already issued; the
+occupancy handler cannot cancel it during that drain. After that operation's
+result reaches its durable boundary, the pass checkpoints the active turn and
+returns without issuing another operation. A successor resumes the same active
+turn from that boundary. A clean exit closes the fenced pool, waits on the guard
+session's exclusive current-generation fence so even detached pool sessions have
+ended, removes only this daemon's identity-pinned and revalidated socket, and
+releases the advisory locks by closing its dedicated guard connection. Window
+expiry abandons remaining tasks, warns, and skips the unbounded pool drain;
+process exit releases its sessions. Why signal-driven shutdown is polish, not
+correctness: abrupt exit at any point is safe because durable rows plus the next
+guarded startup scan recover work and the durable outbox cursor redelivers an
 uncommitted offer (INV-032, INV-034), so the grace window buys only latency.
 Repositories and services are cheap per-invocation clones over the shared pool;
 no shared locked service instance exists.
