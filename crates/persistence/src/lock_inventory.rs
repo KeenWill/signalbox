@@ -111,6 +111,36 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
                    AND NOT delegation_runtime_terminal
             )";
 
+pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
+            SELECT after_turn_id
+              FROM automatic_model_call_reconciliation_discovery_state
+             WHERE singleton
+             FOR UPDATE
+         ), page AS (
+            SELECT turn_id, session_id, recovery_model_call_id
+              FROM turn_lifecycle, discovery
+             WHERE state_kind = 'active'
+               AND active_phase_kind = 'awaiting_model_call_recovery'
+               AND recovery_model_call_id IS NOT NULL
+               AND (after_turn_id IS NULL OR turn_id > after_turn_id)
+             ORDER BY turn_id
+             LIMIT $1
+         ), inserted AS (
+            INSERT INTO automatic_model_call_reconciliation
+                (turn_id, session_id, model_call_id)
+            SELECT turn_id, session_id, recovery_model_call_id FROM page
+            ON CONFLICT (turn_id) DO NOTHING
+            RETURNING turn_id
+         )
+         UPDATE automatic_model_call_reconciliation_discovery_state
+            SET after_turn_id = (
+                SELECT turn_id
+                  FROM page
+                 ORDER BY turn_id DESC
+                 LIMIT 1
+            )
+          WHERE singleton";
+
 pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_CLAIM: &str = "WITH due AS (
                 SELECT turn_id
                   FROM automatic_model_call_reconciliation
