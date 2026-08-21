@@ -501,17 +501,17 @@ impl InputContent {
     }
 }
 
-// numeric-bound: ceiling - bounds retained parts in one user input
 /// Maximum number of ordered parts in one process-protocol user input.
+// numeric-bound: ceiling - bounds retained parts in one user input
 pub const MAX_USER_INPUT_PARTS: usize = signalbox_domain::UserContent::MAX_PARTS;
-// numeric-bound: ceiling - bounds aggregate retained user text
 /// Maximum aggregate UTF-8 bytes across process-protocol text parts.
+// numeric-bound: ceiling - bounds aggregate retained user text
 pub const MAX_USER_INPUT_TEXT_BYTES: usize = signalbox_domain::UserContent::MAX_TEXT_BYTES;
-// numeric-bound: ceiling - bounds retained attachment media types
 /// Maximum encoded bytes in one process-protocol attachment media type.
+// numeric-bound: ceiling - bounds retained attachment media types
 pub const MAX_USER_INPUT_MEDIA_TYPE_BYTES: usize = signalbox_domain::DeclaredMediaType::MAX_BYTES;
-// numeric-bound: ceiling - bounds retained attachment display filenames
 /// Maximum encoded bytes in one process-protocol attachment display filename.
+// numeric-bound: ceiling - bounds retained attachment display filenames
 pub const MAX_USER_INPUT_DISPLAY_FILENAME_BYTES: usize =
     signalbox_domain::AttachmentDisplayFilename::MAX_BYTES;
 
