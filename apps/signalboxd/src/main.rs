@@ -1409,6 +1409,10 @@ async fn run_hub(
                 PostgresStartupScanRepository::new(scan_pool),
             );
             let outcome = scan.execute().await.map_err(|error| {
+                tracing::error!(
+                    startup_scan_detail = %error.repository_error(),
+                    "startup scan rejected durable state"
+                );
                 let failure_class = error.operator_failure_class();
                 let cause_code = error.operator_failure_cause_code();
                 let session = error.session();
