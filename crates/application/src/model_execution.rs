@@ -18,6 +18,7 @@ use std::{
 // numeric-bound: ceiling - protects against an unbounded paid provider loop
 const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 32;
 // Worst-case compact JSON for maximum checked metadata, u64 length, and digest.
+// numeric-bound: ceiling - protects provider-request memory from oversized attachment stubs
 const MAX_RENDERED_ATTACHMENT_STUB_BYTES: usize = 2_304;
 
 use signalbox_domain::{
