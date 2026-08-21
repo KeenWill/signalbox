@@ -233,6 +233,54 @@ async fn corpus_registration_requires_supported_format_version() -> Result<(), B
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn corpus_registration_requires_nonblank_name() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let corpus_digest = [0_u8; 32];
+    let replay_digest = [0_u8; 32];
+
+    sqlx::query(
+        "INSERT INTO evaluation_corpus (
+            corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
+            source_kind
+         ) VALUES ('   ', 'v1', 1, $1, $2, 1, 'database_native')",
+    )
+    .bind(corpus_digest.as_slice())
+    .bind(replay_digest.as_slice())
+    .execute(&pool)
+    .await
+    .expect_err("a durable registration with a blank name is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn corpus_registration_requires_nonblank_version() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let corpus_digest = [0_u8; 32];
+    let replay_digest = [0_u8; 32];
+
+    sqlx::query(
+        "INSERT INTO evaluation_corpus (
+            corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
+            source_kind
+         ) VALUES ('valid-name', '   ', 1, $1, $2, 1, 'database_native')",
+    )
+    .bind(corpus_digest.as_slice())
+    .bind(replay_digest.as_slice())
+    .execute(&pool)
+    .await
+    .expect_err("a durable registration with a blank version is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn stored_case_decode_error_retains_serde_context() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let disk = DiskCorpusStore::open(seed_manifest_path())?;
@@ -417,6 +465,31 @@ async fn stored_blob_registration_is_rejected_before_case_loading() -> Result<()
         .expect_err("blob registrations are rejected before stored cases are read");
 
     assert!(error.to_string().contains("no blob corpus backend"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stored_blob_registration_metadata_can_be_looked_up() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let digest = [0_u8; 32];
+    insert_blob_registration(&pool, "metadata-only-blob", Some(&digest), Some("1")).await?;
+    let database = DatabaseCorpusStore::new(pool.clone());
+    let key = CorpusKey {
+        name: String::from("constraint-fixture"),
+        version: String::from("metadata-only-blob"),
+    };
+
+    let registration = database.registration(&key).await?;
+
+    assert_eq!(registration.key(), &key);
+    assert!(matches!(
+        registration.source(),
+        CorpusSourceDescriptor::BlobReference { byte_length: 1, .. }
+    ));
 
     pool.close().await;
     drop(container);

@@ -179,8 +179,7 @@ impl DatabaseCorpusStore {
         .await?
         .ok_or_else(|| CorpusStoreError::NotFound(key.clone()))?;
         let stored = decode_registration(&row)?;
-        let corpus = self.load_stored_corpus(&stored).await?;
-        registration_from_stored(stored, &corpus)
+        registration_metadata_from_stored(stored)
     }
 
     async fn enumerate_owned(&self) -> Result<Vec<CorpusRegistration>, CorpusStoreError> {

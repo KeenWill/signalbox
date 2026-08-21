@@ -19,9 +19,17 @@ CREATE TABLE evaluation_corpus (
     CONSTRAINT evaluation_corpus_pk
         PRIMARY KEY (corpus_name, corpus_version),
     CONSTRAINT evaluation_corpus_name_bounded
-        CHECK (octet_length(corpus_name) BETWEEN 1 AND 128),
+        CHECK (
+            octet_length(corpus_name) BETWEEN 1 AND 128
+            AND corpus_name !~ '^[[:space:]]*$'
+            AND corpus_name !~ '[[:cntrl:]]'
+        ),
     CONSTRAINT evaluation_corpus_version_bounded
-        CHECK (octet_length(corpus_version) BETWEEN 1 AND 128),
+        CHECK (
+            octet_length(corpus_version) BETWEEN 1 AND 128
+            AND corpus_version !~ '^[[:space:]]*$'
+            AND corpus_version !~ '[[:cntrl:]]'
+        ),
     CONSTRAINT evaluation_corpus_format_version_supported
         CHECK (format_version = 1),
     CONSTRAINT evaluation_corpus_digest_sha256

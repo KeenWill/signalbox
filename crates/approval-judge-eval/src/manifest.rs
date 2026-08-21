@@ -362,6 +362,9 @@ fn validate_manifest_header(manifest: &CorpusManifest) -> Result<(), ManifestErr
             }
         }
     }
+    if manifest.integrity.cases.is_empty() {
+        return Err(ManifestError::MissingCaseIntegrity);
+    }
     Ok(())
 }
 
@@ -621,6 +624,8 @@ pub enum ManifestError {
     DuplicateCaseId(String),
     /// Per-case integrity did not match exactly.
     CaseIntegrityMismatch,
+    /// A manifest omitted integrity for every case.
+    MissingCaseIntegrity,
     /// Aggregate logical integrity did not match.
     CorpusDigestMismatch {
         expected: Sha256Digest,
@@ -691,6 +696,9 @@ impl fmt::Display for ManifestError {
             }
             Self::CaseIntegrityMismatch => {
                 formatter.write_str("per-case integrity does not match the manifest")
+            }
+            Self::MissingCaseIntegrity => {
+                formatter.write_str("manifest requires at least one case-integrity entry")
             }
             Self::CorpusDigestMismatch { expected, observed } => write!(
                 formatter,
@@ -1027,12 +1035,29 @@ mod tests {
 
     #[test]
     fn repository_manifest_rejects_superscript_windows_device_names() {
-        for component in ["COM¹.json", "COM²", "COM³.txt", "LPT¹", "LPT².json", "LPT³"] {
-            assert!(
-                !super::portable_path_component(component),
-                "{component} is a reserved Windows device name"
-            );
-        }
+        assert!(!super::portable_path_component("COM¹.json"));
+        assert!(!super::portable_path_component("COM²"));
+        assert!(!super::portable_path_component("COM³.txt"));
+        assert!(!super::portable_path_component("LPT¹"));
+        assert!(!super::portable_path_component("LPT².json"));
+        assert!(!super::portable_path_component("LPT³"));
+    }
+
+    #[test]
+    fn repository_manifest_requires_case_integrity_during_decoding() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SEED_MANIFEST).expect("the seed manifest is valid JSON");
+        manifest["integrity"]["cases"] = serde_json::json!([]);
+        let encoded = serde_json::to_vec(&manifest).expect("the modified manifest serializes");
+
+        let error = decode_manifest(&encoded)
+            .expect_err("a repository manifest without case integrity is rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("at least one case-integrity entry")
+        );
     }
 
     #[test]
