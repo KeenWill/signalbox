@@ -207,12 +207,15 @@ freshness record is process-local, like the conditional-request cache, so a
 restarted daemon re-fetches every pull request.
 
 **Implemented behavior.** Check-suite and check-run requests explicitly select
-all attempts and follow bounded result pages. Check runs are enumerated through
-each suite returned by the paginated commit suite inventory rather than the
-provider's commit check-run search, whose 1,000-suite cap cannot represent a
-complete baseline. Every completed provider identity returned by that projection
+all attempts and follow bounded result pages. The complete paginated suite
+inventory proves whether the provider's commit check-run search can be
+exhaustive: a nonempty inventory at no more than its 1,000-suite ceiling uses
+one paginated commit search in place of the request-per-suite fanout, while an
+empty inventory needs no run query and a larger one enumerates each suite
+individually. Every completed provider identity returned by that projection
 enters the comparison baseline; the provider's latest-attempt default cannot
-silently discard a completion between polls.
+silently discard a completion between polls. This bounded request optimization
+is verified against this PR (`agent/daemon-live-github-rest-quota`).
 
 **Implemented behavior.** Daemon shutdown wins a race with a repository task's
 clean exit. Once shutdown is observable, the supervisor drains every watch task
