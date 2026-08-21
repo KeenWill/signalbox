@@ -391,11 +391,11 @@ All closed-enum label children are allocated at registry construction. The only
 identity label is the scheduler oldest-pass `session_id`; the metric API accepts
 no turn id, model-call id, prompt, completion, or tool value. The terminal
 metric source is the already-committed typed outbox transition, and
-content-bearing input events are ignored. The dispatcher
-retains only the last observed durable sequence, so a retry of that sequence is
-not counted twice and deduplication has constant memory. Metric help and type
-lines are fixed strings; sample values are counters or gauges. There are no
-tool, queue-depth, or database-duration metrics in this surface.
+content-bearing input events are ignored. The dispatcher retains only the last
+observed durable sequence, so a retry of that sequence is not counted twice and
+deduplication has constant memory. Metric help and type lines are fixed strings;
+sample values are counters or gauges. There are no tool, queue-depth, or
+database-duration metrics in this surface.
 
 The complete OTLP record inventory is:
 
