@@ -646,6 +646,31 @@ fn ready_frame_rejects_manifest_digest_disagreement() {
 }
 
 #[test]
+fn ready_manifest_deserialization_rejects_manifest_digest_disagreement() {
+    let encoded = serde_json::json!({
+        "manifest": manifest(),
+        "manifest_digest": EXPECTED_ADVERTISEMENT_DIGEST,
+        "execution_directory": "/runner/sessions/ready/repo"
+    });
+
+    assert!(serde_json::from_value::<ReadyManifest>(encoded).is_err());
+}
+
+#[test]
+fn ready_manifest_deserialization_rejects_a_relative_execution_directory() {
+    let manifest = manifest();
+    let manifest_digest = workspace_manifest_digest(&manifest)
+        .unwrap_or_else(|error| panic!("ready manifest digests: {error}"));
+    let encoded = serde_json::json!({
+        "manifest": manifest,
+        "manifest_digest": manifest_digest,
+        "execution_directory": "sessions/ready/repo"
+    });
+
+    assert!(serde_json::from_value::<ReadyManifest>(encoded).is_err());
+}
+
+#[test]
 fn ready_frame_rejects_nondeterministic_relative_path() {
     let mut ready_manifest = manifest();
     ready_manifest.relative_path =

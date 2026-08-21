@@ -339,6 +339,13 @@ impl WorkingDirectory {
             .map_err(|_| ValueError::WorkingDirectory)
     }
 
+    /// Checks that this exact runner working directory is absolute.
+    pub fn validate_absolute(&self) -> Result<(), ValueError> {
+        RunnerWorkingDirectory::try_new_absolute(self.0.clone())
+            .map(|_| ())
+            .map_err(|_| ValueError::WorkingDirectory)
+    }
+
     /// Returns the exact directory text.
     pub fn as_str(&self) -> &str {
         &self.0

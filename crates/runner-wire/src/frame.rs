@@ -1,6 +1,6 @@
 //! Closed version-two runner frame vocabulary and payload validation.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::{
@@ -732,7 +732,7 @@ pub enum ShutdownReason {
 }
 
 /// One successfully recorded workspace manifest and its exact digest.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadyManifest {
     /// Complete ready manifest facts.
@@ -741,6 +741,25 @@ pub struct ReadyManifest {
     manifest_digest: Digest,
     /// Absolute runner-authored directory selected for later execution.
     execution_directory: WorkingDirectory,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReadyManifest {
+    manifest: WorkspaceManifest,
+    manifest_digest: Digest,
+    execution_directory: WorkingDirectory,
+}
+
+impl<'de> Deserialize<'de> for ReadyManifest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawReadyManifest::deserialize(deserializer)?;
+        Self::try_new(raw.manifest, raw.manifest_digest, raw.execution_directory)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl ReadyManifest {
@@ -779,10 +798,7 @@ impl ReadyManifest {
         if expected != self.manifest_digest {
             return Err(ValueError::Digest);
         }
-        if !self.execution_directory.as_str().starts_with('/') {
-            return Err(ValueError::WorkingDirectory);
-        }
-        Ok(())
+        self.execution_directory.validate_absolute()
     }
 }
 

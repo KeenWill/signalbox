@@ -142,7 +142,7 @@ pub enum RunnerLeaseOfferTransportFailure {
 pub enum RunnerLeaseOfferRetention {
     /// The transaction returned a lease for another prepared dispatch request.
     AuthorityMismatch,
-    /// Canonical durable facts could not be projected to the version-one wire.
+    /// Canonical durable facts could not be projected to the version-two wire.
     ProjectionFailed,
     /// No live durable connection exists after authorization commit.
     ConnectionUnavailable,

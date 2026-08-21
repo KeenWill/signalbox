@@ -95,7 +95,9 @@ impl RunnerWorkspaceReadyReceipt {
         execution_directory: RunnerWorkingDirectory,
         recovery: WorkspaceRecovery,
     ) -> Result<Self, InvalidRunnerWorkspaceExecutionDirectory> {
-        if !execution_directory.as_str().starts_with('/') {
+        if RunnerWorkingDirectory::try_new_absolute(execution_directory.as_str().to_owned())
+            .is_err()
+        {
             return Err(InvalidRunnerWorkspaceExecutionDirectory);
         }
         Ok(Self {

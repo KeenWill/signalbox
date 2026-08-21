@@ -4962,23 +4962,6 @@ mod tests {
         assert_eq!(receipt.recovery(), &expected);
     }
 
-    #[test]
-    fn workspace_ready_receipt_rejects_a_relative_execution_directory() {
-        let ready = repository_workspace_ready();
-        let relative =
-            signalbox_runner_wire::WorkingDirectory::try_new("sessions/provision/repo".to_owned())
-                .expect("the relative execution-directory fixture is exact text");
-
-        assert!(
-            signalbox_runner_wire::ReadyManifest::try_new(
-                ready.ready.manifest().clone(),
-                ready.ready.manifest_digest().clone(),
-                relative,
-            )
-            .is_err()
-        );
-    }
-
     #[tokio::test]
     async fn s32_inv044_unavailable_workspace_ready_transaction_emits_no_acknowledgement() {
         let rejection = admit_workspace_ready(
