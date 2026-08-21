@@ -217,7 +217,7 @@ alias_id = "30000000-0000-4000-8000-000000000001"
 selection_id = "10000000-0000-4000-8000-000000000001"
 EOF
 sed -n \
-	'/^\[numeric_bounds\]$/,/^# Omit this table/{ /^# Omit this table/!p; }' \
+	'/^\[numeric_bounds\]$/,/^# Blob bytes live outside PostgreSQL\./{ /^# Blob bytes live outside PostgreSQL\./!p; }' \
 	"$REPOSITORY_ROOT/config/signalboxd.example.toml" >>"$MODEL_CONFIGURATION"
 cat >"$TEMPLATE_CONFIGURATION" <<'EOF'
 version = 1
