@@ -52,11 +52,13 @@ is verified against this PR (`agent/daemon-live-webhook-provider-backoff`).
 Webhook preemption of slow complete reconciliation is verified against PR #926
 (`agent/webhook-projection-preemption-review`). The finite cutoff and dispatch
 reconciliation quanta ahead of and after a webhook drain are verified against
-this PR (`agent/daemon-live-bounded-repo-reconciliation`). The approval-judge
-dispatch fence and unattended escalation release described below are verified
-against this PR (`agent/headless-approval-escalation`). The
-operator-commissioned dispatch fence and its unattended-escalation coverage are
-verified against this PR (`agent/commissioned-dispatch-fence`).
+this PR (`agent/daemon-live-bounded-repo-reconciliation`). Repeatable preemption
+while durable drain pages remain is verified against this PR
+(`agent/daemon-live-repeatable-webhook-preemption`). The approval-judge dispatch
+fence and unattended escalation release described below are verified against
+this PR (`agent/headless-approval-escalation`). The operator-commissioned
+dispatch fence and its unattended-escalation coverage are verified against this
+PR (`agent/commissioned-dispatch-fence`).
 
 ## Configuration and credential boundary
 
@@ -171,15 +173,18 @@ in-flight complete poll so admitted durable work cannot wait behind that slow
 sweep. Rule activation, dispatch, webhook projection, and cursor commit remain
 outside that cancellation region. The task joins the cancelled poll's spawned
 fetches, invalidates its partial pull-request freshness, drains webhook work,
-and resumes the still-due complete poll without another preemption. A drain
-retry in backoff suppresses preemption, and the original cycle start remains the
-cadence anchor. The wake therefore loses acceleration when its endpoint is
-failed or unavailable, while reconciliation remains bounded and cannot be
-starved by a sustained stream. Each leading or trailing lifecycle-cutoff phase
-and rule-or-obligation dispatch phase settles at most 16 durable records before
-returning to the webhook-aware scheduler. Reaching that ceiling re-arms the
-repository wake, so durable remainder is revisited without letting a sustained
-reconciliation backlog indefinitely delay webhook work.
+and returns the still-due complete poll through a fresh interruptible scheduler
+pass. Each bounded drain page re-arms that pass while durable remainder exists,
+so a long provider sweep cannot become uninterruptible after the first wake;
+once a page observes no remainder, it leaves no continuation wake and the
+complete poll proceeds. A drain retry in backoff suppresses admission preemption
+until its deadline, and that retry deadline can itself interrupt the provider
+sweep. The original cycle start remains the cadence anchor. Each leading or
+trailing lifecycle-cutoff phase and rule-or-obligation dispatch phase settles at
+most 16 durable records before returning to the webhook-aware scheduler.
+Reaching that ceiling re-arms the repository wake, so durable remainder is
+revisited without letting a sustained reconciliation backlog indefinitely delay
+webhook work.
 
 **Implemented behavior.** One attempt fetches up to eight open pull requests
 concurrently. The fetch sequence within a single pull request stays ordered, and
@@ -1144,9 +1149,10 @@ for the bounded retry backoff. A signature-valid delivery whose event or action
 is outside the mapped set, including a broadly subscribed `workflow_job`, is
 still acknowledged successfully and is cheaply logged and recorded as ignored
 rather than treated as an intake failure. A webhook-enabled shadow wake may also
-preempt the read-only provider sweep of an in-flight complete poll, without
-resetting that poll's deadline, so the durable delivery drains before bounded
-reconciliation resumes.
+preempt the read-only provider sweep of an in-flight complete poll without
+resetting that poll's deadline. After the delivery's bounded page drains, the
+still-due poll returns through the same interruptible scheduler path rather than
+entering an uninterruptible resumed sweep.
 
 **Implemented behavior.** A drain page attempts every loaded delivery after a
 target-specific or persistence failure, but stops at the first repository-wide
