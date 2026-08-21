@@ -93,14 +93,15 @@ test('falls back to metadata and download for an unknown binary capability', asy
   await expect(artifact.getByText('metadata fallback')).toBeVisible()
   const download = artifact.getByRole('link', { name: 'Download' })
   await expect(download).toHaveAttribute('download', 'telemetry.capture')
-  const request = page.waitForRequest((candidate) => {
-    const url = new URL(candidate.url())
-    return url.pathname === binaryDownloadPath
-  })
-  await download.click()
-  const url = new URL((await request).url())
+  const href = await download.getAttribute('href')
+  expect(href).not.toBeNull()
+  const url = new URL(href ?? '', 'http://signalbox.invalid')
+  expect(url.pathname).toBe(binaryDownloadPath)
   expect(url.searchParams.get('media_type')).toBe('application/octet-stream')
   expect(url.searchParams.get('display_filename')).toBe('telemetry.capture')
+  const browserDownload = page.waitForEvent('download')
+  await download.click()
+  expect((await browserDownload).suggestedFilename()).toBe('telemetry.capture')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
