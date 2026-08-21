@@ -33,6 +33,7 @@ pub use store::{
 
 /// The only corpus format this pre-alpha harness currently accepts.
 pub const CORPUS_FORMAT_VERSION: u32 = 1;
+const MAX_CASE_ID_BYTES: usize = 128;
 
 /// A versioned collection of labeled approval-judge cases.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -182,9 +183,12 @@ pub(crate) fn validate_corpus(corpus: &ApprovalJudgeCorpus) -> Result<(), Corpus
                 field,
             });
         }
-        if case.id.trim().is_empty() {
-            return Err(CorpusLoadError::BlankCaseId);
-        }
+        validate_case_id(&case.id).map_err(|error| match error {
+            CaseIdError::Blank => CorpusLoadError::BlankCaseId,
+            CaseIdError::Invalid => CorpusLoadError::InvalidCaseId {
+                id: case.id.clone(),
+            },
+        })?;
         if !case_ids.insert(case.id.as_str()) {
             return Err(CorpusLoadError::DuplicateCaseId {
                 id: case.id.clone(),
@@ -195,6 +199,22 @@ pub(crate) fn validate_corpus(corpus: &ApprovalJudgeCorpus) -> Result<(), Corpus
                 id: case.id.clone(),
             });
         }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaseIdError {
+    Blank,
+    Invalid,
+}
+
+fn validate_case_id(id: &str) -> Result<(), CaseIdError> {
+    if id.trim().is_empty() {
+        return Err(CaseIdError::Blank);
+    }
+    if id.len() > MAX_CASE_ID_BYTES || id.chars().any(char::is_control) {
+        return Err(CaseIdError::Invalid);
     }
     Ok(())
 }
@@ -267,6 +287,11 @@ pub enum CorpusLoadError {
     },
     /// A case id is empty or whitespace-only and carries no stable identity.
     BlankCaseId,
+    /// A case id exceeds the shared byte ceiling or contains a control character.
+    InvalidCaseId {
+        /// Rejected case identity.
+        id: String,
+    },
     /// A case string contains U+0000, which PostgreSQL JSONB cannot preserve.
     NulCaseString {
         /// Case carrying the unsupported string.
@@ -309,6 +334,10 @@ impl fmt::Display for CorpusLoadError {
                 formatter,
                 "corpus contains a case whose id is empty or whitespace-only"
             ),
+            Self::InvalidCaseId { id } => write!(
+                formatter,
+                "corpus case id {id:?} exceeds 128 bytes or contains control characters"
+            ),
             Self::NulCaseString { id, field } => write!(
                 formatter,
                 "corpus case {id:?} field {field} contains unsupported U+0000"
@@ -330,6 +359,7 @@ impl Error for CorpusLoadError {
             | Self::EmptyCorpus
             | Self::DuplicateCaseId { .. }
             | Self::BlankCaseId
+            | Self::InvalidCaseId { .. }
             | Self::NulCaseString { .. }
             | Self::MissingLabelProvenance { .. } => None,
         }
@@ -358,8 +388,14 @@ pub async fn score_corpus(
                 field,
             });
         }
-        if case.id.trim().is_empty() {
-            return Err(ScoreError::BlankCaseId);
+        match validate_case_id(&case.id) {
+            Ok(()) => {}
+            Err(CaseIdError::Blank) => return Err(ScoreError::BlankCaseId),
+            Err(CaseIdError::Invalid) => {
+                return Err(ScoreError::InvalidCaseId {
+                    id: case.id.clone(),
+                });
+            }
         }
         if !case_ids.insert(case.id.as_str()) {
             return Err(ScoreError::DuplicateCaseId {
@@ -547,6 +583,11 @@ pub enum ScoreError {
     },
     /// A case id is empty or whitespace-only and carries no stable identity.
     BlankCaseId,
+    /// A case id exceeds the shared byte ceiling or contains a control character.
+    InvalidCaseId {
+        /// Rejected case identity.
+        id: String,
+    },
     /// A case string contains U+0000, which no admitted store can preserve.
     NulCaseString {
         /// Case carrying the unsupported string.
@@ -575,6 +616,7 @@ impl ScoreError {
         match self {
             Self::UnsupportedFormatVersion { .. } | Self::EmptyCorpus | Self::BlankCaseId => None,
             Self::DuplicateCaseId { id }
+            | Self::InvalidCaseId { id }
             | Self::NulCaseString { id, .. }
             | Self::MissingLabelProvenance { id } => Some(id),
             Self::Case { case_id, .. } => Some(case_id),
@@ -596,6 +638,10 @@ impl fmt::Display for ScoreError {
             Self::BlankCaseId => write!(
                 formatter,
                 "corpus contains a case whose id is empty or whitespace-only"
+            ),
+            Self::InvalidCaseId { id } => write!(
+                formatter,
+                "corpus case id {id:?} exceeds 128 bytes or contains control characters"
             ),
             Self::NulCaseString { id, field } => write!(
                 formatter,
@@ -619,6 +665,7 @@ impl Error for ScoreError {
             | Self::EmptyCorpus
             | Self::DuplicateCaseId { .. }
             | Self::BlankCaseId
+            | Self::InvalidCaseId { .. }
             | Self::NulCaseString { .. }
             | Self::MissingLabelProvenance { .. } => None,
             Self::Case { source, .. } => Some(source.as_ref()),
@@ -735,6 +782,21 @@ mod tests {
 
         expect![["corpus contains a case whose id is empty or whitespace-only"]]
             .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn overlong_corpus_case_ids_fail_shared_admission() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        corpus.cases[0].id = "x".repeat(129);
+        let encoded = serde_json::to_vec(&corpus).expect("the overlong fixture serializes");
+
+        let error = decode_corpus(&encoded).expect_err("an overlong case id is rejected");
+
+        assert!(matches!(
+            error,
+            super::CorpusLoadError::InvalidCaseId { .. }
+        ));
     }
 
     #[test]

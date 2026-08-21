@@ -129,7 +129,7 @@ pub fn load_manifest_corpus(path: impl AsRef<Path>) -> Result<LoadedManifestCorp
                 .unwrap_or_else(|| Path::new("."))
                 .join(relative_path);
             let source_bytes = fs::read(&source_path).map_err(|source| ManifestError::Read {
-                path: source_path,
+                path: source_path.clone(),
                 source,
             })?;
             let observed = digest_bytes(&source_bytes);
@@ -141,11 +141,12 @@ pub fn load_manifest_corpus(path: impl AsRef<Path>) -> Result<LoadedManifestCorp
                 return Err(ManifestError::SourceDigestMismatch { expected, observed });
             }
             let corpus = crate::decode_corpus(&source_bytes).map_err(ManifestError::Corpus)?;
+            let durable_path = repository_relative_path(path, &source_path)?;
             (
                 corpus,
                 CorpusSourceDescriptor::Repository {
                     repository: repository.clone(),
-                    path: relative.clone(),
+                    path: durable_path,
                 },
             )
         }
@@ -359,6 +360,25 @@ fn portable_relative_path(value: &str) -> Result<PathBuf, ManifestError> {
     Ok(path.to_path_buf())
 }
 
+fn repository_relative_path(
+    manifest_path: &Path,
+    source_path: &Path,
+) -> Result<String, ManifestError> {
+    let checkout_root = manifest_path
+        .ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())
+        .ok_or_else(|| ManifestError::RepositoryRootUnavailable(manifest_path.to_path_buf()))?;
+    let relative = source_path
+        .strip_prefix(checkout_root)
+        .map_err(|_| ManifestError::RepositoryRootUnavailable(manifest_path.to_path_buf()))?;
+    let portable = relative
+        .to_str()
+        .ok_or_else(|| ManifestError::NonPortablePath(relative.display().to_string()))?
+        .replace('\\', "/");
+    portable_relative_path(&portable)?;
+    Ok(portable)
+}
+
 fn portable_path_component(component: &str) -> bool {
     let has_invalid_character = component
         .bytes()
@@ -381,7 +401,6 @@ fn portable_path_component(component: &str) -> bool {
 fn validate_unique_case_ids(cases: &[ApprovalJudgeCase]) -> Result<(), ManifestError> {
     let mut ids = BTreeSet::new();
     for case in cases {
-        validate_identity_component("case id", &case.id)?;
         if !ids.insert(&case.id) {
             return Err(ManifestError::DuplicateCaseId(case.id.clone()));
         }
@@ -455,6 +474,8 @@ pub enum ManifestError {
     InvalidIdentity(&'static str),
     /// A repository source escaped the manifest directory or used a platform-specific root.
     NonPortablePath(String),
+    /// The repository checkout root could not be retained in durable provenance.
+    RepositoryRootUnavailable(PathBuf),
     /// A repository source omitted its exact-byte digest.
     MissingSourceDigest,
     /// A non-file source supplied an inapplicable exact-byte digest.
@@ -509,6 +530,11 @@ impl fmt::Display for ManifestError {
             Self::NonPortablePath(path) => write!(
                 formatter,
                 "repository case path {path:?} is not a portable relative path"
+            ),
+            Self::RepositoryRootUnavailable(path) => write!(
+                formatter,
+                "could not determine repository root for manifest {}",
+                path.display()
             ),
             Self::MissingSourceDigest => {
                 formatter.write_str("repository case source requires source_sha256")
@@ -872,7 +898,7 @@ mod tests {
             ManifestCaseSource::Repository { repository, path } => {
                 CorpusSourceDescriptor::Repository {
                     repository: repository.clone(),
-                    path: path.clone(),
+                    path: format!("crates/approval-judge-eval/corpora/{path}"),
                 }
             }
             ManifestCaseSource::DatabaseNative { .. } => CorpusSourceDescriptor::DatabaseNative,

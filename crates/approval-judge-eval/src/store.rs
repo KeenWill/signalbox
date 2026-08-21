@@ -141,7 +141,7 @@ pub enum CorpusSourceDescriptor {
     Repository {
         /// Repository identity recorded as author-supplied provenance.
         repository: String,
-        /// Slash-separated path relative to the manifest.
+        /// Slash-separated path relative to the repository checkout root.
         path: String,
     },
     /// Cases authored directly into the instance database.
@@ -317,6 +317,8 @@ pub enum CorpusStoreError {
     StoredCaseJson(serde_json::Error),
     /// A database row violated the store representation.
     CorruptRegistration(CorpusStoreCorruption),
+    /// Stored content failed shared corpus or registration admission.
+    CorruptStoredAdmission(crate::manifest::ManifestError),
     /// The manifest names a blob, but this slice has no blob backend.
     BlobBackendUnavailable,
     /// Repository content was supplied without verified manifest source bytes.
@@ -420,6 +422,9 @@ impl fmt::Display for CorpusStoreError {
             Self::CorruptRegistration(corruption) => {
                 write!(formatter, "corpus registration is corrupt: {corruption}")
             }
+            Self::CorruptStoredAdmission(source) => {
+                write!(formatter, "stored corpus registration is corrupt: {source}")
+            }
             Self::BlobBackendUnavailable => formatter.write_str(
                 "blob-backed corpus content cannot be loaded: no blob corpus backend is configured",
             ),
@@ -436,6 +441,7 @@ impl Error for CorpusStoreError {
             Self::Manifest(source) => Some(source),
             Self::Database(source) => Some(source),
             Self::StoredCaseJson(source) => Some(source),
+            Self::CorruptStoredAdmission(source) => Some(source),
             Self::NotFound(_)
             | Self::CorruptRegistration(_)
             | Self::BlobBackendUnavailable

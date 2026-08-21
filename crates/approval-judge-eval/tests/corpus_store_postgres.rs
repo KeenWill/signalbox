@@ -235,6 +235,7 @@ async fn stored_case_identity_must_match_its_row_key() -> Result<(), Box<dyn Err
 }
 
 #[tokio::test]
+#[ignore = "selected by the PostgreSQL integration suite"]
 async fn direct_put_rejects_unverified_blob_registration() -> Result<(), Box<dyn Error>> {
     let disk = DiskCorpusStore::open(seed_manifest_path())?;
     let registration = disk
@@ -269,6 +270,7 @@ async fn direct_put_rejects_unverified_blob_registration() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
+#[ignore = "selected by the PostgreSQL integration suite"]
 async fn direct_put_rejects_unverified_repository_registration() -> Result<(), Box<dyn Error>> {
     let disk = DiskCorpusStore::open(seed_manifest_path())?;
     let registration = disk

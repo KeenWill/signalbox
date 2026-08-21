@@ -75,7 +75,8 @@ contract.
 
 The standalone harness implements a pluggable corpus-store contract with
 enumeration and digest-verified load operations. Its disk store resolves a
-repository case path relative to a portable manifest. Its database store keeps
+repository case path relative to a portable manifest and retains it as a
+checkout-root-relative provenance path. Its database store keeps
 evaluation-corpus registration rows and ordered case rows in one instance's
 PostgreSQL database; an import library call verifies a repository or embedded
 database-native manifest and inserts both atomically. Repeating an identical
@@ -119,7 +120,7 @@ computes the same identity whether loaded from repository files, an artifact, or
 rows, and a run verifies its corpus after the content moves between admitted
 storage forms. The checked-in corpus is only one manifest-backed fixture;
 neither the contract nor the database assumes that repository, one database, or
-one Signalbox instance. Per the pre-alpha rule in `AGENTS.md`, no compatibility
+one Signalbox instance. Per the [pre-alpha rule](../../AGENTS.md), no compatibility
 machinery attends any of this: corpus formats and storage may change freely
 until first durable deployment.
 

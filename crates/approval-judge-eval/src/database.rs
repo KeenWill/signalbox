@@ -410,7 +410,7 @@ fn registration_from_stored(
         ));
     }
     let registration = CorpusRegistration::new(stored.key, stored.source, corpus)
-        .map_err(CorpusStoreError::Manifest)?;
+        .map_err(CorpusStoreError::CorruptStoredAdmission)?;
     if registration.case_count() != stored.case_count {
         return Err(CorpusStoreError::CorruptRegistration(
             CorpusStoreCorruption::CaseCountMismatch,
@@ -439,7 +439,7 @@ fn registration_metadata_from_stored(
         stored.case_count,
         stored.source,
     )
-    .map_err(CorpusStoreError::Manifest)
+    .map_err(CorpusStoreError::CorruptStoredAdmission)
 }
 
 fn required_column<Value>(
