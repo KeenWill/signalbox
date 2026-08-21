@@ -140,13 +140,6 @@ max_code_host_result_items = 100
 # Repository-file bytes retained in one code-host result.
 max_repository_file_content_bytes = 65536
 
-# Omit this table for the fixed baseline of 16 concurrent per-session scheduler
-# passes. A smaller deployment override keeps provider and tool work bounded
-# when many durable sessions become eligible together. Zero keeps ingestion
-# and process services live while pausing authoritative session execution.
-# [scheduler]
-# max_in_flight_passes = 4
-
 # Blob bytes live outside PostgreSQL. Each deployment generates and then keeps
 # one namespace UUID per physical store. Both directories must already exist,
 # be owned by the daemon user, and have exact mode 0700.

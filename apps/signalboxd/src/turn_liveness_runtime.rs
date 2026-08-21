@@ -309,8 +309,9 @@ enum TurnLivenessWake {
 pub struct TurnLivenessRuntime {
     repository: PostgresTurnLivenessRepository,
     automatic_reconciliation: PostgresAutomaticReconciliationRepository,
-    staleness_bound: StaleActiveTurnBound,
-    scan_interval: TurnLivenessScanInterval,
+    staleness_bound: Option<StaleActiveTurnBound>,
+    scan_interval: Option<TurnLivenessScanInterval>,
+    automatic_reconciliation_attempt_budget: Option<u32>,
 }
 
 impl TurnLivenessRuntime {
@@ -321,14 +322,23 @@ impl TurnLivenessRuntime {
     /// ceiling stays the only maximum, enforced where the bound is built.
     pub fn new(
         pool: PgPool,
-        staleness_bound: StaleActiveTurnBound,
-        scan_interval: TurnLivenessScanInterval,
+        staleness_bound: Option<StaleActiveTurnBound>,
+        scan_interval: Option<TurnLivenessScanInterval>,
+        automatic_reconciliation_attempt_budget: Option<u32>,
+        automatic_reconciliation_base_backoff: Option<Duration>,
+        automatic_reconciliation_backoff_cap: Option<Duration>,
     ) -> Self {
         Self {
             repository: PostgresTurnLivenessRepository::new(pool.clone()),
-            automatic_reconciliation: PostgresAutomaticReconciliationRepository::new(pool.clone()),
+            automatic_reconciliation: PostgresAutomaticReconciliationRepository::new(pool.clone())
+                .with_policy(
+                    automatic_reconciliation_attempt_budget,
+                    automatic_reconciliation_base_backoff,
+                    automatic_reconciliation_backoff_cap,
+                ),
             staleness_bound,
             scan_interval,
+            automatic_reconciliation_attempt_budget,
         }
     }
 
@@ -342,23 +352,39 @@ impl TurnLivenessRuntime {
     /// the ledger of how long each turn has stood still, and the lap the
     /// terminalization window is partway through.
     pub async fn run(self, shutdown: watch::Receiver<bool>) {
+        let Some(scan_interval) = self.scan_interval else {
+            let mut shutdown = shutdown;
+            while !*shutdown.borrow() && shutdown.changed().await.is_ok() {}
+            return;
+        };
+        let Some(staleness_bound) = self.staleness_bound else {
+            run_ambiguous_operation_watchdog(
+                self.automatic_reconciliation,
+                scan_interval,
+                self.automatic_reconciliation_attempt_budget,
+                shutdown,
+            )
+            .await;
+            return;
+        };
         let quiescent_shutdown = shutdown.clone();
         let slot_held_shutdown = shutdown.clone();
         let quiescent = run_quiescent_watchdog(
             self.repository.clone(),
-            self.staleness_bound,
-            self.scan_interval,
+            staleness_bound,
+            scan_interval,
             quiescent_shutdown,
         );
         let slot_held = run_slot_held_watchdog(
             self.repository,
-            self.staleness_bound,
-            self.scan_interval,
+            staleness_bound,
+            scan_interval,
             slot_held_shutdown,
         );
         let ambiguous_operations = run_ambiguous_operation_watchdog(
             self.automatic_reconciliation,
-            self.scan_interval,
+            scan_interval,
+            self.automatic_reconciliation_attempt_budget,
             shutdown,
         );
         tokio::join!(quiescent, slot_held, ambiguous_operations);
@@ -411,6 +437,7 @@ async fn run_slot_held_watchdog(
 async fn run_ambiguous_operation_watchdog(
     repository: PostgresAutomaticReconciliationRepository,
     scan_interval: TurnLivenessScanInterval,
+    automatic_reconciliation_attempt_budget: Option<u32>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut ticker = interval(scan_interval.get());
@@ -419,7 +446,12 @@ async fn run_ambiguous_operation_watchdog(
         match next_turn_liveness_wake(&mut shutdown, &mut ticker).await {
             TurnLivenessWake::Shutdown => return,
             TurnLivenessWake::Scan => {
-                reconcile_ambiguous_operations(&repository, &mut shutdown).await;
+                reconcile_ambiguous_operations(
+                    &repository,
+                    automatic_reconciliation_attempt_budget,
+                    &mut shutdown,
+                )
+                .await;
             }
         }
     }
@@ -545,6 +577,7 @@ fn report_slot_held_recovery_failure(
 /// Claims and applies one bounded window of durable ambiguous-call work.
 async fn reconcile_ambiguous_operations(
     repository: &PostgresAutomaticReconciliationRepository,
+    automatic_reconciliation_attempt_budget: Option<u32>,
     shutdown: &mut watch::Receiver<bool>,
 ) {
     for _ in 0..AUTOMATIC_RECONCILIATIONS_PER_SCAN {
@@ -571,7 +604,7 @@ async fn reconcile_ambiguous_operations(
                 turn_id = %exhausted.turn().as_uuid(),
                 operation_kind,
                 operation_id = %operation_id,
-                attempt_budget = signalbox_application::AutomaticReconciliationAttempt::budget(),
+                attempt_budget = ?automatic_reconciliation_attempt_budget,
                 "automatic operation reconciliation exhausted; the turn remains visibly parked for an operator"
             );
         }
@@ -1013,6 +1046,11 @@ mod tests {
     };
     use uuid::Uuid;
 
+    fn fixture_staleness_bound() -> StaleActiveTurnBound {
+        StaleActiveTurnBound::try_new(Duration::from_secs(37))
+            .expect("fixture staleness bound is valid")
+    }
+
     fn candidate(seed: u128) -> StaleTurnCandidate {
         StaleTurnCandidate::new(
             SessionId::from_uuid(Uuid::from_u128(seed)),
@@ -1251,7 +1289,7 @@ mod tests {
     /// so the phase cannot push the next scan past the interval.
     #[tokio::test(start_paused = true)]
     async fn one_scan_terminalizes_no_more_than_its_cap() {
-        let bound = StaleActiveTurnBound::hard_ceiling();
+        let bound = fixture_staleness_bound();
         let cohort = vec![candidate(1), candidate(2), candidate(3)];
         let capacity = cohort.len() - 1;
         let repository = CountingRepository::new(cohort.clone());
@@ -1270,7 +1308,7 @@ mod tests {
     /// changed, so it is observed unchanged and comes due again.
     #[tokio::test(start_paused = true)]
     async fn the_next_scan_ends_what_the_cap_deferred() {
-        let bound = StaleActiveTurnBound::hard_ceiling();
+        let bound = fixture_staleness_bound();
         let cohort = vec![candidate(1), candidate(2), candidate(3)];
         let capacity = cohort.len() - 1;
         let repository = CountingRepository::new(cohort.clone());
@@ -1353,7 +1391,7 @@ mod tests {
     /// and the third resumes past it rather than starting over.
     #[tokio::test(start_paused = true)]
     async fn an_undrainable_turn_does_not_starve_the_turn_behind_it() {
-        let bound = StaleActiveTurnBound::hard_ceiling();
+        let bound = fixture_staleness_bound();
         let blocked = candidate(1);
         let behind = candidate(2);
         let repository =
@@ -1378,7 +1416,7 @@ mod tests {
     /// and one that steering blocks reports one of each, not two of either.
     #[tokio::test(start_paused = true)]
     async fn the_phase_counts_endings_apart_from_attempts() {
-        let bound = StaleActiveTurnBound::hard_ceiling();
+        let bound = fixture_staleness_bound();
         let blocked = candidate(1);
         let ends = candidate(2);
         let repository =
@@ -1403,7 +1441,7 @@ mod tests {
     /// is not a fault, and it is evidence the turn may not be wedged.
     #[tokio::test(start_paused = true)]
     async fn a_busy_session_is_counted_apart_from_a_failure() {
-        let bound = StaleActiveTurnBound::hard_ceiling();
+        let bound = fixture_staleness_bound();
         let busy = candidate(1);
         let ends = candidate(2);
         let repository = CountingRepository::with_busy(vec![busy, ends], vec![busy.turn()]);
@@ -1525,11 +1563,10 @@ mod tests {
     /// an operator reading the line sees what actually decided the turn.
     #[test]
     fn the_audited_bound_is_the_configured_one() {
-        let shortened = Duration::from_secs(300);
-        let lowered = StaleActiveTurnBound::try_lowered(shortened).expect("300s is below 30m");
+        let shortened = Duration::from_secs(23);
+        let lowered = StaleActiveTurnBound::try_new(shortened).expect("fixture bound is valid");
 
         assert_eq!(lowered.get(), shortened);
-        assert_eq!(StaleActiveTurnBound::hard_ceiling().as_secs(), 1_800);
     }
 
     /// Recovery must have time to pass the shared durable-write serialization

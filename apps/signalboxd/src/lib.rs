@@ -3554,8 +3554,8 @@ mod tests {
     }
 
     #[test]
-    fn a_newline_dense_prompt_at_the_admission_ceiling_stays_bounded() {
-        let dense = "x\n".repeat(signalbox_domain::SessionSystemPrompt::MAX_UTF8_BYTES / 2);
+    fn a_large_newline_dense_prompt_stays_bounded() {
+        let dense = "x\n".repeat(1024 * 1024);
         let context = SessionAuthorityContext::new(None, None, Some(session_prompt(&dense)));
 
         let rendered = render_session_authority_context(&context);

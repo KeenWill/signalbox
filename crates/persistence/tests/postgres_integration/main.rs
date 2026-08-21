@@ -1501,7 +1501,7 @@ async fn complete_text_turn(
     if !matches!(*outcome, ModelCallTerminalOutcome::Completed(_)) {
         return Err("scripted model completion did not complete the turn".into());
     }
-    let (_, _, _, _, _, provider, _, _, _) = service.into_parts();
+    let (_, _, _, _, _, provider, _, _, _, _) = service.into_parts();
     Ok(provider
         .last_prepared_messages()
         .expect("scripted provider observed prepared messages")

@@ -15,9 +15,6 @@ use std::{
     time::Duration,
 };
 
-// numeric-bound: ceiling - protects against an unbounded paid provider loop
-const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 32;
-
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
     AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, CompletedModelCallIdentities,
@@ -1271,6 +1268,7 @@ pub struct ModelCallExecutionService<
     gate: Gate,
     catalog: Arc<dyn ToolCatalog>,
     retained_state: Option<RetainedModelCallExecutionState>,
+    max_automatic_tool_rounds_per_turn: Option<usize>,
 }
 
 impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
@@ -1296,12 +1294,19 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             gate,
             catalog: Arc::new(NoToolCatalog),
             retained_state: None,
+            max_automatic_tool_rounds_per_turn: None,
         }
     }
 
     /// Replaces the empty compatibility catalog with one tool-capable port.
     pub fn with_tool_catalog(mut self, catalog: impl ToolCatalog + 'static) -> Self {
         self.catalog = Arc::new(catalog);
+        self
+    }
+
+    /// Applies the deployment's optional automatic tool-round policy.
+    pub const fn with_automatic_tool_round_limit(mut self, limit: Option<usize>) -> Self {
+        self.max_automatic_tool_rounds_per_turn = limit;
         self
     }
 
@@ -1317,6 +1322,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         gate: Gate,
         catalog: Arc<dyn ToolCatalog>,
         retained_state: Option<RetainedModelCallExecutionState>,
+        max_automatic_tool_rounds_per_turn: Option<usize>,
     ) -> Self {
         Self {
             ids,
@@ -1328,6 +1334,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             gate,
             catalog,
             retained_state,
+            max_automatic_tool_rounds_per_turn,
         }
     }
 
@@ -1348,6 +1355,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Gate,
         Arc<dyn ToolCatalog>,
         Option<RetainedModelCallExecutionState>,
+        Option<usize>,
     ) {
         (
             self.ids,
@@ -1359,6 +1367,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             self.gate,
             self.catalog,
             self.retained_state,
+            self.max_automatic_tool_rounds_per_turn,
         )
     }
 
@@ -1624,7 +1633,11 @@ where
             &tool_entries,
         )
         .map_err(ModelCallExecutionError::Render)?;
-        if automatic_tool_round_limit_reached(turn, operation.messages()) {
+        if automatic_tool_round_limit_reached(
+            turn,
+            operation.messages(),
+            self.max_automatic_tool_rounds_per_turn,
+        ) {
             return self.commit_capability_known_failure(session, call).await;
         }
         let preparation_cancellation = self.authorization.cancellation_signal(session, call);
@@ -2160,20 +2173,26 @@ fn report_turn_terminalization(
         "turn terminalized"
     );
 }
-fn automatic_tool_round_limit_reached(turn: TurnId, messages: &[ModelConversationMessage]) -> bool {
-    messages
-        .iter()
-        .filter_map(|message| match message {
-            ModelConversationMessage::AssistantToolUse {
-                producing_call,
-                request,
-                ..
-            } if request.turn() == turn => Some(*producing_call),
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>()
-        .len()
-        >= MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN
+fn automatic_tool_round_limit_reached(
+    turn: TurnId,
+    messages: &[ModelConversationMessage],
+    limit: Option<usize>,
+) -> bool {
+    limit.is_some_and(|limit| {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                ModelConversationMessage::AssistantToolUse {
+                    producing_call,
+                    request,
+                    ..
+                } if request.turn() == turn => Some(*producing_call),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .len()
+            >= limit
+    })
 }
 
 /// One deterministic scripted-provider action.
@@ -3817,15 +3836,20 @@ mod tests {
         let below_limit = current_turn_tool_rounds(31);
         assert!(!automatic_tool_round_limit_reached(
             current_turn,
-            &below_limit
+            &below_limit,
+            Some(32),
         ));
 
         let at_limit = current_turn_tool_rounds(32);
-        assert!(automatic_tool_round_limit_reached(current_turn, &at_limit));
+        assert!(automatic_tool_round_limit_reached(
+            current_turn,
+            &at_limit,
+            Some(32),
+        ));
 
         let one_multi_request_round = one_current_batch_with_inherited_tool_history();
         assert!(
-            !automatic_tool_round_limit_reached(current_turn, &one_multi_request_round),
+            !automatic_tool_round_limit_reached(current_turn, &one_multi_request_round, Some(32),),
             "one current-turn batch and inherited history consume one round"
         );
     }
@@ -4907,8 +4931,18 @@ mod tests {
             }) if *retained_session == session && *retained_call == call
         ));
 
-        let (ids, prepare, failure, authorization, observation, provider, gate, catalog, retained) =
-            service.into_parts();
+        let (
+            ids,
+            prepare,
+            failure,
+            authorization,
+            observation,
+            provider,
+            gate,
+            catalog,
+            retained,
+            tool_round_limit,
+        ) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.reread_calls, 0);
@@ -4923,6 +4957,7 @@ mod tests {
             gate,
             catalog,
             retained,
+            tool_round_limit,
         );
         assert!(matches!(
             resumed.execute(identity(99, SessionId::from_uuid)).await,
@@ -4930,7 +4965,7 @@ mod tests {
                 FakeError::Infrastructure
             ))
         ));
-        let (_, prepare, failure, _, _, provider, _, _, retained) = resumed.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = resumed.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 2);
         assert_eq!(failure.reread_calls, 1);
@@ -4985,7 +5020,7 @@ mod tests {
                 .expect("the capability failure commits"),
             ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(failed))
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         // The failure must belong to the prepared turn's own session *and*
@@ -5044,7 +5079,7 @@ mod tests {
                 .expect("the retried capability failure commits"),
             ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(failed))
         );
-        let (_, _, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, _, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(failure.calls, 2);
         // Both attempts must address the prepared call — agreeing only with
         // each other would still pass if the service handed the same stale or
@@ -5087,8 +5122,9 @@ mod tests {
     /// stop.
     #[tokio::test]
     async fn s15_a_turn_at_the_automatic_tool_round_bound_fails_before_provider_entry() {
+        const CONFIGURED_TOOL_ROUND_LIMIT: usize = 7;
         let (request, tool_entries, failed) =
-            tool_round_saturated_fixture(MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN);
+            tool_round_saturated_fixture(CONFIGURED_TOOL_ROUND_LIMIT);
         let session = request.session();
         // Captured before the request moves into the fake: the committed
         // terminalization has to name *this* saturated call.
@@ -5108,7 +5144,8 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([]),
             InProcessAttemptDispatchGate::default(),
-        );
+        )
+        .with_automatic_tool_round_limit(Some(CONFIGURED_TOOL_ROUND_LIMIT));
 
         assert_eq!(
             service
@@ -5117,7 +5154,7 @@ mod tests {
                 .expect("the saturated turn closes as a capability failure"),
             ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(failed))
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         // A count alone accepts `fail_prepared` called with an unrelated
@@ -5182,7 +5219,7 @@ mod tests {
                 .expect("the cancellation reread is authoritative"),
             ModelCallExecutionOutcome::NoWork
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.reread_calls, 1);
@@ -5230,7 +5267,7 @@ mod tests {
                 .expect("the authoritative reread proves the closure landed"),
             ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(call)
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.reread_calls, 1);
@@ -5271,7 +5308,7 @@ mod tests {
                 FakeError::IdentityCollision
             ))
         ));
-        let (_, prepare, _, authorization, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, _, authorization, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 0);
@@ -5309,7 +5346,7 @@ mod tests {
                 .expect("stale authority is a normal no-send result"),
             ModelCallExecutionOutcome::NoWork
         );
-        let (_, _, _, authorization, _, provider, _, _, retained) = service.into_parts();
+        let (_, _, _, authorization, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(provider.capability_preparation_count(), 1);
         assert_eq!(provider.interaction_count(), 0);
@@ -5347,7 +5384,7 @@ mod tests {
             error,
             ModelCallExecutionError::Provider(ScriptedModelCallError::InteractionOperatorFailure)
         ));
-        let (_, prepare, _, authorization, _, provider, _, _, _) = service.into_parts();
+        let (_, prepare, _, authorization, _, provider, _, _, _, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(authorization.calls, 1);
         assert_eq!(provider.capability_preparation_count(), 1);
@@ -5427,7 +5464,7 @@ mod tests {
             ModelCallExecutionOutcome::ObservationAlreadyCommitted(call)
         );
         assert!(service.retained_observation().is_none());
-        let (_, _, _, authorization, observation, provider, _, _, _) = service.into_parts();
+        let (_, _, _, authorization, observation, provider, _, _, _, _) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 0);
         assert_eq!(observation.commit_calls, 2);
@@ -5496,7 +5533,7 @@ mod tests {
             retained.observation(),
             &ModelCallTerminalObservation::KnownFailed
         );
-        let (_, _, _, authorization, observation, provider, _, _, _) = service.into_parts();
+        let (_, _, _, authorization, observation, provider, _, _, _, _) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 1);
         assert_eq!(observation.commit_calls, 1);
@@ -5545,7 +5582,8 @@ mod tests {
                 .expect("the complete terminal cancellation is authoritative"),
             ModelCallExecutionOutcome::NoWork
         );
-        let (_, _, _, authorization, observation, provider, _, _, retained) = service.into_parts();
+        let (_, _, _, authorization, observation, provider, _, _, retained, _) =
+            service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 1);
         assert_eq!(observation.commit_calls, 0);
@@ -5615,8 +5653,18 @@ mod tests {
             }) if *retained_session == session && **prepared == request
         ));
 
-        let (ids, prepare, failure, authorization, observation, provider, gate, catalog, retained) =
-            service.into_parts();
+        let (
+            ids,
+            prepare,
+            failure,
+            authorization,
+            observation,
+            provider,
+            gate,
+            catalog,
+            retained,
+            tool_round_limit,
+        ) = service.into_parts();
         let mut resumed = ModelCallExecutionService::from_parts(
             ids,
             prepare,
@@ -5627,6 +5675,7 @@ mod tests {
             gate,
             catalog,
             retained,
+            tool_round_limit,
         );
         let error = resumed
             .execute(identity(99, SessionId::from_uuid))
@@ -5644,7 +5693,7 @@ mod tests {
             retained_observation.observation(),
             &ModelCallTerminalObservation::KnownFailed
         );
-        let (_, prepare, _, authorization, observation, provider, _, _, retained) =
+        let (_, prepare, _, authorization, observation, provider, _, _, retained, _) =
             resumed.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(authorization.calls, 1);
@@ -5715,7 +5764,8 @@ mod tests {
             })
         ));
 
-        let (_, prepare, _, authorization, observation, provider, _, _, _) = service.into_parts();
+        let (_, prepare, _, authorization, observation, provider, _, _, _, _) =
+            service.into_parts();
         assert_eq!(prepare.calls, 2);
         assert_eq!(authorization.calls, 2);
         assert_eq!(authorization.reread_calls, 2);
@@ -5779,7 +5829,7 @@ mod tests {
                 Err(ModelCallExecutionError::Provider(FakeError::Infrastructure))
             ));
         }
-        let (_, _, _, _, _, provider, _, _, _) = service.into_parts();
+        let (_, _, _, _, _, provider, _, _, _, _) = service.into_parts();
         assert_eq!(provider.interaction_count, 1);
     }
 

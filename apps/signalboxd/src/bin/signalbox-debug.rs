@@ -730,7 +730,7 @@ context_window_tokens = 100
             .split_once("[numeric_bounds]")
             .expect("the example declares numeric bounds");
         let (numeric_bounds, _) = numeric_bounds_and_after
-            .split_once("\n# Omit this table")
+            .split_once("\n# Blob bytes live outside PostgreSQL.")
             .expect("the example terminates numeric bounds");
         HubModelConfiguration::parse(&format!("{content}\n[numeric_bounds]{numeric_bounds}\n"))
             .expect("the model configuration fixture is valid")

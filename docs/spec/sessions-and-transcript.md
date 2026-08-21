@@ -43,6 +43,8 @@ current-head authentication is additionally verified against the parent slice
 verified against this PR (`agent/scoped-visibility-wiring`).
 Defaults-replacement settings admission and its locked expected-epoch handoff
 are verified against this PR (`agent/model-settings-execution`).
+Deployment-owned system-prompt and metadata-count admission is verified against
+this PR (`agent/bounds-required-config-protocol`).
 
 ## Session identity and creation provenance
 
@@ -344,15 +346,15 @@ mid-call (INV-046).
 ### Session system prompt
 
 A present session system prompt (`SessionSystemPrompt`) is nonempty exact
-Unicode text that rejects U+0000 and carries at most
-`SessionSystemPrompt::MAX_UTF8_BYTES` = 1,048,576 UTF-8 bytes, mirroring the
-accepted-input content bound below; construction rejects excess without
-truncating or rewriting, and equality is the exact ordered scalar sequence.
-Absence is typed `None`, never empty text. `CreateSession` and
-`CreateSessionFromImportedFrontier` carry the optional prompt inside their
-complete unversioned initial defaults, and `ReplaceSessionDefaults` replaces it
-only as part of the complete successor epoch — there is no prompt-only mutation.
-This section owns the capacity and epoch-placement contract. Matching
+Unicode text that rejects U+0000. Domain construction does not impose a byte
+policy; the daemon configuration applies its required optional byte limit at
+each ingress. Construction never truncates or rewrites, and equality is the
+exact ordered scalar sequence. Absence is typed `None`, never empty text.
+`CreateSession` and `CreateSessionFromImportedFrontier` carry the optional
+prompt inside their complete unversioned initial defaults, and
+`ReplaceSessionDefaults` replaces it only as part of the complete successor
+epoch — there is no prompt-only mutation. This section owns the capacity and
+epoch-placement contract. Matching
 `octet_length(convert_to(system_prompt, 'UTF8'))` CHECK constraints protect the
 durable epoch and command columns (migration
 `202607280303_session_system_prompt.sql`), and command/defaults schema agreement
@@ -478,11 +480,12 @@ caller order; duplicate tags or attribute keys fail construction rather than
 silently selecting a winner. Tags are human-facing organization and attributes
 are machine-facing provenance; neither shape substitutes for the other.
 
-A snapshot carries at most 256 tags, at most 256 attributes, and at most 262,144
-total UTF-8 bytes across its present title, tags, attribute keys, and attribute
-values. Each tag and attribute key carries at most 1,024 UTF-8 bytes so its
-composite PostgreSQL index entry remains representable. Construction rejects any
-excess before command handling; this section owns the capacity contract.
+A snapshot carries at most 262,144 total UTF-8 bytes across its present title,
+tags, attribute keys, and attribute values. Each tag and attribute key carries
+at most 1,024 UTF-8 bytes so its composite PostgreSQL index entry remains
+representable. The daemon applies deployment-owned optional tag and attribute
+count policies before command handling; domain reconstitution has no count
+policy.
 
 The root `session_metadata` row and normalized
 `session_metadata_tag`/`session_metadata_attribute` rows (migration
@@ -540,11 +543,12 @@ remain available through the single-session metadata read, and the current
 epoch's optional system prompt is deliberately absent from list rows — the
 process boundary's single-session defaults read
 ([process-protocol](process-protocol.md)) returns it exactly. A query has an
-exact tag set of at most 256 members, optional exact case-sensitive title
-substring, `include_archived`, a page size from 1 through 100, and an exclusive
-`after_session_id` cursor. Required tags use the metadata tag rules, a present
-title substring is nonempty and rejects U+0000, and all filter strings together
-carry at most 262,144 UTF-8 bytes:
+exact tag set admitted by the deployment policy, optional exact case-sensitive
+title substring, `include_archived`, a page size admitted by the deployment's
+minimum and maximum policies, and an exclusive `after_session_id` cursor.
+Required tags use the metadata tag rules, a present title substring is nonempty
+and rejects U+0000, and all filter strings together carry at most 262,144 UTF-8
+bytes:
 
 - every requested tag must exist (AND-match); an empty set matches all;
 - a title query matches only a present title containing that exact scalar

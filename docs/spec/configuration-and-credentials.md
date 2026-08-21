@@ -9,8 +9,8 @@ bootstrap are verified against this PR (`agent/web-http-transport`).
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
 
-The required numeric-bound configuration grammar is verified against this PR
-(`agent/bounds-required-config-schema`).
+The required numeric-bound configuration grammar and scheduler admission policy
+are verified against this PR (`agent/bounds-required-config-protocol`).
 
 The delegated tool-approval posture, judge selection, and daemon composition are
 verified against the implementing stack through this PR
@@ -20,9 +20,6 @@ and which of them changes its resolved approval, are re-verified against this PR
 
 The daemon-local Git and execution-tool dependencies are verified against this
 stack through this PR (`agent/daemon-exec-tools`).
-
-The scheduler pass-admission override is verified against this PR
-(`agent/scheduler-pass-pause`).
 
 The derivation of each session's workspace root from the configured root is
 verified against this PR (`agent/per-session-workspaces`).
@@ -630,15 +627,13 @@ fail-closed:
 - Parse errors are typed, sanitized values; no file content appears in error
   text. (signalboxd erases the type before logging, as described above.)
 
-The optional `[scheduler]` table has exactly one `max_in_flight_passes` integer
-from 0 through 16. It replaces the scheduler's fixed 16-pass baseline for this
-daemon process. Omission keeps that baseline. A positive limit bounds concurrent
-authoritative per-session passes, not the durable queue: excess eligible
-sessions remain recorded and are admitted as passes finish. Zero pauses
+The required `numeric_bounds.scheduler_pass_admission_cap` policy bounds
+concurrent authoritative per-session passes, not the durable queue: excess
+eligible sessions remain recorded and are admitted as passes finish. Zero pauses
 authoritative session execution while the scheduler task and the daemon's
-ingestion and process services remain live; durable queued work is unchanged. A
-value above 16, a mistyped value, or an unknown field fails startup as invalid
-scheduler settings.
+ingestion and process services remain live; `"none"` admits every currently
+eligible session. The retired optional `[scheduler]` table is an unknown root
+field.
 
 The optional `[model_settings]` table supplies the deployment-global settings
 overlay. Each `[[model_settings_profiles]]` entry gives an exact unique `name`

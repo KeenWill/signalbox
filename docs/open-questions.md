@@ -104,24 +104,12 @@ specification diff. Accepted cross-component and wire contracts live in the
   replace the conservative ambiguous outcome with trustworthy evidence,
   including its polling posture and evidence classes, remains undecided. Later
   scope. (S02)
-- **Operator control of scheduling and liveness cadence.** The scheduler's sweep
-  interval, per-session scan gating, fairness between contending sessions, and
-  the turn-liveness staleness bound and scan interval are all compiled constants
-  today
-  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)), and
-  almost none of them has anywhere to validate a supplied value. Only the
-  turn-liveness staleness bound has a lowering constructor that enforces its
-  compiled ceiling; the sweep interval's constructor refuses a zero or
-  unrepresentable duration and no more, so it fixes no maximum; and the scan
-  interval, per-session scan gating, and fairness expose no constructor at all.
-  The enforcement points for a configuration surface would therefore have to be
-  built rather than merely called. Undecided with them: whether signalboxd
-  should carry such settings at all; whether they arrive as one operational
-  surface or one constant at a time; and, for each, whether its compiled value
-  is a ceiling that may only be lowered or an ordinary default that may move
-  either way — settled so far only for the staleness bound. Leaning: one
-  surface, introduced when a deployment needs a value the compiled one cannot
-  serve, rather than pre-emptively. Later scope. (S01, S02)
+- **Per-session scheduler scan gating and fairness.** Deployment configuration
+  now owns the scheduler sweep and turn-liveness cadences
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)). What
+  remains undecided is whether one session may tune its own scan gate and how
+  contending sessions share a deployment-wide pass budget. Later scope. (S01,
+  S02)
 - **Terminalizing a turn that holds pending steering.** Every steering row bound
   to a turn must be closed before that turn terminalizes, and the interrupt and
   model-call terminal paths satisfy that by reclassifying the steering into a

@@ -35,7 +35,7 @@ use signalbox_application::{
     ScriptedModelCallStep, StaleActiveTurnBound, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanService, TurnLivenessScanInterval,
     UuidV7ModelCallExecutionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7StartupScanIdGenerator, scheduler_pass_admission_cap,
+    UuidV7StartupScanIdGenerator,
 };
 use signalbox_blob_store::BlobObjectKey;
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
@@ -83,18 +83,19 @@ use signalbox_process_protocol::{
     DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail, FastMode,
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
     ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
-    MetadataActor, ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
-    ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion, ReasoningLevel,
-    RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
-    ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
-    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
-    ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
-    ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
-    ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
-    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SessionPlacement,
-    SettingOverlay, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
-    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
+    MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MetadataActor, ModelChangeAdjustment, ModelSelection,
+    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot,
+    ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
+    ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput,
+    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
+    ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
+    ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
+    ReviewOrchestrationState, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
+    ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent,
+    SessionMetadata, SessionPlacement, SettingOverlay, SystemPromptMember, SystemPromptText,
+    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
+    encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
@@ -2243,7 +2244,9 @@ fn completed_script(provider_model: &str, text: &str, usage: TokenUsage) -> Scri
 // unprovisioned workspace, and scheduled goal resumption are named follow-on
 // slices: they need the same fleet census but not more boot infrastructure.
 
-const FLEET_SESSION_COUNT: usize = scheduler_pass_admission_cap();
+const FLEET_SESSION_COUNT: usize = 16;
+// numeric-bound: test setup - preserves the ordinary production occupancy fixture
+const FLEET_BASELINE_OCCUPANCY_BOUND: Duration = Duration::from_secs(900);
 // numeric-bound: test deadline - exercises the production recovery path promptly
 const FLEET_OCCUPANCY_BOUND: Duration = Duration::from_secs(1);
 // numeric-bound: test deadline - keeps each fault probe inside one CI minute
@@ -2475,8 +2478,11 @@ fn start_fleet_scheduler(
         SchedulerLoop::new(runtime.take_work_source(), pass).with_occupancy_bound(occupancy_bound);
     let turn_liveness = TurnLivenessRuntime::new(
         runtime.pool.clone(),
-        StaleActiveTurnBound::hard_ceiling(),
-        TurnLivenessScanInterval::baseline(),
+        Some(StaleActiveTurnBound::try_new(Duration::from_secs(1_800))?),
+        Some(TurnLivenessScanInterval::try_new(Duration::from_secs(60))?),
+        None,
+        Some(Duration::from_secs(120)),
+        Some(Duration::from_secs(1_800)),
     );
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let scheduler_shutdown = shutdown_receiver.clone();
@@ -2626,7 +2632,7 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
     let baseline_tasks = start_fleet_scheduler(
         &mut runtime,
         model.clone(),
-        SchedulerPassOccupancyBound::hard_ceiling(),
+        SchedulerPassOccupancyBound::try_new(FLEET_BASELINE_OCCUPANCY_BOUND)?,
     )?;
     wait_for_fleet_terminal_count(
         &runtime.pool,
@@ -2637,7 +2643,7 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
     baseline_tasks.stop().await?;
     runtime.restart().await?;
     let fault_fleet = commission_fleet(&runtime, FLEET_SESSION_COUNT - 1, 1).await?;
-    let occupancy_bound = SchedulerPassOccupancyBound::try_lowered(FLEET_OCCUPANCY_BOUND)?;
+    let occupancy_bound = SchedulerPassOccupancyBound::try_new(FLEET_OCCUPANCY_BOUND)?;
     let tasks = start_fleet_scheduler(&mut runtime, model.clone(), occupancy_bound)?;
     wait_for_hangs(&model, 1).await?;
     wait_for_fleet_ambiguous_model_call_park(&runtime.pool, &model, FLEET_ASSERTION_BOUND).await?;
@@ -2670,7 +2676,7 @@ async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
     let first_tasks = start_fleet_scheduler(
         &mut runtime,
         hanging_model.clone(),
-        SchedulerPassOccupancyBound::hard_ceiling(),
+        SchedulerPassOccupancyBound::try_new(FLEET_BASELINE_OCCUPANCY_BOUND)?,
     )?;
     wait_for_hangs(&hanging_model, FLEET_SESSION_COUNT).await?;
     wait_for_fleet_lifecycle_counts(
@@ -2685,7 +2691,7 @@ async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
     let replacement_tasks = start_fleet_scheduler(
         &mut runtime,
         replacement_model,
-        SchedulerPassOccupancyBound::hard_ceiling(),
+        SchedulerPassOccupancyBound::try_new(FLEET_BASELINE_OCCUPANCY_BOUND)?,
     )?;
     wait_for_fleet_lifecycle_counts(
         &runtime.pool,
@@ -3665,9 +3671,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
 async fn metadata_shape_failure_is_a_malformed_frame() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
-    let required_tags = (0..=256)
-        .map(|index| format!("tag-{index:03}"))
-        .collect::<Vec<_>>();
+    let required_tags = vec!["x".repeat(MAX_SESSION_METADATA_INDEXED_UTF8_BYTES + 1)];
     let frame = format!(
         "{{\"version\":1,\"request_id\":\"21\",\"request\":{{\"type\":\"list_session_metadata\",\"required_tags\":{},\"title_contains\":null,\"include_archived\":false,\"page_size\":\"50\",\"after_session_id\":null}}}}\n",
         serde_json::to_string(&required_tags)?
