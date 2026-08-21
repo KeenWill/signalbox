@@ -6,6 +6,7 @@ CREATE TABLE blob_derivation (
     transformation_name text COLLATE "C" NOT NULL,
     transformation_version bigint NOT NULL,
     parameters_json jsonb NOT NULL,
+    parameters_canonical text COLLATE "C" NOT NULL,
     producer_class text COLLATE "C" NOT NULL,
     implementation_digest bytea,
     execution_id uuid,
@@ -29,7 +30,10 @@ CREATE TABLE blob_derivation (
     CONSTRAINT blob_derivation_version_shape
         CHECK (transformation_version BETWEEN 1 AND 4294967295),
     CONSTRAINT blob_derivation_parameter_bound
-        CHECK (octet_length(parameters_json::text) <= 4096),
+        CHECK (
+            octet_length(parameters_canonical) <= 4096
+            AND parameters_canonical::jsonb = parameters_json
+        ),
     CONSTRAINT blob_derivation_counts
         CHECK (input_count BETWEEN 1 AND 16 AND output_count BETWEEN 1 AND 16),
     CONSTRAINT blob_derivation_producer_shape
@@ -37,6 +41,7 @@ CREATE TABLE blob_derivation (
             (
                 producer_class = 'deterministic'
                 AND deterministic_key IS NOT NULL
+                AND implementation_digest IS NOT NULL
                 AND octet_length(implementation_digest) = 32
                 AND execution_id IS NULL
                 AND model_call_id IS NULL
@@ -45,6 +50,7 @@ CREATE TABLE blob_derivation (
             (
                 producer_class = 'executed'
                 AND deterministic_key IS NULL
+                AND implementation_digest IS NOT NULL
                 AND octet_length(implementation_digest) = 32
                 AND execution_id IS NOT NULL
                 AND model_call_id IS NULL
@@ -143,21 +149,31 @@ DECLARE
     expected_outputs smallint;
     observed_inputs bigint;
     observed_outputs bigint;
+    minimum_input_ordinal smallint;
+    maximum_input_ordinal smallint;
+    minimum_output_ordinal smallint;
+    maximum_output_ordinal smallint;
 BEGIN
     selected_id := NEW.derivation_id;
     SELECT input_count, output_count
       INTO expected_inputs, expected_outputs
       FROM blob_derivation
      WHERE derivation_id = selected_id;
-    SELECT count(*) INTO observed_inputs
+    SELECT count(*), min(input_ordinal), max(input_ordinal)
+      INTO observed_inputs, minimum_input_ordinal, maximum_input_ordinal
       FROM blob_derivation_input
      WHERE derivation_id = selected_id;
-    SELECT count(*) INTO observed_outputs
+    SELECT count(*), min(output_ordinal), max(output_ordinal)
+      INTO observed_outputs, minimum_output_ordinal, maximum_output_ordinal
       FROM blob_derivation_output
      WHERE derivation_id = selected_id;
     IF expected_inputs IS NULL
        OR observed_inputs <> expected_inputs
-       OR observed_outputs <> expected_outputs THEN
+       OR observed_outputs <> expected_outputs
+       OR minimum_input_ordinal <> 0
+       OR maximum_input_ordinal <> expected_inputs - 1
+       OR minimum_output_ordinal <> 0
+       OR maximum_output_ordinal <> expected_outputs - 1 THEN
         RAISE EXCEPTION 'blob derivation record is incomplete';
     END IF;
     RETURN NULL;

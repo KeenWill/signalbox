@@ -74,6 +74,12 @@ impl WebContractBootstrap {
     /// Describes this daemon build's one exact browser contract.
     #[must_use]
     pub fn current() -> Self {
+        Self::for_runtime(false, false)
+    }
+
+    /// Describes this contract with deployment-bound blob capabilities.
+    #[must_use]
+    pub fn for_runtime(immutable_blob_content: bool, image_derivatives: bool) -> Self {
         Self {
             contract: WebContractIdentity {
                 name: WEB_CONTRACT_NAME.to_owned(),
@@ -83,9 +89,9 @@ impl WebContractBootstrap {
                 bounded_json: true,
                 same_origin_json_mutations: true,
                 ndjson_streaming: true,
-                immutable_blob_content: true,
-                blob_derivations: true,
-                image_derivatives: true,
+                immutable_blob_content,
+                blob_derivations: immutable_blob_content,
+                image_derivatives,
             },
             limits: WebContractLimits {
                 max_json_body_bytes: MAX_JSON_BODY_BYTES as u32,
@@ -386,6 +392,12 @@ function assertSchema(root, schema, value, path) {{
     if (!Array.isArray(value)) {{
       fail(path, "an array");
     }}
+    if (schema.minItems !== undefined && value.length < schema.minItems) {{
+      fail(path, `at least ${{schema.minItems}} items`);
+    }}
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {{
+      fail(path, `at most ${{schema.maxItems}} items`);
+    }}
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${{path}}[${{index}}]`));
     return;
   }}
@@ -447,6 +459,9 @@ function assertUuid(value, path) {{
 
 function assertSameOriginBlobUrl(value, path) {{
   const base = "http://signalbox.invalid";
+  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//")) {{
+    fail(path, "a root-relative blob API path");
+  }}
   const parsed = new URL(value, base);
   if (parsed.origin !== base || !parsed.pathname.startsWith("/api/blobs/") || parsed.hash !== "") {{
     fail(path, "a same-origin blob API path");

@@ -32,7 +32,7 @@ function ArtifactRenderer({ descriptor }: { descriptor: WebBlobDescriptor }) {
   const original = viewByKind(descriptor, 'browser_native')
   const download = viewByKind(descriptor, 'download')
   const rendered = originalRequested && original ? original : automatic
-  const derivation = automatic?.derivations[0]
+  const derivation = rendered?.derivations[0]
 
   return (
     <article className="artifact-row" aria-label={`Artifact ${displayName(descriptor)}`}>

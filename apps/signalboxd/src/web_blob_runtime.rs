@@ -213,6 +213,11 @@ impl DeterministicBlobProducer for ImageProducer {
         tokio::fs::copy(&self.worker_program, &worker_path)
             .await
             .map_err(|_| WebBlobRuntimeError::Unavailable)?;
+        let copied_implementation =
+            digest_file(&worker_path).map_err(|_| WebBlobRuntimeError::Unavailable)?;
+        if copied_implementation != self.implementation {
+            return Err(WebBlobRuntimeError::Integrity);
+        }
         make_executable(&worker_path)?;
         run_isolated_worker(workspace.path(), &self.supervisor_program, edge_px).await?;
         let expected = expected_output(&output_path).await?;

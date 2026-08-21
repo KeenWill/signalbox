@@ -457,6 +457,12 @@ function assertSchema(root, schema, value, path) {
     if (!Array.isArray(value)) {
       fail(path, "an array");
     }
+    if (schema.minItems !== undefined && value.length < schema.minItems) {
+      fail(path, `at least ${schema.minItems} items`);
+    }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      fail(path, `at most ${schema.maxItems} items`);
+    }
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${path}[${index}]`));
     return;
   }
@@ -518,6 +524,9 @@ function assertUuid(value, path) {
 
 function assertSameOriginBlobUrl(value, path) {
   const base = "http://signalbox.invalid";
+  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//")) {
+    fail(path, "a root-relative blob API path");
+  }
   const parsed = new URL(value, base);
   if (parsed.origin !== base || !parsed.pathname.startsWith("/api/blobs/") || parsed.hash !== "") {
     fail(path, "a same-origin blob API path");

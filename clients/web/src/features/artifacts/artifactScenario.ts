@@ -21,14 +21,14 @@ export const imageArtifact = decodeWebBlobDescriptor({
       kind: 'browser_native',
       media_type: 'image/png',
       byte_length: '94371840',
-      content_url: `/api/blobs/${sourceDigest}/content/image.svg`,
+      content_url: `/api/blobs/${sourceDigest}/content/image-png`,
       derivations: [],
     },
     {
       kind: 'preview',
-      media_type: 'image/svg+xml',
+      media_type: 'image/png',
       byte_length: '842',
-      content_url: `/api/blobs/${previewDigest}/content/image.svg`,
+      content_url: `/api/blobs/${previewDigest}/content/image-png`,
       derivations: [
         {
           derivation_id: '0198f321-2300-7000-8000-000000000001',

@@ -15,7 +15,7 @@ use sqlx::{
 use crate::commit_failure_is_ambiguous;
 
 const LOAD_ROOT_BY_KEY: &str = r#"SELECT derivation_id, deterministic_key,
-           transformation_name, transformation_version, parameters_json,
+           transformation_name, transformation_version, parameters_json, parameters_canonical,
            producer_class, implementation_digest, execution_id, model_call_id,
            input_count, output_count
       FROM blob_derivation
@@ -134,10 +134,10 @@ impl BlobDerivationRepository {
         let inserted = sqlx::query(
             r#"INSERT INTO blob_derivation (
                    derivation_id, deterministic_key, transformation_name,
-                   transformation_version, parameters_json, producer_class,
+                   transformation_version, parameters_json, parameters_canonical, producer_class,
                    implementation_digest, execution_id, model_call_id,
                    input_count, output_count
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                ON CONFLICT DO NOTHING"#,
         )
         .bind(derivation.id().into_uuid())
@@ -150,6 +150,7 @@ impl BlobDerivationRepository {
             )
             .map_err(|_| BlobDerivationCorruption::InvalidTransformation)?,
         )
+        .bind(derivation.transformation().parameters_json())
         .bind(producer_class)
         .bind(implementation.map(|digest| digest.as_bytes().to_vec()))
         .bind(execution_id)
@@ -298,7 +299,9 @@ async fn load_satellites(
     }
     let version = u32::try_from(root.try_get::<i64, _>("transformation_version")?)
         .map_err(|_| BlobDerivationCorruption::InvalidTransformation)?;
-    let parameters: serde_json::Value = root.try_get("parameters_json")?;
+    let parameters_canonical: String = root.try_get("parameters_canonical")?;
+    let parameters: serde_json::Value = serde_json::from_str(&parameters_canonical)
+        .map_err(|_| BlobDerivationCorruption::InvalidTransformation)?;
     let transformation = BlobTransformation::try_new(
         BlobTransformationName::try_new(root.try_get::<String, _>("transformation_name")?)
             .map_err(|_| BlobDerivationCorruption::InvalidTransformation)?,
@@ -306,6 +309,9 @@ async fn load_satellites(
         &parameters,
     )
     .map_err(|_| BlobDerivationCorruption::InvalidTransformation)?;
+    if transformation.parameters_json() != parameters_canonical {
+        return Err(BlobDerivationCorruption::InvalidTransformation.into());
+    }
     let producer = decode_producer(&root)?;
     let derivation = BlobDerivation::try_new(id, inputs, transformation, producer, outputs)
         .map_err(|_| BlobDerivationCorruption::InvalidCardinality)?;

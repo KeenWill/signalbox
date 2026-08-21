@@ -32,7 +32,7 @@ non-waiting process admission, and the terminal read commands are verified
 against this implementing change (`agent/blob-storage-read-wire`).
 
 Same-origin browser delivery, immutable derivation provenance, and lazy isolated
-image derivatives are verified against this implementing change
+image derivatives are verified against this PR
 (`agent/web-blob-delivery`).
 
 It owns one thing: how Signalbox stores, identifies, references, and reads

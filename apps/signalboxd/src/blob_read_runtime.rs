@@ -149,6 +149,7 @@ pub(crate) async fn open_recorded_blob_range(
         });
     }
     let mut saw_missing = false;
+    let mut saw_corrupt = false;
     let mut saw_unavailable = false;
     for replica in entry.replicas() {
         let Some(store) = registry.recorded_store(replica.store()) else {
@@ -158,25 +159,33 @@ pub(crate) async fn open_recorded_blob_range(
             Ok(opened) if opened.byte_length() == expected.byte_length() => {
                 let mut reader = opened.into_reader();
                 let skipped =
-                    tokio::io::copy(&mut (&mut reader).take(offset), &mut tokio::io::sink())
+                    match tokio::io::copy(&mut (&mut reader).take(offset), &mut tokio::io::sink())
                         .await
-                        .map_err(|_| BlobReadError::Unavailable)?;
+                    {
+                        Ok(skipped) => skipped,
+                        Err(_) => {
+                            saw_unavailable = true;
+                            continue;
+                        }
+                    };
                 if skipped != offset {
-                    return Err(BlobReadError::Integrity);
+                    saw_corrupt = true;
+                    continue;
                 }
                 return Ok(Box::new(reader.take(length.get())));
             }
-            Ok(_) => return Err(BlobReadError::Corrupt),
+            Ok(_) => saw_corrupt = true,
             Err(error) => match error.kind() {
                 BlobStoreFailureKind::NotFound => saw_missing = true,
-                BlobStoreFailureKind::VerificationFailed | BlobStoreFailureKind::Unavailable => {
-                    saw_unavailable = true;
-                }
+                BlobStoreFailureKind::VerificationFailed => saw_corrupt = true,
+                BlobStoreFailureKind::Unavailable => saw_unavailable = true,
             },
         }
     }
     if saw_unavailable {
         Err(BlobReadError::Unavailable)
+    } else if saw_corrupt {
+        Err(BlobReadError::Corrupt)
     } else if saw_missing {
         Err(BlobReadError::Missing)
     } else {

@@ -524,10 +524,10 @@ async fn recorded_store_bindings_use_bytewise_name_order() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// INV-070: one deterministic key has one immutable, complete derivation record.
+/// INV-071: one deterministic key has one immutable, complete derivation record.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv070_deterministic_blob_derivation_is_cached_and_immutable() -> Result<(), Box<dyn Error>>
+async fn inv071_deterministic_blob_derivation_is_cached_and_immutable() -> Result<(), Box<dyn Error>>
 {
     let (container, pool) = migrated_postgres().await?;
     let catalog = BlobCatalogRepository::new(pool.clone());
@@ -549,6 +549,29 @@ async fn inv070_deterministic_blob_derivation_is_cached_and_immutable() -> Resul
     let recorded = repository.record(derivation.clone()).await?;
     let replay = repository.record(derivation.clone()).await?;
     let loaded = repository.find_deterministic(key).await?;
+    let boundary_transformation = BlobTransformation::try_new(
+        BlobTransformationName::try_new("image.boundary")
+            .expect("the boundary transformation name is valid"),
+        1,
+        &serde_json::json!({"payload": "x".repeat(4082)}),
+    )
+    .expect("the canonical boundary parameters are valid");
+    assert_eq!(boundary_transformation.parameters_json().len(), 4096);
+    let boundary_derivation = BlobDerivation::try_new(
+        BlobDerivationId::from_uuid(Uuid::from_u128(0x5a10_0710)),
+        [input.digest()],
+        boundary_transformation,
+        BlobDerivationProducer::Deterministic {
+            implementation: BlobDigest::digest(b"boundary-worker-v1"),
+        },
+        [output.digest()],
+    )
+    .expect("the boundary derivation is valid");
+    let boundary_key = boundary_derivation
+        .deterministic_key()
+        .expect("the boundary producer is deterministic");
+    repository.record(boundary_derivation.clone()).await?;
+    let loaded_boundary = repository.find_deterministic(boundary_key).await?;
     let mutation = sqlx::query("UPDATE blob_derivation SET transformation_version = 2")
         .execute(&pool)
         .await;
@@ -563,6 +586,57 @@ async fn inv070_deterministic_blob_derivation_is_cached_and_immutable() -> Resul
     let truncation = sqlx::query("TRUNCATE blob_derivation CASCADE")
         .execute(&pool)
         .await;
+    let null_implementation = sqlx::query(
+        "INSERT INTO blob_derivation (
+             derivation_id, deterministic_key, transformation_name, transformation_version,
+             parameters_json, parameters_canonical, producer_class, implementation_digest,
+             execution_id, model_call_id, input_count, output_count
+         ) VALUES ($1, $2, 'image.thumbnail', 1, '{}'::jsonb, '{}',
+                   'deterministic', NULL, NULL, NULL, 1, 1)",
+    )
+    .bind(Uuid::from_u128(0x5a10_0711))
+    .bind(
+        BlobDigest::digest(b"null implementation key")
+            .as_bytes()
+            .as_slice(),
+    )
+    .execute(&pool)
+    .await;
+    let mut malformed_ordinals = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO blob_derivation (
+             derivation_id, deterministic_key, transformation_name, transformation_version,
+             parameters_json, parameters_canonical, producer_class, implementation_digest,
+             execution_id, model_call_id, input_count, output_count
+         ) VALUES ($1, $2, 'image.thumbnail', 1, '{}'::jsonb, '{}',
+                   'deterministic', $3, NULL, NULL, 1, 1)",
+    )
+    .bind(Uuid::from_u128(0x5a10_0712))
+    .bind(
+        BlobDigest::digest(b"malformed ordinal key")
+            .as_bytes()
+            .as_slice(),
+    )
+    .bind(BlobDigest::digest(b"implementation").as_bytes().as_slice())
+    .execute(&mut *malformed_ordinals)
+    .await?;
+    sqlx::query(
+        "INSERT INTO blob_derivation_input (derivation_id, input_ordinal, digest)
+         VALUES ($1, 15, $2)",
+    )
+    .bind(Uuid::from_u128(0x5a10_0712))
+    .bind(input.digest().as_bytes().as_slice())
+    .execute(&mut *malformed_ordinals)
+    .await?;
+    sqlx::query(
+        "INSERT INTO blob_derivation_output (derivation_id, output_ordinal, digest)
+         VALUES ($1, 0, $2)",
+    )
+    .bind(Uuid::from_u128(0x5a10_0712))
+    .bind(output.digest().as_bytes().as_slice())
+    .execute(&mut *malformed_ordinals)
+    .await?;
+    let malformed_ordinals = malformed_ordinals.commit().await;
 
     assert_eq!(
         recorded,
@@ -573,9 +647,39 @@ async fn inv070_deterministic_blob_derivation_is_cached_and_immutable() -> Resul
         BlobDerivationRecordOutcome::Existing(derivation.clone())
     );
     assert_eq!(loaded, Some(derivation));
-    assert!(mutation.is_err());
-    assert!(extra_output.is_err());
-    assert!(truncation.is_err());
+    assert_eq!(loaded_boundary, Some(boundary_derivation));
+    let mutation = mutation.expect_err("the immutability trigger rejects the update");
+    let extra_output = extra_output.expect_err("the completeness trigger rejects the extra output");
+    let truncation = truncation.expect_err("the truncate trigger rejects the statement");
+    let null_implementation =
+        null_implementation.expect_err("producer provenance rejects a null implementation");
+    let malformed_ordinals =
+        malformed_ordinals.expect_err("completeness rejects non-contiguous ordinals");
+    assert!(
+        mutation
+            .to_string()
+            .contains("blob derivation records are immutable")
+    );
+    assert!(
+        extra_output
+            .to_string()
+            .contains("blob derivation record is incomplete")
+    );
+    assert!(
+        truncation
+            .to_string()
+            .contains("blob derivation records are immutable")
+    );
+    assert!(
+        null_implementation
+            .to_string()
+            .contains("blob_derivation_producer_shape")
+    );
+    assert!(
+        malformed_ordinals
+            .to_string()
+            .contains("blob derivation record is incomplete")
+    );
 
     pool.close().await;
     drop(container);

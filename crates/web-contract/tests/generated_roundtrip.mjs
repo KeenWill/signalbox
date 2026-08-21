@@ -107,7 +107,43 @@ test("generated blob decoder rejects off-origin content URLs", () => {
           },
         ],
       }),
-    /same-origin blob API path/,
+    /root-relative blob API path/,
+  );
+});
+
+test("generated blob decoder rejects multiple display filenames", () => {
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        digest: `sha256:${"a1".repeat(32)}`,
+        byte_length: "1",
+        declared_media_type: "application/octet-stream",
+        display_filename: ["first.bin", "second.bin"],
+        available_views: [],
+      }),
+    /display_filename must be at most 1 items/,
+  );
+});
+
+test("generated blob decoder rejects an absolute sentinel-origin URL", () => {
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        digest: `sha256:${"a1".repeat(32)}`,
+        byte_length: "1",
+        declared_media_type: "application/octet-stream",
+        display_filename: [],
+        available_views: [
+          {
+            kind: "download",
+            content_url: `http://signalbox.invalid/api/blobs/sha256:${"a1".repeat(32)}/download`,
+            media_type: "application/octet-stream",
+            byte_length: "1",
+            derivations: [],
+          },
+        ],
+      }),
+    /root-relative blob API path/,
   );
 });
 

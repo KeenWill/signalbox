@@ -174,7 +174,7 @@ pub struct BlobTransformation {
 }
 
 impl BlobTransformation {
-    /// Constructs a definition while canonicalizing its JSON parameters.
+    /// Constructs a definition using compact JSON with deterministically sorted object keys.
     pub fn try_new(
         name: BlobTransformationName,
         version: u32,
@@ -467,8 +467,8 @@ mod tests {
     }
 
     #[test]
-    /// INV-070: deterministic reuse is fixed by inputs, procedure, parameters, and implementation.
-    fn inv070_deterministic_derivation_keys_cover_exact_procedure_provenance() {
+    /// INV-071: deterministic reuse is fixed by inputs, procedure, parameters, and implementation.
+    fn inv071_deterministic_derivation_keys_cover_exact_procedure_provenance() {
         let transformation = BlobTransformation::try_new(
             BlobTransformationName::try_new("image.thumbnail")
                 .expect("the fixture procedure name is valid"),
@@ -495,6 +495,9 @@ mod tests {
         )
         .expect("the replay fixture is valid");
 
-        assert_eq!(first.deterministic_key(), replay.deterministic_key());
+        let expected = first
+            .deterministic_key()
+            .expect("a deterministic producer has a key");
+        assert_eq!(replay.deterministic_key(), Some(expected));
     }
 }

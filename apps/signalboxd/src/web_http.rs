@@ -18,7 +18,7 @@ use std::{
 use axum::{
     Json, Router,
     body::{Body, Bytes, to_bytes},
-    extract::{DefaultBodyLimit, Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State, rejection::QueryRejection},
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
         header::{
@@ -275,7 +275,7 @@ pub fn deterministic_test_router() -> Router {
         .route("/mutate", post(deterministic_mutation))
         .route_layer(middleware::from_fn(validate_json_mutation));
     let api = Router::new()
-        .route("/bootstrap", get(contract_bootstrap))
+        .route("/bootstrap", get(deterministic_contract_bootstrap))
         .route("/test/read", get(deterministic_read))
         .route("/test/stream", get(deterministic_stream))
         .nest("/test", mutation)
@@ -286,7 +286,18 @@ pub fn deterministic_test_router() -> Router {
         .nest("/api", api)
 }
 
-async fn contract_bootstrap() -> Json<WebContractBootstrap> {
+async fn contract_bootstrap(State(state): State<WebHttpState>) -> Json<WebContractBootstrap> {
+    let image_derivatives = state
+        .blobs
+        .as_ref()
+        .is_some_and(WebBlobRuntime::supports_image_derivatives);
+    Json(WebContractBootstrap::for_runtime(
+        state.blobs.is_some(),
+        image_derivatives,
+    ))
+}
+
+async fn deterministic_contract_bootstrap() -> Json<WebContractBootstrap> {
     Json(WebContractBootstrap::current())
 }
 
@@ -300,8 +311,12 @@ struct BlobUseQuery {
 async fn blob_descriptor(
     State(state): State<WebHttpState>,
     Path(digest): Path<String>,
-    Query(use_metadata): Query<BlobUseQuery>,
+    use_metadata: Result<Query<BlobUseQuery>, QueryRejection>,
 ) -> Response {
+    let use_metadata = match use_metadata {
+        Ok(Query(use_metadata)) => use_metadata,
+        Err(_) => return invalid_blob_use_response(),
+    };
     let Some(runtime) = state.blobs else {
         return application_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -343,7 +358,9 @@ async fn blob_descriptor(
     if let Some(representation) = image_representation(&use_metadata.media_type) {
         available_views.push(WebBlobAvailableView {
             kind: WebBlobViewKind::BrowserNative,
-            media_type: use_metadata.media_type.clone(),
+            media_type: representation_media_type(representation)
+                .expect("an admitted representation has a media type")
+                .to_owned(),
             byte_length: byte_length.clone(),
             content_url: format!("/api/blobs/{digest}/content/{representation}"),
             derivations: Vec::new(),
@@ -456,6 +473,14 @@ fn valid_blob_use(value: &BlobUseQuery) -> bool {
         })
 }
 
+fn invalid_blob_use_response() -> Response {
+    transport_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_blob_use",
+        "blob media type or display filename is invalid",
+    )
+}
+
 fn blob_use_query(value: &BlobUseQuery) -> String {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     serializer.append_pair("media_type", &value.media_type);
@@ -500,9 +525,13 @@ async fn blob_content(
 async fn blob_download(
     State(state): State<WebHttpState>,
     Path(digest): Path<String>,
-    Query(use_metadata): Query<BlobUseQuery>,
+    use_metadata: Result<Query<BlobUseQuery>, QueryRejection>,
     request: Request,
 ) -> Response {
+    let use_metadata = match use_metadata {
+        Ok(Query(use_metadata)) => use_metadata,
+        Err(_) => return invalid_blob_use_response(),
+    };
     if !valid_blob_use(&use_metadata) {
         return transport_error(
             StatusCode::BAD_REQUEST,
@@ -1207,8 +1236,26 @@ mod tests {
                 .expect("fixture URL is valid")
                 .origin()
         );
-        assert_eq!(decoded, WebContractBootstrap::current());
+        assert_eq!(decoded, WebContractBootstrap::for_runtime(false, false));
         assert_eq!(runtime_outcome, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn malformed_blob_query_is_a_structured_transport_error() {
+        let request = Request::get("/api/blobs/not-a-digest/descriptor")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the query rejection is JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["kind"], "transport");
+        assert_eq!(body["error"]["code"], "invalid_blob_use");
     }
 
     #[tokio::test]
