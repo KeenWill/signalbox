@@ -667,7 +667,7 @@ mod tests {
     fn anthropic_debug_mode_rejects_a_configured_codex_route() {
         let selection =
             DirectModelSelection::from_uuid(Uuid::from_u128(0x10000000000040008000000000000001));
-        let configuration = HubModelConfiguration::parse(
+        let configuration = HubModelConfiguration::parse_test_fixture(
             r#"
 version = 1
 

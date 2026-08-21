@@ -516,7 +516,7 @@ selection_id = "00000000-0000-0000-0000-000000000001"
         workspace.display(),
         executable.display(),
     );
-    Ok(HubModelConfiguration::parse(&configuration)?)
+    Ok(HubModelConfiguration::parse_test_fixture(&configuration)?)
 }
 
 fn session_template_configuration(

@@ -624,7 +624,7 @@ impl RunningRuntime {
             || String::from(MODEL_CONFIGURATION),
             BlobStorageFixture::model_configuration,
         );
-        let model_configuration = HubModelConfiguration::parse(&configuration)?;
+        let model_configuration = HubModelConfiguration::parse_test_fixture(&configuration)?;
         let blob_store_registry = match blob_storage {
             BlobStorageFixtureMode::Disabled => None,
             BlobStorageFixtureMode::Enabled => BlobStoreRegistry::initialize_for_conformance(
@@ -683,7 +683,7 @@ impl RunningRuntime {
         &mut self,
         configuration: &str,
     ) -> Result<usize, Box<dyn Error>> {
-        let model_configuration = HubModelConfiguration::parse(configuration)?;
+        let model_configuration = HubModelConfiguration::parse_test_fixture(configuration)?;
         let template_configuration = session_template_configuration(&model_configuration)?;
         self.restart_with_templates(configuration, template_configuration)
             .await
@@ -713,7 +713,7 @@ impl RunningRuntime {
         let listener = LocalProcessListener::bind(self.socket())?;
         let sweep = PostgresEligibilitySweep::new(self.pool.clone());
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-        let model_configuration = HubModelConfiguration::parse(configuration)?;
+        let model_configuration = HubModelConfiguration::parse_test_fixture(configuration)?;
         let mut runtime = ProcessRuntime::new_with_templates(
             listener,
             self.pool.clone(),
@@ -755,7 +755,7 @@ impl RunningRuntime {
         let listener = LocalProcessListener::bind(self.socket())?;
         let sweep = PostgresEligibilitySweep::new(self.pool.clone());
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-        let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+        let model_configuration = HubModelConfiguration::parse_test_fixture(MODEL_CONFIGURATION)?;
         let template_configuration = session_template_configuration(&model_configuration)?;
         let runtime = ProcessRuntime::new_with_templates(
             listener,
@@ -2053,7 +2053,7 @@ async fn execute_streamed_turn_until(
     turn_id: CanonicalUuid,
     settle: TurnSettle,
 ) -> Result<ScriptedModel<ModelCallId>, Box<dyn Error>> {
-    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let model_configuration = HubModelConfiguration::parse_test_fixture(MODEL_CONFIGURATION)?;
     let probe = scripted.clone();
     let provider =
         RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
@@ -2448,7 +2448,7 @@ fn start_fleet_scheduler(
     model: FleetScriptedModel,
     occupancy_bound: SchedulerPassOccupancyBound,
 ) -> Result<FleetRuntimeTasks, Box<dyn Error>> {
-    let configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let configuration = HubModelConfiguration::parse_test_fixture(MODEL_CONFIGURATION)?;
     let provider = RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog())
         .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
@@ -4734,7 +4734,7 @@ async fn park_turn_on_ambiguous_model_call(
         return Err(io::Error::other("the queued fixture turn must activate").into());
     };
 
-    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let model_configuration = HubModelConfiguration::parse_test_fixture(MODEL_CONFIGURATION)?;
     let calls = PostgresModelCallRepository::new(
         pool.clone(),
         model_configuration.target_catalog(),
@@ -5544,7 +5544,7 @@ async fn authorize_issued_model_call(
 > {
     let session = SessionId::from_uuid(session_id.into_uuid());
     activate_turn(pool, session).await?;
-    let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+    let targets = HubModelConfiguration::parse_test_fixture(MODEL_CONFIGURATION)?.target_catalog();
     let calls = PostgresModelCallRepository::new(
         pool.clone(),
         targets,
@@ -6699,7 +6699,7 @@ async fn s09_queued_inputs_deliver_in_acceptance_order_after_the_active_turn()
     .await?;
     assert_ne!(first_queued_turn, second_queued_turn);
 
-    let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+    let targets = HubModelConfiguration::parse_test_fixture(MODEL_CONFIGURATION)?.target_catalog();
     complete_active_text_turn(&runtime.pool, session, targets.clone()).await?;
     activate_expected_turn(&runtime.pool, session, first_queued_turn).await?;
     complete_active_text_turn(&runtime.pool, session, targets).await?;
@@ -7601,7 +7601,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     let second_probe = execute_recorded_turn(
         &mut runtime,
         second_model,
-        HubModelConfiguration::parse(MODEL_CONFIGURATION)?,
+        HubModelConfiguration::parse_test_fixture(MODEL_CONFIGURATION)?,
         session_id,
         second_turn,
     )
@@ -8071,7 +8071,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
         )
         .await?;
     let second_turn = accepted_successor_turn(&mut successor, session_id, 2).await?;
-    let guarded_configuration = HubModelConfiguration::parse(
+    let guarded_configuration = HubModelConfiguration::parse_test_fixture(
         &MODEL_CONFIGURATION
             .replace("max_output_tokens = 256", "max_output_tokens = 1")
             .replace(
@@ -8217,7 +8217,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
         )
         .await?;
     let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
-    let guarded_configuration = HubModelConfiguration::parse(
+    let guarded_configuration = HubModelConfiguration::parse_test_fixture(
         &MODEL_CONFIGURATION
             .replace("max_output_tokens = 256", "max_output_tokens = 1")
             .replace(
@@ -8371,7 +8371,7 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
         String::from("ambiguous guarded stage request"),
     )
     .await?;
-    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let model_configuration = HubModelConfiguration::parse_test_fixture(MODEL_CONFIGURATION)?;
     let runtime_models = model_configuration.runtime_model_catalog();
     let provider = RuntimeModelCallProvider::new(
         ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>()),
@@ -8909,7 +8909,8 @@ impl ReviewRuntimeDriver {
             },
         )
         .await?;
-        let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+        let targets =
+            HubModelConfiguration::parse_test_fixture(MODEL_CONFIGURATION)?.target_catalog();
         complete_active_text_turn(
             &self.pool,
             SessionId::from_uuid(session.into_uuid()),

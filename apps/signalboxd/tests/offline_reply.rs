@@ -521,7 +521,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
 async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_retry()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let configuration = HubModelConfiguration::parse(GOAL_MODEL_CONFIGURATION)?;
+    let configuration = HubModelConfiguration::parse_test_fixture(GOAL_MODEL_CONFIGURATION)?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
     let mut create = CreateSessionService::new(
         UuidV7SessionIdGenerator,
