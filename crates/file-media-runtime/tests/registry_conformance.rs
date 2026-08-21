@@ -80,6 +80,7 @@ enum ReadBehavior {
     OversizedText,
     MalformedStructured,
     DuplicateStructuredMember,
+    CanonicalizedStructuredOverflow,
     ContradictoryContinuation,
 }
 
@@ -176,6 +177,11 @@ impl FileMediaProcessor for SyntheticProcessor {
                     truncated: false,
                     cursor: None,
                 },
+                ReadBehavior::CanonicalizedStructuredOverflow => ProcessorReadOutput::Structured {
+                    body_json: String::from("1e400"),
+                    truncated: false,
+                    cursor: None,
+                },
                 ReadBehavior::ContradictoryContinuation => ProcessorReadOutput::Text {
                     body: String::from("synthetic admitted text"),
                     truncated: true,
@@ -215,6 +221,10 @@ fn text_view() -> ReadViewDeclaration {
 }
 
 fn structured_view() -> ReadViewDeclaration {
+    structured_view_with_output_bytes(256)
+}
+
+fn structured_view_with_output_bytes(output_bytes: usize) -> ReadViewDeclaration {
     ReadViewDeclaration::try_new(
         ReadViewName::try_new(STRUCTURED_VIEW_NAME).expect("fixture view name is valid"),
         String::from("Reads bounded synthetic structure."),
@@ -223,10 +233,10 @@ fn structured_view() -> ReadViewDeclaration {
         ReadAccessPattern::Streaming,
         ReadViewBounds::Structured {
             source_bytes: 1_024,
-            output_bytes: 256,
+            output_bytes,
             depth: 8,
             nodes: 32,
-            string_bytes: 128,
+            string_bytes: output_bytes.min(128),
         },
     )
     .expect("fixture view declaration is valid")
@@ -410,6 +420,26 @@ fn inv076_duplicate_structured_member_is_sanitized_to_failure() {
     let processor = SyntheticProcessor {
         validation: ValidationBehavior::Valid,
         read: ReadBehavior::DuplicateStructuredMember,
+    };
+    let request = FileReadRequest {
+        inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+        view: ReadViewName::try_new(STRUCTURED_VIEW_NAME).expect("fixture view name is valid"),
+        options: serde_json::json!({}),
+    };
+
+    let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
+
+    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
+/// INV-076: canonicalization cannot expand structured output past its declared bound.
+#[test]
+fn inv076_canonicalized_structured_bytes_are_rechecked() {
+    let source = MemorySource::synthetic();
+    let registry = registry_with_view(structured_view_with_output_bytes(5));
+    let processor = SyntheticProcessor {
+        validation: ValidationBehavior::Valid,
+        read: ReadBehavior::CanonicalizedStructuredOverflow,
     };
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),

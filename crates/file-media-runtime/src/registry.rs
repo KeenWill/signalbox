@@ -619,6 +619,12 @@ fn sanitize_read(
             let continuation = sanitize_continuation(truncated, cursor)?;
             let body = crate::value::parse_json_without_duplicate_members(&body_json)
                 .map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            let canonical_bytes = serde_json::to_string(&body)
+                .map_err(|_| FileMediaFailure::ProcessorFailed)?
+                .len();
+            if canonical_bytes > output_bytes || canonical_bytes > ceilings.text_or_json_bytes {
+                return Err(FileMediaFailure::ProcessorFailed);
+            }
             let mut observed = ObservedJson::default();
             observe_json(&body, 1, &mut observed)?;
             if observed.depth > depth
@@ -795,6 +801,9 @@ fn validate_aggregate_inventory(
         readers = readers
             .checked_add(provider.readers().len())
             .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+        if readers > MAX_REGISTRY_READERS {
+            return Err(FileMediaRegistryConstructionError::Inventory);
+        }
         for reader in provider.readers() {
             media_types = media_types
                 .checked_add(reader.media_types().len())
@@ -805,20 +814,21 @@ fn validate_aggregate_inventory(
             reason_codes = reason_codes
                 .checked_add(reader.reason_codes().len())
                 .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+            if media_types > MAX_REGISTRY_MEDIA_TYPES
+                || views > MAX_REGISTRY_VIEWS
+                || reason_codes > MAX_REGISTRY_REASON_CODES
+            {
+                return Err(FileMediaRegistryConstructionError::Inventory);
+            }
             for view in reader.views() {
                 schema_bytes = schema_bytes
                     .checked_add(view.arguments_schema().as_str().len())
                     .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+                if schema_bytes > MAX_REGISTRY_SCHEMA_BYTES {
+                    return Err(FileMediaRegistryConstructionError::Inventory);
+                }
             }
         }
-    }
-    if readers > MAX_REGISTRY_READERS
-        || media_types > MAX_REGISTRY_MEDIA_TYPES
-        || views > MAX_REGISTRY_VIEWS
-        || schema_bytes > MAX_REGISTRY_SCHEMA_BYTES
-        || reason_codes > MAX_REGISTRY_REASON_CODES
-    {
-        return Err(FileMediaRegistryConstructionError::Inventory);
     }
     Ok(())
 }
