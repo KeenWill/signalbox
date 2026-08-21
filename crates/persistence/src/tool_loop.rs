@@ -1391,6 +1391,8 @@ pub(crate) async fn load_active_batch_from_connection(
     let frontier =
         signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
     let yielded_snapshot = load_snapshot(connection, session, frontier).await?;
+    let projection_base_snapshot =
+        load_current_runner_placement_snapshot(connection, session).await?;
     let requests = load_requests(connection, producing_call, session, turn).await?;
     let approvals = load_approvals(connection, producing_call).await?;
     let attempts = load_attempts(connection, producing_call).await?;
@@ -1444,7 +1446,7 @@ pub(crate) async fn load_active_batch_from_connection(
             .into());
         }
     };
-    ToolBatchReconstitutionInput::new(
+    let mut input = ToolBatchReconstitutionInput::new(
         session,
         turn,
         producing_call,
@@ -1453,17 +1455,20 @@ pub(crate) async fn load_active_batch_from_connection(
         approvals,
         attempts,
         phase,
-    )
-    .with_retired_attempts(retired_attempts)
-    .with_runner_authorized_attempts(runner_authorized_attempts)
-    .reconstitute()
-    .map(Some)
-    .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
+    );
+    if let Some(snapshot) = projection_base_snapshot {
+        input = input.with_projection_base_snapshot(snapshot);
+    }
+    input
+        .with_retired_attempts(retired_attempts)
+        .with_runner_authorized_attempts(runner_authorized_attempts)
+        .reconstitute()
+        .map(Some)
+        .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
-/// Loads the exact frontier from which a runner-recovery interrupt must
-/// continue. A recovery wait retaining a tool round uses that round's yielded
-/// boundary; a wait without one uses the turn's starting frontier.
+/// Loads the latest compatible frontier from which a runner-recovery interrupt
+/// must continue, including the authoritative placement boundary when present.
 pub(crate) async fn load_runner_recovery_source_snapshot(
     connection: &mut PgConnection,
     session: SessionId,
@@ -1506,7 +1511,9 @@ pub(crate) async fn load_runner_recovery_source_snapshot(
     } else {
         signalbox_domain::ContextFrontierId::from_uuid(required(&row, "starting_frontier_id")?)
     };
-    load_snapshot(connection, session, frontier).await.map(Some)
+    let source = load_snapshot(connection, session, frontier).await?;
+    let placement = load_current_runner_placement_snapshot(connection, session).await?;
+    select_projection_base_snapshot(source, placement).map(Some)
 }
 
 pub(crate) async fn load_runner_recovery_batch_without_attempt(
@@ -1564,22 +1571,29 @@ pub(crate) async fn load_runner_recovery_cancellation_batch(
         signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
     let mut retired_attempts = load_retired_attempts(connection, producing_call).await?;
     retired_attempts.retain(|attempt| Some(*attempt) != interrupted_attempt);
-    ToolBatchReconstitutionInput::new(
+    let yielded_snapshot = load_snapshot(connection, session, frontier).await?;
+    let projection_base_snapshot =
+        load_current_runner_placement_snapshot(connection, session).await?;
+    let mut input = ToolBatchReconstitutionInput::new(
         session,
         turn,
         producing_call,
-        load_snapshot(connection, session, frontier).await?,
+        yielded_snapshot,
         load_requests(connection, producing_call, session, turn).await?,
         load_approvals(connection, producing_call).await?,
         load_runner_recovery_attempts(connection, producing_call, interrupted_attempt).await?,
         ToolBatchPhaseReconstitutionInput::Executing {
             turn_attempt: yielded_attempt,
         },
-    )
-    .with_retired_attempts(retired_attempts)
-    .reconstitute()
-    .map(Some)
-    .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
+    );
+    if let Some(snapshot) = projection_base_snapshot {
+        input = input.with_projection_base_snapshot(snapshot);
+    }
+    input
+        .with_retired_attempts(retired_attempts)
+        .reconstitute()
+        .map(Some)
+        .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
 pub(crate) async fn load_recovery_batch_by_attempt(
@@ -1624,21 +1638,28 @@ pub(crate) async fn load_recovery_batch_by_attempt(
         signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
     let mut retired_attempts = load_retired_attempts(connection, producing_call).await?;
     retired_attempts.retain(|attempt| *attempt != recovery_attempt);
-    ToolBatchReconstitutionInput::new(
+    let yielded_snapshot = load_snapshot(connection, session, frontier).await?;
+    let projection_base_snapshot =
+        load_current_runner_placement_snapshot(connection, session).await?;
+    let mut input = ToolBatchReconstitutionInput::new(
         session,
         turn,
         producing_call,
-        load_snapshot(connection, session, frontier).await?,
+        yielded_snapshot,
         load_requests(connection, producing_call, session, turn).await?,
         load_approvals(connection, producing_call).await?,
         load_runner_recovery_attempts(connection, producing_call, Some(recovery_attempt)).await?,
         ToolBatchPhaseReconstitutionInput::AwaitingRecovery {
             attempt: recovery_attempt,
         },
-    )
-    .with_retired_attempts(retired_attempts)
-    .reconstitute()
-    .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
+    );
+    if let Some(snapshot) = projection_base_snapshot {
+        input = input.with_projection_base_snapshot(snapshot);
+    }
+    input
+        .with_retired_attempts(retired_attempts)
+        .reconstitute()
+        .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
 /// Identifies the single continuing tool round whose request suffix exactly
@@ -1972,6 +1993,51 @@ async fn load_snapshot(
     ResolvedContextFrontierReconstitutionInput::new(session, frontier, entries)
         .reconstitute()
         .ok_or_else(|| ToolLoopCorruption::Inconsistent("frontier snapshot").into())
+}
+
+async fn load_current_runner_placement_snapshot(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<Option<ResolvedContextFrontierSnapshot>, ToolLoopRepositoryError> {
+    let frontier = sqlx::query_scalar::<_, Uuid>(
+        "SELECT pointer.context_frontier_id
+           FROM runner_current_session_placement AS head
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = head.session_id
+            AND placement.event_ordinal = head.event_ordinal
+           JOIN session_runner_placement_frontier AS pointer
+             ON pointer.session_id = placement.session_id
+            AND pointer.placement_revision = placement.placement_revision
+          WHERE head.session_id = $1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(frontier) = frontier else {
+        return Ok(None);
+    };
+    load_snapshot(
+        connection,
+        session,
+        signalbox_domain::ContextFrontierId::from_uuid(frontier),
+    )
+    .await
+    .map(Some)
+}
+
+fn select_projection_base_snapshot(
+    yielded: ResolvedContextFrontierSnapshot,
+    placement: Option<ResolvedContextFrontierSnapshot>,
+) -> Result<ResolvedContextFrontierSnapshot, ToolLoopRepositoryError> {
+    match placement {
+        Some(candidate) if yielded.is_semantic_prefix_of(&candidate) => Ok(candidate),
+        Some(candidate) if candidate.is_semantic_prefix_of(&yielded) => Ok(yielded),
+        Some(_) => Err(ToolLoopCorruption::Inconsistent(
+            "tool result and runner placement frontier lineage",
+        )
+        .into()),
+        None => Ok(yielded),
+    }
 }
 
 async fn load_requests(

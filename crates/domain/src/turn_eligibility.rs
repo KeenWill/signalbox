@@ -6775,20 +6775,25 @@ fn reconstitute_inner(
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
-                let source_frontier = ambiguous_tool.yielded_frontier();
-                if source_frontier != *starting_frontier {
-                    referenced_snapshots.insert(source_frontier);
+                let yielded_frontier = ambiguous_tool.yielded_frontier();
+                if yielded_frontier != *starting_frontier {
+                    referenced_snapshots.insert(yielded_frontier);
                 }
-                let source = snapshots.get(&source_frontier).ok_or(
+                let yielded = snapshots.get(&yielded_frontier).ok_or(
                     AcceptedInputSchedulingReconstitutionFailure::StartingSnapshotMissing { turn },
                 )?;
-                if !snapshots[starting_frontier].is_semantic_prefix_of(source) {
+                let source = tool_batch.projection_base_snapshot();
+                if snapshots.get(&source.frontier().snapshot()) != Some(source)
+                    || !yielded.is_semantic_prefix_of(source)
+                    || !snapshots[starting_frontier].is_semantic_prefix_of(source)
+                {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
                             turn,
                         },
                     );
                 }
+                referenced_snapshots.insert(source.frontier().snapshot());
                 let terminal = snapshots.get(terminal_frontier).cloned().ok_or(
                     AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
                 )?;

@@ -947,9 +947,13 @@ impl ModelCallExecution {
             || result_projection.source_frontier() != self.current_snapshot.frontier().snapshot()
             || !self
                 .current_snapshot
+                .is_semantic_prefix_of(result_projection.projection_base_snapshot())
+            || !result_projection
+                .projection_base_snapshot()
                 .is_semantic_prefix_of(result_projection.snapshot())
             || result_projection.snapshot().entry_count()
-                != self.current_snapshot.entry_count() + result_projection.entries().len()
+                != result_projection.projection_base_snapshot().entry_count()
+                    + result_projection.entries().len()
         {
             return Err(ModelCallClosureError::InterruptCorrelationMismatch);
         }
@@ -957,6 +961,7 @@ impl ModelCallExecution {
             &self.active_turn,
             &identities.pending_steering_reclassifications,
         )?;
+        let cancellation_source = result_projection.projection_base_snapshot().clone();
         let (result_entries, _result_snapshot) = result_projection.into_parts();
         let mut cancelled = close_cancelled_turn(
             ModelCallTurnScope {
@@ -965,7 +970,7 @@ impl ModelCallExecution {
             },
             Some(self.current_attempt),
             None,
-            CancellationFrontierSource::new(self.current_snapshot, &result_entries),
+            CancellationFrontierSource::new(cancellation_source, &result_entries),
             interrupt.proof(),
             identities,
             reclassified_pending_steering,
@@ -4251,7 +4256,7 @@ pub(crate) fn apply_interrupt_to_runner_recovery_wait(
     let tool_result_entries = match result_projection {
         Some(projection)
             if projection.turn() == active_turn.turn()
-                && projection.source_frontier() == source_snapshot.frontier().snapshot()
+                && projection.projection_base_snapshot() == &source_snapshot
                 && projection.snapshot().frontier().owning_session() == active_turn.session()
                 && source_snapshot.is_semantic_prefix_of(projection.snapshot()) =>
         {
@@ -4405,11 +4410,13 @@ pub(crate) fn apply_interrupt_to_retryable_runner_tool_recovery_wait(
     {
         return Err(ModelCallClosureError::InterruptCorrelationMismatch);
     }
-    let source_snapshot = batch.yielded_snapshot().clone();
-    if !starting_snapshot.is_semantic_prefix_of(&source_snapshot)
+    let yielded_snapshot = batch.yielded_snapshot().clone();
+    let source_snapshot = batch.projection_base_snapshot().clone();
+    if !starting_snapshot.is_semantic_prefix_of(&yielded_snapshot)
         || result_projection.turn() != active_turn.turn()
         || result_projection.producing_call() != batch.producing_call()
-        || result_projection.source_frontier() != source_snapshot.frontier().snapshot()
+        || result_projection.source_frontier() != yielded_snapshot.frontier().snapshot()
+        || result_projection.projection_base_snapshot() != &source_snapshot
         || result_projection.snapshot().frontier().owning_session() != active_turn.session()
         || result_projection.snapshot().frontier().snapshot() != identities.terminal_frontier
         || !source_snapshot.is_semantic_prefix_of(result_projection.snapshot())
@@ -4568,10 +4575,12 @@ pub(crate) fn apply_interrupt_to_executing_tool_batch(
     {
         return Err(ModelCallClosureError::InterruptCorrelationMismatch);
     }
-    let source_snapshot = batch.yielded_snapshot().clone();
+    let yielded_snapshot = batch.yielded_snapshot().clone();
+    let source_snapshot = batch.projection_base_snapshot().clone();
     if result_projection.turn() != active_turn.turn()
         || result_projection.snapshot().frontier().owning_session() != active_turn.session()
-        || result_projection.source_frontier() != source_snapshot.frontier().snapshot()
+        || result_projection.source_frontier() != yielded_snapshot.frontier().snapshot()
+        || result_projection.projection_base_snapshot() != &source_snapshot
         || !source_snapshot.is_semantic_prefix_of(result_projection.snapshot())
         || result_projection.snapshot().entry_count()
             != source_snapshot.entry_count() + result_projection.entries().len()
@@ -5694,6 +5703,7 @@ mod tests {
             .expect("tool denial extends the yielded frontier");
         let projection = PreparedToolResultProjection::from_validated_parts(
             yielded.frontier().snapshot(),
+            yielded.clone(),
             initial.turn,
             model_call_id(32),
             vec![denied.clone()],

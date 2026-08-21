@@ -27,7 +27,9 @@ context-compaction record and projection were verified through PR #312
 (`agent/context-compaction-core`); the command path and canonical visible-range
 selection were verified through PR #314 (`agent/context-compaction-protocol`).
 The runner placement-entry payload and checked relational readback were verified
-against this PR (`agent/runner-placement-semantic-persistence`). The
+against this PR (`agent/runner-placement-semantic-persistence`); the transaction
+that produces and installs that boundary remains committed unimplemented
+functionality. The
 imported-conversation record and converter are owned by
 [conversation-import](conversation-import.md). Where a law is cited as
 `INV-NNN`, the generated [invariant test index](../invariants.md) resolves it;
@@ -694,7 +696,10 @@ sealed inside the domain crate — checked constructors are `pub(crate)`.
 imported-frontier session creation is the only producer of `Imported`; sealed
 tool transitions produce tool-use/result references only through the atomic
 boundaries owned by [tool-loop](tool-loop.md); and the checked owner placement
-transactions are the only producers of `RunnerPlacementChanged`.
+transactions are the only intended producers of `RunnerPlacementChanged`.
+**Committed unimplemented functionality:** no present production transaction
+installs `session_runner_placement_frontier` or emits this entry; the future
+checked successor-placement transaction owns that producer boundary.
 
 `OriginAcceptedInput` and `SteeringAcceptedInput` reference the accepted input's
 identity; neither copies content. Steering additionally names the exact active
@@ -804,9 +809,10 @@ predecessor terminal prefix, then appends the model-identity boundary when the
 frozen direct selection changed, and finally appends its ordinary origin
 (INV-039, INV-046).
 
-Session relocation has a session-level frontier boundary. Every transaction that
-installs a successor placement — loss replacement today, and the committed
-user-directed move of a healthy session or of its working directory later
+Session relocation has a committed but unimplemented session-level frontier
+boundary. No present production surface installs it. The future checked
+transaction that installs a successor placement — loss replacement and the
+committed user-directed move of a healthy session or of its working directory
 ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one))
 — appends one `RunnerPlacementChanged` entry after the latest authoritative
 semantic frontier, or establishes a one-entry root when no frontier exists, and

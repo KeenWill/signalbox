@@ -5155,6 +5155,10 @@ impl ToolBatchReconstitutionInput {
         self,
         runner_authorized_attempts: Vec<ToolAttemptId>,
     ) -> Self;
+    pub fn with_projection_base_snapshot(
+        self,
+        projection_base_snapshot: ResolvedContextFrontierSnapshot,
+    ) -> Self;
     pub fn reconstitute(self) -> Result<ToolBatch, ToolBatchReconstitutionError>;
 }
 pub enum ToolBatchReconstitutionFailure {
@@ -5163,6 +5167,7 @@ pub enum ToolBatchReconstitutionFailure {
     RequestOwnershipMismatch,
     RequestOrderMismatch,
     YieldedSnapshotSessionMismatch,
+    ProjectionBaseMismatch,
     ApprovalInventoryMismatch,
     AttemptInventoryMismatch,
     AttemptAuthorizationMismatch,
@@ -5265,8 +5270,8 @@ impl ToolBatch {
         entry_ids: Vec<SemanticTranscriptEntryId>,
         terminal_frontier: ContextFrontierId,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
-    // accessors: session(), turn(), producing_call(), yielded_snapshot(), requests(),
-    // approval(), attempt(), phase()
+    // accessors: session(), turn(), producing_call(), yielded_snapshot(),
+    // projection_base_snapshot(), requests(), approval(), attempt(), phase()
 }
 pub struct AwaitingToolApproval { /* private */ }
 // sealed: ToolBatch::awaiting_approval
@@ -5309,7 +5314,8 @@ pub enum ToolBatchExecutionFailure {
 pub struct ToolBatchExecutionError { /* private */ }
 // accessor: failure()
 pub struct PreparedToolResultProjection { /* private */ }
-// accessors: entries(), snapshot(), into_parts()
+// accessors: entries(), snapshot(), into_parts(); crate-internal correlation
+// accessors retain the yielded source and checked projection-base snapshot
 pub enum ToolResultProjectionFailure {
     BatchNotResolved,
     TurnLevelFailure,
