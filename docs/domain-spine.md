@@ -55,7 +55,7 @@ impl <Identity> {
 }
 ```
 
-The twenty-seven identities defined in `lib.rs`:
+The twenty-eight identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -75,6 +75,7 @@ pub struct RunnerId(/* private */);
 pub struct RunnerAuthenticationId(/* private */);
 pub struct RunnerLeaseId(/* private */);
 pub struct WorkspaceManifestId(/* private */);
+pub struct ProgramRunId(/* private */);
 pub struct ReviewTargetId(/* private */);
 pub struct ReviewRunId(/* private */);
 pub struct ReviewPassId(/* private */);
@@ -123,6 +124,206 @@ pub enum BlobDigestParseFailure {
 pub struct BlobDigestParseError { /* private */ }
 impl BlobDigestParseError {
     // accessors: rejected(), failure()
+}
+```
+
+## domain: program_journal
+
+```rust
+pub struct JournalPosition(/* private NonZeroU64 */);
+pub struct RequestOrdinal(/* private NonZeroU64 */);
+pub struct DeliveryOrdinal(/* private NonZeroU64 */);
+pub struct ScopeOrdinal(/* private NonZeroU64 */);
+
+pub struct InlineFramePayload { /* private */ }
+impl InlineFramePayload {
+    pub fn new(bytes: impl Into<Box<[u8]>>) -> Self;
+    // accessor: as_bytes()
+}
+
+pub enum ProgramCapability {
+    Time,
+    Random,
+    Sleep,
+    Subscribe,
+    Session,
+    Judge,
+    ExecStage,
+    Corpus,
+    EvalRecord,
+    Blob,
+    Register,
+}
+
+pub enum ScopeOperation {
+    Open,
+    Close,
+}
+
+pub struct ScopeRequest { /* private */ }
+impl ScopeRequest {
+    pub const fn new(
+        operation: ScopeOperation,
+        scope: ScopeOrdinal,
+        parent: Option<ScopeOrdinal>,
+    ) -> Self;
+    // accessors: operation(), scope(), parent()
+}
+
+pub struct EffectRequest { /* private */ }
+impl EffectRequest {
+    pub fn new(
+        capability: ProgramCapability,
+        method: String,
+        payload: InlineFramePayload,
+    ) -> Self;
+    // accessors: capability(), method(), payload()
+}
+
+pub enum RequestKind {
+    Now(InlineFramePayload),
+    Random(InlineFramePayload),
+    Sleep(InlineFramePayload),
+    AwaitEvent(InlineFramePayload),
+    Effect(EffectRequest),
+    Scope(ScopeRequest),
+    Terminal(InlineFramePayload),
+}
+
+pub struct RequestFrame { /* private */ }
+impl RequestFrame {
+    pub const fn new(
+        ordinal: RequestOrdinal,
+        scope: Option<ScopeOrdinal>,
+        kind: RequestKind,
+    ) -> Self;
+    // accessors: ordinal(), scope(), kind()
+}
+
+pub enum RejectReason {
+    OutstandingRequests,
+}
+
+pub enum FaultCause {
+    Timeout,
+    Memory,
+    Nondeterminism,
+    ProgramError,
+    ContractRetired,
+    JournalBound,
+    PayloadTooLarge,
+}
+
+pub enum ProgramFault {
+    Timeout(InlineFramePayload),
+    Memory(InlineFramePayload),
+    Nondeterminism {
+        expected: RequestFrame,
+        observed: RequestFrame,
+    },
+    ProgramError(InlineFramePayload),
+    ContractRetired(InlineFramePayload),
+    JournalBound(InlineFramePayload),
+    PayloadTooLarge(InlineFramePayload),
+}
+impl ProgramFault {
+    // accessors: cause(), evidence()
+}
+
+pub enum FaultEvidenceRef<'a> {
+    Ordinary(&'a InlineFramePayload),
+    Nondeterminism {
+        expected: &'a RequestFrame,
+        observed: &'a RequestFrame,
+    },
+}
+
+pub enum DeliveryKind {
+    Answer {
+        resolves: RequestOrdinal,
+        payload: InlineFramePayload,
+    },
+    Wake {
+        resolves: RequestOrdinal,
+        payload: InlineFramePayload,
+    },
+    Reject {
+        resolves: RequestOrdinal,
+        reason: RejectReason,
+    },
+    Cancel {
+        resolves: RequestOrdinal,
+        payload: InlineFramePayload,
+    },
+    RunCancel(InlineFramePayload),
+    Fault(ProgramFault),
+}
+impl DeliveryKind {
+    // accessor: resolves()
+}
+
+pub struct DeliveryFrame { /* private */ }
+impl DeliveryFrame {
+    pub const fn new(ordinal: DeliveryOrdinal, kind: DeliveryKind) -> Self;
+    // accessors: ordinal(), kind()
+}
+
+pub enum JournalFrame {
+    Request(RequestFrame),
+    Delivery(DeliveryFrame),
+}
+
+pub struct JournalEntry { /* private */ }
+impl JournalEntry {
+    pub const fn new(position: JournalPosition, frame: JournalFrame) -> Self;
+    // accessors: position(), frame()
+}
+
+pub struct ProgramJournal { /* private */ }
+impl ProgramJournal {
+    pub fn try_new(
+        run: ProgramRunId,
+        entries: Vec<JournalEntry>,
+    ) -> Result<Self, ProgramJournalError>;
+    pub fn terminal_delivery(&self) -> Option<&DeliveryFrame>;
+    // accessors: run(), entries()
+}
+
+pub enum ProgramJournalError {
+    NoncontiguousPosition,
+    NoncontiguousRequestOrdinal,
+    NoncontiguousDeliveryOrdinal,
+    UnknownResolvedRequest,
+    RequestResolvedTwice,
+    OrdinalExhausted,
+}
+
+pub enum ReplayInstruction {
+    AwaitRequest,
+    Deliver(DeliveryFrame),
+    Live,
+}
+
+pub enum ReplayedRequest {
+    Matched,
+    DeliveryPending,
+    Live,
+}
+
+pub struct NondeterminismError { /* private */ }
+impl NondeterminismError {
+    pub fn into_fault(self) -> ProgramFault;
+    // accessors: run(), expected(), observed()
+}
+
+pub struct ReplayCursor { /* private */ }
+impl ReplayCursor {
+    pub fn new(journal: ProgramJournal) -> Self;
+    pub fn next_instruction(&mut self) -> ReplayInstruction;
+    pub fn submit_request(
+        &mut self,
+        observed: RequestFrame,
+    ) -> Result<ReplayedRequest, NondeterminismError>;
 }
 ```
 
@@ -2131,13 +2332,15 @@ pub enum AttachmentKind {
 pub struct DeclaredMediaType(/* private String */);
 impl DeclaredMediaType {
     pub fn try_new(value: String) -> Result<Self, DeclaredMediaTypeError>;
-    // accessor: as_str()
+    // accessors: as_str()
 }
+
 pub enum DeclaredMediaTypeFailure {
     Empty,
     TooLong,
     NotVisibleAscii,
 }
+
 pub struct DeclaredMediaTypeError { /* private */ }
 impl DeclaredMediaTypeError {
     // accessors: failure(), value()
@@ -2146,8 +2349,9 @@ impl DeclaredMediaTypeError {
 pub struct AttachmentDisplayFilename(/* private String */);
 impl AttachmentDisplayFilename {
     pub fn try_new(value: String) -> Result<Self, AttachmentDisplayFilenameError>;
-    // accessor: as_str()
+    // accessors: as_str()
 }
+
 pub enum AttachmentDisplayFilenameFailure {
     Empty,
     TooLong,
@@ -2155,13 +2359,16 @@ pub enum AttachmentDisplayFilenameFailure {
     ContainsPathSeparator,
     ContainsNull,
 }
+
 pub struct AttachmentDisplayFilenameError { /* private */ }
 impl AttachmentDisplayFilenameError {
     // accessors: failure(), value()
 }
 
 pub enum UserContentPart {
-    Text { value: NonEmptyUnicodeText },
+    Text {
+        value: NonEmptyUnicodeText,
+    },
     Attachment {
         digest: BlobDigest,
         kind: AttachmentKind,
@@ -2172,14 +2379,16 @@ pub enum UserContentPart {
 impl UserContentPart {
     pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
 }
-pub struct UserContent { /* private Vec<UserContentPart> */ }
+
+pub struct UserContent { /* private */ }
 impl UserContent {
-    pub const MAX_TEXT_BYTES: usize; // 1_048_576
-    pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
+    pub const MAX_TEXT_BYTES: usize;
     pub fn try_parts(parts: Vec<UserContentPart>) -> Result<Self, UserContentError>;
     pub fn into_parts(self) -> Vec<UserContentPart>;
+    pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
     // accessors: parts(), single_text()
 }
+
 pub enum UserContentError {
     Empty,
     TooManyParts,
@@ -2384,10 +2593,16 @@ pub struct SubmitInputTerminalSourceConstructionInput {
 pub struct SubmitInputInterruptedModelCallReconciliationConstructionInput {
     /* public named canonical origin, turn, ambiguous call, and interrupt facts */
 }
+pub struct SubmitInputInterruptedToolReconciliationConstructionInput {
+    /* public named canonical origin, turn, ambiguous attempt, and interrupt facts */
+}
 impl SubmitInputTerminalSourceReconstitutionInput {
     pub fn new(input: SubmitInputTerminalSourceConstructionInput) -> Self;
     pub fn interrupted_model_call_reconciliation(
         input: SubmitInputInterruptedModelCallReconciliationConstructionInput,
+    ) -> Self;
+    pub fn interrupted_tool_reconciliation(
+        input: SubmitInputInterruptedToolReconciliationConstructionInput,
     ) -> Self;
 }
 
@@ -3840,6 +4055,7 @@ impl ModelCallExecutionReconstitutionInput {
         self,
         projection: PreparedToolResultProjection,
     ) -> Self;
+    pub fn with_availability_successor(self) -> Self;
     pub fn reconstitute(self) -> Result<ModelCallExecution, ModelCallExecutionReconstitutionError>;
 }
 pub struct ToolResultAttemptCorrelation { /* private */ }
@@ -3929,11 +4145,21 @@ impl ModelCallExecution {
         observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentities,
     ) -> Result<ModelCallTerminalOutcome, ModelCallClosureError>;
+    pub fn apply_availability_successor(
+        self,
+        observation: CorrelatedModelCallTerminalObservation,
+        successor_attempt: TurnAttemptId,
+    ) -> Result<AvailabilitySuccessorModelCallTurn, ModelCallClosureError>;
     pub fn fail_target_resolution(
         self,
         resolution_error: ModelTargetResolutionError,
         identities: FailedModelCallTurnIdentities,
     ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
+    pub fn fail_credential_pool_exhausted(
+        self,
+        pool_name: String,
+        identities: FailedModelCallTurnIdentities,
+    ) -> Result<CredentialPoolExhaustedModelCallTurn, ModelCallClosureError>;
     pub fn fail_prepared_call(
         self,
         identities: FailedModelCallTurnIdentities,
@@ -4009,6 +4235,13 @@ impl IssuedModelCallCorrelation {
         cause: ProviderModelCallFailureCause,
         usage: ProviderReportedTokenUsage,
     ) -> CorrelatedModelCallTerminalObservation;
+    pub fn bind_provider_failure_observation_with_retry_after(
+        self,
+        cause: ProviderModelCallFailureCause,
+        usage: ProviderReportedTokenUsage,
+        retry_after: Option<std::time::Duration>,
+        non_acceptance_proven: bool,
+    ) -> CorrelatedModelCallTerminalObservation;
 }
 pub struct ProviderReportedTokenUsage { /* private */ }
 impl ProviderReportedTokenUsage {
@@ -4042,7 +4275,22 @@ pub enum ProviderModelCallFailureCause {
 pub struct CorrelatedModelCallTerminalObservation { /* private */ }
 impl CorrelatedModelCallTerminalObservation {
     // accessors: call(), correlation(), observation(), usage(),
-    //   provider_failure_cause()
+    //   provider_failure_cause(), retry_after(), non_acceptance_proven()
+}
+
+pub struct AvailabilitySuccessorModelCallTurn { /* private */ }
+// sealed: ModelCallExecution::apply_availability_successor
+impl AvailabilitySuccessorModelCallTurn {
+    // accessors: session(), turn(), predecessor_call(), predecessor_attempt(),
+    //   successor_attempt()
+}
+
+pub struct CredentialPoolExhaustedModelCallTurn { /* private */ }
+// sealed: ModelCallExecution::fail_credential_pool_exhausted
+impl CredentialPoolExhaustedModelCallTurn {
+    pub fn pool_name(&self) -> &str;
+    pub const fn failed(&self) -> &FailedModelCallTurn;
+    pub fn into_failed(self) -> FailedModelCallTurn;
 }
 
 pub enum ModelCallTerminalObservation {
@@ -4674,6 +4922,7 @@ pub struct ToolDenialReason(/* private */);
 impl ToolDenialReason {
     pub const MAX_UTF8_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, ToolDenialReasonError>;
+    pub fn from_rationale(rationale: &ToolDecisionRationale) -> Option<Self>;
     pub fn as_str(&self) -> &str;
     pub fn into_string(self) -> String;
 }
@@ -4698,7 +4947,10 @@ impl ToolApprovalResolution {
 pub struct ToolApprovalResolutionReconstitutionInput { /* private */ }
 impl ToolApprovalResolutionReconstitutionInput {
     pub const fn user_command(command: PreparedDecideToolRequest) -> Self;
-    pub fn delegate(approval: DelegateToolApproval) -> Self;
+    pub fn delegate(
+        approval: DelegateToolApproval,
+        stored_denial_reason: Option<ToolDenialReason>,
+    ) -> Self;
     pub const fn policy_auto(request: ToolRequestId) -> Self;
     pub const fn session_blanket(
         request: ToolRequestId,
@@ -6195,6 +6447,8 @@ pub enum ModelFrontierRenderingError {
 
 pub enum PrepareModelCallOutcome {
     NoWork,
+    RetryBackoff(std::time::Duration),
+    PoolExhausted(Box<CredentialPoolExhaustedModelCallTurn>),
     Checkpointed(ModelCallId),
     Ready {
         request: Box<PreparedModelCallRequest>,
@@ -6278,10 +6532,37 @@ pub enum ModelCallAuthorizationReread {
 
 pub enum ModelCallTerminalIdentityCandidates {
     Exact(ModelCallTerminalIdentities),
+    Availability {
+        failed: FailedModelCallTurnIdentities,
+        successor_attempt: TurnAttemptId,
+    },
     ToolRound {
         continuing: ToolRoundModelCallIdentities,
         stopped: StoppedToolRoundModelCallIdentities,
     },
+}
+
+pub enum ModelCallObservationCommitOutcome {
+    Terminal(Box<ModelCallTerminalOutcome>),
+    AvailabilitySuccessor(Box<AvailabilitySuccessorOutcome>),
+    PoolExhausted(CredentialPoolExhaustedOutcome),
+}
+
+pub enum CredentialPoolExhaustedOutcome {
+    BeforeCall(Box<CredentialPoolExhaustedModelCallTurn>),
+    AfterCall {
+        pool_name: Arc<str>,
+        terminal: Box<ModelCallTerminalOutcome>,
+    },
+}
+
+pub struct AvailabilitySuccessorOutcome { /* private */ }
+impl AvailabilitySuccessorOutcome {
+    pub const fn new(
+        successor: AvailabilitySuccessorModelCallTurn,
+        backoff: std::time::Duration,
+    ) -> Self;
+    // accessors: successor(), backoff()
 }
 
 pub trait CommitModelCallObservationTransaction {
@@ -6292,7 +6573,7 @@ pub trait CommitModelCallObservationTransaction {
         observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentityCandidates,
         next_reclassified_turn: NextTurn,
-    ) -> impl Future<Output = Result<Option<ModelCallTerminalOutcome>, Self::Error>> + Send
+    ) -> impl Future<Output = Result<Option<ModelCallObservationCommitOutcome>, Self::Error>> + Send
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
     fn reread_observation(
@@ -6376,11 +6657,14 @@ pub struct InProcessAttemptDispatchPermit { /* private */ }
 
 pub enum ModelCallExecutionOutcome {
     NoWork,
+    RetryBackoff(std::time::Duration),
+    PoolExhausted(Box<CredentialPoolExhaustedOutcome>),
     Checkpointed(ModelCallId),
     TargetUnavailable(Box<FailedModelCallTurn>),
     CapabilityKnownFailure(Box<FailedModelCallTurn>),
     CapabilityFailureAlreadyCommitted(ModelCallId),
     ObservationCommitted(Box<ModelCallTerminalOutcome>),
+    AvailabilitySuccessor(Box<AvailabilitySuccessorOutcome>),
     ObservationAlreadyCommitted(ModelCallId),
 }
 
@@ -6709,6 +6993,10 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     ChildWaitReconciliation(TransactionError),
     ChildWaitMismatch,
     CrashClassification(TransactionError),
+    RecoveredFatalExecutorFailure {
+        failure_class: OperatorFailureClass,
+        cause_code: &'static str,
+    },
     Continuation(TransactionError),
     CatalogDrift,
 }
@@ -6838,6 +7126,45 @@ pub trait RepoWatchEventIdGenerator {
 }
 
 pub struct UuidV7RepoWatchEventIdGenerator;
+
+pub struct RepoWatchEventContentIdentityV1(/* private */);
+impl RepoWatchEventContentIdentityV1 {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
+    // accessors: as_bytes()
+}
+
+pub struct RepoWatchEventIdentityFrontierEntryV1 { /* private */ }
+impl RepoWatchEventIdentityFrontierEntryV1 {
+    pub const fn new(stream_identity: [u8; 32], sequence: NonZeroU64) -> Self;
+    // accessors: stream_identity(), sequence()
+}
+
+pub struct RepoWatchEventIdentityFrontierV1 { /* private */ }
+impl RepoWatchEventIdentityFrontierV1 {
+    pub fn try_from_entries(
+        entries: Vec<RepoWatchEventIdentityFrontierEntryV1>,
+    ) -> Result<Self, RepoWatchEventIdentityFrontierError>;
+    pub fn entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = RepoWatchEventIdentityFrontierEntryV1> + '_;
+}
+
+pub enum RepoWatchEventIdentityFrontierError {
+    DuplicateStream,
+    StreamLimit,
+    SequenceExhausted,
+}
+
+pub struct RepoWatchEventOccurrenceV1 { /* private */ }
+impl RepoWatchEventOccurrenceV1 {
+    // Compiled only under the `test-support` feature.
+    pub const fn from_parts(
+        event: RepoWatchEvent,
+        content_identity: RepoWatchEventContentIdentityV1,
+    ) -> Self;
+    // accessors: event(), content_identity()
+    pub fn into_event(self) -> RepoWatchEvent;
+}
 
 pub enum RepoWatchPullRequestLifecycle {
     Open,
@@ -6978,14 +7305,28 @@ pub enum RepoWatchRepositoryStateError {
     DuplicateBranchHead(BranchName),
 }
 
+pub enum RepoWatchDifferFailureKind {
+    EventConstruction,
+    IdentityFrontier,
+}
+
 pub struct RepoWatchDifferError(/* private */);
+impl RepoWatchDifferError {
+    pub const fn kind(&self) -> RepoWatchDifferFailureKind;
+}
+
+pub fn repo_watch_events_have_equal_identified_content(
+    left: &RepoWatchEvent,
+    right: &RepoWatchEvent,
+) -> bool;
 
 pub fn derive_repo_watch_events(
     repository: &RepositorySlug,
     previous: Option<&RepoWatchObservation>,
     current: &RepoWatchObservation,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
-) -> Result<Vec<RepoWatchEvent>, RepoWatchDifferError>;
+) -> Result<Vec<RepoWatchEventOccurrenceV1>, RepoWatchDifferError>;
 
 pub struct RepoWatchResolvedTemplate { /* private */ }
 impl RepoWatchResolvedTemplate {
@@ -7047,6 +7388,7 @@ pub enum RepoWatchRuleEvaluation {
 pub enum RepoWatchRuleEvaluationOutcome {
     Inactive,
     NotMatched,
+    TargetClosed,
     Occupied,
     Cooldown,
     Dispatched {
@@ -8035,10 +8377,12 @@ impl<
 ```rust
 pub enum SubmitInputRequestError {
     InvalidCommandId(InvalidDurableCommandId),
+    OversizedContent { utf8_byte_length: usize },
 }
 
 pub struct SubmitInputRequest { /* private */ }
 impl SubmitInputRequest {
+    pub const MAX_CONTENT_UTF8_BYTES: usize; // 1_048_576
     pub fn try_new(
         command_id: DurableCommandId,
         session: SessionId,
@@ -8249,6 +8593,7 @@ pub enum PrepareToolContinuationOutcome {
     NoWork,
     Checkpointed(ModelCallId),
     TargetUnavailable(Box<FailedModelCallTurn>),
+    PoolExhausted(Box<CredentialPoolExhaustedModelCallTurn>),
 }
 
 pub enum RetainedToolAttemptObservationStatus {
@@ -9542,6 +9887,33 @@ impl RepoWatchRuleContentDigest {
     pub const fn as_bytes(&self) -> &[u8; 32];
 }
 
+pub enum RepoWatchRuleIdentityField {
+    MatcherEventKinds,
+    MatcherRepository,
+    MatcherBaseBranch,
+    MatcherHeadBranchRegex,
+    MatcherTitleRegex,
+    MatcherBodyRegex,
+    MatcherLabelsAnyOf,
+    MatcherLabelsAllOf,
+    MatcherLabelsNoneOf,
+    MatcherDraft,
+    MatcherAuthor,
+    MatcherMergeableStateAnyOf,
+    MatcherConclusionAnyOf,
+    Actions,
+    SingletonPer,
+    CooldownSeconds,
+}
+impl RepoWatchRuleIdentityField {
+    pub const fn configuration_path(self) -> &'static str;
+}
+
+pub struct RepoWatchRuleIdentityFieldDigest(/* private [u8; 32] */);
+impl RepoWatchRuleIdentityFieldDigest {
+    pub const fn as_bytes(&self) -> &[u8; 32];
+}
+
 pub struct RepoWatchRule { /* private */ }
 impl RepoWatchRule {
     pub fn try_new(
@@ -9557,6 +9929,9 @@ impl RepoWatchRule {
         declarations: &[RepoWatchTemplateContextDeclaration],
     ) -> Result<(), RepoWatchRuleValidationError>;
     pub fn content_digest(&self) -> RepoWatchRuleContentDigest;
+    pub fn identity_field_digests(
+        &self,
+    ) -> Vec<(RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest)>;
     pub fn actions_for_event(
         &self,
         event: &RepoWatchEvent,
@@ -10367,69 +10742,70 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 ## Inventory
 
-| Module                                             | Public types          |
-| -------------------------------------------------- | --------------------- |
-| domain: lib.rs identities                          | 27                    |
-| domain: actor                                      | 1                     |
-| domain: blob                                       | 3                     |
-| domain: imported_conversation                      | 32 (+5 free fn)       |
-| domain: session_template                           | 6                     |
-| domain: session_placement                          | 18                    |
-| domain: git_remote                                 | 4 (+2 free fn)        |
-| domain: session                                    | 22                    |
-| domain: session_delegation                         | 37 (+3 free fn)       |
-| domain: imported_session                           | 18                    |
-| domain: configuration                              | 24                    |
-| domain: model_settings                             | 25                    |
-| domain: accepted_input                             | 5                     |
-| domain: delivery_request                           | 2                     |
-| domain: user_content                               | 13                    |
-| domain: submit_input                               | 35                    |
-| domain: queue_order                                | 5 (+1 free fn)        |
-| domain: repo_watch                                 | 49                    |
-| domain: turn_lifecycle                             | 10                    |
-| domain: turn_eligibility                           | 37                    |
-| domain: turn_attempt                               | 13                    |
-| domain: model_call                                 | 12                    |
-| domain: context_compaction                         | 12                    |
-| domain: model_execution                            | 51                    |
-| domain: context_frontier                           | 6                     |
-| domain: semantic_entry                             | 4                     |
-| domain: tool                                       | 45                    |
-| domain: tool_attempt                               | 27                    |
-| domain: tool_execution                             | 20                    |
-| domain: provider_evidence                          | 5                     |
-| domain: applied_interrupt                          | 2                     |
-| domain: fatal_mismatch                             | 0                     |
-| domain: replace_session_defaults                   | 13                    |
-| domain: goal                                       | 25                    |
-| domain: goal_command                               | 5                     |
-| domain: review_workflow                            | 83 (+1 free fn)       |
-| domain: session_metadata                           | 15                    |
-| domain: runner                                     | 70                    |
-| domain: workspace                                  | 4                     |
-| **signalbox-domain total**                         | **785 (+12 free fn)** |
-| application: approval_judge                        | 1 (incl. 1 trait)     |
-| application: conversation_import                   | 12 (incl. 4 traits)   |
-| application: create_session                        | 8 (incl. 2 traits)    |
-| application: update_session_placement              | 4 (incl. 1 trait)     |
-| application: create_session_from_imported_frontier | 6 (incl. 2 traits)    |
-| application: list_conversations                    | 8 (incl. 2 traits)    |
-| application: load_session                          | 2 (incl. 1 trait)     |
-| application: model_execution                       | 32 (incl. 8 traits)   |
-| application: tool_loop                             | 26 (incl. 5 traits)   |
-| application: operator_failure                      | 2 (incl. 1 trait)     |
-| application: session_delegation                    | 1 (incl. 1 trait)     |
-| application: replace_session_defaults              | 5 (incl. 1 trait)     |
-| application: repo_watch                            | 33 (incl. 4 traits)   |
-| application: review_orchestration                  | 37 (incl. 2 traits)   |
-| application: review_workflow                       | 9 (incl. 2 traits)    |
-| application: session_metadata                      | 12 (incl. 4 traits)   |
-| application: scheduler                             | 15 (incl. 5 traits)   |
-| application: start_eligible_turn                   | 5 (incl. 2 traits)    |
-| application: startup_scan                          | 7 (incl. 2 traits)    |
-| application: submit_input                          | 7 (incl. 2 traits)    |
-| application: tool_dispatch_gate                    | 2                     |
-| application: tool_execution_test_support           | 7 (+1 free fn)        |
-| application: tool_loop_ports                       | 8 (incl. 2 traits)    |
-| **signalbox-application total**                    | **249 (+1 free fn)**  |
+| Module                                             | Public types                     |
+| -------------------------------------------------- | -------------------------------- |
+| domain: lib.rs identities                          | 28                               |
+| domain: actor                                      | 1                                |
+| domain: blob                                       | 3                                |
+| domain: program_journal                            | 25                               |
+| domain: imported_conversation                      | 32 (+5 free fn)                  |
+| domain: session_template                           | 6                                |
+| domain: session_placement                          | 18                               |
+| domain: git_remote                                 | 4 (+2 free fn)                   |
+| domain: session                                    | 22                               |
+| domain: session_delegation                         | 37 (+3 free fn)                  |
+| domain: imported_session                           | 18                               |
+| domain: configuration                              | 24                               |
+| domain: model_settings                             | 25                               |
+| domain: accepted_input                             | 5                                |
+| domain: delivery_request                           | 2                                |
+| domain: user_content                               | 13                               |
+| domain: submit_input                               | 36                               |
+| domain: queue_order                                | 5 (+1 free fn)                   |
+| domain: repo_watch                                 | 51                               |
+| domain: turn_lifecycle                             | 10                               |
+| domain: turn_eligibility                           | 37                               |
+| domain: turn_attempt                               | 13                               |
+| domain: model_call                                 | 12                               |
+| domain: context_compaction                         | 12                               |
+| domain: model_execution                            | 53                               |
+| domain: context_frontier                           | 6                                |
+| domain: semantic_entry                             | 4                                |
+| domain: tool                                       | 45                               |
+| domain: tool_attempt                               | 27                               |
+| domain: tool_execution                             | 20                               |
+| domain: provider_evidence                          | 5                                |
+| domain: applied_interrupt                          | 2                                |
+| domain: fatal_mismatch                             | 0                                |
+| domain: replace_session_defaults                   | 13                               |
+| domain: goal                                       | 25                               |
+| domain: goal_command                               | 5                                |
+| domain: review_workflow                            | 83 (+1 free fn)                  |
+| domain: session_metadata                           | 15                               |
+| domain: runner                                     | 70                               |
+| domain: workspace                                  | 4                                |
+| **signalbox-domain total**                         | **816 (+12 free fn)**            |
+| application: approval_judge                        | 1 (incl. 1 trait)                |
+| application: conversation_import                   | 12 (incl. 4 traits)              |
+| application: create_session                        | 8 (incl. 2 traits)               |
+| application: update_session_placement              | 4 (incl. 1 trait)                |
+| application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
+| application: list_conversations                    | 8 (incl. 2 traits)               |
+| application: load_session                          | 2 (incl. 1 trait)                |
+| application: model_execution                       | 35 (incl. 8 traits)              |
+| application: tool_loop                             | 26 (incl. 5 traits)              |
+| application: operator_failure                      | 2 (incl. 1 trait)                |
+| application: session_delegation                    | 1 (incl. 1 trait)                |
+| application: replace_session_defaults              | 5 (incl. 1 trait)                |
+| application: repo_watch                            | 38 (+2 free fn) (incl. 4 traits) |
+| application: review_orchestration                  | 37 (incl. 2 traits)              |
+| application: review_workflow                       | 9 (incl. 2 traits)               |
+| application: session_metadata                      | 12 (incl. 4 traits)              |
+| application: scheduler                             | 15 (incl. 5 traits)              |
+| application: start_eligible_turn                   | 5 (incl. 2 traits)               |
+| application: startup_scan                          | 7 (incl. 2 traits)               |
+| application: submit_input                          | 7 (incl. 2 traits)               |
+| application: tool_dispatch_gate                    | 2                                |
+| application: tool_execution_test_support           | 7 (+1 free fn)                   |
+| application: tool_loop_ports                       | 8 (incl. 2 traits)               |
+| **signalbox-application total**                    | **257 (+3 free fn)**             |
