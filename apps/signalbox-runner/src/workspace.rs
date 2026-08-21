@@ -9,13 +9,14 @@ use std::{
     io::{self, Read, Write},
     os::unix::ffi::{OsStrExt as _, OsStringExt as _},
     os::unix::fs::{MetadataExt as _, PermissionsExt as _},
+    os::unix::io::AsRawFd as _,
     path::{Path, PathBuf},
     rc::Rc,
 };
 
 use rustix::{
     fs::{
-        AtFlags, Dir, FileType, Mode, OFlags, RenameFlags, chmodat, fchmod, mkdirat, openat,
+        AtFlags, CWD, Dir, FileType, Mode, OFlags, RenameFlags, chmodat, fchmod, mkdirat, openat,
         renameat, renameat_with, statat, unlinkat,
     },
     process::geteuid,
@@ -656,8 +657,9 @@ fn validate_execution_directory_representation(path: &Path) -> Result<(), Runner
 
 fn validate_root_directory(path: &Path, directory: &File) -> Result<(), io::Error> {
     let metadata = directory.metadata()?;
-    let path_metadata = std::fs::metadata(path)?;
+    let path_metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_dir()
+        || !path_metadata.is_dir()
         || metadata.uid() != geteuid().as_raw()
         || metadata.permissions().mode() & PERMISSION_MASK != DIRECTORY_MODE
         || metadata.dev() != path_metadata.dev()
@@ -1030,23 +1032,38 @@ fn remove_open_directory_tree(
                 let status =
                     statat(parent.as_ref(), &name, AtFlags::SYMLINK_NOFOLLOW).map_err(rustix_io)?;
                 if FileType::from_raw_mode(status.st_mode) == FileType::Directory {
+                    let pinned = File::from(
+                        openat(
+                            parent.as_ref(),
+                            &name,
+                            OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                            Mode::empty(),
+                        )
+                        .map_err(rustix_io)?,
+                    );
+                    let identity = DirectoryIdentity::from_file(&pinned)?;
+                    if !identity.names(parent.as_ref(), &name)? {
+                        return Err(RunnerWorkspaceError::ManifestConflict);
+                    }
+                    let pinned_path = format!("/proc/self/fd/{}", pinned.as_raw_fd());
                     chmodat(
-                        parent.as_ref(),
-                        &name,
+                        CWD,
+                        pinned_path,
                         Mode::RUSR | Mode::WUSR | Mode::XUSR,
-                        AtFlags::SYMLINK_NOFOLLOW,
+                        AtFlags::empty(),
                     )
                     .map_err(rustix_io)?;
                     let descriptor = openat(
-                        parent.as_ref(),
-                        &name,
+                        &pinned,
+                        ".",
                         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                         Mode::empty(),
                     )
                     .map_err(rustix_io)?;
                     let child = Rc::new(File::from(descriptor));
-                    let identity = DirectoryIdentity::from_file(&child)?;
-                    if !identity.names(parent.as_ref(), &name)? {
+                    if DirectoryIdentity::from_file(child.as_ref())? != identity
+                        || !identity.names(parent.as_ref(), &name)?
+                    {
                         return Err(RunnerWorkspaceError::ManifestConflict);
                     }
                     steps.push(RemovalStep::RemoveDirectory {
@@ -1700,12 +1717,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repository_workspace_rejects_a_symlinked_runner_root_before_publish() {
+        let (parent, state) = fixture_root();
+        let root = parent.path().join("runner-state");
+        let moved_root = parent.path().join("moved-runner-state");
+        let failure = state
+            .workspace_store()
+            .expect("the locked root forms a workspace store")
+            .prepare_repository_workspace(&repository_request(), |target| async move {
+                fs::rename(&root, &moved_root)?;
+                std::os::unix::fs::symlink(&moved_root, &root)?;
+                fs::write(target.path().join("prepared"), PREPARED_REPOSITORY_BYTES)?;
+                Ok::<Recovery, std::io::Error>(Recovery::Commit {
+                    revision: "4".repeat(40),
+                })
+            })
+            .await
+            .expect_err("a symlink cannot replace the canonical runner root");
+
+        assert!(matches!(
+            failure,
+            PrepareRepositoryWorkspaceError::Storage(RunnerWorkspaceError::Io(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn repository_workspace_rejects_a_non_utf8_root_before_preparation() {
         let parent = tempfile::tempdir().expect("the non-UTF-8 fixture parent exists");
         let non_utf8_parent = parent
             .path()
             .join(OsString::from_vec(b"non-utf8-\xff".to_vec()));
         fs::create_dir(&non_utf8_parent).expect("the non-UTF-8 fixture directory exists");
+        let runner_root = non_utf8_parent.join("runner-state");
+        fs::create_dir(&runner_root).expect("the real runner-root fixture exists");
+        fs::set_permissions(&runner_root, fs::Permissions::from_mode(0o700))
+            .expect("the real runner-root fixture is owner-private");
         let alias = parent.path().join("alias");
         std::os::unix::fs::symlink(&non_utf8_parent, &alias)
             .expect("the UTF-8 fixture alias exists");
