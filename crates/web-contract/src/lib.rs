@@ -145,6 +145,7 @@ pub struct WebBlobDerivation {
     pub derivation_id: String,
     pub input_digests: Vec<String>,
     pub transformation_name: String,
+    #[schemars(range(min = 1))]
     pub transformation_version: u32,
     pub parameters_json: String,
     pub producer: WebBlobDerivationProducer,

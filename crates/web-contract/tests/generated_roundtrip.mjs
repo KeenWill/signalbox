@@ -125,6 +125,43 @@ test("generated blob decoder rejects multiple display filenames", () => {
   );
 });
 
+test("generated blob decoder rejects a zero transformation version", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        digest,
+        byte_length: "1",
+        declared_media_type: "image/png",
+        display_filename: [],
+        available_views: [
+          {
+            kind: "preview",
+            content_url: `/api/blobs/${digest}/content/image-png`,
+            media_type: "image/png",
+            byte_length: "1",
+            derivations: [
+              {
+                derivation_id: "01990f5f-55c0-7000-8000-000000000001",
+                input_digests: [digest],
+                output_digests: [digest],
+                transformation_name: "image.preview",
+                transformation_version: 0,
+                parameters_json: "{}",
+                producer: {
+                  class: "deterministic",
+                  implementation_digest: digest,
+                  cache_key: digest,
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    /transformation_version must be at least 1/,
+  );
+});
+
 test("generated blob decoder rejects an absolute sentinel-origin URL", () => {
   assert.throws(
     () =>

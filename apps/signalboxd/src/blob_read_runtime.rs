@@ -1,13 +1,14 @@
 //! Bounded catalog-backed blob reads with no database transaction across store I/O.
 
-use std::num::NonZeroU64;
+use std::{io::SeekFrom, num::NonZeroU64};
 
+use sha2::{Digest as _, Sha256};
 use signalbox_blob_store::{BlobStoreFailureKind, MAX_BLOB_RANGE_BYTES};
 use signalbox_domain::BlobDigest;
 use signalbox_persistence::blob::{
     BlobCatalogEntry, BlobCatalogRepository, BlobCatalogRepositoryError,
 };
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::blob_storage_runtime::BlobStoreRegistry;
 
@@ -128,11 +129,10 @@ pub(crate) async fn read_blob_chunk(
     }
 }
 
-/// Opens one published, catalog-verified replica and advances to an HTTP range.
+/// Opens one published replica, verifies all bytes, and advances to an HTTP range.
 ///
-/// The present main-branch store contract can either stream a whole object or
-/// reverify and retain only a small model-facing range. Browser delivery uses
-/// the streaming arm so a multi-gigabyte response never materializes in memory.
+/// Verification spools to an anonymous file so no bytes are exposed under an
+/// immutable digest until the complete candidate matches the catalog identity.
 pub(crate) async fn open_recorded_blob_range(
     registry: &BlobStoreRegistry,
     entry: &BlobCatalogEntry,
@@ -158,21 +158,53 @@ pub(crate) async fn open_recorded_blob_range(
         match store.open(replica.object_key()).await {
             Ok(opened) if opened.byte_length() == expected.byte_length() => {
                 let mut reader = opened.into_reader();
-                let skipped =
-                    match tokio::io::copy(&mut (&mut reader).take(offset), &mut tokio::io::sink())
-                        .await
-                    {
-                        Ok(skipped) => skipped,
+                let temporary = tempfile::tempfile().map_err(|_| BlobReadError::Unavailable)?;
+                let mut verified = tokio::fs::File::from_std(temporary);
+                let mut hasher = Sha256::new();
+                let mut observed = 0_u64;
+                let mut buffer = [0_u8; 64 * 1024];
+                let mut unavailable = false;
+                loop {
+                    let read = match reader.read(&mut buffer).await {
+                        Ok(read) => read,
                         Err(_) => {
-                            saw_unavailable = true;
-                            continue;
+                            unavailable = true;
+                            break;
                         }
                     };
-                if skipped != offset {
+                    if read == 0 {
+                        break;
+                    }
+                    observed = observed
+                        .checked_add(u64::try_from(read).map_err(|_| BlobReadError::Integrity)?)
+                        .ok_or(BlobReadError::Integrity)?;
+                    if observed > expected.byte_length() {
+                        break;
+                    }
+                    hasher.update(&buffer[..read]);
+                    verified
+                        .write_all(&buffer[..read])
+                        .await
+                        .map_err(|_| BlobReadError::Unavailable)?;
+                }
+                if unavailable {
+                    saw_unavailable = true;
+                    continue;
+                }
+                let observed_digest = BlobDigest::from_bytes(hasher.finalize().into());
+                if observed != expected.byte_length() || observed_digest != expected.digest() {
                     saw_corrupt = true;
                     continue;
                 }
-                return Ok(Box::new(reader.take(length.get())));
+                verified
+                    .flush()
+                    .await
+                    .map_err(|_| BlobReadError::Unavailable)?;
+                verified
+                    .seek(SeekFrom::Start(offset))
+                    .await
+                    .map_err(|_| BlobReadError::Unavailable)?;
+                return Ok(Box::new(verified.take(length.get())));
             }
             Ok(_) => saw_corrupt = true,
             Err(error) => match error.kind() {

@@ -123,7 +123,7 @@ const schemas = {
           },
           "transformation_version": {
             "format": "uint32",
-            "minimum": 0,
+            "minimum": 1,
             "type": "integer"
           }
         },

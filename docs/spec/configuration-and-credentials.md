@@ -1,8 +1,8 @@
 # Configuration and credentials
 
 The browser HTTP listener and same-origin static assets are verified against
-this PR (`agent/web-http-transport`); contract version two and its blob routes are
-verified against this PR (`agent/web-blob-delivery`).
+this PR (`agent/web-http-transport`); contract version two and its blob routes
+are verified against this PR (`agent/web-blob-delivery`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).

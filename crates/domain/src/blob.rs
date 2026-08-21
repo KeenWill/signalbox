@@ -494,10 +494,21 @@ mod tests {
             [BlobDigest::digest(b"independently-produced-output")],
         )
         .expect("the replay fixture is valid");
+        let changed_implementation = BlobDerivation::try_new(
+            crate::BlobDerivationId::from_uuid(uuid::Uuid::from_u128(3)),
+            [input],
+            replay.transformation().clone(),
+            BlobDerivationProducer::Deterministic {
+                implementation: BlobDigest::digest(b"implementation-v2"),
+            },
+            [BlobDigest::digest(b"changed-implementation-output")],
+        )
+        .expect("the changed implementation fixture is valid");
 
         let expected = first
             .deterministic_key()
             .expect("a deterministic producer has a key");
         assert_eq!(replay.deterministic_key(), Some(expected));
+        assert_ne!(changed_implementation.deterministic_key(), Some(expected));
     }
 }

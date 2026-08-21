@@ -356,11 +356,12 @@ async fn blob_descriptor(
         derivations: Vec::new(),
     }];
     if let Some(representation) = image_representation(&use_metadata.media_type) {
+        let Some(representation_media_type) = representation_media_type(representation) else {
+            return runtime_error_response(WebBlobRuntimeError::Integrity);
+        };
         available_views.push(WebBlobAvailableView {
             kind: WebBlobViewKind::BrowserNative,
-            media_type: representation_media_type(representation)
-                .expect("an admitted representation has a media type")
-                .to_owned(),
+            media_type: representation_media_type.to_owned(),
             byte_length: byte_length.clone(),
             content_url: format!("/api/blobs/{digest}/content/{representation}"),
             derivations: Vec::new(),

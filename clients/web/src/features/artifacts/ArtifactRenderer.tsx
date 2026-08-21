@@ -7,11 +7,7 @@ import './artifacts.css'
 type WebBlobAvailableView = WebBlobDescriptor['available_views'][number]
 type WebBlobViewKind = WebBlobAvailableView['kind']
 
-const IMAGE_VIEW_PRIORITY: ReadonlyArray<WebBlobViewKind> = [
-  'preview',
-  'thumbnail',
-  'browser_native',
-]
+const IMAGE_VIEW_PRIORITY: ReadonlyArray<WebBlobViewKind> = ['preview', 'thumbnail']
 
 export const selectImageView = (descriptor: WebBlobDescriptor): WebBlobAvailableView | undefined =>
   IMAGE_VIEW_PRIORITY.map((kind) =>
@@ -70,7 +66,7 @@ function ArtifactRenderer({ descriptor }: { descriptor: WebBlobDescriptor }) {
           </div>
         </dl>
         <div className="artifact-actions">
-          {original && automatic?.kind !== 'browser_native' && !originalRequested && (
+          {original && !originalRequested && (
             <button type="button" onClick={() => setOriginalRequested(true)}>
               <Maximize2 aria-hidden="true" /> Load original
             </button>

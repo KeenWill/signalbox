@@ -11,6 +11,7 @@ const previewPath = `/api/blobs/sha256:${'2b'.repeat(32)}/content/image-png`
 const originalPath = `/api/blobs/sha256:${'1a'.repeat(32)}/content/image-png`
 const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.meta.url))
 const originalFixture = readFileSync(new URL('./fixtures/original.png', import.meta.url))
+const binaryDownloadPath = `/api/blobs/sha256:${'3c'.repeat(32)}/download`
 
 const watchBrowser = (page: Page): BrowserProblems => {
   const problems: BrowserProblems = { consoleErrors: [], pageErrors: [] }
@@ -83,14 +84,23 @@ test('selects an image capability without prefetching original bytes', async ({ 
 
 test('falls back to metadata and download for an unknown binary capability', async ({ page }) => {
   const problems = watchBrowser(page)
+  await page.route('**/api/blobs/**/download?*', async (route) => {
+    await route.fulfill({ body: 'fixture', contentType: 'application/octet-stream' })
+  })
   await page.goto('/scenario/blobs')
 
   const artifact = page.getByRole('article', { name: 'Artifact telemetry.capture' })
   await expect(artifact.getByText('metadata fallback')).toBeVisible()
-  await expect(artifact.getByRole('link', { name: 'Download' })).toHaveAttribute(
-    'download',
-    'telemetry.capture',
-  )
+  const download = artifact.getByRole('link', { name: 'Download' })
+  await expect(download).toHaveAttribute('download', 'telemetry.capture')
+  const request = page.waitForRequest((candidate) => {
+    const url = new URL(candidate.url())
+    return url.pathname === binaryDownloadPath
+  })
+  await download.click()
+  const url = new URL((await request).url())
+  expect(url.searchParams.get('media_type')).toBe('application/octet-stream')
+  expect(url.searchParams.get('display_filename')).toBe('telemetry.capture')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

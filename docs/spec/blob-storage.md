@@ -32,8 +32,7 @@ non-waiting process admission, and the terminal read commands are verified
 against this implementing change (`agent/blob-storage-read-wire`).
 
 Same-origin browser delivery, immutable derivation provenance, and lazy isolated
-image derivatives are verified against this PR
-(`agent/web-blob-delivery`).
+image derivatives are verified against this PR (`agent/web-blob-delivery`).
 
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
@@ -413,9 +412,9 @@ response uses `attachment` disposition and keeps caller filename bytes in an RFC
 `browser_native` view at a representation-specific URL; no caller-controlled
 media type is copied into that URL. Thumbnail and preview views exist only after
 their exact output is present and carry their complete derivation record. The
-initial client renderer automatically loads the preview, then thumbnail, then
-browser-native view by capability order, and loads an original only after an
-explicit action. A descriptor without an admitted inline view receives a
+initial client renderer automatically loads the preview, then thumbnail view by
+capability order, and loads a browser-native original only after an explicit
+action. A descriptor without an admitted derivative view receives a
 metadata-and-download fallback.
 
 Content and download responses stream from recorded replicas in bounded chunks.
@@ -445,14 +444,15 @@ deterministic append reloads the one winning record.
 Image thumbnail (256-pixel edge) and preview (1,600-pixel edge) transforms are
 lazy deterministic producers. Repeated requests reuse the recorded key without
 executing the producer. A miss copies and re-verifies the source into a private
-temporary workspace and invokes the current daemon executable through the
-configured filesystem-confined supervisor with no network, a 120-second
-deadline, and at most two concurrent workers. The decoder accepts only the
-enabled GIF, JPEG, PNG, and WebP formats, limits either axis to 16,384 pixels,
-total pixels to 67,108,864, decoder allocation to 320 MiB, and the PNG output to
-16 MiB. The digest of the exact worker executable is the implementation
-provenance. Publication to the generated-artifact route and catalog registration
-precede the derivation append.
+temporary workspace, rejecting inputs above 64 MiB and bounding the copy to 120
+seconds, then invokes the current daemon executable through the configured
+filesystem-confined supervisor with no network, a 120-second deadline, and at
+most two concurrent workers. The decoder accepts only the enabled GIF, JPEG,
+PNG, and WebP formats, limits either axis to 16,384 pixels, total pixels to
+67,108,864, decoder allocation to 320 MiB, and the PNG output to 16 MiB. The
+digest of the exact worker executable is the implementation provenance.
+Publication to the generated-artifact route and catalog registration precede the
+derivation append.
 
 ## Multipart user content
 

@@ -14,7 +14,7 @@ export const imageArtifact = decodeWebBlobDescriptor({
       kind: 'download',
       media_type: 'image/png',
       byte_length: '94371840',
-      content_url: `/api/blobs/${sourceDigest}/download`,
+      content_url: `/api/blobs/${sourceDigest}/download?media_type=image%2Fpng&display_filename=orbital-map.png`,
       derivations: [],
     },
     {
@@ -58,7 +58,7 @@ export const binaryArtifact = decodeWebBlobDescriptor({
       kind: 'download',
       media_type: 'application/octet-stream',
       byte_length: '734003200',
-      content_url: `/api/blobs/${binaryDigest}/download`,
+      content_url: `/api/blobs/${binaryDigest}/download?media_type=application%2Foctet-stream&display_filename=telemetry.capture`,
       derivations: [],
     },
   ],

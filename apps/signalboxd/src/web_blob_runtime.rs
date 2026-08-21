@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
+    time::Duration,
 };
 
 use image::{GenericImageView as _, ImageFormat, ImageReader, Limits};
@@ -41,6 +42,7 @@ const MAX_IMAGE_AXIS: u32 = 16_384;
 const MAX_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
 const MAX_DECODER_ALLOCATION_BYTES: u64 = 320 * 1024 * 1024;
 const MAX_DERIVATIVE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_IMAGE_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ACTIVE_IMAGE_DERIVATIONS: usize = 2;
 const WORKER_TIMEOUT_SECONDS: u64 = 120;
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
@@ -249,6 +251,9 @@ async fn copy_verified_input(
         .await
         .map_err(|_| WebBlobRuntimeError::Unavailable)?
         .ok_or(WebBlobRuntimeError::NotFound)?;
+    if entry.expected().byte_length() > MAX_IMAGE_INPUT_BYTES {
+        return Err(WebBlobRuntimeError::ProducerFailed);
+    }
     for replica in entry.replicas() {
         let Some(store) = registry.recorded_store(replica.store()) else {
             return Err(WebBlobRuntimeError::Integrity);
@@ -259,43 +264,69 @@ async fn copy_verified_input(
             Err(error) if error.kind() == BlobStoreFailureKind::NotFound => continue,
             Err(_) => continue,
         };
-        let mut reader = opened.into_reader();
-        let mut output = tokio::fs::File::create(destination)
-            .await
-            .map_err(|_| WebBlobRuntimeError::Unavailable)?;
-        let mut hasher = Sha256::new();
-        let mut observed = 0_u64;
-        let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
-        loop {
-            let read = reader
-                .read(&mut buffer)
-                .await
-                .map_err(|_| WebBlobRuntimeError::Unavailable)?;
-            if read == 0 {
-                break;
-            }
-            observed = observed
-                .checked_add(u64::try_from(read).unwrap_or(u64::MAX))
-                .ok_or(WebBlobRuntimeError::Integrity)?;
-            if observed > entry.expected().byte_length() {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-            output
-                .write_all(&buffer[..read])
-                .await
-                .map_err(|_| WebBlobRuntimeError::Unavailable)?;
-        }
-        output
-            .flush()
-            .await
-            .map_err(|_| WebBlobRuntimeError::Unavailable)?;
-        let observed_digest = BlobDigest::from_bytes(hasher.finalize().into());
-        if observed == entry.expected().byte_length() && observed_digest == digest {
-            return Ok(());
+        let copied = tokio::time::timeout(
+            Duration::from_secs(WORKER_TIMEOUT_SECONDS),
+            copy_input_candidate(
+                opened.into_reader(),
+                destination,
+                entry.expected().byte_length(),
+            ),
+        )
+        .await;
+        match copied {
+            Ok(Ok(observed_digest)) if observed_digest == digest => return Ok(()),
+            Ok(Ok(_)) | Ok(Err(CandidateCopyError::Read)) | Err(_) => continue,
+            Ok(Err(CandidateCopyError::Write)) => return Err(WebBlobRuntimeError::Unavailable),
         }
     }
     Err(WebBlobRuntimeError::Corrupt)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CandidateCopyError {
+    Read,
+    Write,
+}
+
+async fn copy_input_candidate(
+    mut reader: signalbox_blob_store::BlobReader,
+    destination: &Path,
+    expected_length: u64,
+) -> Result<BlobDigest, CandidateCopyError> {
+    let mut output = tokio::fs::File::create(destination)
+        .await
+        .map_err(|_| CandidateCopyError::Write)?;
+    let mut hasher = Sha256::new();
+    let mut observed = 0_u64;
+    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|_| CandidateCopyError::Read)?;
+        if read == 0 {
+            break;
+        }
+        observed = observed
+            .checked_add(u64::try_from(read).map_err(|_| CandidateCopyError::Read)?)
+            .ok_or(CandidateCopyError::Read)?;
+        if observed > expected_length {
+            return Err(CandidateCopyError::Read);
+        }
+        hasher.update(&buffer[..read]);
+        output
+            .write_all(&buffer[..read])
+            .await
+            .map_err(|_| CandidateCopyError::Write)?;
+    }
+    output
+        .flush()
+        .await
+        .map_err(|_| CandidateCopyError::Write)?;
+    if observed != expected_length {
+        return Err(CandidateCopyError::Read);
+    }
+    Ok(BlobDigest::from_bytes(hasher.finalize().into()))
 }
 
 async fn run_isolated_worker(
@@ -499,11 +530,35 @@ mod tests {
         reason = "image fixtures use explicit expectations"
     )]
 
-    use std::{ffi::OsString, fs::File};
+    use std::{ffi::OsString, fs::File, io};
 
     use image::{GenericImageView as _, Rgba, RgbaImage};
+    use tokio::io::{AsyncRead, ReadBuf};
 
-    use super::{MAX_DERIVATIVE_BYTES, expected_output, worker_transform};
+    use super::{
+        CandidateCopyError, MAX_DERIVATIVE_BYTES, copy_input_candidate, expected_output,
+        worker_transform,
+    };
+
+    struct FailingReader {
+        bytes: &'static [u8],
+        emitted: bool,
+    }
+
+    impl AsyncRead for FailingReader {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            if self.emitted {
+                return std::task::Poll::Ready(Err(io::Error::other("fixture read failure")));
+            }
+            buffer.put_slice(self.bytes);
+            self.emitted = true;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn deterministic_image_worker_bounds_the_long_edge_and_emits_png() {
@@ -540,5 +595,19 @@ mod tests {
         let result = expected_output(&output).await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn input_candidate_rejects_a_midstream_read_failure() {
+        let workspace = tempfile::tempdir().expect("fixture workspace exists");
+        let destination = workspace.path().join("input");
+        let reader = Box::new(FailingReader {
+            bytes: b"partial",
+            emitted: false,
+        });
+
+        let result = copy_input_candidate(reader, &destination, 14).await;
+
+        assert_eq!(result, Err(CandidateCopyError::Read));
     }
 }

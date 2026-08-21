@@ -31,4 +31,15 @@ describe('artifact renderer compatibility', () => {
 
     expect(selectImageView(descriptor)).toBeUndefined()
   })
+
+  it('keeps a browser-native original behind explicit loading', () => {
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      available_views: imageArtifact.available_views.filter(
+        (view) => view.kind === 'browser_native' || view.kind === 'download',
+      ),
+    }
+
+    expect(selectImageView(descriptor)).toBeUndefined()
+  })
 })
