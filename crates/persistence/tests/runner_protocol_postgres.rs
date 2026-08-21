@@ -5055,6 +5055,85 @@ async fn s31_inv009_inv043_inv044_runner_loss_transaction_retires_offered_lease(
     Ok(())
 }
 
+/// INV-009 / INV-043 / INV-044: profile replacement does not hide the live
+/// lease offered against its pinned predecessor from later loss propagation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv009_inv043_inv044_runner_loss_finds_lease_before_profile_replacement()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin, connection_epoch) =
+        stored_active_pin_fixture_with_authorization(
+            &pool,
+            authorized,
+            catalog(),
+            no_permission_overrides(),
+            "effect_free",
+        )
+        .await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries a credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    let replacement_grant = duplicate_grant(&replacement.grant.grant, registration.registration());
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement_grant),
+        )
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the offered lease loss owns its exact cursor");
+    let attempt = pin.lease.attempt();
+
+    assert_eq!(
+        store
+            .propagate_connection_loss_session(loss, pin.placement.session())
+            .await?,
+        RunnerConnectionLossSessionDisposition::Applied {
+            state: DispatchedRunnerState::RunnerLost,
+            interrupted_tool_attempt: Some(attempt),
+        }
+    );
+    assert_eq!(
+        store
+            .load_lease_loss(pin.lease.correlation().lease, pin.lease.generation())
+            .await?
+            .expect("the predecessor lease is classified by the loss")
+            .lost()
+            .state(),
+        signalbox_domain::RunnerLeaseState::LostUnclaimed
+    );
+    assert_eq!(
+        store
+            .load_runner_recovery_wait(pin.placement.session())
+            .await?
+            .expect("the active turn moves to runner recovery")
+            .interrupted_tool_attempt(),
+        Some(attempt)
+    );
+    drop(pool);
+    Ok(())
+}
+
 /// INV-009 / INV-032 / INV-043 / INV-044: refusing the follower event rolls
 /// placement, lease, turn wait, and propagation-cursor mutation back together.
 #[tokio::test]
