@@ -10,7 +10,7 @@ use signalbox_domain::{
 use signalbox_persistence::runner_protocol::{
     AppliedRunnerConnectionTransition, IssuedRunnerEnrollmentIdentities,
     PristineRunnerEnrollmentRequest, RunnerConnectionCause, RunnerConnectionEpoch,
-    RunnerConnectionTransition, RunnerConnectionTransitionEffect,
+    RunnerConnectionState, RunnerConnectionTransition, RunnerConnectionTransitionEffect,
     RunnerConnectionTransitionOutcome, RunnerEnrollmentDisposition, RunnerEnrollmentRequestFailure,
     RunnerEnrollmentRequestId, RunnerProtocolStore, RunnerProtocolStoreError,
     RunnerRegistrationRevision,
@@ -125,7 +125,51 @@ impl PostgresRunnerRegistrationService {
                 ) => {}
             }
         }
+        self.propagate_pending_connection_losses(None).await?;
         Ok(transitions)
+    }
+
+    async fn propagate_pending_connection_losses(
+        &self,
+        only_enrollment: Option<RunnerEnrollmentId>,
+    ) -> Result<(), RunnerProtocolStoreError> {
+        for loss in self
+            .store
+            .load_pending_connection_losses()
+            .await?
+            .into_iter()
+            .filter(|loss| only_enrollment.is_none_or(|enrollment| loss.enrollment() == enrollment))
+        {
+            loop {
+                let page = self
+                    .store
+                    .load_connection_loss_propagation_page(loss)
+                    .await?;
+                if page.is_complete() {
+                    break;
+                }
+                if page.sessions().is_empty() {
+                    self.store
+                        .complete_connection_loss_propagation(loss)
+                        .await?;
+                    break;
+                }
+                for session in page.sessions() {
+                    let disposition = self
+                        .store
+                        .propagate_connection_loss_session(loss, *session)
+                        .await?;
+                    tracing::info!(
+                        enrollment_id = %loss.enrollment().into_uuid(),
+                        loss_epoch = loss.loss_epoch().get(),
+                        session_id = %session.into_uuid(),
+                        ?disposition,
+                        "runner connection loss propagated to session"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn enroll_durably(&self, request: Enroll) -> Result<Enrolled, RunnerRegistrationFailure> {
@@ -453,15 +497,30 @@ impl PostgresRunnerRegistrationService {
                     error,
                 )
             })?;
-        match effect {
+        let outcome = match effect {
             RunnerConnectionTransitionEffect::Applied(applied) => {
                 log_connection_transition(applied, transition);
-                Ok(RunnerConnectionTransitionOutcome::Current(
-                    applied.snapshot(),
-                ))
+                RunnerConnectionTransitionOutcome::Current(applied.snapshot())
             }
-            RunnerConnectionTransitionEffect::Unchanged(outcome) => Ok(outcome),
+            RunnerConnectionTransitionEffect::Unchanged(outcome) => outcome,
+        };
+        if matches!(
+            outcome,
+            RunnerConnectionTransitionOutcome::Current(snapshot)
+                if snapshot.state() == RunnerConnectionState::Lost
+        ) {
+            let enrollment = RunnerEnrollmentId::from_uuid(enrollment.into_uuid());
+            self.propagate_pending_connection_losses(Some(enrollment))
+                .await
+                .map_err(|error| {
+                    store_failure(
+                        operation_kind,
+                        AvailableCorrelation::ConnectionEpoch(wire_epoch),
+                        error,
+                    )
+                })?;
         }
+        Ok(outcome)
     }
 }
 
@@ -1957,10 +2016,20 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;
+    use signalbox_domain::{
+        CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
+        RunnerLostBeforePin, RunnerSandboxProfile, RunnerSelector, RunnerToolPermissionOverrides,
+        RunnerWorkingDirectory, SessionConfigurationDefaults, SessionCreationCause,
+        SessionCreationProvenance, SessionId, SessionRunnerPlacement,
+        SessionRunnerPlacementRequest, SessionRunnerPlacementState, TranscriptAncestry,
+        WorkingDirectorySelection, WorkspaceRequirement,
+    };
     use signalbox_persistence::{
+        create_session::CreateSessionRepository,
         disposable_postgres_server_args, disposable_postgres_state_tmpfs,
         disposable_test_container_labels, local_test_connection_options, migrate,
         runner_protocol::{RunnerConnectionCause, RunnerConnectionState},
+        session_credentials::{SessionCredentialPin, SessionModelCredential},
     };
     use sqlx::{PgPool, postgres::PgPoolOptions};
     use testcontainers_modules::{
@@ -1980,6 +2049,13 @@ mod tests {
     const ARBITRARY_PROVISION_RUNNER_ID_SEED: u128 = 7;
     const ARBITRARY_PROVISION_PLACEMENT_REVISION: u64 = 1;
     const ARBITRARY_PROVISION_REGISTRATION_REVISION: u64 = 1;
+    const ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED: u128 = 0x300;
+    const ARBITRARY_RUNNER_SESSION_COMMAND_ID_SEED: u128 = 0x301;
+    const ARBITRARY_RUNNER_SESSION_MODEL_SELECTION_SEED: u128 = 0x302;
+    const ARBITRARY_RUNNER_SESSION_ID_SEED: u128 = 0x303;
+    const RUNNER_SESSION_WORKING_DIRECTORY: &str = "/workspace/session";
+    const SYNTHETIC_MODEL_FAMILY: &str = "fixture-model-family";
+    const SYNTHETIC_CREDENTIAL_REFERENCE: &str = "fixture-credential-reference";
 
     #[derive(Clone)]
     struct EnrollmentService {
@@ -2031,6 +2107,58 @@ mod tests {
 
     fn identity(value: u128) -> CanonicalUuid {
         CanonicalUuid::from_uuid(uuid::Uuid::from_u128(value))
+    }
+
+    async fn create_runner_placed_session(
+        pool: &PgPool,
+        store: &RunnerProtocolStore,
+        session: SessionId,
+        runner: RunnerId,
+    ) {
+        let credentials = SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+            SYNTHETIC_MODEL_FAMILY,
+            SYNTHETIC_CREDENTIAL_REFERENCE,
+        )])
+        .expect("the synthetic credential pin is valid");
+        let creation = CreateSession::new(
+            DurableCommandId::from_uuid(uuid::Uuid::from_u128(
+                ARBITRARY_RUNNER_SESSION_COMMAND_ID_SEED,
+            )),
+            SessionCreationProvenance::new(
+                SessionCreationCause::UserInitiated,
+                TranscriptAncestry::None,
+            ),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
+                DirectModelSelection::from_uuid(uuid::Uuid::from_u128(
+                    ARBITRARY_RUNNER_SESSION_MODEL_SELECTION_SEED,
+                )),
+            )),
+        )
+        .prepare(session)
+        .expect("the runner session creation is preparable");
+        CreateSessionRepository::new(pool.clone(), credentials)
+            .handle(creation)
+            .await
+            .expect("the runner session is created");
+        let placement = SessionRunnerPlacement::new(
+            session,
+            SessionRunnerPlacementRequest {
+                selector: RunnerSelector::Identity(runner),
+                working_directory: WorkingDirectorySelection::Exact(
+                    RunnerWorkingDirectory::try_new(RUNNER_SESSION_WORKING_DIRECTORY.to_owned())
+                        .expect("the synthetic runner directory is valid"),
+                ),
+                credential_profile: None,
+                workspace: WorkspaceRequirement::None,
+                sandbox: RunnerSandboxProfile::Ambient,
+                permission_overrides: RunnerToolPermissionOverrides::try_new([])
+                    .expect("the empty permission override inventory is valid"),
+            },
+        );
+        store
+            .store_placement(&placement, None, None)
+            .await
+            .expect("the runner placement is stored");
     }
 
     fn canonical_lease_correlation() -> signalbox_runner_wire::LeaseCorrelation {
@@ -2796,7 +2924,7 @@ mod tests {
         let service = PostgresRunnerRegistrationService::new(store.clone(), []);
         let enrolled = service
             .enroll(Enroll {
-                request_id: identity(1),
+                request_id: identity(ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED),
                 digest_version: DIGEST_VERSION,
                 advertisement: empty_advertisement(),
             })
@@ -3114,6 +3242,173 @@ mod tests {
         assert_eq!(applied.snapshot(), observed);
         assert_eq!(observed.state(), RunnerConnectionState::Lost);
         assert_eq!(observed.cause(), RunnerConnectionCause::TransportClosed);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn s32_inv044_terminal_connection_transition_propagates_loss_to_placed_sessions() {
+        let (_container, database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let enrolled = service
+            .enroll(Enroll {
+                request_id: identity(ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED),
+                digest_version: DIGEST_VERSION,
+                advertisement: empty_advertisement(),
+            })
+            .await
+            .expect("the runner enrolls before session placement");
+        let pool = fresh_pool(&database_url).await;
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(ARBITRARY_RUNNER_SESSION_ID_SEED));
+        let runner = RunnerId::from_uuid(enrolled.runner_id.into_uuid());
+        create_runner_placed_session(&pool, &store, session, runner).await;
+
+        service
+            .transition_connection(
+                enrolled.enrollment_id,
+                enrolled.connection_epoch,
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await
+            .expect("the terminal transition propagates its durable loss cursor");
+        let placement = store
+            .load_placement(session)
+            .await
+            .expect("the projected placement loads")
+            .expect("the runner placement remains canonical");
+        let pending = store
+            .load_pending_connection_losses()
+            .await
+            .expect("the pending cursor inventory loads");
+
+        assert_eq!(
+            placement.placement().state(),
+            &SessionRunnerPlacementState::RunnerLostBeforePin(RunnerLostBeforePin::from_stored(
+                runner,
+            ))
+        );
+        assert_eq!(pending, []);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn s32_inv044_terminal_connection_replay_resumes_its_pending_loss_cursor() {
+        let (_container, database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let enrolled = service
+            .enroll(Enroll {
+                request_id: identity(ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED),
+                digest_version: DIGEST_VERSION,
+                advertisement: empty_advertisement(),
+            })
+            .await
+            .expect("the runner enrolls before session placement");
+        let pool = fresh_pool(&database_url).await;
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(ARBITRARY_RUNNER_SESSION_ID_SEED));
+        let runner = RunnerId::from_uuid(enrolled.runner_id.into_uuid());
+        create_runner_placed_session(&pool, &store, session, runner).await;
+        store
+            .transition_connection_with_effect(
+                RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid()),
+                RunnerConnectionEpoch::try_from_u64(enrolled.connection_epoch.get())
+                    .expect("the connection epoch is positive"),
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await
+            .expect("the terminal connection state commits before propagation");
+
+        let replayed = service
+            .transition_connection(
+                enrolled.enrollment_id,
+                enrolled.connection_epoch,
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await
+            .expect("the terminal replay resumes pending propagation");
+        let placement = store
+            .load_placement(session)
+            .await
+            .expect("the projected placement loads")
+            .expect("the runner placement remains canonical");
+        let pending = store
+            .load_pending_connection_losses()
+            .await
+            .expect("the completed cursor inventory loads");
+
+        assert_eq!(
+            replayed,
+            RunnerConnectionTransitionOutcome::Current(
+                store
+                    .load_connection(RunnerEnrollmentId::from_uuid(
+                        enrolled.enrollment_id.into_uuid(),
+                    ))
+                    .await
+                    .expect("the connection state loads")
+                    .expect("the connection lifecycle exists")
+            )
+        );
+        assert_eq!(
+            placement.placement().state(),
+            &SessionRunnerPlacementState::RunnerLostBeforePin(RunnerLostBeforePin::from_stored(
+                runner,
+            ))
+        );
+        assert_eq!(pending, []);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn s32_inv044_startup_resumes_a_previously_committed_loss_cursor() {
+        let (_container, database_url, store) = postgres_store().await;
+        let service = PostgresRunnerRegistrationService::new(store.clone(), []);
+        let enrolled = service
+            .enroll(Enroll {
+                request_id: identity(ARBITRARY_RUNNER_ENROLLMENT_REQUEST_ID_SEED),
+                digest_version: DIGEST_VERSION,
+                advertisement: empty_advertisement(),
+            })
+            .await
+            .expect("the prior daemon enrolls the runner");
+        let pool = fresh_pool(&database_url).await;
+        let session = SessionId::from_uuid(uuid::Uuid::from_u128(ARBITRARY_RUNNER_SESSION_ID_SEED));
+        let runner = RunnerId::from_uuid(enrolled.runner_id.into_uuid());
+        create_runner_placed_session(&pool, &store, session, runner).await;
+        store
+            .transition_connection_with_effect(
+                RunnerEnrollmentId::from_uuid(enrolled.enrollment_id.into_uuid()),
+                RunnerConnectionEpoch::try_from_u64(enrolled.connection_epoch.get())
+                    .expect("the connection epoch is positive"),
+                RunnerConnectionTransition::TransportClosed,
+            )
+            .await
+            .expect("the prior daemon commits loss before propagation");
+        let pending_before = store
+            .load_pending_connection_losses()
+            .await
+            .expect("the stranded cursor inventory loads");
+
+        let transitions = service
+            .mark_orphaned_connections_lost()
+            .await
+            .expect("startup resumes every pending loss cursor");
+        let placement = store
+            .load_placement(session)
+            .await
+            .expect("the resumed placement loads")
+            .expect("the runner placement remains canonical");
+        let pending_after = store
+            .load_pending_connection_losses()
+            .await
+            .expect("the completed cursor inventory loads");
+
+        assert_eq!(pending_before.len(), 1);
+        assert_eq!(transitions, []);
+        assert_eq!(
+            placement.placement().state(),
+            &SessionRunnerPlacementState::RunnerLostBeforePin(RunnerLostBeforePin::from_stored(
+                runner,
+            ))
+        );
+        assert_eq!(pending_after, []);
     }
 
     #[tokio::test]
