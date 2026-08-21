@@ -1664,7 +1664,7 @@ impl HubModelConfiguration {
     /// required deployment policy comes from the one source that owns today's
     /// values instead of being re-encoded across fixtures.
     #[doc(hidden)]
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub fn parse_test_fixture(content: &str) -> Result<Self, HubModelConfigurationError> {
         let example = include_str!("../../../config/signalboxd.example.toml");
         let (_, numeric_bounds_and_after) = example

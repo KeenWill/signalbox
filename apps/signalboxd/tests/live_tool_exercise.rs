@@ -12,6 +12,8 @@
     reason = "the standalone live integration smoke uses explicit fixture assertions"
 )]
 
+mod support;
+
 use std::{
     error::Error,
     fs, io,
@@ -516,7 +518,7 @@ selection_id = "00000000-0000-0000-0000-000000000001"
         workspace.display(),
         executable.display(),
     );
-    Ok(HubModelConfiguration::parse_test_fixture(&configuration)?)
+    Ok(support::parse_model_configuration(&configuration)?)
 }
 
 fn session_template_configuration(

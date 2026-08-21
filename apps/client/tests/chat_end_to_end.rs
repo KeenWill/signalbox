@@ -4,6 +4,8 @@
     reason = "the standalone integration test uses assertion panics and explicit fixture expectations"
 )]
 
+mod support;
+
 use std::{
     error::Error,
     fmt, fs,
@@ -43,7 +45,7 @@ use signalbox_persistence::{
 };
 use signalbox_test_bin::test_bin_path;
 use signalboxd::{
-    ActivatedTurnPass, FatalExecutionSupervisor, HubModelConfiguration, LocalProcessListener,
+    ActivatedTurnPass, FatalExecutionSupervisor, LocalProcessListener,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -188,7 +190,7 @@ impl RunningIdleFixture {
         let selection_uuid = Uuid::from_u128(0x9501);
         let target_uuid = Uuid::from_u128(0x9502);
         let selection = DirectModelSelection::from_uuid(selection_uuid);
-        let model_configuration = HubModelConfiguration::parse(&format!(
+        let model_configuration = support::parse_model_configuration(&format!(
             r#"
 version = 1
 
@@ -286,7 +288,7 @@ impl RunningChatFixture {
         let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x9401));
         let target_uuid = Uuid::from_u128(0x9402);
         let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(target_uuid));
-        let model_configuration = HubModelConfiguration::parse(&format!(
+        let model_configuration = support::parse_model_configuration(&format!(
             r#"
 version = 1
 
