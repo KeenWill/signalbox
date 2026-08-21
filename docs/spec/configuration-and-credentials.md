@@ -29,6 +29,9 @@ variant is verified against this PR (`agent/kubernetes-bwrap-proc`).
 Direct unsandboxed Git execution from sandbox-created linked worktrees is
 verified against this PR (`agent/unsandboxed-worktree-gitdir`).
 
+The explicit read-only Cargo registry cache is verified against this PR
+(`agent/daemon-live-sandbox-provisioning`).
+
 The daemon web-tool composition, Brave credential channel, and shipped human
 postures are verified against PR #433 (`agent/web-search-wiring`).
 
@@ -722,13 +725,14 @@ value. A missing table, unknown field, invalid value, or identity construction
 failure is a sanitized configuration failure.
 
 The complete mapped composition also requires one `[daemon_tools]` table with
-exactly `exec_supervisor_executable`. The value is an absolute path to an
-existing file naming the separately packaged `signalbox-exec-supervisor`
-program. A missing table, unknown field, relative path, or path that is not a
-file is a sanitized configuration failure. Production resolves an admitted
-symlink to its canonical regular-file path and passes that canonical path to the
-execution suite, which pins the program during construction; the daemon never
-derives it from its own executable path.
+`exec_supervisor_executable` and admits the optional `cargo_registry_cache`. The
+executable value is an absolute path to an existing file naming the separately
+packaged `signalbox-exec-supervisor` program. The cache value, when present, is
+an absolute path to an existing directory. A missing table, unknown field,
+relative path, or wrong path kind is a sanitized configuration failure.
+Production resolves admitted paths to their canonical targets; the execution
+suite pins both the program and optional cache during construction. The daemon
+never derives either from its own executable path or home directory.
 
 The configured root is opened once during tool construction and its pinned
 authority is cloned into both workspace suites. The local Git suite
@@ -1017,8 +1021,11 @@ session's bound workspace root read-write at `/workspace`, read-only binds the
 pinned execution supervisor — a host path that need not lie under that root — at
 `/signalbox-exec-dispatch`, and changes directory to `/workspace` or to the
 requested directory beneath it. The child environment is cleared and then set to
-`LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. Every command is dispatched
-through the supervisor.
+`LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. When `cargo_registry_cache` is
+configured, the profile additionally creates a private writable tmpfs at
+`/cargo-home`, read-only binds the pinned cache at `/cargo-home/registry`, and
+sets `CARGO_HOME=/cargo-home`; replacement or removal of the configured cache
+fails sandbox setup closed. Every command is dispatched through the supervisor.
 
 The profile does not provide the following, and no other daemon-local control
 supplies them:
@@ -1039,8 +1046,11 @@ supplies them:
   identifier among it — that no workspace bind governs, so the readable surface
   is wider than the bound paths alone.
 - `HOME` is the workspace root, so home-relative configuration discovery —
-  `~/.cargo`, `~/.config`, and anything else a program resolves that way — lands
-  inside the writable workspace rather than at a host location.
+  `~/.config` and anything else a program resolves that way — lands inside the
+  writable workspace rather than at a host location. Cargo alone uses the
+  private `/cargo-home` when an explicit registry cache is configured; its
+  registry is read-only while its lock and other transient state remain private
+  to the process.
 - Everything under the workspace root is writable, including the repository's
   `.git`.
 - `cargo_diagnostics` compiles and runs the workspace's own build scripts,

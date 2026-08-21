@@ -382,6 +382,9 @@ adapter = "application"
 # execution tools. The daemon never guesses this path from its own executable.
 [daemon_tools]
 exec_supervisor_executable = "/usr/local/bin/signalbox-exec-supervisor"
+# Optional pre-populated Cargo registry mounted read-only at the sandbox's
+# dedicated CARGO_HOME. The sandbox keeps its writable lock state in tmpfs.
+# cargo_registry_cache = "/var/cache/signalbox/cargo/registry"
 
 # The complete mapped composition uses this explicit identity for both author
 # and committer fields. It never consults ambient Git configuration.

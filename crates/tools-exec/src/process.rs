@@ -69,6 +69,8 @@ const PROCESS_CAPTURE_BYTES_LIMIT: usize = 1024 * 1024;
 const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded direct-command arguments";
 pub(crate) const BWRAP_PROGRAM: &str = "/usr/bin/bwrap";
 const SANDBOX_WORKSPACE: &str = "/workspace";
+const SANDBOX_CARGO_HOME: &str = "/cargo-home";
+const SANDBOX_CARGO_REGISTRY: &str = "/cargo-home/registry";
 #[cfg(target_os = "linux")]
 /// Hard safety ceiling keeping an untrusted workspace marker read bounded well
 /// above Git's single-line administration path.
@@ -160,6 +162,14 @@ pub enum ExecToolConstructionError {
         /// Underlying filesystem failure, when one occurred.
         source: Option<std::io::Error>,
     },
+    /// The optional read-only Cargo registry cache was not an absolute
+    /// canonical directory.
+    CargoRegistry {
+        /// Supplied cache root associated with the failure.
+        path: PathBuf,
+        /// Underlying filesystem failure, when one occurred.
+        source: Option<std::io::Error>,
+    },
     /// The injected supervisor program was not an absolute canonical file.
     SupervisorProgram {
         /// Supplied program associated with the failure.
@@ -183,6 +193,13 @@ impl fmt::Display for ExecToolConstructionError {
                     path.display()
                 )
             }
+            Self::CargoRegistry { path, .. } => {
+                write!(
+                    formatter,
+                    "exec Cargo registry cache `{}` is invalid",
+                    path.display()
+                )
+            }
             Self::SupervisorProgram { path, .. } => {
                 write!(
                     formatter,
@@ -201,6 +218,10 @@ impl Error for ExecToolConstructionError {
                 source: Some(source),
                 ..
             }
+            | Self::CargoRegistry {
+                source: Some(source),
+                ..
+            }
             | Self::SupervisorProgram {
                 source: Some(source),
                 ..
@@ -210,6 +231,7 @@ impl Error for ExecToolConstructionError {
             | Self::ErrorDetail
             | Self::Duplicate
             | Self::WorkspaceRoot { source: None, .. }
+            | Self::CargoRegistry { source: None, .. }
             | Self::SupervisorProgram { source: None, .. } => None,
         }
     }
@@ -229,6 +251,22 @@ impl<Runner: ProcessRunner> SandboxedExecTool<Runner> {
         workspace_root: impl AsRef<Path>,
     ) -> Result<Self, ExecToolConstructionError> {
         let command_runner = SandboxedCommandRunner::try_new(runner, workspace_root)?;
+        let (catalog, executor) =
+            build_tool::<SandboxedExecContract, _>(command_runner, ToolPermissionDefault::Confirm)?;
+        Ok(Self { catalog, executor })
+    }
+
+    /// Compiles the sandboxed tool with one pinned read-only Cargo registry.
+    pub fn try_new_with_cargo_registry(
+        runner: Runner,
+        workspace_root: impl AsRef<Path>,
+        cargo_registry: impl AsRef<Path>,
+    ) -> Result<Self, ExecToolConstructionError> {
+        let command_runner = SandboxedCommandRunner::try_new_with_cargo_registry(
+            runner,
+            workspace_root,
+            cargo_registry,
+        )?;
         let (catalog, executor) =
             build_tool::<SandboxedExecContract, _>(command_runner, ToolPermissionDefault::Confirm)?;
         Ok(Self { catalog, executor })
@@ -737,6 +775,10 @@ pub struct SandboxedCommandRunner<Runner> {
     sandbox_launcher_descriptor: i32,
     #[cfg(target_os = "linux")]
     workspace_identity: WorkspaceIdentity,
+    #[cfg(target_os = "linux")]
+    cargo_registry_identity: Option<CargoRegistryIdentity>,
+    #[cfg(not(target_os = "linux"))]
+    cargo_registry: Option<PathBuf>,
 }
 
 impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
@@ -745,10 +787,25 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         runner: Runner,
         workspace_root: impl AsRef<Path>,
     ) -> Result<Self, ExecToolConstructionError> {
-        Self::try_new_with_process_namespace(
+        Self::try_new_with_process_namespace_and_cargo_registry(
             runner,
             workspace_root,
             SandboxProcessNamespace::Private,
+            None,
+        )
+    }
+
+    /// Admits one canonical workspace plus a pinned read-only Cargo registry.
+    pub fn try_new_with_cargo_registry(
+        runner: Runner,
+        workspace_root: impl AsRef<Path>,
+        cargo_registry: impl AsRef<Path>,
+    ) -> Result<Self, ExecToolConstructionError> {
+        Self::try_new_with_process_namespace_and_cargo_registry(
+            runner,
+            workspace_root,
+            SandboxProcessNamespace::Private,
+            Some(cargo_registry.as_ref()),
         )
     }
 
@@ -759,12 +816,32 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
         workspace_root: impl AsRef<Path>,
         process_namespace: SandboxProcessNamespace,
     ) -> Result<Self, ExecToolConstructionError> {
+        Self::try_new_with_process_namespace_and_cargo_registry(
+            runner,
+            workspace_root,
+            process_namespace,
+            None,
+        )
+    }
+
+    fn try_new_with_process_namespace_and_cargo_registry(
+        runner: Runner,
+        workspace_root: impl AsRef<Path>,
+        process_namespace: SandboxProcessNamespace,
+        cargo_registry: Option<&Path>,
+    ) -> Result<Self, ExecToolConstructionError> {
         #[cfg(target_os = "linux")]
         let workspace_identity = WorkspaceIdentity::capture(workspace_root.as_ref())?;
         #[cfg(target_os = "linux")]
         let workspace_root = workspace_identity.canonical_path.clone();
         #[cfg(not(target_os = "linux"))]
         let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
+        #[cfg(target_os = "linux")]
+        let cargo_registry_identity = cargo_registry
+            .map(CargoRegistryIdentity::capture)
+            .transpose()?;
+        #[cfg(not(target_os = "linux"))]
+        let cargo_registry = cargo_registry.map(canonical_cargo_registry).transpose()?;
         let sandbox_launcher = runner.sandbox_launcher_program().to_owned();
         #[cfg(target_os = "linux")]
         let sandbox_launcher_descriptor = runner
@@ -784,6 +861,10 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
             workspace_identity,
             workspace_root,
             process_namespace,
+            #[cfg(target_os = "linux")]
+            cargo_registry_identity,
+            #[cfg(not(target_os = "linux"))]
+            cargo_registry,
         })
     }
 
@@ -835,6 +916,21 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 stderr: OutputCapture::empty(),
             };
         }
+        #[cfg(target_os = "linux")]
+        if self
+            .cargo_registry_identity
+            .as_ref()
+            .is_some_and(|identity| !identity.matches())
+        {
+            return ExecResult {
+                confinement: ExecutionConfinement::SandboxSetupFailed,
+                outcome: ProcessOutcome::SpawnFailed {
+                    reason: ProcessSpawnFailure::SandboxSetup,
+                },
+                stdout: OutputCapture::empty(),
+                stderr: OutputCapture::empty(),
+            };
+        }
         let probe_program = sandbox_shell(&self.workspace_root)
             .to_string_lossy()
             .into_owned();
@@ -868,6 +964,13 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 working_directory_bind_source: None,
                 #[cfg(target_os = "linux")]
                 working_directory_bind_descriptor: None,
+                #[cfg(target_os = "linux")]
+                cargo_registry_bind_descriptor: self
+                    .cargo_registry_identity
+                    .as_ref()
+                    .map(CargoRegistryIdentity::descriptor),
+                #[cfg(not(target_os = "linux"))]
+                cargo_registry_bind_source: self.cargo_registry.as_deref(),
             },
             self.process_namespace,
             &probe_program,
@@ -881,6 +984,21 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
             BwrapAvailability::Available => {
                 #[cfg(target_os = "linux")]
                 if !self.workspace_identity.matches(&self.workspace_root) {
+                    return ExecResult {
+                        confinement: ExecutionConfinement::SandboxSetupFailed,
+                        outcome: ProcessOutcome::SpawnFailed {
+                            reason: ProcessSpawnFailure::SandboxSetup,
+                        },
+                        stdout: OutputCapture::empty(),
+                        stderr: OutputCapture::empty(),
+                    };
+                }
+                #[cfg(target_os = "linux")]
+                if self
+                    .cargo_registry_identity
+                    .as_ref()
+                    .is_some_and(|identity| !identity.matches())
+                {
                     return ExecResult {
                         confinement: ExecutionConfinement::SandboxSetupFailed,
                         outcome: ProcessOutcome::SpawnFailed {
@@ -938,8 +1056,15 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                         working_directory_bind_descriptor: working_directory_identity
                             .as_ref()
                             .map(|directory| rustix::fd::AsRawFd::as_raw_fd(&directory._directory)),
+                        #[cfg(target_os = "linux")]
+                        cargo_registry_bind_descriptor: self
+                            .cargo_registry_identity
+                            .as_ref()
+                            .map(CargoRegistryIdentity::descriptor),
                         #[cfg(not(target_os = "linux"))]
                         working_directory_bind_source: None,
+                        #[cfg(not(target_os = "linux"))]
+                        cargo_registry_bind_source: self.cargo_registry.as_deref(),
                     },
                     self.process_namespace,
                     &arguments.program,
@@ -1106,6 +1231,81 @@ impl WorkspaceIdentity {
 struct WorkspaceDirectoryIdentity {
     bind_source: PathBuf,
     _directory: rustix::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug)]
+struct CargoRegistryIdentity {
+    device: u64,
+    inode: u64,
+    canonical_path: PathBuf,
+    _directory: Arc<rustix::fd::OwnedFd>,
+}
+
+#[cfg(target_os = "linux")]
+impl CargoRegistryIdentity {
+    fn capture(path: &Path) -> Result<Self, ExecToolConstructionError> {
+        if !path.is_absolute() {
+            return Err(ExecToolConstructionError::CargoRegistry {
+                path: path.to_owned(),
+                source: None,
+            });
+        }
+        let directory = rustix::fs::open(
+            path,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|source| ExecToolConstructionError::CargoRegistry {
+            path: path.to_owned(),
+            source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+        })?;
+        let directory =
+            inherited_descriptor_above_standard_streams(directory).map_err(|source| {
+                ExecToolConstructionError::CargoRegistry {
+                    path: path.to_owned(),
+                    source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+                }
+            })?;
+        let metadata = rustix::fs::fstat(&directory).map_err(|source| {
+            ExecToolConstructionError::CargoRegistry {
+                path: path.to_owned(),
+                source: Some(std::io::Error::from_raw_os_error(source.raw_os_error())),
+            }
+        })?;
+        let bind_source = PathBuf::from(format!(
+            "/proc/self/fd/{}",
+            rustix::fd::AsRawFd::as_raw_fd(&directory)
+        ));
+        let canonical_path = bind_source.canonicalize().map_err(|source| {
+            ExecToolConstructionError::CargoRegistry {
+                path: path.to_owned(),
+                source: Some(source),
+            }
+        })?;
+        Ok(Self {
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+            canonical_path,
+            _directory: Arc::new(directory),
+        })
+    }
+
+    fn descriptor(&self) -> i32 {
+        rustix::fd::AsRawFd::as_raw_fd(self._directory.as_ref())
+    }
+
+    fn matches(&self) -> bool {
+        self.canonical_path
+            .symlink_metadata()
+            .is_ok_and(|metadata| {
+                metadata.file_type().is_dir()
+                    && metadata.dev() == self.device
+                    && metadata.ino() == self.inode
+            })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1289,6 +1489,29 @@ fn canonical_workspace_root(root: &Path) -> Result<PathBuf, ExecToolConstruction
     Ok(canonical)
 }
 
+#[cfg(not(target_os = "linux"))]
+fn canonical_cargo_registry(root: &Path) -> Result<PathBuf, ExecToolConstructionError> {
+    if !root.is_absolute() {
+        return Err(ExecToolConstructionError::CargoRegistry {
+            path: root.to_owned(),
+            source: None,
+        });
+    }
+    let canonical =
+        root.canonicalize()
+            .map_err(|source| ExecToolConstructionError::CargoRegistry {
+                path: root.to_owned(),
+                source: Some(source),
+            })?;
+    if !canonical.is_dir() {
+        return Err(ExecToolConstructionError::CargoRegistry {
+            path: root.to_owned(),
+            source: None,
+        });
+    }
+    Ok(canonical)
+}
+
 fn direct_request(
     root: &Path,
     working_directory: &str,
@@ -1321,6 +1544,10 @@ struct SandboxLaunchContext<'a> {
     working_directory_bind_source: Option<&'a Path>,
     #[cfg(target_os = "linux")]
     working_directory_bind_descriptor: Option<i32>,
+    #[cfg(target_os = "linux")]
+    cargo_registry_bind_descriptor: Option<i32>,
+    #[cfg(not(target_os = "linux"))]
+    cargo_registry_bind_source: Option<&'a Path>,
 }
 
 fn bwrap_request(
@@ -1332,6 +1559,10 @@ fn bwrap_request(
     timeout: Duration,
     capture_bytes: usize,
 ) -> ProcessRequest {
+    #[cfg(target_os = "linux")]
+    let cargo_registry_bound = context.cargo_registry_bind_descriptor.is_some();
+    #[cfg(not(target_os = "linux"))]
+    let cargo_registry_bound = context.cargo_registry_bind_source.is_some();
     let sandbox_path = sandbox_path(context.workspace_root);
     let sandbox_directory = if working_directory == "." {
         String::from(SANDBOX_WORKSPACE)
@@ -1451,6 +1682,30 @@ fn bwrap_request(
         ]);
     }
     #[cfg(target_os = "linux")]
+    if let Some(cargo_registry_bind_descriptor) = context.cargo_registry_bind_descriptor {
+        bwrap_arguments.extend([
+            OsString::from("--dir"),
+            OsString::from(SANDBOX_CARGO_HOME),
+            OsString::from("--tmpfs"),
+            OsString::from(SANDBOX_CARGO_HOME),
+            OsString::from("--ro-bind"),
+            descriptor_path(cargo_registry_bind_descriptor).into_os_string(),
+            OsString::from(SANDBOX_CARGO_REGISTRY),
+        ]);
+    }
+    #[cfg(not(target_os = "linux"))]
+    if let Some(cargo_registry_bind_source) = context.cargo_registry_bind_source {
+        bwrap_arguments.extend([
+            OsString::from("--dir"),
+            OsString::from(SANDBOX_CARGO_HOME),
+            OsString::from("--tmpfs"),
+            OsString::from(SANDBOX_CARGO_HOME),
+            OsString::from("--ro-bind"),
+            cargo_registry_bind_source.as_os_str().to_owned(),
+            OsString::from(SANDBOX_CARGO_REGISTRY),
+        ]);
+    }
+    #[cfg(target_os = "linux")]
     bwrap_arguments.extend([
         OsString::from("--ro-bind"),
         descriptor_path(context.launcher_descriptor).into_os_string(),
@@ -1468,6 +1723,15 @@ fn bwrap_request(
         OsString::from("--setenv"),
         OsString::from("HOME"),
         OsString::from(SANDBOX_WORKSPACE),
+    ]);
+    if cargo_registry_bound {
+        bwrap_arguments.extend([
+            OsString::from("--setenv"),
+            OsString::from("CARGO_HOME"),
+            OsString::from(SANDBOX_CARGO_HOME),
+        ]);
+    }
+    bwrap_arguments.extend([
         OsString::from("--"),
         OsString::from(SANDBOX_DISPATCH_PROGRAM),
         OsString::from("--dispatch"),
@@ -3879,6 +4143,114 @@ mod tests {
         Ok(())
     }
 
+    /// A configured cache is mounted read-only below a private Cargo home, so
+    /// workspace build code can consume it without gaining write authority over
+    /// the host registry.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandboxed_request_mounts_the_pinned_cargo_registry_read_only()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let registry = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(b"complete"),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new_with_cargo_registry(
+            runner,
+            &workspace.path,
+            &registry.path,
+        )?;
+        assert!(
+            command_runner
+                .cargo_registry_identity
+                .as_ref()
+                .is_some_and(CargoRegistryIdentity::matches)
+        );
+        let arguments = ExecArguments {
+            program: String::from("cargo"),
+            arguments: vec![String::from("check")],
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.execute(arguments).await;
+        let requests = observation.recorded_requests();
+        let request = requests
+            .last()
+            .ok_or_else(|| std::io::Error::other("one sandbox process request"))?;
+        let cargo_home = [
+            OsString::from("--setenv"),
+            OsString::from("CARGO_HOME"),
+            OsString::from(SANDBOX_CARGO_HOME),
+        ];
+        let registry_destination = request
+            .arguments
+            .iter()
+            .position(|argument| argument == SANDBOX_CARGO_REGISTRY)
+            .ok_or_else(|| std::io::Error::other("Cargo registry mount destination"))?;
+        let registry_bind_flag = registry_destination
+            .checked_sub(2)
+            .ok_or_else(|| std::io::Error::other("Cargo registry mount source"))?;
+
+        assert_eq!(
+            result.outcome,
+            successful_sandbox_process(b"complete").outcome
+        );
+        assert!(
+            request
+                .arguments
+                .windows(cargo_home.len())
+                .any(|arguments| arguments == cargo_home)
+        );
+        assert_eq!(
+            request.arguments.get(registry_bind_flag),
+            Some(&OsString::from("--ro-bind"))
+        );
+        Ok(())
+    }
+
+    /// The cache path is deployment authority rather than ambient Cargo state;
+    /// replacing it after composition refuses before bubblewrap is probed.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sandboxed_runner_refuses_a_replaced_cargo_registry_before_probe()
+    -> Result<(), Box<dyn Error>> {
+        let workspace = ReplacementWorkspace::new()?;
+        let registry = ReplacementWorkspace::new()?;
+        let runner = FakeRunner::returning(
+            BwrapAvailability::Available,
+            successful_sandbox_process(b"must remain unused"),
+        );
+        let observation = runner.clone();
+        let mut command_runner = SandboxedCommandRunner::try_new_with_cargo_registry(
+            runner,
+            &workspace.path,
+            &registry.path,
+        )?;
+        registry.replace()?;
+        let arguments = ExecArguments {
+            program: String::from("cargo"),
+            arguments: vec![String::from("check")],
+            working_directory: String::from("."),
+            timeout_seconds: 30,
+        };
+
+        let result = command_runner.execute(arguments).await;
+
+        assert_eq!(result.confinement, ExecutionConfinement::SandboxSetupFailed);
+        assert_eq!(
+            result.outcome,
+            ProcessOutcome::SpawnFailed {
+                reason: ProcessSpawnFailure::SandboxSetup,
+            }
+        );
+        assert_eq!(observation.recorded_probes(), Vec::new());
+        assert_eq!(observation.recorded_requests(), Vec::new());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn process_tree_unsupported_remains_typed_without_terminal_text()
     -> Result<(), Box<dyn Error>> {
@@ -4170,6 +4542,10 @@ mod tests {
             working_directory_bind_source: None,
             #[cfg(target_os = "linux")]
             working_directory_bind_descriptor: None,
+            #[cfg(target_os = "linux")]
+            cargo_registry_bind_descriptor: None,
+            #[cfg(not(target_os = "linux"))]
+            cargo_registry_bind_source: None,
         }
     }
 

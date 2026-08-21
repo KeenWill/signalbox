@@ -767,6 +767,7 @@ where
         root: &Path,
         git_identity: GitIdentity,
         exec_runner: ExecRunner,
+        cargo_registry_cache: Option<&Path>,
     ) -> Result<Self, DaemonToolsConstructionError> {
         // Each family below resolves the same pathname independently, so a
         // rename or replacement between two of them would leave one family
@@ -783,12 +784,22 @@ where
             .map_err(|_| DaemonToolsConstructionError::LocalGit)?;
         let git_object_format = local_git.object_format();
         let pinned_directories = local_git.pinned_directories();
-        let sandboxed_exec = SandboxedExecTool::try_new(exec_runner.clone(), root)
-            .map_err(|_| DaemonToolsConstructionError::Exec)?;
+        let sandboxed_exec = match cargo_registry_cache {
+            Some(cache) => {
+                SandboxedExecTool::try_new_with_cargo_registry(exec_runner.clone(), root, cache)
+            }
+            None => SandboxedExecTool::try_new(exec_runner.clone(), root),
+        }
+        .map_err(|_| DaemonToolsConstructionError::Exec)?;
         let unsandboxed_exec = UnsandboxedExecTool::try_new(exec_runner.clone(), root)
             .map_err(|_| DaemonToolsConstructionError::Exec)?;
-        let cargo_diagnostics = CargoDiagnosticsTool::try_new(exec_runner, root)
-            .map_err(|_| DaemonToolsConstructionError::Exec)?;
+        let cargo_diagnostics = match cargo_registry_cache {
+            Some(cache) => {
+                CargoDiagnosticsTool::try_new_with_cargo_registry(exec_runner, root, cache)
+            }
+            None => CargoDiagnosticsTool::try_new(exec_runner, root),
+        }
+        .map_err(|_| DaemonToolsConstructionError::Exec)?;
         let (workspace_read_catalog, workspace_read) = workspace_read.into_parts();
         let (workspace_mutation_catalog, workspace_mutation) = workspace_mutation.into_parts();
         let (local_git_catalog, local_git) = local_git.into_parts();
@@ -863,6 +874,7 @@ struct ConfiguredWorkspaceComposition<
     roots: SessionWorkspaceRoots,
     git_identity: GitIdentity,
     exec_runner: ExecRunner,
+    cargo_registry_cache: Option<PathBuf>,
 }
 
 /// Credential channels required by the daemon's base tool composition.
@@ -938,6 +950,7 @@ impl<Clock>
         workspace_root: &Path,
         git_identity: GitIdentity,
         exec_supervisor_executable: &Path,
+        cargo_registry_cache: Option<&Path>,
         web_fetch_egress_policy: WebFetchEgressPolicy,
     ) -> Result<Self, DaemonToolsConstructionError> {
         let MappedDaemonCredentialInputs {
@@ -968,10 +981,12 @@ impl<Clock>
                 workspace_root,
                 git_identity.clone(),
                 exec_runner.clone(),
+                cargo_registry_cache,
             )?,
             roots: SessionWorkspaceRoots::try_new(workspace_root)?,
             git_identity,
             exec_runner,
+            cargo_registry_cache: cargo_registry_cache.map(Path::to_path_buf),
         };
         let conversations =
             ConversationTools::try_new(PostgresConversationIntrospection::new(pool.clone()))
@@ -1123,10 +1138,12 @@ where
                 workspace_root,
                 git_identity.clone(),
                 exec_runner.clone(),
+                None,
             )?,
             roots: SessionWorkspaceRoots::try_new(workspace_root)?,
             git_identity,
             exec_runner,
+            cargo_registry_cache: None,
         };
         let conversations = ConversationTools::try_new(conversation_port)
             .map_err(|_| DaemonToolsConstructionError::Conversations)?;
@@ -1773,6 +1790,7 @@ struct SessionWorkspaceExecutors<FileSystem: WorkspaceMutationFileSystem, ExecRu
     roots: SessionWorkspaceRoots,
     git_identity: GitIdentity,
     exec_runner: ExecRunner,
+    cargo_registry_cache: Option<PathBuf>,
     configured: WorkspaceBoundExecutors<FileSystem, ExecRunner>,
     failure_details: SessionWorkspaceFailureDetails,
     state: Arc<Mutex<SessionWorkspaceState<WorkspaceBoundExecutors<FileSystem, ExecRunner>>>>,
@@ -1786,6 +1804,7 @@ impl<FileSystem: WorkspaceMutationFileSystem, ExecRunner: ProcessRunner> Clone
             roots: self.roots.clone(),
             git_identity: self.git_identity.clone(),
             exec_runner: self.exec_runner.clone(),
+            cargo_registry_cache: self.cargo_registry_cache.clone(),
             configured: self.configured.clone(),
             failure_details: self.failure_details.clone(),
             state: Arc::clone(&self.state),
@@ -1816,12 +1835,14 @@ where
             roots,
             git_identity,
             exec_runner,
+            cargo_registry_cache,
         } = composition;
         let failure_details = SessionWorkspaceFailureDetails::try_new()?;
         Ok(Self {
             roots,
             git_identity,
             exec_runner,
+            cargo_registry_cache,
             configured: families.executors,
             failure_details,
             state: Arc::new(Mutex::new(SessionWorkspaceState::new())),
@@ -1987,6 +2008,7 @@ where
             &path,
             self.git_identity.clone(),
             self.exec_runner.clone(),
+            self.cargo_registry_cache.as_deref(),
         )
         .map_err(SessionWorkspaceFailure::Composition)?;
         // Every family above resolved the derived pathname independently, and
@@ -2620,12 +2642,14 @@ mod tests {
                 workspace,
                 git_identity.clone(),
                 process_runner.clone(),
+                None,
             )
             .expect("workspace-bound tools compile"),
             roots: SessionWorkspaceRoots::try_new(workspace)
                 .expect("session workspace roots derive"),
             git_identity,
             exec_runner: process_runner,
+            cargo_registry_cache: None,
         };
         let conversations = ConversationTools::try_new(OfflineConversationPort)
             .expect("offline conversation tools compile");
@@ -2701,6 +2725,7 @@ mod tests {
             workspace.path(),
             git_identity(),
             &std::env::current_exe().expect("test executable path is available"),
+            None,
             WebFetchEgressPolicy::deny_all(),
         )
         .expect("production daemon tools compile");
