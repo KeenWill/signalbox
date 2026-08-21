@@ -7847,7 +7847,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
-    async fn admission_during_a_concurrent_drain_is_drained_by_the_same_task_run()
+    async fn admission_during_a_concurrent_drain_rearms_the_next_bounded_page()
     -> Result<(), Box<dyn Error>> {
         let (_container, pool) = migrated_postgres().await?;
         let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
@@ -7862,7 +7862,10 @@ mod tests {
             .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
             .execute(&mut *blocker)
             .await?;
-        let fixture = webhook_task(&pool).await?;
+        let (sender, receiver) = watch::channel(());
+        let _nudge_keepalive = sender.clone();
+        let mut fixture = webhook_task(&pool).await?;
+        fixture.task.webhook_nudge = Some(Arc::new(sender));
         let mut task = fixture.task;
         let drain = tokio::spawn(async move { task.process_webhook_deliveries().await });
         wait_for_webhook_projection_wedge(&webhook_store).await;
@@ -7876,6 +7879,13 @@ mod tests {
 
         assert!(unlocked, "the fixture releases its deliberate drain wedge");
         assert!(webhook_disposition_exists(&webhook_store, first.key()).await?);
+        assert!(!webhook_disposition_exists(&webhook_store, second.key()).await?);
+        assert!(receiver.has_changed()?);
+
+        let mut continuation = webhook_task(&pool).await?.task;
+        let continued = continuation.process_webhook_deliveries().await;
+
+        assert_eq!(continued, WebhookDrainOutcome::Drained);
         assert!(webhook_disposition_exists(&webhook_store, second.key()).await?);
         Ok(())
     }
