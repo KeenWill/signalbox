@@ -9,6 +9,7 @@ mod lock_inventory;
 mod model_settings_resolution;
 
 pub mod approval_judge;
+pub mod automatic_reconciliation;
 pub mod blob;
 pub mod commissioned_dispatch;
 pub mod context_compaction;
@@ -20,7 +21,6 @@ pub mod goal;
 pub mod goal_turn;
 pub mod hub_fence;
 pub mod mapping;
-pub mod model_call_reconciliation;
 pub mod model_execution;
 pub mod outbox;
 pub mod plan;

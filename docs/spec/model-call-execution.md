@@ -968,9 +968,9 @@ persistence commits it atomically with its outbox rows
   Independently, the turn-liveness runtime can spend one durably claimed
   automatic recovery attempt on an unstopped wait. After revalidating that the
   exact call and ended attempt still own it, the aggregate uses
-  `AutomaticModelCallRecovery { attempt }` as its typed reason and commits the
-  same equal-content frontier and reconciliation outbox record. This treatment
-  does not claim a provider result; the call remains terminal `Ambiguous`.
+  `AutomaticRecovery { attempt }` as its typed reason and commits the same
+  equal-content frontier and reconciliation outbox record. This treatment does
+  not claim a provider result; the call remains terminal `Ambiguous`.
 
 Completion and refusal races against `StopRequested` end through their typed
 `AfterCancellation` dispositions while retaining their ordinary turn outcomes.

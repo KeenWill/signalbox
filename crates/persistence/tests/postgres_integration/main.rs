@@ -39,14 +39,14 @@ use std::{
 use rust_decimal::Decimal;
 use signalbox_application::{
     ApprovalJudgeCompletionIdentities, AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
-    ClassifyOperatorFailure, CommitModelCallObservationTransaction, CompiledTool,
-    CompiledToolCatalog, CorrelatedDurableChildWait, CreateSessionError, CreateSessionOutcome,
-    CreateSessionRequest, CreateSessionService, EligibilityNudge, EligibilityNudgeOutcome,
-    EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
+    AutomaticReconciliationFailureKind, AutomaticReconciliationOperation,
+    AutomaticReconciliationOutcome, ClassifyOperatorFailure, CommitModelCallObservationTransaction,
+    CompiledTool, CompiledToolCatalog, CorrelatedDurableChildWait, CreateSessionError,
+    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, EligibilityNudge,
+    EligibilityNudgeOutcome, EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
     ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionError,
     ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelCallObservationCommitOutcome, ModelCallReconciliationFailureKind,
-    ModelCallReconciliationOutcome, ModelConversationMessage, OperatorFailureClass,
+    ModelCallObservationCommitOutcome, ModelConversationMessage, OperatorFailureClass,
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
     ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
     RetainedModelCallObservationStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
@@ -99,6 +99,7 @@ use signalbox_persistence::{
         AuthorizeApprovalJudgeOutcome, AuthorizedApprovalJudge, CompleteApprovalJudgeOutcome,
         FailedApprovalJudgeDisposition, PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
     },
+    automatic_reconciliation::PostgresAutomaticReconciliationRepository,
     create_session::{
         CreateSessionCorruption, CreateSessionHandlingOutcome, CreateSessionRepository,
         CreateSessionRepositoryError,
@@ -111,7 +112,6 @@ use signalbox_persistence::{
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
-    model_call_reconciliation::PostgresModelCallReconciliationRepository,
     model_execution::{
         CredentialPoolRuntimeAction, CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,

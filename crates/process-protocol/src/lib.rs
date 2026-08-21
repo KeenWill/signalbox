@@ -4907,6 +4907,10 @@ pub enum TurnState {
         ended_attempt_id: CanonicalUuid,
         /// Ambiguous tool attempt awaiting recovery.
         recovery_tool_attempt_id: CanonicalUuid,
+        /// Durable automatic reconciliation attempts already claimed.
+        automatic_reconciliation_attempts: CanonicalU64,
+        /// True only when the automatic attempt budget is exhausted.
+        operator_action_required: bool,
     },
     /// The turn is parked on replacement of one exact lost runner placement.
     ActiveAwaitingRunnerRecovery {
@@ -5020,6 +5024,8 @@ enum RawTurnState {
     ActiveAwaitingToolRecovery {
         ended_attempt_id: CanonicalUuid,
         recovery_tool_attempt_id: CanonicalUuid,
+        automatic_reconciliation_attempts: CanonicalU64,
+        operator_action_required: bool,
     },
     ActiveAwaitingRunnerRecovery {
         runner_id: CanonicalUuid,
@@ -5155,9 +5161,13 @@ impl<'de> Deserialize<'de> for TurnState {
             RawTurnState::ActiveAwaitingToolRecovery {
                 ended_attempt_id,
                 recovery_tool_attempt_id,
+                automatic_reconciliation_attempts,
+                operator_action_required,
             } => Self::ActiveAwaitingToolRecovery {
                 ended_attempt_id,
                 recovery_tool_attempt_id,
+                automatic_reconciliation_attempts,
+                operator_action_required,
             },
             RawTurnState::ActiveAwaitingRunnerRecovery {
                 runner_id,
@@ -14278,6 +14288,29 @@ mod tests {
             tool_reconciliation,
         )?;
         assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::ActiveAwaitingToolRecovery {
+                    ended_attempt_id: uuid(7),
+                    recovery_tool_attempt_id: uuid(9),
+                    automatic_reconciliation_attempts: CanonicalU64::new(2),
+                    operator_action_required: false,
+                },
+            },
+            concat!(
+                "{\"type\":\"transcript_turn\",\"turn_id\":\"00000000-0000-0000-0000-000000000003\",",
+                "\"acceptance_position\":\"1\",\"model_settings\":null,\"state\":{",
+                "\"type\":\"active_awaiting_tool_recovery\",",
+                "\"ended_attempt_id\":\"00000000-0000-0000-0000-000000000007\",",
+                "\"recovery_tool_attempt_id\":\"00000000-0000-0000-0000-000000000009\",",
+                "\"automatic_reconciliation_attempts\":\"2\",",
+                "\"operator_action_required\":false}}"
+            ),
+        )?;
         Ok(())
     }
 

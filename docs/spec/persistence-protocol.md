@@ -2,7 +2,9 @@
 
 The durable automatic model-call reconciliation state, attempt history, and
 final-state authority were verified against this PR
-(`agent/turn-lifecycle-hardening`).
+(`agent/turn-lifecycle-hardening`). Their generalization to exact model-call or
+tool-attempt operations is verified against this PR
+(`agent/daemon-live-tool-recovery-reconcile`).
 
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
@@ -391,6 +393,10 @@ Representation rules, all enforced in the schema:
   final-state assertion only for an exact `reconciled` row binding that terminal
   turn, session, and ambiguous model call; every frontier, attempt, call, and
   outbox proof remains required.
+- Migration `202608210601` renames that ledger to `automatic_reconciliation` and
+  makes its operation identity exactly one of model call or tool attempt. Its
+  final-state authority matches both nullable operation columns exactly; tool
+  reconciliation retains the same five-attempt state and history algebra.
 - Migration `202608080100` closes runner placement history over
   `runner_lost_before_pin`, `pre_pin_replaced`, sourced `runner_lost`, and
   `abandoned` records. Each event retains the complete facts required by its
@@ -1289,16 +1295,17 @@ equal-content frontier and typed outbox record. The reconciliation marker and
 accepted successor carry the exact interrupt proof. The attempt trigger rejects
 every update to an ended attempt.
 
-The periodic daemon also discovers an unstopped model-call wait without an
-interrupt into the automatic reconciliation tables. A claimed attempt records
-its ordinal before the terminal transaction. Under the scheduler lock, the
-adapter reconstitutes the same exact ambiguous call and ended attempt, derives
-fresh frontier and pending-steering reclassification identities, and persists
-the existing `reconciliation_required` lifecycle and outbox shapes. The
-`reconciled` recovery row is the typed authority admitted by the deferred
-final-state assertion when no applied interrupt exists. It asserts nothing about
-the provider's outcome; the terminal call remains `ambiguous`. A lost daemon
-leaves `attempting` durable, which a later claim pass classifies as
+The periodic daemon also discovers an unstopped model-call or tool-attempt wait
+without an interrupt into the automatic reconciliation tables. A claimed attempt
+records its ordinal before the terminal transaction. Under the scheduler lock,
+the adapter reconstitutes the exact ambiguous operation and ended turn attempt,
+derives fresh frontier and pending-steering reclassification identities, and
+persists the existing model-call or proposal-ordered tool
+`reconciliation_required` lifecycle and outbox shapes. The `reconciled` recovery
+row is the typed authority admitted by the deferred final-state assertion when
+no applied interrupt exists. It asserts nothing about the physical outcome; the
+model call or tool attempt remains `ambiguous`. A lost daemon leaves
+`attempting` durable, which a later claim pass classifies as
 `infrastructure_failure` after its deadline before retrying.
 
 ## Corruption taxonomy

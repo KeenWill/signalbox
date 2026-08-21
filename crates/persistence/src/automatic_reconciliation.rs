@@ -1,33 +1,58 @@
-//! Durable daemon-owned reconciliation of ambiguous model calls.
+//! Durable daemon-owned reconciliation of ambiguous physical operations.
 
 use std::{error::Error, fmt};
 
 use signalbox_application::{
-    ClaimedModelCallReconciliation, ClassifyOperatorFailure, ExhaustedModelCallReconciliation,
-    ModelCallReconciliationAttempt, ModelCallReconciliationBatch,
-    ModelCallReconciliationFailureKind, ModelCallReconciliationOutcome, OperatorFailureClass,
+    AutomaticReconciliationAttempt, AutomaticReconciliationBatch,
+    AutomaticReconciliationFailureKind, AutomaticReconciliationOperation,
+    AutomaticReconciliationOutcome, ClaimedAutomaticReconciliation, ClassifyOperatorFailure,
+    ExhaustedAutomaticReconciliation, OperatorFailureClass,
 };
 use signalbox_domain::{
     AmbiguousModelCallTurnIdentities, ContextFrontierId, PendingSteeringReclassificationIdentity,
-    ProviderReportedTokenUsage, TurnId,
+    ProviderReportedTokenUsage, ReconstitutedToolAttempt, SemanticTranscriptEntryId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row};
 
 use crate::{
     commit_failure_is_ambiguous,
-    mapping::{session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid},
-    model_execution::{ModelCallRepositoryError, persist_reconciliation_required},
+    mapping::{
+        session_id_from_uuid, session_id_to_uuid, tool_attempt_id_from_uuid, turn_id_from_uuid,
+        turn_id_to_uuid,
+    },
+    model_execution::{
+        ModelCallRepositoryError, persist_reconciliation_required,
+        persist_tool_reconciliation_required,
+    },
     session::{SessionRepositoryError, load_session_from_connection},
     submit_input::{SubmitInputRepositoryError, load_scheduling_projection},
+    tool_loop::{ToolLoopRepositoryError, load_recovery_batch_by_attempt},
 };
 
 /// Maximum reconciliation attempts claimed by one watchdog scan.
 // numeric-bound: ceiling - bounds reconciliation transactions started per watchdog scan
 const CLAIM_WINDOW: i64 = 64;
 
+fn decode_operation(
+    model_call: Option<uuid::Uuid>,
+    tool_attempt: Option<uuid::Uuid>,
+) -> Result<AutomaticReconciliationOperation, AutomaticReconciliationRepositoryError> {
+    match (model_call, tool_attempt) {
+        (Some(call), None) => Ok(AutomaticReconciliationOperation::ModelCall(
+            signalbox_domain::ModelCallId::from_uuid(call),
+        )),
+        (None, Some(attempt)) => Ok(AutomaticReconciliationOperation::ToolAttempt(
+            tool_attempt_id_from_uuid(attempt),
+        )),
+        (Some(_), Some(_)) | (None, None) => Err(
+            AutomaticReconciliationRepositoryError::Corruption("operation identity"),
+        ),
+    }
+}
+
 /// Failure while discovering, claiming, or applying automatic reconciliation.
 #[derive(Debug)]
-pub enum ModelCallReconciliationRepositoryError {
+pub enum AutomaticReconciliationRepositoryError {
     /// PostgreSQL failed before or during a commit.
     Database {
         /// Whether a commit acknowledgement was lost.
@@ -41,11 +66,13 @@ pub enum ModelCallReconciliationRepositoryError {
     Scheduling(SubmitInputRepositoryError),
     /// The shared model-call terminal transition failed.
     Model(ModelCallRepositoryError),
+    /// Tool-round evidence could not reconstruct the exact recovery wait.
+    Tool(ToolLoopRepositoryError),
     /// A durable recovery row was outside the closed application vocabulary.
     Corruption(&'static str),
 }
 
-impl ModelCallReconciliationRepositoryError {
+impl AutomaticReconciliationRepositoryError {
     fn database(source: sqlx::Error) -> Self {
         Self::Database {
             commit_ambiguous: false,
@@ -54,58 +81,62 @@ impl ModelCallReconciliationRepositoryError {
     }
 
     /// Returns the durable failure class recorded for an attempt.
-    pub const fn failure_kind(&self) -> ModelCallReconciliationFailureKind {
+    pub const fn failure_kind(&self) -> AutomaticReconciliationFailureKind {
         match self {
-            Self::Database { .. } => ModelCallReconciliationFailureKind::Infrastructure,
+            Self::Database { .. } => AutomaticReconciliationFailureKind::Infrastructure,
             Self::Session(SessionRepositoryError::Database(_))
             | Self::Scheduling(SubmitInputRepositoryError::Database(_))
             | Self::Scheduling(SubmitInputRepositoryError::CommitAmbiguous(_))
-            | Self::Model(ModelCallRepositoryError::Database { .. }) => {
-                ModelCallReconciliationFailureKind::Infrastructure
+            | Self::Model(ModelCallRepositoryError::Database { .. })
+            | Self::Tool(ToolLoopRepositoryError::Database { .. }) => {
+                AutomaticReconciliationFailureKind::Infrastructure
             }
             Self::Session(SessionRepositoryError::Corruption(_))
             | Self::Scheduling(_)
             | Self::Model(_)
-            | Self::Corruption(_) => ModelCallReconciliationFailureKind::Integrity,
+            | Self::Tool(_)
+            | Self::Corruption(_) => AutomaticReconciliationFailureKind::Integrity,
         }
     }
 }
 
-impl fmt::Display for ModelCallReconciliationRepositoryError {
+impl fmt::Display for AutomaticReconciliationRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database { source, .. } => {
                 write!(
                     formatter,
-                    "automatic model-call reconciliation failed: {source}"
+                    "automatic operation reconciliation failed: {source}"
                 )
             }
             Self::Session(source) => source.fmt(formatter),
             Self::Scheduling(source) => source.fmt(formatter),
             Self::Model(source) => source.fmt(formatter),
+            Self::Tool(source) => source.fmt(formatter),
             Self::Corruption(detail) => {
                 write!(
                     formatter,
-                    "invalid automatic model-call reconciliation {detail}"
+                    "invalid automatic operation reconciliation {detail}"
                 )
             }
         }
     }
 }
 
-impl Error for ModelCallReconciliationRepositoryError {
+impl Error for AutomaticReconciliationRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database { source, .. } => Some(source),
             Self::Session(source) => Some(source),
             Self::Scheduling(source) => Some(source),
             Self::Model(source) => Some(source),
+            Self::Tool(source) => Some(source),
             Self::Corruption(_) => None,
         }
     }
 }
 
-impl ClassifyOperatorFailure for ModelCallReconciliationRepositoryError {
+impl ClassifyOperatorFailure for AutomaticReconciliationRepositoryError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
             Self::Database {
@@ -128,22 +159,24 @@ impl ClassifyOperatorFailure for ModelCallReconciliationRepositoryError {
                 OperatorFailureClass::FailClosedCorruption
             }
             Self::Model(source) => source.operator_failure_class(),
+            Self::Tool(source) => source.operator_failure_class(),
             Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
         }
     }
 
     fn operator_failure_cause_code(&self) -> &'static str {
         match self {
-            Self::Database { .. } => "model_call_reconciliation_database",
-            Self::Session(_) => "model_call_reconciliation_session",
-            Self::Scheduling(_) => "model_call_reconciliation_scheduling",
-            Self::Model(_) => "model_call_reconciliation_transition",
-            Self::Corruption(_) => "model_call_reconciliation_corruption",
+            Self::Database { .. } => "automatic_reconciliation_database",
+            Self::Session(_) => "automatic_reconciliation_session",
+            Self::Scheduling(_) => "automatic_reconciliation_scheduling",
+            Self::Model(_) => "automatic_reconciliation_transition",
+            Self::Tool(_) => "automatic_reconciliation_tool_evidence",
+            Self::Corruption(_) => "automatic_reconciliation_corruption",
         }
     }
 }
 
-impl From<sqlx::Error> for ModelCallReconciliationRepositoryError {
+impl From<sqlx::Error> for AutomaticReconciliationRepositoryError {
     fn from(source: sqlx::Error) -> Self {
         Self::database(source)
     }
@@ -151,26 +184,26 @@ impl From<sqlx::Error> for ModelCallReconciliationRepositoryError {
 
 /// PostgreSQL adapter for durable automatic reconciliation attempts.
 #[derive(Clone, Debug)]
-pub struct PostgresModelCallReconciliationRepository {
+pub struct PostgresAutomaticReconciliationRepository {
     pool: PgPool,
 }
 
-impl PostgresModelCallReconciliationRepository {
+impl PostgresAutomaticReconciliationRepository {
     /// Uses the shared daemon pool.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 
-    /// Discovers exact model-call waits and claims one bounded due window.
+    /// Discovers exact ambiguity waits and claims one bounded due window.
     pub async fn claim_due(
         &self,
-    ) -> Result<ModelCallReconciliationBatch, ModelCallReconciliationRepositoryError> {
+    ) -> Result<AutomaticReconciliationBatch, AutomaticReconciliationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         discover_recoveries(&mut transaction).await?;
         settle_abandoned_attempts(&mut transaction).await?;
         mark_superseded_recoveries(&mut transaction).await?;
         let exhausted_rows = mark_exhausted_recoveries(&mut transaction).await?;
-        let rows = sqlx::query(crate::lock_inventory::AUTOMATIC_MODEL_CALL_RECONCILIATION_CLAIM)
+        let rows = sqlx::query(crate::lock_inventory::AUTOMATIC_RECONCILIATION_CLAIM)
             .bind(CLAIM_WINDOW)
             .fetch_all(&mut *transaction)
             .await?;
@@ -181,26 +214,33 @@ impl PostgresModelCallReconciliationRepository {
             let attempt: i32 = row.try_get("attempt_count")?;
             let attempt = u32::try_from(attempt)
                 .ok()
-                .and_then(ModelCallReconciliationAttempt::try_from_u32)
-                .ok_or(ModelCallReconciliationRepositoryError::Corruption(
+                .and_then(AutomaticReconciliationAttempt::try_from_u32)
+                .ok_or(AutomaticReconciliationRepositoryError::Corruption(
                     "attempt ordinal",
                 ))?;
-            claimed.push(ClaimedModelCallReconciliation::new(
+            let model_call: Option<uuid::Uuid> = row.try_get("model_call_id")?;
+            let tool_attempt: Option<uuid::Uuid> = row.try_get("tool_attempt_id")?;
+            let operation = decode_operation(model_call, tool_attempt)?;
+            claimed.push(ClaimedAutomaticReconciliation::new(
                 session_id_from_uuid(row.try_get("session_id")?),
                 turn_id_from_uuid(row.try_get("turn_id")?),
-                signalbox_domain::ModelCallId::from_uuid(row.try_get("model_call_id")?),
+                operation,
                 attempt,
             ));
         }
         let mut exhausted = Vec::with_capacity(exhausted_rows.len());
         for row in exhausted_rows {
-            exhausted.push(ExhaustedModelCallReconciliation::new(
+            let operation = decode_operation(
+                row.try_get("model_call_id")?,
+                row.try_get("tool_attempt_id")?,
+            )?;
+            exhausted.push(ExhaustedAutomaticReconciliation::new(
                 session_id_from_uuid(row.try_get("session_id")?),
                 turn_id_from_uuid(row.try_get("turn_id")?),
-                signalbox_domain::ModelCallId::from_uuid(row.try_get("model_call_id")?),
+                operation,
             ));
         }
-        Ok(ModelCallReconciliationBatch::new(
+        Ok(AutomaticReconciliationBatch::new(
             claimed.into_boxed_slice(),
             exhausted.into_boxed_slice(),
         ))
@@ -209,13 +249,21 @@ impl PostgresModelCallReconciliationRepository {
     /// Applies one claimed attempt under the session scheduler lock.
     pub async fn reconcile(
         &self,
-        claimed: ClaimedModelCallReconciliation,
-    ) -> Result<ModelCallReconciliationOutcome, ModelCallReconciliationRepositoryError> {
+        claimed: ClaimedAutomaticReconciliation,
+    ) -> Result<AutomaticReconciliationOutcome, AutomaticReconciliationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(crate::lock_inventory::STARTUP_RECOVERY)
             .bind(session_id_to_uuid(claimed.session()))
             .fetch_optional(&mut *transaction)
             .await?;
+        let (model_call, tool_attempt, phase) = match claimed.operation() {
+            AutomaticReconciliationOperation::ModelCall(call) => {
+                (Some(call.into_uuid()), None, "awaiting_model_call_recovery")
+            }
+            AutomaticReconciliationOperation::ToolAttempt(attempt) => {
+                (None, Some(attempt.into_uuid()), "awaiting_tool_recovery")
+            }
+        };
         let exact_wait: bool = sqlx::query_scalar(
             "SELECT EXISTS (
                 SELECT 1
@@ -223,31 +271,34 @@ impl PostgresModelCallReconciliationRepository {
                  WHERE session_id = $1
                    AND turn_id = $2
                    AND state_kind = 'active'
-                   AND active_phase_kind = 'awaiting_model_call_recovery'
-                   AND recovery_model_call_id = $3
+                   AND active_phase_kind = $3
+                   AND recovery_model_call_id IS NOT DISTINCT FROM $4
+                   AND recovery_tool_attempt_id IS NOT DISTINCT FROM $5
             )",
         )
         .bind(session_id_to_uuid(claimed.session()))
         .bind(turn_id_to_uuid(claimed.turn()))
-        .bind(claimed.call().into_uuid())
+        .bind(phase)
+        .bind(model_call)
+        .bind(tool_attempt)
         .fetch_one(&mut *transaction)
         .await?;
         if !exact_wait {
             finish_superseded(&mut transaction, claimed).await?;
             transaction.commit().await.map_err(Self::commit_error)?;
-            return Ok(ModelCallReconciliationOutcome::Superseded);
+            return Ok(AutomaticReconciliationOutcome::Superseded);
         }
         let Some(session) = load_session_from_connection(&mut transaction, claimed.session())
             .await
-            .map_err(ModelCallReconciliationRepositoryError::Session)?
+            .map_err(AutomaticReconciliationRepositoryError::Session)?
         else {
-            return Err(ModelCallReconciliationRepositoryError::Corruption(
+            return Err(AutomaticReconciliationRepositoryError::Corruption(
                 "session for exact wait",
             ));
         };
         let scheduling = load_scheduling_projection(&mut transaction, session)
             .await
-            .map_err(ModelCallReconciliationRepositoryError::Scheduling)?;
+            .map_err(AutomaticReconciliationRepositoryError::Scheduling)?;
         let pending = scheduling
             .active_turn_execution()
             .filter(|turn| turn.turn() == claimed.turn())
@@ -262,49 +313,108 @@ impl PostgresModelCallReconciliationRepository {
                     })
                     .collect::<Vec<_>>()
             });
-        let pending = pending.ok_or(ModelCallReconciliationRepositoryError::Corruption(
+        let pending = pending.ok_or(AutomaticReconciliationRepositoryError::Corruption(
             "active turn for exact wait",
         ))?;
-        let identities = AmbiguousModelCallTurnIdentities::new(ContextFrontierId::from_uuid(
-            uuid::Uuid::now_v7(),
-        ))
-        .with_pending_steering_reclassifications(pending);
+        let terminal_frontier = ContextFrontierId::from_uuid(uuid::Uuid::now_v7());
+        let identities = AmbiguousModelCallTurnIdentities::new(terminal_frontier)
+            .with_pending_steering_reclassifications(pending);
         let Some(attempt) = std::num::NonZeroU32::new(claimed.attempt().get()) else {
-            return Err(ModelCallReconciliationRepositoryError::Corruption(
+            return Err(AutomaticReconciliationRepositoryError::Corruption(
                 "zero attempt ordinal",
             ));
         };
-        let reconciliation = match scheduling
-            .apply_automatic_model_call_reconciliation(attempt, identities)
-        {
-            Ok(reconciliation) if reconciliation.call().id() == claimed.call() => reconciliation,
-            Ok(_) | Err(_) => {
-                return Err(ModelCallReconciliationRepositoryError::Corruption(
-                    "aggregate transition for exact wait",
-                ));
+        match claimed.operation() {
+            AutomaticReconciliationOperation::ModelCall(claimed_call) => {
+                let reconciliation =
+                    match scheduling.apply_automatic_reconciliation(attempt, identities) {
+                        Ok(reconciliation) if reconciliation.call().id() == claimed_call => {
+                            reconciliation
+                        }
+                        Ok(_) | Err(_) => {
+                            return Err(AutomaticReconciliationRepositoryError::Corruption(
+                                "model-call aggregate transition for exact wait",
+                            ));
+                        }
+                    };
+                persist_reconciliation_required(
+                    &mut transaction,
+                    &reconciliation,
+                    ProviderReportedTokenUsage::unreported(),
+                )
+                .await
+                .map_err(AutomaticReconciliationRepositoryError::Model)?;
             }
-        };
-        persist_reconciliation_required(
-            &mut transaction,
-            &reconciliation,
-            ProviderReportedTokenUsage::unreported(),
-        )
-        .await
-        .map_err(ModelCallReconciliationRepositoryError::Model)?;
+            AutomaticReconciliationOperation::ToolAttempt(claimed_attempt) => {
+                let batch = load_recovery_batch_by_attempt(
+                    &mut transaction,
+                    claimed.session(),
+                    claimed.turn(),
+                    claimed_attempt,
+                )
+                .await
+                .map_err(AutomaticReconciliationRepositoryError::Tool)?;
+                let wait = batch.awaiting_recovery().ok_or(
+                    AutomaticReconciliationRepositoryError::Corruption(
+                        "tool recovery wait evidence",
+                    ),
+                )?;
+                let ended = batch
+                    .requests()
+                    .iter()
+                    .find_map(|request| match batch.attempt(request.id()) {
+                        Some(ReconstitutedToolAttempt::Ended(ended))
+                            if ended.attempt() == claimed_attempt =>
+                        {
+                            Some(ended.clone())
+                        }
+                        Some(ReconstitutedToolAttempt::Current(_))
+                        | Some(ReconstitutedToolAttempt::Ended(_))
+                        | None => None,
+                    })
+                    .ok_or(AutomaticReconciliationRepositoryError::Corruption(
+                        "ambiguous tool attempt evidence",
+                    ))?;
+                let entry_ids = batch
+                    .requests()
+                    .iter()
+                    .map(|_| SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()))
+                    .collect();
+                let projection = batch
+                    .prepare_reconciliation_projection(entry_ids, terminal_frontier)
+                    .map_err(|_| {
+                        AutomaticReconciliationRepositoryError::Corruption(
+                            "tool recovery result projection",
+                        )
+                    })?;
+                let reconciliation = scheduling
+                    .apply_automatic_tool_reconciliation(
+                        wait, ended, projection, attempt, identities,
+                    )
+                    .map_err(|_| {
+                        AutomaticReconciliationRepositoryError::Corruption(
+                            "tool aggregate transition for exact wait",
+                        )
+                    })?;
+                persist_tool_reconciliation_required(&mut transaction, &reconciliation)
+                    .await
+                    .map_err(AutomaticReconciliationRepositoryError::Model)?;
+            }
+        }
         finish_attempt(&mut transaction, claimed, "reconciled", "reconciled").await?;
         transaction.commit().await.map_err(Self::commit_error)?;
-        Ok(ModelCallReconciliationOutcome::Reconciled)
+        Ok(AutomaticReconciliationOutcome::Reconciled)
     }
 
     /// Durably classifies an attempt whose authoritative transaction failed.
     pub async fn record_failure(
         &self,
-        claimed: ClaimedModelCallReconciliation,
-        failure: ModelCallReconciliationFailureKind,
-    ) -> Result<(), ModelCallReconciliationRepositoryError> {
+        claimed: ClaimedAutomaticReconciliation,
+        failure: AutomaticReconciliationFailureKind,
+    ) -> Result<(), AutomaticReconciliationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let rows = sqlx::query(
-            "UPDATE automatic_model_call_reconciliation_attempt
+            "UPDATE automatic_reconciliation_attempt
                 SET outcome_kind = $3, finished_at = statement_timestamp()
               WHERE turn_id = $1 AND attempt_ordinal = $2
                 AND outcome_kind = 'attempting'",
@@ -316,7 +426,7 @@ impl PostgresModelCallReconciliationRepository {
         .await?
         .rows_affected();
         let recovery_rows = sqlx::query(
-            "UPDATE automatic_model_call_reconciliation
+            "UPDATE automatic_reconciliation
                 SET state_kind = 'scheduled'
               WHERE turn_id = $1 AND attempt_count = $2
                 AND state_kind = 'attempting'",
@@ -327,7 +437,7 @@ impl PostgresModelCallReconciliationRepository {
         .await?
         .rows_affected();
         if rows != 1 || recovery_rows != 1 {
-            return Err(ModelCallReconciliationRepositoryError::Corruption(
+            return Err(AutomaticReconciliationRepositoryError::Corruption(
                 "attempt failure cardinality",
             ));
         }
@@ -335,8 +445,8 @@ impl PostgresModelCallReconciliationRepository {
         Ok(())
     }
 
-    fn commit_error(source: sqlx::Error) -> ModelCallReconciliationRepositoryError {
-        ModelCallReconciliationRepositoryError::Database {
+    fn commit_error(source: sqlx::Error) -> AutomaticReconciliationRepositoryError {
+        AutomaticReconciliationRepositoryError::Database {
             commit_ambiguous: commit_failure_is_ambiguous(&source),
             source,
         }
@@ -345,15 +455,18 @@ impl PostgresModelCallReconciliationRepository {
 
 async fn discover_recoveries(
     connection: &mut PgConnection,
-) -> Result<(), ModelCallReconciliationRepositoryError> {
+) -> Result<(), AutomaticReconciliationRepositoryError> {
     sqlx::query(
-        "INSERT INTO automatic_model_call_reconciliation
-            (turn_id, session_id, model_call_id)
-         SELECT turn_id, session_id, recovery_model_call_id
+        "INSERT INTO automatic_reconciliation
+            (turn_id, session_id, model_call_id, tool_attempt_id)
+         SELECT turn_id, session_id, recovery_model_call_id,
+                recovery_tool_attempt_id
            FROM turn_lifecycle
           WHERE state_kind = 'active'
-            AND active_phase_kind = 'awaiting_model_call_recovery'
-            AND recovery_model_call_id IS NOT NULL
+            AND active_phase_kind IN (
+                'awaiting_model_call_recovery', 'awaiting_tool_recovery'
+            )
+            AND num_nonnulls(recovery_model_call_id, recovery_tool_attempt_id) = 1
          ON CONFLICT (turn_id) DO NOTHING",
     )
     .execute(connection)
@@ -363,12 +476,12 @@ async fn discover_recoveries(
 
 async fn settle_abandoned_attempts(
     connection: &mut PgConnection,
-) -> Result<(), ModelCallReconciliationRepositoryError> {
+) -> Result<(), AutomaticReconciliationRepositoryError> {
     sqlx::query(
-        "UPDATE automatic_model_call_reconciliation_attempt AS attempt
+        "UPDATE automatic_reconciliation_attempt AS attempt
             SET outcome_kind = 'infrastructure_failure',
                 finished_at = statement_timestamp()
-           FROM automatic_model_call_reconciliation AS recovery
+           FROM automatic_reconciliation AS recovery
           WHERE recovery.turn_id = attempt.turn_id
             AND recovery.state_kind = 'attempting'
             AND recovery.next_attempt_at <= statement_timestamp()
@@ -378,7 +491,7 @@ async fn settle_abandoned_attempts(
     .execute(&mut *connection)
     .await?;
     sqlx::query(
-        "UPDATE automatic_model_call_reconciliation
+        "UPDATE automatic_reconciliation
             SET state_kind = 'scheduled'
           WHERE state_kind = 'attempting'
             AND attempt_count < 5
@@ -391,11 +504,11 @@ async fn settle_abandoned_attempts(
 
 async fn mark_superseded_recoveries(
     connection: &mut PgConnection,
-) -> Result<(), ModelCallReconciliationRepositoryError> {
+) -> Result<(), AutomaticReconciliationRepositoryError> {
     sqlx::query(
-        "UPDATE automatic_model_call_reconciliation_attempt AS attempt
+        "UPDATE automatic_reconciliation_attempt AS attempt
             SET outcome_kind = 'superseded', finished_at = statement_timestamp()
-           FROM automatic_model_call_reconciliation AS recovery
+           FROM automatic_reconciliation AS recovery
           WHERE recovery.turn_id = attempt.turn_id
             AND recovery.state_kind = 'attempting'
             AND attempt.attempt_ordinal = recovery.attempt_count
@@ -405,14 +518,20 @@ async fn mark_superseded_recoveries(
                  WHERE lifecycle.turn_id = recovery.turn_id
                    AND lifecycle.session_id = recovery.session_id
                    AND lifecycle.state_kind = 'active'
-                   AND lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
-                   AND lifecycle.recovery_model_call_id = recovery.model_call_id
+                   AND (
+                        lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
+                        AND lifecycle.recovery_model_call_id = recovery.model_call_id
+                        AND recovery.tool_attempt_id IS NULL
+                     OR lifecycle.active_phase_kind = 'awaiting_tool_recovery'
+                        AND lifecycle.recovery_tool_attempt_id = recovery.tool_attempt_id
+                        AND recovery.model_call_id IS NULL
+                   )
             )",
     )
     .execute(&mut *connection)
     .await?;
     sqlx::query(
-        "UPDATE automatic_model_call_reconciliation AS recovery
+        "UPDATE automatic_reconciliation AS recovery
             SET state_kind = 'superseded', exhausted_at = NULL
           WHERE recovery.state_kind IN ('scheduled', 'attempting', 'exhausted')
             AND NOT EXISTS (
@@ -420,8 +539,14 @@ async fn mark_superseded_recoveries(
                  WHERE lifecycle.turn_id = recovery.turn_id
                    AND lifecycle.session_id = recovery.session_id
                    AND lifecycle.state_kind = 'active'
-                   AND lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
-                   AND lifecycle.recovery_model_call_id = recovery.model_call_id
+                   AND (
+                        lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
+                        AND lifecycle.recovery_model_call_id = recovery.model_call_id
+                        AND recovery.tool_attempt_id IS NULL
+                     OR lifecycle.active_phase_kind = 'awaiting_tool_recovery'
+                        AND lifecycle.recovery_tool_attempt_id = recovery.tool_attempt_id
+                        AND recovery.model_call_id IS NULL
+                   )
             )",
     )
     .execute(connection)
@@ -431,9 +556,9 @@ async fn mark_superseded_recoveries(
 
 async fn mark_exhausted_recoveries(
     connection: &mut PgConnection,
-) -> Result<Vec<sqlx::postgres::PgRow>, ModelCallReconciliationRepositoryError> {
+) -> Result<Vec<sqlx::postgres::PgRow>, AutomaticReconciliationRepositoryError> {
     let rows = sqlx::query(
-        "UPDATE automatic_model_call_reconciliation
+        "UPDATE automatic_reconciliation
             SET state_kind = 'exhausted', exhausted_at = statement_timestamp()
           WHERE state_kind IN ('scheduled', 'attempting')
             AND attempt_count = 5
@@ -441,7 +566,7 @@ async fn mark_exhausted_recoveries(
                 state_kind = 'scheduled'
                 OR next_attempt_at <= statement_timestamp()
             )
-      RETURNING session_id, turn_id, model_call_id",
+      RETURNING session_id, turn_id, model_call_id, tool_attempt_id",
     )
     .fetch_all(connection)
     .await?;
@@ -450,19 +575,19 @@ async fn mark_exhausted_recoveries(
 
 async fn finish_superseded(
     connection: &mut PgConnection,
-    claimed: ClaimedModelCallReconciliation,
-) -> Result<(), ModelCallReconciliationRepositoryError> {
+    claimed: ClaimedAutomaticReconciliation,
+) -> Result<(), AutomaticReconciliationRepositoryError> {
     finish_attempt(connection, claimed, "superseded", "superseded").await
 }
 
 async fn finish_attempt(
     connection: &mut PgConnection,
-    claimed: ClaimedModelCallReconciliation,
+    claimed: ClaimedAutomaticReconciliation,
     attempt_outcome: &str,
     recovery_state: &str,
-) -> Result<(), ModelCallReconciliationRepositoryError> {
+) -> Result<(), AutomaticReconciliationRepositoryError> {
     let attempt_rows = sqlx::query(
-        "UPDATE automatic_model_call_reconciliation_attempt
+        "UPDATE automatic_reconciliation_attempt
             SET outcome_kind = $3, finished_at = statement_timestamp()
           WHERE turn_id = $1 AND attempt_ordinal = $2
             AND outcome_kind = 'attempting'",
@@ -474,7 +599,7 @@ async fn finish_attempt(
     .await?
     .rows_affected();
     let recovery_rows = sqlx::query(
-        "UPDATE automatic_model_call_reconciliation
+        "UPDATE automatic_reconciliation
             SET state_kind = $3
           WHERE turn_id = $1 AND attempt_count = $2
             AND state_kind = 'attempting'",
@@ -486,7 +611,7 @@ async fn finish_attempt(
     .await?
     .rows_affected();
     if attempt_rows != 1 || recovery_rows != 1 {
-        return Err(ModelCallReconciliationRepositoryError::Corruption(
+        return Err(AutomaticReconciliationRepositoryError::Corruption(
             "completion cardinality",
         ));
     }

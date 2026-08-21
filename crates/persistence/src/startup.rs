@@ -521,12 +521,8 @@ where
         Some(signalbox_domain::ActiveTurnPhase::Running { .. }) => {}
         // A prior process already ended this turn's physical tenure and
         // recorded the exact ambiguity set, so there is no lost live end for
-        // the scan to classify. Reporting it separately keeps the wait visible
-        // to the operator instead of indistinguishable from a healed session.
-        //
-        // The domain phase also carries a tool-attempt ambiguity wait, which
-        // has no operator surface to point at; that wait stays classified as
-        // it was, so the report never promises a decision nothing can make.
+        // the scan to classify. The independent automatic-reconciliation
+        // watchdog owns both model-call and tool-attempt waits.
         Some(signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision {
             ambiguous_operations,
             ..

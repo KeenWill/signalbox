@@ -1447,7 +1447,7 @@ fn automatic_recovery_status(snapshot: &ProcessTranscriptSnapshot) -> (u32, bool
 }
 
 async fn spend_automatic_reconciliation_budget(
-    repository: &PostgresModelCallReconciliationRepository,
+    repository: &PostgresAutomaticReconciliationRepository,
     pool: &PgPool,
 ) -> Result<(), Box<dyn Error>> {
     for expected_attempt in 1_u32..=5 {
@@ -1457,11 +1457,11 @@ async fn spend_automatic_reconciliation_budget(
         repository
             .record_failure(
                 batch.claimed()[0],
-                ModelCallReconciliationFailureKind::Infrastructure,
+                AutomaticReconciliationFailureKind::Infrastructure,
             )
             .await?;
         sqlx::query(
-            "UPDATE automatic_model_call_reconciliation
+            "UPDATE automatic_reconciliation
                 SET next_attempt_at = statement_timestamp()
               WHERE turn_id = $1
                 AND attempt_count < 5",
@@ -1478,11 +1478,11 @@ async fn spend_automatic_reconciliation_budget(
 /// ambiguous model-call wait without rewriting the call's unknown outcome.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_automatic_model_call_reconciliation_records_the_operator_transition()
--> Result<(), Box<dyn Error>> {
+async fn s04_automatic_reconciliation_records_the_operator_transition() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xC100).await?;
-    let repository = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
     let steering = AcceptedInputId::from_uuid(Uuid::from_u128(0xC300));
     let steering_outcome = SubmitInputRepository::new(pool.clone())
         .handle(
@@ -1509,11 +1509,11 @@ async fn s04_automatic_model_call_reconciliation_records_the_operator_transition
                 recovery.state_kind,
                 recovery.attempt_count,
                 (SELECT count(*)
-                   FROM automatic_model_call_reconciliation_attempt AS attempt
+                   FROM automatic_reconciliation_attempt AS attempt
                   WHERE attempt.turn_id = recovery.turn_id
                     AND attempt.outcome_kind = 'reconciled')
            FROM turn_lifecycle AS lifecycle
-           JOIN automatic_model_call_reconciliation AS recovery
+           JOIN automatic_reconciliation AS recovery
              ON recovery.turn_id = lifecycle.turn_id
           WHERE lifecycle.turn_id = $1",
     )
@@ -1533,9 +1533,12 @@ async fn s04_automatic_model_call_reconciliation_records_the_operator_transition
     assert_eq!(batch.exhausted(), &[]);
     assert_eq!(claimed.session(), parked.session);
     assert_eq!(claimed.turn(), parked.turn);
-    assert_eq!(claimed.call(), parked.call);
+    assert_eq!(
+        claimed.operation(),
+        AutomaticReconciliationOperation::ModelCall(parked.call)
+    );
     assert_eq!(claimed.attempt().get(), 1);
-    assert_eq!(outcome, ModelCallReconciliationOutcome::Reconciled);
+    assert_eq!(outcome, AutomaticReconciliationOutcome::Reconciled);
     assert_eq!(
         durable,
         (
@@ -1597,7 +1600,7 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xE100;
     let parked = park_restart_ambiguity(&pool, seed).await?;
-    let repository = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
     let batch = repository.claim_due().await?;
     let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x203));
 
@@ -1624,8 +1627,8 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
                 (SELECT count(*)
                    FROM turn_reconciliation_required_outbox_event
                   WHERE turn_id = recovery.turn_id)
-           FROM automatic_model_call_reconciliation AS recovery
-           JOIN automatic_model_call_reconciliation_attempt AS attempt
+           FROM automatic_reconciliation AS recovery
+           JOIN automatic_reconciliation_attempt AS attempt
              ON attempt.turn_id = recovery.turn_id
             AND attempt.attempt_ordinal = recovery.attempt_count
           WHERE recovery.turn_id = $1",
@@ -1666,7 +1669,7 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xD100).await?;
-    let repository = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
     spend_automatic_reconciliation_budget(&repository, &pool).await?;
 
     let exhaustion = repository.claim_due().await?;
@@ -1677,7 +1680,7 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
     let attempt_history: (i64, i64) = sqlx::query_as(
         "SELECT count(*),
                 count(*) FILTER (WHERE outcome_kind = 'infrastructure_failure')
-           FROM automatic_model_call_reconciliation_attempt
+           FROM automatic_reconciliation_attempt
           WHERE turn_id = $1",
     )
     .bind(parked.turn.into_uuid())
@@ -1688,7 +1691,10 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
     assert_eq!(exhaustion.exhausted().len(), 1);
     assert_eq!(exhaustion.exhausted()[0].session(), parked.session);
     assert_eq!(exhaustion.exhausted()[0].turn(), parked.turn);
-    assert_eq!(exhaustion.exhausted()[0].call(), parked.call);
+    assert_eq!(
+        exhaustion.exhausted()[0].operation(),
+        AutomaticReconciliationOperation::ModelCall(parked.call)
+    );
     assert_eq!(automatic_recovery_status(&snapshot), (5, true));
     assert_eq!(attempt_history, (5, 5));
 

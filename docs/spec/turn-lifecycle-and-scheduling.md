@@ -2,7 +2,9 @@
 
 The scheduler occupancy ceiling and metrics, daemon-owned ambiguous-call
 reconciliation, and outer slot-held watchdog coverage were verified against this
-PR (`agent/turn-lifecycle-hardening`).
+PR (`agent/turn-lifecycle-hardening`). Automatic reconciliation of ambiguous
+tool attempts is verified against this PR
+(`agent/daemon-live-tool-recovery-reconcile`).
 
 The expired-pass recovery operation and retry budgets were re-verified against
 this PR (`agent/daemon-live-recovery-attempt-budget`).
@@ -751,36 +753,37 @@ at the moment its outcome became unknown. The durable record is the ordinary
 `TurnFailed` shape, which has no cause column, so a watchdog-ended turn is not
 durably distinguishable from a restart-recovered one.
 
-**Ambiguous model-call reconciliation.** Every watchdog wake also discovers
-active `awaiting_model_call_recovery` turns and durably claims at most 64 due
-attempts. The recovery row binds the exact session, turn, and ambiguous call;
-each claim inserts a one-based attempt row. Failed attempts end with the typed
-outcome `infrastructure_failure` or `integrity_failure`, and recovery becomes
-due after 120, 240, 480, 960, then 1,800 seconds. If a daemon disappears while
-an attempt is `attempting`, its recorded deadline lets the next daemon classify
-it as an infrastructure failure before continuing. Every inventory or
-application transaction has the same one-second wall-clock bound; a timed-out
-claimed attempt remains durably `attempting` until that deadline makes it
-classifiable. An explicitly recorded fifth failure becomes exhausted on the next
-watchdog scan without waiting out that final ambiguity deadline; the deadline
-remains necessary when the daemon cannot tell whether the fifth attempt
-committed.
+**Ambiguous-operation reconciliation.** Every watchdog wake also discovers
+active `awaiting_model_call_recovery` and `awaiting_tool_recovery` turns and
+durably claims at most 64 due attempts. The recovery row binds the exact
+session, turn, and one ambiguous model call or tool attempt; each claim inserts
+a one-based attempt row. Failed attempts end with the typed outcome
+`infrastructure_failure` or `integrity_failure`, and recovery becomes due after
+120, 240, 480, 960, then 1,800 seconds. If a daemon disappears while an attempt
+is `attempting`, its recorded deadline lets the next daemon classify it as an
+infrastructure failure before continuing. Every inventory or application
+transaction has the same one-second wall-clock bound; a timed-out claimed
+attempt remains durably `attempting` until that deadline makes it classifiable.
+An explicitly recorded fifth failure becomes exhausted on the next watchdog scan
+without waiting out that final ambiguity deadline; the deadline remains
+necessary when the daemon cannot tell whether the fifth attempt committed.
 
 The automatic budget is five attempts. Each attempt locks the same session
 scheduler row as the operator path, reconstitutes the complete scheduling
 projection, and applies the existing reconciliation-required transition to the
-exact ambiguous call and ended attempt. It neither claims what the provider did
-nor rewrites the ambiguous call, and it reclassifies pending steering through
-the same terminal boundary. A concurrent operator decision or other
+exact ambiguous operation and ended attempt. Tool recovery additionally rebuilds
+the proposal-ordered result suffix. It neither claims what the provider or tool
+did nor rewrites the ambiguous operation, and it reclassifies pending steering
+through the same terminal boundary. A concurrent operator decision or other
 authoritative transition wins by ordinary row locking and records the automatic
 attempt as `superseded`. After five failures, the recovery row becomes
 `exhausted`, the active wait remains unchanged, and the process transcript sets
 `operator_action_required`; only then is the wait an operator park.
 
-Quiescent turns, slot-held turns, and ambiguous-call attempts run on independent
-watchdog loops with the same cadence. A stalled inventory or database operation
-on one surface therefore cannot prevent either of the other two from reaching
-its next bounded attempt.
+Quiescent turns, slot-held turns, and ambiguous-operation attempts run on
+independent watchdog loops with the same cadence. A stalled inventory or
+database operation on one surface therefore cannot prevent either of the other
+two from reaching its next bounded attempt.
 
 ## Startup scan and recovery
 
