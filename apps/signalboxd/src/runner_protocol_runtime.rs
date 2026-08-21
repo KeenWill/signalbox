@@ -497,48 +497,31 @@ impl PostgresRunnerRegistrationService {
                     error,
                 )
             })?;
-        let (outcome, should_propagate) = match effect {
+        let outcome = match effect {
             RunnerConnectionTransitionEffect::Applied(applied) => {
                 log_connection_transition(applied, transition);
-                let snapshot = applied.snapshot();
-                (
-                    RunnerConnectionTransitionOutcome::Current(snapshot),
-                    snapshot.state() == RunnerConnectionState::Lost,
-                )
+                RunnerConnectionTransitionOutcome::Current(applied.snapshot())
             }
-            RunnerConnectionTransitionEffect::Unchanged(
-                RunnerConnectionTransitionOutcome::Current(snapshot),
-            ) => (
-                RunnerConnectionTransitionOutcome::Current(snapshot),
-                snapshot.state() == RunnerConnectionState::Lost
-                    && transition_produces_loss(transition),
-            ),
-            RunnerConnectionTransitionEffect::Unchanged(outcome) => (outcome, false),
+            RunnerConnectionTransitionEffect::Unchanged(outcome) => outcome,
         };
-        if should_propagate {
+        if matches!(
+            outcome,
+            RunnerConnectionTransitionOutcome::Current(snapshot)
+                if snapshot.state() == RunnerConnectionState::Lost
+        ) {
             let enrollment = RunnerEnrollmentId::from_uuid(enrollment.into_uuid());
-            if let Err(error) = self
-                .propagate_pending_connection_losses(Some(enrollment))
+            self.propagate_pending_connection_losses(Some(enrollment))
                 .await
-            {
-                tracing::error!(
-                    error = %error,
-                    enrollment_id = %enrollment.into_uuid(),
-                    "runner connection loss propagation deferred to startup recovery"
-                );
-            }
+                .map_err(|error| {
+                    store_failure(
+                        operation_kind,
+                        AvailableCorrelation::ConnectionEpoch(wire_epoch),
+                        error,
+                    )
+                })?;
         }
         Ok(outcome)
     }
-}
-
-const fn transition_produces_loss(transition: RunnerConnectionTransition) -> bool {
-    matches!(
-        transition,
-        RunnerConnectionTransition::HeartbeatTimeout
-            | RunnerConnectionTransition::TransportClosed
-            | RunnerConnectionTransition::ProtocolFailure
-    )
 }
 
 fn log_connection_transition(
