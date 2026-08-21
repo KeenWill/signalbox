@@ -502,11 +502,18 @@ impl InputContent {
 }
 
 // numeric-bound: ceiling - bounds retained parts in one user input
-const MAX_USER_INPUT_PARTS: usize = 256;
+/// Maximum number of ordered parts in one process-protocol user input.
+pub const MAX_USER_INPUT_PARTS: usize = signalbox_domain::UserContent::MAX_PARTS;
 // numeric-bound: ceiling - bounds aggregate retained user text
-const MAX_USER_INPUT_TEXT_BYTES: usize = 1_048_576;
-// numeric-bound: ceiling - bounds retained attachment metadata fields
-const MAX_USER_ATTACHMENT_METADATA_BYTES: usize = 255;
+/// Maximum aggregate UTF-8 bytes across process-protocol text parts.
+pub const MAX_USER_INPUT_TEXT_BYTES: usize = signalbox_domain::UserContent::MAX_TEXT_BYTES;
+// numeric-bound: ceiling - bounds retained attachment media types
+/// Maximum encoded bytes in one process-protocol attachment media type.
+pub const MAX_USER_INPUT_MEDIA_TYPE_BYTES: usize = signalbox_domain::DeclaredMediaType::MAX_BYTES;
+// numeric-bound: ceiling - bounds retained attachment display filenames
+/// Maximum encoded bytes in one process-protocol attachment display filename.
+pub const MAX_USER_INPUT_DISPLAY_FILENAME_BYTES: usize =
+    signalbox_domain::AttachmentDisplayFilename::MAX_BYTES;
 
 /// Closed semantic kind declared for one user attachment on the wire.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -604,14 +611,14 @@ impl UserInputContent {
                     ..
                 } => {
                     if media_type.is_empty()
-                        || media_type.len() > MAX_USER_ATTACHMENT_METADATA_BYTES
+                        || media_type.len() > MAX_USER_INPUT_MEDIA_TYPE_BYTES
                         || !media_type.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
                     {
                         return Err(FrameValidationError::UserContentShape);
                     }
                     if display_filename.as_ref().is_some_and(|filename| {
                         filename.is_empty()
-                            || filename.len() > MAX_USER_ATTACHMENT_METADATA_BYTES
+                            || filename.len() > MAX_USER_INPUT_DISPLAY_FILENAME_BYTES
                             || filename == "."
                             || filename == ".."
                             || filename.contains('/')

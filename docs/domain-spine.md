@@ -2311,10 +2311,12 @@ impl NonEmptyUnicodeText {
     pub fn into_string(self) -> String;
     // accessors: as_str()
 }
+// Debug is content-redacted.
 
 pub enum NonEmptyUnicodeTextFailure {
     Empty,
     ContainsNull,
+    TooLong,
 }
 
 pub struct NonEmptyUnicodeTextError { /* private */ }
@@ -2322,13 +2324,82 @@ impl NonEmptyUnicodeTextError {
     pub fn into_parts(self) -> (String, NonEmptyUnicodeTextFailure);
     // accessors: failure(), value()
 }
+// Debug is content-redacted.
 
-pub enum UserContent {
-    Text { value: NonEmptyUnicodeText },
+pub enum AttachmentKind {
+    Image,
+    Document,
+    File,
 }
-impl UserContent {
+
+pub struct DeclaredMediaType(/* private String */);
+impl DeclaredMediaType {
+    pub const MAX_BYTES: usize;
+    pub fn try_new(value: String) -> Result<Self, DeclaredMediaTypeError>;
+    // accessor: as_str()
+}
+
+pub enum DeclaredMediaTypeFailure {
+    Empty,
+    TooLong,
+    NotVisibleAscii,
+}
+
+pub struct DeclaredMediaTypeError { /* private */ }
+impl DeclaredMediaTypeError {
+    // accessors: failure(), value()
+}
+
+pub struct AttachmentDisplayFilename(/* private String */);
+impl AttachmentDisplayFilename {
+    pub const MAX_BYTES: usize;
+    pub fn try_new(value: String) -> Result<Self, AttachmentDisplayFilenameError>;
+    // accessor: as_str()
+}
+// Debug is content-redacted.
+
+pub enum AttachmentDisplayFilenameFailure {
+    Empty,
+    TooLong,
+    ReservedBasename,
+    ContainsPathSeparator,
+    ContainsNull,
+}
+
+pub struct AttachmentDisplayFilenameError { /* private */ }
+impl AttachmentDisplayFilenameError {
+    // accessors: failure(), value()
+}
+// Debug is content-redacted.
+
+pub enum UserContentPart {
+    Text { value: NonEmptyUnicodeText },
+    Attachment {
+        digest: BlobDigest,
+        kind: AttachmentKind,
+        media_type: DeclaredMediaType,
+        display_filename: Option<AttachmentDisplayFilename>,
+    },
+}
+impl UserContentPart {
     pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
-    // accessors: text()
+}
+
+pub struct UserContent { /* private */ }
+impl UserContent {
+    pub const MAX_PARTS: usize;
+    pub const MAX_TEXT_BYTES: usize;
+    pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
+    pub fn try_parts(parts: Vec<UserContentPart>) -> Result<Self, UserContentError>;
+    pub fn into_parts(self) -> Vec<UserContentPart>;
+    // accessors: parts(), single_text()
+}
+
+pub enum UserContentError {
+    Empty,
+    TooManyParts,
+    AdjacentTextParts,
+    TextTooLarge,
 }
 ```
 

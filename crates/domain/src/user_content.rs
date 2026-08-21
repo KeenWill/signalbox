@@ -16,8 +16,14 @@ pub const MAX_DECLARED_MEDIA_TYPE_BYTES: usize = 255;
 pub const MAX_ATTACHMENT_DISPLAY_FILENAME_BYTES: usize = 255;
 
 /// A nonempty decoded Unicode scalar sequence containing no U+0000.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub struct NonEmptyUnicodeText(String);
+
+impl fmt::Debug for NonEmptyUnicodeText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NonEmptyUnicodeText(<redacted>)")
+    }
+}
 
 impl NonEmptyUnicodeText {
     /// Checks one decoded string without trimming or normalization.
@@ -59,10 +65,19 @@ pub enum NonEmptyUnicodeTextFailure {
 }
 
 /// Failed text construction retaining the rejected string unchanged.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct NonEmptyUnicodeTextError {
     value: String,
     failure: NonEmptyUnicodeTextFailure,
+}
+
+impl fmt::Debug for NonEmptyUnicodeTextError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NonEmptyUnicodeTextError")
+            .field("failure", &self.failure)
+            .finish()
+    }
 }
 
 impl NonEmptyUnicodeTextError {
@@ -98,6 +113,9 @@ pub enum AttachmentKind {
 pub struct DeclaredMediaType(String);
 
 impl DeclaredMediaType {
+    /// Inclusive encoded-byte bound for one declaration.
+    pub const MAX_BYTES: usize = MAX_DECLARED_MEDIA_TYPE_BYTES;
+
     /// Checks one media-type declaration without normalization.
     pub fn try_new(value: String) -> Result<Self, DeclaredMediaTypeError> {
         let failure = if value.is_empty() {
@@ -157,6 +175,9 @@ impl DeclaredMediaTypeError {
 pub struct AttachmentDisplayFilename(String);
 
 impl AttachmentDisplayFilename {
+    /// Inclusive encoded-byte bound for one display filename.
+    pub const MAX_BYTES: usize = MAX_ATTACHMENT_DISPLAY_FILENAME_BYTES;
+
     /// Checks one display filename without path or Unicode normalization.
     pub fn try_new(value: String) -> Result<Self, AttachmentDisplayFilenameError> {
         let failure = if value.is_empty() {
@@ -271,6 +292,8 @@ pub struct UserContent {
 }
 
 impl UserContent {
+    /// Maximum number of ordered parts in one accepted input.
+    pub const MAX_PARTS: usize = MAX_USER_CONTENT_PARTS;
     /// Inclusive aggregate UTF-8 byte bound across all text parts.
     pub const MAX_TEXT_BYTES: usize = MAX_USER_CONTENT_TEXT_BYTES;
 
@@ -397,6 +420,26 @@ mod tests {
             null_error.into_parts(),
             (with_null, NonEmptyUnicodeTextFailure::ContainsNull)
         );
+    }
+
+    #[test]
+    fn user_text_debug_is_redacted() {
+        let private_text = "private user text";
+        let text = NonEmptyUnicodeText::try_new(String::from(private_text))
+            .expect("the fixture text is valid");
+
+        assert!(!format!("{text:?}").contains(private_text));
+    }
+
+    #[test]
+    fn rejected_user_text_debug_is_redacted() {
+        let rejected = "private rejected text\0";
+        let error = NonEmptyUnicodeText::try_new(String::from(rejected))
+            .expect_err("the fixture text contains U+0000");
+        let debug = format!("{error:?}");
+
+        assert!(!debug.contains(rejected));
+        assert!(debug.contains("ContainsNull"));
     }
 
     /// INV-005 / INV-012: content preserves exact scalar spellings.
