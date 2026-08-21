@@ -18,7 +18,10 @@ use signalbox_domain::{
 };
 use sqlx::{PgPool, Row};
 
-use crate::{commit_failure_is_ambiguous, mapping::session_id_to_uuid};
+use crate::{
+    commit_failure_is_ambiguous,
+    mapping::{session_id_from_uuid, session_id_to_uuid},
+};
 
 /// Durable effect of one commission request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,6 +42,11 @@ pub enum CommissionDispatchOutcome {
     },
     /// The command identity already names a different commission.
     ConflictingReuse,
+    /// Another live commissioned session already owns this pull request.
+    TargetBusy {
+        /// The live session that prevents a racing dispatch.
+        session: SessionId,
+    },
 }
 
 /// Database or durable-shape failure while committing one commission.
@@ -202,6 +210,23 @@ impl PostgresCommissionedDispatchStore {
                 &content_digest,
             ));
         }
+        let live_target = lock_live_pull_request_target(&mut transaction, prepared.fence()).await?;
+        // The target lock can have waited behind an equal commission. Re-read
+        // command identity before treating that winner as unrelated live work.
+        if let Some(recorded) = load_recorded_commission(&mut transaction, command_id).await? {
+            transaction.rollback().await?;
+            return Ok(replay_or_conflict(
+                &recorded,
+                &template_name,
+                prepared.fence(),
+                &statement,
+                &content_digest,
+            ));
+        }
+        if let Some(session) = live_target {
+            transaction.rollback().await?;
+            return Ok(CommissionDispatchOutcome::TargetBusy { session });
+        }
         let (
             dispatch_id,
             fence,
@@ -293,6 +318,49 @@ impl PostgresCommissionedDispatchStore {
             session,
         })
     }
+}
+
+async fn lock_live_pull_request_target(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    fence: &CommissionedDispatchFence,
+) -> Result<Option<SessionId>, CommissionedDispatchRepositoryError> {
+    let CommissionedDispatchFence::PullRequest {
+        repository,
+        pull_request,
+        ..
+    } = fence
+    else {
+        return Ok(None);
+    };
+    let key = format!(
+        "commissioned-dispatch:{}:{}",
+        repository.as_str(),
+        pull_request.get()
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(key)
+        .execute(&mut **transaction)
+        .await?;
+    let session: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT dispatch.session_id
+           FROM commissioned_dispatch AS dispatch
+          WHERE dispatch.target_kind = 'pull_request'
+            AND dispatch.repository = $1
+            AND dispatch.pull_request_number = $2
+            AND coalesce((
+                SELECT event.event_kind IN ('commissioned', 'resumed', 'superseded')
+                  FROM goal_event AS event
+                 WHERE event.session_id = dispatch.session_id
+                 ORDER BY event.event_ordinal DESC LIMIT 1
+            ), false)
+          ORDER BY dispatch.recorded_at DESC, dispatch.dispatch_id DESC
+          LIMIT 1",
+    )
+    .bind(repository.as_str())
+    .bind(Decimal::from(pull_request.get()))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(session.map(session_id_from_uuid))
 }
 
 /// Borrows the statement the prepared commission attaches.
