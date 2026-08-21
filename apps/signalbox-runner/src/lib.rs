@@ -27,8 +27,8 @@ pub use protocol::{
     RunnerWorkspaceReleaseReady, ServeOutcome, SocketConnectError, connect_verified,
 };
 pub use state::{
-    AcceptedWorkspaceRelease, EnrollmentAuthority, EnrollmentReceipt, RunnerState,
-    RunnerStateError, RunnerStateRoot, StateOperation, StateResource,
+    AcceptedWorkspaceRelease, EnrollmentAuthority, EnrollmentReceipt, LeaseCredentialAuthorization,
+    RunnerState, RunnerStateError, RunnerStateRoot, StateOperation, StateResource,
 };
 pub use workspace::{
     PrepareRepositoryWorkspaceError, PrivateWorkspaceRequest, RepositoryWorkspaceRequest,

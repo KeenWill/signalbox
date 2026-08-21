@@ -16,13 +16,14 @@ use rustix::{
 use serde::{Deserialize, Deserializer, Serialize};
 use signalbox_runner_wire::{
     CanonicalUuid, Digest, Frame, LeaseCorrelation, LeasePhase, LeasePhaseKind, MAX_FRAME_BYTES,
-    Message, OperationCorrelation, OperationFailure, PositiveU64, ProvisionCorrelation,
-    ProvisionPhase, ReconnectInventory, ReleaseCorrelation, ReleasePhase, RetainedResult,
-    WorkspaceOperation, WorkspaceReady, WorkspaceRecorded,
+    Message, OperationCorrelation, OperationFailure, PositiveU64, ProfileName,
+    ProvisionCorrelation, ProvisionPhase, ReconnectInventory, ReleaseCorrelation, ReleasePhase,
+    RetainedResult, WorkspaceOperation, WorkspaceReady, WorkspaceRecorded,
 };
 use uuid::Uuid;
 
 const STATE_DOCUMENT_VERSION: u64 = 1;
+const OPERATION_JOURNAL_VERSION: u64 = 2;
 const ROOT_MODE: u32 = 0o700;
 const STATE_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;
@@ -53,6 +54,39 @@ pub enum EnrollmentAuthority {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedWorkspaceRelease {
     correlation: ReleaseCorrelation,
+}
+
+/// Non-secret credential authorization retained beside one claimed lease.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "selection", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LeaseCredentialAuthorization {
+    /// The daemon offered the lease without a credential grant.
+    Profileless,
+    /// The daemon bound one exact configured profile and positive grant revision.
+    Granted {
+        /// Exact non-secret profile selected by the placement and grant.
+        profile: ProfileName,
+        /// Exact positive grant revision authorizing this physical lease.
+        grant_revision: PositiveU64,
+    },
+}
+
+impl LeaseCredentialAuthorization {
+    /// Borrows the selected profile, or returns `None` for an explicit profileless lease.
+    pub const fn profile(&self) -> Option<&ProfileName> {
+        match self {
+            Self::Profileless => None,
+            Self::Granted { profile, .. } => Some(profile),
+        }
+    }
+
+    /// Returns the selected grant revision, or `None` for a profileless lease.
+    pub const fn grant_revision(&self) -> Option<PositiveU64> {
+        match self {
+            Self::Profileless => None,
+            Self::Granted { grant_revision, .. } => Some(*grant_revision),
+        }
+    }
 }
 
 impl AcceptedWorkspaceRelease {
@@ -195,6 +229,12 @@ struct StateDocument {
 struct OperationJournalDocument {
     version: u64,
     inventory: ReconnectInventory,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    lease_credential: Option<LeaseCredentialAuthorization>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -381,6 +421,7 @@ pub struct RunnerStateRoot {
     canonical_path: PathBuf,
     state: RunnerState,
     inventory: ReconnectInventory,
+    lease_credential: Option<LeaseCredentialAuthorization>,
     ready_workspace: Option<WorkspaceReady>,
 }
 
@@ -520,14 +561,14 @@ impl RunnerStateRoot {
                 });
             }
         };
-        let (inventory, ready_workspace) = match openat(
+        let (inventory, lease_credential, ready_workspace) = match openat(
             &directory,
             OPERATION_JOURNAL_FILE,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         ) {
             Ok(descriptor) => read_operation_journal(File::from(descriptor), effective_user)?,
-            Err(rustix::io::Errno::NOENT) => (ReconnectInventory::default(), None),
+            Err(rustix::io::Errno::NOENT) => (ReconnectInventory::default(), None, None),
             Err(error) => {
                 return Err(RunnerStateError::Io {
                     operation: StateOperation::Open,
@@ -542,6 +583,7 @@ impl RunnerStateRoot {
             canonical_path,
             state,
             inventory,
+            lease_credential,
             ready_workspace,
         })
     }
@@ -554,6 +596,11 @@ impl RunnerStateRoot {
     /// Borrows the exact current in-memory copy of the fsynced operation slots.
     pub const fn reconnect_inventory(&self) -> &ReconnectInventory {
         &self.inventory
+    }
+
+    /// Borrows the exact non-secret credential authorization beside the retained lease.
+    pub const fn retained_lease_credential(&self) -> Option<&LeaseCredentialAuthorization> {
+        self.lease_credential.as_ref()
     }
 
     /// Clones the pinned root descriptor into the managed-workspace store.
@@ -613,6 +660,28 @@ impl RunnerStateRoot {
 
     /// Atomically journals one exact lease phase without opening another slot.
     pub fn record_lease_phase(&mut self, next: LeasePhase) -> Result<(), RunnerStateError> {
+        let credential = self
+            .inventory
+            .lease
+            .is_none()
+            .then_some(LeaseCredentialAuthorization::Profileless);
+        self.record_lease_phase_with_credential(next, credential)
+    }
+
+    /// Atomically journals the first claimed phase with its exact credential authorization.
+    pub(crate) fn record_claimed_lease(
+        &mut self,
+        next: LeasePhase,
+        credential: LeaseCredentialAuthorization,
+    ) -> Result<(), RunnerStateError> {
+        self.record_lease_phase_with_credential(next, Some(credential))
+    }
+
+    fn record_lease_phase_with_credential(
+        &mut self,
+        next: LeasePhase,
+        supplied_credential: Option<LeaseCredentialAuthorization>,
+    ) -> Result<(), RunnerStateError> {
         self.validate_current_lease_correlation(&next.correlation)?;
         if matches!(
             self.inventory
@@ -623,6 +692,28 @@ impl RunnerStateRoot {
         ) {
             return Err(RunnerStateError::InvalidTransition);
         }
+        let next_credential = match (
+            self.inventory.lease.as_ref(),
+            self.lease_credential.as_ref(),
+            supplied_credential,
+        ) {
+            (None, None, Some(credential)) if next.phase == LeasePhaseKind::WaitingDispatch => {
+                credential
+            }
+            (Some(current), Some(credential), None) if current != &next => credential.clone(),
+            (Some(current), Some(_), None) if current == &next => return Ok(()),
+            (Some(current), Some(credential), Some(supplied))
+                if current == &next && credential == &supplied =>
+            {
+                return Ok(());
+            }
+            (Some(current), Some(_), Some(_)) if current == &next => {
+                return Err(RunnerStateError::OperationCorrelationMismatch);
+            }
+            _ => {
+                return Err(RunnerStateError::InvalidTransition);
+            }
+        };
         match self.inventory.lease.as_ref() {
             None if next.phase == LeasePhaseKind::WaitingDispatch => {}
             None => return Err(RunnerStateError::InvalidTransition),
@@ -645,8 +736,14 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.lease = Some(next);
-        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
+        write_operation_journal(
+            &self.directory,
+            &inventory,
+            Some(&next_credential),
+            self.ready_workspace.as_ref(),
+        )?;
         self.inventory = inventory;
+        self.lease_credential = Some(next_credential);
         Ok(())
     }
 
@@ -674,7 +771,12 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.result = Some(result);
-        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
+        write_operation_journal(
+            &self.directory,
+            &inventory,
+            self.lease_credential.as_ref(),
+            self.ready_workspace.as_ref(),
+        )?;
         self.inventory = inventory;
         Ok(())
     }
@@ -700,8 +802,14 @@ impl RunnerStateRoot {
         let mut inventory = self.inventory.clone();
         inventory.lease = None;
         inventory.result = None;
-        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
+        write_operation_journal(
+            &self.directory,
+            &inventory,
+            None,
+            self.ready_workspace.as_ref(),
+        )?;
         self.inventory = inventory;
+        self.lease_credential = None;
         Ok(())
     }
 
@@ -730,8 +838,14 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.lease = None;
-        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
+        write_operation_journal(
+            &self.directory,
+            &inventory,
+            None,
+            self.ready_workspace.as_ref(),
+        )?;
         self.inventory = inventory;
+        self.lease_credential = None;
         Ok(())
     }
 
@@ -754,7 +868,12 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.operation_failure = Some(failure);
-        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
+        write_operation_journal(
+            &self.directory,
+            &inventory,
+            self.lease_credential.as_ref(),
+            self.ready_workspace.as_ref(),
+        )?;
         self.inventory = inventory;
         Ok(())
     }
@@ -774,7 +893,12 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.operation_failure = None;
-        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
+        write_operation_journal(
+            &self.directory,
+            &inventory,
+            self.lease_credential.as_ref(),
+            self.ready_workspace.as_ref(),
+        )?;
         self.inventory = inventory;
         Ok(())
     }
@@ -817,7 +941,12 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.workspace_operation = Some(next_operation);
-        write_operation_journal(&self.directory, &inventory, Some(&ready))?;
+        write_operation_journal(
+            &self.directory,
+            &inventory,
+            self.lease_credential.as_ref(),
+            Some(&ready),
+        )?;
         self.inventory = inventory;
         self.ready_workspace = Some(ready);
         Ok(())
@@ -848,7 +977,12 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.workspace_operation = None;
-        write_operation_journal(&self.directory, &inventory, None)?;
+        write_operation_journal(
+            &self.directory,
+            &inventory,
+            self.lease_credential.as_ref(),
+            None,
+        )?;
         self.inventory = inventory;
         self.ready_workspace = None;
         Ok(())
@@ -883,7 +1017,12 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.workspace_operation = None;
-        write_operation_journal(&self.directory, &inventory, None)?;
+        write_operation_journal(
+            &self.directory,
+            &inventory,
+            self.lease_credential.as_ref(),
+            None,
+        )?;
         self.inventory = inventory;
         self.ready_workspace = None;
         Ok(())
@@ -921,7 +1060,12 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.workspace_operation = Some(next);
-        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
+        write_operation_journal(
+            &self.directory,
+            &inventory,
+            self.lease_credential.as_ref(),
+            self.ready_workspace.as_ref(),
+        )?;
         self.inventory = inventory;
         Ok(())
     }
@@ -955,7 +1099,12 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.workspace_operation = None;
-        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
+        write_operation_journal(
+            &self.directory,
+            &inventory,
+            self.lease_credential.as_ref(),
+            self.ready_workspace.as_ref(),
+        )?;
         self.inventory = inventory;
         Ok(())
     }
@@ -980,7 +1129,12 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.workspace_operation = None;
-        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
+        write_operation_journal(
+            &self.directory,
+            &inventory,
+            self.lease_credential.as_ref(),
+            self.ready_workspace.as_ref(),
+        )?;
         self.inventory = inventory;
         Ok(())
     }
@@ -1014,7 +1168,12 @@ impl RunnerStateRoot {
         }
         let mut inventory = self.inventory.clone();
         inventory.operation_failure = Some(failure);
-        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
+        write_operation_journal(
+            &self.directory,
+            &inventory,
+            self.lease_credential.as_ref(),
+            self.ready_workspace.as_ref(),
+        )?;
         self.inventory = inventory;
         Ok(())
     }
@@ -1042,7 +1201,12 @@ impl RunnerStateRoot {
         let mut inventory = self.inventory.clone();
         inventory.workspace_operation = None;
         inventory.operation_failure = None;
-        write_operation_journal(&self.directory, &inventory, self.ready_workspace.as_ref())?;
+        write_operation_journal(
+            &self.directory,
+            &inventory,
+            self.lease_credential.as_ref(),
+            self.ready_workspace.as_ref(),
+        )?;
         self.inventory = inventory;
         Ok(())
     }
@@ -1283,7 +1447,14 @@ fn read_state(mut file: File, effective_user: u32) -> Result<RunnerState, Runner
 fn read_operation_journal(
     mut file: File,
     effective_user: u32,
-) -> Result<(ReconnectInventory, Option<WorkspaceReady>), RunnerStateError> {
+) -> Result<
+    (
+        ReconnectInventory,
+        Option<LeaseCredentialAuthorization>,
+        Option<WorkspaceReady>,
+    ),
+    RunnerStateError,
+> {
     let metadata = file.metadata().map_err(|source| RunnerStateError::Io {
         operation: StateOperation::Inspect,
         resource: StateResource::OperationJournal,
@@ -1312,8 +1483,18 @@ fn read_operation_journal(
     }
     let document: OperationJournalDocument =
         serde_json::from_slice(&content).map_err(|_| RunnerStateError::CorruptOperationJournal)?;
-    if document.version != STATE_DOCUMENT_VERSION
-        || document.inventory.validate().is_err()
+    let lease_credential = match (
+        document.version,
+        document.inventory.lease.is_some(),
+        document.lease_credential,
+    ) {
+        (1, true, None) => Some(LeaseCredentialAuthorization::Profileless),
+        (1, false, None) => None,
+        (OPERATION_JOURNAL_VERSION, true, Some(credential)) => Some(credential),
+        (OPERATION_JOURNAL_VERSION, false, None) => None,
+        _ => return Err(RunnerStateError::CorruptOperationJournal),
+    };
+    if document.inventory.validate().is_err()
         || !operation_journal_has_only_supported_slots(
             &document.inventory,
             document.ready_workspace.as_ref(),
@@ -1321,7 +1502,11 @@ fn read_operation_journal(
     {
         return Err(RunnerStateError::CorruptOperationJournal);
     }
-    Ok((document.inventory, document.ready_workspace))
+    Ok((
+        document.inventory,
+        lease_credential,
+        document.ready_workspace,
+    ))
 }
 
 fn write_state(directory: &File, state: &RunnerState) -> Result<(), RunnerStateError> {
@@ -1388,17 +1573,21 @@ fn write_state(directory: &File, state: &RunnerState) -> Result<(), RunnerStateE
 fn write_operation_journal(
     directory: &File,
     inventory: &ReconnectInventory,
+    lease_credential: Option<&LeaseCredentialAuthorization>,
     ready_workspace: Option<&WorkspaceReady>,
 ) -> Result<(), RunnerStateError> {
     inventory
         .validate()
         .map_err(|_| RunnerStateError::CorruptOperationJournal)?;
-    if !operation_journal_has_only_supported_slots(inventory, ready_workspace) {
+    if inventory.lease.is_some() != lease_credential.is_some()
+        || !operation_journal_has_only_supported_slots(inventory, ready_workspace)
+    {
         return Err(RunnerStateError::CorruptOperationJournal);
     }
     let document = OperationJournalDocument {
-        version: STATE_DOCUMENT_VERSION,
+        version: OPERATION_JOURNAL_VERSION,
         inventory: inventory.clone(),
+        lease_credential: lease_credential.cloned(),
         ready_workspace: ready_workspace.cloned(),
     };
     let mut encoded =
@@ -1571,6 +1760,14 @@ mod tests {
         LeasePhase {
             correlation: lease_correlation(),
             phase,
+        }
+    }
+
+    fn granted_lease_credential() -> LeaseCredentialAuthorization {
+        LeaseCredentialAuthorization::Granted {
+            profile: ProfileName::try_new("github-runner".to_owned())
+                .expect("the fixture profile is valid"),
+            grant_revision: positive(7),
         }
     }
 
@@ -1757,14 +1954,25 @@ mod tests {
         inventory: ReconnectInventory,
         ready_workspace: Option<WorkspaceReady>,
     ) {
+        let lease_credential = inventory
+            .lease
+            .as_ref()
+            .map(|_| LeaseCredentialAuthorization::Profileless);
         let document = OperationJournalDocument {
-            version: STATE_DOCUMENT_VERSION,
+            version: OPERATION_JOURNAL_VERSION,
             inventory,
+            lease_credential,
             ready_workspace,
         };
-        let encoded = serde_json::to_vec(&document).expect("the journal fixture encodes");
-        fs::write(path.join(OPERATION_JOURNAL_FILE), encoded)
-            .expect("the operation journal fixture is replaced");
+        write_operation_document(path, &document);
+    }
+
+    fn write_operation_document(path: &Path, document: &OperationJournalDocument) {
+        let encoded = serde_json::to_vec(document).expect("the journal fixture encodes");
+        let journal = path.join(OPERATION_JOURNAL_FILE);
+        fs::write(&journal, encoded).expect("the operation journal fixture is replaced");
+        fs::set_permissions(&journal, fs::Permissions::from_mode(STATE_MODE))
+            .expect("the operation journal fixture remains owner-private");
     }
 
     fn replace_operation_journal(path: &Path, inventory: ReconnectInventory) {
@@ -1802,6 +2010,20 @@ mod tests {
             reopened.reconnect_inventory(),
             &ReconnectInventory::default()
         );
+        assert_eq!(reopened.retained_lease_credential(), None);
+    }
+
+    #[test]
+    fn lease_credential_authorization_accessors_preserve_the_closed_selection() {
+        let profileless = LeaseCredentialAuthorization::Profileless;
+        let granted = granted_lease_credential();
+        let expected_profile =
+            ProfileName::try_new("github-runner".to_owned()).expect("the fixture profile is valid");
+
+        assert_eq!(profileless.profile(), None);
+        assert_eq!(profileless.grant_revision(), None);
+        assert_eq!(granted.profile(), Some(&expected_profile));
+        assert_eq!(granted.grant_revision(), Some(positive(7)));
     }
 
     /// INV-011 / INV-024: a claim acknowledgement is durable before the runner
@@ -1812,7 +2034,8 @@ mod tests {
         let path = root_path(&parent);
         let mut root = enrolled_root(&parent);
         let waiting = lease_phase(LeasePhaseKind::WaitingDispatch);
-        root.record_lease_phase(waiting.clone())
+        let credential = granted_lease_credential();
+        root.record_claimed_lease(waiting.clone(), credential.clone())
             .expect("the waiting-dispatch phase is durable");
         drop(root);
 
@@ -1821,6 +2044,111 @@ mod tests {
         assert_eq!(
             reopened.reconnect_inventory(),
             &inventory_with_lease(waiting)
+        );
+        assert_eq!(reopened.retained_lease_credential(), Some(&credential));
+    }
+
+    /// INV-011 / INV-024: version-one retained leases were necessarily
+    /// profileless and upgrade to an explicit version-two authorization.
+    #[test]
+    fn inv011_inv024_legacy_profileless_lease_upgrades_without_guessing_a_profile() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let root = enrolled_root(&parent);
+        let waiting = lease_phase(LeasePhaseKind::WaitingDispatch);
+        drop(root);
+        let legacy = OperationJournalDocument {
+            version: 1,
+            inventory: inventory_with_lease(waiting),
+            lease_credential: None,
+            ready_workspace: None,
+        };
+        write_operation_document(&path, &legacy);
+
+        let mut reopened =
+            RunnerStateRoot::open(&path).expect("the legacy profileless operation journal reopens");
+        let received = lease_phase(LeasePhaseKind::DispatchReceived);
+        reopened
+            .record_lease_phase(received.clone())
+            .expect("the next phase rewrites the explicit authorization");
+        drop(reopened);
+        let encoded = fs::read(path.join(OPERATION_JOURNAL_FILE))
+            .expect("the upgraded operation journal is readable");
+        let upgraded: OperationJournalDocument =
+            serde_json::from_slice(&encoded).expect("the upgraded journal decodes");
+
+        assert_eq!(upgraded.version, OPERATION_JOURNAL_VERSION);
+        assert_eq!(upgraded.inventory, inventory_with_lease(received));
+        assert_eq!(
+            upgraded.lease_credential,
+            Some(LeaseCredentialAuthorization::Profileless)
+        );
+    }
+
+    #[test]
+    fn version_two_lease_without_credential_authorization_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let root = enrolled_root(&parent);
+        drop(root);
+        let corrupt = OperationJournalDocument {
+            version: OPERATION_JOURNAL_VERSION,
+            inventory: inventory_with_lease(lease_phase(LeasePhaseKind::WaitingDispatch)),
+            lease_credential: None,
+            ready_workspace: None,
+        };
+        write_operation_document(&path, &corrupt);
+
+        let error = RunnerStateRoot::open(&path)
+            .expect_err("a version-two retained lease must name its credential authorization");
+
+        assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
+    }
+
+    #[test]
+    fn credential_authorization_without_a_retained_lease_fails_closed() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let path = root_path(&parent);
+        let root = enrolled_root(&parent);
+        drop(root);
+        let corrupt = OperationJournalDocument {
+            version: OPERATION_JOURNAL_VERSION,
+            inventory: ReconnectInventory::default(),
+            lease_credential: Some(granted_lease_credential()),
+            ready_workspace: None,
+        };
+        write_operation_document(&path, &corrupt);
+
+        let error = RunnerStateRoot::open(&path)
+            .expect_err("credential authorization cannot outlive its retained lease");
+
+        assert!(matches!(error, RunnerStateError::CorruptOperationJournal));
+    }
+
+    #[test]
+    fn equal_claim_replay_rejects_a_different_credential_authorization() {
+        let parent = TempDir::new().expect("a temporary parent is available");
+        let mut root = enrolled_root(&parent);
+        let waiting = lease_phase(LeasePhaseKind::WaitingDispatch);
+        root.record_claimed_lease(waiting.clone(), granted_lease_credential())
+            .expect("the granted authorization is durable");
+        let conflicting = LeaseCredentialAuthorization::Granted {
+            profile: ProfileName::try_new("github-runner".to_owned())
+                .expect("the fixture profile is valid"),
+            grant_revision: positive(8),
+        };
+
+        let error = root
+            .record_claimed_lease(waiting, conflicting)
+            .expect_err("equal lease replay cannot replace its credential grant");
+
+        assert!(matches!(
+            error,
+            RunnerStateError::OperationCorrelationMismatch
+        ));
+        assert_eq!(
+            root.retained_lease_credential(),
+            Some(&granted_lease_credential())
         );
     }
 
@@ -1868,6 +2196,7 @@ mod tests {
             reopened.reconnect_inventory(),
             &ReconnectInventory::default()
         );
+        assert_eq!(reopened.retained_lease_credential(), None);
     }
 
     /// INV-011 / INV-024: stale classification cannot clear a lease after its
@@ -2098,8 +2427,8 @@ mod tests {
         assert_eq!(root.reconnect_inventory().result, None);
     }
 
-    /// INV-011 / INV-024: daemon recording frees the result and its lease in
-    /// one durable journal replacement.
+    /// INV-011 / INV-024: daemon recording frees the result, credential
+    /// authorization, and lease in one durable journal replacement.
     #[test]
     fn inv011_inv024_result_acknowledgement_clears_both_slots_across_reopen() {
         let parent = TempDir::new().expect("a temporary parent is available");
@@ -2118,6 +2447,7 @@ mod tests {
             reopened.reconnect_inventory(),
             &ReconnectInventory::default()
         );
+        assert_eq!(reopened.retained_lease_credential(), None);
     }
 
     #[test]
