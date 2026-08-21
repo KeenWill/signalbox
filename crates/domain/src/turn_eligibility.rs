@@ -6714,26 +6714,8 @@ fn reconstitute_inner(
                     }
                     AutomaticReconciliationAuthority::AutomaticRecovery { .. } => None,
                 };
-                let attempt_end_matches = match reconciling_attempt_end.end() {
-                    AttemptEnd::WithoutStop {
-                        disposition:
-                            UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost,
-                    } => reconciling_attempt_end.interrupt() == interrupt,
-                    AttemptEnd::AfterCancellation {
-                        cause,
-                        disposition:
-                            CancellationStopDisposition::Ambiguous | CancellationStopDisposition::Lost,
-                    } => {
-                        interrupt.is_some_and(|interrupt| *cause == interrupt.proof())
-                            && reconciling_attempt_end.interrupt() == interrupt
-                    }
-                    AttemptEnd::WithoutStop {
-                        disposition: UnstoppedAttemptDisposition::YieldedToDurableWait,
-                    } => interrupt.is_some_and(|interrupt| {
-                        reconciling_attempt_end.interrupt() == Some(interrupt)
-                    }),
-                    _ => false,
-                };
+                let attempt_end_matches =
+                    tool_reconciliation_attempt_end_matches(reconciling_attempt_end, interrupt);
                 let successor_matches = match interrupt {
                     Some(interrupt) => {
                         records_by_turn
@@ -7334,6 +7316,28 @@ fn terminal_record_interrupt(
             terminal_execution: None,
             ..
         } => None,
+    }
+}
+
+fn tool_reconciliation_attempt_end_matches(
+    attempt_end: &TerminalAttemptEndReconstitutionInput,
+    interrupt: Option<AppliedInterruptCommandResult>,
+) -> bool {
+    match attempt_end.end() {
+        AttemptEnd::WithoutStop {
+            disposition: UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost,
+        } => attempt_end.interrupt().is_none(),
+        AttemptEnd::AfterCancellation {
+            cause,
+            disposition: CancellationStopDisposition::Ambiguous | CancellationStopDisposition::Lost,
+        } => {
+            interrupt.is_some_and(|interrupt| *cause == interrupt.proof())
+                && attempt_end.interrupt() == interrupt
+        }
+        AttemptEnd::WithoutStop {
+            disposition: UnstoppedAttemptDisposition::YieldedToDurableWait,
+        } => interrupt.is_some_and(|interrupt| attempt_end.interrupt() == Some(interrupt)),
+        _ => false,
     }
 }
 
@@ -15548,6 +15552,36 @@ mod tests {
                     expected_tool_attempt
                 ))
         );
+    }
+
+    /// S07 / INV-006 / INV-037: a later interrupt supplies terminal authority
+    /// without being rewritten into an already ambiguous attempt end.
+    #[test]
+    fn s07_inv006_inv037_tool_reconciliation_retains_without_stop_attempt_end() {
+        let session = current_session();
+        let predecessor = accepted_origin(1);
+        let successor = accepted_origin(2);
+        let successor_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+            successor.position(),
+            predecessor.turn(),
+        );
+        let interrupt = AppliedInterruptCommandResult::from_correlated_submit(
+            command_id(90),
+            session.id(),
+            predecessor.turn(),
+            successor.accepted_input(),
+            successor.turn(),
+            successor_order,
+        )
+        .expect("the fixture interrupt is exactly correlated");
+        let attempt_end = TerminalAttemptEndReconstitutionInput::without_stop(
+            UnstoppedAttemptDisposition::Ambiguous,
+        );
+
+        assert!(tool_reconciliation_attempt_end_matches(
+            &attempt_end,
+            Some(interrupt),
+        ));
     }
 
     /// S09 / INV-015: a predecessor snapshot that omits its required failed
