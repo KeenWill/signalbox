@@ -83,18 +83,19 @@ use signalbox_process_protocol::{
     DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail, FastMode,
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
     ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
-    MetadataActor, ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
-    ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion, ReasoningLevel,
-    RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
-    ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
-    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
-    ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
-    ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
-    ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
-    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SessionPlacement,
-    SettingOverlay, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
-    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
+    MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MetadataActor, ModelChangeAdjustment, ModelSelection,
+    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot,
+    ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome,
+    ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput,
+    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentDisposition,
+    ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput,
+    ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
+    ReviewOrchestrationState, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
+    ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent,
+    SessionMetadata, SessionPlacement, SettingOverlay, SystemPromptMember, SystemPromptText,
+    ToolDecision, TranscriptEntry, TranscriptTextEntry, TurnState, decode_server_line,
+    encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
@@ -3670,9 +3671,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
 async fn metadata_shape_failure_is_a_malformed_frame() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
-    let required_tags = (0..=256)
-        .map(|index| format!("tag-{index:03}"))
-        .collect::<Vec<_>>();
+    let required_tags = vec!["x".repeat(MAX_SESSION_METADATA_INDEXED_UTF8_BYTES + 1)];
     let frame = format!(
         "{{\"version\":1,\"request_id\":\"21\",\"request\":{{\"type\":\"list_session_metadata\",\"required_tags\":{},\"title_contains\":null,\"include_archived\":false,\"page_size\":\"50\",\"after_session_id\":null}}}}\n",
         serde_json::to_string(&required_tags)?
