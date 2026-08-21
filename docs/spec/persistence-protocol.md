@@ -1,5 +1,9 @@
 # Persistence protocol
 
+The durable automatic model-call reconciliation state, attempt history, and
+final-state authority were verified against this PR
+(`agent/turn-lifecycle-hardening`).
+
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
 
@@ -156,8 +160,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — ninety files, `202607180001` through
-`202608200001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — ninety-two files, `202607180001` through
+`202608210500` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -375,6 +379,18 @@ Representation rules, all enforced in the schema:
   `without_stop` and `after_cancellation`, and model-call state
   `prepared`/`in_flight`/`cancellation_requested`/`terminal` with terminal
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
+- Migration `202608210500` adds one current
+  `automatic_model_call_reconciliation` row per discovered model-call recovery
+  wait and typed attempt-history rows keyed by one-based ordinal. Current state
+  is `scheduled`, `attempting`, `reconciled`, `superseded`, or `exhausted`;
+  attempt outcome is `attempting`, `reconciled`, `superseded`,
+  `infrastructure_failure`, or `integrity_failure`. Checks close the
+  five-attempt budget, require a completion timestamp exactly for terminal
+  attempt outcomes, and require an exhaustion timestamp exactly for exhausted
+  current state. The same migration widens the reconciliation-required
+  final-state assertion only for an exact `reconciled` row binding that terminal
+  turn, session, and ambiguous model call; every frontier, attempt, call, and
+  outbox proof remains required.
 - Migration `202608080100` closes runner placement history over
   `runner_lost_before_pin`, `pre_pin_replaced`, sourced `runner_lost`, and
   `abandoned` records. Each event retains the complete facts required by its
@@ -883,6 +899,17 @@ Locks per transaction, in acquisition order:
   capacity-row or cursor-row lock; or take a capacity-row lock while holding a
   cursor-row lock.
 
+- **Automatic model-call reconciliation**: discovery and abandoned-attempt
+  normalization take no explicit lock. Claiming locks at most 64 due recovery
+  rows `FOR UPDATE SKIP LOCKED`, increments their durable attempt ordinal, sets
+  the exact backoff deadline, and inserts the attempt rows in the same
+  transaction. Applying a claim then takes the session's `session_scheduler` row
+  `FOR UPDATE`, reconstitutes the complete scheduling projection, and uses the
+  existing reconciliation-required write transaction. Operator reconciliation
+  takes the session row before this same scheduler row; it can therefore win
+  before the automatic lock is taken, while the automatic path itself never
+  acquires the session row and introduces no reversed pair.
+
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
   projection plus continuation preparation, and their authoritative rereads):
@@ -1261,6 +1288,18 @@ the active lifecycle terminalizes `reconciliation_required` with an
 equal-content frontier and typed outbox record. The reconciliation marker and
 accepted successor carry the exact interrupt proof. The attempt trigger rejects
 every update to an ended attempt.
+
+The periodic daemon also discovers an unstopped model-call wait without an
+interrupt into the automatic reconciliation tables. A claimed attempt records
+its ordinal before the terminal transaction. Under the scheduler lock, the
+adapter reconstitutes the same exact ambiguous call and ended attempt, derives
+fresh frontier and pending-steering reclassification identities, and persists
+the existing `reconciliation_required` lifecycle and outbox shapes. The
+`reconciled` recovery row is the typed authority admitted by the deferred
+final-state assertion when no applied interrupt exists. It asserts nothing about
+the provider's outcome; the terminal call remains `ambiguous`. A lost daemon
+leaves `attempting` durable, which a later claim pass classifies as
+`infrastructure_failure` after its deadline before retrying.
 
 ## Corruption taxonomy
 

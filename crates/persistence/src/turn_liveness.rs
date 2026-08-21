@@ -234,6 +234,23 @@ impl PostgresTurnLivenessRepository {
         Ok(QuiescentActiveTurnPage::new(fetched))
     }
 
+    /// Reads one bounded page of running turns regardless of their currently
+    /// live operation, for the outer slot-held staleness watchdog.
+    pub async fn slot_held_active_turns(
+        &self,
+        after: Option<SessionId>,
+    ) -> Result<QuiescentActiveTurnPage, TurnLivenessRepositoryError> {
+        let mut connection = self
+            .pool
+            .acquire()
+            .await
+            .map_err(TurnLivenessRepositoryError::Inventory)?;
+        let fetched = read_slot_held_active_turns(&mut connection, after)
+            .await
+            .map_err(TurnLivenessRepositoryError::Inventory)?;
+        Ok(QuiescentActiveTurnPage::new(fetched))
+    }
+
     /// Terminalizes one observed-stale turn as failed under the session locks.
     ///
     /// The observation is revalidated inside the transaction, so a turn that
@@ -475,6 +492,63 @@ const QUIESCENT_ACTIVE_TURNS: &str = "SELECT active.session_id,
       ORDER BY active.session_id
       LIMIT $3";
 
+/// Outer watchdog inventory for a pass that still holds an active running
+/// turn after every component deadline should have ended. Approval and other
+/// durable waits are excluded by the phase predicate; live calls and tools are
+/// intentionally retained because their containing pass has its own tighter
+/// occupancy ceiling.
+const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
+            active.turn_id,
+            active.current_attempt_id,
+            (SELECT newest.event_sequence
+               FROM outbox_event AS newest
+              WHERE newest.session_id = active.session_id
+                AND newest.event_kind NOT IN (
+                    'session_created',
+                    'session_model_settings_changed',
+                    'turn_model_settings_resolved',
+                    'input_accepted',
+                    'goal_turn_retired',
+                    'runner_state_transition'
+                )
+              ORDER BY newest.event_sequence DESC
+              LIMIT 1) AS outbox_frontier
+       FROM turn_lifecycle AS active
+       JOIN turn_attempt AS tenure
+         ON tenure.turn_attempt_id = active.current_attempt_id
+        AND tenure.turn_id = active.turn_id
+        AND tenure.session_id = active.session_id
+      WHERE active.state_kind = 'active'
+        AND NOT active.delegation_runtime_terminal
+        AND active.active_phase_kind = 'running'
+        AND tenure.state_kind IN ('prepared', 'running', 'stop_requested')
+        AND tenure.end_variant IS NULL
+        AND tenure.end_disposition IS NULL
+        AND (
+            tenure.state_kind = 'stop_requested'
+            OR EXISTS (
+                SELECT 1
+                  FROM model_call AS live
+                 WHERE live.session_id = active.session_id
+                   AND live.state_kind <> 'terminal'
+            )
+            OR EXISTS (
+                SELECT 1
+                  FROM context_compaction_model_call AS live
+                 WHERE live.session_id = active.session_id
+                   AND live.state_kind <> 'terminal'
+            )
+            OR EXISTS (
+                SELECT 1
+                  FROM tool_attempt AS live
+                 WHERE live.session_id = active.session_id
+                   AND live.state_kind <> 'terminal'
+            )
+        )
+        AND ($1::uuid IS NULL OR active.session_id > $1)
+      ORDER BY active.session_id
+      LIMIT $2";
+
 /// Reads one page, leaving classification of any failure to the caller.
 ///
 /// The same statement serves the periodic scan and the locked revalidation, so
@@ -502,6 +576,10 @@ async fn read_quiescent_active_turns(
         .bind(QUIESCENT_INVENTORY_PAGE_SIZE)
         .fetch_all(connection)
         .await?;
+    decode_candidate_page(rows)
+}
+
+fn decode_candidate_page(rows: Vec<sqlx::postgres::PgRow>) -> Result<FetchedPage, sqlx::Error> {
     let fetched_rows = rows.len();
     let mut furthest_session = None;
     let mut candidates = Vec::with_capacity(fetched_rows);
@@ -539,6 +617,18 @@ async fn read_quiescent_active_turns(
         rows: fetched_rows,
         furthest_session,
     })
+}
+
+async fn read_slot_held_active_turns(
+    connection: &mut PgConnection,
+    after: Option<SessionId>,
+) -> Result<FetchedPage, sqlx::Error> {
+    let rows = sqlx::query(SLOT_HELD_ACTIVE_TURNS)
+        .bind(after.map(session_id_to_uuid))
+        .bind(QUIESCENT_INVENTORY_PAGE_SIZE)
+        .fetch_all(connection)
+        .await?;
+    decode_candidate_page(rows)
 }
 
 /// Reads one outbox sequence as the token the ledger compares, or nothing if
