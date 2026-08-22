@@ -657,8 +657,13 @@ fn sanitize_read(
                 return Err(FileMediaFailure::ProcessorFailed);
             }
             let continuation = sanitize_continuation(truncated, cursor)?;
-            let body = crate::value::parse_json_without_duplicate_members(&body_json)
-                .map_err(|_| FileMediaFailure::ProcessorFailed)?;
+            let maximum_nodes = nodes.min(ceilings.structured_nodes);
+            let body = crate::value::parse_json_without_duplicate_members_bounded(
+                &body_json,
+                maximum_nodes,
+                ceilings.observed_container_entries,
+            )
+            .map_err(|_| FileMediaFailure::ProcessorFailed)?;
             let canonical_bytes = serde_json::to_string(&body)
                 .map_err(|_| FileMediaFailure::ProcessorFailed)?
                 .len();

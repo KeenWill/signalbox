@@ -61,11 +61,14 @@ An adapter author supplies one provider declaration with exact owned canonical
 types, probe budget, view schemas and resource envelopes, registered sanitized
 reason codes, and immutable reader revision. Probe, inspect, and read methods
 receive only a placement-free `VerifiedBlobSource`, cooperative cancellation,
-and their checked request. Validation requests carry effective lowerable
-source-byte and exact-range ceilings for broker enforcement. They return raw
-processor outputs: the registry reparses and cross-checks every type, evidence
-claim, reason, metadata object, body, JSON tree, continuation, and bound before
-admitting it.
+and their checked request. An adapter may report only adapter execution failure;
+the daemon supervisor originates process availability, timeout, cancellation,
+and framing failures. Validation requests carry effective lowerable source-byte
+and exact-range ceilings for broker enforcement. They return raw processor
+outputs: the registry reparses and cross-checks every type, evidence claim,
+reason, metadata object, body, JSON tree, continuation, and bound before
+admitting it. Structured output node and per-container entry ceilings stop
+duplicate-aware deserialization before structural excess is materialized.
 
 ## Detection and validation
 
@@ -116,10 +119,10 @@ complete `file_read` argument document admits a maximum nesting depth of 256
 JSON object and array containers; the outer argument and options objects count
 toward that depth. Text must be bounded valid UTF-8 without U+0000. Structured
 output must parse as bounded JSON within its declared depth, node, string, and
-byte limits. A cursor is absent on
-complete output and is a bounded control-free opaque value on a truncated
-result. A continuation read sends that cursor instead of initial view options
-through the same checked service and processor request contracts.
+byte limits. A cursor is absent on complete output and is a bounded control-free
+opaque value on a truncated result. A continuation read sends that cursor
+instead of initial view options through the same checked service and processor
+request contracts.
 
 **Committed unimplemented functionality.** No present daemon catalog composes
 these tools because the concrete rendered-frontier attachment resolver is not

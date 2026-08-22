@@ -488,17 +488,56 @@ impl BoundedMetadata {
 pub(crate) fn parse_json_without_duplicate_members(
     value: &str,
 ) -> Result<serde_json::Value, serde_json::Error> {
-    let raw = serde_json::from_str::<Box<RawValue>>(value)?;
-    parse_raw_json(raw.get(), 0)
+    parse_json_without_duplicate_members_bounded(
+        value,
+        crate::MAX_STRUCTURED_NODES,
+        crate::MAX_OBSERVED_CONTAINER_ENTRIES,
+    )
 }
 
-fn parse_raw_json(value: &str, depth: u32) -> Result<serde_json::Value, serde_json::Error> {
+pub(crate) fn parse_json_without_duplicate_members_bounded(
+    value: &str,
+    maximum_nodes: u64,
+    maximum_container_entries: u64,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let raw = serde_json::from_str::<Box<RawValue>>(value)?;
+    let mut budget = JsonParseBudget {
+        remaining_nodes: maximum_nodes,
+        maximum_container_entries,
+    };
+    parse_raw_json(raw.get(), 0, &mut budget)
+}
+
+struct JsonParseBudget {
+    remaining_nodes: u64,
+    maximum_container_entries: u64,
+}
+
+impl JsonParseBudget {
+    fn admit_node(&mut self) -> Result<(), serde_json::Error> {
+        self.remaining_nodes = self.remaining_nodes.checked_sub(1).ok_or_else(|| {
+            serde_json::Error::custom("JSON node count exceeds the effective ceiling")
+        })?;
+        Ok(())
+    }
+
+    fn admits_container_entries(&self, entries: u64) -> bool {
+        entries <= self.maximum_container_entries
+    }
+}
+
+fn parse_raw_json(
+    value: &str,
+    depth: u32,
+    budget: &mut JsonParseBudget,
+) -> Result<serde_json::Value, serde_json::Error> {
+    budget.admit_node()?;
     match value.trim_start().as_bytes().first() {
         Some(b'{') if depth < crate::MAX_STRUCTURED_DEPTH => {
-            deserialize_seed(value, DuplicateAwareObject { depth })
+            deserialize_seed(value, DuplicateAwareObject { depth, budget })
         }
         Some(b'[') if depth < crate::MAX_STRUCTURED_DEPTH => {
-            deserialize_seed(value, DuplicateAwareArray { depth })
+            deserialize_seed(value, DuplicateAwareArray { depth, budget })
         }
         Some(b'{' | b'[') => Err(serde_json::Error::custom(
             "JSON nesting depth exceeds the compiled ceiling",
@@ -517,11 +556,12 @@ where
     Ok(parsed)
 }
 
-struct DuplicateAwareObject {
+struct DuplicateAwareObject<'a> {
     depth: u32,
+    budget: &'a mut JsonParseBudget,
 }
 
-impl<'de> DeserializeSeed<'de> for DuplicateAwareObject {
+impl<'de> DeserializeSeed<'de> for DuplicateAwareObject<'_> {
     type Value = serde_json::Value;
 
     fn deserialize<Deserializer>(
@@ -531,15 +571,19 @@ impl<'de> DeserializeSeed<'de> for DuplicateAwareObject {
     where
         Deserializer: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_map(DuplicateAwareObjectVisitor { depth: self.depth })
+        deserializer.deserialize_map(DuplicateAwareObjectVisitor {
+            depth: self.depth,
+            budget: self.budget,
+        })
     }
 }
 
-struct DuplicateAwareArray {
+struct DuplicateAwareArray<'a> {
     depth: u32,
+    budget: &'a mut JsonParseBudget,
 }
 
-impl<'de> DeserializeSeed<'de> for DuplicateAwareArray {
+impl<'de> DeserializeSeed<'de> for DuplicateAwareArray<'_> {
     type Value = serde_json::Value;
 
     fn deserialize<Deserializer>(
@@ -549,15 +593,19 @@ impl<'de> DeserializeSeed<'de> for DuplicateAwareArray {
     where
         Deserializer: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_seq(DuplicateAwareArrayVisitor { depth: self.depth })
+        deserializer.deserialize_seq(DuplicateAwareArrayVisitor {
+            depth: self.depth,
+            budget: self.budget,
+        })
     }
 }
 
-struct DuplicateAwareObjectVisitor {
+struct DuplicateAwareObjectVisitor<'a> {
     depth: u32,
+    budget: &'a mut JsonParseBudget,
 }
 
-impl<'de> Visitor<'de> for DuplicateAwareObjectVisitor {
+impl<'de> Visitor<'de> for DuplicateAwareObjectVisitor<'_> {
     type Value = serde_json::Value;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -569,23 +617,34 @@ impl<'de> Visitor<'de> for DuplicateAwareObjectVisitor {
         Access: MapAccess<'de>,
     {
         let mut values = std::collections::BTreeMap::new();
+        let mut entries = 0_u64;
         while let Some(name) = object.next_key::<String>()? {
+            entries = entries
+                .checked_add(1)
+                .ok_or_else(|| Access::Error::custom("JSON container entry count overflowed"))?;
+            if !self.budget.admits_container_entries(entries) {
+                return Err(Access::Error::custom(
+                    "JSON container entries exceed the effective ceiling",
+                ));
+            }
             if values.contains_key(&name) {
                 return Err(Access::Error::custom("duplicate JSON object member"));
             }
             let raw = object.next_value::<Box<RawValue>>()?;
-            let value = parse_raw_json(raw.get(), self.depth + 1).map_err(Access::Error::custom)?;
+            let value = parse_raw_json(raw.get(), self.depth + 1, self.budget)
+                .map_err(Access::Error::custom)?;
             values.insert(name, value);
         }
         Ok(serde_json::Value::Object(values.into_iter().collect()))
     }
 }
 
-struct DuplicateAwareArrayVisitor {
+struct DuplicateAwareArrayVisitor<'a> {
     depth: u32,
+    budget: &'a mut JsonParseBudget,
 }
 
-impl<'de> Visitor<'de> for DuplicateAwareArrayVisitor {
+impl<'de> Visitor<'de> for DuplicateAwareArrayVisitor<'_> {
     type Value = serde_json::Value;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -597,8 +656,20 @@ impl<'de> Visitor<'de> for DuplicateAwareArrayVisitor {
         Access: SeqAccess<'de>,
     {
         let mut values = Vec::new();
+        let mut entries = 0_u64;
         while let Some(raw) = sequence.next_element::<Box<RawValue>>()? {
-            values.push(parse_raw_json(raw.get(), self.depth + 1).map_err(Access::Error::custom)?);
+            entries = entries
+                .checked_add(1)
+                .ok_or_else(|| Access::Error::custom("JSON container entry count overflowed"))?;
+            if !self.budget.admits_container_entries(entries) {
+                return Err(Access::Error::custom(
+                    "JSON container entries exceed the effective ceiling",
+                ));
+            }
+            values.push(
+                parse_raw_json(raw.get(), self.depth + 1, self.budget)
+                    .map_err(Access::Error::custom)?,
+            );
         }
         Ok(serde_json::Value::Array(values))
     }
@@ -706,6 +777,28 @@ mod tests {
     fn nested_metadata(depth: u32) -> String {
         let depth = usize::try_from(depth).expect("compiled depth ceiling fits usize");
         format!("{{\"value\":{}0{}}}", "[".repeat(depth), "]".repeat(depth))
+    }
+
+    fn flat_array(entries: usize) -> String {
+        format!("[{}]", vec!["0"; entries].join(","))
+    }
+
+    #[test]
+    fn bounded_parser_rejects_nodes_during_deserialization() {
+        let input = flat_array(2);
+
+        let outcome = parse_json_without_duplicate_members_bounded(&input, 2, 2);
+
+        assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn bounded_parser_rejects_container_entries_during_deserialization() {
+        let input = flat_array(2);
+
+        let outcome = parse_json_without_duplicate_members_bounded(&input, 3, 1);
+
+        assert!(outcome.is_err());
     }
 
     #[test]

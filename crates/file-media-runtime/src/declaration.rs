@@ -2,9 +2,9 @@ use std::{error::Error, fmt, future::Future, pin::Pin};
 
 use crate::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileReaderName,
-    FileReaderProviderName, FileReaderRevision, FileUse, ProcessorFailure, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode,
-    ValidatedFile, VerifiedBlobSource,
+    FileReaderProviderName, FileReaderRevision, FileUse, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode, ValidatedFile,
+    VerifiedBlobSource,
 };
 
 // numeric-bound: ceiling - bounds retained model-facing view-description memory
@@ -403,9 +403,24 @@ pub struct FileMediaProviderReadRequest {
     pub input: crate::FileReadInput,
 }
 
+/// Adapter-owned execution failure inside an isolated worker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileMediaProviderFailure {
+    /// The adapter could not complete its bounded format operation.
+    Failed,
+}
+
+impl fmt::Display for FileMediaProviderFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("file media adapter failed")
+    }
+}
+
+impl Error for FileMediaProviderFailure {}
+
 /// Boxed adapter future used by isolated worker-side provider implementations.
 pub type FileMediaProviderFuture<'a, Output> =
-    Pin<Box<dyn Future<Output = Result<Output, ProcessorFailure>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<Output, FileMediaProviderFailure>> + Send + 'a>>;
 
 /// Worker-side format adapter contract.
 ///
