@@ -1153,7 +1153,7 @@ describe('BoundedSessionHistory', () => {
 
     await expect(
       source.readItemDetail(sessionId, detailAddress, { maxItems: 1, maxBytes: 1024 }),
-    ).rejects.toThrow('continuation contradicts its body excerpt')
+    ).rejects.toThrow('continuation must be the excerpt body continuation')
   })
 
   it('rejects more-at continuations from exact item detail reads', async () => {
