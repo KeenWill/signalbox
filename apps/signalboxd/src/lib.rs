@@ -80,16 +80,16 @@ pub use blob_storage_runtime::{BlobStoreRegistry, BlobStoreRegistryError};
 pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, ConvergenceSweepConfiguration,
     DaemonToolConfiguration, DerivedModelCallCost, FileCredentialAccess, HubModelConfiguration,
-    HubModelConfigurationError, MAX_CONVERGENCE_SWEEP_COOL_OFF, MAX_CONVERGENCE_SWEEP_INTERVAL,
-    ModelAdapter, ModelBillingRates, NumericBoundsConfiguration, OPENAI_CREDENTIAL_REFERENCE,
-    RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
+    HubModelConfigurationError, ModelAdapter, ModelBillingRates, NumericBoundsConfiguration,
+    OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration, WatchedRepositoryConfiguration,
 };
 pub use context_guard::{
     ContextGuardedTurnPass, ContextGuardedTurnPassError, ReportedUsageCompaction,
     ReportedUsageCompactionError,
 };
 pub use convergence_sweep_runtime::{
-    ConvergenceSweepRuntime, ConvergenceSweepRuntimeConstructionError,
+    ConvergenceSweepNumericBounds, ConvergenceSweepRuntime,
+    ConvergenceSweepRuntimeConstructionError,
 };
 pub use conversation_introspection::{
     ConversationIntrospectionError, PostgresConversationIntrospection,
@@ -104,7 +104,9 @@ pub use daemon_tools::{
     DaemonToolsConstructionError, MappedDaemonCredentialInputs, PinnedWorkspaceFileSystem,
 };
 pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
-pub use goal_mode::{PostgresGoalPassDisposition, PostgresGoalPassDispositionError};
+pub use goal_mode::{
+    GoalModeNumericBounds, PostgresGoalPassDisposition, PostgresGoalPassDispositionError,
+};
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError};
 pub use repo_watch_runtime::{
@@ -184,7 +186,7 @@ pub use telemetry::{
     TelemetryConfiguration, TelemetryConfigurationError, TelemetryConfigurationFailure,
     TelemetryExportFilter, TelemetryExportLayer, TelemetryMetrics,
 };
-pub use turn_liveness_runtime::TurnLivenessRuntime;
+pub use turn_liveness_runtime::{TurnLivenessNumericBounds, TurnLivenessRuntime};
 
 /// Per-activation model execution constructed by the hub composition root.
 pub trait ActivatedTurnExecution {
@@ -792,12 +794,39 @@ pub struct ActivatedTurnPass<Generator, Transaction, Execution> {
     reported_usage_compaction: Option<crate::context_guard::ReportedUsageCompaction>,
 }
 
+/// Deployment policy for detached recovery after scheduler-pass expiry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExpiredPassRecoveryPolicy {
+    attempts: Option<u32>,
+    attempt_bound: Option<std::time::Duration>,
+    lock_retry_delay: Option<std::time::Duration>,
+    conservative_retry_delay: Option<std::time::Duration>,
+}
+
+impl ExpiredPassRecoveryPolicy {
+    /// Binds every recovery limit to the validated daemon configuration.
+    pub const fn new(
+        attempts: Option<u32>,
+        attempt_bound: Option<std::time::Duration>,
+        lock_retry_delay: Option<std::time::Duration>,
+        conservative_retry_delay: Option<std::time::Duration>,
+    ) -> Self {
+        Self {
+            attempts,
+            attempt_bound,
+            lock_retry_delay,
+            conservative_retry_delay,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SchedulerPassOccupancyRecovery {
     pool: sqlx::PgPool,
     eligibility_nudge: signalbox_application::InProcessEligibilityNudge,
     execution_expiry: Option<std::sync::Arc<dyn SchedulerPassExpiryHandler>>,
     expected_turns: std::sync::Arc<std::sync::Mutex<HashMap<SessionId, TurnId>>>,
+    policy: ExpiredPassRecoveryPolicy,
 }
 
 impl SchedulerPassOccupancyRecovery {
@@ -875,6 +904,7 @@ impl<Generator, Transaction, Execution> ActivatedTurnPass<Generator, Transaction
         mut self,
         pool: sqlx::PgPool,
         eligibility_nudge: signalbox_application::InProcessEligibilityNudge,
+        policy: ExpiredPassRecoveryPolicy,
     ) -> Self
     where
         Execution: ActivatedTurnExecution,
@@ -884,6 +914,7 @@ impl<Generator, Transaction, Execution> ActivatedTurnPass<Generator, Transaction
             eligibility_nudge,
             execution_expiry: self.execution.occupancy_expiry_handler(),
             expected_turns: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            policy,
         });
         self
     }
@@ -1008,44 +1039,15 @@ where
     }
 }
 
-/// Attempts spent on daemon-owned recovery for one expired scheduler pass.
-// numeric-bound: ceiling - bounds detached recovery work for one expired pass
-const EXPIRED_PASS_RECOVERY_ATTEMPTS: u32 = 4;
-/// Wall-clock bound for each detached database operation.
-///
-/// Persistence may spend 250 ms acquiring a connection, 250 ms taking the
-/// session scheduler row, and one second on later write locks before it can
-/// return a typed nonambiguous refusal. Three seconds leaves those internal
-/// budgets room to classify and still bounds a commit whose outcome cannot be
-/// observed promptly.
-// numeric-bound: ceiling - prevents one database operation from wedging recovery
-const EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND: std::time::Duration = std::time::Duration::from_secs(3);
-/// Delay before retrying an expired-pass lock refusal.
-///
-/// Occupancy cancellation releases the execution future immediately, but a
-/// contended outbox commit can hold its rows for tens of seconds. Six seconds
-/// spaces the four attempts across that observed handoff tail without delaying
-/// an uncontended first attempt or extending the work beyond a small fraction
-/// of the outer watchdog interval.
-// numeric-bound: interval - allows the canceled pass to release its database resources
-const EXPIRED_PASS_RECOVERY_LOCK_RETRY_DELAY: std::time::Duration =
-    std::time::Duration::from_secs(6);
-/// Delay before retrying an ambiguous or non-infrastructure recovery failure.
-// numeric-bound: interval - avoids rapid replay when failure safety is not proven
-const EXPIRED_PASS_RECOVERY_CONSERVATIVE_RETRY_DELAY: std::time::Duration =
-    std::time::Duration::from_secs(120);
-
 async fn recover_expired_scheduler_pass(
     recovery: SchedulerPassOccupancyRecovery,
     session: SessionId,
     expected_turn: TurnId,
 ) {
-    // The first attempt is immediate. A database outage spends three bounded
-    // retries while the independent liveness scan remains the durable
-    // backstop for the still-active turn.
+    let policy = recovery.policy;
     let repository = PostgresTurnLivenessRepository::new(recovery.pool.clone());
-    let candidate = match timeout(
-        EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND,
+    let candidate = match optional_timeout(
+        policy.attempt_bound,
         repository.observed_slot_held_turn(session),
     )
     .await
@@ -1071,21 +1073,22 @@ async fn recover_expired_scheduler_pass(
                 cause_code = "scheduler_pass_occupancy_observation_timed_out",
                 session_id = %session.as_uuid(),
                 turn_id = %expected_turn.as_uuid(),
-                attempt_bound_seconds = EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND.as_secs(),
+                attempt_bound_seconds = ?policy.attempt_bound.map(|bound| bound.as_secs()),
                 "scheduler pass expiry observation exceeded its bound; the turn-liveness watchdog remains responsible"
             );
             recovery.nudge(session);
             return;
         }
     };
-    for attempt in 1_u32..=EXPIRED_PASS_RECOVERY_ATTEMPTS {
+    let mut attempt = 1_u32;
+    while policy.attempts.is_none_or(|limit| attempt <= limit) {
         let mut ids = UuidV7StartupScanIdGenerator;
         let identities = signalbox_domain::AcceptedInputTurnFailureIdentities::new(
             SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
             ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
         );
-        match timeout(
-            EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND,
+        match optional_timeout(
+            policy.attempt_bound,
             repository.recover_observed_slot_held_turn(candidate, identities, &mut ids),
         )
         .await
@@ -1117,7 +1120,13 @@ async fn recover_expired_scheduler_pass(
                 if matches!(
                     &error,
                     TurnLivenessRepositoryError::TerminalizationLockUnavailable(_)
-                ) && expired_pass_lock_owner_is_live(&repository, session, expected_turn).await
+                ) && expired_pass_lock_owner_is_live(
+                    &repository,
+                    session,
+                    expected_turn,
+                    policy.attempt_bound,
+                )
+                .await
                 {
                     recovery.nudge(session);
                     tracing::info!(
@@ -1130,8 +1139,8 @@ async fn recover_expired_scheduler_pass(
                     return;
                 }
                 report_scheduler_pass_recovery_failure(session, expected_turn, attempt, &error);
-                if attempt < EXPIRED_PASS_RECOVERY_ATTEMPTS {
-                    sleep(expired_pass_recovery_retry_delay(&error)).await;
+                if policy.attempts.is_none_or(|limit| attempt < limit) {
+                    sleep_for_policy(expired_pass_recovery_retry_delay(policy, &error)).await;
                 }
             }
             Err(_) => {
@@ -1141,20 +1150,21 @@ async fn recover_expired_scheduler_pass(
                     session_id = %session.as_uuid(),
                     turn_id = %expected_turn.as_uuid(),
                     attempt,
-                    attempt_bound_seconds = EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND.as_secs(),
+                    attempt_bound_seconds = ?policy.attempt_bound.map(|bound| bound.as_secs()),
                     "scheduler pass expiry recovery attempt exceeded its bound"
                 );
-                if attempt < EXPIRED_PASS_RECOVERY_ATTEMPTS {
-                    sleep(EXPIRED_PASS_RECOVERY_CONSERVATIVE_RETRY_DELAY).await;
+                if policy.attempts.is_none_or(|limit| attempt < limit) {
+                    sleep_for_policy(policy.conservative_retry_delay).await;
                 }
             }
         }
+        attempt = attempt.saturating_add(1);
     }
     tracing::error!(
         cause_code = "scheduler_pass_occupancy_recovery_exhausted",
         session_id = %session.as_uuid(),
         turn_id = %expected_turn.as_uuid(),
-        attempts = EXPIRED_PASS_RECOVERY_ATTEMPTS,
+        attempts = ?policy.attempts,
         "scheduler pass expiry recovery exhausted; the turn-liveness watchdog remains responsible"
     );
     recovery.nudge(session);
@@ -1164,12 +1174,10 @@ async fn expired_pass_lock_owner_is_live(
     repository: &PostgresTurnLivenessRepository,
     session: SessionId,
     expected_turn: TurnId,
+    attempt_bound: Option<std::time::Duration>,
 ) -> bool {
-    let observation = timeout(
-        EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND,
-        repository.observed_slot_held_turn(session),
-    )
-    .await;
+    let observation =
+        optional_timeout(attempt_bound, repository.observed_slot_held_turn(session)).await;
     match observation {
         Ok(Ok(candidate)) => matches_exact_slot_held_turn(candidate, expected_turn),
         Ok(Err(_)) | Err(_) => false,
@@ -1183,16 +1191,35 @@ fn matches_exact_slot_held_turn(
     matches!(candidate, Some(candidate) if candidate.turn() == expected_turn)
 }
 
-fn expired_pass_recovery_retry_delay(error: &TurnLivenessRepositoryError) -> std::time::Duration {
+fn expired_pass_recovery_retry_delay(
+    policy: ExpiredPassRecoveryPolicy,
+    error: &TurnLivenessRepositoryError,
+) -> Option<std::time::Duration> {
     match error {
-        TurnLivenessRepositoryError::TerminalizationLockUnavailable(_) => {
-            EXPIRED_PASS_RECOVERY_LOCK_RETRY_DELAY
-        }
+        TurnLivenessRepositoryError::TerminalizationLockUnavailable(_) => policy.lock_retry_delay,
         TurnLivenessRepositoryError::Inventory(_)
         | TurnLivenessRepositoryError::TerminalizationDatabase { .. }
-        | TurnLivenessRepositoryError::Terminalization(_) => {
-            EXPIRED_PASS_RECOVERY_CONSERVATIVE_RETRY_DELAY
-        }
+        | TurnLivenessRepositoryError::Terminalization(_) => policy.conservative_retry_delay,
+    }
+}
+
+async fn optional_timeout<F>(
+    bound: Option<std::time::Duration>,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: Future,
+{
+    match bound {
+        Some(bound) => timeout(bound, future).await,
+        None => Ok(future.await),
+    }
+}
+
+async fn sleep_for_policy(delay: Option<std::time::Duration>) {
+    match delay {
+        Some(delay) => sleep(delay).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -2374,8 +2401,7 @@ mod tests {
 
     use super::{
         APPROVAL_JUDGE_SYSTEM_PROMPT, ActivatedTurnExecution, ActivatedTurnPass,
-        ActivatedTurnPassError, ApprovalJudgeModelError, EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND,
-        EXPIRED_PASS_RECOVERY_CONSERVATIVE_RETRY_DELAY, EXPIRED_PASS_RECOVERY_LOCK_RETRY_DELAY,
+        ActivatedTurnPassError, ApprovalJudgeModelError, ExpiredPassRecoveryPolicy,
         FailedApprovalJudgeDisposition, FatalExecutionGuardState, FatalExecutionOccupancyExpiry,
         FatalExecutionSignal, FatalExecutionSupervisor, JudgeRequestFields,
         MAX_QUOTED_CONTEXT_BYTES, SchedulerPassOccupancyRecovery, SessionAuthorityContext,
@@ -2386,12 +2412,30 @@ mod tests {
         supervise_execution_for_session,
     };
 
+    fn example_expired_pass_policy() -> ExpiredPassRecoveryPolicy {
+        let configured = crate::configuration::checked_in_example_configuration()
+            .expect("checked-in example parses");
+        let bounds = configured.numeric_bounds();
+        ExpiredPassRecoveryPolicy::new(
+            bounds
+                .integer("expired_pass_recovery_attempts")
+                .flatten()
+                .and_then(|value| u32::try_from(value).ok()),
+            bounds
+                .duration("expired_pass_recovery_attempt_bound")
+                .flatten(),
+            bounds
+                .duration("expired_pass_recovery_lock_retry_delay")
+                .flatten(),
+            bounds
+                .duration("expired_pass_recovery_conservative_retry_delay")
+                .flatten(),
+        )
+    }
+
     #[test]
     fn expired_pass_attempt_budget_outlives_the_persistence_lock_budgets() {
-        assert_eq!(
-            EXPIRED_PASS_RECOVERY_ATTEMPT_BOUND,
-            std::time::Duration::from_secs(3)
-        );
+        assert!(example_expired_pass_policy().attempt_bound.is_some());
     }
 
     #[test]
@@ -2400,8 +2444,8 @@ mod tests {
             TurnLivenessRepositoryError::TerminalizationLockUnavailable(sqlx::Error::PoolTimedOut);
 
         assert_eq!(
-            expired_pass_recovery_retry_delay(&error),
-            EXPIRED_PASS_RECOVERY_LOCK_RETRY_DELAY
+            expired_pass_recovery_retry_delay(example_expired_pass_policy(), &error),
+            example_expired_pass_policy().lock_retry_delay
         );
     }
 
@@ -2413,8 +2457,8 @@ mod tests {
         };
 
         assert_eq!(
-            expired_pass_recovery_retry_delay(&error),
-            EXPIRED_PASS_RECOVERY_CONSERVATIVE_RETRY_DELAY
+            expired_pass_recovery_retry_delay(example_expired_pass_policy(), &error),
+            example_expired_pass_policy().conservative_retry_delay
         );
     }
 
@@ -2426,8 +2470,8 @@ mod tests {
         };
 
         assert_eq!(
-            expired_pass_recovery_retry_delay(&error),
-            EXPIRED_PASS_RECOVERY_CONSERVATIVE_RETRY_DELAY
+            expired_pass_recovery_retry_delay(example_expired_pass_policy(), &error),
+            example_expired_pass_policy().conservative_retry_delay
         );
     }
 
@@ -2795,7 +2839,7 @@ mod tests {
                 observed: Arc::clone(&observed),
             },
         )
-        .with_occupancy_recovery(pool, nudge);
+        .with_occupancy_recovery(pool, nudge, example_expired_pass_policy());
         let recovery = pass
             .occupancy_recovery
             .clone()
@@ -2837,6 +2881,7 @@ mod tests {
             eligibility_nudge: nudge,
             execution_expiry: None,
             expected_turns: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            policy: example_expired_pass_policy(),
         };
 
         recovery.occupancy_expired(session);

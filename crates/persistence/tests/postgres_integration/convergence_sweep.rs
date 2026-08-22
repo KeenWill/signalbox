@@ -301,6 +301,49 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn unbounded_retry_delay_has_no_claimable_deadline() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+
+    let disposition = store
+        .record_failure(
+            Uuid::from_u128(6),
+            &repository,
+            pull_request(),
+            Some(&observation()?),
+            ConvergenceSweepFailureKind::FactsFetch,
+            None,
+        )
+        .await?;
+    let (state_kind, retry_is_infinite): (String, bool) = sqlx::query_as(
+        "SELECT state_kind, retry_not_before = 'infinity'::timestamptz
+           FROM convergence_sweep_target
+          WHERE repository = $1 AND pull_request_number = $2",
+    )
+    .bind(repository.as_str())
+    .bind(rust_decimal::Decimal::from(pull_request().get()))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        disposition,
+        ConvergenceSweepFailureDisposition::RetryScheduled
+    );
+    assert_eq!(state_kind, "retry_wait");
+    assert!(retry_is_infinite);
+    assert!(
+        !store
+            .load_target(&repository, pull_request())
+            .await?
+            .expect("the retrying target is durable")
+            .retry_ready()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let store = PostgresConvergenceSweepStore::new(pool);

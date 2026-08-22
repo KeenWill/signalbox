@@ -47,8 +47,8 @@ use signalbox_persistence::{
 };
 use signalbox_test_bin::test_bin_path;
 use signalboxd::{
-    ActivatedTurnPass, FatalExecutionSupervisor, PostgresGoalPassDisposition,
-    PostgresProviderModelExecution,
+    ActivatedTurnPass, FatalExecutionSupervisor, GoalModeNumericBounds,
+    PostgresGoalPassDisposition, PostgresProviderModelExecution,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -583,7 +583,12 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
     );
     let pass = GoalAwareEligibilityPass::new(
         activated_pass,
-        PostgresGoalPassDisposition::new(pool.clone(), configuration, nudge),
+        PostgresGoalPassDisposition::new(
+            pool.clone(),
+            configuration,
+            nudge,
+            GoalModeNumericBounds::new(None, None, None, None),
+        ),
     );
     let mut scheduler = SchedulerLoop::new(work_source, pass);
     let observation_pool = pool.clone();
