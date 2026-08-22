@@ -18,18 +18,18 @@ use signalbox_domain::{
     ConsumedSteeringReconstitutionInput, ContextCompactionId,
     ContextCompactionModelCallReconstitutionInput, ContextCompactionModelCallState,
     ContextCompactionRange, ContextCompactionReconstitutionInput, ContextCompactionTokenUsage,
-    ContextFrontierId, ContinuationRoundReconstitutionInput, DelegatedTurnSchedulingFact,
-    DelegatedTurnSchedulingState, DelegationContent, DelegationMessageId, DelegationOutcome,
-    DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenanceReconstitutionInput,
-    DelegationWaitMode, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
-    FrozenModelSelection, GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput,
-    GoalTurnSource, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
-    ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-    ModelCallTerminalOutcome, ModelCapabilityCatalog, ModelSelectionOverride,
-    ModelSelectionRequest, NonAcceptedTurnPredecessorReconstitutionInput,
-    NonEmptyUnicodeTextFailure, OriginConfiguration, OriginConfigurationReconstitutionInput,
-    OriginModelSettingsError, PerInputConfigurationChoices,
+    ContextFrontierId, ContextFrontierProjection, ContinuationRoundReconstitutionInput,
+    DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState, DelegationContent,
+    DelegationMessageId, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
+    DelegationProvenanceReconstitutionInput, DelegationWaitMode, DeliveryRequest,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
+    GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput, GoalTurnSource,
+    IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
+    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
+    ModelCapabilityCatalog, ModelSelectionOverride, ModelSelectionRequest,
+    NonAcceptedTurnPredecessorReconstitutionInput, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    OriginConfigurationReconstitutionInput, OriginModelSettingsError, PerInputConfigurationChoices,
     PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
     ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
     RunnerGeneration, RunnerId, SemanticTranscriptEntryId,
@@ -1730,13 +1730,26 @@ async fn prospective_attachment_frontier_exceeds_bound(
         }
     };
     let scheduling = load_scheduling_projection(connection, current).await?;
-    let (base_origins, check_base) =
-        match require_live_execution_for_restart(connection, session).await {
-            Ok(execution) => {
-                let mut distinct = BTreeSet::new();
-                let mut origins = execution
-                    .frontier_entries()
-                    .filter_map(|entry| match entry.payload() {
+    let (base_origins, check_base) = match require_live_execution_for_restart(connection, session)
+        .await
+    {
+        Ok(execution) => {
+            let complete_entries = execution.frontier_entries().cloned().collect::<Vec<_>>();
+            let projection = ContextFrontierProjection::from_complete_entries(&complete_entries)
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent(
+                        "prospective attachment frontier projection",
+                    )
+                })?;
+            let entries_by_reference = complete_entries
+                .iter()
+                .map(|entry| (entry.reference(), entry))
+                .collect::<BTreeMap<_, _>>();
+            let mut distinct = BTreeSet::new();
+            let mut origins = projection
+                .ordered_entries()
+                .filter_map(
+                    |reference| match entries_by_reference[&reference].payload() {
                         InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
                             accepted_input,
                         }
@@ -1758,11 +1771,100 @@ async fn prospective_attachment_frontier_exceeds_bound(
                         | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
                         | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. }
                         | InitialSemanticTranscriptEntryPayload::Imported { .. } => None,
-                    })
-                    .collect::<Vec<_>>();
+                    },
+                )
+                .collect::<Vec<_>>();
+            origins.extend(
+                execution
+                    .active_turn()
+                    .pending_steering()
+                    .iter()
+                    .map(|pending| pending.accepted_input())
+                    .filter(|accepted_input| distinct.insert(*accepted_input)),
+            );
+            (
+                origins,
+                matches!(
+                    result,
+                    SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+                ),
+            )
+        }
+        Err(ModelCallRepositoryError::NoLiveExecution) => {
+            if let Some(active) = scheduling.active_turn_execution() {
+                let mut distinct = BTreeSet::new();
+                let mut origins =
+                    if matches!(
+                        active.phase(),
+                        signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. }
+                    ) {
+                        let snapshot = load_runner_recovery_source_snapshot(
+                            connection,
+                            session,
+                            active.turn(),
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?
+                        .ok_or(SubmitInputCorruption::Inconsistent(
+                            "runner recovery prospective attachment frontier missing",
+                        ))?;
+                        let complete_entries = snapshot
+                            .ordered_entries()
+                            .map(|reference| scheduling.semantic_entry(reference).cloned())
+                            .collect::<Option<Vec<_>>>()
+                            .ok_or(SubmitInputCorruption::Inconsistent(
+                                "runner recovery prospective attachment frontier entry missing",
+                            ))?;
+                        let projection = ContextFrontierProjection::from_complete_entries(
+                            &complete_entries,
+                        )
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "runner recovery prospective attachment frontier projection",
+                            )
+                        })?;
+                        let entries_by_reference = complete_entries
+                            .iter()
+                            .map(|entry| (entry.reference(), entry))
+                            .collect::<BTreeMap<_, _>>();
+                        projection
+                            .ordered_entries()
+                            .filter_map(|reference| {
+                                match entries_by_reference[&reference].payload() {
+                                InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                                    accepted_input,
+                                }
+                                | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                                    accepted_input,
+                                    ..
+                                } => distinct.insert(*accepted_input).then_some(*accepted_input),
+                                InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
+                                | InitialSemanticTranscriptEntryPayload::DelegatedTask { .. }
+                                | InitialSemanticTranscriptEntryPayload::DelegationMessage { .. }
+                                | InitialSemanticTranscriptEntryPayload::DelegationResult { .. }
+                                | InitialSemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+                                | InitialSemanticTranscriptEntryPayload::ContextSummary { .. }
+                                | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
+                                | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+                                | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                                | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                                | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
+                                | InitialSemanticTranscriptEntryPayload::ToolClosed { .. }
+                                | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. }
+                                | InitialSemanticTranscriptEntryPayload::Imported { .. } => None,
+                            }
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        scheduling.active_rendered_frontier_origins().ok_or(
+                            SubmitInputCorruption::Inconsistent(
+                                "active prospective attachment frontier missing",
+                            ),
+                        )?
+                    };
+                distinct.extend(origins.iter().copied());
                 origins.extend(
-                    execution
-                        .active_turn()
+                    active
                         .pending_steering()
                         .iter()
                         .map(|pending| pending.accepted_input())
@@ -1775,15 +1877,17 @@ async fn prospective_attachment_frontier_exceeds_bound(
                         SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
                     ),
                 )
+            } else {
+                (
+                    scheduling
+                        .earliest_queued_rendered_base_origins()
+                        .unwrap_or_default(),
+                    false,
+                )
             }
-            Err(ModelCallRepositoryError::NoLiveExecution) => (
-                scheduling
-                    .earliest_queued_rendered_base_origins()
-                    .unwrap_or_default(),
-                false,
-            ),
-            Err(error) => return Err(error.into()),
-        };
+        }
+        Err(error) => return Err(error.into()),
+    };
     let queued_inputs = scheduling
         .turns()
         .filter(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Queued)
@@ -3257,6 +3361,7 @@ pub(crate) async fn load_scheduling_projection(
                                 "tool recovery wait evidence",
                             ))?;
                         required_model_calls.insert(round_call);
+                        required_frontiers.insert(wait.yielded_frontier().into_uuid());
                         match (end_variant.as_deref(), end_disposition.as_deref()) {
                             (Some("without_stop"), Some("ambiguous")) => {
                                 ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery(

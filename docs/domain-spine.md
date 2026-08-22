@@ -3490,6 +3490,9 @@ impl AcceptedInputSchedulingProjection {
     ) -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn active_turn(&self) -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn active_turn_execution(&self) -> Option<ActivatedAcceptedInputTurn>;
+    pub fn active_rendered_frontier_origins(
+        &self,
+    ) -> Option<Vec<AcceptedInputId>>;
     pub fn apply_interrupt_to_model_call_recovery(
         self,
         interrupt: AppliedInterruptCommandResult,
