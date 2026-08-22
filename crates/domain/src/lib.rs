@@ -389,7 +389,7 @@ pub use user_content::{
     AttachmentDisplayFilename, AttachmentDisplayFilenameError, AttachmentDisplayFilenameFailure,
     AttachmentKind, DeclaredMediaType, DeclaredMediaTypeError, DeclaredMediaTypeFailure,
     NonEmptyUnicodeText, NonEmptyUnicodeTextError, NonEmptyUnicodeTextFailure, UserContent,
-    UserContentError, UserContentPart,
+    UserContentError, UserContentFailure, UserContentPart,
 };
 pub use workspace::{WorkspaceOrigin, WorkspaceRecord, WorkspaceRootPath, WorkspaceRootPathError};
 
