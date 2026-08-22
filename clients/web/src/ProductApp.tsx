@@ -454,7 +454,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </div>
             <div>
               <dt>Cache</dt>
-              <dd>{surface === 'settings' ? 'Local settings' : 'Bounded query'}</dd>
+              <dd>{surface === 'settings' ? 'Local preferences' : 'Bounded query'}</dd>
             </div>
           </dl>
         </aside>

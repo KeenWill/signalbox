@@ -4,6 +4,8 @@ import {
   decodeBrowserPreferences,
   defaultBrowserPreferences,
   loadBrowserPreferences,
+  MAX_KEY_OVERRIDE_KEY_BYTES,
+  MAX_KEY_OVERRIDE_VALUE_BYTES,
   MAX_KEY_OVERRIDES,
   MAX_LOGICAL_POSITION_KEY_BYTES,
   MAX_LOGICAL_POSITION_VALUE_BYTES,
@@ -122,5 +124,21 @@ describe('browser preferences', () => {
     })
 
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(1)
+  })
+
+  it('rejects key-override keys and values above their UTF-8 byte ceilings', () => {
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        keyOverrides: { ['é'.repeat(MAX_KEY_OVERRIDE_KEY_BYTES)]: 'Shift+K' },
+      }),
+    ).toThrow('preferences.keyOverrides keys or values exceed their byte limits')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        keyOverrides: { command: 'é'.repeat(MAX_KEY_OVERRIDE_VALUE_BYTES) },
+      }),
+    ).toThrow('preferences.keyOverrides keys or values exceed their byte limits')
   })
 })
