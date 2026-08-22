@@ -502,7 +502,10 @@ test('the command palette opens keyboard help without closing it', async ({ page
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   await page.getByRole('button', { name: /Open keyboard help/ }).click()
-  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  const help = page.getByRole('dialog', { name: 'Keyboard help' })
+  await expect(help).toBeVisible()
+  await expect(help.getByText('Select first loaded item')).toBeVisible()
+  await expect(help.getByText('Go to Attention')).toBeHidden()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

@@ -37,6 +37,7 @@ export interface ProductSearchRequest {
 }
 
 const MAX_SEARCH_RESPONSE_BYTES = 1_048_576
+const MAX_BOOTSTRAP_RESPONSE_BYTES = 65_536
 const MAX_SEARCH_HIGHLIGHTS_PER_RESULT = 64
 const ERROR_RESPONSE_BYTES = 16_384
 
@@ -134,6 +135,13 @@ export class ProductRequestError extends Error {
   }
 }
 
+export class ProductTransportError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ProductTransportError'
+  }
+}
+
 export class SameOriginProductTransport implements ProductTransport {
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
     const response = await fetch('/api/bootstrap', {
@@ -142,7 +150,7 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    return decodeWebContractBootstrap(await response.json())
+    return decodeWebContractBootstrap(await readBoundedJson(response, MAX_BOOTSTRAP_RESPONSE_BYTES))
   }
 
   async search(request: ProductSearchRequest, signal?: AbortSignal): Promise<WebSearchPage> {
@@ -156,11 +164,17 @@ export class SameOriginProductTransport implements ProductTransport {
       query.set('after_address', request.after.address)
       query.set('after_projection', request.after.projectionId)
     }
-    const response = await fetch(`/api/search?${query}`, {
-      headers: { accept: 'application/json' },
-      credentials: 'same-origin',
-      signal,
-    })
+    let response: Response
+    try {
+      response = await fetch(`/api/search?${query}`, {
+        headers: { accept: 'application/json' },
+        credentials: 'same-origin',
+        signal,
+      })
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') throw error
+      throw new ProductTransportError('The search request could not reach Signalbox.')
+    }
     if (!response.ok) {
       const failure = decodeWebApiErrorResponse(
         await readBoundedJson(response, ERROR_RESPONSE_BYTES),

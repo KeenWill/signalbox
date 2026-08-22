@@ -131,6 +131,20 @@ test('preserves search focus and announces asynchronous results', async ({ page 
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('reports an unreachable search transport separately from contract decoding', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/search?**', (route) => route.abort('connectionrefused'))
+  await page.goto('/search?q=release')
+
+  await expect(page.getByRole('alert')).toContainText(
+    'The search request could not reach Signalbox.',
+  )
+  expect(problems.pageErrors).toEqual([])
+})
+
 test('captures desktop dark, desktop light, and responsive search evidence', async ({
   page,
 }, testInfo) => {

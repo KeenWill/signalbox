@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ProductRequestError, readProductSearchState, SameOriginProductTransport } from './product'
+import {
+  ProductRequestError,
+  ProductTransportError,
+  readProductSearchState,
+  SameOriginProductTransport,
+} from './product'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '1' },
@@ -68,6 +73,22 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('rejects a bootstrap response beyond the fixed JSON byte bound', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(bootstrapFixture), {
+            headers: { 'content-length': '65537' },
+          }),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'response exceeds 65536 bytes',
+    )
+  })
+
   it('reports an unsuccessful HTTP response without decoding its body', async () => {
     vi.stubGlobal(
       'fetch',
@@ -115,6 +136,21 @@ describe('SameOriginProductTransport', () => {
         errorFixture.error.message,
       ),
     )
+  })
+
+  it('distinguishes an unreachable search transport from contract decoding failures', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Promise.reject(new TypeError('Failed to fetch'))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 10,
+        maxSnippetBytes: 512,
+      }),
+    ).rejects.toEqual(new ProductTransportError('The search request could not reach Signalbox.'))
   })
 
   it('rejects an encoded search response beyond its byte bound', async () => {

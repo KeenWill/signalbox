@@ -3,7 +3,12 @@ import { Link } from '@tanstack/react-router'
 import { ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react'
 import type { WebContractBootstrap, WebSearchPage } from './generated/web-contract.mjs'
-import { ProductRequestError, type ProductSearchState, productTransport } from './product'
+import {
+  ProductRequestError,
+  type ProductSearchState,
+  ProductTransportError,
+  productTransport,
+} from './product'
 
 type SearchResult = WebSearchPage['results'][number]
 
@@ -160,7 +165,9 @@ export function SearchSurface({
             <p>
               {results.error instanceof ProductRequestError
                 ? `${results.error.code}: ${results.error.message}`
-                : 'The response did not match the generated web contract.'}
+                : results.error instanceof ProductTransportError
+                  ? results.error.message
+                  : 'The response did not match the generated web contract.'}
             </p>
             <button type="button" onClick={() => void results.refetch()}>
               Retry
