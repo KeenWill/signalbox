@@ -14,6 +14,7 @@ use std::{
     path::PathBuf,
     str::FromStr as _,
     sync::Arc,
+    time::Duration,
 };
 
 use axum::{
@@ -44,7 +45,8 @@ use signalbox_web_contract::{
 use tokio::{
     io::AsyncReadExt as _,
     net::TcpListener,
-    sync::{OwnedSemaphorePermit, Semaphore, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
+    time::{Instant, timeout_at},
 };
 use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
@@ -70,6 +72,7 @@ const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 const MAX_DISPLAY_FILENAME_BYTES: usize = 1024;
 const BLOB_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_CONCURRENT_WEB_BLOB_READS: usize = 4;
+const BLOB_RESPONSE_TIMEOUT_SECONDS: u64 = 120;
 
 #[derive(Clone, Debug)]
 struct WebHttpState {
@@ -722,30 +725,53 @@ fn reader_body(
     length: u64,
     permit: OwnedSemaphorePermit,
 ) -> Body {
-    let source = stream::try_unfold(
-        (reader, length, permit),
-        |(mut reader, remaining, permit)| async move {
-            if remaining == 0 {
-                return Ok(None);
+    reader_body_with_timeout(
+        reader,
+        length,
+        permit,
+        Duration::from_secs(BLOB_RESPONSE_TIMEOUT_SECONDS),
+    )
+}
+
+fn reader_body_with_timeout(
+    mut reader: signalbox_blob_store::BlobReader,
+    length: u64,
+    permit: OwnedSemaphorePermit,
+    timeout: Duration,
+) -> Body {
+    let (sender, receiver) = mpsc::channel(1);
+    tokio::spawn(async move {
+        let _permit = permit;
+        let deadline = Instant::now() + timeout;
+        let produce = async move {
+            let mut remaining = length;
+            while remaining > 0 {
+                let capacity = usize::try_from(remaining.min(BLOB_STREAM_CHUNK_BYTES as u64))
+                    .map_err(|_| io::Error::other("blob response length is invalid"))?;
+                let mut buffer = vec![0_u8; capacity];
+                let read = reader.read(&mut buffer).await?;
+                if read == 0 {
+                    return Err(io::Error::other(
+                        "blob response ended before its declared length",
+                    ));
+                }
+                buffer.truncate(read);
+                remaining -=
+                    u64::try_from(read).map_err(|_| io::Error::other("blob read is invalid"))?;
+                sender
+                    .send(Ok::<Bytes, io::Error>(Bytes::from(buffer)))
+                    .await
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::BrokenPipe, "blob response closed")
+                    })?;
             }
-            let capacity = usize::try_from(remaining.min(BLOB_STREAM_CHUNK_BYTES as u64))
-                .map_err(|_| io::Error::other("blob response length is invalid"))?;
-            let mut buffer = vec![0_u8; capacity];
-            let read = reader.read(&mut buffer).await?;
-            if read == 0 {
-                return Err(io::Error::other(
-                    "blob response ended before its declared length",
-                ));
-            }
-            buffer.truncate(read);
-            let read = u64::try_from(read).map_err(|_| io::Error::other("blob read is invalid"))?;
-            Ok(Some((
-                Bytes::from(buffer),
-                (reader, remaining - read, permit),
-            )))
-        },
-    );
-    Body::from_stream(source)
+            Ok::<(), io::Error>(())
+        };
+        let _ = timeout_at(deadline, produce).await;
+    });
+    Body::from_stream(stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|item| (item, receiver))
+    }))
 }
 
 fn parse_byte_range(value: &HeaderValue, total: u64) -> Result<(u64, u64, bool), ()> {
@@ -1254,8 +1280,8 @@ mod tests {
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, MAX_CONCURRENT_WEB_BLOB_READS, WebHttpConfiguration,
         WebHttpConfigurationError, WebHttpRuntime, content_disposition, deterministic_test_router,
-        if_none_match, ndjson_response, parse_byte_range, production_router, single_range_header,
-        try_acquire_web_blob_read_permit,
+        if_none_match, ndjson_response, parse_byte_range, production_router,
+        reader_body_with_timeout, single_range_header, try_acquire_web_blob_read_permit,
     };
 
     fn loopback_ephemeral() -> SocketAddr {
@@ -1380,6 +1406,31 @@ mod tests {
         assert!(try_acquire_web_blob_read_permit(Arc::clone(&budget)).is_none());
         drop(held);
         assert!(try_acquire_web_blob_read_permit(budget).is_some());
+    }
+
+    #[tokio::test]
+    async fn stalled_blob_response_releases_its_read_permit_at_the_deadline() {
+        let budget = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&budget)
+            .try_acquire_owned()
+            .expect("the fixture acquires the read permit");
+        let reader: signalbox_blob_store::BlobReader = Box::new(tokio::io::repeat(1));
+        let _body = reader_body_with_timeout(
+            reader,
+            u64::try_from(super::BLOB_STREAM_CHUNK_BYTES * 3).expect("the fixture length fits u64"),
+            permit,
+            Duration::from_millis(10),
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while budget.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the stalled response releases its permit within the test bound");
+
+        assert_eq!(budget.available_permits(), 1);
     }
 
     #[test]

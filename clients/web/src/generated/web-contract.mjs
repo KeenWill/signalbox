@@ -548,37 +548,6 @@ function compareUtf8(left, right) {
   return leftBytes.length - rightBytes.length;
 }
 
-function rustFloatSpelling(value) {
-  if (Object.is(value, -0)) return "-0.0";
-  const sign = value < 0 ? "-" : "";
-  const [mantissa, exponentSource] = Math.abs(value).toExponential().split("e");
-  const exponent = Number(exponentSource);
-  const digits = mantissa.replace(".", "");
-  if (exponent < -4 || exponent >= 16) {
-    const fraction = digits.slice(1);
-    return `${sign}${digits[0]}${fraction === "" ? "" : `.${fraction}`}e${exponent >= 0 ? "+" : ""}${exponent}`;
-  }
-  let fixed;
-  if (exponent < 0) {
-    fixed = `0.${"0".repeat(-exponent - 1)}${digits}`;
-  } else if (exponent + 1 < digits.length) {
-    fixed = `${digits.slice(0, exponent + 1)}.${digits.slice(exponent + 1)}`;
-  } else {
-    fixed = `${digits}${"0".repeat(exponent + 1 - digits.length)}.0`;
-  }
-  return sign + fixed;
-}
-
-function assertCanonicalJsonNumber(source) {
-  if (/^-?(?:0|[1-9][0-9]*)$/u.test(source)) {
-    const integer = BigInt(source);
-    if (integer < -9223372036854775808n || integer > 18446744073709551615n) throw new TypeError();
-    return;
-  }
-  const number = Number(source);
-  if (!Number.isFinite(number) || rustFloatSpelling(number) !== source) throw new TypeError();
-}
-
 function parseCanonicalJson(source) {
   let cursor = 0;
   const parseString = () => {
@@ -639,7 +608,6 @@ function parseCanonicalJson(source) {
     }
     const number = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/u.exec(source.slice(cursor))?.[0];
     if (number === undefined) throw new TypeError();
-    assertCanonicalJsonNumber(number);
     cursor += number.length;
   };
   parseValue();
@@ -844,6 +812,12 @@ export function decodeWebBlobDescriptor(value) {
       if ((view.kind === "download") !== (contentRoute.kind === "download")) {
         fail(contentPath, "a route matching the advertised view kind");
       }
+      if (view.byte_length !== value.byte_length) {
+        fail(`blob_descriptor.available_views[${index}].byte_length`, "the descriptor byte length for an original representation");
+      }
+      if (view.kind === "download" && view.media_type !== value.declared_media_type) {
+        fail(`blob_descriptor.available_views[${index}].media_type`, "the descriptor declared media type for the download representation");
+      }
     } else {
       if (contentRoute.kind !== "content/image-png") {
         fail(contentPath, "an image-content route for a derivative view");
@@ -875,6 +849,25 @@ export function decodeWebBlobDescriptor(value) {
         assertUuid(derivation.producer.model_call_id, `${path}.producer.model_call_id`);
       }
     });
+    if (view.kind === "thumbnail" || view.kind === "preview") {
+      const derivation = view.derivations[0];
+      const expectedName = view.kind === "thumbnail" ? "image.thumbnail" : "image.preview";
+      const expectedParameters = view.kind === "thumbnail"
+        ? '{"edge_px":256,"format":"image/png"}'
+        : '{"edge_px":1600,"format":"image/png"}';
+      if (
+        derivation === undefined ||
+        derivation.transformation_name !== expectedName ||
+        derivation.transformation_version !== 1 ||
+        derivation.parameters_json !== expectedParameters ||
+        derivation.producer.class !== "deterministic"
+      ) {
+        fail(
+          `blob_descriptor.available_views[${index}].derivations`,
+          "the exact deterministic image transformation for the advertised view kind",
+        );
+      }
+    }
   });
   const downloadViews = value.available_views.filter((view) => view.kind === "download");
   if (downloadViews.length !== 1) {
