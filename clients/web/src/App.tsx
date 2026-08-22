@@ -106,6 +106,13 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
 
+  useEffect(() => {
+    document.title = `${transport.scenario.title} · Signalbox scenarios`
+    return () => {
+      document.title = 'Signalbox'
+    }
+  }, [transport.scenario.title])
+
   const snapshot = useMemo<DiagnosticSnapshot>(
     () => ({
       scenario: transport.scenario.id,
@@ -181,7 +188,12 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
           <Toolbar context={commandContext} />
         </header>
         <div className="primary-stack">
-          <Transcript key={`timeline-${knownId}`} items={timeline.items} context={commandContext} />
+          <Transcript
+            key={`timeline-${knownId}`}
+            items={timeline.items}
+            context={commandContext}
+            autoFocus
+          />
           {app.layout === 'workbench' && (
             <FleetTable key={`fleet-${knownId}`} rows={fleet.items} totalCount={fleet.totalCount} />
           )}
