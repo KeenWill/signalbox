@@ -79,12 +79,19 @@ impl ImportedRawBlobStorage for ImportedSourceBlobStorage {
         })
     }
 
-    fn read(&self, blobs: Box<[ExpectedBlob]>) -> ImportedRawBlobReadFuture<'_> {
+    fn read(
+        &self,
+        blobs: Box<[ExpectedBlob]>,
+        total_source_bytes: u64,
+    ) -> ImportedRawBlobReadFuture<'_> {
         Box::pin(async move {
             let registry = self
                 .registry
                 .as_deref()
                 .ok_or(ImportedRawBlobStorageError::Unavailable)?;
+            if total_source_bytes > self.maximum_source_bytes {
+                return Err(ImportedRawBlobStorageError::Integrity);
+            }
             enforce_cumulative_bound(blobs.iter().copied(), self.maximum_source_bytes)?;
             let permit = Arc::clone(&self.read_budget)
                 .try_acquire_owned()

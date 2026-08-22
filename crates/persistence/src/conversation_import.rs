@@ -170,8 +170,13 @@ pub trait ImportedRawBlobStorage: fmt::Debug + Send + Sync {
     /// Publishes or verifies each distinct source record in supplied order.
     fn publish(&self, blobs: Box<[ImportedRawBlobInput]>) -> ImportedRawBlobPublicationFuture<'_>;
 
-    /// Reads and verifies each distinct source record in supplied order.
-    fn read(&self, blobs: Box<[ExpectedBlob]>) -> ImportedRawBlobReadFuture<'_>;
+    /// Reads and verifies each distinct source record in supplied order after
+    /// enforcing the complete occurrence-expanded source size.
+    fn read(
+        &self,
+        blobs: Box<[ExpectedBlob]>,
+        total_source_bytes: u64,
+    ) -> ImportedRawBlobReadFuture<'_>;
 }
 
 #[cfg(feature = "postgres-integration")]
@@ -237,7 +242,11 @@ impl ImportedRawBlobStorage for IntegrationImportedRawBlobStorage {
         })
     }
 
-    fn read(&self, blobs: Box<[ExpectedBlob]>) -> ImportedRawBlobReadFuture<'_> {
+    fn read(
+        &self,
+        blobs: Box<[ExpectedBlob]>,
+        _total_source_bytes: u64,
+    ) -> ImportedRawBlobReadFuture<'_> {
         Box::pin(async move {
             let retained = integration_imported_blobs()
                 .lock()
@@ -1259,6 +1268,16 @@ async fn decode_projection(
     })
 }
 
+fn total_expected_bytes(
+    blobs: impl IntoIterator<Item = ExpectedBlob>,
+) -> Result<u64, ImportedRawBlobStorageError> {
+    blobs.into_iter().try_fold(0_u64, |total, blob| {
+        total
+            .checked_add(blob.byte_length())
+            .ok_or(ImportedRawBlobStorageError::Integrity)
+    })
+}
+
 fn distinct_expected_blobs(
     blobs: impl IntoIterator<Item = ExpectedBlob>,
 ) -> Result<BTreeMap<BlobDigest, ExpectedBlob>, ImportedConversationRepositoryError> {
@@ -1281,10 +1300,11 @@ pub(crate) async fn finish_projection(
     storage: &dyn ImportedRawBlobStorage,
     projection: StoredConversationProjection,
 ) -> Result<ImportedConversation, ImportedConversationRepositoryError> {
+    let total_source_bytes = total_expected_bytes(projection.raws.iter().map(|raw| raw.expected))?;
     let expected_by_digest =
         distinct_expected_blobs(projection.raws.iter().map(|raw| raw.expected))?;
     let expected = expected_by_digest.values().copied().collect::<Box<[_]>>();
-    let distinct_bytes = storage.read(expected).await?;
+    let distinct_bytes = storage.read(expected, total_source_bytes).await?;
     if distinct_bytes.len() != expected_by_digest.len() {
         return Err(ImportedConversationCorruption::Missing("raw blob bytes").into());
     }
@@ -1679,6 +1699,14 @@ mod tests {
 
         assert_eq!(distinct.len(), 1);
         assert_eq!(distinct.get(&expected.digest()), Some(&expected));
+    }
+
+    #[test]
+    fn imported_blob_source_size_counts_equal_occurrences() {
+        let expected = ExpectedBlob::try_new(BlobDigest::from_bytes([1; 32]), 3)
+            .expect("fixture length is positive");
+
+        assert_eq!(super::total_expected_bytes([expected, expected]), Ok(6));
     }
 
     /// S28 / INV-001 / INV-038: globally unique entry keys are emitted in one

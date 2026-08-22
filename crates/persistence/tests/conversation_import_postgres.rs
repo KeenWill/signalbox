@@ -769,6 +769,19 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
     sqlx::raw_sql(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
+         VALUES ('30000000-0000-4000-8000-000000000065',
+                 'replace_session_metadata', 1, transaction_timestamp());
+         INSERT INTO replace_session_metadata_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, replacement_archived, result_kind, rejection_kind,
+             result_session_id)
+         VALUES ('30000000-0000-4000-8000-000000000065',
+                 'replace_session_metadata', 1,
+                 '40000000-0000-4000-8000-000000000039',
+                 'owner', false, 'rejected', 'session_not_found',
+                 '40000000-0000-4000-8000-000000000039');
+         INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
          VALUES ('30000000-0000-4000-8000-000000000064',
                  'create_session', 1, transaction_timestamp());
          INSERT INTO session
@@ -809,7 +822,7 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
 
     apply_exact_migration(&pool, 202608110019).await?;
 
-    let after: (i64, i64, i64, i64, i64) = sqlx::query_as(
+    let after: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM imported_conversation),
             (SELECT count(*) FROM imported_raw_source_record),
@@ -818,11 +831,15 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
             (SELECT count(*) FROM session
               WHERE session_id = '40000000-0000-4000-8000-000000000064'),
             (SELECT count(*) FROM durable_command
-              WHERE command_id = '30000000-0000-4000-8000-000000000064')",
+              WHERE command_id = '30000000-0000-4000-8000-000000000064'),
+            (SELECT count(*) FROM replace_session_metadata_command
+              WHERE command_id = '30000000-0000-4000-8000-000000000065'),
+            (SELECT count(*) FROM durable_command
+              WHERE command_id = '30000000-0000-4000-8000-000000000065')",
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(after, (0, 0, 0, 1, 1));
+    assert_eq!(after, (0, 0, 0, 1, 1, 0, 0));
     let raw_bytes_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1

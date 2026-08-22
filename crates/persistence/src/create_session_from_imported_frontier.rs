@@ -412,18 +412,20 @@ impl ImportedSessionRepository {
         .bind(durable_command_id_to_uuid(command_id))
         .fetch_optional(&mut *connection)
         .await?;
-        let conversation = match conversation_id {
-            Some(identity) => self
-                .imported_conversations
-                .load(ImportedConversationId::from_uuid(identity))
-                .await
-                .map_err(map_imported_conversation_error)?,
-            None => None,
-        };
-        let conversation = conversation
-            .as_ref()
+        let conversation_id = conversation_id.ok_or(ImportedSessionCorruption::Missing(
+            "imported creation command",
+        ))?;
+        drop(connection);
+
+        let conversation = self
+            .imported_conversations
+            .load(ImportedConversationId::from_uuid(conversation_id))
+            .await
+            .map_err(map_imported_conversation_error)?
             .ok_or(ImportedSessionCorruption::Missing("imported conversation"))?;
-        load_creation_from_connection(&mut connection, command_id, conversation).await
+
+        let mut connection = self.pool.acquire().await?;
+        load_creation_from_connection(&mut connection, command_id, &conversation).await
     }
 
     async fn existing_outcome(

@@ -251,6 +251,22 @@ mod tests {
     }
 
     #[test]
+    fn imported_conversation_database_failure_remains_retryable() {
+        let error = map_imported_scheduling_error(
+            crate::create_session_from_imported_frontier::ImportedSessionRepositoryError::ImportedConversation(
+                crate::conversation_import::ImportedConversationRepositoryError::Database(
+                    sqlx::Error::PoolTimedOut,
+                ),
+            ),
+        );
+
+        assert!(matches!(
+            error,
+            SubmitInputRepositoryError::Database(sqlx::Error::PoolTimedOut)
+        ));
+    }
+
+    #[test]
     fn delegation_child_result_decoder_restores_exact_typed_outcome() {
         let child = Uuid::from_u128(0xd101);
         let turn = Uuid::from_u128(0xd102);
@@ -5634,6 +5650,9 @@ fn map_imported_scheduling_error(
         ImportedSessionRepositoryError::Database(error) => {
             SubmitInputRepositoryError::Database(error)
         }
+        ImportedSessionRepositoryError::ImportedConversation(
+            crate::conversation_import::ImportedConversationRepositoryError::Database(error),
+        ) => SubmitInputRepositoryError::Database(error),
         ImportedSessionRepositoryError::Corruption(_)
         | ImportedSessionRepositoryError::CommitAmbiguous(_)
         | ImportedSessionRepositoryError::DifferentCommandKind { .. }

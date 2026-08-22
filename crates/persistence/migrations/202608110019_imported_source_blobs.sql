@@ -22,6 +22,9 @@ BEGIN
         cascade_definition text NOT NULL,
         PRIMARY KEY (relation_oid, constraint_name)
     ) ON COMMIT DROP;
+    CREATE TEMPORARY TABLE imported_reset_command (
+        command_id uuid PRIMARY KEY
+    ) ON COMMIT DROP;
 
     -- Follow only foreign keys whose referenced rows can be reached from an
     -- imported root. This includes all durable effects of imported sessions,
@@ -99,10 +102,50 @@ BEGIN
         );
     END LOOP;
 
+    -- Preserve registry identities before deleting imported sessions. Later
+    -- typed commands rooted in those sessions disappear through the temporary
+    -- cascades, so their owner-global claims must disappear in the same reset.
+    FOR table_record IN
+        SELECT reset.relation_oid
+          FROM imported_reset_table AS reset
+         WHERE EXISTS (
+                   SELECT 1
+                     FROM pg_attribute
+                    WHERE attrelid = reset.relation_oid
+                      AND attname = 'command_id'
+                      AND atttypid = 'uuid'::regtype
+                      AND attnum > 0
+                      AND NOT attisdropped
+               )
+           AND EXISTS (
+                   SELECT 1
+                     FROM pg_attribute
+                    WHERE attrelid = reset.relation_oid
+                      AND attname = 'session_id'
+                      AND atttypid = 'uuid'::regtype
+                      AND attnum > 0
+                      AND NOT attisdropped
+               )
+         ORDER BY reset.relation_oid
+    LOOP
+        EXECUTE format(
+            'INSERT INTO imported_reset_command (command_id)
+             SELECT command_id FROM %s
+              WHERE session_id IN (
+                    SELECT session_id FROM session
+                     WHERE ancestry_kind = %L
+              )
+             ON CONFLICT DO NOTHING',
+            table_record.relation_oid::regclass,
+            'imported_conversation'
+        );
+    END LOOP;
+
     DELETE FROM session
      WHERE ancestry_kind = 'imported_conversation';
     DELETE FROM durable_command
-     WHERE command_kind = 'create_session_from_imported_frontier';
+     WHERE command_kind = 'create_session_from_imported_frontier'
+        OR command_id IN (SELECT command_id FROM imported_reset_command);
     DELETE FROM imported_conversation;
     DELETE FROM imported_raw_source_record;
 
