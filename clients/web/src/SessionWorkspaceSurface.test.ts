@@ -24,8 +24,13 @@ const fixture = decodeWebSessionTimelineWindow({
       kind: 'turn_failed',
       projected_structured_bytes: 96,
     },
+    {
+      address: { event_sequence: '44' },
+      kind: 'turn_reconciliation_required',
+      projected_structured_bytes: 96,
+    },
   ],
-  projected_structured_bytes: 288,
+  projected_structured_bytes: 384,
   continuation_before: { event_sequence: '41' },
   continuation_after: null,
 })
@@ -45,7 +50,12 @@ describe('Session Workspace projection', () => {
   it('projects result mode without materializing another window', () => {
     const results = visibleSessionItems(fixture.items, 'results')
 
-    expect(results).toEqual([fixture.items[0], fixture.items[1], fixture.items[2]])
+    expect(results).toEqual([
+      fixture.items[0],
+      fixture.items[1],
+      fixture.items[2],
+      fixture.items[3],
+    ])
   })
 
   it('uses one stable cache entry for every request for a session', () => {

@@ -40,6 +40,7 @@ export const visibleSessionItems = (
           'turn_failed',
           'turn_refused',
           'turn_cancelled',
+          'turn_reconciliation_required',
         ].includes(item.kind),
       )
     : items
@@ -158,6 +159,11 @@ export function SessionWorkspaceSurface({
     dispatch(actions.timelineSelected(eventSequence))
   }
   const handleTimelineKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if ((event.key === 'Enter' || event.key === ' ') && selected !== null) {
+      event.preventDefault()
+      toggleExpanded(selected)
+      return
+    }
     if (['j', 'k', 'ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
       event.currentTarget.focus()
     }
@@ -313,16 +319,21 @@ export function SessionWorkspaceSurface({
                     else rowRefs.current.delete(id)
                   }}
                   className={selected === id ? 'selected' : undefined}
+                  onClick={() => {
+                    select(id)
+                    toggleExpanded(id)
+                    timelineRef.current?.focus()
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return
+                    event.preventDefault()
+                    event.stopPropagation()
+                    select(id)
+                    toggleExpanded(id)
+                    timelineRef.current?.focus()
+                  }}
                 >
-                  <button
-                    type="button"
-                    className="session-item-summary"
-                    aria-expanded={isExpanded}
-                    onClick={() => {
-                      select(id)
-                      toggleExpanded(id)
-                    }}
-                  >
+                  <div className="session-item-summary">
                     {isExpanded ? (
                       <ChevronDown aria-hidden="true" />
                     ) : (
@@ -331,7 +342,7 @@ export function SessionWorkspaceSurface({
                     <span className="session-address">{id}</span>
                     <strong>{item.kind.replaceAll('_', ' ')}</strong>
                     <small>{item.projected_structured_bytes} B</small>
-                  </button>
+                  </div>
                   {isExpanded && (
                     <dl className="session-item-detail">
                       <div>
