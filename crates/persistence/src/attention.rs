@@ -202,8 +202,11 @@ WITH selected AS (
     SELECT DISTINCT ON (lifecycle.session_id)
            lifecycle.session_id, lifecycle.turn_id, lifecycle.state_kind,
            lifecycle.active_phase_kind, lifecycle.terminal_disposition_kind,
-           lifecycle.approval_tool_request_id
+           lifecycle.approval_tool_request_id, current_goal.goal_generation
       FROM turn_lifecycle AS lifecycle JOIN selected USING (session_id)
+      LEFT JOIN goal_turn AS current_goal
+        ON current_goal.session_id = lifecycle.session_id
+       AND current_goal.turn_id = lifecycle.turn_id
      WHERE NOT EXISTS (
                SELECT 1
                  FROM goal_turn_retired_outbox_event AS retired
@@ -260,7 +263,7 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
                )
                AND (
                    NOT (
-                       goal.generation = '1'
+                       COALESCE(turn.goal_generation = 1, false)
                        AND (
                            EXISTS (
                                SELECT 1
@@ -362,8 +365,9 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
         AttentionState::Ambiguous | AttentionState::AwaitingReconciliation => {
             Some(AttentionAction::ReconcileTurn)
         }
-        AttentionState::AwaitingApproval | AttentionState::AwaitingToolRecovery => None,
-        AttentionState::RunnerLost => Some(AttentionAction::RestoreRunner),
+        AttentionState::AwaitingApproval
+        | AttentionState::AwaitingToolRecovery
+        | AttentionState::RunnerLost => None,
         AttentionState::Active | AttentionState::Queued | AttentionState::Idle => None,
     };
     let fact_kind = required_string(row, "fact_kind")?;

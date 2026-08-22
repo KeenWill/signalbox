@@ -1257,7 +1257,7 @@ mod tests {
             goal_block: Some(AttentionGoalBlock {
                 generation: u64::MAX,
                 reason: AttentionBlockedReason::ExternalChangeRequired,
-                need_summary: String::from("🦀")
+                need_summary: String::from('\u{1}')
                     .repeat(usize::from(max_attention_goal_summary_characters())),
             }),
             judge: AttentionJudgeFacts {
