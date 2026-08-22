@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import type { CommandContext } from './commands'
 import type { WebContractBootstrap, WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import { SessionItemDetail } from './SessionItemDetail'
 import {
@@ -11,6 +12,8 @@ import {
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const SESSION_ID_HTML_PATTERN =
+  '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
 const SESSION_WINDOW_ITEMS = 80
 const SESSION_WINDOW_BYTES = 64 * 1024
 
@@ -19,25 +22,49 @@ export const isCanonicalSessionId = (value: string): boolean => SESSION_ID_PATTE
 export const visibleSessionItems = (
   items: WebSessionTimelineWindow['items'],
   detail: 'full' | 'condensed' | 'results',
-) =>
-  detail === 'results'
-    ? items.filter((item) =>
-        [
-          'input_accepted',
-          'turn_completed',
-          'turn_failed',
-          'turn_refused',
-          'turn_cancelled',
-        ].includes(item.kind),
-      )
-    : items
+) => {
+  if (detail === 'results') {
+    return items.filter((item) =>
+      [
+        'input_accepted',
+        'turn_completed',
+        'turn_failed',
+        'turn_refused',
+        'turn_cancelled',
+      ].includes(item.kind),
+    )
+  }
+  if (detail === 'condensed') {
+    return items.filter((item) =>
+      [
+        'input_accepted',
+        'model_call_transition',
+        'tool_batch_transition',
+        'tool_approval_decided',
+        'goal_turn_retired',
+        'turn_failed',
+        'turn_completed',
+        'turn_refused',
+        'turn_cancelled',
+        'turn_reconciliation_required',
+      ].includes(item.kind),
+    )
+  }
+  return items
+}
 
 export function SessionWorkspaceSurface({
   bootstrap,
+  bootstrapState,
   onTimelineIds,
+  onTimelineActions,
 }: {
   bootstrap: WebContractBootstrap | undefined
+  bootstrapState: 'checking' | 'failed' | 'ready'
   onTimelineIds: (ids: readonly string[]) => void
+  onTimelineActions: (
+    actions: Pick<CommandContext, 'selectTimeline' | 'openTimelineWindow'> | null,
+  ) => void
 }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
@@ -84,6 +111,21 @@ export function SessionWorkspaceSurface({
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
+  useEffect(() => {
+    onTimelineActions({
+      selectTimeline: (eventSequence) => {
+        if (sessionId !== null) {
+          dispatch(actions.logicalPositionRecorded({ sessionId, position: eventSequence }))
+        }
+      },
+      openTimelineWindow: (anchor) => {
+        setManualAnchor({ kind: anchor })
+        setExpanded(new Set())
+        dispatch(actions.timelineSelected(null))
+      },
+    })
+    return () => onTimelineActions(null)
+  }, [dispatch, onTimelineActions, sessionId])
 
   const openSession = (event: FormEvent) => {
     event.preventDefault()
@@ -118,8 +160,8 @@ export function SessionWorkspaceSurface({
             aria-label="Exact session ID"
             placeholder="00000000-0000-0000-0000-000000000000"
             value={draftId}
-            onChange={(event) => setDraftId(event.target.value)}
-            pattern={SESSION_ID_PATTERN.source}
+            onChange={(event) => setDraftId(event.target.value.trim().toLowerCase())}
+            pattern={SESSION_ID_HTML_PATTERN}
             required
           />
         </label>
@@ -131,7 +173,24 @@ export function SessionWorkspaceSurface({
         </button>
       </form>
 
-      {!sessionCapabilitiesAvailable && bootstrap ? (
+      {bootstrapState !== 'ready' ? (
+        <section className="surface-empty session-entry" aria-labelledby="session-entry-heading">
+          <Radio aria-hidden="true" />
+          <div>
+            <span className="availability-tag">
+              {bootstrapState === 'failed' ? 'Unavailable' : 'Checking'}
+            </span>
+            <h2 id="session-entry-heading">
+              {bootstrapState === 'failed'
+                ? 'Session timeline readiness could not be established'
+                : 'Checking session timeline capabilities'}
+            </h2>
+            <p>
+              A decoded bootstrap must positively advertise bounded timeline and typed-detail reads.
+            </p>
+          </div>
+        </section>
+      ) : !sessionCapabilitiesAvailable && bootstrap ? (
         <section className="surface-empty session-entry" aria-labelledby="session-entry-heading">
           <Radio aria-hidden="true" />
           <div>

@@ -7,6 +7,7 @@ import {
   MAX_TIMELINE_HTTP_RESPONSE_BYTES,
   SESSION_FOUNDATION_TOTAL,
   type SessionTimelineSource,
+  TIMELINE_DETAIL_BODY_ENVELOPE_BYTES,
 } from './model'
 
 const sessionId = '00000000-0000-0000-0000-000000000991'
@@ -231,7 +232,7 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
-  it('does not expose mutable retained items', async () => {
+  it('rejects an advertised detail item ceiling below one', async () => {
     const invalidDetailRequest = async () =>
       new Response(
         JSON.stringify({
@@ -249,6 +250,34 @@ describe('BoundedSessionHistory', () => {
             max_timeline_window_items: 256,
             max_timeline_window_bytes: 64 * 1024,
             max_timeline_detail_items: 0,
+            max_timeline_detail_bytes: 64 * 1024,
+          },
+        }),
+      )
+
+    await expect(HttpSessionTimelineSource.connect(invalidDetailRequest)).rejects.toThrow(
+      'timeline detail limits are invalid',
+    )
+  })
+
+  it('rejects an advertised detail byte ceiling below 256', async () => {
+    const invalidDetailRequest = async () =>
+      new Response(
+        JSON.stringify({
+          contract: { name: 'signalbox.web-http', version: '1' },
+          capabilities: {
+            bounded_json: true,
+            same_origin_json_mutations: true,
+            ndjson_streaming: true,
+            bounded_session_timeline: true,
+            bounded_session_timeline_detail: true,
+          },
+          limits: {
+            max_json_body_bytes: 1024,
+            max_ndjson_item_bytes: 1024,
+            max_timeline_window_items: 256,
+            max_timeline_window_bytes: 64 * 1024,
+            max_timeline_detail_items: 128,
             max_timeline_detail_bytes: 255,
           },
         }),
@@ -257,7 +286,9 @@ describe('BoundedSessionHistory', () => {
     await expect(HttpSessionTimelineSource.connect(invalidDetailRequest)).rejects.toThrow(
       'timeline detail limits are invalid',
     )
+  })
 
+  it('does not expose mutable retained items', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const history = new BoundedSessionHistory(sessionId, scenario)
     await history.load({ kind: 'first' }, { maxItems: 1, maxBytes: 256 })
@@ -556,10 +587,10 @@ describe('BoundedSessionHistory', () => {
             },
             attachments: [],
           },
-          projected_body_bytes: 5,
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
         },
       ],
-      projected_body_bytes: 5,
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
       continuation: bodyContinuation,
     } as const
     const secondPageFixture = {
@@ -579,10 +610,10 @@ describe('BoundedSessionHistory', () => {
             },
             attachments: [],
           },
-          projected_body_bytes: 6,
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 6,
         },
       ],
-      projected_body_bytes: 6,
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 6,
       continuation: null,
     } as const
     const request = vi
@@ -636,6 +667,110 @@ describe('BoundedSessionHistory', () => {
       String(bodyContinuation.body.member_index),
     )
     expect(secondUrl.searchParams.get('cursor_offset')).toBe(bodyContinuation.body.offset_bytes)
+  })
+
+  it('rejects detail continuations that change the stable address', async () => {
+    const bootstrap = {
+      contract: { name: 'signalbox.web-http', version: '1' },
+      capabilities: {
+        bounded_json: true,
+        same_origin_json_mutations: true,
+        ndjson_streaming: true,
+        bounded_session_timeline: true,
+        bounded_session_timeline_detail: true,
+      },
+      limits: {
+        max_json_body_bytes: 1024,
+        max_ndjson_item_bytes: 1024,
+        max_timeline_window_items: 256,
+        max_timeline_window_bytes: 64 * 1024,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
+      },
+    }
+    const detail = {
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'hello', offset_bytes: '0', total_bytes: '5', continuation: null },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: {
+        type: 'more_body',
+        body: {
+          address: { event_sequence: '42' },
+          field: 'input_text',
+          member_index: 0,
+          offset_bytes: '5',
+        },
+      },
+    }
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify(bootstrap)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detail)))
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('changed the stable address')
+  })
+
+  it('rejects a detail item below the fixed body envelope charge', async () => {
+    const bootstrap = {
+      contract: { name: 'signalbox.web-http', version: '1' },
+      capabilities: {
+        bounded_json: true,
+        same_origin_json_mutations: true,
+        ndjson_streaming: true,
+        bounded_session_timeline: true,
+        bounded_session_timeline_detail: true,
+      },
+      limits: {
+        max_json_body_bytes: 1024,
+        max_ndjson_item_bytes: 1024,
+        max_timeline_window_items: 256,
+        max_timeline_window_bytes: 64 * 1024,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
+      },
+    }
+    const detail = {
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'turn_completed',
+          body: {
+            type: 'turn_lifecycle',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            lifecycle: 'terminalized',
+            cause_code: 'completed',
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES - 1,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES - 1,
+      continuation: null,
+    }
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify(bootstrap)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detail)))
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('fixed body envelope charge')
   })
 
   it('fails closed when item detail capability is unavailable', async () => {

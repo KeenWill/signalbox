@@ -21,8 +21,13 @@ const fixture = decodeWebSessionTimelineWindow({
       kind: 'turn_failed',
       projected_structured_bytes: 96,
     },
+    {
+      address: { event_sequence: '44' },
+      kind: 'turn_activated',
+      projected_structured_bytes: 96,
+    },
   ],
-  projected_structured_bytes: 288,
+  projected_structured_bytes: 384,
   continuation_before: { event_sequence: '41' },
   continuation_after: null,
 })
@@ -34,9 +39,9 @@ describe('Session Workspace projection', () => {
     expect(isCanonicalSessionId('not-a-session')).toBe(false)
   })
 
-  it('keeps full and condensed modes over the same bounded window', () => {
+  it('uses a distinct condensed projection over the same bounded window', () => {
     expect(visibleSessionItems(fixture.items, 'full')).toBe(fixture.items)
-    expect(visibleSessionItems(fixture.items, 'condensed')).toBe(fixture.items)
+    expect(visibleSessionItems(fixture.items, 'condensed')).toEqual(fixture.items.slice(0, 3))
   })
 
   it('projects result mode without materializing another window', () => {

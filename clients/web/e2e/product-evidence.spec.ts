@@ -60,6 +60,50 @@ const sessionEvidenceFixture = {
               state: 'completed',
               effect_posture: 'read_only',
               sandbox_posture: 'workspace_read',
+              result: null,
+              failure: null,
+              cause_code: null,
+            },
+          ],
+          goal_events: [],
+        },
+        projected_body_bytes: 384,
+      },
+    ],
+    projected_body_bytes: 384,
+    continuation: {
+      type: 'more_body',
+      body: {
+        address: { event_sequence: '999998' },
+        field: 'tool_result',
+        member_index: 0,
+        offset_bytes: '0',
+      },
+    },
+  },
+  detailResult: {
+    session_id: '00000000-0000-0000-0000-000000000991',
+    items: [
+      {
+        address: { event_sequence: '999998' },
+        kind: 'tool_batch_transition',
+        body: {
+          type: 'tool_batch',
+          turn_id: '00000000-0000-0000-0000-000000999998',
+          producing_model_call_id: '00000000-0000-0000-0000-000000999898',
+          state: 'completed',
+          tools: [
+            {
+              request_id: '00000000-0000-0000-0000-000000999798',
+              tool_name: 'workspace_read',
+              approval_posture: 'auto',
+              approval_judge_escalated: false,
+              operator_required: false,
+              arguments: null,
+              attempt_id: '00000000-0000-0000-0000-000000999698',
+              state: 'completed',
+              effect_posture: 'read_only',
+              sandbox_posture: 'workspace_read',
               result: {
                 text: toolEvidenceResult,
                 offset_bytes: '0',
@@ -70,6 +114,34 @@ const sessionEvidenceFixture = {
               cause_code: null,
             },
           ],
+          goal_events: [],
+        },
+        projected_body_bytes: 384,
+      },
+    ],
+    projected_body_bytes: 384,
+    continuation: {
+      type: 'more_body',
+      body: {
+        address: { event_sequence: '999998' },
+        field: 'goal_text',
+        member_index: 0,
+        offset_bytes: '0',
+      },
+    },
+  },
+  detailGoal: {
+    session_id: '00000000-0000-0000-0000-000000000991',
+    items: [
+      {
+        address: { event_sequence: '999998' },
+        kind: 'tool_batch_transition',
+        body: {
+          type: 'tool_batch',
+          turn_id: '00000000-0000-0000-0000-000000999998',
+          producing_model_call_id: '00000000-0000-0000-0000-000000999898',
+          state: 'completed',
+          tools: [],
           goal_events: [
             {
               event_kind: 'advanced',
@@ -120,7 +192,15 @@ const useDeterministicSession = (page: Page) =>
   page.route('**/api/sessions/**', (route) => {
     const path = new URL(route.request().url()).pathname
     if (path.endsWith(`/${sessionEvidenceFixture.detailAddress}/detail`)) {
-      return route.fulfill({ json: sessionEvidenceFixture.detail })
+      const field = new URL(route.request().url()).searchParams.get('cursor_field')
+      return route.fulfill({
+        json:
+          field === 'tool_result'
+            ? sessionEvidenceFixture.detailResult
+            : field === 'goal_text'
+              ? sessionEvidenceFixture.detailGoal
+              : sessionEvidenceFixture.detail,
+      })
     }
     if (path.endsWith('/timeline')) {
       return route.fulfill({
@@ -212,6 +292,11 @@ const captureSessionEvidence = async (page: Page) => {
       name: sessionEvidenceFixture.detail.items[0].body.tools[0].tool_name,
     }),
   ).toBeVisible()
+  const continueDetail = page.getByRole('button', { name: 'Load next bounded detail chunk' })
+  await continueDetail.click()
+  await expect(page.getByText(toolEvidenceResult, { exact: true })).toBeVisible()
+  await continueDetail.click()
+  await expect(page.getByText('evidence inspected', { exact: true })).toBeVisible()
   await expect(page).toHaveScreenshot('sessions-detail-desktop-dark.png', {
     animations: 'disabled',
   })

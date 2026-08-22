@@ -48,6 +48,25 @@ const boundedRecord = (value: unknown, maximum: number): Record<string, string> 
   )
 }
 
+const MAX_U64 = (1n << 64n) - 1n
+const canonicalSessionId = (value: string): boolean =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
+const canonicalTimelineAddress = (value: string): boolean => {
+  if (!/^[1-9]\d*$/.test(value)) return false
+  try {
+    return BigInt(value) <= MAX_U64
+  } catch {
+    return false
+  }
+}
+const boundedLogicalPositions = (value: unknown): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(boundedRecord(value, MAX_SAVED_LOGICAL_POSITIONS)).filter(
+      ([sessionId, position]) =>
+        canonicalSessionId(sessionId) && canonicalTimelineAddress(position),
+    ),
+  )
+
 export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => {
   const candidate =
     value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -84,10 +103,7 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
         480,
       ),
     },
-    lastLogicalPositions: boundedRecord(
-      candidate.lastLogicalPositions,
-      MAX_SAVED_LOGICAL_POSITIONS,
-    ),
+    lastLogicalPositions: boundedLogicalPositions(candidate.lastLogicalPositions),
     keyOverrides: boundedRecord(candidate.keyOverrides, MAX_KEY_OVERRIDES),
   }
 }

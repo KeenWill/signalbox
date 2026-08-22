@@ -31,8 +31,8 @@ describe('browser preferences', () => {
   it('bounds retained positions and future key overrides', () => {
     const lastLogicalPositions = Object.fromEntries(
       Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS + 3 }, (_, index) => [
-        `session-${index}`,
-        `cursor-${index}`,
+        `00000000-0000-0000-0000-${String(index).padStart(12, '0')}`,
+        String(index + 1),
       ]),
     )
     const keyOverrides = Object.fromEntries(
@@ -46,6 +46,20 @@ describe('browser preferences', () => {
 
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
     expect(Object.keys(decoded.keyOverrides)).toHaveLength(MAX_KEY_OVERRIDES)
+  })
+
+  it('rejects malformed remembered session identities and timeline addresses', () => {
+    const validSession = '00000000-0000-0000-0000-000000000991'
+    const decoded = decodeBrowserPreferences({
+      lastLogicalPositions: {
+        [validSession]: '42',
+        'not-a-session': '42',
+        '00000000-0000-0000-0000-000000000992': 'cursor-1',
+        '00000000-0000-0000-0000-000000000993': '18446744073709551616',
+      },
+    })
+
+    expect(decoded.lastLogicalPositions).toEqual({ [validSession]: '42' })
   })
 
   it('falls back when browser storage reads are unavailable', () => {

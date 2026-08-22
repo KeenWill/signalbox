@@ -15,6 +15,7 @@ import {
   invokeProductCommand,
   type ProductCommandContext,
   productCommandRegistry,
+  productHotkeySequenceBindings,
 } from './productCommands'
 import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
@@ -270,7 +271,16 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
+  const [timelineActions, setTimelineActions] = useState<Pick<
+    ProductCommandContext,
+    'selectTimeline' | 'openTimelineWindow'
+  > | null>(null)
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
+  const updateTimelineActions = useCallback(
+    (next: Pick<ProductCommandContext, 'selectTimeline' | 'openTimelineWindow'> | null) =>
+      setTimelineActions(next),
+    [],
+  )
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -283,8 +293,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       timelineIds,
       focusTimeline: () => primaryRef.current?.focus(),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      selectTimeline: timelineActions?.selectTimeline,
+      openTimelineWindow: timelineActions?.openTimelineWindow,
     }),
-    [dispatch, navigate, timelineIds],
+    [dispatch, navigate, timelineActions, timelineIds],
   )
   useHotkeys(
     globalHotkeyBindings
@@ -292,12 +304,14 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       .map((binding) => ({
         hotkey: binding.hotkey,
         callback: () => invokeProductCommand(binding.commandId, context),
+        options: { enabled: app.overlay === null || binding.commandId === 'surface.escape' },
       })),
   )
   useHotkeySequences(
-    globalHotkeySequenceBindings.map((binding) => ({
-      sequence: binding.sequence,
+    [...globalHotkeySequenceBindings, ...productHotkeySequenceBindings].map((binding) => ({
+      sequence: [...binding.sequence],
       callback: () => invokeProductCommand(binding.commandId, context),
+      options: { enabled: app.overlay === null },
     })),
   )
 
@@ -311,7 +325,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     surface === 'attention' ? (
       <AttentionSurface />
     ) : surface === 'sessions' ? (
-      <SessionWorkspaceSurface bootstrap={bootstrap.data} onTimelineIds={updateTimelineIds} />
+      <SessionWorkspaceSurface
+        bootstrap={bootstrap.data}
+        bootstrapState={bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : 'checking'}
+        onTimelineIds={updateTimelineIds}
+        onTimelineActions={updateTimelineActions}
+      />
     ) : surface === 'settings' ? (
       <SettingsSurface />
     ) : (

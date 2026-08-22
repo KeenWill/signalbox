@@ -17,6 +17,8 @@ export const MAX_RETAINED_SESSION_ITEMS = 768
 // Hard safety ceiling preventing a regressed endpoint from materializing an
 // unbounded JSON response before the generated decoder can reject its shape.
 export const MAX_TIMELINE_HTTP_RESPONSE_BYTES = 256 * 1024
+// Fixed contract charge applied to every projected detail record before excerpt bytes.
+export const TIMELINE_DETAIL_BODY_ENVELOPE_BYTES = 128
 
 type TimelineContractLimits = Pick<
   WebContractBootstrap['limits'],
@@ -27,6 +29,7 @@ type TimelineContractLimits = Pick<
 >
 
 type TimelineDetailCursor = NonNullable<WebSessionTimelineDetailPage['continuation']>
+type TimelineBodyCursor = Extract<TimelineDetailCursor, { type: 'more_body' }>['body']
 
 export type SessionWindowAnchor =
   | { kind: 'first' | 'latest' }
@@ -133,6 +136,25 @@ const cloneTimelineItem = (
   ...item,
   address: { ...item.address },
 })
+
+const sameBodyContinuation = (left: TimelineBodyCursor, right: TimelineBodyCursor): boolean =>
+  left.address.event_sequence === right.address.event_sequence &&
+  left.field === right.field &&
+  left.member_index === right.member_index &&
+  left.offset_bytes === right.offset_bytes
+
+const bodyContinuations = (value: unknown): TimelineBodyCursor[] => {
+  if (value === null || typeof value !== 'object') return []
+  if (Array.isArray(value)) return value.flatMap(bodyContinuations)
+  const record = value as Record<string, unknown>
+  const nested = Object.values(record).flatMap(bodyContinuations)
+  const continuation = record.continuation
+  if (continuation === null || typeof continuation !== 'object' || Array.isArray(continuation)) {
+    return nested
+  }
+  const candidate = continuation as TimelineBodyCursor
+  return 'address' in candidate && 'field' in candidate ? [candidate, ...nested] : nested
+}
 
 export class SessionTimelineClientError extends Error {
   constructor(readonly response: WebApiErrorResponse) {
@@ -253,6 +275,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       if (item.address.event_sequence !== address) {
         throw new TypeError('item detail returned a different timeline address')
       }
+      if (item.projected_body_bytes < TIMELINE_DETAIL_BODY_ENVELOPE_BYTES) {
+        throw new TypeError('timeline detail omits the fixed body envelope charge')
+      }
       projectedBodyBytes += item.projected_body_bytes
       if (!Number.isSafeInteger(projectedBodyBytes)) {
         throw new TypeError('timeline detail byte total is not a safe integer')
@@ -263,6 +288,25 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     }
     if (projectedBodyBytes > bounded.maxBytes) {
       throw new TypeError('timeline detail exceeds the requested byte ceiling')
+    }
+    if (page.continuation) {
+      const continuationAddress =
+        page.continuation.type === 'more_at'
+          ? page.continuation.address.event_sequence
+          : page.continuation.body.address.event_sequence
+      if (continuationAddress !== address) {
+        throw new TypeError('timeline detail continuation changed the stable address')
+      }
+      if (page.continuation.type === 'more_body') {
+        const continuation = page.continuation.body
+        const excerpts = page.items.flatMap((item) => bodyContinuations(item.body))
+        if (
+          excerpts.length > 0 &&
+          !excerpts.some((entry) => sameBodyContinuation(entry, continuation))
+        ) {
+          throw new TypeError('timeline detail continuation disagrees with its excerpt')
+        }
+      }
     }
     return page
   }
