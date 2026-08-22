@@ -40,6 +40,16 @@ const searchPageFixture = {
   continuation: null,
 } as const
 
+const escapedSearchPageFixture = {
+  results: Array.from({ length: 100 }, (_, index) => ({
+    ...searchPageFixture.results[0],
+    address: { event_sequence: String(100 - index) },
+    snippet: '\0'.repeat(512),
+    highlights: [],
+  })),
+  continuation: null,
+}
+
 const errorFixture = {
   error: {
     code: 'search_projection_unavailable',
@@ -216,6 +226,21 @@ describe('SameOriginProductTransport', () => {
         maxSnippetBytes: 512,
       }),
     ).rejects.toThrow('response exceeds')
+  })
+
+  it('accepts bounded snippets at their worst-case JSON expansion', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(escapedSearchPageFixture))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().search({
+        query: 'term',
+        maxItems: 100,
+        maxSnippetBytes: 512,
+      }),
+    ).resolves.toEqual(escapedSearchPageFixture)
   })
 
   it('rejects decoded search fields beyond their rendering bounds', async () => {

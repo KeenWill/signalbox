@@ -69,7 +69,7 @@ export function SearchSurface({
   const [draftQuery, setDraftQuery] = useState(state.q ?? '')
   const [draftSession, setDraftSession] = useState(state.session ?? '')
   const resultsHeadingRef = useRef<HTMLHeadingElement>(null)
-  const restorePaginationFocusRef = useRef(false)
+  const restoreResultsFocusRef = useRef(false)
   const [activeAfter, setActiveAfter] = useState(() =>
     state.afterAddress && state.afterProjection
       ? { address: state.afterAddress, projectionId: state.afterProjection }
@@ -77,6 +77,25 @@ export function SearchSurface({
   )
   useEffect(() => setDraftQuery(state.q ?? ''), [state.q])
   useEffect(() => setDraftSession(state.session ?? ''), [state.session])
+  useEffect(
+    () =>
+      setActiveAfter(
+        state.afterAddress && state.afterProjection
+          ? { address: state.afterAddress, projectionId: state.afterProjection }
+          : undefined,
+      ),
+    [state.afterAddress, state.afterProjection],
+  )
+  useEffect(() => {
+    const synchronizeWithHistory = () => {
+      const search = new URLSearchParams(window.location.search)
+      const address = search.get('afterAddress')
+      const projectionId = search.get('afterProjection')
+      setActiveAfter(address && projectionId ? { address, projectionId } : undefined)
+    }
+    window.addEventListener('popstate', synchronizeWithHistory)
+    return () => window.removeEventListener('popstate', synchronizeWithHistory)
+  }, [])
   const queryText = state.q?.trim() ?? ''
   const queryBytes = new TextEncoder().encode(queryText).length
   const queryLimit = bootstrap?.limits.max_search_query_bytes ?? 0
@@ -98,8 +117,8 @@ export function SearchSurface({
     gcTime: 0,
   })
   useEffect(() => {
-    if (restorePaginationFocusRef.current && results.data !== undefined) {
-      restorePaginationFocusRef.current = false
+    if (restoreResultsFocusRef.current && results.data !== undefined) {
+      restoreResultsFocusRef.current = false
       resultsHeadingRef.current?.focus()
     }
   }, [results.data])
@@ -109,7 +128,7 @@ export function SearchSurface({
     const form = new FormData(event.currentTarget)
     const q = String(form.get('q') ?? '').trim()
     const session = String(form.get('session') ?? '').trim()
-    restorePaginationFocusRef.current = false
+    restoreResultsFocusRef.current = false
     setActiveAfter(undefined)
     onStateChange({ q: q || undefined, session: session || undefined })
   }
@@ -180,7 +199,13 @@ export function SearchSurface({
                   ? results.error.message
                   : 'The response did not match the generated web contract.'}
             </p>
-            <button type="button" onClick={() => void results.refetch()}>
+            <button
+              type="button"
+              onClick={() => {
+                restoreResultsFocusRef.current = true
+                void results.refetch()
+              }}
+            >
               Retry
             </button>
           </div>
@@ -205,7 +230,7 @@ export function SearchSurface({
                     address: continuation.address.event_sequence,
                     projectionId: continuation.projection_id,
                   }
-                  restorePaginationFocusRef.current = true
+                  restoreResultsFocusRef.current = true
                   setActiveAfter(nextAfter)
                   onStateChange({
                     q: queryText,

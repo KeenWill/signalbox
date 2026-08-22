@@ -23,6 +23,16 @@ const bootstrapFixture = {
 const useDeterministicBootstrap = (page: Page) =>
   page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
 
+const useRecoveringBootstrap = async (page: Page) => {
+  let attempts = 0
+  await page.route('**/api/bootstrap', (route) => {
+    attempts += 1
+    return attempts === 1
+      ? route.fulfill({ status: 503 })
+      : route.fulfill({ json: bootstrapFixture })
+  })
+}
+
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
   page.on('console', (message) => {
@@ -127,6 +137,24 @@ test('closes the phone navigation sheet after route selection', async ({ page })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('restores desktop navigation focus to the command-owned surface', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Open navigation/ }).click()
+  await page.keyboard.press('Escape')
+
+  await expect(page.getByRole('main')).toBeFocused()
+})
+
+test('reports browser-local authority for Settings', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/settings')
+
+  await expect(page.getByText('Browser local', { exact: true })).toBeVisible()
+})
+
 test('runs product navigation sequences but leaves Mod+K to an editing field', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -196,13 +224,7 @@ test('retries an initial bootstrap failure', async ({ page }) => {
   const problems = watchBrowser(page)
   const expectedFailureMessage =
     'Failed to load resource: the server responded with a status of 503 (Service Unavailable)'
-  let attempts = 0
-  await page.route('**/api/bootstrap', (route) => {
-    attempts += 1
-    return attempts === 1
-      ? route.fulfill({ status: 503 })
-      : route.fulfill({ json: bootstrapFixture })
-  })
+  await useRecoveringBootstrap(page)
   await page.goto('/attention')
 
   await expect(page.getByRole('status')).toContainText('Transport unavailable')

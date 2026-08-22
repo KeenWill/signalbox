@@ -268,9 +268,11 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
 function ProductToolbar({
   context,
   paletteReturnFocusRef,
+  navigationReturnFocusRef,
 }: {
   context: CommandContext
   paletteReturnFocusRef: RefObject<HTMLElement | null>
+  navigationReturnFocusRef: RefObject<HTMLElement | null>
 }) {
   const app = useAppSelector(selectApp)
   return (
@@ -279,7 +281,10 @@ function ProductToolbar({
         className="icon-button mobile-only"
         type="button"
         aria-label="Open navigation"
-        onClick={() => invokeCommand('navigation.open', context)}
+        onClick={(event) => {
+          navigationReturnFocusRef.current = event.currentTarget
+          invokeCommand('navigation.open', context)
+        }}
       >
         <Menu />
       </button>
@@ -334,6 +339,7 @@ export function ProductApp({
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
   const paletteReturnFocusRef = useRef<HTMLElement | null>(null)
+  const navigationReturnFocusRef = useRef<HTMLElement | null>(null)
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -391,6 +397,12 @@ export function ProductApp({
     document.title = `${surfaceCopy[surface].title} · Signalbox`
   }, [surface])
 
+  useEffect(() => {
+    if (app.overlay === 'navigation' && navigationReturnFocusRef.current === null) {
+      navigationReturnFocusRef.current = primaryRef.current
+    }
+  }, [app.overlay])
+
   const copy = surfaceCopy[surface]
   const updateSearch = (next: ProductSearchState) =>
     void navigate({ to: '/$surface', params: { surface }, search: next })
@@ -418,7 +430,11 @@ export function ProductApp({
             <span className="eyebrow">{copy.eyebrow}</span>
             <h1>{copy.title}</h1>
           </div>
-          <ProductToolbar context={context} paletteReturnFocusRef={paletteReturnFocusRef} />
+          <ProductToolbar
+            context={context}
+            paletteReturnFocusRef={paletteReturnFocusRef}
+            navigationReturnFocusRef={navigationReturnFocusRef}
+          />
         </header>
         <div className="surface-question">
           <p>{copy.question}</p>
@@ -456,7 +472,7 @@ export function ProductApp({
             </div>
             <div>
               <dt>Authority</dt>
-              <dd>Daemon</dd>
+              <dd>{surface === 'settings' ? 'Browser local' : 'Daemon'}</dd>
             </div>
             <div>
               <dt>Cache</dt>
@@ -479,7 +495,8 @@ export function ProductApp({
             aria-describedby="mobile-navigation-description"
             onCloseAutoFocus={(event) => {
               event.preventDefault()
-              document.querySelector<HTMLElement>('[aria-label="Open navigation"]')?.focus()
+              navigationReturnFocusRef.current?.focus()
+              navigationReturnFocusRef.current = null
             }}
           >
             <Dialog.Title className="sr-only">Product navigation</Dialog.Title>

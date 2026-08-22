@@ -299,11 +299,7 @@ export class SameOriginProductTransport implements ProductTransport {
       )
       throw new ProductRequestError(failure.error.code, failure.error.kind, failure.error.message)
     }
-    const responseLimit = Math.min(
-      MAX_SEARCH_RESPONSE_BYTES,
-      16_384 + request.maxItems * (request.maxSnippetBytes + 2_048),
-    )
-    const page = decodeWebSearchPage(await readBoundedJson(response, responseLimit))
+    const page = decodeWebSearchPage(await readBoundedJson(response, MAX_SEARCH_RESPONSE_BYTES))
     return validateSearchPageBounds(page, request)
   }
 }

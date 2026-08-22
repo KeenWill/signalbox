@@ -80,6 +80,22 @@ const useSearchFixture = async (page: Page) => {
   })
 }
 
+const useRecoveringSearchFixture = async (page: Page) => {
+  let attempts = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/search?**', (route) => {
+    attempts += 1
+    return attempts === 1
+      ? route.fulfill({
+          status: 503,
+          json: {
+            error: { code: 'temporary', kind: 'transport', message: 'temporary failure' },
+          },
+        })
+      : route.fulfill({ json: firstPage })
+  })
+}
+
 const submitSearch = async (page: Page) => {
   await page.getByRole('textbox', { name: 'Search text' }).fill('release evidence')
   await page.getByRole('textbox', { name: /Exact session/ }).fill(sessionId)
@@ -155,6 +171,31 @@ test('resets pagination when submitting a different search scope', async ({ page
   await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
   await expect(page).toHaveURL(/q=different(?:\+|%20)scope/)
   await expect(page).not.toHaveURL(/afterAddress=/)
+})
+
+test('synchronizes pagination with browser history', async ({ page }) => {
+  await useSearchFixture(page)
+  await page.goto('/search?q=release')
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Next page' }).click()
+  await expect(page.getByRole('heading', { name: '1 results on this page' })).toBeVisible()
+  await expect(page).toHaveURL(/afterAddress=750/)
+  await page.goBack()
+
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page).not.toHaveURL(/afterAddress=/)
+})
+
+test('restores focus after a successful search retry', async ({ page }) => {
+  await useRecoveringSearchFixture(page)
+  await page.goto('/search?q=release')
+
+  const retry = page.getByRole('button', { name: 'Retry' })
+  await retry.focus()
+  await retry.click()
+
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeFocused()
 })
 
 test('preserves search focus and announces asynchronous results', async ({ page }) => {
