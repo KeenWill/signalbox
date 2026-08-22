@@ -310,12 +310,26 @@ async fn load_descriptor(
     if !row.try_get::<bool, _>("facts_present")? {
         return Err(SessionTimelineCorruption::Missing("projection facts").into());
     }
-    let first = optional_address(row.try_get("first_sequence")?, "first address")?;
-    let latest = optional_address(row.try_get("latest_sequence")?, "latest address")?;
+    let item_count = nonnegative(row.try_get("item_count")?, "item count")?;
+    if item_count == 0 {
+        return Err(SessionTimelineCorruption::InvalidOrdinal("item count").into());
+    }
+    let first = optional_address(row.try_get("first_sequence")?, "first address")?
+        .ok_or(SessionTimelineCorruption::Missing("first address"))?;
+    let latest = optional_address(row.try_get("latest_sequence")?, "latest address")?
+        .ok_or(SessionTimelineCorruption::Missing("latest address"))?;
+    let observed_through = nonnegative(
+        row.try_get::<Option<Decimal>, _>("last_sequence")?
+            .ok_or(SessionTimelineCorruption::Missing("observation cursor"))?,
+        "observation cursor",
+    )?;
+    if first > latest || latest.sequence().get() > observed_through {
+        return Err(SessionTimelineCorruption::InvalidOrdinal("timeline bounds").into());
+    }
     Ok(Some(SessionTimelineDescriptor {
         session,
         sizes: SessionTimelineSizeFacts {
-            item_count: nonnegative(row.try_get("item_count")?, "item count")?,
+            item_count,
             projected_text_bytes: nonnegative(row.try_get("text_bytes")?, "projected text bytes")?,
             projected_structured_bytes: nonnegative(
                 row.try_get("structured_bytes")?,
@@ -324,16 +338,15 @@ async fn load_descriptor(
             referenced_blob_count: 0,
             referenced_blob_bytes: 0,
         },
-        bounds: SessionTimelineBounds { first, latest },
+        bounds: SessionTimelineBounds {
+            first: Some(first),
+            latest: Some(latest),
+        },
         work: SessionWorkFacts {
             active_turn_count: nonnegative(row.try_get("active_count")?, "active turn count")?,
             queued_turn_count: nonnegative(row.try_get("queued_count")?, "queued turn count")?,
         },
-        observed_through: nonnegative(
-            row.try_get::<Option<Decimal>, _>("last_sequence")?
-                .ok_or(SessionTimelineCorruption::Missing("observation cursor"))?,
-            "observation cursor",
-        )?,
+        observed_through,
     }))
 }
 
