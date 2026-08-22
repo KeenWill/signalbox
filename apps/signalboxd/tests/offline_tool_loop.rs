@@ -2829,6 +2829,10 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
     execution
         .execute(Box::new(fixture.activated.clone()))
         .await?;
+    let expected_user_content = format!(
+        r#"[{{"type":"text","text":{}}}]"#,
+        serde_json::to_string(FIXTURE_USER_CONTENT)?
+    );
     assert_eq!(
         continuation_result_json(&runtime)?,
         serde_json::json!({
@@ -2836,10 +2840,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
             "entries": [{
                 "position": 1,
                 "kind": "user",
-                "content": serde_json::json!([{
-                    "type": "text",
-                    "text": FIXTURE_USER_CONTENT
-                }]).to_string(),
+                "content": expected_user_content,
                 "content_truncated": false
             }, {
                 "position": 2,
