@@ -11,10 +11,11 @@ mod registry;
 mod value;
 
 pub use declaration::{
-    FileMediaProvider, FileMediaProviderDeclaration, FileMediaProviderFuture,
-    FileMediaProviderReadRequest, FileMediaProviderValidationRequest, ProbeDeclaration,
-    ProbeStrength, ReadAccessPattern, ReadOutputKind, ReadViewBounds, ReadViewDeclaration,
-    ReaderDeclaration, ReaderDeclarationInput, RegistryDeclarationError, StreamingTextFallback,
+    FileMediaProvider, FileMediaProviderDeclaration, FileMediaProviderFailure,
+    FileMediaProviderFuture, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
+    ProbeDeclaration, ProbeStrength, ReadAccessPattern, ReadOutputKind, ReadViewBounds,
+    ReadViewDeclaration, ReaderDeclaration, ReaderDeclarationInput, RegistryDeclarationError,
+    StreamingTextFallback,
 };
 pub use detection::{
     CancellationSignal, FileInspection, FileInspectionStatus, FileMediaFailure, FileMediaProcessor,
