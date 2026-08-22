@@ -2957,10 +2957,12 @@ struct MultipartReplayFixture {
     repository: SubmitInputRepository,
     command: SubmitInput,
     first: SubmitInputHandlingOutcome,
-    before: UserContentPart,
-    attachment: UserContentPart,
-    after: UserContentPart,
-    digest: BlobDigest,
+}
+
+#[derive(sqlx::FromRow)]
+struct MultipartProjectionFacts {
+    command_projection: Value,
+    accepted_projection: Value,
 }
 
 impl MultipartReplayFixture {
@@ -2970,13 +2972,15 @@ impl MultipartReplayFixture {
     }
 }
 
-async fn multipart_replay_fixture() -> Result<MultipartReplayFixture, Box<dyn Error>> {
+async fn multipart_replay_fixture(
+    command: SubmitInput,
+    digest: BlobDigest,
+) -> Result<MultipartReplayFixture, Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x324, 0x724, direct(0x824)))
         .await?;
 
-    let digest = BlobDigest::digest(b"multipart attachment");
     let mut catalog = pool.begin().await?;
     sqlx::query(
         "INSERT INTO blob_store_binding (store_name, namespace_id)
@@ -2999,30 +3003,6 @@ async fn multipart_replay_fixture() -> Result<MultipartReplayFixture, Box<dyn Er
     .await?;
     catalog.commit().await?;
 
-    let attachment = UserContentPart::Attachment {
-        digest,
-        kind: AttachmentKind::Document,
-        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
-            .expect("the fixture media type is valid"),
-        display_filename: Some(
-            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
-                .expect("the fixture display filename is valid"),
-        ),
-    };
-    let before = UserContentPart::try_text(String::from("before"))
-        .expect("the fixture leading text is valid");
-    let after = UserContentPart::try_text(String::from("after"))
-        .expect("the fixture trailing text is valid");
-    let content = UserContent::try_parts(vec![before.clone(), attachment.clone(), after.clone()])
-        .expect("the fixture parts are canonical");
-    let command = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0x325)),
-        SessionId::from_uuid(Uuid::from_u128(0x724)),
-        content,
-        DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-        },
-    );
     let repository = SubmitInputRepository::new(pool.clone());
     let first = repository
         .handle(
@@ -3038,20 +3018,40 @@ async fn multipart_replay_fixture() -> Result<MultipartReplayFixture, Box<dyn Er
         repository,
         command,
         first,
-        before,
-        attachment,
-        after,
-        digest,
     })
 }
 
-/// INV-012: equal multipart replay returns the original durable receipt and
-/// command value.
+/// INV-012: equal multipart replay returns the original durable receipt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
 -> Result<(), Box<dyn Error>> {
-    let fixture = multipart_replay_fixture().await?;
+    let digest = BlobDigest::digest(b"multipart attachment");
+    let before = UserContentPart::try_text(String::from("before"))
+        .expect("the fixture leading text is valid");
+    let attachment = UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
+                .expect("the fixture display filename is valid"),
+        ),
+    };
+    let after = UserContentPart::try_text(String::from("after"))
+        .expect("the fixture trailing text is valid");
+    let content = UserContent::try_parts(vec![before, attachment, after])
+        .expect("the fixture parts are canonical");
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x325)),
+        SessionId::from_uuid(Uuid::from_u128(0x724)),
+        content,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let fixture = multipart_replay_fixture(command, digest).await?;
     assert_eq!(
         fixture
             .repository
@@ -3063,6 +3063,41 @@ async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
             .await?,
         fixture.first
     );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: loading a durable multipart command reconstructs its exact value.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_durable_multipart_command_reconstructs_the_original_value()
+-> Result<(), Box<dyn Error>> {
+    let digest = BlobDigest::digest(b"multipart attachment");
+    let before = UserContentPart::try_text(String::from("before"))
+        .expect("the fixture leading text is valid");
+    let attachment = UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
+                .expect("the fixture display filename is valid"),
+        ),
+    };
+    let after = UserContentPart::try_text(String::from("after"))
+        .expect("the fixture trailing text is valid");
+    let content = UserContent::try_parts(vec![before, attachment, after])
+        .expect("the fixture parts are canonical");
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x325)),
+        SessionId::from_uuid(Uuid::from_u128(0x724)),
+        content,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let fixture = multipart_replay_fixture(command, digest).await?;
     assert_eq!(
         fixture
             .repository
@@ -3080,16 +3115,37 @@ async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
-    let fixture = multipart_replay_fixture().await?;
+    let digest = BlobDigest::digest(b"multipart attachment");
+    let before = UserContentPart::try_text(String::from("before"))
+        .expect("the fixture leading text is valid");
+    let attachment = UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
+                .expect("the fixture display filename is valid"),
+        ),
+    };
+    let after = UserContentPart::try_text(String::from("after"))
+        .expect("the fixture trailing text is valid");
+    let content = UserContent::try_parts(vec![before.clone(), attachment.clone(), after.clone()])
+        .expect("the fixture parts are canonical");
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x325)),
+        SessionId::from_uuid(Uuid::from_u128(0x724)),
+        content,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let fixture = multipart_replay_fixture(command, digest).await?;
     let reordered = SubmitInput::new(
         fixture.command.command_id(),
         fixture.command.session(),
-        UserContent::try_parts(vec![
-            fixture.after.clone(),
-            fixture.attachment.clone(),
-            fixture.before.clone(),
-        ])
-        .expect("the reordered fixture parts are canonical"),
+        UserContent::try_parts(vec![after, attachment, before])
+            .expect("the reordered fixture parts are canonical"),
         fixture.command.delivery(),
     );
     assert_eq!(
@@ -3114,9 +3170,34 @@ async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
-    let fixture = multipart_replay_fixture().await?;
+    let digest = BlobDigest::digest(b"multipart attachment");
+    let before = UserContentPart::try_text(String::from("before"))
+        .expect("the fixture leading text is valid");
+    let attachment = UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
+                .expect("the fixture display filename is valid"),
+        ),
+    };
+    let after = UserContentPart::try_text(String::from("after"))
+        .expect("the fixture trailing text is valid");
+    let content = UserContent::try_parts(vec![before.clone(), attachment, after.clone()])
+        .expect("the fixture parts are canonical");
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x325)),
+        SessionId::from_uuid(Uuid::from_u128(0x724)),
+        content,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let fixture = multipart_replay_fixture(command, digest).await?;
     let changed_attachment = UserContentPart::Attachment {
-        digest: fixture.digest,
+        digest,
         kind: AttachmentKind::Document,
         media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
             .expect("the fixture media type is valid"),
@@ -3128,12 +3209,8 @@ async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(),
     let changed_metadata = SubmitInput::new(
         fixture.command.command_id(),
         fixture.command.session(),
-        UserContent::try_parts(vec![
-            fixture.before.clone(),
-            changed_attachment,
-            fixture.after.clone(),
-        ])
-        .expect("the changed-metadata fixture parts are canonical"),
+        UserContent::try_parts(vec![before, changed_attachment, after])
+            .expect("the changed-metadata fixture parts are canonical"),
         fixture.command.delivery(),
     );
     assert_eq!(
@@ -3159,8 +3236,33 @@ async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(),
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_multipart_command_and_accepted_satellites_are_identical()
 -> Result<(), Box<dyn Error>> {
-    let fixture = multipart_replay_fixture().await?;
-    let mirrored: (Value, Value) = sqlx::query_as(
+    let digest = BlobDigest::digest(b"multipart attachment");
+    let before = UserContentPart::try_text(String::from("before"))
+        .expect("the fixture leading text is valid");
+    let attachment = UserContentPart::Attachment {
+        digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("notes.pdf"))
+                .expect("the fixture display filename is valid"),
+        ),
+    };
+    let after = UserContentPart::try_text(String::from("after"))
+        .expect("the fixture trailing text is valid");
+    let content = UserContent::try_parts(vec![before, attachment, after])
+        .expect("the fixture parts are canonical");
+    let command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x325)),
+        SessionId::from_uuid(Uuid::from_u128(0x724)),
+        content,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let fixture = multipart_replay_fixture(command, digest).await?;
+    let mirrored: MultipartProjectionFacts = sqlx::query_as(
         "SELECT
             (SELECT jsonb_agg(
                 jsonb_build_array(position, part_kind, text_value,
@@ -3168,7 +3270,7 @@ async fn inv012_multipart_command_and_accepted_satellites_are_identical()
                     declared_media_type, display_filename)
                 ORDER BY position)
                FROM submit_input_command_content_part
-              WHERE command_id = $1),
+              WHERE command_id = $1) AS command_projection,
             (SELECT jsonb_agg(
                 jsonb_build_array(position, part_kind, text_value,
                     encode(blob_digest, 'hex'), attachment_kind,
@@ -3177,12 +3279,12 @@ async fn inv012_multipart_command_and_accepted_satellites_are_identical()
                FROM accepted_input_content_part AS part
                JOIN accepted_input AS accepted
                  ON accepted.accepted_input_id = part.accepted_input_id
-              WHERE accepted.accepting_command_id = $1)",
+              WHERE accepted.accepting_command_id = $1) AS accepted_projection",
     )
     .bind(fixture.command.command_id().as_uuid())
     .fetch_one(&fixture.pool)
     .await?;
-    assert_eq!(mirrored.0, mirrored.1);
+    assert_eq!(mirrored.command_projection, mirrored.accepted_projection);
 
     fixture.finish().await;
     Ok(())
