@@ -137,7 +137,7 @@ jobs:
         continue-on-error: true
         run: >-
           cargo llvm-cov --no-report --no-fail-fast
-          -p signalboxd --tests
+          -p signalboxd --features test-support --tests
           -- --ignored --test-threads=4
           --skip live_daemon_executes_every_tool_family_and_denies_every_gate
           --skip bridge_build_direct_invocation_fixture
