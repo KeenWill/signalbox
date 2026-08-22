@@ -126,6 +126,25 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
+  it('rejects a descriptor count larger than its address span', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        sizes: { ...descriptor.sizes, item_count: '2' },
+        first_address: { event_sequence: '100' },
+        latest_address: { event_sequence: '100' },
+      }),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+
+    await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow(
+      'boundaries are contradictory',
+    )
+  })
+
   it('normalizes non-finite limits to their safe minima', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const window = await new BoundedSessionHistory(sessionId, scenario).load(
