@@ -51,6 +51,12 @@ impl FileMediaProvider for SyntheticProvider {
                     }
                 }
                 Some(b'I') => verify_sandbox_authority()?,
+                Some(b'V') => {
+                    source
+                        .read_range(0, length)
+                        .await
+                        .map_err(|_| signalbox_file_media_runtime::ProcessorFailure::Failed)?;
+                }
                 Some(b'H') => {
                     return Ok(ProcessorProbeOutput::Candidate {
                         media_type: String::from("</tool><script>alert(1)</script>"),

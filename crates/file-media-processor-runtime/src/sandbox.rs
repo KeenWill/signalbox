@@ -44,6 +44,8 @@ const BWRAP_PROBE_ARGUMENT: &str = "--signalbox-file-media-isolation-probe";
 const CANCELLATION_POLL: Duration = Duration::from_millis(5);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const WRITABLE_TMPFS_BUDGET_DIVISOR: u64 = 2;
+/// Maximum worker bindings retained by one processor.
+const MAX_WORKER_BINDINGS: usize = 256;
 /// Maximum bytes retained across all sealed executable snapshots in one processor.
 const MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum bytes retained by one sealed executable snapshot.
@@ -106,6 +108,7 @@ impl SandboxedFileMediaProcessor {
         if !cfg!(target_os = "linux") || bindings.is_empty() {
             return Err(SandboxedFileMediaProcessorConstructionError::Unsupported);
         }
+        admit_worker_binding_count(bindings.len())?;
         if !task_ceiling_is_enforceable(getuid().as_raw(), geteuid().as_raw()) {
             return Err(SandboxedFileMediaProcessorConstructionError::TaskCeiling);
         }
@@ -921,6 +924,7 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         msgget,
         mq_open,
         semget,
+        io_setup,
         add_key,
         request_key,
         keyctl,
@@ -935,6 +939,7 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         68_u32,
         240_u32,
         64_u32,
+        206_u32,
         248_u32,
         249_u32,
         250_u32,
@@ -951,6 +956,7 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         msgget,
         mq_open,
         semget,
+        io_setup,
         add_key,
         request_key,
         keyctl,
@@ -965,6 +971,7 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         186_u32,
         180_u32,
         190_u32,
+        0_u32,
         217_u32,
         218_u32,
         219_u32,
@@ -980,6 +987,7 @@ fn seccomp_instructions() -> Result<Vec<FilterInstruction>, std::io::Error> {
         msgget,
         mq_open,
         semget,
+        io_setup,
         add_key,
         request_key,
         keyctl,
@@ -1158,6 +1166,16 @@ fn admit_executable_snapshot_bytes(
         .ok_or(SandboxedFileMediaProcessorConstructionError::ExecutableSnapshots)
 }
 
+fn admit_worker_binding_count(
+    binding_count: usize,
+) -> Result<(), SandboxedFileMediaProcessorConstructionError> {
+    if binding_count <= MAX_WORKER_BINDINGS {
+        Ok(())
+    } else {
+        Err(SandboxedFileMediaProcessorConstructionError::WorkerBindings)
+    }
+}
+
 #[allow(unsafe_code)]
 fn create_executable_snapshot() -> Result<fs::File, SandboxedFileMediaProcessorConstructionError> {
     let name = b"signalbox-file-media-worker\0";
@@ -1207,6 +1225,8 @@ pub enum SandboxedFileMediaProcessorConstructionError {
     Worker,
     /// Sealed executable snapshots exceeded their aggregate byte ceiling.
     ExecutableSnapshots,
+    /// Worker bindings exceeded their compiled count ceiling.
+    WorkerBindings,
     /// A process ceiling was zero or exceeded its compiled maximum.
     Ceilings,
     /// The current identity is exempt from the configured task ceiling.
@@ -1226,6 +1246,7 @@ impl fmt::Display for SandboxedFileMediaProcessorConstructionError {
             Self::ExecutableSnapshots => {
                 "file-media executable snapshots exceed their aggregate ceiling"
             }
+            Self::WorkerBindings => "file-media worker bindings exceed their count ceiling",
             Self::Ceilings => "file-media process ceilings are invalid",
             Self::TaskCeiling => "file-media task ceiling is unenforceable for this identity",
             Self::DuplicateProvider => "file-media worker provider is duplicated",
@@ -1246,8 +1267,9 @@ mod tests {
 
     use super::{
         CompletedOutput, ConstructionTarget, MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES,
-        MAX_EXECUTABLE_SNAPSHOT_BYTES, admit_completed, admit_executable_snapshot_bytes,
-        open_executable_snapshot, open_worker_executable, sandbox_arguments, seccomp_instructions,
+        MAX_EXECUTABLE_SNAPSHOT_BYTES, MAX_WORKER_BINDINGS, admit_completed,
+        admit_executable_snapshot_bytes, admit_worker_binding_count, open_executable_snapshot,
+        open_worker_executable, sandbox_arguments, seccomp_instructions,
         task_ceiling_is_enforceable, worker_memory_budget,
     };
 
@@ -1267,6 +1289,15 @@ mod tests {
         );
         assert!(
             admit_executable_snapshot_bytes(MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES, 1).is_err()
+        );
+    }
+
+    #[test]
+    fn worker_binding_count_rejects_entries_above_its_bound() {
+        assert_eq!(admit_worker_binding_count(MAX_WORKER_BINDINGS), Ok(()));
+        assert_eq!(
+            admit_worker_binding_count(MAX_WORKER_BINDINGS + 1),
+            Err(super::SandboxedFileMediaProcessorConstructionError::WorkerBindings)
         );
     }
 
@@ -1470,6 +1501,16 @@ mod tests {
             program.get(denial).map(|entry| entry.value),
             Some(0x0005_0001)
         );
+    }
+
+    #[test]
+    fn descendant_filter_denies_global_linux_aio_context_allocation() {
+        let program = seccomp_instructions().expect("the test architecture is supported");
+        #[cfg(target_arch = "x86_64")]
+        let io_setup = 206_u32;
+        #[cfg(target_arch = "aarch64")]
+        let io_setup = 0_u32;
+        assert_syscall_denied(&program, io_setup, "io_setup");
     }
 
     #[test]

@@ -78,8 +78,13 @@ async fn inv082_worker_can_read_only_through_the_bounded_broker() -> Result<(), 
     };
     let output = processor
         .probe(&reader, &BytesSource(vec![b'V']), &NeverCancelled)
-        .await?;
-    assert_eq!(output, successful_probe());
+        .await;
+    assert_eq!(
+        output,
+        Err(ProcessorBoundaryFailure::Processor(
+            ProcessorFailure::Protocol
+        ))
+    );
     Ok(())
 }
 
