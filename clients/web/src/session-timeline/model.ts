@@ -2,12 +2,14 @@ import type {
   WebApiErrorResponse,
   WebContractBootstrap,
   WebSessionTimelineDescriptor,
+  WebSessionTimelineDetailPage,
   WebSessionTimelineWindow,
 } from '../generated/web-contract.mjs'
 import {
   decodeWebApiErrorResponse,
   decodeWebContractBootstrap,
   decodeWebSessionTimelineDescriptor,
+  decodeWebSessionTimelineDetailPage,
   decodeWebSessionTimelineWindow,
 } from '../generated/web-contract.mjs'
 
@@ -18,14 +20,24 @@ export const MAX_TIMELINE_HTTP_RESPONSE_BYTES = 256 * 1024
 
 type TimelineContractLimits = Pick<
   WebContractBootstrap['limits'],
-  'max_timeline_window_items' | 'max_timeline_window_bytes'
+  | 'max_timeline_window_items'
+  | 'max_timeline_window_bytes'
+  | 'max_timeline_detail_items'
+  | 'max_timeline_detail_bytes'
 >
+
+type TimelineDetailCursor = NonNullable<WebSessionTimelineDetailPage['continuation']>
 
 export type SessionWindowAnchor =
   | { kind: 'first' | 'latest' }
   | { kind: 'before' | 'after' | 'around'; eventSequence: string }
 
 export interface SessionWindowLimits {
+  maxItems: number
+  maxBytes: number
+}
+
+export interface SessionDetailLimits {
   maxItems: number
   maxBytes: number
 }
@@ -65,6 +77,14 @@ const boundedLimits = (
 ): SessionWindowLimits => ({
   maxItems: boundedLimit(limits.maxItems, 1, contract.max_timeline_window_items),
   maxBytes: boundedLimit(limits.maxBytes, 256, contract.max_timeline_window_bytes),
+})
+
+const boundedDetailLimits = (
+  limits: SessionDetailLimits,
+  contract: TimelineContractLimits,
+): SessionDetailLimits => ({
+  maxItems: boundedLimit(limits.maxItems, 1, contract.max_timeline_detail_items),
+  maxBytes: boundedLimit(limits.maxBytes, 256, contract.max_timeline_detail_bytes),
 })
 
 const canonicalSessionId = (value: string): string => {
@@ -128,6 +148,7 @@ const throwApiError = async (response: Response): Promise<never> => {
 export class HttpSessionTimelineSource implements SessionTimelineSource {
   private constructor(
     readonly limits: TimelineContractLimits,
+    private readonly detailAvailable: boolean,
     private readonly request: typeof fetch,
   ) {}
 
@@ -138,7 +159,11 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     if (!bootstrap.capabilities.bounded_session_timeline) {
       throw new TypeError('bounded session timeline capability is unavailable')
     }
-    return new HttpSessionTimelineSource(bootstrap.limits, request)
+    return new HttpSessionTimelineSource(
+      bootstrap.limits,
+      bootstrap.capabilities.bounded_session_timeline_detail,
+      request,
+    )
   }
 
   async readDescriptor(
@@ -171,6 +196,62 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     )
     if (!response.ok) return throwApiError(response)
     return decodeWebSessionTimelineWindow(await readBoundedJson(response))
+  }
+
+  async readItemDetail(
+    sessionId: string,
+    eventSequence: string,
+    limits: SessionDetailLimits,
+    cursor?: TimelineDetailCursor,
+    signal?: AbortSignal,
+  ): Promise<WebSessionTimelineDetailPage> {
+    if (!this.detailAvailable) {
+      throw new TypeError('bounded session timeline detail capability is unavailable')
+    }
+    const address = String(decimalAddress(eventSequence))
+    const bounded = boundedDetailLimits(limits, this.limits)
+    const query = new URLSearchParams({
+      max_items: String(bounded.maxItems),
+      max_bytes: String(bounded.maxBytes),
+    })
+    if (cursor?.type === 'more_at') {
+      query.set('cursor_address', cursor.address.event_sequence)
+    }
+    if (cursor?.type === 'more_body') {
+      query.set('cursor_address', cursor.body.address.event_sequence)
+      query.set('cursor_field', cursor.body.field)
+      query.set('cursor_member', String(cursor.body.member_index))
+      query.set('cursor_offset', cursor.body.offset_bytes)
+    }
+    const response = await this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/timeline/${address}/detail?${query}`,
+      { signal },
+    )
+    if (!response.ok) return throwApiError(response)
+    const page = decodeWebSessionTimelineDetailPage(await readBoundedJson(response))
+    if (canonicalSessionId(page.session_id) !== canonicalSessionId(sessionId)) {
+      throw new TypeError('timeline detail session mismatch')
+    }
+    if (page.items.length > bounded.maxItems) {
+      throw new TypeError('timeline detail exceeds the requested item ceiling')
+    }
+    let projectedBodyBytes = 0
+    for (const item of page.items) {
+      if (item.address.event_sequence !== address) {
+        throw new TypeError('item detail returned a different timeline address')
+      }
+      projectedBodyBytes += item.projected_body_bytes
+      if (!Number.isSafeInteger(projectedBodyBytes)) {
+        throw new TypeError('timeline detail byte total is not a safe integer')
+      }
+    }
+    if (projectedBodyBytes !== page.projected_body_bytes) {
+      throw new TypeError('timeline detail byte total does not match its items')
+    }
+    if (projectedBodyBytes > bounded.maxBytes) {
+      throw new TypeError('timeline detail exceeds the requested byte ceiling')
+    }
+    return page
   }
 }
 
@@ -301,6 +382,8 @@ const SCENARIO_ITEM_BYTES = 96
 const SCENARIO_TIMELINE_LIMITS: TimelineContractLimits = {
   max_timeline_window_items: 256,
   max_timeline_window_bytes: 64 * 1024,
+  max_timeline_detail_items: 128,
+  max_timeline_detail_bytes: 64 * 1024,
 }
 
 export class EnormousSessionScenarioSource implements SessionTimelineSource {
