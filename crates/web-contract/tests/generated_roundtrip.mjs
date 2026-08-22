@@ -85,7 +85,7 @@ test("generated blob decoder accepts capability-projected views", () => {
             producer: {
               class: "deterministic",
               implementation_digest: `sha256:${"c3".repeat(32)}`,
-              cache_key: `sha256:${"d4".repeat(32)}`,
+              cache_key: "sha256:a19f72fb3f56c8462d4d2b861111592c325e0f9329c3e204d5bb4d0dddf21357",
             },
           },
         ],
@@ -354,7 +354,7 @@ test("generated blob decoder preserves exact large JSON integers", () => {
             producer: {
               class: "deterministic",
               implementation_digest: digest,
-              cache_key: digest,
+              cache_key: "sha256:82d6a29a685b22337ef640db7ff1ebe8eea86bdf541e5e356b6adb2803c7fc73",
             },
           },
         ],
@@ -582,6 +582,149 @@ test("generated blob decoder bounds nested view collections", () => {
         ],
       }),
     /derivations must be at most 1 items/,
+  );
+});
+
+test("generated blob decoder accepts Rust-compatible floating-point spellings", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const cases = [
+    [
+      '{"n":1e+20}',
+      "sha256:086cdb3b3cec1aae2ced395220c6b5c5d5190fc1220a4d3b8d38c9bf20b662b6",
+    ],
+    [
+      '{"n":1e-6}',
+      "sha256:5c124e0dafa4dfba43e7b9b68d356ddfdfe22155fafdee5e59d5b44236c1e596",
+    ],
+    [
+      '{"n":-0.0}',
+      "sha256:fcf3b35e58c2865942ffa068ce9d78ab58211cc3c7684f1c586ff117b34f7ff5",
+    ],
+  ];
+
+  for (const [parameters_json, cache_key] of cases) {
+    assert.doesNotThrow(() =>
+      decodeWebBlobDescriptor({
+        digest,
+        byte_length: "1",
+        declared_media_type: "image/png",
+        display_filename: [],
+        available_views: [
+          {
+            kind: "download",
+            content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+            media_type: "image/png",
+            byte_length: "1",
+            derivations: [],
+          },
+          {
+            kind: "preview",
+            content_url: `/api/blobs/${digest}/content/image-png`,
+            media_type: "image/png",
+            byte_length: "1",
+            derivations: [
+              {
+                derivation_id: "01990f5f-55c0-7000-8000-000000000001",
+                input_digests: [digest],
+                output_digests: [digest],
+                transformation_name: "image.preview",
+                transformation_version: 1,
+                parameters_json,
+                producer: {
+                  class: "deterministic",
+                  implementation_digest: digest,
+                  cache_key,
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+  }
+});
+
+test("generated blob decoder rejects unsupported routes and incomplete download metadata", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const descriptor = {
+    digest,
+    byte_length: "1",
+    declared_media_type: "application/octet-stream",
+    display_filename: [],
+    available_views: [
+      {
+        kind: "download",
+        content_url: `/api/blobs/${digest}/download`,
+        media_type: "application/octet-stream",
+        byte_length: "1",
+        derivations: [],
+      },
+    ],
+  };
+
+  assert.throws(
+    () => decodeWebBlobDescriptor(descriptor),
+    /download route with required media type metadata/,
+  );
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        ...descriptor,
+        available_views: [
+          {
+            ...descriptor.available_views[0],
+            kind: "browser_native",
+            content_url: `/api/blobs/${digest}/content/arbitrary-name`,
+          },
+        ],
+      }),
+    /canonical blob API route/,
+  );
+});
+
+test("generated blob decoder rejects a contradictory deterministic cache key", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const outputDigest = `sha256:${"b2".repeat(32)}`;
+
+  assert.throws(
+    () =>
+      decodeWebBlobDescriptor({
+        digest,
+        byte_length: "1",
+        declared_media_type: "image/png",
+        display_filename: [],
+        available_views: [
+          {
+            kind: "download",
+            content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+            media_type: "image/png",
+            byte_length: "1",
+            derivations: [],
+          },
+          {
+            kind: "preview",
+            content_url: `/api/blobs/${outputDigest}/content/image-png`,
+            media_type: "image/png",
+            byte_length: "1",
+            derivations: [
+              {
+                derivation_id: "01990f5f-55c0-7000-8000-000000000001",
+                input_digests: [digest],
+                output_digests: [outputDigest],
+                transformation_name: "image.preview",
+                transformation_version: 1,
+                parameters_json: "{}",
+                producer: {
+                  class: "deterministic",
+                  implementation_digest: digest,
+                  cache_key: outputDigest,
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    /cache_key must be the deterministic key for the advertised provenance/,
   );
 });
 
