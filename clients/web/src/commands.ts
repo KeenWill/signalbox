@@ -7,6 +7,7 @@ export interface CommandContext {
   getState: () => RootState
   timelineIds: readonly string[]
   focusTimeline: () => void
+  artifactAction?: () => void
 }
 
 export interface CommandBinding {
@@ -20,14 +21,70 @@ interface CommandDefinitionShape {
   id: string
   title: string
   description: string
-  category: 'Navigate' | 'View' | 'Surface'
+  category: 'Navigate' | 'View' | 'Surface' | 'Artifact'
   bindings: readonly CommandBinding[]
   available: (context: CommandContext) => boolean
   run: (context: CommandContext) => void
 }
 
 const always = () => true
+const hasArtifactAction = (context: CommandContext) => context.artifactAction !== undefined
+const runArtifactAction = (context: CommandContext) => context.artifactAction?.()
 export const commandRegistry = [
+  {
+    id: 'artifact.preview.expand',
+    title: 'Expand bounded artifact preview',
+    description: 'Show the larger bounded projection of the selected artifact.',
+    category: 'Artifact',
+    bindings: [],
+    available: hasArtifactAction,
+    run: runArtifactAction,
+  },
+  {
+    id: 'artifact.preview.collapse',
+    title: 'Collapse artifact preview',
+    description: 'Return the selected artifact to its initial bounded projection.',
+    category: 'Artifact',
+    bindings: [],
+    available: hasArtifactAction,
+    run: runArtifactAction,
+  },
+  {
+    id: 'artifact.original.load',
+    title: 'Load artifact original',
+    description: 'Request the admitted browser-native original for the selected artifact.',
+    category: 'Artifact',
+    bindings: [],
+    available: hasArtifactAction,
+    run: runArtifactAction,
+  },
+  {
+    id: 'artifact.remote-policy.ask',
+    title: 'Ask before remote media',
+    description: 'Require per-item approval if bounded remote delivery becomes available.',
+    category: 'Artifact',
+    bindings: [],
+    available: hasArtifactAction,
+    run: runArtifactAction,
+  },
+  {
+    id: 'artifact.remote-policy.block',
+    title: 'Block remote media',
+    description: 'Keep remote media unavailable.',
+    category: 'Artifact',
+    bindings: [],
+    available: hasArtifactAction,
+    run: runArtifactAction,
+  },
+  {
+    id: 'artifact.remote-policy.allow',
+    title: 'Allow bounded remote media',
+    description: 'Allow remote media only through an owning bounded delivery service.',
+    category: 'Artifact',
+    bindings: [],
+    available: hasArtifactAction,
+    run: runArtifactAction,
+  },
   {
     id: 'palette.open',
     title: 'Open command palette',

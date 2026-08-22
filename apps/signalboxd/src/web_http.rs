@@ -783,10 +783,10 @@ fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
 }
 
 fn if_range_matches(headers: &HeaderMap, etag: &str) -> bool {
-    headers
-        .get(IF_RANGE)
-        .and_then(|value| value.to_str().ok())
-        .is_none_or(|value| value.trim() == etag)
+    match headers.get(IF_RANGE) {
+        None => true,
+        Some(value) => value.to_str().is_ok_and(|value| value.trim() == etag),
+    }
 }
 
 fn not_modified_response(etag: &str) -> Response {
@@ -1230,6 +1230,18 @@ mod tests {
         );
 
         assert!(if_none_match(&headers, "\"matching\""));
+    }
+
+    #[test]
+    fn malformed_if_range_is_not_treated_as_absent() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_RANGE,
+            header::HeaderValue::from_bytes(&[0xff])
+                .expect("the fixture is an opaque HTTP field value"),
+        );
+
+        assert!(!super::if_range_matches(&headers, "\"matching\""));
     }
 
     #[test]

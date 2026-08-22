@@ -11,9 +11,11 @@ import {
   ShieldAlert,
 } from 'lucide-react'
 import { type ComponentType, type ReactNode, useState } from 'react'
+import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import { artifactScenario } from './artifactScenario'
 import {
+  ARTIFACT_PREVIEW_CHARACTERS,
   type ArtifactItem,
   boundArtifactText,
   type CodeArtifact,
@@ -48,9 +50,24 @@ const viewByKind = (
 interface RendererProps<T extends RenderableArtifact> {
   artifact: T
   remoteMediaPolicy: RemoteMediaPolicy
+  commandContext: CommandContext
 }
 
-function TextBody({ artifact }: RendererProps<TextArtifact>) {
+type ArtifactCommandId =
+  | 'artifact.preview.expand'
+  | 'artifact.preview.collapse'
+  | 'artifact.original.load'
+  | 'artifact.remote-policy.ask'
+  | 'artifact.remote-policy.block'
+  | 'artifact.remote-policy.allow'
+
+const invokeArtifactAction = (
+  commandContext: CommandContext,
+  commandId: ArtifactCommandId,
+  action: () => void,
+) => invokeCommand(commandId, { ...commandContext, artifactAction: action })
+
+function TextBody({ artifact, commandContext }: RendererProps<TextArtifact>) {
   const [expanded, setExpanded] = useState(false)
   const bounded = boundArtifactText(artifact.content, expanded)
   const canExpand = !expanded && bounded.omittedCharacters > 0
@@ -62,13 +79,19 @@ function TextBody({ artifact }: RendererProps<TextArtifact>) {
         omittedCharacters={bounded.omittedCharacters}
         canExpand={canExpand}
         expanded={expanded}
-        onToggle={() => setExpanded((current) => !current)}
+        onToggle={() =>
+          invokeArtifactAction(
+            commandContext,
+            expanded ? 'artifact.preview.collapse' : 'artifact.preview.expand',
+            () => setExpanded((current) => !current),
+          )
+        }
       />
     </div>
   )
 }
 
-function CodeBody({ artifact }: RendererProps<CodeArtifact>) {
+function CodeBody({ artifact, commandContext }: RendererProps<CodeArtifact>) {
   const [expanded, setExpanded] = useState(false)
   const bounded = boundArtifactText(artifact.content, expanded)
   const canExpand = !expanded && bounded.omittedCharacters > 0
@@ -86,7 +109,13 @@ function CodeBody({ artifact }: RendererProps<CodeArtifact>) {
         omittedCharacters={bounded.omittedCharacters}
         canExpand={canExpand}
         expanded={expanded}
-        onToggle={() => setExpanded((current) => !current)}
+        onToggle={() =>
+          invokeArtifactAction(
+            commandContext,
+            expanded ? 'artifact.preview.collapse' : 'artifact.preview.expand',
+            () => setExpanded((current) => !current),
+          )
+        }
       />
     </div>
   )
@@ -120,7 +149,7 @@ function BoundedFooter({
   )
 }
 
-function SignalboxImageBody({ artifact }: RendererProps<SignalboxImageArtifact>) {
+function SignalboxImageBody({ artifact, commandContext }: RendererProps<SignalboxImageArtifact>) {
   const [originalRequested, setOriginalRequested] = useState(false)
   const { descriptor } = artifact.source
   const automatic = selectImageView(descriptor)
@@ -147,9 +176,18 @@ function SignalboxImageBody({ artifact }: RendererProps<SignalboxImageArtifact>)
         mediaType={descriptor.declared_media_type}
         provenance={derivation?.transformation_name ?? 'original bytes'}
       >
-        {original && !originalRequested && (
-          <button type="button" onClick={() => setOriginalRequested(true)}>
-            <Maximize2 aria-hidden="true" /> Load original
+        {original && (
+          <button
+            type="button"
+            aria-pressed={originalRequested}
+            onClick={() =>
+              invokeArtifactAction(commandContext, 'artifact.original.load', () =>
+                setOriginalRequested(true),
+              )
+            }
+          >
+            <Maximize2 aria-hidden="true" />
+            {originalRequested ? 'Original loaded' : 'Load original'}
           </button>
         )}
         {download && (
@@ -162,38 +200,21 @@ function SignalboxImageBody({ artifact }: RendererProps<SignalboxImageArtifact>)
   )
 }
 
-function RemoteImageBody({
-  artifact,
-  remoteMediaPolicy: policy,
-}: RendererProps<RemoteImageArtifact>) {
-  const [approved, setApproved] = useState(false)
+function RemoteImageBody({ artifact }: RendererProps<RemoteImageArtifact>) {
   const admittedUrl = admitRemoteMediaUrl(artifact.source.url)
-  const visible = admittedUrl !== null && (policy === 'allow' || (policy === 'ask' && approved))
 
   return (
     <div className="artifact-image-layout">
       <div className="artifact-visual remote-media">
-        {visible ? (
-          <img src={admittedUrl} alt={artifact.source.alt} />
-        ) : (
-          <Ban aria-label="Remote media not loaded" />
-        )}
+        <Ban aria-label="Remote media not loaded" />
       </div>
       <ArtifactMetadata
-        renderer={
-          admittedUrl === null
-            ? 'remote media blocked'
-            : visible
-              ? 'remote image'
-              : `remote media ${policy}`
-        }
+        renderer={admittedUrl === null ? 'remote media blocked' : 'remote media unavailable'}
         mediaType="Not inspected"
         provenance="External URL"
       >
-        {admittedUrl !== null && policy === 'ask' && !approved && (
-          <button type="button" onClick={() => setApproved(true)}>
-            <ImageIcon aria-hidden="true" /> Load this remote image
-          </button>
+        {admittedUrl !== null && (
+          <p>Remote rendering requires a bounded owning media service. No bytes were fetched.</p>
         )}
       </ArtifactMetadata>
     </div>
@@ -207,11 +228,20 @@ const isSignalboxImage = (
 function ImageBody({
   artifact,
   remoteMediaPolicy,
+  commandContext,
 }: RendererProps<SignalboxImageArtifact | RemoteImageArtifact>) {
   return isSignalboxImage(artifact) ? (
-    <SignalboxImageBody artifact={artifact} remoteMediaPolicy={remoteMediaPolicy} />
+    <SignalboxImageBody
+      artifact={artifact}
+      remoteMediaPolicy={remoteMediaPolicy}
+      commandContext={commandContext}
+    />
   ) : (
-    <RemoteImageBody artifact={artifact} remoteMediaPolicy={remoteMediaPolicy} />
+    <RemoteImageBody
+      artifact={artifact}
+      remoteMediaPolicy={remoteMediaPolicy}
+      commandContext={commandContext}
+    />
   )
 }
 
@@ -262,9 +292,11 @@ export const registeredArtifactKinds = Object.freeze(Object.keys(rendererRegistr
 function RendererBoundary({
   artifact,
   remoteMediaPolicy,
+  commandContext,
 }: {
   artifact: ArtifactItem
   remoteMediaPolicy: RemoteMediaPolicy
+  commandContext: CommandContext
 }) {
   if (artifact.kind === 'blocked') {
     return (
@@ -293,7 +325,13 @@ function RendererBoundary({
   }
 
   const Renderer = rendererRegistry[artifact.kind] as ComponentType<RendererProps<typeof artifact>>
-  return <Renderer artifact={artifact} remoteMediaPolicy={remoteMediaPolicy} />
+  return (
+    <Renderer
+      artifact={artifact}
+      remoteMediaPolicy={remoteMediaPolicy}
+      commandContext={commandContext}
+    />
+  )
 }
 
 const artifactIcon = (artifact: ArtifactItem) => {
@@ -306,9 +344,11 @@ const artifactIcon = (artifact: ArtifactItem) => {
 
 export function ArtifactRenderer({
   artifact,
+  commandContext,
   remoteMediaPolicy = 'ask',
 }: {
   artifact: ArtifactItem
+  commandContext: CommandContext
   remoteMediaPolicy?: RemoteMediaPolicy
 }) {
   return (
@@ -324,12 +364,16 @@ export function ArtifactRenderer({
           </small>
         </div>
       </header>
-      <RendererBoundary artifact={artifact} remoteMediaPolicy={remoteMediaPolicy} />
+      <RendererBoundary
+        artifact={artifact}
+        remoteMediaPolicy={remoteMediaPolicy}
+        commandContext={commandContext}
+      />
     </article>
   )
 }
 
-export function ArtifactWorkbench() {
+export function ArtifactWorkbench({ commandContext }: { commandContext: CommandContext }) {
   const [remoteMedia, setRemoteMedia] = useRemoteMediaPreference()
 
   return (
@@ -343,7 +387,12 @@ export function ArtifactWorkbench() {
           Remote media
           <select
             value={remoteMedia}
-            onChange={(event) => setRemoteMedia(event.target.value as typeof remoteMedia)}
+            onChange={(event) => {
+              const policy = event.target.value as typeof remoteMedia
+              invokeArtifactAction(commandContext, `artifact.remote-policy.${policy}`, () =>
+                setRemoteMedia(policy),
+              )
+            }}
           >
             <option value="ask">Ask</option>
             <option value="block">Block</option>
@@ -352,12 +401,17 @@ export function ArtifactWorkbench() {
         </label>
       </header>
       <p className="artifact-bound-summary">
-        {artifactScenario.length} typed records · 4,000-character previews · 0 original bytes
-        prefetched
+        {artifactScenario.length} typed records · {ARTIFACT_PREVIEW_CHARACTERS.toLocaleString()}
+        -character previews · 0 original bytes prefetched
       </p>
       <div className="artifact-list">
         {artifactScenario.map((artifact) => (
-          <ArtifactRenderer key={artifact.id} artifact={artifact} remoteMediaPolicy={remoteMedia} />
+          <ArtifactRenderer
+            key={artifact.id}
+            artifact={artifact}
+            remoteMediaPolicy={remoteMedia}
+            commandContext={commandContext}
+          />
         ))}
       </div>
     </section>

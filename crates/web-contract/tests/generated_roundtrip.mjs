@@ -323,6 +323,83 @@ test("generated blob decoder rejects noncanonical transformation parameters", ()
   );
 });
 
+test("generated blob decoder preserves exact large JSON integers", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const descriptor = {
+    digest,
+    byte_length: "1",
+    declared_media_type: "image/png",
+    display_filename: [],
+    available_views: [
+      {
+        kind: "download",
+        content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+        media_type: "image/png",
+        byte_length: "1",
+        derivations: [],
+      },
+      {
+        kind: "preview",
+        content_url: `/api/blobs/${digest}/content/image-png`,
+        media_type: "image/png",
+        byte_length: "1",
+        derivations: [
+          {
+            derivation_id: "01990f5f-55c0-7000-8000-000000000001",
+            input_digests: [digest],
+            output_digests: [digest],
+            transformation_name: "image.preview",
+            transformation_version: 1,
+            parameters_json: '{"n":9007199254740993}',
+            producer: {
+              class: "deterministic",
+              implementation_digest: digest,
+              cache_key: digest,
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  assert.equal(
+    decodeWebBlobDescriptor(descriptor).available_views[1].derivations[0].parameters_json,
+    '{"n":9007199254740993}',
+  );
+});
+
+test("generated blob decoder rejects invalid display filenames", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const descriptor = {
+    digest,
+    byte_length: "1",
+    declared_media_type: "application/octet-stream",
+    display_filename: [""],
+    available_views: [
+      {
+        kind: "download",
+        content_url: `/api/blobs/${digest}/download?media_type=application%2Foctet-stream`,
+        media_type: "application/octet-stream",
+        byte_length: "1",
+        derivations: [],
+      },
+    ],
+  };
+
+  assert.throws(
+    () => decodeWebBlobDescriptor(descriptor),
+    /display_filename\[0\] must be a nonempty/,
+  );
+  assert.throws(
+    () => decodeWebBlobDescriptor({ ...descriptor, display_filename: ["bad\nname"] }),
+    /display_filename\[0\] must be a nonempty/,
+  );
+  assert.throws(
+    () => decodeWebBlobDescriptor({ ...descriptor, display_filename: ["é".repeat(513)] }),
+    /display_filename\[0\] must be a nonempty/,
+  );
+});
+
 test("generated blob decoder requires exactly one download view", () => {
   const digest = `sha256:${"a1".repeat(32)}`;
   const download = {
@@ -404,6 +481,53 @@ test("generated blob decoder ties content routes to advertised digests", () => {
   assert.throws(
     () => decodeWebBlobDescriptor(descriptor),
     /content_url must be a route for the descriptor digest/,
+  );
+});
+
+test("generated blob decoder binds derivative provenance to the descriptor input", () => {
+  const digest = `sha256:${"a1".repeat(32)}`;
+  const unrelatedDigest = `sha256:${"b2".repeat(32)}`;
+  const outputDigest = `sha256:${"c3".repeat(32)}`;
+  const descriptor = {
+    digest,
+    byte_length: "1",
+    declared_media_type: "image/png",
+    display_filename: [],
+    available_views: [
+      {
+        kind: "download",
+        content_url: `/api/blobs/${digest}/download?media_type=image%2Fpng`,
+        media_type: "image/png",
+        byte_length: "1",
+        derivations: [],
+      },
+      {
+        kind: "preview",
+        content_url: `/api/blobs/${outputDigest}/content/image-png`,
+        media_type: "image/png",
+        byte_length: "1",
+        derivations: [
+          {
+            derivation_id: "01990f5f-55c0-7000-8000-000000000001",
+            input_digests: [unrelatedDigest],
+            output_digests: [outputDigest],
+            transformation_name: "image.preview",
+            transformation_version: 1,
+            parameters_json: "{}",
+            producer: {
+              class: "deterministic",
+              implementation_digest: digest,
+              cache_key: digest,
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  assert.throws(
+    () => decodeWebBlobDescriptor(descriptor),
+    /content_url must be a route for a derivation output bound to the descriptor input/,
   );
 });
 

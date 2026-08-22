@@ -75,6 +75,16 @@ describe('artifact renderer compatibility', () => {
     expect(bounded.omittedCharacters).toBe(content.length - ARTIFACT_EXPANDED_CHARACTERS)
   })
 
+  it('counts and truncates Unicode by code point without splitting surrogate pairs', () => {
+    const content = `${'😀'.repeat(ARTIFACT_PREVIEW_CHARACTERS)}z`
+
+    const bounded = boundArtifactText(content, false)
+
+    expect(Array.from(bounded.content)).toHaveLength(ARTIFACT_PREVIEW_CHARACTERS)
+    expect(bounded.content.endsWith('😀')).toBe(true)
+    expect(bounded.omittedCharacters).toBe(1)
+  })
+
   it('fails an unknown remote-media preference closed to ask', () => {
     expect(decodeRemoteMediaPolicy('invented')).toBe('ask')
   })

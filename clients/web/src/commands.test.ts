@@ -16,4 +16,20 @@ describe('command registry', () => {
 
     expect(selectApp(store.getState()).selectedTimeline).toBe(timelineIds[0])
   })
+
+  it('routes artifact actions through a registered command', () => {
+    let invocations = 0
+
+    invokeCommand('artifact.preview.expand', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      artifactAction: () => {
+        invocations += 1
+      },
+    })
+
+    expect(invocations).toBe(1)
+  })
 })
