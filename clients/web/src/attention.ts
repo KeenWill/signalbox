@@ -81,7 +81,7 @@ export const synchronizeAttention = async ({
         }
         const acceptance = onProjection(reduction.snapshot)
         projection = acceptance.snapshot
-        if (event.kind === 'snapshot' && acceptance.accepted) resyncs = 0
+        if (event.kind === 'update' && acceptance.accepted) resyncs = 0
         transition('live')
       }
       if (!restart) {

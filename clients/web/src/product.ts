@@ -209,7 +209,11 @@ export class SameOriginProductTransport implements ProductTransport {
     })
     if (!response.ok) {
       await response.body?.cancel().catch(() => undefined)
-      throw new Error(`bootstrap request failed with status ${response.status}`)
+      throw new ProductRequestError(
+        'transport_unavailable',
+        'transport',
+        `Bootstrap request failed with status ${response.status}.`,
+      )
     }
     return validateBootstrap(
       decodeWebContractBootstrap(

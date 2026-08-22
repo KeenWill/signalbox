@@ -209,6 +209,7 @@ test('does not start Attention reads when bootstrap validation fails', async ({ 
   await page.goto('/attention')
 
   await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
+  await expect(page.getByText('Contract incompatible')).toBeVisible()
   expect(attentionRequests).toBe(0)
 })
 
@@ -230,6 +231,7 @@ test('does not start Attention reads for incompatible bootstrap values', async (
   await page.goto('/attention')
 
   await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
+  await expect(page.getByText('Contract incompatible')).toBeVisible()
   expect(attentionRequests).toBe(0)
 })
 
@@ -238,6 +240,7 @@ test('retries a transient bootstrap failure in place', async ({ page }) => {
   await page.goto('/attention')
 
   await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
+  await expect(page.getByText('Transport unavailable')).toBeVisible()
   await page.getByRole('button', { name: 'Retry contract check' }).click()
 
   await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()

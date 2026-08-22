@@ -134,18 +134,17 @@ describe('attention projection recovery', () => {
     expect(phases).toEqual(['connecting', 'resyncing', 'failed'])
   })
 
-  it('resets the immediate resync budget after an authoritative projection', async () => {
+  it('resets the immediate resync budget after accepted incremental progress', async () => {
     const phases: string[] = []
     const resync = { kind: 'resync_required', cursor: '18' } as const
     const recovered = { kind: 'snapshot', snapshot } as const
+    const progressed = { kind: 'update', cursor: '18', summaries: [replacement] } as const
 
     await synchronizeAttention({
       transport: streamTransport([
         [resync],
-        [recovered, resync],
-        [recovered, resync],
-        [recovered, resync],
-        [recovered],
+        [recovered, progressed, resync],
+        [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '19' } }],
       ]),
       signal: new AbortController().signal,
       onPhase: (phase) => phases.push(phase),
@@ -153,6 +152,26 @@ describe('attention projection recovery', () => {
     })
 
     expect(phases.at(-1)).toBe('stale')
+  })
+
+  it('preserves the immediate resync budget across replacement snapshots', async () => {
+    const phases: string[] = []
+    const resync = { kind: 'resync_required', cursor: '18' } as const
+    const recovered = { kind: 'snapshot', snapshot } as const
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [recovered, resync],
+        [recovered, resync],
+        [recovered, resync],
+        [recovered, resync],
+      ]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: (projection) => ({ snapshot: projection, accepted: true }),
+    })
+
+    expect(phases.at(-1)).toBe('failed')
   })
 
   it('uses the projection accepted by the cache as the follower baseline', async () => {

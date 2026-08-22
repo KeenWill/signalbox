@@ -22,7 +22,12 @@ import {
   globalHotkeySequenceBindings,
   invokeCommand,
 } from './commands'
-import { type ProductRouteId, productRoutes, productTransport } from './product'
+import {
+  ProductRequestError,
+  type ProductRouteId,
+  productRoutes,
+  productTransport,
+} from './product'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
 const surfaceCopy: Record<
@@ -336,6 +341,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [app.density, app.theme])
 
   const copy = surfaceCopy[surface]
+  const bootstrapTransportFailure =
+    bootstrap.error instanceof ProductRequestError && bootstrap.error.kind === 'transport'
   const content =
     surface === 'attention' && bootstrap.isSuccess ? (
       <AttentionSurface registerEscapeHandler={registerSurfaceEscape} />
@@ -384,7 +391,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             {bootstrap.isSuccess
               ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
               : bootstrap.isError
-                ? 'Transport unavailable'
+                ? bootstrapTransportFailure
+                  ? 'Transport unavailable'
+                  : 'Contract incompatible'
                 : 'Checking contract…'}
           </span>
         </div>
