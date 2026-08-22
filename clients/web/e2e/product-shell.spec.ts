@@ -281,6 +281,8 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(
     page
       .getByLabel('Session telemetry')
+      .getByText('Items', { exact: true })
+      .locator('..')
       .getByText(sessionWorkspaceFixture.itemCount, { exact: true }),
   ).toBeVisible()
   const completed = page.getByRole('button', {
