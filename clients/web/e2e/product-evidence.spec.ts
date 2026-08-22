@@ -10,6 +10,7 @@ const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '1' },
   capabilities: {
     bounded_json: true,
+    bounded_session_live: true,
     bounded_session_timeline: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
@@ -17,6 +18,7 @@ const bootstrapFixture = {
   limits: {
     max_json_body_bytes: 65_536,
     max_ndjson_item_bytes: 262_144,
+    max_session_live_queued_turns: 32,
     max_timeline_window_items: 256,
     max_timeline_window_bytes: 65_536,
   },
