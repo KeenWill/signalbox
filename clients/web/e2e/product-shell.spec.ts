@@ -128,6 +128,17 @@ test('closes the navigation sheet after selecting a phone route', async ({ page 
 
   await expect(page).toHaveURL(/\/sessions$/)
   await expect(navigation).toBeHidden()
+
+  await page.setViewportSize({ width: 1280, height: 844 })
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await page
+    .getByRole('dialog', { name: 'Command palette' })
+    .getByRole('button', { name: /Open navigation/ })
+    .click()
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.product-main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -268,6 +279,9 @@ test('withholds Imports until bootstrap admission succeeds', async ({ page }) =>
     }),
   ).toBeVisible()
   await expect(page.getByText('Transport unavailable')).toBeVisible()
+  const inspector = page.getByRole('complementary', { name: 'Inspector' })
+  await expect(inspector.getByText('Unavailable', { exact: true })).toBeVisible()
+  await expect(inspector.getByText('None', { exact: true })).toBeVisible()
   expect(importRequests).toBe(0)
   expect(problems.pageErrors).toEqual([])
 })

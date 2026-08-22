@@ -13,7 +13,7 @@ import {
   Sun,
   X,
 } from 'lucide-react'
-import { type CSSProperties, useCallback, useMemo, useRef, useState } from 'react'
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   type CommandContext,
   commandRegistry,
@@ -331,6 +331,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const focusDestination = useCallback(() => {
     requestAnimationFrame(() => primaryRef.current?.focus())
   }, [])
+  useEffect(() => {
+    if (app.overlay === 'navigation') restoreNavigationFocusRef.current = true
+  }, [app.overlay])
   const context = useMemo<CommandContext>(() => {
     const surfaceContext = surface === 'imports' ? importsCommandContext : null
     return {
@@ -456,7 +459,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               <dd>
                 {productSurfaceStates[surface].kind === 'browser-local'
                   ? 'Browser'
-                  : productSurfaceStates[surface].kind === 'server-backed'
+                  : productSurfaceStates[surface].kind === 'server-backed' && bootstrap.isSuccess
                     ? 'Daemon'
                     : 'Unavailable'}
               </dd>
@@ -466,7 +469,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               <dd>
                 {productSurfaceStates[surface].kind === 'browser-local'
                   ? 'Local settings'
-                  : productSurfaceStates[surface].kind === 'server-backed'
+                  : productSurfaceStates[surface].kind === 'server-backed' && bootstrap.isSuccess
                     ? 'Bounded query'
                     : 'None'}
               </dd>
