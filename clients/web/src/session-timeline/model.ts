@@ -156,8 +156,21 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     const response = await request('/api/bootstrap')
     if (!response.ok) return throwApiError(response)
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
+    return HttpSessionTimelineSource.fromBootstrap(bootstrap, request)
+  }
+
+  static fromBootstrap(
+    bootstrap: WebContractBootstrap,
+    request: typeof fetch = fetch,
+  ): HttpSessionTimelineSource {
     if (!bootstrap.capabilities.bounded_session_timeline) {
       throw new TypeError('bounded session timeline capability is unavailable')
+    }
+    if (
+      bootstrap.limits.max_timeline_window_items < 1 ||
+      bootstrap.limits.max_timeline_window_bytes < 256
+    ) {
+      throw new TypeError('bounded session timeline limits are invalid')
     }
     return new HttpSessionTimelineSource(
       bootstrap.limits,
@@ -250,6 +263,32 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     }
     if (projectedBodyBytes > bounded.maxBytes) {
       throw new TypeError('timeline detail exceeds the requested byte ceiling')
+    }
+    if (cursor?.type === 'more_at') {
+      if (page.items[0]?.address.event_sequence !== cursor.address.event_sequence) {
+        throw new TypeError('timeline detail page does not match its requested cursor')
+      }
+    }
+    if (cursor?.type === 'more_body') {
+      const item = page.items[0]
+      if (!item || item.address.event_sequence !== cursor.body.address.event_sequence) {
+        throw new TypeError('timeline detail body does not match its requested cursor address')
+      }
+      const excerpt =
+        cursor.body.field === 'input_text' && item.body.type === 'user_input'
+          ? item.body.text
+          : cursor.body.field === 'model_response' && item.body.type === 'model_call'
+            ? item.body.response
+            : undefined
+      if (!excerpt || excerpt.offset_bytes !== cursor.body.offset_bytes) {
+        throw new TypeError('timeline detail body does not match its requested cursor field')
+      }
+      const excerptContinuation = excerpt.continuation ?? null
+      const pageContinuation =
+        page.continuation?.type === 'more_body' ? page.continuation.body : null
+      if (JSON.stringify(excerptContinuation) !== JSON.stringify(pageContinuation)) {
+        throw new TypeError('timeline detail continuation contradicts its body excerpt')
+      }
     }
     return page
   }
@@ -350,6 +389,12 @@ export class BoundedSessionHistory {
     }
     const firstItemAddress = window.items[0]?.address.event_sequence
     const lastItemAddress = window.items.at(-1)?.address.event_sequence
+    if (anchor.kind === 'first' && window.continuation_before) {
+      throw new TypeError('first timeline window cannot continue before its anchor')
+    }
+    if (anchor.kind === 'latest' && window.continuation_after) {
+      throw new TypeError('latest timeline window cannot continue after its anchor')
+    }
     if (window.continuation_before) {
       decimalAddress(window.continuation_before.event_sequence)
       if (window.continuation_before.event_sequence !== firstItemAddress) {

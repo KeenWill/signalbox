@@ -1,9 +1,13 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
-import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
+import type { WebContractBootstrap, WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import { SessionItemDetail } from './SessionItemDetail'
-import { HttpSessionTimelineSource, type SessionWindowAnchor } from './session-timeline/model'
+import {
+  BoundedSessionHistory,
+  HttpSessionTimelineSource,
+  type SessionWindowAnchor,
+} from './session-timeline/model'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -18,40 +22,48 @@ export const visibleSessionItems = (
 ) =>
   detail === 'results'
     ? items.filter((item) =>
-        ['turn_completed', 'turn_failed', 'turn_refused', 'turn_cancelled'].includes(item.kind),
+        [
+          'input_accepted',
+          'turn_completed',
+          'turn_failed',
+          'turn_refused',
+          'turn_cancelled',
+        ].includes(item.kind),
       )
     : items
 
 export function SessionWorkspaceSurface({
+  bootstrap,
   onTimelineIds,
 }: {
+  bootstrap: WebContractBootstrap | undefined
   onTimelineIds: (ids: readonly string[]) => void
 }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const [draftId, setDraftId] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
+  const [restoreAnchor, setRestoreAnchor] = useState<SessionWindowAnchor | null>(null)
   const [manualAnchor, setManualAnchor] = useState<SessionWindowAnchor | null>(null)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
-  const remembered = sessionId === null ? undefined : app.lastLogicalPositions[sessionId]
   const session = useQuery({
-    queryKey: ['production', 'session-workspace', sessionId, manualAnchor, remembered],
+    queryKey: ['production', 'session-workspace', sessionId, manualAnchor, restoreAnchor],
     queryFn: async ({ signal }) => {
-      const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window))
-      const descriptor = await source.readDescriptor(sessionId ?? '', signal)
+      if (!bootstrap) throw new TypeError('web contract bootstrap is unavailable')
+      const source = HttpSessionTimelineSource.fromBootstrap(bootstrap, window.fetch.bind(window))
+      const history = new BoundedSessionHistory(sessionId ?? '', source)
+      const descriptor = await history.describe(signal)
       const active = BigInt(descriptor.work.active_turn_count) !== BigInt(0)
       const anchor: SessionWindowAnchor =
-        manualAnchor ??
-        (!active && remembered ? { kind: 'around', eventSequence: remembered } : { kind: 'latest' })
-      const timelineWindow = await source.readWindow(
-        sessionId ?? '',
+        manualAnchor ?? (!active && restoreAnchor ? restoreAnchor : { kind: 'latest' })
+      const timelineWindow = await history.load(
         anchor,
         { maxItems: SESSION_WINDOW_ITEMS, maxBytes: SESSION_WINDOW_BYTES },
         signal,
       )
       return { active, descriptor, source, window: timelineWindow }
     },
-    enabled: sessionId !== null,
+    enabled: sessionId !== null && bootstrap?.capabilities.bounded_session_timeline === true,
   })
   const items = useMemo(
     () => visibleSessionItems(session.data?.window.items ?? [], app.detail),
@@ -67,11 +79,16 @@ export function SessionWorkspaceSurface({
     const candidate = draftId.trim().toLowerCase()
     if (!isCanonicalSessionId(candidate)) return
     setManualAnchor(null)
+    const remembered = app.lastLogicalPositions[candidate]
+    setRestoreAnchor(remembered ? { kind: 'around', eventSequence: remembered } : null)
     setExpanded(new Set())
     dispatch(actions.timelineSelected(null))
-    setSessionId(candidate)
+    if (candidate === sessionId) void session.refetch()
+    else setSessionId(candidate)
   }
   const selected = app.selectedTimeline
+  const timelineAvailable = bootstrap?.capabilities.bounded_session_timeline === true
+  const detailAvailable = bootstrap?.capabilities.bounded_session_timeline_detail === true
   const select = (eventSequence: string) => {
     dispatch(actions.timelineSelected(eventSequence))
     if (sessionId !== null) {
@@ -99,7 +116,10 @@ export function SessionWorkspaceSurface({
             required
           />
         </label>
-        <button type="submit" disabled={!isCanonicalSessionId(draftId.trim())}>
+        <button
+          type="submit"
+          disabled={!isCanonicalSessionId(draftId.trim()) || !timelineAvailable}
+        >
           Open workspace
         </button>
       </form>
@@ -108,19 +128,26 @@ export function SessionWorkspaceSurface({
         <section className="surface-empty session-entry" aria-labelledby="session-entry-heading">
           <Radio aria-hidden="true" />
           <div>
-            <span className="availability-tag ready">Timeline reads available</span>
+            <span className={`availability-tag ${timelineAvailable ? 'ready' : ''}`}>
+              {timelineAvailable ? 'Timeline reads available' : 'Timeline reads unavailable'}
+            </span>
             <h2 id="session-entry-heading">Open a known session by immutable identity</h2>
             <p>
-              This branch provides bounded descriptor, timeline, and typed detail reads, but no
-              session catalog, creation operation, or live follow channel. Enter an exact
-              server-issued ID.
+              {timelineAvailable
+                ? `This daemon provides bounded descriptor and timeline reads${
+                    detailAvailable ? ' with typed item detail' : ''
+                  }, but no session catalog, creation operation, or live follow channel. Enter an exact server-issued ID.`
+                : 'The current daemon contract does not advertise bounded session timeline reads.'}
             </p>
           </div>
         </section>
       ) : session.isError ? (
-        <p className="session-load-state" role="alert">
-          The daemon could not provide this bounded session window: {session.error.message}
-        </p>
+        <div className="session-load-state" role="alert">
+          <p>The daemon could not provide this bounded session window: {session.error.message}</p>
+          <button type="button" onClick={() => void session.refetch()}>
+            Retry
+          </button>
+        </div>
       ) : !session.data ? (
         <p className="session-load-state">Loading descriptor and bounded history…</p>
       ) : (
@@ -175,10 +202,11 @@ export function SessionWorkspaceSurface({
                   <button
                     type="button"
                     className="session-item-summary"
+                    data-timeline-id={id}
                     aria-expanded={isExpanded}
                     onClick={() => {
                       select(id)
-                      toggleExpanded(id)
+                      if (detailAvailable) toggleExpanded(id)
                     }}
                   >
                     {isExpanded ? (
@@ -190,7 +218,7 @@ export function SessionWorkspaceSurface({
                     <strong>{item.kind.replaceAll('_', ' ')}</strong>
                     <small>{item.projected_structured_bytes} B</small>
                   </button>
-                  {isExpanded && (
+                  {isExpanded && detailAvailable && (
                     <SessionItemDetail
                       source={session.data.source}
                       sessionId={sessionId}

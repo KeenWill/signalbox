@@ -15,6 +15,15 @@ type DetailBody = DetailItem['body']
 type TextExcerpt = Extract<DetailBody, { type: 'user_input' }>['text']
 type ModelCallBody = Extract<DetailBody, { type: 'model_call' }>
 
+export const detailBodyMatchesKind = (detail: DetailItem): boolean => {
+  const body = detail.body
+  if (body.type === 'user_input') return detail.kind === 'input_accepted'
+  if (body.type === 'model_call') return detail.kind === 'model_call_transition'
+  if (body.type === 'event_fact') return body.kind === detail.kind
+  if (body.lifecycle === 'activated') return detail.kind === 'turn_activated'
+  return ['turn_completed', 'turn_failed', 'turn_refused', 'turn_cancelled'].includes(detail.kind)
+}
+
 const modelCallState = (state: ModelCallBody['state']): string =>
   state.type === 'terminal' ? `terminal · ${state.disposition}` : state.type.replaceAll('_', ' ')
 
@@ -152,7 +161,11 @@ export function SessionItemDetail({
     )
   }
   if (!detail.data) return <p className="session-detail-state">Loading typed detail…</p>
-  if (detail.data.items.some((detailItem) => detailItem.kind !== item.kind)) {
+  if (
+    detail.data.items.some(
+      (detailItem) => detailItem.kind !== item.kind || !detailBodyMatchesKind(detailItem),
+    )
+  ) {
     return (
       <p className="session-detail-state" role="alert">
         Detail rejected because its event kind did not match the selected timeline header.

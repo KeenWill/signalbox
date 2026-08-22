@@ -6,6 +6,8 @@ import {
   decodeWebApiErrorResponse,
   decodeWebContractBootstrap,
   decodeWebContractExample,
+  decodeWebSessionTimelineDescriptor,
+  decodeWebSessionTimelineWindow,
 } from "../../../clients/web/src/generated/web-contract.mjs";
 
 const fixtureUrl = new URL("./fixtures/example.json", import.meta.url);
@@ -75,5 +77,46 @@ test("generated error decoder preserves the transport application boundary", () 
         },
       }),
     /one recognized variant/,
+  );
+});
+
+test("generated timeline decoder rejects an address beyond u64", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionTimelineWindow({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        items: [
+          {
+            address: { event_sequence: "18446744073709551616" },
+            kind: "input_accepted",
+            projected_structured_bytes: 96,
+          },
+        ],
+        projected_structured_bytes: 96,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    /unsigned 64-bit integer/,
+  );
+});
+
+test("generated descriptor decoder rejects a fact beyond u64", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionTimelineDescriptor({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        sizes: {
+          item_count: "18446744073709551616",
+          projected_text_bytes: "0",
+          projected_structured_bytes: "96",
+          referenced_blob_count: "0",
+          referenced_blob_bytes: "0",
+        },
+        first_address: { event_sequence: "1" },
+        latest_address: { event_sequence: "1" },
+        work: { active_turn_count: "0", queued_turn_count: "0" },
+        observed_through: "1",
+      }),
+    /unsigned 64-bit integer/,
   );
 });
