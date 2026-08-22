@@ -1904,6 +1904,16 @@ async fn prospective_attachment_frontier_exceeds_bound(
         .filter(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Queued)
         .map(|turn| turn.accepted_input().id())
         .collect::<Vec<_>>();
+    let queued_reset_origins = scheduling
+        .turns()
+        .filter(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Queued)
+        .enumerate()
+        .filter_map(|(index, turn)| {
+            scheduling
+                .external_predecessor_rendered_base_origins(turn.turn())
+                .map(|origins| (index, origins))
+        })
+        .collect::<BTreeMap<_, _>>();
     let first_changed_queue = if check_base {
         0
     } else {
@@ -1923,6 +1933,7 @@ async fn prospective_attachment_frontier_exceeds_bound(
     let all_origins = base_origins
         .iter()
         .chain(&queued_inputs)
+        .chain(queued_reset_origins.values().flatten())
         .map(|accepted_input| accepted_input.into_uuid())
         .collect::<Vec<_>>();
     let rows = sqlx::query(
@@ -1971,6 +1982,20 @@ async fn prospective_attachment_frontier_exceeds_bound(
         return Ok(true);
     }
     for (index, accepted_input) in queued_inputs.iter().enumerate() {
+        if let Some(reset_origins) = queued_reset_origins.get(&index) {
+            digests.clear();
+            total = 0;
+            for reset_origin in reset_origins {
+                add_prospective_attachment_lengths(
+                    &mut digests,
+                    &mut total,
+                    attachments
+                        .get(reset_origin)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                )?;
+            }
+        }
         add_prospective_attachment_lengths(
             &mut digests,
             &mut total,
@@ -3260,6 +3285,18 @@ pub(crate) async fn load_scheduling_projection(
                             .ok_or(SubmitInputCorruption::Inconsistent(
                                 "runner recovery placement revision",
                             ))?;
+                        let source_snapshot = load_runner_recovery_source_snapshot(
+                            connection,
+                            lifecycle_session,
+                            lifecycle_turn,
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?
+                        .ok_or(SubmitInputCorruption::Inconsistent(
+                            "runner recovery source snapshot missing",
+                        ))?;
+                        required_frontiers
+                            .insert(source_snapshot.frontier().snapshot().into_uuid());
                         ActiveTurnSchedulingReconstitutionInput::awaiting_runner_recovery(
                             lifecycle_turn,
                             RunnerId::from_uuid(runner),

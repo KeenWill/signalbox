@@ -2322,6 +2322,7 @@ pub struct AcceptedInputSchedulingProjection {
     snapshots: BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
     attempt_owners: BTreeMap<TurnAttemptId, TurnId>,
     active_model_call_recovery: Option<ActiveModelCallRecoveryWait>,
+    active_stop_requested_frontier: Option<ContextFrontierId>,
     active_tool_recovery_attempt: Option<EndedTurnAttempt>,
     active_tool_recovery_frontier: Option<ContextFrontierId>,
     active_executing_tool_batch: Option<ActiveExecutingToolBatchCorrelation>,
@@ -2390,6 +2391,7 @@ impl AcceptedInputSchedulingProjection {
             .active_model_call_recovery
             .as_ref()
             .map(|recovery| recovery.source_snapshot.frontier().snapshot())
+            .or(self.active_stop_requested_frontier)
             .or_else(|| {
                 self.active_executing_tool_batch
                     .map(|batch| batch.yielded_frontier)
@@ -2449,6 +2451,25 @@ impl AcceptedInputSchedulingProjection {
                 .or(Some(terminal))
         };
         Self::rendered_frontier_origins(base, &self.semantic_entries)
+    }
+
+    /// Returns the rendered base origins for a queued turn rooted directly at
+    /// a terminal non-accepted predecessor.
+    ///
+    /// Absence means this turn continues the accepted-input chain and does not
+    /// reset prospective frontier accounting.
+    pub fn external_predecessor_rendered_base_origins(
+        &self,
+        turn: TurnId,
+    ) -> Option<Vec<AcceptedInputId>> {
+        let predecessor = self.preceding_non_accepted_successors.get(&turn)?;
+        let terminal = &self.preceding_non_accepted_terminals.get(predecessor)?.0;
+        let base = self
+            .latest_compaction_result
+            .and_then(|frontier| self.snapshots.get(&frontier))
+            .filter(|latest| terminal.is_semantic_prefix_of(latest))
+            .unwrap_or(terminal);
+        Self::rendered_frontier_origins(Some(base), &self.semantic_entries)
     }
 
     fn rendered_frontier_origins(
@@ -5295,6 +5316,7 @@ fn reconstitute_inner(
     let mut previous_selected = None;
     let mut active = None;
     let mut active_model_call_recovery = None;
+    let mut active_stop_requested_frontier = None;
     let mut active_tool_recovery_attempt = None;
     let mut active_tool_recovery_frontier = None;
     let mut active_executing_tool_batch = None;
@@ -5596,6 +5618,8 @@ fn reconstitute_inner(
                         if current_call.frontier().snapshot() != *starting_frontier {
                             referenced_snapshots.insert(current_call.frontier().snapshot());
                         }
+                        active_stop_requested_frontier =
+                            Some(current_call.frontier().snapshot());
                         referenced_model_calls.insert(*call);
                         phase.canonical_evidence_free_phase().ok_or(
                             AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
@@ -6933,6 +6957,7 @@ fn reconstitute_inner(
         snapshots,
         attempt_owners,
         active_model_call_recovery,
+        active_stop_requested_frontier,
         active_tool_recovery_attempt,
         active_tool_recovery_frontier,
         active_executing_tool_batch,
