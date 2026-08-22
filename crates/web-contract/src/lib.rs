@@ -367,6 +367,7 @@ pub enum WebTimelineTurnLifecycleKind {
 pub enum WebTimelineToolState {
     Prepared,
     InFlight,
+    AwaitingChild,
     Completed,
     KnownFailed,
     Ambiguous,
@@ -438,13 +439,51 @@ pub enum WebTimelineRunnerState {
     Abandoned,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineGoalEventKind {
+    Commissioned,
+    Blocked,
+    Resumed,
+    Achieved,
+    UserStopped,
+    Superseded,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineGoalBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineGoalEvent {
     pub generation: WebU64,
-    pub event_kind: String,
-    pub reason: Option<String>,
+    pub event_kind: WebTimelineGoalEventKind,
+    pub reason: Option<WebTimelineGoalBlockedReason>,
     pub text: Option<WebTimelineTextExcerpt>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebTimelineBoundChildAction {
+    KeepRunning,
+    Stop,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
+pub enum WebTimelineDelegationPolicy {
+    Background,
+    Bound {
+        on_parent_stopped: WebTimelineBoundChildAction,
+        on_parent_cancelled: WebTimelineBoundChildAction,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -534,6 +573,7 @@ pub enum WebSessionTimelineDetailBody {
         event_kind: String,
         relationship_id: String,
         subject_id: Option<String>,
+        policy: Option<WebTimelineDelegationPolicy>,
         outcome: Option<String>,
         reason: Option<String>,
         content: Option<WebTimelineTextExcerpt>,

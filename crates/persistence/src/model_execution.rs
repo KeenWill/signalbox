@@ -7141,6 +7141,7 @@ async fn persist_tool_round_authority(
         .execute(&mut *connection)
         .await?;
     }
+    let mut response_text_start_bytes = 0_u64;
     for (response_part_ordinal, entry) in assistant_entries.iter().enumerate() {
         let response_part_ordinal = u64::try_from(response_part_ordinal)
             .map_err(|_| ModelCallCorruption::Inconsistent("tool response part ordinal"))?;
@@ -7153,16 +7154,25 @@ async fn persist_tool_round_authority(
                     "INSERT INTO semantic_transcript_entry
                         (source_session_id, semantic_entry_id, payload_kind,
                          assistant_text_value, producing_model_call_id,
-                         assistant_response_part_ordinal)
-                     VALUES ($1, $2, 'assistant_text', $3, $4, $5)",
+                         assistant_response_part_ordinal,
+                         assistant_response_text_start_bytes)
+                     VALUES ($1, $2, 'assistant_text', $3, $4, $5, $6)",
                 )
                 .bind(session_id_to_uuid(entry.source_session()))
                 .bind(entry.identity().into_uuid())
                 .bind(value.as_str())
                 .bind(producing_call.into_uuid())
                 .bind(Decimal::from(response_part_ordinal))
+                .bind(Decimal::from(response_text_start_bytes))
                 .execute(&mut *connection)
                 .await?;
+                response_text_start_bytes = response_text_start_bytes
+                    .checked_add(u64::try_from(value.as_str().len()).map_err(|_| {
+                        ModelCallCorruption::Inconsistent("tool response text byte length")
+                    })?)
+                    .ok_or(ModelCallCorruption::Inconsistent(
+                        "tool response text byte position",
+                    ))?;
             }
             SemanticTranscriptEntryPayload::AssistantToolUse {
                 producing_call,
@@ -7317,7 +7327,8 @@ async fn persist_completed(
         completed.attempt(),
     )
     .await?;
-    for entry in completed.assistant_entries() {
+    let mut response_text_start_bytes = 0_u64;
+    for (response_part_ordinal, entry) in completed.assistant_entries().iter().enumerate() {
         let SemanticTranscriptEntryPayload::AssistantText {
             producing_call,
             value,
@@ -7328,15 +7339,30 @@ async fn persist_completed(
         sqlx::query(
             "INSERT INTO semantic_transcript_entry
                 (source_session_id, semantic_entry_id, payload_kind,
-                 assistant_text_value, producing_model_call_id)
-             VALUES ($1, $2, 'assistant_text', $3, $4)",
+                 assistant_text_value, producing_model_call_id,
+                 assistant_response_part_ordinal,
+                 assistant_response_text_start_bytes)
+             VALUES ($1, $2, 'assistant_text', $3, $4, $5, $6)",
         )
         .bind(session_id_to_uuid(entry.source_session()))
         .bind(entry.identity().into_uuid())
         .bind(value.as_str())
         .bind(producing_call.into_uuid())
+        .bind(Decimal::from(
+            u64::try_from(response_part_ordinal).map_err(|_| {
+                ModelCallCorruption::Inconsistent("completed response part ordinal")
+            })?,
+        ))
+        .bind(Decimal::from(response_text_start_bytes))
         .execute(&mut *connection)
         .await?;
+        response_text_start_bytes = response_text_start_bytes
+            .checked_add(u64::try_from(value.as_str().len()).map_err(|_| {
+                ModelCallCorruption::Inconsistent("completed response text byte length")
+            })?)
+            .ok_or(ModelCallCorruption::Inconsistent(
+                "completed response text byte position",
+            ))?;
     }
     let completion = completed.completion_entry();
     if !matches!(

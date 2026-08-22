@@ -30,11 +30,13 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
     SessionTimelineDescriptor, SessionTimelineDetailBody, SessionTimelineDetailPage,
     SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress, TimelineApprovalDecider,
-    TimelineApprovalSource, TimelineBodyContinuation, TimelineBodyField, TimelineContinuation,
-    TimelineDetailContinuation, TimelineDetailCursor, TimelineDetailLimits, TimelineGoalEvent,
-    TimelineModelCallDisposition, TimelineModelCallState, TimelineRunnerSandboxPosture,
-    TimelineRunnerState, TimelineTextExcerpt, TimelineToolAttempt, TimelineToolBatchState,
-    TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    TimelineApprovalSource, TimelineBodyContinuation, TimelineBodyField, TimelineBoundChildAction,
+    TimelineContinuation, TimelineDelegationPolicy, TimelineDetailContinuation,
+    TimelineDetailCursor, TimelineDetailLimits, TimelineGoalBlockedReason, TimelineGoalEvent,
+    TimelineGoalEventKind, TimelineModelCallDisposition, TimelineModelCallState,
+    TimelineRunnerSandboxPosture, TimelineRunnerState, TimelineTextExcerpt, TimelineToolAttempt,
+    TimelineToolBatchState, TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor,
+    TimelineWindowLimits,
 };
 use signalbox_domain::{SessionId, TurnId};
 use signalbox_persistence::outbox::OutboxDispatchError;
@@ -48,11 +50,13 @@ use signalbox_web_contract::{
     WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
     WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineApprovalDecider,
     WebTimelineApprovalSource, WebTimelineBlobReference, WebTimelineBodyContinuation,
-    WebTimelineBodyField, WebTimelineDetailContinuation, WebTimelineEventSequence,
-    WebTimelineGoalEvent, WebTimelineImportedEvidence, WebTimelineModelCallDisposition,
-    WebTimelineModelCallState, WebTimelineModelUsage, WebTimelineRunnerSandboxPosture,
-    WebTimelineRunnerState, WebTimelineTextExcerpt, WebTimelineToolAttempt,
-    WebTimelineToolBatchState, WebTimelineToolState, WebTimelineTurnLifecycleKind, WebU64,
+    WebTimelineBodyField, WebTimelineBoundChildAction, WebTimelineDelegationPolicy,
+    WebTimelineDetailContinuation, WebTimelineEventSequence, WebTimelineGoalBlockedReason,
+    WebTimelineGoalEvent, WebTimelineGoalEventKind, WebTimelineImportedEvidence,
+    WebTimelineModelCallDisposition, WebTimelineModelCallState, WebTimelineModelUsage,
+    WebTimelineRunnerSandboxPosture, WebTimelineRunnerState, WebTimelineTextExcerpt,
+    WebTimelineToolAttempt, WebTimelineToolBatchState, WebTimelineToolState,
+    WebTimelineTurnLifecycleKind, WebU64,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -261,8 +265,7 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
     let state = WebApiState {
         timeline: pool.map(SessionTimelineRepository::new),
     };
-    let api = Router::new()
-        .route("/bootstrap", get(contract_bootstrap))
+    let session_reads = Router::new()
         .route("/sessions/{session_id}", get(session_descriptor))
         .route(
             "/sessions/{session_id}/timeline",
@@ -280,6 +283,10 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
             "/sessions/{session_id}/timeline-detail",
             get(session_timeline_region_detail),
         )
+        .route_layer(middleware::from_fn(validate_loopback_host));
+    let api = Router::new()
+        .route("/bootstrap", get(contract_bootstrap))
+        .merge(session_reads)
         .with_state(state)
         .fallback(api_not_found);
     let router = Router::new().nest("/api", api);
@@ -296,6 +303,32 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
 #[derive(Clone, Debug)]
 struct WebApiState {
     timeline: Option<SessionTimelineRepository>,
+}
+
+async fn validate_loopback_host(request: Request, next: Next) -> Response {
+    let loopback = request
+        .headers()
+        .get(HOST)
+        .and_then(|host| host.to_str().ok())
+        .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
+        .is_some_and(|authority| {
+            let host = authority.host();
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .strip_prefix('[')
+                    .and_then(|host| host.strip_suffix(']'))
+                    .unwrap_or(host)
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+    if !loopback {
+        return transport_error(
+            StatusCode::FORBIDDEN,
+            "non_loopback_host_rejected",
+            "session reads require a loopback request authority",
+        );
+    }
+    next.run(request).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -823,7 +856,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             attachments: attachments
                 .into_iter()
                 .map(|reference| WebTimelineBlobReference {
-                    blob_id: reference.blob_id,
+                    blob_id: reference.blob_id.to_string(),
                     length_bytes: WebU64::from_u64(reference.length_bytes),
                     media_type: reference.media_type,
                 })
@@ -999,6 +1032,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             event_kind,
             relationship_id,
             subject_id,
+            policy,
             outcome,
             reason,
             content,
@@ -1006,6 +1040,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             event_kind,
             relationship_id,
             subject_id,
+            policy: policy.map(delegation_policy_dto),
             outcome,
             reason,
             content: content.map(text_excerpt_dto),
@@ -1016,9 +1051,50 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
 fn goal_event_dto(event: TimelineGoalEvent) -> WebTimelineGoalEvent {
     WebTimelineGoalEvent {
         generation: WebU64::from_u64(event.generation),
-        event_kind: event.event_kind,
-        reason: event.reason,
+        event_kind: match event.event_kind {
+            TimelineGoalEventKind::Commissioned => WebTimelineGoalEventKind::Commissioned,
+            TimelineGoalEventKind::Blocked => WebTimelineGoalEventKind::Blocked,
+            TimelineGoalEventKind::Resumed => WebTimelineGoalEventKind::Resumed,
+            TimelineGoalEventKind::Achieved => WebTimelineGoalEventKind::Achieved,
+            TimelineGoalEventKind::UserStopped => WebTimelineGoalEventKind::UserStopped,
+            TimelineGoalEventKind::Superseded => WebTimelineGoalEventKind::Superseded,
+        },
+        reason: event.reason.map(|reason| match reason {
+            TimelineGoalBlockedReason::UserInputRequired => {
+                WebTimelineGoalBlockedReason::UserInputRequired
+            }
+            TimelineGoalBlockedReason::ExternalChangeRequired => {
+                WebTimelineGoalBlockedReason::ExternalChangeRequired
+            }
+            TimelineGoalBlockedReason::AuthorizationRequired => {
+                WebTimelineGoalBlockedReason::AuthorizationRequired
+            }
+            TimelineGoalBlockedReason::ExecutionFailure => {
+                WebTimelineGoalBlockedReason::ExecutionFailure
+            }
+        }),
         text: event.text.map(text_excerpt_dto),
+    }
+}
+
+fn delegation_policy_dto(policy: TimelineDelegationPolicy) -> WebTimelineDelegationPolicy {
+    match policy {
+        TimelineDelegationPolicy::Background => WebTimelineDelegationPolicy::Background,
+        TimelineDelegationPolicy::Bound {
+            on_parent_stopped,
+            on_parent_cancelled,
+        } => WebTimelineDelegationPolicy::Bound {
+            on_parent_stopped: bound_child_action_dto(on_parent_stopped),
+            on_parent_cancelled: bound_child_action_dto(on_parent_cancelled),
+        },
+    }
+}
+
+const fn bound_child_action_dto(action: TimelineBoundChildAction) -> WebTimelineBoundChildAction {
+    match action {
+        TimelineBoundChildAction::KeepRunning => WebTimelineBoundChildAction::KeepRunning,
+        TimelineBoundChildAction::Stop => WebTimelineBoundChildAction::Stop,
+        TimelineBoundChildAction::Cancel => WebTimelineBoundChildAction::Cancel,
     }
 }
 
@@ -1038,6 +1114,7 @@ fn tool_attempt_dto(attempt: TimelineToolAttempt) -> WebTimelineToolAttempt {
         state: attempt.state.map(|state| match state {
             TimelineToolState::Prepared => WebTimelineToolState::Prepared,
             TimelineToolState::InFlight => WebTimelineToolState::InFlight,
+            TimelineToolState::AwaitingChild => WebTimelineToolState::AwaitingChild,
             TimelineToolState::Completed => WebTimelineToolState::Completed,
             TimelineToolState::KnownFailed => WebTimelineToolState::KnownFailed,
             TimelineToolState::Ambiguous => WebTimelineToolState::Ambiguous,
@@ -1779,6 +1856,7 @@ mod tests {
         let request = Request::get(
             "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?max_items=nope",
         )
+        .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
         let response = production_router(None, None)
@@ -1799,6 +1877,7 @@ mod tests {
         let request = Request::get(
             "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?anchor=first&max_items=1",
         )
+        .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
         let response = production_router(None, None)
@@ -1818,6 +1897,7 @@ mod tests {
         let request = Request::get(
             "/api/sessions/00000000-0000-0000-0000-000000000991/timeline/1/detail?max_items=1",
         )
+        .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
         let response = production_router(None, None)
@@ -1831,6 +1911,25 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["kind"], "application");
         assert_eq!(body["error"]["code"], "invalid_timeline_detail_limits");
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_non_loopback_host_authorities() {
+        let request = Request::get("/api/sessions/00000000-0000-0000-0000-000000000991")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["kind"], "transport");
+        assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
     }
 
     #[test]

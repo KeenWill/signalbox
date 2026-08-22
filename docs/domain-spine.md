@@ -6503,7 +6503,7 @@ pub struct TimelineTextExcerpt {
     pub continuation: Option<TimelineBodyContinuation>,
 }
 pub struct TimelineBlobReference {
-    pub blob_id: String,
+    pub blob_id: BlobDigest,
     pub length_bytes: u64,
     pub media_type: Option<String>,
 }
@@ -6527,7 +6527,9 @@ pub struct TimelineModelUsage {
     pub cache_read_input_tokens: Option<u64>,
 }
 pub enum TimelineTurnLifecycleKind { Activated, Terminalized }
-pub enum TimelineToolState { Prepared, InFlight, Completed, KnownFailed, Ambiguous }
+pub enum TimelineToolState {
+    Prepared, InFlight, AwaitingChild, Completed, KnownFailed, Ambiguous,
+}
 pub enum TimelineToolBatchState { Proposed, ResultsProjected, RecoveryRequired }
 pub struct TimelineToolAttempt { /* fields */ }
 pub enum TimelineApprovalSource { Policy, Delegate, User }
@@ -6540,7 +6542,22 @@ pub enum TimelineRunnerState {
     Pinned, Suspect, Connected, RunnerLostBeforePin, RunnerLost, Replaced,
     WorkingDirectoryChanged, Abandoned,
 }
+pub enum TimelineGoalEventKind {
+    Commissioned, Blocked, Resumed, Achieved, UserStopped, Superseded,
+}
+pub enum TimelineGoalBlockedReason {
+    UserInputRequired, ExternalChangeRequired, AuthorizationRequired,
+    ExecutionFailure,
+}
 pub struct TimelineGoalEvent { /* fields */ }
+pub enum TimelineBoundChildAction { KeepRunning, Stop, Cancel }
+pub enum TimelineDelegationPolicy {
+    Background,
+    Bound {
+        on_parent_stopped: TimelineBoundChildAction,
+        on_parent_cancelled: TimelineBoundChildAction,
+    },
+}
 pub struct TimelineImportedEvidence { /* fields */ }
 pub enum SessionTimelineDetailBody {
     SessionCreated { /* fields */ },
@@ -6554,7 +6571,7 @@ pub enum SessionTimelineDetailBody {
     TurnLifecycle { /* fields */ },
     Reconciliation { /* fields */ },
     Runner { /* fields */ },
-    Delegation { /* fields */ },
+    Delegation { policy: Option<TimelineDelegationPolicy>, /* other fields */ },
 }
 pub struct SessionTimelineDetail {
     pub address: TimelineAddress,
@@ -11345,7 +11362,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
-| application: session_timeline                      | 38 (+6 free fn) (incl. 1 trait)  |
+| application: session_timeline                      | 42 (+6 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 35 (incl. 8 traits)              |
 | application: tool_loop                             | 26 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
@@ -11364,4 +11381,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
 | application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **333 (+12 free fn)**            |
+| **signalbox-application total**                    | **337 (+12 free fn)**            |

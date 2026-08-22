@@ -570,7 +570,43 @@ export class BoundedSessionHistory {
 
 const SCENARIO_SESSION_ID = '00000000-0000-0000-0000-000000000991'
 export const SESSION_FOUNDATION_TOTAL = 1_000_000
-const SCENARIO_ITEM_BYTES = 96
+const SCENARIO_EVENT_KINDS = [
+  'input_accepted',
+  'turn_activated',
+  'model_call_transition',
+  'tool_batch_transition',
+  'turn_completed',
+] as const
+
+const scenarioEventKind = (sequence: number): (typeof SCENARIO_EVENT_KINDS)[number] => {
+  const kind = SCENARIO_EVENT_KINDS[sequence % SCENARIO_EVENT_KINDS.length]
+  if (kind === undefined) throw new TypeError('timeline event kind is unavailable')
+  return kind
+}
+
+const scenarioProjectedBytesThrough = (sequence: number): number => {
+  const cycleBytes = SCENARIO_EVENT_KINDS.reduce(
+    (total, kind) => total + projectedItemBytes(kind),
+    0,
+  )
+  const completeCycles = Math.floor(sequence / SCENARIO_EVENT_KINDS.length)
+  const remainder = sequence % SCENARIO_EVENT_KINDS.length
+  let total = completeCycles * cycleBytes
+  for (let offset = 1; offset <= remainder; offset += 1) {
+    total += projectedItemBytes(scenarioEventKind(offset))
+  }
+  return total
+}
+
+const scenarioItem = (sequence: number) => {
+  const kind = scenarioEventKind(sequence)
+  return {
+    address: { event_sequence: String(sequence) },
+    kind,
+    projected_structured_bytes: projectedItemBytes(kind),
+  }
+}
+
 const SCENARIO_TIMELINE_LIMITS: TimelineContractLimits = {
   max_timeline_window_items: 256,
   max_timeline_window_bytes: 64 * 1024,
@@ -587,7 +623,7 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
       sizes: {
         item_count: String(SESSION_FOUNDATION_TOTAL),
         projected_text_bytes: '48000000',
-        projected_structured_bytes: String(SESSION_FOUNDATION_TOTAL * SCENARIO_ITEM_BYTES),
+        projected_structured_bytes: String(scenarioProjectedBytesThrough(SESSION_FOUNDATION_TOTAL)),
         referenced_blob_count: '24000',
         referenced_blob_bytes: '96000000000',
       },
@@ -604,63 +640,57 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
     limits: SessionWindowLimits,
   ): Promise<WebSessionTimelineWindow> {
     const bounded = boundedLimits(limits, this.limits)
-    const count = Math.min(bounded.maxItems, Math.floor(bounded.maxBytes / SCENARIO_ITEM_BYTES))
     const addressed = 'eventSequence' in anchor ? Number(decimalAddress(anchor.eventSequence)) : 0
-    const initialStart = (() => {
+    const candidateSequences = (() => {
       switch (anchor.kind) {
         case 'first':
-          return 1
+          return Array.from({ length: bounded.maxItems }, (_, offset) => offset + 1)
         case 'latest':
-          return Math.max(SESSION_FOUNDATION_TOTAL - count + 1, 1)
+          return Array.from(
+            { length: bounded.maxItems },
+            (_, offset) => SESSION_FOUNDATION_TOTAL - offset,
+          )
         case 'after':
-          return Math.min(addressed + 1, SESSION_FOUNDATION_TOTAL + 1)
+          return Array.from({ length: bounded.maxItems }, (_, offset) => addressed + offset + 1)
         case 'before':
-          return 1
-        case 'around':
-          return Math.max(Math.min(addressed - Math.floor(count / 2), SESSION_FOUNDATION_TOTAL), 1)
+          return Array.from({ length: bounded.maxItems }, (_, offset) => addressed - offset - 1)
+        case 'around': {
+          const candidates = Array.from(
+            { length: bounded.maxItems * 2 },
+            (_, offset) => Math.max(addressed - bounded.maxItems + 1, 1) + offset,
+          ).filter((sequence) => sequence <= SESSION_FOUNDATION_TOTAL)
+          candidates.sort(
+            (left, right) =>
+              Math.abs(left - addressed) - Math.abs(right - addressed) || left - right,
+          )
+          return candidates.slice(0, bounded.maxItems)
+        }
       }
     })()
-    const end =
-      anchor.kind === 'before'
-        ? Math.min(addressed - 1, SESSION_FOUNDATION_TOTAL)
-        : Math.min(initialStart + count - 1, SESSION_FOUNDATION_TOTAL)
-    const start =
-      anchor.kind === 'before' || anchor.kind === 'around'
-        ? Math.max(end - count + 1, 1)
-        : initialStart
-    const items =
-      start > end
-        ? []
-        : Array.from({ length: end - start + 1 }, (_, offset) => {
-            const sequence = start + offset
-            const kinds = [
-              'input_accepted',
-              'turn_activated',
-              'model_call_transition',
-              'tool_batch_transition',
-              'turn_completed',
-            ] as const
-            const kind = kinds[sequence % kinds.length]
-            if (kind === undefined) throw new TypeError('timeline event kind is unavailable')
-            return {
-              address: { event_sequence: String(sequence) },
-              kind,
-              projected_structured_bytes: projectedItemBytes(kind),
-            }
-          })
+    const items = [] as ReturnType<typeof scenarioItem>[]
+    let projectedBytes = 0
+    for (const sequence of candidateSequences) {
+      if (sequence < 1 || sequence > SESSION_FOUNDATION_TOTAL) continue
+      const item = scenarioItem(sequence)
+      if (projectedBytes + item.projected_structured_bytes > bounded.maxBytes) break
+      projectedBytes += item.projected_structured_bytes
+      items.push(item)
+    }
+    items.sort(
+      (left, right) => Number(left.address.event_sequence) - Number(right.address.event_sequence),
+    )
     const firstItem = items[0]
     const lastItem = items.at(-1)
     return decodeWebSessionTimelineWindow({
       session_id: sessionId,
       items,
-      projected_structured_bytes: items.reduce(
-        (total, item) => total + item.projected_structured_bytes,
-        0,
-      ),
+      projected_structured_bytes: projectedBytes,
       continuation_before:
-        firstItem && start > 1 ? { event_sequence: firstItem.address.event_sequence } : null,
+        firstItem && Number(firstItem.address.event_sequence) > 1
+          ? { event_sequence: firstItem.address.event_sequence }
+          : null,
       continuation_after:
-        lastItem && end < SESSION_FOUNDATION_TOTAL
+        lastItem && Number(lastItem.address.event_sequence) < SESSION_FOUNDATION_TOTAL
           ? { event_sequence: lastItem.address.event_sequence }
           : null,
     })

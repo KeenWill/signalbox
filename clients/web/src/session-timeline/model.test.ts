@@ -164,6 +164,20 @@ describe('BoundedSessionHistory', () => {
     expect(window.projected_structured_bytes).toBeLessThanOrEqual(256)
   })
 
+  it('budgets scenario windows and descriptors from exact event-kind charges', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const window = await scenario.readWindow(
+      sessionId,
+      { kind: 'first' },
+      { maxItems: scenario.limits.max_timeline_window_items, maxBytes: 256 },
+    )
+
+    expect(descriptor.sizes.projected_structured_bytes).toBe('80800000')
+    expect(window.items.map((item) => item.address.event_sequence)).toEqual(['1', '2', '3'])
+    expect(window.projected_structured_bytes).toBe(248)
+  })
+
   it('does not fabricate continuations for an empty scenario window', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const window = await scenario.readWindow(

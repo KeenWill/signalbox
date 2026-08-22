@@ -725,9 +725,11 @@ reported token usage, terminal disposition, and provider failure cause code; and
 activated or terminalized turn lifecycle with a cause code. The remaining closed
 variants carry session creation and imported-frontier evidence, settings
 changes, tool requests and attempts, explicit approval provenance and judge
-escalation, goal transitions, context compaction, reconciliation and
-operator-required parking, runner sandbox posture, and delegation updates and
-wakes. Tool arguments, results, failures, approval rationale, goal text,
+escalation, closed goal transitions and blocked reasons, context compaction,
+reconciliation and operator-required parking, runner sandbox posture, and
+delegation updates and wakes. Child-spawn detail preserves the selected
+background or bound policy, including both bound parent-terminal actions. Tool
+arguments, results, failures, approval rationale, goal text,
 compaction summaries, and delegation content use their own continuation fields;
 repeated tool members advance by explicit member index. An unknown durable event
 or state is corruption, never a generic body or guessed prose.
