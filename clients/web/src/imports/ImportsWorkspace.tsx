@@ -95,6 +95,7 @@ export function ImportsWorkspace({
   const importsQuery = useQuery({
     queryKey: ['imports', queryScope, 'catalog', listRequest],
     queryFn: ({ signal }) => api.list(listRequest, signal),
+    gcTime: 0,
   })
   const imports = importsQuery.data
   const firstImport = imports?.items[0]?.imported_conversation_id ?? null
@@ -193,7 +194,8 @@ export function ImportsWorkspace({
   useEffect(() => {
     const snapshot: DiagnosticSnapshot = {
       scenario: scenario ? 'imports' : 'production-imports',
-      connection: importsQuery.isError || windowQuery.isError ? 'failed' : 'ready',
+      connection:
+        importsQuery.isError || descriptorQuery.isError || windowQuery.isError ? 'failed' : 'ready',
       loadedTimeline: 0,
       logicalTimeline: 0,
       loadedFleet: 0,
@@ -219,6 +221,7 @@ export function ImportsWorkspace({
     }
   }, [
     descriptorQuery.fetchStatus,
+    descriptorQuery.isError,
     descriptorQuery.status,
     imports?.items.length,
     importsQuery.fetchStatus,
@@ -235,12 +238,14 @@ export function ImportsWorkspace({
   ])
 
   const resetCatalog = () => {
+    if (hasRetainedCommand) return
     resetContinuation()
     setAfter(undefined)
     setSelectedImport(null)
   }
 
   const showCatalogPage = (cursor: string | undefined) => {
+    if (hasRetainedCommand) return
     resetContinuation()
     setAfter(cursor)
   }
@@ -279,6 +284,7 @@ export function ImportsWorkspace({
 
   const retryableContinuationFailure =
     continuation.isError && isRetryableContinuationError(continuation.error)
+  const modelSelectionMissing = modelSelectionId.trim().length === 0
 
   const continueAt = (relationship: WebImportedSessionRelationship) => {
     if (!selectedFrontier || modelSelectionId.trim().length === 0) return
@@ -300,7 +306,7 @@ export function ImportsWorkspace({
       <div className={`imports-shell imports-shell-${presentation}`}>
         {presentation === 'standalone' && (
           <aside className="navigation-pane imports-navigation">
-            <ScenarioNavigation activeId="imports" />
+            <ScenarioNavigation activeId="imports" disabled={hasRetainedCommand} />
           </aside>
         )}
         <div
@@ -336,7 +342,9 @@ export function ImportsWorkspace({
                   <select
                     aria-label="Filter imports by format"
                     value={format}
+                    disabled={hasRetainedCommand}
                     onChange={(event) => {
+                      if (hasRetainedCommand) return
                       setFormat(event.target.value as FormatFilter)
                       resetCatalog()
                     }}
@@ -354,7 +362,9 @@ export function ImportsWorkspace({
                     aria-label="Filter imports by exact source session evidence"
                     value={sourceSession}
                     placeholder="Exact attested identifier"
+                    disabled={hasRetainedCommand}
                     onChange={(event) => {
+                      if (hasRetainedCommand) return
                       setSourceSession(event.target.value)
                       resetCatalog()
                     }}
@@ -366,18 +376,24 @@ export function ImportsWorkspace({
                     aria-label="Use exact source session filter"
                     type="checkbox"
                     checked={sourceSessionFilterEnabled}
+                    disabled={hasRetainedCommand}
                     onChange={(event) => {
+                      if (hasRetainedCommand) return
                       setSourceSessionFilterEnabled(event.target.checked)
                       resetCatalog()
                     }}
                   />
                 </label>
-                <button type="button" disabled={!after} onClick={() => showCatalogPage(undefined)}>
+                <button
+                  type="button"
+                  disabled={!after || hasRetainedCommand}
+                  onClick={() => showCatalogPage(undefined)}
+                >
                   First page
                 </button>
                 <button
                   type="button"
-                  disabled={!imports?.next_cursor}
+                  disabled={!imports?.next_cursor || hasRetainedCommand}
                   onClick={() => showCatalogPage(imports?.next_cursor ?? undefined)}
                 >
                   Next page
@@ -494,6 +510,11 @@ export function ImportsWorkspace({
                     </div>
                   </dl>
                 )}
+                {descriptorQuery.isError && (
+                  <p className="imports-state" role="alert">
+                    The selected import descriptor could not be loaded.
+                  </p>
+                )}
                 <div className="continuation-form">
                   <span className="eyebrow">Create native session from selected frontier</span>
                   <div className="model-selection">
@@ -520,14 +541,26 @@ export function ImportsWorkspace({
                     <button
                       type="button"
                       onClick={() => continueAt('resume')}
-                      disabled={!selectedFrontier || continuation.isPending || hasRetainedCommand}
+                      disabled={
+                        !selectedFrontier ||
+                        modelSelectionMissing ||
+                        descriptorQuery.isError ||
+                        continuation.isPending ||
+                        hasRetainedCommand
+                      }
                     >
                       Resume
                     </button>
                     <button
                       type="button"
                       onClick={() => continueAt('fork')}
-                      disabled={!selectedFrontier || continuation.isPending || hasRetainedCommand}
+                      disabled={
+                        !selectedFrontier ||
+                        modelSelectionMissing ||
+                        descriptorQuery.isError ||
+                        continuation.isPending ||
+                        hasRetainedCommand
+                      }
                     >
                       Fork
                     </button>
@@ -605,7 +638,11 @@ export function ImportsWorkspace({
         </div>
       </div>
       {presentation === 'standalone' && (
-        <OverlaySurfaces context={commandContext} activeId="imports" />
+        <OverlaySurfaces
+          context={commandContext}
+          activeId="imports"
+          navigationDisabled={hasRetainedCommand}
+        />
       )}
     </>
   )

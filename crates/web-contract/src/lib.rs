@@ -123,7 +123,8 @@ pub enum WebImportFormat {
     CodexRolloutJsonlV1,
 }
 
-/// Bounded imports catalog request carried as query parameters.
+/// Bounded imports catalog request carried as query parameters, or as a bounded
+/// JSON search body when an exact source-session filter is present.
 #[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebImportListRequest {
@@ -283,6 +284,8 @@ pub enum WebImportedSpeakerEvidence {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebImportedContentKind {
+    /// Bounded evidence for a non-text value too large to classify without full decoding.
+    OpaqueNonText,
     /// Non-message source record.
     SourceEvent,
     /// Source-defined message block.

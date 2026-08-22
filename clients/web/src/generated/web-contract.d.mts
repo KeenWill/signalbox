@@ -79,7 +79,7 @@ export type WebImportTimelineBounds = {
 
 export type WebImportWindowAnchor = "first" | "latest" | "position";
 
-export type WebImportedContentKind = "source_event" | "source_message_block" | "text" | "tool_call" | "tool_result" | "thinking" | "redacted_thinking" | "document" | "message_content_absent";
+export type WebImportedContentKind = "opaque_non_text" | "source_event" | "source_message_block" | "text" | "tool_call" | "tool_result" | "thinking" | "redacted_thinking" | "document" | "message_content_absent";
 
 export type WebImportedEntry = {
   readonly content_kind: WebImportedContentKind;

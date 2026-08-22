@@ -2426,12 +2426,13 @@ async fn imported_discovery_describes_and_windows_without_complete_reconstitutio
     const FIRST_TEXT: &str = "first imported observation";
     const SECOND_TEXT: &str = "second imported observation";
     const THIRD_TEXT: &str = "third imported observation";
+    const SOURCE_SESSION: &str = "discovery-source";
     let (container, pool, _database_url) = migrated_postgres().await?;
     let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x900));
     let source = format!(
-        "{{\"sessionId\":\"discovery-source\",\"type\":\"user\",\"message\":{{\"content\":\"{FIRST_TEXT}\"}}}}\n\
-         {{\"sessionId\":\"discovery-source\",\"type\":\"assistant\",\"message\":{{\"content\":\"{SECOND_TEXT}\"}}}}\n\
-         {{\"sessionId\":\"discovery-source\",\"type\":\"user\",\"message\":{{\"content\":\"{THIRD_TEXT}\"}}}}"
+        "{{\"sessionId\":\"{SOURCE_SESSION}\",\"type\":\"user\",\"message\":{{\"content\":\"{FIRST_TEXT}\"}}}}\n\
+         {{\"sessionId\":\"{SOURCE_SESSION}\",\"type\":\"assistant\",\"message\":{{\"content\":\"{SECOND_TEXT}\"}}}}\n\
+         {{\"sessionId\":\"{SOURCE_SESSION}\",\"type\":\"user\",\"message\":{{\"content\":\"{THIRD_TEXT}\"}}}}"
     );
     let mut importer = ImportConversationService::new(
         FixedIds::for_conversations([conversation]),
@@ -2454,7 +2455,7 @@ async fn imported_discovery_describes_and_windows_without_complete_reconstitutio
             .source_session_id
             .as_ref()
             .map(|evidence| evidence.leading_text.as_str()),
-        Some("discovery-source")
+        Some(SOURCE_SESSION)
     );
     assert_eq!(descriptor.raw_record_count, 3);
     assert_eq!(descriptor.entry_count, 3);

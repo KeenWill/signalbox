@@ -52,6 +52,13 @@ export class ImportWindowCorrelationError extends Error {
   }
 }
 
+export class ImportDescriptorCorrelationError extends Error {
+  constructor() {
+    super('import descriptor does not correlate with its request')
+    this.name = 'ImportDescriptorCorrelationError'
+  }
+}
+
 const correlateEntryWindow = (
   importedConversationId: string,
   request: WebImportEntryWindowRequest,
@@ -105,6 +112,15 @@ const queryString = (request: WebImportListRequest | WebImportEntryWindowRequest
 
 export class HttpImportApi implements ImportApi {
   async list(request: WebImportListRequest, signal?: AbortSignal): Promise<WebImportListPage> {
+    if (request.source_session_id !== undefined && request.source_session_id !== null) {
+      const response = await fetch('/api/imports/searches', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+        signal,
+      })
+      return decodeResponse(response, decodeWebImportListPage)
+    }
     const response = await fetch(`/api/imports/${queryString(request)}`, { signal })
     return decodeResponse(response, decodeWebImportListPage)
   }
@@ -116,7 +132,11 @@ export class HttpImportApi implements ImportApi {
     const response = await fetch(`/api/imports/${encodeURIComponent(importedConversationId)}`, {
       signal,
     })
-    return decodeResponse(response, decodeWebImportDescriptor)
+    const descriptor = await decodeResponse(response, decodeWebImportDescriptor)
+    if (descriptor.imported_conversation_id !== importedConversationId) {
+      throw new ImportDescriptorCorrelationError()
+    }
+    return descriptor
   }
 
   async entries(

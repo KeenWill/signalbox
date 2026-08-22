@@ -692,6 +692,11 @@ const schemas = {
         "description": "Closed normalized imported content kind.",
         "oneOf": [
           {
+            "const": "opaque_non_text",
+            "description": "Bounded evidence for a non-text value too large to classify without full decoding.",
+            "type": "string"
+          },
+          {
             "const": "source_event",
             "description": "Non-message source record.",
             "type": "string"
@@ -1082,7 +1087,7 @@ const schemas = {
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Bounded imports catalog request carried as query parameters.",
+    "description": "Bounded imports catalog request carried as query parameters, or as a bounded\nJSON search body when an exact source-session filter is present.",
     "properties": {
       "after": {
         "description": "Exclusive imported-conversation UUID cursor.",
