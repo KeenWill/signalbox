@@ -72,7 +72,7 @@ export function SessionWorkspaceSurface({
   const session = useQuery({
     queryKey: sessionWorkspaceQueryKey(sessionId),
     queryFn: async ({ signal }) => {
-      const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window))
+      const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window), signal)
       const history = new BoundedSessionHistory(sessionId ?? '', source)
       const descriptor = await history.describe(signal)
       const active = BigInt(descriptor.work.active_turn_count) !== BigInt(0)
@@ -158,6 +158,9 @@ export function SessionWorkspaceSurface({
     dispatch(actions.timelineSelected(eventSequence))
   }
   const handleTimelineKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (['j', 'k', 'ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.currentTarget.focus()
+    }
     const command = {
       ArrowDown: 'selection.next',
       ArrowUp: 'selection.previous',
