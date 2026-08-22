@@ -22,7 +22,10 @@ use signalbox_persistence::{
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{migrated_postgres, test_session_credential_pin};
+use super::{
+    commission_fixture_session_goal, migrated_postgres, stop_fixture_session_goal,
+    test_session_credential_pin,
+};
 
 fn credential_pin() -> signalbox_persistence::SessionCredentialPin {
     test_session_credential_pin()
@@ -174,6 +177,32 @@ async fn missing_projection_facts_are_corruption_not_session_absence() -> Result
             "projection facts"
         ))
     ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn retired_queued_goal_turn_is_removed_from_work_facts() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x994);
+    create_session(&pool, identity).await?;
+    commission_fixture_session_goal(&pool, identity, 0x0009_9400).await?;
+    let repository = SessionTimelineRepository::new(pool.clone());
+    let pursuing = repository
+        .read_descriptor(identity)
+        .await?
+        .expect("commissioned session has a descriptor");
+    stop_fixture_session_goal(&pool, identity, 0x0009_9500).await?;
+    let stopped = repository
+        .read_descriptor(identity)
+        .await?
+        .expect("stopped session has a descriptor");
+
+    assert_eq!(pursuing.work.queued_turn_count, 1);
+    assert_eq!(stopped.work.queued_turn_count, 0);
 
     pool.close().await;
     drop(container);
