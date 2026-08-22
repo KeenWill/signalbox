@@ -22,7 +22,7 @@ CREATE TABLE operator_attention_change (
     fact_kind text NOT NULL CHECK (
         fact_kind IN ('session', 'turn', 'goal', 'approval_judge', 'runner')
     ),
-    recorded_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
+    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     CHECK (change_sequence > 0)
 );
 

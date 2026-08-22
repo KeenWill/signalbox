@@ -231,6 +231,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebAttentionSummary"
         },
+        "maxItems": 64,
         "type": "array"
       }
     },
@@ -348,6 +349,7 @@ const schemas = {
             "items": {
               "$ref": "#/$defs/WebAttentionSummary"
             },
+            "maxItems": 64,
             "type": "array"
           }
         },
@@ -708,6 +710,9 @@ function assertSchema(root, schema, value, path) {
   if (schema.type === "array") {
     if (!Array.isArray(value)) {
       fail(path, "an array");
+    }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      fail(path, `at most ${schema.maxItems} items`);
     }
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${path}[${index}]`));
     return;

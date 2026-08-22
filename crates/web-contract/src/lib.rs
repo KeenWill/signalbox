@@ -217,6 +217,7 @@ pub struct WebAttentionSummary {
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSnapshot {
     pub cursor: String,
+    #[schemars(length(max = 64))]
     pub summaries: Vec<WebAttentionSummary>,
     pub continuation_after_session_id: Option<String>,
 }
@@ -454,6 +455,9 @@ function assertSchema(root, schema, value, path) {{
   if (schema.type === "array") {{
     if (!Array.isArray(value)) {{
       fail(path, "an array");
+    }}
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {{
+      fail(path, `at most ${{schema.maxItems}} items`);
     }}
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${{path}}[${{index}}]`));
     return;

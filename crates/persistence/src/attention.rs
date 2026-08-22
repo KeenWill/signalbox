@@ -8,8 +8,10 @@ use signalbox_application::{
     AttentionSnapshot, AttentionState, AttentionSummary, max_attention_change_items,
     max_attention_goal_summary_characters, max_attention_snapshot_items,
 };
-use signalbox_domain::{SessionId, TurnId};
+use signalbox_domain::{GoalBlockedReasonKind, SessionId, TurnId};
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
+
+use crate::mapping::goal_blocked_reason_from_str;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AttentionCorruption {
@@ -208,7 +210,13 @@ WITH selected AS (
                 WHERE retired.session_id = lifecycle.session_id
                   AND retired.turn_id = lifecycle.turn_id
            )
-     ORDER BY lifecycle.session_id, lifecycle.acceptance_position DESC
+     ORDER BY lifecycle.session_id,
+              CASE lifecycle.state_kind
+                  WHEN 'active' THEN 0
+                  WHEN 'queued' THEN 1
+                  ELSE 2
+              END,
+              lifecycle.acceptance_position DESC
 ), latest_goal AS (
     SELECT DISTINCT ON (goal.session_id)
            goal.session_id, goal.generation::text AS generation, goal.event_kind,
@@ -248,6 +256,40 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
                     AND approval_call.recommendation_kind = 'escalate_to_human')
                    OR approval_call.terminal_disposition_kind IN (
                        'known_failed', 'refused', 'cancelled', 'ambiguous'
+                   )
+               )
+               AND (
+                   NOT (
+                       goal.generation = '1'
+                       AND (
+                           EXISTS (
+                               SELECT 1
+                                 FROM repo_watch_dispatch_action AS dispatched
+                                WHERE dispatched.session_id = selected.session_id
+                           )
+                           OR EXISTS (
+                               SELECT 1
+                                 FROM commissioned_dispatch AS dispatched
+                                WHERE dispatched.session_id = selected.session_id
+                           )
+                       )
+                   )
+                   OR EXISTS (
+                       SELECT 1
+                         FROM accepted_input AS steering
+                        WHERE steering.session_id = selected.session_id
+                          AND steering.expected_active_turn_id = turn.turn_id
+                          AND steering.disposition_kind = 'pending_steering'
+                   )
+                   OR EXISTS (
+                       SELECT 1
+                         FROM repo_watch_headless_approval_escalation AS escalation
+                        WHERE escalation.session_id = selected.session_id
+                   )
+                   OR EXISTS (
+                       SELECT 1
+                         FROM commissioned_dispatch_headless_approval_escalation AS escalation
+                        WHERE escalation.session_id = selected.session_id
                    )
                )
            ELSE false
@@ -398,15 +440,20 @@ fn decode_goal_block(
     if goal_state != Some("blocked") {
         return Ok(None);
     }
-    let reason = match required_string(row, "blocked_reason")?.as_str() {
-        "user_input_required" => AttentionBlockedReason::UserInputRequired,
-        "external_change_required" => AttentionBlockedReason::ExternalChangeRequired,
-        "authorization_required" => AttentionBlockedReason::AuthorizationRequired,
-        "execution_failure" => AttentionBlockedReason::ExecutionFailure,
-        value => {
+    let stored_reason = required_string(row, "blocked_reason")?;
+    let reason = match goal_blocked_reason_from_str(&stored_reason) {
+        Some(GoalBlockedReasonKind::UserInputRequired) => AttentionBlockedReason::UserInputRequired,
+        Some(GoalBlockedReasonKind::ExternalChangeRequired) => {
+            AttentionBlockedReason::ExternalChangeRequired
+        }
+        Some(GoalBlockedReasonKind::AuthorizationRequired) => {
+            AttentionBlockedReason::AuthorizationRequired
+        }
+        Some(GoalBlockedReasonKind::ExecutionFailure) => AttentionBlockedReason::ExecutionFailure,
+        None => {
             return Err(AttentionCorruption::Unsupported {
                 field: "goal blocked reason",
-                value: value.to_owned(),
+                value: stored_reason,
             }
             .into());
         }
