@@ -1,9 +1,13 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
-import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
+import type { WebContractBootstrap, WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import { SessionItemDetail } from './SessionItemDetail'
-import { HttpSessionTimelineSource, type SessionWindowAnchor } from './session-timeline/model'
+import {
+  BoundedSessionHistory,
+  HttpSessionTimelineSource,
+  type SessionWindowAnchor,
+} from './session-timeline/model'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -18,40 +22,59 @@ export const visibleSessionItems = (
 ) =>
   detail === 'results'
     ? items.filter((item) =>
-        ['turn_completed', 'turn_failed', 'turn_refused', 'turn_cancelled'].includes(item.kind),
+        [
+          'input_accepted',
+          'turn_completed',
+          'turn_failed',
+          'turn_refused',
+          'turn_cancelled',
+        ].includes(item.kind),
       )
     : items
 
 export function SessionWorkspaceSurface({
+  bootstrap,
   onTimelineIds,
 }: {
+  bootstrap: WebContractBootstrap | undefined
   onTimelineIds: (ids: readonly string[]) => void
 }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const [draftId, setDraftId] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
+  const [restorePosition, setRestorePosition] = useState<string | undefined>()
   const [manualAnchor, setManualAnchor] = useState<SessionWindowAnchor | null>(null)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
-  const remembered = sessionId === null ? undefined : app.lastLogicalPositions[sessionId]
+  const sessionCapabilitiesAvailable =
+    bootstrap?.capabilities.bounded_session_timeline === true &&
+    bootstrap.capabilities.bounded_session_timeline_detail === true
   const session = useQuery({
-    queryKey: ['production', 'session-workspace', sessionId, manualAnchor, remembered],
+    queryKey: ['production', 'session-workspace', sessionId, manualAnchor, restorePosition],
     queryFn: async ({ signal }) => {
       const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window))
-      const descriptor = await source.readDescriptor(sessionId ?? '', signal)
+      const history = new BoundedSessionHistory(sessionId ?? '', source)
+      const descriptor = await history.describe(signal)
       const active = BigInt(descriptor.work.active_turn_count) !== BigInt(0)
       const anchor: SessionWindowAnchor =
         manualAnchor ??
-        (!active && remembered ? { kind: 'around', eventSequence: remembered } : { kind: 'latest' })
-      const timelineWindow = await source.readWindow(
-        sessionId ?? '',
+        (!active && restorePosition
+          ? { kind: 'around', eventSequence: restorePosition }
+          : { kind: 'latest' })
+      const timelineWindow = await history.load(
         anchor,
         { maxItems: SESSION_WINDOW_ITEMS, maxBytes: SESSION_WINDOW_BYTES },
         signal,
       )
-      return { active, descriptor, source, window: timelineWindow }
+      return {
+        active,
+        descriptor,
+        restored: !active && restorePosition !== undefined,
+        source,
+        window: timelineWindow,
+      }
     },
-    enabled: sessionId !== null,
+    enabled: sessionId !== null && sessionCapabilitiesAvailable,
   })
   const items = useMemo(
     () => visibleSessionItems(session.data?.window.items ?? [], app.detail),
@@ -69,6 +92,7 @@ export function SessionWorkspaceSurface({
     setManualAnchor(null)
     setExpanded(new Set())
     dispatch(actions.timelineSelected(null))
+    setRestorePosition(app.lastLogicalPositions[candidate])
     setSessionId(candidate)
   }
   const selected = app.selectedTimeline
@@ -99,12 +123,26 @@ export function SessionWorkspaceSurface({
             required
           />
         </label>
-        <button type="submit" disabled={!isCanonicalSessionId(draftId.trim())}>
+        <button
+          type="submit"
+          disabled={!isCanonicalSessionId(draftId.trim()) || !sessionCapabilitiesAvailable}
+        >
           Open workspace
         </button>
       </form>
 
-      {sessionId === null ? (
+      {!sessionCapabilitiesAvailable && bootstrap ? (
+        <section className="surface-empty session-entry" aria-labelledby="session-entry-heading">
+          <Radio aria-hidden="true" />
+          <div>
+            <span className="availability-tag">Unavailable</span>
+            <h2 id="session-entry-heading">Session timeline reads are unavailable</h2>
+            <p>
+              The connected daemon does not advertise both bounded timeline and typed-detail reads.
+            </p>
+          </div>
+        </section>
+      ) : sessionId === null ? (
         <section className="surface-empty session-entry" aria-labelledby="session-entry-heading">
           <Radio aria-hidden="true" />
           <div>
@@ -132,7 +170,9 @@ export function SessionWorkspaceSurface({
               <p>
                 {session.data.active
                   ? 'Active · opened near latest'
-                  : 'Inactive · restored logical position'}
+                  : session.data.restored
+                    ? 'Inactive · restored logical position'
+                    : 'Inactive · opened near latest'}
               </p>
             </div>
             <dl className="session-telemetry">

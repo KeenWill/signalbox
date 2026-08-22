@@ -165,6 +165,13 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     ) {
       throw new TypeError('bounded session timeline limits are invalid')
     }
+    if (
+      bootstrap.capabilities.bounded_session_timeline_detail &&
+      (bootstrap.limits.max_timeline_detail_items < 1 ||
+        bootstrap.limits.max_timeline_detail_bytes < 256)
+    ) {
+      throw new TypeError('bounded session timeline detail limits are invalid')
+    }
     return new HttpSessionTimelineSource(
       bootstrap.limits,
       bootstrap.capabilities.bounded_session_timeline_detail,

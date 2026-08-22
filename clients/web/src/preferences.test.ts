@@ -1,10 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   decodeBrowserPreferences,
   defaultBrowserPreferences,
+  loadBrowserPreferences,
   MAX_KEY_OVERRIDES,
   MAX_SAVED_LOGICAL_POSITIONS,
+  saveBrowserPreferences,
 } from './preferences'
+
+afterEach(() => vi.unstubAllGlobals())
 
 describe('browser preferences', () => {
   it('fails closed to defaults for an unrelated stored value', () => {
@@ -16,14 +20,12 @@ describe('browser preferences', () => {
       layout: 'dashboard',
       density: 'comfortable',
       paneSizes: { navigation: -50, inspector: 50_000 },
-      remoteMedia: 'proxy',
     } as const
     const decoded = decodeBrowserPreferences(stored)
 
     expect(decoded.layout).toBe(defaultBrowserPreferences.layout)
     expect(decoded.density).toBe(stored.density)
     expect(decoded.paneSizes).toEqual({ navigation: 160, inspector: 480 })
-    expect(decoded.remoteMedia).toBe(defaultBrowserPreferences.remoteMedia)
   })
 
   it('bounds retained positions and future key overrides', () => {
@@ -44,5 +46,25 @@ describe('browser preferences', () => {
 
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
     expect(Object.keys(decoded.keyOverrides)).toHaveLength(MAX_KEY_OVERRIDES)
+  })
+
+  it('falls back when browser storage reads are unavailable', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => {
+        throw new DOMException('denied', 'SecurityError')
+      }),
+    })
+
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+  })
+
+  it('keeps in-memory preferences when browser storage writes are unavailable', () => {
+    vi.stubGlobal('localStorage', {
+      setItem: vi.fn(() => {
+        throw new DOMException('quota', 'QuotaExceededError')
+      }),
+    })
+
+    expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
   })
 })

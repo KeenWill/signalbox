@@ -1,5 +1,33 @@
 import { decodeWebContractBootstrap, type WebContractBootstrap } from './generated/web-contract.mjs'
 
+// Hard safety ceiling: bootstrap establishes connection-wide authority and must be bounded before
+// decoding even if a regressed server omits or misreports its own body limit.
+export const MAX_BOOTSTRAP_HTTP_RESPONSE_BYTES = 256 * 1024
+
+const readBoundedBootstrapJson = async (response: Response): Promise<unknown> => {
+  const reader = response.body?.getReader()
+  if (!reader) throw new TypeError('bootstrap response has no body')
+  const chunks: Uint8Array[] = []
+  let byteCount = 0
+  while (true) {
+    const next = await reader.read()
+    if (next.done) break
+    byteCount += next.value.byteLength
+    if (byteCount > MAX_BOOTSTRAP_HTTP_RESPONSE_BYTES) {
+      await reader.cancel()
+      throw new TypeError('bootstrap response exceeds its encoded byte ceiling')
+    }
+    chunks.push(next.value)
+  }
+  const encoded = new Uint8Array(byteCount)
+  let offset = 0
+  for (const chunk of chunks) {
+    encoded.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(encoded)) as unknown
+}
+
 export const productRoutes = [
   { id: 'attention', label: 'Attention', description: 'Actionable work and fleet state' },
   { id: 'sessions', label: 'Sessions', description: 'Conversation activity and history' },
@@ -83,7 +111,7 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    return decodeWebContractBootstrap(await response.json())
+    return decodeWebContractBootstrap(await readBoundedBootstrapJson(response))
   }
 }
 

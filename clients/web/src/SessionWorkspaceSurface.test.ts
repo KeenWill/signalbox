@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { decodeWebSessionTimelineWindow } from './generated/web-contract.mjs'
+import { isCompatibleDetailBody } from './SessionItemDetail'
 import { isCanonicalSessionId, visibleSessionItems } from './SessionWorkspaceSurface'
 
 const fixture = decodeWebSessionTimelineWindow({
@@ -41,6 +42,18 @@ describe('Session Workspace projection', () => {
   it('projects result mode without materializing another window', () => {
     const results = visibleSessionItems(fixture.items, 'results')
 
-    expect(results).toEqual([fixture.items[1], fixture.items[2]])
+    expect(results).toEqual([fixture.items[0], fixture.items[1], fixture.items[2]])
+  })
+
+  it('rejects detail bodies that do not belong to the advertised event kind', () => {
+    const lifecycleBody = {
+      type: 'turn_lifecycle',
+      turn_id: '00000000-0000-0000-0000-000000000041',
+      lifecycle: 'terminalized',
+      cause_code: 'completed',
+    } as const
+
+    expect(isCompatibleDetailBody('input_accepted', lifecycleBody)).toBe(false)
+    expect(isCompatibleDetailBody('turn_completed', lifecycleBody)).toBe(true)
   })
 })

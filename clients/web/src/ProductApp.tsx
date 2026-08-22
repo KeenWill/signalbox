@@ -1,10 +1,10 @@
 import * as Dialog from '@radix-ui/react-dialog'
-import { useHotkeys } from '@tanstack/react-hotkeys'
+import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { AlertTriangle, Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react'
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { globalHotkeyBindings } from './commands'
+import { globalHotkeyBindings, globalHotkeySequenceBindings } from './commands'
 import {
   type ProductRouteId,
   productRoutes,
@@ -68,7 +68,13 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
   },
 }
 
-function ProductNavigation({ active }: { active: ProductRouteId }) {
+function ProductNavigation({
+  active,
+  onSelect,
+}: {
+  active: ProductRouteId
+  onSelect?: () => void
+}) {
   return (
     <div className="product-navigation">
       <div className="brand">
@@ -84,6 +90,7 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
+            onClick={onSelect}
           >
             <span>{route.label}</span>
             <small>{route.description}</small>
@@ -134,6 +141,7 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
               .filter(
                 (command) =>
                   command.id !== 'surface.escape' &&
+                  command.id !== 'help.open' &&
                   (!('available' in command) || command.available(context)),
               )
               .map((command) => (
@@ -279,8 +287,16 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     [dispatch, navigate, timelineIds],
   )
   useHotkeys(
-    globalHotkeyBindings.map((binding) => ({
-      hotkey: binding.hotkey,
+    globalHotkeyBindings
+      .filter((binding) => binding.commandId !== 'help.open')
+      .map((binding) => ({
+        hotkey: binding.hotkey,
+        callback: () => invokeProductCommand(binding.commandId, context),
+      })),
+  )
+  useHotkeySequences(
+    globalHotkeySequenceBindings.map((binding) => ({
+      sequence: binding.sequence,
       callback: () => invokeProductCommand(binding.commandId, context),
     })),
   )
@@ -295,7 +311,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     surface === 'attention' ? (
       <AttentionSurface />
     ) : surface === 'sessions' ? (
-      <SessionWorkspaceSurface onTimelineIds={updateTimelineIds} />
+      <SessionWorkspaceSurface bootstrap={bootstrap.data} onTimelineIds={updateTimelineIds} />
     ) : surface === 'settings' ? (
       <SettingsSurface />
     ) : (
@@ -376,7 +392,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <Dialog.Description id="mobile-navigation-description" className="sr-only">
               Choose a Signalbox surface.
             </Dialog.Description>
-            <ProductNavigation active={surface} />
+            <ProductNavigation
+              active={surface}
+              onSelect={() => dispatch(actions.overlaySet(null))}
+            />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

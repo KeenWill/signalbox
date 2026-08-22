@@ -6,9 +6,14 @@ import type {
 } from './generated/web-contract.mjs'
 import type { HttpSessionTimelineSource } from './session-timeline/model'
 
+// Effective request limits: keep each independently requested detail page small while allowing
+// explicit continuation within the daemon-advertised hard ceilings.
 const DETAIL_PAGE_ITEMS = 1
 const DETAIL_PAGE_BYTES = 16 * 1024
+// Hard render ceilings: cap repeated members even inside a valid bounded page so one record cannot
+// mount an unexpectedly large subtree.
 const MAX_RENDERED_ATTACHMENTS = 24
+const MAX_RENDERED_MEMBERS = 24
 
 type DetailItem = WebSessionTimelineDetailPage['items'][number]
 type DetailBody = DetailItem['body']
@@ -16,8 +21,31 @@ type TextExcerpt = Extract<DetailBody, { type: 'user_input' }>['text']
 type ModelCallBody = Extract<DetailBody, { type: 'model_call' }>
 type GoalEvent = Extract<DetailBody, { type: 'goal_event' }>['event']
 type ToolAttempt = Extract<DetailBody, { type: 'tool_batch' }>['tools'][number]
+type DetailKind = DetailItem['kind']
 
-const MAX_RENDERED_MEMBERS = 24
+const compatibleKinds = {
+  session_created: ['session_created'],
+  model_settings: ['session_model_settings_changed', 'turn_model_settings_resolved'],
+  user_input: ['input_accepted'],
+  model_call: ['model_call_transition'],
+  tool_batch: ['tool_batch_transition'],
+  tool_approval_decision: ['tool_approval_decided'],
+  goal_event: ['goal_turn_retired'],
+  context_compaction: ['context_compacted'],
+  turn_lifecycle: [
+    'turn_activated',
+    'turn_failed',
+    'turn_completed',
+    'turn_refused',
+    'turn_cancelled',
+  ],
+  reconciliation: ['turn_reconciliation_required'],
+  runner: ['runner_state_transition'],
+  delegation: ['delegation_update', 'delegation_wake'],
+} as const satisfies Record<DetailBody['type'], readonly DetailKind[]>
+
+export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): boolean =>
+  (compatibleKinds[body.type] as readonly DetailKind[]).includes(kind)
 
 const modelCallState = (state: ModelCallBody['state']): string =>
   state.type === 'terminal' ? `terminal · ${state.disposition}` : state.type.replaceAll('_', ' ')
@@ -150,8 +178,10 @@ const detailContent = (body: DetailBody): ReactNode => {
         <>
           <Facts
             facts={[
+              ['Call', body.model_call_id],
               ['Model', body.model_identity_id],
               ['State', modelCallState(body.state)],
+              ['Cause', body.cause_code ?? 'not recorded'],
               ['Input tokens', body.usage.input_tokens ?? 'not reported'],
               ['Output tokens', body.usage.output_tokens ?? 'not reported'],
             ]}
@@ -173,8 +203,8 @@ const detailContent = (body: DetailBody): ReactNode => {
               ['Turn', body.turn_id],
               ['Producing call', body.producing_model_call_id],
               ['State', body.state.replaceAll('_', ' ')],
-              ['Tools', String(body.tools.length)],
-              ['Goal events', String(body.goal_events.length)],
+              ['Tool attempts in this page', String(body.tools.length)],
+              ['Goal events in this page', String(body.goal_events.length)],
             ]}
           />
           {tools.length > 0 && (
@@ -339,10 +369,16 @@ export function SessionItemDetail({
     )
   }
   if (!detail.data) return <p className="session-detail-state">Loading typed detail…</p>
-  if (detail.data.items.some((detailItem) => detailItem.kind !== item.kind)) {
+  if (
+    detail.data.items.some(
+      (detailItem) =>
+        detailItem.kind !== item.kind || !isCompatibleDetailBody(detailItem.kind, detailItem.body),
+    )
+  ) {
     return (
       <p className="session-detail-state" role="alert">
-        Detail rejected because its event kind did not match the selected timeline header.
+        Detail rejected because its event kind or body variant did not match the selected timeline
+        header.
       </p>
     )
   }

@@ -21,6 +21,7 @@ const bootstrapFixture = {
 
 const toolArguments = '{"path":"docs/spec/sessions-and-transcript.md"}'
 const toolResult = 'bounded typed contract'
+const toolGoalText = 'advance the bounded session workspace'
 const toolAddress = '42'
 
 const sessionWorkspaceFixture = {
@@ -48,57 +49,136 @@ const sessionWorkspaceFixture = {
     continuation: null,
   },
   toolDetail: {
-    session_id: '00000000-0000-0000-0000-000000000991',
-    items: [
-      {
-        address: { event_sequence: toolAddress },
-        kind: 'tool_batch_transition',
-        body: {
-          type: 'tool_batch',
-          turn_id: '00000000-0000-0000-0000-000000000042',
-          producing_model_call_id: '00000000-0000-0000-0000-000000000142',
-          state: 'executing',
-          tools: [
-            {
-              request_id: '00000000-0000-0000-0000-000000000242',
-              tool_name: 'workspace_read',
-              approval_posture: 'auto',
-              approval_judge_escalated: false,
-              operator_required: false,
-              arguments: {
-                text: toolArguments,
-                offset_bytes: '0',
-                total_bytes: String(new TextEncoder().encode(toolArguments).byteLength),
-                continuation: null,
+    arguments: {
+      session_id: '00000000-0000-0000-0000-000000000991',
+      items: [
+        {
+          address: { event_sequence: toolAddress },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000042',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000142',
+            state: 'executing',
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000242',
+                tool_name: 'workspace_read',
+                approval_posture: 'auto',
+                approval_judge_escalated: false,
+                operator_required: false,
+                arguments: {
+                  text: toolArguments,
+                  offset_bytes: '0',
+                  total_bytes: String(new TextEncoder().encode(toolArguments).byteLength),
+                  continuation: null,
+                },
+                attempt_id: null,
+                state: null,
+                effect_posture: null,
+                sandbox_posture: null,
+                result: null,
+                failure: null,
+                cause_code: null,
               },
-              attempt_id: '00000000-0000-0000-0000-000000000342',
-              state: 'completed',
-              effect_posture: 'read_only',
-              sandbox_posture: 'workspace_read',
-              result: {
-                text: toolResult,
-                offset_bytes: '0',
-                total_bytes: String(new TextEncoder().encode(toolResult).byteLength),
-                continuation: null,
-              },
-              failure: null,
-              cause_code: null,
-            },
-          ],
-          goal_events: [
-            {
-              event_kind: 'advanced',
-              generation: '7',
-              reason: 'tool completed',
-              text: null,
-            },
-          ],
+            ],
+            goal_events: [],
+          },
+          projected_body_bytes: 96,
         },
-        projected_body_bytes: 256,
+      ],
+      projected_body_bytes: 96,
+      continuation: {
+        type: 'more_body',
+        body: {
+          address: { event_sequence: toolAddress },
+          field: 'tool_result',
+          member_index: 0,
+          offset_bytes: '0',
+        },
       },
-    ],
-    projected_body_bytes: 256,
-    continuation: null,
+    },
+    result: {
+      session_id: '00000000-0000-0000-0000-000000000991',
+      items: [
+        {
+          address: { event_sequence: toolAddress },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000042',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000142',
+            state: 'executing',
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000242',
+                tool_name: 'workspace_read',
+                approval_posture: 'auto',
+                approval_judge_escalated: false,
+                operator_required: false,
+                arguments: null,
+                attempt_id: '00000000-0000-0000-0000-000000000342',
+                state: 'completed',
+                effect_posture: 'read_only',
+                sandbox_posture: 'workspace_read',
+                result: {
+                  text: toolResult,
+                  offset_bytes: '0',
+                  total_bytes: String(new TextEncoder().encode(toolResult).byteLength),
+                  continuation: null,
+                },
+                failure: null,
+                cause_code: null,
+              },
+            ],
+            goal_events: [],
+          },
+          projected_body_bytes: 96,
+        },
+      ],
+      projected_body_bytes: 96,
+      continuation: {
+        type: 'more_body',
+        body: {
+          address: { event_sequence: toolAddress },
+          field: 'goal_text',
+          member_index: 0,
+          offset_bytes: '0',
+        },
+      },
+    },
+    goal: {
+      session_id: '00000000-0000-0000-0000-000000000991',
+      items: [
+        {
+          address: { event_sequence: toolAddress },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000042',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000142',
+            state: 'executing',
+            tools: [],
+            goal_events: [
+              {
+                event_kind: 'advanced',
+                generation: '7',
+                reason: 'tool completed',
+                text: {
+                  text: toolGoalText,
+                  offset_bytes: '0',
+                  total_bytes: String(new TextEncoder().encode(toolGoalText).byteLength),
+                  continuation: null,
+                },
+              },
+            ],
+          },
+          projected_body_bytes: 96,
+        },
+      ],
+      projected_body_bytes: 96,
+      continuation: null,
+    },
   },
   inputDetail: {
     first: {
@@ -188,7 +268,15 @@ const useDeterministicSession = async (page: Page) => {
       return route.fulfill({ json: sessionWorkspaceFixture.detail })
     }
     if (path.endsWith(`/${toolAddress}/detail`)) {
-      return route.fulfill({ json: sessionWorkspaceFixture.toolDetail })
+      const field = new URL(route.request().url()).searchParams.get('cursor_field')
+      return route.fulfill({
+        json:
+          field === 'tool_result'
+            ? sessionWorkspaceFixture.toolDetail.result
+            : field === 'goal_text'
+              ? sessionWorkspaceFixture.toolDetail.goal
+              : sessionWorkspaceFixture.toolDetail.arguments,
+      })
     }
     if (path.endsWith('/timeline')) {
       return route.fulfill({
@@ -392,9 +480,14 @@ test('inspects closed tool and goal facts without a mouse', async ({ page }) => 
   await page.keyboard.press('Enter')
   await expect(page.getByRole('heading', { name: 'workspace_read' })).toBeVisible()
   await expect(page.getByText(toolArguments, { exact: true })).toBeVisible()
+  const continueDetail = page.getByRole('button', { name: 'Load next bounded detail chunk' })
+  await continueDetail.focus()
+  await page.keyboard.press('Enter')
   await expect(page.getByText(toolResult, { exact: true })).toBeVisible()
-  await expect(
-    page.getByText(sessionWorkspaceFixture.toolDetail.items[0].body.goal_events[0].reason),
-  ).toBeVisible()
+  await continueDetail.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByText('tool completed', { exact: true })).toBeVisible()
+  await expect(page.getByText(toolGoalText, { exact: true })).toBeVisible()
+  await expect(continueDetail).toBeHidden()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

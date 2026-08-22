@@ -232,6 +232,32 @@ describe('BoundedSessionHistory', () => {
   })
 
   it('does not expose mutable retained items', async () => {
+    const invalidDetailRequest = async () =>
+      new Response(
+        JSON.stringify({
+          contract: { name: 'signalbox.web-http', version: '1' },
+          capabilities: {
+            bounded_json: true,
+            same_origin_json_mutations: true,
+            ndjson_streaming: true,
+            bounded_session_timeline: true,
+            bounded_session_timeline_detail: true,
+          },
+          limits: {
+            max_json_body_bytes: 1024,
+            max_ndjson_item_bytes: 1024,
+            max_timeline_window_items: 256,
+            max_timeline_window_bytes: 64 * 1024,
+            max_timeline_detail_items: 0,
+            max_timeline_detail_bytes: 255,
+          },
+        }),
+      )
+
+    await expect(HttpSessionTimelineSource.connect(invalidDetailRequest)).rejects.toThrow(
+      'timeline detail limits are invalid',
+    )
+
     const scenario = new EnormousSessionScenarioSource()
     const history = new BoundedSessionHistory(sessionId, scenario)
     await history.load({ kind: 'first' }, { maxItems: 1, maxBytes: 256 })
