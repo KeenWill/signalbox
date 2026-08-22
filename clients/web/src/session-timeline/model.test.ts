@@ -14,6 +14,46 @@ import {
 const sessionId = '00000000-0000-0000-0000-000000000991'
 
 describe('BoundedSessionHistory', () => {
+  it('keeps all model-call metadata in continuation identity', () => {
+    const body = {
+      type: 'model_call',
+      turn_id: '00000000-0000-0000-0000-000000000041',
+      model_call_id: '00000000-0000-0000-0000-000000000042',
+      model_identity_id: '00000000-0000-0000-0000-000000000043',
+      state: 'terminal',
+      request_context_items: '3',
+      usage: {
+        input_tokens: '10',
+        output_tokens: '20',
+        cache_creation_input_tokens: '2',
+        cache_read_input_tokens: '4',
+      },
+      cause_code: 'completed',
+      response: null,
+    } as const
+    const item = {
+      address: { event_sequence: '41' },
+      kind: 'model_call_transition',
+      body,
+      projected_body_bytes: 128,
+    }
+    const identity = timelineDetailIdentity(
+      item as unknown as Parameters<typeof timelineDetailIdentity>[0],
+    )
+
+    for (const bodyChange of [
+      { state: 'known_failed' },
+      { request_context_items: '4' },
+      { usage: { ...body.usage, output_tokens: '21' } },
+      { cause_code: 'failed' },
+    ]) {
+      const changed = { ...item, body: { ...body, ...bodyChange } }
+      expect(
+        timelineDetailIdentity(changed as unknown as Parameters<typeof timelineDetailIdentity>[0]),
+      ).not.toEqual(identity)
+    }
+  })
+
   it('navigates an enormous session without retaining lifetime history', async () => {
     const arbitraryAddress = '500000'
     const scenario = new EnormousSessionScenarioSource()

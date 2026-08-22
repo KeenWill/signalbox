@@ -144,7 +144,18 @@ export const timelineDetailIdentity = (item: TimelineDetailItem): TimelineDetail
   const body = item.body
   if (body.type === 'user_input') return [body.type, body.turn_id]
   if (body.type === 'model_call') {
-    return [body.type, body.turn_id, body.model_call_id, body.model_identity_id]
+    return [
+      body.type,
+      JSON.stringify({
+        turn_id: body.turn_id,
+        model_call_id: body.model_call_id,
+        model_identity_id: body.model_identity_id,
+        state: body.state,
+        request_context_items: body.request_context_items,
+        usage: body.usage,
+        cause_code: body.cause_code,
+      }),
+    ]
   }
   if (body.type === 'turn_lifecycle') return [body.type, body.turn_id]
   return [body.type, body.kind]
