@@ -110,4 +110,17 @@ describe('browser preferences', () => {
       }),
     ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
   })
+
+  it('accepts UTF-8 logical positions exactly at their byte ceilings', () => {
+    const decoded = decodeBrowserPreferences({
+      ...defaultBrowserPreferences,
+      lastLogicalPositions: {
+        ['é'.repeat(MAX_LOGICAL_POSITION_KEY_BYTES / 2)]: '😀'.repeat(
+          MAX_LOGICAL_POSITION_VALUE_BYTES / 4,
+        ),
+      },
+    })
+
+    expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(1)
+  })
 })

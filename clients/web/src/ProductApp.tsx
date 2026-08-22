@@ -280,6 +280,22 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   )
 }
 
+function SettingsSurface() {
+  return (
+    <div className="surface-body">
+      <section className="surface-empty" aria-labelledby="settings-local-heading">
+        <div>
+          <h2 id="settings-local-heading">Local settings are not exposed in this slice</h2>
+          <p>
+            Presentation preferences remain browser-local. Their dedicated controls arrive in Web
+            track H slice 2 and do not depend on a daemon read contract.
+          </p>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function ProductToolbar({
   context,
   navigationTriggerRef,
@@ -391,6 +407,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <AttentionSurface />
     ) : surface === 'sessions' ? (
       <SessionsSurface />
+    ) : surface === 'settings' ? (
+      <SettingsSurface />
     ) : (
       <DeferredSurface surface={surface} />
     )

@@ -30,11 +30,19 @@ export const MAX_KEY_OVERRIDES = 64
 export const MAX_LOGICAL_POSITION_KEY_BYTES = 512
 export const MAX_LOGICAL_POSITION_VALUE_BYTES = 4_096
 
-const utf8ByteLength = (value: string) => new TextEncoder().encode(value).byteLength
+const isWithinUtf8ByteLimit = (value: string, limit: number): boolean => {
+  let bytes = 0
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0
+    bytes += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4
+    if (bytes > limit) return false
+  }
+  return true
+}
 
 export const isBoundedLogicalPosition = (sessionId: string, position: string): boolean =>
-  utf8ByteLength(sessionId) <= MAX_LOGICAL_POSITION_KEY_BYTES &&
-  utf8ByteLength(position) <= MAX_LOGICAL_POSITION_VALUE_BYTES
+  isWithinUtf8ByteLimit(sessionId, MAX_LOGICAL_POSITION_KEY_BYTES) &&
+  isWithinUtf8ByteLimit(position, MAX_LOGICAL_POSITION_VALUE_BYTES)
 
 const exactKeys = (value: Record<string, unknown>, expected: readonly string[]) =>
   Object.keys(value).length === expected.length &&
