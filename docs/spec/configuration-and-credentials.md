@@ -178,17 +178,15 @@ requires an explicit authentication and transport-security design first.
 `GET /api/bootstrap` returns the exact contract family `signalbox.web-http`,
 version `2`, the `bounded_json`, `same_origin_json_mutations`,
 `ndjson_streaming`, `immutable_blob_content`, `blob_derivations`, and
-`image_derivatives` capabilities, the `bounded_session_timeline` capability,
-the effective 65,536-byte JSON-body and NDJSON-item hard ceilings, and the
-256-item and 65,536-projected-byte timeline
-ceilings. The generated browser decoder rejects an unknown field, wrong shape,
-different family, or different version rather than interpreting it as the local
-process protocol. No process-protocol frame is a browser DTO. The blob
-descriptor, content, and download routes beneath `/api/blobs/{digest}` are the
-same-origin surface owned by
+`image_derivatives` capabilities, the `bounded_session_timeline` capability, the
+effective 65,536-byte JSON-body and NDJSON-item hard ceilings, and the 256-item
+and 65,536-projected-byte timeline ceilings. The generated browser decoder
+rejects an unknown field, wrong shape, different family, or different version
+rather than interpreting it as the local process protocol. No process-protocol
+frame is a browser DTO. The blob descriptor, content, and download routes
+beneath `/api/blobs/{digest}` are the same-origin surface owned by
 [blob storage](blob-storage.md#browser-delivery-views-and-derivations). The
-session descriptor and historical-window route shapes and semantics are owned
-by
+session descriptor and historical-window route shapes and semantics are owned by
 [Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline).
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
