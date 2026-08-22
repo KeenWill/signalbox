@@ -38,6 +38,7 @@ const PULL_REQUEST: u64 = 892;
 const INACTIVE_PULL_REQUEST: u64 = 893;
 const UNRESOLVED_THREADS: u64 = 3;
 const RETRY_DELAY_SECONDS: u64 = 60;
+const RETRY_DELAY_CAP_SECONDS: u64 = 15 * 60;
 const RETRY_BUDGET: i16 = 5;
 const MODEL_SELECTION_ID: u128 = 0x89_200;
 const FIRST_PENDING_COMMAND: u128 = 0x89_210;
@@ -237,6 +238,7 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
             RETRY_DELAY_SECONDS,
+            RETRY_DELAY_CAP_SECONDS,
         )
         .await?;
     let second = store
@@ -247,6 +249,7 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
             RETRY_DELAY_SECONDS,
+            RETRY_DELAY_CAP_SECONDS,
         )
         .await?;
     let third = store
@@ -257,6 +260,7 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
             RETRY_DELAY_SECONDS,
+            RETRY_DELAY_CAP_SECONDS,
         )
         .await?;
     let fourth = store
@@ -267,6 +271,7 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
             RETRY_DELAY_SECONDS,
+            RETRY_DELAY_CAP_SECONDS,
         )
         .await?;
     let fifth = store
@@ -277,8 +282,20 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
             RETRY_DELAY_SECONDS,
+            RETRY_DELAY_CAP_SECONDS,
         )
         .await?;
+    let retry_delays: Vec<i64> = sqlx::query_scalar(
+        "SELECT round(EXTRACT(EPOCH FROM (retry_not_before - recorded_at)))::bigint
+           FROM convergence_sweep_event
+          WHERE repository = $1 AND pull_request_number = $2
+            AND retry_not_before IS NOT NULL
+          ORDER BY consecutive_failures",
+    )
+    .bind(repository.as_str())
+    .bind(rust_decimal::Decimal::from(pull_request().get()))
+    .fetch_all(&pool)
+    .await?;
     let parked: (String, i16, String) = sqlx::query_as("SELECT failure_kind, consecutive_failures, operator_need FROM convergence_sweep_parked_target WHERE repository = $1 AND pull_request_number = $2")
         .bind(repository.as_str())
         .bind(rust_decimal::Decimal::from(pull_request().get()))
@@ -290,6 +307,7 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
     assert_eq!(third, ConvergenceSweepFailureDisposition::RetryScheduled);
     assert_eq!(fourth, ConvergenceSweepFailureDisposition::RetryScheduled);
     assert_eq!(fifth, ConvergenceSweepFailureDisposition::Parked);
+    assert_eq!(retry_delays, vec![60, 120, 240, 480]);
     assert_eq!(
         parked,
         (
@@ -317,6 +335,7 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
             RETRY_DELAY_SECONDS,
+            RETRY_DELAY_CAP_SECONDS,
         )
         .await?;
     store
@@ -327,6 +346,7 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
             RETRY_DELAY_SECONDS,
+            RETRY_DELAY_CAP_SECONDS,
         )
         .await?;
     store
@@ -337,6 +357,7 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             Some(&observation),
             ConvergenceSweepFailureKind::CommissionRefused,
             RETRY_DELAY_SECONDS,
+            RETRY_DELAY_CAP_SECONDS,
         )
         .await?;
     let state = store
@@ -557,6 +578,7 @@ async fn no_model_activity_parks_immediately_with_its_typed_need() -> Result<(),
             Some(&observation),
             ConvergenceSweepFailureKind::NoModelActivity,
             RETRY_DELAY_SECONDS,
+            RETRY_DELAY_CAP_SECONDS,
         )
         .await?;
     let parked: (String, String) = sqlx::query_as(
@@ -596,6 +618,7 @@ async fn configured_target_reenrollment_clears_a_durable_park() -> Result<(), Bo
             Some(&observation),
             ConvergenceSweepFailureKind::NoModelActivity,
             RETRY_DELAY_SECONDS,
+            RETRY_DELAY_CAP_SECONDS,
         )
         .await?;
     store
@@ -661,6 +684,7 @@ async fn removed_targets_leave_the_parked_operator_view() -> Result<(), Box<dyn 
             Some(&observation),
             ConvergenceSweepFailureKind::NoModelActivity,
             RETRY_DELAY_SECONDS,
+            RETRY_DELAY_CAP_SECONDS,
         )
         .await?;
 

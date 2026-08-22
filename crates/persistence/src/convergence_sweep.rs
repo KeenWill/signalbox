@@ -5,7 +5,7 @@ use std::{error::Error, fmt, time::SystemTime};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use signalbox_domain::{CommitSha, DurableCommandId, PullRequestNumber, RepositorySlug, SessionId};
 use sqlx::{
-    PgPool, Row,
+    PgConnection, PgPool, Row,
     types::{Uuid, time::OffsetDateTime},
 };
 
@@ -527,7 +527,8 @@ impl PostgresConvergenceSweepStore {
         pull_request: PullRequestNumber,
         observation: Option<&ConvergenceSweepObservation>,
         failure: ConvergenceSweepFailureKind,
-        retry_delay_seconds: u64,
+        retry_backoff_base_seconds: u64,
+        retry_backoff_cap_seconds: u64,
     ) -> Result<ConvergenceSweepFailureDisposition, ConvergenceSweepStoreError> {
         self.record_failure_guarded(
             event_id,
@@ -535,7 +536,8 @@ impl PostgresConvergenceSweepStore {
             pull_request,
             observation,
             failure,
-            retry_delay_seconds,
+            retry_backoff_base_seconds,
+            retry_backoff_cap_seconds,
             None,
         )
         .await
@@ -557,6 +559,7 @@ impl PostgresConvergenceSweepStore {
             Some(observation),
             ConvergenceSweepFailureKind::NoModelActivity,
             0,
+            0,
             Some(expected_session),
         )
         .await
@@ -573,11 +576,15 @@ impl PostgresConvergenceSweepStore {
         pull_request: PullRequestNumber,
         observation: Option<&ConvergenceSweepObservation>,
         failure: ConvergenceSweepFailureKind,
-        retry_delay_seconds: u64,
+        retry_backoff_base_seconds: u64,
+        retry_backoff_cap_seconds: u64,
         expected_inactive_session: Option<SessionId>,
     ) -> Result<ConvergenceSweepFailureDisposition, ConvergenceSweepStoreError> {
         let mut transaction = self.pool.begin().await?;
         ensure_target(&mut transaction, repository, pull_request).await?;
+        if let Some(session) = expected_inactive_session {
+            lock_model_activity_fence(&mut transaction, session).await?;
+        }
         let budget: i16 = sqlx::query_scalar("SELECT convergence_sweep_retry_budget()")
             .fetch_one(&mut *transaction)
             .await?;
@@ -627,7 +634,15 @@ impl PostgresConvergenceSweepStore {
                                 THEN least(consecutive_failures + 1, $5)
                             ELSE 1::smallint END) >= $5
                         THEN NULL
-                        ELSE clock_timestamp() + $6 * interval '1 second' END,
+                        ELSE clock_timestamp() + least(
+                            $6::bigint * (1::bigint << greatest(
+                                (CASE WHEN failure_kind = $3
+                                    THEN least(consecutive_failures + 1, $5)
+                                    ELSE 1::smallint END) - 1,
+                                0
+                            )),
+                            $7::bigint
+                        ) * interval '1 second' END,
                     parked_at = CASE WHEN
                         (CASE WHEN $4 THEN $5
                             WHEN failure_kind = $3
@@ -639,15 +654,15 @@ impl PostgresConvergenceSweepStore {
                             WHEN failure_kind = $3
                                 THEN least(consecutive_failures + 1, $5)
                             ELSE 1::smallint END) >= $5
-                        THEN $7 ELSE NULL END,
-                    last_head_sha = coalesce($8, last_head_sha),
-                    last_unresolved_threads = coalesce($9, last_unresolved_threads),
-                    last_observed_at = CASE WHEN $8 IS NULL THEN last_observed_at
+                        THEN $8 ELSE NULL END,
+                    last_head_sha = coalesce($9, last_head_sha),
+                    last_unresolved_threads = coalesce($10, last_unresolved_threads),
+                    last_observed_at = CASE WHEN $9 IS NULL THEN last_observed_at
                         ELSE clock_timestamp() END
               WHERE repository = $1 AND pull_request_number = $2
-                AND ($10::uuid IS NULL OR EXISTS (
+                AND ($11::uuid IS NULL OR EXISTS (
                     SELECT 1 FROM selected_dispatch
-                     WHERE session_id = $10
+                     WHERE session_id = $11
                        AND NOT has_model_activity
                 ))
           RETURNING consecutive_failures, state_kind = 'parked'",
@@ -657,7 +672,8 @@ impl PostgresConvergenceSweepStore {
         .bind(failure.storage())
         .bind(failure == ConvergenceSweepFailureKind::NoModelActivity)
         .bind(budget)
-        .bind(i64::try_from(retry_delay_seconds).unwrap_or(i64::MAX))
+        .bind(i64::try_from(retry_backoff_base_seconds).unwrap_or(i64::MAX))
+        .bind(i64::try_from(retry_backoff_cap_seconds).unwrap_or(i64::MAX))
         .bind(failure.need())
         .bind(head)
         .bind(threads)
@@ -694,6 +710,21 @@ impl PostgresConvergenceSweepStore {
             ConvergenceSweepFailureDisposition::RetryScheduled
         })
     }
+}
+
+/// Serializes first model-call creation with inactivity parking for one session.
+pub(crate) async fn lock_model_activity_fence(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "convergence_model_activity:{}",
+            session.into_uuid()
+        ))
+        .execute(connection)
+        .await?;
+    Ok(())
 }
 
 async fn ensure_target(

@@ -5699,6 +5699,7 @@ pub(crate) async fn insert_prepared_call(
     credential_pool_policy: Option<&CredentialPoolRuntimePolicy>,
     input_includes_cache_tokens: bool,
 ) -> Result<(), ModelCallRepositoryError> {
+    crate::convergence_sweep::lock_model_activity_fence(connection, prepared.session()).await?;
     let call = prepared.call();
     let (kind, direct, alias, alias_selected) = encode_selection(call.selection());
     for steering in prepared.consumed_steering() {

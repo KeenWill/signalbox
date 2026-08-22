@@ -32,7 +32,7 @@ use sqlx::PgPool;
 use tokio::{
     select,
     sync::{Semaphore, watch},
-    time::{MissedTickBehavior, interval, sleep},
+    time::{MissedTickBehavior, interval, sleep, sleep_until},
 };
 
 use crate::{
@@ -248,13 +248,13 @@ impl ConvergenceSweepRuntime {
                     ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
                     let mut reenrolled = false;
                     loop {
-                        select! {
-                            _ = ticks.tick() => {}
+                        let scheduled = select! {
+                            scheduled = ticks.tick() => scheduled,
                             changed = shutdown.changed() => {
                                 if changed.is_err() || *shutdown.borrow() { return; }
                                 continue;
                             }
-                        }
+                        };
                         let permit = select! {
                             permit = active_targets.acquire() => {
                                 match permit {
@@ -288,6 +288,13 @@ impl ConvergenceSweepRuntime {
                         }
                         select! {
                             () = runtime.reconcile_target(target) => {}
+                            _ = sleep_until(scheduled + runtime.interval) => {
+                                tracing::warn!(
+                                    repository = %target.repository.as_str(),
+                                    pull_request = target.pull_request.get(),
+                                    "convergence sweep census exceeded its polling interval"
+                                );
+                            }
                             changed = shutdown.changed() => {
                                 if changed.is_err() || *shutdown.borrow() { return; }
                             }
@@ -599,17 +606,6 @@ impl ConvergenceSweepRuntime {
         failure: ConvergenceSweepFailureKind,
         cause: CensusError,
     ) {
-        let prior = self
-            .state
-            .load_target(&target.repository, target.pull_request)
-            .await
-            .ok()
-            .flatten();
-        let attempt = prior
-            .as_ref()
-            .filter(|state| state.failure_kind() == Some(failure))
-            .map_or(0, |state| u32::from(state.consecutive_failures()));
-        let delay = retry_delay(attempt);
         match self
             .state
             .record_failure(
@@ -618,7 +614,8 @@ impl ConvergenceSweepRuntime {
                 target.pull_request,
                 observation,
                 failure,
-                delay.as_secs(),
+                RETRY_BACKOFF_BASE.as_secs(),
+                RETRY_BACKOFF_CAP.as_secs(),
             )
             .await
         {
@@ -1083,25 +1080,12 @@ fn blocker_text(blocker: &PullRequestConvergenceBlocker) -> String {
     }
 }
 
-fn retry_delay(attempt: u32) -> Duration {
-    RETRY_BACKOFF_BASE
-        .saturating_mul(2u32.saturating_pow(attempt.min(4)))
-        .min(RETRY_BACKOFF_CAP)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn sha(value: char) -> CommitSha {
         CommitSha::try_new(value.to_string().repeat(40)).expect("fixture SHA is valid")
-    }
-
-    #[test]
-    fn retry_delay_is_bounded() {
-        assert_eq!(retry_delay(0), Duration::from_secs(60));
-        assert_eq!(retry_delay(4), RETRY_BACKOFF_CAP);
-        assert_eq!(retry_delay(u32::MAX), RETRY_BACKOFF_CAP);
     }
 
     #[test]
