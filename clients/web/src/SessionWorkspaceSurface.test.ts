@@ -3,6 +3,8 @@ import { decodeWebSessionTimelineWindow } from './generated/web-contract.mjs'
 import {
   boundarySessionItemId,
   pruneExpandedSessionItems,
+  reconcileVisibleSessionSelection,
+  sessionHasLiveWork,
   sessionWorkspaceQueryKey,
   visibleSessionItems,
 } from './SessionWorkspaceSurface'
@@ -65,6 +67,19 @@ describe('Session Workspace projection', () => {
     expect(boundarySessionItemId(fixture.items, 'full', 'first')).toBe('41')
     expect(boundarySessionItemId(fixture.items, 'full', 'latest')).toBe('44')
     expect(boundarySessionItemId([], 'results', 'latest')).toBeNull()
+  })
+
+  it('reconciles selection to a stable visible option', () => {
+    expect(reconcileVisibleSessionSelection(null, ['41', '42'])).toBe('41')
+    expect(reconcileVisibleSessionSelection('42', ['41', '42'])).toBe('42')
+    expect(reconcileVisibleSessionSelection('44', ['41', '42'])).toBe('41')
+    expect(reconcileVisibleSessionSelection('44', [])).toBeNull()
+  })
+
+  it('treats active or queued turns as live work', () => {
+    expect(sessionHasLiveWork('1', '0')).toBe(true)
+    expect(sessionHasLiveWork('0', '2')).toBe(true)
+    expect(sessionHasLiveWork('0', '0')).toBe(false)
   })
 
   it('retains expansion state only for the current bounded window', () => {

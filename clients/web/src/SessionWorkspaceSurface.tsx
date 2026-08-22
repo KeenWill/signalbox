@@ -59,6 +59,15 @@ export interface SessionSelectionEvidence {
 export const sessionWorkspaceQueryKey = (sessionId: string | null) =>
   ['production', 'session-workspace', sessionId] as const
 
+export const sessionHasLiveWork = (activeTurnCount: string, queuedTurnCount: string): boolean =>
+  BigInt(activeTurnCount) !== BigInt(0) || BigInt(queuedTurnCount) !== BigInt(0)
+
+export const reconcileVisibleSessionSelection = (
+  selected: string | null,
+  visibleIds: readonly string[],
+): string | null =>
+  selected !== null && visibleIds.includes(selected) ? selected : (visibleIds[0] ?? null)
+
 export interface SessionCommandControls {
   catalogAvailable: boolean
   workspaceAvailable: boolean
@@ -205,7 +214,10 @@ export function SessionWorkspaceSurface({
       const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window), signal)
       const history = new BoundedSessionHistory(sessionId ?? '', source)
       const descriptor = await history.describe(signal)
-      const active = BigInt(descriptor.work.active_turn_count) !== BigInt(0)
+      const active = sessionHasLiveWork(
+        descriptor.work.active_turn_count,
+        descriptor.work.queued_turn_count,
+      )
       const anchor: SessionWindowAnchor =
         manualAnchorRef.current ??
         (!active && openingPosition
@@ -301,6 +313,12 @@ export function SessionWorkspaceSurface({
   }, [session.refetch, sessionId, synchronizer, timelineCapability])
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
+  useEffect(() => {
+    const reconciled = reconcileVisibleSessionSelection(app.selectedTimeline, timelineIds)
+    if (reconciled !== app.selectedTimeline) {
+      dispatch(actions.timelineSelected(reconciled))
+    }
+  }, [app.selectedTimeline, dispatch, timelineIds])
   useEffect(() => {
     const selectedItem = combinedItems.find(
       (item) => item.address.event_sequence === app.selectedTimeline,
