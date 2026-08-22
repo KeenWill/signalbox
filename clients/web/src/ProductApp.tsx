@@ -1,5 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog'
-import { useHotkeys } from '@tanstack/react-hotkeys'
+import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import {
@@ -13,14 +13,16 @@ import {
   Sun,
   X,
 } from 'lucide-react'
-import { type CSSProperties, useEffect, useMemo, useRef } from 'react'
+import { type CSSProperties, type RefObject, useEffect, useMemo, useRef } from 'react'
 import {
   type CommandContext,
   commandRegistry,
   globalHotkeyBindings,
+  globalHotkeySequenceBindings,
   invokeCommand,
 } from './commands'
 import {
+  BootstrapContractError,
   type ProductRouteId,
   productRoutes,
   productSurfaceStates,
@@ -77,7 +79,13 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
   },
 }
 
-function ProductNavigation({ active }: { active: ProductRouteId }) {
+function ProductNavigation({
+  active,
+  onNavigate,
+}: {
+  active: ProductRouteId
+  onNavigate?: () => void
+}) {
   return (
     <div className="product-navigation">
       <div className="brand">
@@ -93,6 +101,7 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
+            onClick={onNavigate}
           >
             <span>{route.label}</span>
             <small>{route.description}</small>
@@ -103,6 +112,7 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
+        onClick={onNavigate}
       >
         Scenario studio <span aria-hidden="true">↗</span>
       </Link>
@@ -237,15 +247,22 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   )
 }
 
-function ProductToolbar({ context }: { context: CommandContext }) {
+function ProductToolbar({
+  context,
+  navigationTriggerRef,
+}: {
+  context: CommandContext
+  navigationTriggerRef: RefObject<HTMLButtonElement | null>
+}) {
   const app = useAppSelector(selectApp)
   return (
     <div className="toolbar" role="toolbar" aria-label="Application controls">
       <button
+        ref={navigationTriggerRef}
         className="icon-button mobile-only"
         type="button"
         aria-label="Open navigation"
-        onClick={() => context.dispatch(actions.overlaySet('navigation'))}
+        onClick={() => invokeCommand('navigation.open', context)}
       >
         <Menu />
       </button>
@@ -290,6 +307,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
+  const navigationTriggerRef = useRef<HTMLButtonElement>(null)
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -308,7 +326,17 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
-      callback: () => invokeCommand(binding.commandId, context),
+      callback: () => {
+        if (store.getState().app.overlay === null) invokeCommand(binding.commandId, context)
+      },
+    })),
+  )
+  useHotkeySequences(
+    globalHotkeySequenceBindings.map((binding) => ({
+      sequence: binding.sequence,
+      callback: () => {
+        if (store.getState().app.overlay === null) invokeCommand(binding.commandId, context)
+      },
     })),
   )
 
@@ -316,6 +344,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     document.documentElement.dataset.theme = app.theme
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
+
+  useEffect(() => {
+    document.title = `${surfaceCopy[surface].title} · Signalbox`
+    return () => {
+      document.title = 'Signalbox scenarios'
+    }
+  }, [surface])
 
   const copy = surfaceCopy[surface]
   const content =
@@ -345,17 +380,21 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <span className="eyebrow">{copy.eyebrow}</span>
             <h1>{copy.title}</h1>
           </div>
-          <ProductToolbar context={context} />
+          <ProductToolbar context={context} navigationTriggerRef={navigationTriggerRef} />
         </header>
         <div className="surface-question">
           <p>{copy.question}</p>
           <span
             className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+            role="status"
+            aria-live="polite"
           >
             {bootstrap.isSuccess
               ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
               : bootstrap.isError
-                ? 'Transport unavailable'
+                ? bootstrap.error instanceof BootstrapContractError
+                  ? 'Incompatible daemon contract'
+                  : 'Transport unavailable'
                 : 'Checking contract…'}
           </span>
         </div>
@@ -399,15 +438,21 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             className="mobile-navigation"
             aria-describedby="mobile-navigation-description"
             onCloseAutoFocus={(event) => {
-              event.preventDefault()
-              document.querySelector<HTMLElement>('[aria-label="Open navigation"]')?.focus()
+              const trigger = navigationTriggerRef.current
+              if (trigger?.getClientRects().length) {
+                event.preventDefault()
+                trigger.focus()
+              }
             }}
           >
             <Dialog.Title className="sr-only">Product navigation</Dialog.Title>
             <Dialog.Description id="mobile-navigation-description" className="sr-only">
               Choose a Signalbox surface.
             </Dialog.Description>
-            <ProductNavigation active={surface} />
+            <ProductNavigation
+              active={surface}
+              onNavigate={() => dispatch(actions.overlaySet(null))}
+            />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
