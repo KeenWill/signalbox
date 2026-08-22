@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { productRoutes, productSurfaceStates, SameOriginProductTransport } from './product'
+import { productHotkeySequenceBindings } from './productCommands'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '2' },
@@ -56,6 +57,14 @@ describe('SameOriginProductTransport', () => {
 })
 
 describe('product surface availability', () => {
+  it('registers every advertised product navigation sequence', () => {
+    expect(productHotkeySequenceBindings).toEqual([
+      { commandId: 'navigate.attention', sequence: ['G', 'A'] },
+      { commandId: 'navigate.sessions', sequence: ['G', 'S'] },
+      { commandId: 'navigate.settings', sequence: ['G', ','] },
+    ])
+  })
+
   it('defines one typed authority state for every product route', () => {
     expect(productSurfaceStates).toHaveProperty(productRoutes[0].id)
     expect(productSurfaceStates).toHaveProperty(productRoutes[1].id)

@@ -32,4 +32,34 @@ describe('command registry', () => {
 
     expect(invocations).toBe(1)
   })
+
+  it('persists timeline selections made by commands', () => {
+    const persisted: string[] = []
+
+    invokeCommand('selection.last', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: ['41', '42'],
+      focusTimeline: () => undefined,
+      onTimelineSelected: (eventSequence) => persisted.push(eventSequence),
+    })
+
+    expect(persisted).toEqual(['42'])
+  })
+
+  it('routes the first-item sequence to the owning window action when available', () => {
+    let firstWindowRequests = 0
+
+    invokeCommand('selection.first', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: ['41', '42'],
+      focusTimeline: () => undefined,
+      openFirstTimelineWindow: () => {
+        firstWindowRequests += 1
+      },
+    })
+
+    expect(firstWindowRequests).toBe(1)
+  })
 })

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronLeft, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
-import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { MissingAttachmentState } from './features/artifacts/ArtifactAttachments'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import {
@@ -33,8 +33,12 @@ export const visibleSessionItems = (
     : items
 
 export function SessionWorkspaceSurface({
+  onFirstWindowAction,
+  onSessionId,
   onTimelineIds,
 }: {
+  onFirstWindowAction: (action: (() => void) | null) => void
+  onSessionId: (sessionId: string | null) => void
   onTimelineIds: (ids: readonly string[]) => void
 }) {
   const dispatch = useAppDispatch()
@@ -62,6 +66,7 @@ export function SessionWorkspaceSurface({
       return { active, descriptor, window: timelineWindow }
     },
     enabled: sessionId !== null,
+    gcTime: 0,
   })
   const items = useMemo(
     () => visibleSessionItems(session.data?.window.items ?? [], app.detail),
@@ -71,6 +76,13 @@ export function SessionWorkspaceSurface({
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
+  useEffect(() => onSessionId(sessionId), [onSessionId, sessionId])
+  useEffect(() => () => onSessionId(null), [onSessionId])
+  const showFirstWindow = useCallback(() => setManualAnchor({ kind: 'first' }), [])
+  useEffect(() => {
+    onFirstWindowAction(showFirstWindow)
+    return () => onFirstWindowAction(null)
+  }, [onFirstWindowAction, showFirstWindow])
 
   const openSession = (event: FormEvent) => {
     event.preventDefault()
@@ -164,7 +176,7 @@ export function SessionWorkspaceSurface({
             </dl>
           </header>
           <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
-            <button type="button" onClick={() => setManualAnchor({ kind: 'first' })}>
+            <button type="button" onClick={showFirstWindow}>
               <SkipBack aria-hidden="true" /> First <kbd>gg</kbd>
             </button>
             <button

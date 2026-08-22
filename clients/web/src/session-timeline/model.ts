@@ -189,8 +189,20 @@ export class BoundedSessionHistory {
       if (incoming.has(address)) throw new TypeError('timeline window repeats an address')
       incoming.set(address, item)
     }
-    if (window.continuation_before) decimalAddress(window.continuation_before.event_sequence)
-    if (window.continuation_after) decimalAddress(window.continuation_after.event_sequence)
+    const firstAddress = window.items[0]?.address.event_sequence
+    const lastAddress = window.items.at(-1)?.address.event_sequence
+    if (window.continuation_before) {
+      decimalAddress(window.continuation_before.event_sequence)
+      if (window.continuation_before.event_sequence !== firstAddress) {
+        throw new TypeError('timeline continuation before does not match the first item')
+      }
+    }
+    if (window.continuation_after) {
+      decimalAddress(window.continuation_after.event_sequence)
+      if (window.continuation_after.event_sequence !== lastAddress) {
+        throw new TypeError('timeline continuation after does not match the last item')
+      }
+    }
     const candidates = [
       ...incoming.values(),
       ...this.retainedValue.filter((item) => !incoming.has(item.address.event_sequence)),

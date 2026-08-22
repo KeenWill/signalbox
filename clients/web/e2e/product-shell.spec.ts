@@ -139,6 +139,20 @@ test('completes route switching from the command palette without a mouse', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('opens visible keyboard help and follows product navigation sequences', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.keyboard.press('Shift+/')
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/sessions$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -219,10 +233,13 @@ test('opens and inspects a bounded production session without a mouse', async ({
   ).toBeVisible()
   await expect(page.getByRole('button', { name: 'Previous window' })).toBeEnabled()
   await expect(page.getByRole('button', { name: 'Next window' })).toBeDisabled()
+  const firstWindowRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url())
+    return url.pathname.endsWith('/timeline') && url.searchParams.get('anchor') === 'first'
+  })
   await page.keyboard.press('g')
   await page.keyboard.press('g')
-  const acceptedItem = page.getByRole('listitem').filter({ has: accepted })
-  await expect(acceptedItem).toHaveClass(/selected/)
-  await expect(completedItem).not.toHaveClass(/selected/)
+  await firstWindowRequest
+  await expect(completedItem).toHaveClass(/selected/)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

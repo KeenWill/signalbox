@@ -15,6 +15,7 @@ import {
   invokeProductCommand,
   type ProductCommandContext,
   productCommandRegistry,
+  productHotkeySequenceBindings,
 } from './productCommands'
 import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
@@ -167,6 +168,51 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
   )
 }
 
+function ProductKeyboardHelp({ context }: { context: ProductCommandContext }) {
+  const open = useAppSelector((state) => state.app.overlay === 'help')
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) invokeProductCommand('surface.escape', context)
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="dialog-content" aria-describedby="product-help-description">
+          <div className="dialog-heading">
+            <div>
+              <Dialog.Title>Keyboard help</Dialog.Title>
+              <Dialog.Description id="product-help-description">
+                Product navigation and workstation shortcuts.
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <button className="icon-button" type="button" aria-label="Close Keyboard help">
+                <X />
+              </button>
+            </Dialog.Close>
+          </div>
+          <dl className="shortcut-list">
+            {productCommandRegistry
+              .filter((command) => command.bindings.length > 0)
+              .map((command) => (
+                <div key={command.id}>
+                  <dt>{command.title}</dt>
+                  <dd>
+                    {command.bindings.map((binding) => (
+                      <kbd key={binding.label}>{binding.label}</kbd>
+                    ))}
+                  </dd>
+                </div>
+              ))}
+          </dl>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
 function SurfaceUnavailable({ surface }: { surface: ProductRouteId }) {
   const state = productSurfaceStates[surface]
   if (state.kind !== 'committed-unimplemented') return null
@@ -269,8 +315,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
+  const firstTimelineWindowRef = useRef<(() => void) | null>(null)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
+  const [timelineSessionId, setTimelineSessionId] = useState<string | null>(null)
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
+  const updateFirstTimelineWindow = useCallback((action: (() => void) | null) => {
+    firstTimelineWindowRef.current = action
+  }, [])
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -282,9 +333,20 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       getState: store.getState,
       timelineIds,
       focusTimeline: () => primaryRef.current?.focus(),
+      openFirstTimelineWindow: () => firstTimelineWindowRef.current?.(),
+      onTimelineSelected: (eventSequence) => {
+        if (timelineSessionId !== null) {
+          dispatch(
+            actions.logicalPositionRecorded({
+              sessionId: timelineSessionId,
+              position: eventSequence,
+            }),
+          )
+        }
+      },
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
     }),
-    [dispatch, navigate, timelineIds],
+    [dispatch, navigate, timelineIds, timelineSessionId],
   )
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
@@ -293,7 +355,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     })),
   )
   useHotkeySequences(
-    globalHotkeySequenceBindings.map((binding) => ({
+    [...globalHotkeySequenceBindings, ...productHotkeySequenceBindings].map((binding) => ({
       sequence: binding.sequence,
       callback: () => invokeProductCommand(binding.commandId, context),
     })),
@@ -309,7 +371,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     surface === 'attention' ? (
       <AttentionSurface />
     ) : surface === 'sessions' ? (
-      <SessionWorkspaceSurface onTimelineIds={updateTimelineIds} />
+      <SessionWorkspaceSurface
+        onFirstWindowAction={updateFirstTimelineWindow}
+        onSessionId={setTimelineSessionId}
+        onTimelineIds={updateTimelineIds}
+      />
     ) : surface === 'settings' ? (
       <SettingsSurface />
     ) : (
@@ -370,6 +436,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         </aside>
       )}
       <CommandPalette context={context} />
+      <ProductKeyboardHelp context={context} />
       <Dialog.Root
         open={app.overlay === 'navigation'}
         onOpenChange={(open) => {

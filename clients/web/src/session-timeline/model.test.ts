@@ -106,6 +106,25 @@ describe('BoundedSessionHistory', () => {
     expect(window.continuation_after).toBeNull()
   })
 
+  it('rejects continuation addresses that do not match window boundaries', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async (requestedSessionId, anchor, limits) => {
+        const window = await scenario.readWindow(requestedSessionId, anchor, limits)
+        return { ...window, continuation_after: { event_sequence: '1' } }
+      },
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'first' },
+        { maxItems: 4, maxBytes: 1024 },
+      ),
+    ).rejects.toThrow('continuation after does not match the last item')
+  })
+
   it('stops a scenario before window strictly before its anchor', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const window = await scenario.readWindow(
