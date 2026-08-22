@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
+import { type CommandContext, invokeCommand } from './commands'
 import { defaultBrowserPreferences } from './preferences'
-import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
+import { selectApp, useAppSelector } from './state'
 
 function PreferenceGroup({ legend, children }: { legend: string; children: ReactNode }) {
   return (
@@ -11,9 +12,8 @@ function PreferenceGroup({ legend, children }: { legend: string; children: React
   )
 }
 
-export function SettingsSurface() {
+export function SettingsSurface({ context }: { context: CommandContext }) {
   const app = useAppSelector(selectApp)
-  const dispatch = useAppDispatch()
   return (
     <div className="surface-body settings-surface">
       <section className="settings-intro">
@@ -32,7 +32,7 @@ export function SettingsSurface() {
               type="radio"
               name="layout"
               checked={app.layout === 'workbench'}
-              onChange={() => dispatch(actions.layoutSet('workbench'))}
+              onChange={() => invokeCommand('layout.workbench', context)}
             />
             <span>Workbench</span>
             <small>Navigation, primary surface, and contextual inspector.</small>
@@ -42,7 +42,7 @@ export function SettingsSurface() {
               type="radio"
               name="layout"
               checked={app.layout === 'focus'}
-              onChange={() => dispatch(actions.layoutSet('focus'))}
+              onChange={() => invokeCommand('layout.focus', context)}
             />
             <span>Focus</span>
             <small>A quiet primary surface with secondary panes removed.</small>
@@ -55,7 +55,7 @@ export function SettingsSurface() {
               type="radio"
               name="density"
               checked={app.density === 'compact'}
-              onChange={() => dispatch(actions.densitySet('compact'))}
+              onChange={() => invokeCommand('density.compact', context)}
             />
             <span>Compact</span>
             <small>Dense rows for high-volume operator work.</small>
@@ -65,7 +65,7 @@ export function SettingsSurface() {
               type="radio"
               name="density"
               checked={app.density === 'comfortable'}
-              onChange={() => dispatch(actions.densitySet('comfortable'))}
+              onChange={() => invokeCommand('density.comfortable', context)}
             />
             <span>Comfortable</span>
             <small>More separation without changing information detail.</small>
@@ -78,7 +78,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'full'}
-              onChange={() => dispatch(actions.detailSet('full'))}
+              onChange={() => invokeCommand('detail.full', context)}
             />
             <span>Full</span>
           </label>
@@ -87,7 +87,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'condensed'}
-              onChange={() => dispatch(actions.detailSet('condensed'))}
+              onChange={() => invokeCommand('detail.condensed', context)}
             />
             <span>Condensed</span>
           </label>
@@ -96,7 +96,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'results'}
-              onChange={() => dispatch(actions.detailSet('results'))}
+              onChange={() => invokeCommand('detail.results', context)}
             />
             <span>Results</span>
           </label>
@@ -108,7 +108,7 @@ export function SettingsSurface() {
               type="radio"
               name="theme"
               checked={app.theme === 'dark'}
-              onChange={() => dispatch(actions.themeSet('dark'))}
+              onChange={() => invokeCommand('theme.dark', context)}
             />
             <span>Dark</span>
           </label>
@@ -117,7 +117,7 @@ export function SettingsSurface() {
               type="radio"
               name="theme"
               checked={app.theme === 'light'}
-              onChange={() => dispatch(actions.themeSet('light'))}
+              onChange={() => invokeCommand('theme.light', context)}
             />
             <span>Light</span>
           </label>
@@ -129,7 +129,7 @@ export function SettingsSurface() {
               type="radio"
               name="remote-media"
               checked={app.remoteMedia === 'ask'}
-              onChange={() => dispatch(actions.remoteMediaSet('ask'))}
+              onChange={() => invokeCommand('remote-media.ask', context)}
             />
             <span>Ask before loading</span>
           </label>
@@ -138,7 +138,7 @@ export function SettingsSurface() {
               type="radio"
               name="remote-media"
               checked={app.remoteMedia === 'block'}
-              onChange={() => dispatch(actions.remoteMediaSet('block'))}
+              onChange={() => invokeCommand('remote-media.block', context)}
             />
             <span>Block</span>
           </label>
@@ -147,7 +147,7 @@ export function SettingsSurface() {
               type="radio"
               name="remote-media"
               checked={app.remoteMedia === 'allow'}
-              onChange={() => dispatch(actions.remoteMediaSet('allow'))}
+              onChange={() => invokeCommand('remote-media.allow', context)}
             />
             <span>Allow</span>
           </label>
@@ -164,12 +164,10 @@ export function SettingsSurface() {
               max="360"
               value={app.paneSizes.navigation}
               onChange={(event) =>
-                dispatch(
-                  actions.paneSizesSet({
-                    ...app.paneSizes,
-                    navigation: event.currentTarget.valueAsNumber,
-                  }),
-                )
+                invokeCommand('pane.navigation.resize', {
+                  ...context,
+                  paneSize: event.currentTarget.valueAsNumber,
+                })
               }
             />
           </label>
@@ -182,12 +180,10 @@ export function SettingsSurface() {
               max="480"
               value={app.paneSizes.inspector}
               onChange={(event) =>
-                dispatch(
-                  actions.paneSizesSet({
-                    ...app.paneSizes,
-                    inspector: event.currentTarget.valueAsNumber,
-                  }),
-                )
+                invokeCommand('pane.inspector.resize', {
+                  ...context,
+                  paneSize: event.currentTarget.valueAsNumber,
+                })
               }
             />
           </label>
@@ -195,7 +191,7 @@ export function SettingsSurface() {
       </div>
 
       <div className="settings-actions">
-        <button type="button" onClick={() => dispatch(actions.preferencesReset())}>
+        <button type="button" onClick={() => invokeCommand('preferences.reset', context)}>
           Restore defaults
         </button>
         <small>

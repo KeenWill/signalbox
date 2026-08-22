@@ -16,4 +16,27 @@ describe('command registry', () => {
 
     expect(selectApp(store.getState()).selectedTimeline).toBe(timelineIds[0])
   })
+
+  it('applies an exact Settings preference through its registered command', () => {
+    invokeCommand('theme.light', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+    })
+
+    expect(selectApp(store.getState()).theme).toBe('light')
+  })
+
+  it('applies a pane size through its registered parameterized command', () => {
+    invokeCommand('pane.navigation.resize', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      paneSize: 300,
+    })
+
+    expect(selectApp(store.getState()).paneSizes.navigation).toBe(300)
+  })
 })

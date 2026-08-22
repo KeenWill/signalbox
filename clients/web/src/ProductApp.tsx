@@ -324,7 +324,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     ) : surface === 'sessions' ? (
       <SessionsSurface />
     ) : surface === 'settings' ? (
-      <SettingsSurface />
+      <SettingsSurface context={context} />
     ) : (
       <DeferredSurface surface={surface} />
     )
@@ -365,7 +365,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         <aside className="product-inspector" aria-label="Inspector">
           <span className="eyebrow">Inspector</span>
           <h2>Selection details</h2>
-          <p>Select an available operational record to inspect its server-provided evidence.</p>
+          <p>
+            {surface === 'settings'
+              ? 'Preferences are stored in this browser and do not represent server evidence.'
+              : 'Select an available operational record to inspect its server-provided evidence.'}
+          </p>
           <dl>
             <div>
               <dt>Surface</dt>
