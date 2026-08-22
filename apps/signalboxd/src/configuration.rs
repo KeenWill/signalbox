@@ -49,7 +49,7 @@ use signalbox_persistence::{
     ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
     model_execution::{
         CredentialPoolRuntimeAction, CredentialPoolRuntimeCatalog, CredentialPoolRuntimeExhaustion,
-        CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,
+        CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy, ToolContinuationUsageLimit,
     },
     process_read::ProcessModelCallInputTokenSemantics,
 };
@@ -702,6 +702,7 @@ impl RepositoryWatchConfiguration {
 pub struct HubModelConfiguration {
     targets: ModelTargetCatalog,
     runtime_models: RuntimeModelCatalog,
+    tool_continuation_usage_limits: Vec<ToolContinuationUsageLimit>,
     direct_selections: HashSet<DirectModelSelection>,
     aliases: HashMap<ModelAlias, FrozenAliasDefinition>,
     routes: HashMap<DirectModelSelection, ResolvedModelRoute>,
@@ -1354,6 +1355,23 @@ impl HubModelConfiguration {
         )?;
         let runtime_models = RuntimeModelCatalog::try_from_definitions(runtime_definitions)
             .map_err(|_| HubModelConfigurationError::ConflictingTarget)?;
+        let mut tool_continuation_usage_limits = Vec::with_capacity(routes.len().saturating_mul(2));
+        for route in routes.values() {
+            let definition = runtime_models
+                .resolve(route.target)
+                .ok_or(HubModelConfigurationError::ConflictingTarget)?;
+            for fast_mode in [FastMode::Disabled, FastMode::Enabled] {
+                let effective = runtime_models
+                    .effective_definition(definition, fast_mode)
+                    .ok_or(HubModelConfigurationError::ConflictingTarget)?;
+                tool_continuation_usage_limits.push(ToolContinuationUsageLimit::new(
+                    route.target,
+                    fast_mode,
+                    u64::from(effective.max_output_tokens()),
+                    u64::from(effective.context_window_tokens()),
+                ));
+            }
+        }
         let billing_rates = target_billing_rates
             .into_iter()
             .filter_map(|(target, rates)| rates.map(|rates| (target, rates)))
@@ -1371,6 +1389,7 @@ impl HubModelConfiguration {
         Ok(Self {
             targets,
             runtime_models,
+            tool_continuation_usage_limits,
             direct_selections,
             aliases,
             routes,
@@ -1450,6 +1469,12 @@ impl HubModelConfiguration {
     /// Returns the exact runtime delivery catalog used by the provider bridge.
     pub fn runtime_model_catalog(&self) -> RuntimeModelCatalog {
         self.runtime_models.clone()
+    }
+
+    /// Returns configured output reservations and context ceilings for every
+    /// same-turn continuation mode.
+    pub fn tool_continuation_usage_limits(&self) -> Vec<ToolContinuationUsageLimit> {
+        self.tool_continuation_usage_limits.clone()
     }
 
     /// Returns the adapter route for one configured direct selection.

@@ -1761,7 +1761,8 @@ async fn run_hub(
     )
     .with_session_credentials(model_configuration.credential_family_catalog())
     .with_credential_pools(model_configuration.credential_pool_runtime_catalog())
-    .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets());
+    .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets())
+    .with_continuation_usage_limits(model_configuration.tool_continuation_usage_limits());
     let reported_usage_compaction = ReportedUsageCompaction::new(
         StartEligibleTurnRepository::new(scheduler_pool.clone()),
         model_repository.clone(),

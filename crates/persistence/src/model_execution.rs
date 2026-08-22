@@ -29,12 +29,12 @@ use signalbox_domain::{
     ActiveTurnSchedulingReconstitutionInput, AmbiguousModelCallTurn, AssistantResponsePart,
     AssistantText, AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, CancelledModelCallTurn,
     CancelledToolRoundModelCallTurn, CompletedModelCallTurn, ConsumedSteeringReconstitutionInput,
-    CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
-    DelegatedTurnActivationInput, DelegatedWakeTurnActivationInput, DelegationContent,
-    DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason, DirectModelSelection,
-    DurableCommandId, FailedModelCallTurn, FailedModelCallTurnIdentities, FastMode,
-    FrozenAliasDefinition, FrozenModelSelection, ModelAlias, ModelCallDisposition,
-    ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    ContextHeadroomExhaustedModelCallTurn, CorrelatedModelCallTerminalObservation,
+    CredentialPoolExhaustedModelCallTurn, DelegatedTurnActivationInput,
+    DelegatedWakeTurnActivationInput, DelegationContent, DelegationOutcome, DelegationOutcomeKind,
+    DelegationOutcomeReason, DirectModelSelection, DurableCommandId, FailedModelCallTurn,
+    FailedModelCallTurnIdentities, FastMode, FrozenAliasDefinition, FrozenModelSelection,
+    ModelAlias, ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
     ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
     ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
@@ -73,6 +73,44 @@ use crate::{
         load_scheduling_projection, require_recorded_batch,
     },
 };
+
+/// Immutable usage boundary for one resolved continuation mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolContinuationUsageLimit {
+    target: ResolvedProviderTarget,
+    fast_mode: FastMode,
+    max_output_tokens: u64,
+    context_window_tokens: u64,
+}
+
+impl ToolContinuationUsageLimit {
+    /// Defines one deployment-owned continuation boundary.
+    pub const fn new(
+        target: ResolvedProviderTarget,
+        fast_mode: FastMode,
+        max_output_tokens: u64,
+        context_window_tokens: u64,
+    ) -> Self {
+        Self {
+            target,
+            fast_mode,
+            max_output_tokens,
+            context_window_tokens,
+        }
+    }
+
+    pub(crate) const fn max_output_tokens(self) -> u64 {
+        self.max_output_tokens
+    }
+
+    pub(crate) const fn context_window_tokens(self) -> u64 {
+        self.context_window_tokens
+    }
+}
+
+/// Exact continuation limits derived from immutable model configuration.
+pub type ToolContinuationUsageLimitCatalog =
+    HashMap<(ResolvedProviderTarget, FastMode), ToolContinuationUsageLimit>;
 
 /// Exact prospective first-call material derived from one activation preview.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -475,6 +513,7 @@ pub struct PostgresModelCallRepository {
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
     credential_pools: CredentialPoolRuntimeCatalog,
     cache_inclusive_input_targets: HashSet<ResolvedProviderTarget>,
+    continuation_usage_limits: ToolContinuationUsageLimitCatalog,
 }
 
 /// Proof that one model-call transaction serialized before either shared lock class.
@@ -499,6 +538,7 @@ impl PostgresModelCallRepository {
             credential_families: None,
             credential_pools: HashMap::new(),
             cache_inclusive_input_targets: HashSet::new(),
+            continuation_usage_limits: HashMap::new(),
         }
     }
 
@@ -523,6 +563,18 @@ impl PostgresModelCallRepository {
         targets: HashSet<ResolvedProviderTarget>,
     ) -> Self {
         self.cache_inclusive_input_targets = targets;
+        self
+    }
+
+    /// Pins configured usage headroom for same-turn tool continuations.
+    pub fn with_continuation_usage_limits(
+        mut self,
+        limits: impl IntoIterator<Item = ToolContinuationUsageLimit>,
+    ) -> Self {
+        self.continuation_usage_limits = limits
+            .into_iter()
+            .map(|limit| ((limit.target, limit.fast_mode), limit))
+            .collect();
         self
     }
 
@@ -636,6 +688,7 @@ impl PostgresModelCallRepository {
             self.credential_reference.clone(),
         )
         .with_cache_inclusive_input_targets(self.cache_inclusive_input_targets.clone())
+        .with_continuation_usage_limits(self.continuation_usage_limits.clone())
         .with_session_credentials(self.credential_families.clone())
         .with_credential_pools(self.credential_pools.clone())
     }
@@ -2293,7 +2346,9 @@ pub(crate) async fn prepare_tool_continuation_call<NextSteeringIdentities>(
     credential_families: Option<&crate::ModelCredentialFamilyCatalog>,
     credential_pools: &CredentialPoolRuntimeCatalog,
     cache_inclusive_input_targets: &HashSet<ResolvedProviderTarget>,
+    continuation_usage_limits: &ToolContinuationUsageLimitCatalog,
     projection: &PreparedToolResultProjection,
+    producing_call: ModelCallId,
     call: ModelCallId,
     failure_identities: FailedModelCallTurnIdentities,
     steering_frontier: signalbox_domain::ContextFrontierId,
@@ -2357,34 +2412,82 @@ where
         .model_settings()
         .effective()
         .fast_mode();
-    let selected =
-        if let Ok(resolved) = targets.resolve(*execution.configuration().effective().model()) {
-            let default_reference = resolve_session_credential(
+    let resolved_target = targets.resolve(*execution.configuration().effective().model());
+    if let Ok(resolved) = resolved_target
+        && let Some(limit) = continuation_usage_limits.get(&(resolved.target(), fast_mode))
+        && let Some(evidence) = load_tool_continuation_headroom_evidence(
+            connection,
+            session,
+            turn,
+            producing_call,
+            *limit,
+        )
+        .await?
+    {
+        let source_turn = execution.turn();
+        let reclassifications = steering_identities
+            .iter()
+            .map(|(_, reclassification)| *reclassification)
+            .collect::<Vec<_>>();
+        let mut proposed_turns = BTreeSet::new();
+        for reclassification in &reclassifications {
+            record_reclassified_turn_candidate(
+                source_turn,
+                reclassification.turn(),
+                &mut proposed_turns,
+            )?;
+        }
+        let required = execution
+            .require_context_compaction_after_tool_results(
+                producing_call,
+                failure_identities
+                    .clone()
+                    .with_pending_steering_reclassifications(reclassifications),
+            )
+            .map_err(|_| {
+                ModelCallRepositoryError::InvalidTransition(
+                    "context headroom exhaustion could not close tool continuation",
+                )
+            })?;
+        persist_failed_with_delegated_child_result(
+            connection,
+            required.failed(),
+            ProviderReportedTokenUsage::unreported(),
+            None,
+        )
+        .await?;
+        persist_tool_continuation_headroom_exhaustion(connection, &required, evidence).await?;
+        return Ok(PrepareToolContinuationOutcome::ContextCompactionRequired(
+            Box::new(required),
+        ));
+    }
+    let selected = if let Ok(resolved) = resolved_target {
+        let default_reference = resolve_session_credential(
+            connection,
+            session,
+            resolved.target(),
+            fast_mode,
+            credential_reference,
+            credential_families,
+        )
+        .await?;
+        let selected = Some(
+            select_runtime_pool_credential(
                 connection,
                 session,
-                resolved.target(),
-                fast_mode,
-                credential_reference,
-                credential_families,
+                turn,
+                execution.current_attempt().id(),
+                serving_pool_target(credential_families, resolved.target(), fast_mode),
+                default_reference,
+                credential_pools,
             )
-            .await?;
-            let selected = Some(
-                select_runtime_pool_credential(
-                    connection,
-                    session,
-                    turn,
-                    execution.current_attempt().id(),
-                    serving_pool_target(credential_families, resolved.target(), fast_mode),
-                    default_reference,
-                    credential_pools,
-                )
-                .await?,
-            );
-            outbox::lock_sequence_allocator(connection).await?;
-            selected
-        } else {
-            None
-        };
+            .await?,
+        );
+        outbox::lock_sequence_allocator(connection).await?;
+        selected
+    } else {
+        None
+    };
     if let Some(SelectedRuntimePoolCredential {
         reference: None,
         policy: Some(policy),
@@ -2499,6 +2602,83 @@ where
     )
     .await?;
     Ok(PrepareToolContinuationOutcome::Checkpointed(call))
+}
+
+#[derive(Clone, Copy)]
+struct ToolContinuationHeadroomEvidence {
+    usage: ProviderReportedTokenUsage,
+    input_includes_cache_tokens: bool,
+    limit: ToolContinuationUsageLimit,
+}
+
+async fn load_tool_continuation_headroom_evidence(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    producing_call: ModelCallId,
+    limit: ToolContinuationUsageLimit,
+) -> Result<Option<ToolContinuationHeadroomEvidence>, ModelCallRepositoryError> {
+    let row = sqlx::query(
+        "SELECT usage_input_includes_cache_tokens,
+                usage_input_tokens, usage_output_tokens,
+                usage_cache_creation_input_tokens,
+                usage_cache_read_input_tokens
+           FROM model_call
+          WHERE model_call_id = $1
+            AND session_id = $2
+            AND turn_id = $3
+            AND state_kind = 'terminal'
+            AND terminal_disposition_kind = 'completed'",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Err(ModelCallCorruption::Missing("completed tool-producing call").into());
+    };
+    let decode = |field: &'static str| -> Result<Option<u64>, ModelCallRepositoryError> {
+        row.try_get::<Option<Decimal>, _>(field)?
+            .map(|value| {
+                if !value.fract().is_zero() || value.is_sign_negative() {
+                    return Err(ModelCallCorruption::Inconsistent(
+                        "tool-producing model-call token usage",
+                    )
+                    .into());
+                }
+                u64::try_from(value).map_err(|_| {
+                    ModelCallCorruption::Inconsistent("tool-producing model-call token usage")
+                        .into()
+                })
+            })
+            .transpose()
+    };
+    let usage = ProviderReportedTokenUsage::unreported()
+        .with_input_tokens(decode("usage_input_tokens")?)
+        .with_output_tokens(decode("usage_output_tokens")?)
+        .with_cache_creation_input_tokens(decode("usage_cache_creation_input_tokens")?)
+        .with_cache_read_input_tokens(decode("usage_cache_read_input_tokens")?);
+    let input_includes_cache_tokens = row.try_get("usage_input_includes_cache_tokens")?;
+    let Some(input_tokens) = usage.input_tokens() else {
+        return Ok(None);
+    };
+    let input_tokens = if input_includes_cache_tokens {
+        input_tokens
+    } else {
+        input_tokens
+            .saturating_add(usage.cache_creation_input_tokens().unwrap_or(0))
+            .saturating_add(usage.cache_read_input_tokens().unwrap_or(0))
+    };
+    let exhausted = input_tokens
+        .saturating_add(usage.output_tokens().unwrap_or(0))
+        .saturating_add(limit.max_output_tokens())
+        > limit.context_window_tokens();
+    Ok(exhausted.then_some(ToolContinuationHeadroomEvidence {
+        usage,
+        input_includes_cache_tokens,
+        limit,
+    }))
 }
 
 pub(crate) async fn resolve_session_credential(
@@ -7096,6 +7276,37 @@ async fn persist_credential_pool_exhaustion(
         None,
     )
     .await
+}
+
+async fn persist_tool_continuation_headroom_exhaustion(
+    connection: &mut PgConnection,
+    required: &ContextHeadroomExhaustedModelCallTurn,
+    evidence: ToolContinuationHeadroomEvidence,
+) -> Result<(), ModelCallRepositoryError> {
+    let usage = encode_token_usage(evidence.usage);
+    sqlx::query(
+        "INSERT INTO tool_continuation_context_headroom
+            (terminal_attempt_id, producing_model_call_id, session_id, turn_id,
+             usage_input_includes_cache_tokens, usage_input_tokens,
+             usage_output_tokens, usage_cache_creation_input_tokens,
+             usage_cache_read_input_tokens, max_output_tokens,
+             context_window_tokens)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+    )
+    .bind(required.failed().attempt().id().into_uuid())
+    .bind(required.producing_call().into_uuid())
+    .bind(session_id_to_uuid(required.failed().session()))
+    .bind(turn_id_to_uuid(required.failed().turn()))
+    .bind(evidence.input_includes_cache_tokens)
+    .bind(usage.input_tokens)
+    .bind(usage.output_tokens)
+    .bind(usage.cache_creation_input_tokens)
+    .bind(usage.cache_read_input_tokens)
+    .bind(Decimal::from(evidence.limit.max_output_tokens()))
+    .bind(Decimal::from(evidence.limit.context_window_tokens()))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
 }
 
 const MAX_AVAILABILITY_BACKOFF: Duration = Duration::from_secs(300);

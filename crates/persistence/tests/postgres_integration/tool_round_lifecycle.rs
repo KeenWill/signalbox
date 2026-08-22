@@ -152,6 +152,149 @@ async fn inv007_inv009_inv012_tool_continuation_guards_before_result_outbox()
     Ok(())
 }
 
+/// INV-014: exact provider usage that exhausts configured headroom preserves
+/// tool results, closes the turn with typed evidence, and prepares no oversized
+/// continuation call. The daemon-owned closure is budget-neutral for goals.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ef9;
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round_with_usage(
+        &pool,
+        seed,
+        "current_time",
+        "{}",
+        ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(90))
+            .with_output_tokens(Some(5)),
+    )
+    .await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22));
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || continuation_attempt,
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    tool_repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(String::from("2026-08-22T04:00:00Z"))
+                            .expect("bounded result"),
+                    ),
+                }),
+        )
+        .await?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one continuation target forms a catalog");
+    let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
+    let continuing_repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
+            .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
+                target,
+                FastMode::Disabled,
+                10,
+                100,
+            )])
+            .tool_loop_repository();
+    let outcome = continuing_repository
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0x26,
+                ))],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27)),
+                continuation_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+            ),
+            |_| panic!("fixture has no pending steering"),
+        )
+        .await?;
+    let signalbox_application::PrepareToolContinuationOutcome::ContextCompactionRequired(required) =
+        outcome
+    else {
+        panic!("reported usage closes the continuation for compaction");
+    };
+    assert_eq!(required.producing_call(), fixture.call);
+    assert_eq!(required.failed().turn(), fixture.turn);
+
+    let stored: (String, Option<Uuid>, Uuid, Decimal, Decimal, i64) = sqlx::query_as(
+        "SELECT lifecycle.terminal_disposition_kind,
+                lifecycle.terminal_model_call_id,
+                headroom.producing_model_call_id,
+                headroom.max_output_tokens,
+                headroom.context_window_tokens,
+                (SELECT count(*) FROM model_call WHERE model_call_id = $3)
+           FROM turn_lifecycle AS lifecycle
+           JOIN tool_continuation_context_headroom AS headroom
+             ON headroom.terminal_attempt_id = lifecycle.terminal_attempt_id
+            AND headroom.turn_id = lifecycle.turn_id
+            AND headroom.session_id = lifecycle.session_id
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(continuation_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored,
+        (
+            String::from("failed"),
+            None,
+            fixture.call.into_uuid(),
+            Decimal::from(10_u64),
+            Decimal::from(100_u64),
+            0,
+        )
+    );
+    assert_eq!(
+        GoalRepository::new(pool.clone())
+            .unchargeable_automatic_resume_turns(fixture.session, &[fixture.turn])
+            .await?
+            .as_ref(),
+        &[fixture.turn]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S02 / S08 / INV-016 / INV-036: a NextSafePoint input accepted while a tool
 /// round executes is consumed by the same-turn continuation call, and the
 /// committed continuation shape reloads through the scheduling projection —
