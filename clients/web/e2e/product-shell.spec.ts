@@ -169,6 +169,21 @@ test('changes and restores a Settings preference without a mouse', async ({ page
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('applies saved pane widths to the scenario workspace', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/settings')
+
+  const paneSliders = page.getByRole('group', { name: 'Workbench panes' }).getByRole('slider')
+  await paneSliders.nth(0).fill('300')
+  await paneSliders.nth(1).fill('400')
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+
+  await expect(page.locator('.navigation-pane')).toHaveCSS('width', '300px')
+  await expect(page.getByRole('complementary', { name: 'Diagnostics' })).toHaveCSS('width', '400px')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('keeps Settings available without consulting daemon bootstrap', async ({ page }) => {
   const problems = watchBrowser(page)
   let bootstrapRequests = 0
