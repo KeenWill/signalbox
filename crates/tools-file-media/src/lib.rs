@@ -717,7 +717,7 @@ mod tests {
             "]".repeat(MAX_FILE_READ_ARGUMENT_DEPTH)
         );
         format!(
-            r#"{{\"digest\":\"{digest}\",\"view\":\"body_text\",\"options\":{{\"nested\":{nested}}},\"visible_part\":null}}"#
+            r#"{{"digest":"{digest}","view":"body_text","options":{{"nested":{nested}}},"visible_part":null}}"#
         )
     }
 
