@@ -31,10 +31,10 @@ function userInputDetailPage() {
           },
           attachments: [],
         },
-        projected_body_bytes: 3,
+        projected_body_bytes: 131,
       },
     ],
-    projected_body_bytes: 3,
+    projected_body_bytes: 131,
     continuation: null,
   };
 }
@@ -172,6 +172,29 @@ test("generated detail decoder rejects oversized arrays before their members", (
   assert.throws(
     () => decodeWebSessionTimelineDetailPage(page),
     /at most 128 items/,
+  );
+});
+
+test("generated detail decoder rejects projected byte mismatches", () => {
+  const page = userInputDetailPage();
+  page.projected_body_bytes = 130;
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /the computed 131 bytes/,
+  );
+});
+
+test("generated detail decoder enforces the projected byte ceiling", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.text.text = "x".repeat(65536);
+  page.items[0].body.text.total_bytes = "65536";
+  page.items[0].projected_body_bytes = 65664;
+  page.projected_body_bytes = 65664;
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /at most 65536 bytes/,
   );
 });
 

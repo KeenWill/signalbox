@@ -501,8 +501,13 @@ WITH turn_events AS (
       JOIN delegation_wake_outbox_event AS wake
         ON wake.session_id = delivery.recipient_session_id
        AND (
-            wake.message_id = message_delivery.message_id
-            OR wake.spawning_tool_request_id = result_delivery.spawning_tool_request_id
+            (wake.subject_kind = 'message'
+             AND wake.message_id = message_delivery.message_id)
+            OR (wake.subject_kind = 'result'
+                AND wake.result_spawning_request_id =
+                    result_delivery.spawning_tool_request_id
+                AND wake.awaiting_tool_request_id IS NOT DISTINCT FROM
+                    result_delivery.awaiting_tool_request_id)
        )
      WHERE origin.recipient_session_id = $1 AND origin.turn_id = $2
 )
@@ -817,8 +822,16 @@ async fn project_detail_event(
                 DispatchedOutboxEventKind::ModelCallTransition { turn, call, state } => {
                     require_cursor_field(cursor, TimelineBodyField::ModelResponse, 0)?;
                     let response_offset = cursor.map_or(0, |cursor| cursor.offset_bytes);
-                    let row =
-                        load_model_detail(transaction, *call, response_offset, remaining).await?;
+                    let include_terminal_evidence =
+                        matches!(state, DispatchedModelCallState::Terminal(_));
+                    let row = load_model_detail(
+                        transaction,
+                        *call,
+                        include_terminal_evidence,
+                        response_offset,
+                        remaining,
+                    )
+                    .await?;
                     let response = match row.response {
                         Some(response) => {
                             Some(response_excerpt(response, address, &mut remaining)?)
@@ -1004,6 +1017,7 @@ struct ModelResponseSlice {
 async fn load_model_detail(
     transaction: &mut Transaction<'_, Postgres>,
     call: signalbox_domain::ModelCallId,
+    include_terminal_evidence: bool,
     response_offset: u64,
     max_response_bytes: u32,
 ) -> Result<ModelDetailRow, SessionTimelineRepositoryError> {
@@ -1024,6 +1038,7 @@ SELECT call.session_id,
             WHERE entry.source_session_id = call.session_id
               AND entry.producing_model_call_id = call.model_call_id
               AND entry.payload_kind = 'assistant_text'
+              AND $2::boolean
             ORDER BY entry.assistant_response_text_start_bytes DESC
             LIMIT 1
        ) AS response_total_bytes
@@ -1035,6 +1050,7 @@ SELECT call.session_id,
 "#,
     )
     .bind(call.into_uuid())
+    .bind(include_terminal_evidence)
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(SessionTimelineCorruption::MissingDetailRecord)?;
@@ -1099,21 +1115,38 @@ SELECT substring(
         request_context_items: nonnegative(row.try_get("member_count")?, "context item count")?,
         response,
         usage: TimelineModelUsage {
-            input_tokens: optional_nonnegative(row.try_get("usage_input_tokens")?, "input usage")?,
-            output_tokens: optional_nonnegative(
-                row.try_get("usage_output_tokens")?,
-                "output usage",
-            )?,
-            cache_creation_input_tokens: optional_nonnegative(
-                row.try_get("usage_cache_creation_input_tokens")?,
-                "cache creation usage",
-            )?,
-            cache_read_input_tokens: optional_nonnegative(
-                row.try_get("usage_cache_read_input_tokens")?,
-                "cache read usage",
-            )?,
+            input_tokens: if include_terminal_evidence {
+                optional_nonnegative(row.try_get("usage_input_tokens")?, "input usage")?
+            } else {
+                None
+            },
+            output_tokens: if include_terminal_evidence {
+                optional_nonnegative(row.try_get("usage_output_tokens")?, "output usage")?
+            } else {
+                None
+            },
+            cache_creation_input_tokens: if include_terminal_evidence {
+                optional_nonnegative(
+                    row.try_get("usage_cache_creation_input_tokens")?,
+                    "cache creation usage",
+                )?
+            } else {
+                None
+            },
+            cache_read_input_tokens: if include_terminal_evidence {
+                optional_nonnegative(
+                    row.try_get("usage_cache_read_input_tokens")?,
+                    "cache read usage",
+                )?
+            } else {
+                None
+            },
         },
-        cause_code: row.try_get("terminal_provider_failure_cause")?,
+        cause_code: if include_terminal_evidence {
+            row.try_get("terminal_provider_failure_cause")?
+        } else {
+            None
+        },
     })
 }
 
