@@ -210,6 +210,57 @@ test('navigates from Attention to Sessions with the shared semantic link', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('describes Settings as browser-local rather than daemon-backed', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/settings')
+
+  await expect(page.getByRole('heading', { name: 'Operator preferences' })).toBeVisible()
+  await expect(page.getByText(/Presentation choices stay in this browser/)).toBeVisible()
+  await expect(page.getByText('Browser-local preferences', { exact: true })).toHaveAttribute(
+    'role',
+    'status',
+  )
+  await expect(page.getByText('Transport unavailable', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Incompatible daemon contract', { exact: true })).toHaveCount(0)
+  await expect(
+    page.getByText('Operational data is not exposed by this daemon contract'),
+  ).toHaveCount(0)
+  const inspector = page.getByRole('complementary', { name: 'Inspector' })
+  await expect(inspector.getByText('Browser', { exact: true })).toBeVisible()
+  await expect(inspector.getByText('Local settings', { exact: true })).toBeVisible()
+  await expect(inspector.getByText('Daemon', { exact: true })).toHaveCount(0)
+  await expect(
+    inspector.getByText('Presentation preferences are stored locally in this browser.'),
+  ).toBeVisible()
+  await expect(inspector.getByText(/server-provided evidence/)).toHaveCount(0)
+  const settingsCopy = page.getByRole('heading', { name: 'Operator preferences' })
+  expect((await settingsCopy.boundingBox())?.width).toBeGreaterThan(200)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('clears scenario-only help when browser history returns to the product shell', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Open keyboard help/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  await page.goBack()
+
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/sessions$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('preserves a scenario-specific title after leaving the product shell', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
