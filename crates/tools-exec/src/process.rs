@@ -1794,7 +1794,7 @@ fn capture_read_only_paths(
         .collect::<Result<Vec<_>, _>>()?;
     if let Some(path) = paths
         .iter()
-        .find(|path| Path::new(SANDBOX_ENVIRONMENT_FILE).starts_with(&path.destination))
+        .find(|path| read_only_path_overlaps_environment_file(&path.destination))
     {
         return Err(ExecToolConstructionError::ReadOnlyPath {
             path: path.destination.clone(),
@@ -1802,6 +1802,11 @@ fn capture_read_only_paths(
         });
     }
     Ok(paths)
+}
+
+fn read_only_path_overlaps_environment_file(path: &Path) -> bool {
+    let environment_file = Path::new(SANDBOX_ENVIRONMENT_FILE);
+    environment_file.starts_with(path) || path.starts_with(environment_file)
 }
 
 #[cfg(target_os = "linux")]
@@ -5715,6 +5720,13 @@ mod tests {
         assert_eq!(path, ancestor);
         assert!(source.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn runner_restricted_profile_rejects_a_read_only_delivery_descendant() {
+        let descendant = PathBuf::from(SANDBOX_ENVIRONMENT_FILE).join("cache");
+
+        assert!(read_only_path_overlaps_environment_file(&descendant));
     }
 
     #[cfg(target_os = "linux")]
