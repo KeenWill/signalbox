@@ -67,7 +67,7 @@ use tokio::{
     select,
     sync::watch,
     task::JoinSet,
-    time::{Instant, sleep, sleep_until},
+    time::{Instant, sleep, sleep_until, timeout},
 };
 
 use crate::SessionTemplateConfiguration;
@@ -119,6 +119,13 @@ const WEBHOOK_DRAIN_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 // room for an in-flight bounded provider request while ensuring a task wedge
 // becomes an operator-visible error well before the next full poll.
 const WEBHOOK_DRAIN_STALL_THRESHOLD: Duration = Duration::from_secs(60);
+// The serialized repository owner must return to its scheduler even when one
+// drain step never does. Individual provider requests have their own deadline,
+// but a drain can perform many requests and database operations; without this
+// outer bound, admission wakes and retries remain coalesced behind it forever.
+// Pending delivery records are durable, so cancellation leaves the unfinished
+// work for the existing bounded backoff path to retry.
+const WEBHOOK_DRAIN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 // The monitor reads through the shared daemon pool, whose connections wedged
 // repositories can hold all of. An unbounded acquisition would leave the
 // observer silent during exactly the degradation it exists to expose, so the
@@ -1437,7 +1444,7 @@ impl RepositoryWatchTask {
         // every scheduled poll.
         let accelerated = match drain {
             WebhookDrain::Run => {
-                let outcome = self.process_webhook_deliveries().await;
+                let outcome = self.process_webhook_deliveries_with_timeout().await;
                 *drained = Some(outcome);
                 outcome.failure().map_or(Ok(()), Err)
             }
@@ -1483,7 +1490,7 @@ impl RepositoryWatchTask {
             Some(WebhookDrainOutcome::ProjectionFailed(_))
         );
         if drain == WebhookDrain::Run && !pre_drain_projection_failed {
-            let outcome = self.process_webhook_deliveries().await;
+            let outcome = self.process_webhook_deliveries_with_timeout().await;
             if let Some(error) = outcome.failure() {
                 *drained = Some(outcome);
                 return Err(error);
@@ -1543,7 +1550,7 @@ impl RepositoryWatchTask {
             } else {
                 self.process_dispatches().await.err()
             };
-            match self.process_webhook_deliveries().await {
+            match self.process_webhook_deliveries_with_timeout().await {
                 WebhookDrainOutcome::Drained => {}
                 WebhookDrainOutcome::ProjectionFailed(error) => {
                     return WebhookAttemptOutcome::DrainFailed(error);
@@ -1694,6 +1701,35 @@ impl RepositoryWatchTask {
                 }
             }
             None => WebhookDrainOutcome::Drained,
+        }
+    }
+
+    async fn process_webhook_deliveries_with_timeout(&mut self) -> WebhookDrainOutcome {
+        self.process_webhook_deliveries_with_deadline(WEBHOOK_DRAIN_ATTEMPT_TIMEOUT)
+            .await
+    }
+
+    async fn process_webhook_deliveries_with_deadline(
+        &mut self,
+        deadline: Duration,
+    ) -> WebhookDrainOutcome {
+        match timeout(deadline, self.process_webhook_deliveries()).await {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                // A future implementation may use the poller's bounded child
+                // fetch set while hydrating a delivery. Join anything the
+                // cancelled drain owned before the next attempt can begin.
+                self.poller.drain_fetches().await;
+                self.poller.invalidate_freshness();
+                let error = RepositoryWatchAttemptError::WebhookDrainTimedOut;
+                tracing::error!(
+                    repository = %self.repository.as_str(),
+                    timeout_seconds = deadline.as_secs(),
+                    cause_code = error.cause_code(),
+                    "repository-watch webhook drain exceeded its attempt deadline"
+                );
+                WebhookDrainOutcome::ProjectionFailed(error)
+            }
         }
     }
 
@@ -3044,6 +3080,7 @@ enum RepositoryWatchAttemptError {
     IdentityFrontier,
     Dispatch,
     Persistence,
+    WebhookDrainTimedOut,
     RetiredRuleIdentity,
     ChangedRuleIdentity,
     RegressedRuleVersion,
@@ -3066,6 +3103,7 @@ impl RepositoryWatchAttemptError {
             Self::IdentityFrontier => "repository_identity_frontier_exhausted",
             Self::Dispatch => "repository_dispatch_failed",
             Self::Persistence => "repository_watch_persistence_failed",
+            Self::WebhookDrainTimedOut => "webhook_projection_drain_timed_out",
             Self::RetiredRuleIdentity => "repository_watch_rule_identity_retired",
             Self::ChangedRuleIdentity => "repository_watch_rule_identity_changed",
             Self::RegressedRuleVersion => "repository_watch_rule_version_regressed",
@@ -3111,7 +3149,8 @@ impl RepositoryWatchAttemptError {
             | Self::Differ
             | Self::IdentityFrontier
             | Self::Dispatch
-            | Self::Persistence => false,
+            | Self::Persistence
+            | Self::WebhookDrainTimedOut => false,
         }
     }
 }
@@ -7552,6 +7591,49 @@ mod tests {
         assert!(unlocked, "the fixture releases its deliberate drain wedge");
         assert!(webhook_disposition_exists(&webhook_store, first.key()).await?);
         assert!(webhook_disposition_exists(&webhook_store, second.key()).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_webhook_drain_deadline_cancels_and_retries_durable_work()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let admission = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&admission).await?;
+        webhook_store
+            .inject_projection_wedge(admission.key(), WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .await?;
+        let mut blocker = pool.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .execute(&mut *blocker)
+            .await?;
+        let mut fixture = webhook_task(&pool).await?;
+
+        let timed_out = fixture
+            .task
+            .process_webhook_deliveries_with_deadline(Duration::from_millis(50))
+            .await;
+
+        assert_eq!(
+            timed_out,
+            WebhookDrainOutcome::ProjectionFailed(
+                RepositoryWatchAttemptError::WebhookDrainTimedOut
+            )
+        );
+        assert!(!webhook_disposition_exists(&webhook_store, admission.key()).await?);
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+            .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .fetch_one(&mut *blocker)
+            .await?;
+
+        let retried = fixture.task.process_webhook_deliveries().await;
+
+        assert!(unlocked, "the fixture releases its deliberate drain wedge");
+        assert_eq!(retried, WebhookDrainOutcome::Drained);
+        assert!(webhook_disposition_exists(&webhook_store, admission.key()).await?);
         Ok(())
     }
 
