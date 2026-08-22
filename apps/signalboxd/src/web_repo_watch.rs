@@ -7,7 +7,7 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Query, State, rejection::QueryRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
@@ -112,10 +112,20 @@ struct ActivityQuery {
     include_webhooks: Option<bool>,
 }
 
+fn typed_query<T>(query: Result<Query<T>, QueryRejection>) -> Result<T, Response> {
+    query
+        .map(|Query(query)| query)
+        .map_err(|_| invalid_query("invalid_query", "query parameters are invalid"))
+}
+
 async fn repository_statuses(
     State(state): State<RepoWatchApiState>,
-    Query(query): Query<RepositoryStatusesQuery>,
+    query: Result<Query<RepositoryStatusesQuery>, QueryRejection>,
 ) -> Response {
+    let query = match typed_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let Some(operations) = state.operations else {
         return unavailable();
     };
@@ -134,8 +144,12 @@ async fn repository_statuses(
 
 async fn pull_requests(
     State(state): State<RepoWatchApiState>,
-    Query(query): Query<PullRequestsQuery>,
+    query: Result<Query<PullRequestsQuery>, QueryRejection>,
 ) -> Response {
+    let query = match typed_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let Some(operations) = state.operations else {
         return unavailable();
     };
@@ -160,7 +174,14 @@ async fn pull_requests(
     }
 }
 
-async fn work(State(state): State<RepoWatchApiState>, Query(query): Query<WorkQuery>) -> Response {
+async fn work(
+    State(state): State<RepoWatchApiState>,
+    query: Result<Query<WorkQuery>, QueryRejection>,
+) -> Response {
+    let query = match typed_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let Some(operations) = state.operations else {
         return unavailable();
     };
@@ -204,8 +225,12 @@ async fn work(State(state): State<RepoWatchApiState>, Query(query): Query<WorkQu
 
 async fn pull_request_sessions(
     State(state): State<RepoWatchApiState>,
-    Query(query): Query<PullRequestSessionsQuery>,
+    query: Result<Query<PullRequestSessionsQuery>, QueryRejection>,
 ) -> Response {
+    let query = match typed_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let Some(operations) = state.operations else {
         return unavailable();
     };
@@ -237,8 +262,12 @@ async fn pull_request_sessions(
 
 async fn activity(
     State(state): State<RepoWatchApiState>,
-    Query(query): Query<ActivityQuery>,
+    query: Result<Query<ActivityQuery>, QueryRejection>,
 ) -> Response {
+    let query = match typed_query(query) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
     let Some(operations) = state.operations else {
         return unavailable();
     };
@@ -907,6 +936,13 @@ fn projection_error(error: Option<RepoWatchOperationsError>) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use signalbox_web_contract::WebApiErrorResponse;
+    use tower::ServiceExt;
+
     use super::{
         event_cursor, held_cursor, postgres_bigint, session_cursor, timestamp,
         validate_activity_window,
@@ -963,5 +999,28 @@ mod tests {
                 "an excluded activity feed cannot carry a cursor"
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn malformed_typed_query_returns_the_json_api_error_contract() {
+        let response = super::router(None)
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/repository-watch/activity?repository=example%2Frepository&include_events=x",
+                    )
+                    .body(Body::empty())
+                    .expect("the request is valid"),
+            )
+            .await
+            .expect("the router responds");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 65_536)
+            .await
+            .expect("the error body is bounded");
+        let error: WebApiErrorResponse =
+            serde_json::from_slice(&body).expect("the error follows the web API contract");
+        assert_eq!(error.error.code, "invalid_query");
     }
 }

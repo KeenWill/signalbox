@@ -18,8 +18,22 @@ import {
   type WebRepoWatchWorkPage,
 } from './generated/web-contract.mjs'
 
-// The version-one browser contract fixes the NDJSON item ceiling at 65,536 bytes.
+// The version-one browser contract fixes both transport ceilings at 65,536 bytes.
+const MAX_JSON_BODY_BYTES = 65_536
 const MAX_ATTENTION_EVENT_BYTES = 65_536
+
+const requireCompatibleBootstrap = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
+  if (
+    !bootstrap.capabilities.bounded_json ||
+    !bootstrap.capabilities.same_origin_json_mutations ||
+    !bootstrap.capabilities.ndjson_streaming ||
+    bootstrap.limits.max_json_body_bytes !== MAX_JSON_BODY_BYTES ||
+    bootstrap.limits.max_ndjson_item_bytes !== MAX_ATTENTION_EVENT_BYTES
+  ) {
+    throw new TypeError('bootstrap capabilities or limits are incompatible with this client')
+  }
+  return bootstrap
+}
 
 const decodeAttentionLines = async function* (
   body: ReadableStream<Uint8Array>,
@@ -143,13 +157,13 @@ export class ProductRequestError extends Error {
 
 export class SameOriginProductTransport implements ProductTransport, RepoWatchProductTransport {
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
-    const response = await fetch('/api/bootstrap', {
+    const response = await this.fetchResponse('/api/bootstrap', {
       headers: { accept: 'application/json' },
       credentials: 'same-origin',
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    return decodeWebContractBootstrap(await response.json())
+    return requireCompatibleBootstrap(decodeWebContractBootstrap(await response.json()))
   }
 
   async readAttention(
@@ -159,7 +173,7 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
     const query = new URLSearchParams()
     if (afterSessionId) query.set('after_session_id', afterSessionId)
     const path = query.size === 0 ? '/api/attention' : `/api/attention?${query}`
-    const response = await fetch(path, {
+    const response = await this.fetchResponse(path, {
       headers: { accept: 'application/json' },
       credentials: 'same-origin',
       signal,
@@ -169,7 +183,7 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
   }
 
   async *followAttention(signal?: AbortSignal): AsyncGenerator<WebAttentionStreamEvent> {
-    const response = await fetch('/api/attention/follow', {
+    const response = await this.fetchResponse('/api/attention/follow', {
       headers: { accept: 'application/x-ndjson' },
       credentials: 'same-origin',
       signal,
@@ -283,13 +297,26 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
     decode: (value: unknown) => T,
     signal?: AbortSignal,
   ): Promise<T> {
-    const response = await fetch(path, {
+    const response = await this.fetchResponse(path, {
       headers: { accept: 'application/json' },
       credentials: 'same-origin',
       signal,
     })
     if (!response.ok) throw await this.requestError(response)
     return decode(await response.json())
+  }
+
+  private async fetchResponse(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
+    try {
+      return await fetch(input, init)
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') throw error
+      throw new ProductRequestError(
+        'network_unavailable',
+        'transport',
+        'the daemon request could not be completed',
+      )
+    }
   }
 
   private async requestError(response: Response): Promise<ProductRequestError> {

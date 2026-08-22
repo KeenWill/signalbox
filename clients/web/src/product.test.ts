@@ -72,6 +72,25 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('rejects bootstrap capabilities that this client cannot honor', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...bootstrapFixture,
+              capabilities: { ...bootstrapFixture.capabilities, ndjson_streaming: false },
+            }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'capabilities or limits are incompatible',
+    )
+  })
+
   it('reports an unsuccessful HTTP response without decoding its body', async () => {
     vi.stubGlobal(
       'fetch',
@@ -79,6 +98,23 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('status 503')
+  })
+
+  it('classifies a failed fetch as a typed transport error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Promise.reject(new TypeError('offline'))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readRepoWatchActivity('example/repository'),
+    ).rejects.toEqual(
+      new ProductRequestError(
+        'network_unavailable',
+        'transport',
+        'the daemon request could not be completed',
+      ),
+    )
   })
 
   it('decodes one bounded attention page and preserves its typed continuation', async () => {

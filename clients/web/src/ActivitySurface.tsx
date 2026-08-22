@@ -77,15 +77,6 @@ const time = (unixMilliseconds: string | null | undefined) => {
   }).format(new Date(value))
 }
 
-const age = (unixMilliseconds: string) => {
-  const value = Number(unixMilliseconds)
-  if (!Number.isSafeInteger(value)) return unixMilliseconds
-  const seconds = Math.max(0, Math.round((Date.now() - value) / 1000))
-  if (seconds < 60) return `${seconds}s`
-  if (seconds < 3_600) return `${Math.round(seconds / 60)}m`
-  return `${Math.round(seconds / 3_600)}h`
-}
-
 const errorMessage = (error: unknown) =>
   error instanceof ProductRequestError
     ? `${error.code}: ${error.message}`
@@ -277,7 +268,13 @@ function PullRequestTable({
             {page.pull_requests.map((pullRequest) => (
               <tr key={pullRequest.number} data-selected={selected === pullRequest.number}>
                 <td>
-                  <button type="button" onClick={() => onSelect(pullRequest.number)}>
+                  <button
+                    type="button"
+                    aria-controls="pr-sessions-panel"
+                    aria-expanded={selected === pullRequest.number}
+                    aria-pressed={selected === pullRequest.number}
+                    onClick={() => onSelect(pullRequest.number)}
+                  >
                     #{pullRequest.number} {pullRequest.title}
                   </button>
                   <a
@@ -349,7 +346,7 @@ function WorkTables({ page }: { page: WebRepoWatchWorkPage }) {
                 <td>
                   #{slot.pull_request ?? 'repo'} · {slot.rule}
                 </td>
-                <td>{age(slot.held_since_unix_milliseconds)}</td>
+                <td>{time(slot.held_since_unix_milliseconds)}</td>
                 <td>{slot.blockers.map(words).join(', ') || 'No blocker'}</td>
               </tr>
             ))}
@@ -379,7 +376,7 @@ function WorkTables({ page }: { page: WebRepoWatchWorkPage }) {
                 <td>
                   #{obligation.pull_request ?? 'repo'} · {obligation.rule}
                 </td>
-                <td>{age(obligation.owed_since_unix_milliseconds)}</td>
+                <td>{time(obligation.owed_since_unix_milliseconds)}</td>
                 <td>{obligation.matched_event_count}</td>
                 <td>{words(obligation.readiness.kind)}</td>
               </tr>
@@ -399,7 +396,11 @@ function SessionPanel({
   query: ReturnType<typeof useQuery<WebRepoWatchPullRequestSessionPage>>
 }) {
   return (
-    <section className="activity-session-panel" aria-labelledby="pr-sessions-heading">
+    <section
+      id="pr-sessions-panel"
+      className="activity-session-panel"
+      aria-labelledby="pr-sessions-heading"
+    >
       <header>
         <div>
           <span className="eyebrow">PR #{pullRequest.number}</span>
@@ -412,10 +413,10 @@ function SessionPanel({
       <ol>
         {query.data?.sessions.map((session: PullRequestSession) => (
           <li key={session.attention.session_id}>
-            <a href={`/sessions?session=${session.attention.session_id}`}>
+            <div>
               <strong>{words(session.attention.state)}</strong>
               <code>{session.attention.session_id}</code>
-            </a>
+            </div>
             <span>
               {words(session.purpose.kind)} · {session.purpose.template}
             </span>
