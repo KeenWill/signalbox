@@ -238,7 +238,13 @@ export class BoundedSessionHistory {
     const latestAddress = decimalAddress(descriptor.latest_address.event_sequence)
     const observedThrough = decimalU64(descriptor.observed_through)
     const itemCount = decimalU64(descriptor.sizes.item_count)
-    if (itemCount === 0n || firstAddress > latestAddress || latestAddress > observedThrough) {
+    const addressSpan = latestAddress - firstAddress + 1n
+    if (
+      itemCount === 0n ||
+      firstAddress > latestAddress ||
+      latestAddress > observedThrough ||
+      itemCount > addressSpan
+    ) {
       throw new TypeError('descriptor timeline boundaries are contradictory')
     }
     decimalU64(descriptor.sizes.projected_text_bytes)
@@ -256,6 +262,8 @@ export class BoundedSessionHistory {
     limits: SessionWindowLimits,
     signal?: AbortSignal,
   ): Promise<WebSessionTimelineWindow> {
+    const anchorKind = anchor.kind
+    const sourceAnchor = { ...anchor }
     const anchorAddress =
       'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : undefined
     const bounded = boundedLimits(limits, this.source.limits)
@@ -263,7 +271,7 @@ export class BoundedSessionHistory {
     const maxBytes = bounded.maxBytes
     const window = await this.source.readWindow(
       this.sessionId,
-      anchor,
+      sourceAnchor,
       { maxItems, maxBytes },
       signal,
     )
@@ -274,7 +282,7 @@ export class BoundedSessionHistory {
     }
     if (
       window.items.length === 0 &&
-      (anchor.kind === 'first' || anchor.kind === 'latest' || anchor.kind === 'around')
+      (anchorKind === 'first' || anchorKind === 'latest' || anchorKind === 'around')
     ) {
       throw new TypeError('timeline anchor requires a nonempty window')
     }
@@ -284,15 +292,11 @@ export class BoundedSessionHistory {
     for (const item of window.items) {
       const address = item.address.event_sequence
       const parsedAddress = decimalAddress(address)
-      if (
-        anchor.kind === 'after' &&
-        anchorAddress !== undefined &&
-        parsedAddress <= anchorAddress
-      ) {
+      if (anchorKind === 'after' && anchorAddress !== undefined && parsedAddress <= anchorAddress) {
         throw new TypeError('timeline window item is not strictly after its anchor')
       }
       if (
-        anchor.kind === 'before' &&
+        anchorKind === 'before' &&
         anchorAddress !== undefined &&
         parsedAddress >= anchorAddress
       ) {
@@ -320,10 +324,10 @@ export class BoundedSessionHistory {
     }
     const firstItemAddress = window.items[0]?.address.event_sequence
     const lastItemAddress = window.items.at(-1)?.address.event_sequence
-    if (anchor.kind === 'first' && window.continuation_before) {
+    if (anchorKind === 'first' && window.continuation_before) {
       throw new TypeError('first timeline window cannot continue before its anchor')
     }
-    if (anchor.kind === 'latest' && window.continuation_after) {
+    if (anchorKind === 'latest' && window.continuation_after) {
       throw new TypeError('latest timeline window cannot continue after its anchor')
     }
     if (window.continuation_before) {

@@ -45,7 +45,7 @@ use signalbox_persistence::session_timeline::{
 };
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
-    WebContractBootstrap, WebContractExample, WebSessionTimelineDescriptor,
+    WebContractBootstrap, WebContractExample, WebSessionId, WebSessionTimelineDescriptor,
     WebSessionTimelineDetail, WebSessionTimelineDetailBody, WebSessionTimelineDetailPage,
     WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
     WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineApprovalDecider,
@@ -370,6 +370,7 @@ enum SessionTimelineRequestError {
     InvalidAddress,
     InvalidAnchor,
     MissingBounds,
+    InvalidProjectedSessionId,
 }
 
 impl SessionTimelineRequestError {
@@ -399,6 +400,17 @@ impl SessionTimelineRequestError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "session_projection_failed",
                     "an existing session has no durable timeline bound",
+                )
+            }
+            Self::InvalidProjectedSessionId => {
+                tracing::error!(
+                    failure_class = "fail_closed_corruption",
+                    "session timeline projection has an invalid session identity"
+                );
+                application_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_projection_failed",
+                    "an existing session has an invalid durable identity",
                 )
             }
         }
@@ -473,7 +485,10 @@ async fn session_timeline_window(
         Err(error) => return error.into_response(),
     };
     match repository.read_window(session, anchor, limits).await {
-        Ok(Some(window)) => Json(window_dto(window)).into_response(),
+        Ok(Some(window)) => match window_dto(window) {
+            Ok(window) => Json(window).into_response(),
+            Err(error) => error.into_response(),
+        },
         Ok(None) => application_error(
             StatusCode::NOT_FOUND,
             "session_not_found",
@@ -763,7 +778,8 @@ fn descriptor_dto(
         return Err(SessionTimelineRequestError::MissingBounds);
     };
     Ok(WebSessionTimelineDescriptor {
-        session_id: descriptor.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_canonical(descriptor.session.into_uuid().to_string())
+            .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
         sizes: WebSessionTimelineSizeFacts {
             item_count: WebU64::from_u64(descriptor.sizes.item_count),
             projected_text_bytes: WebU64::from_u64(descriptor.sizes.projected_text_bytes),
@@ -783,7 +799,9 @@ fn descriptor_dto(
     })
 }
 
-fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
+fn window_dto(
+    window: SessionTimelineWindow,
+) -> Result<WebSessionTimelineWindow, SessionTimelineRequestError> {
     let continuation_before = match window.continuation_before {
         TimelineContinuation::Exhausted => None,
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
@@ -792,8 +810,9 @@ fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
         TimelineContinuation::Exhausted => None,
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
     };
-    WebSessionTimelineWindow {
-        session_id: window.session.into_uuid().to_string(),
+    Ok(WebSessionTimelineWindow {
+        session_id: WebSessionId::from_canonical(window.session.into_uuid().to_string())
+            .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
         items: window
             .items
             .into_iter()
@@ -806,7 +825,7 @@ fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
         projected_structured_bytes: window.projected_structured_bytes,
         continuation_before,
         continuation_after,
-    }
+    })
 }
 
 fn detail_page_dto(page: SessionTimelineDetailPage) -> WebSessionTimelineDetailPage {

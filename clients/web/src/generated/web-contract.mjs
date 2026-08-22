@@ -214,6 +214,11 @@ const schemas = {
   },
   "WebSessionTimelineDescriptor": {
     "$defs": {
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
       "WebSessionTimelineSizeFacts": {
         "additionalProperties": false,
         "description": "Explicit lifetime size facts used only for browser loading policy.",
@@ -299,7 +304,7 @@ const schemas = {
         "$ref": "#/$defs/WebU64"
       },
       "session_id": {
-        "type": "string"
+        "$ref": "#/$defs/WebSessionId"
       },
       "sizes": {
         "$ref": "#/$defs/WebSessionTimelineSizeFacts"
@@ -1438,6 +1443,11 @@ const schemas = {
   },
   "WebSessionTimelineWindow": {
     "$defs": {
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
       "WebSessionTimelineEventKind": {
         "description": "Closed durable event categories in the browser timeline foundation.",
         "enum": [
@@ -1541,7 +1551,7 @@ const schemas = {
         "type": "integer"
       },
       "session_id": {
-        "type": "string"
+        "$ref": "#/$defs/WebSessionId"
       }
     },
     "required": [
@@ -1743,6 +1753,8 @@ function assertTimelineExcerpt(excerpt, address, field, path) {
 }
 
 function assertTimelineDetailPage(value) {
+  const maxProjectedBodyBytes = 65536;
+  const detailEnvelopeBytes = 128;
   const terminalKinds = new Set([
     "turn_failed",
     "turn_completed",
@@ -1757,9 +1769,11 @@ function assertTimelineDetailPage(value) {
     ...terminalKinds,
   ]);
   let expectedBodyContinuation = null;
+  let computedProjectedBodyBytes = 0;
   value.items.forEach((item, index) => {
     const path = `timeline_detail_page.items[${index}]`;
     let continuation = null;
+    let textBytes = 0;
     switch (item.body.type) {
       case "user_input":
         if (item.kind !== "input_accepted") {
@@ -1771,6 +1785,7 @@ function assertTimelineDetailPage(value) {
           "input_text",
           `${path}.body.text`,
         );
+        textBytes = new TextEncoder().encode(item.body.text.text).byteLength;
         break;
       case "model_call":
         if (item.kind !== "model_call_transition") {
@@ -1783,6 +1798,7 @@ function assertTimelineDetailPage(value) {
             "model_response",
             `${path}.body.response`,
           );
+          textBytes = new TextEncoder().encode(item.body.response.text).byteLength;
         }
         break;
       case "turn_lifecycle":
@@ -1799,6 +1815,14 @@ function assertTimelineDetailPage(value) {
         }
         break;
     }
+    const computedItemBytes = detailEnvelopeBytes + textBytes;
+    if (item.projected_body_bytes !== computedItemBytes) {
+      fail(`${path}.projected_body_bytes`, `the computed ${computedItemBytes} bytes`);
+    }
+    computedProjectedBodyBytes += computedItemBytes;
+    if (computedProjectedBodyBytes > maxProjectedBodyBytes) {
+      fail("timeline_detail_page.projected_body_bytes", `at most ${maxProjectedBodyBytes} bytes`);
+    }
     if (continuation !== null) {
       if (expectedBodyContinuation !== null) {
         fail(path, "at most one continued body per page");
@@ -1806,6 +1830,12 @@ function assertTimelineDetailPage(value) {
       expectedBodyContinuation = continuation;
     }
   });
+  if (value.projected_body_bytes !== computedProjectedBodyBytes) {
+    fail(
+      "timeline_detail_page.projected_body_bytes",
+      `the computed ${computedProjectedBodyBytes} bytes`,
+    );
+  }
 
   if (value.continuation === undefined || value.continuation === null) {
     if (expectedBodyContinuation !== null) {
