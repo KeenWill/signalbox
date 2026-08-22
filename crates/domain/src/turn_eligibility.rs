@@ -2043,7 +2043,8 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
         snapshot: ContextFrontierId,
     },
     /// The latest runner-placement boundary does not end in its exact
-    /// `RunnerPlacementChanged` semantic entry.
+    /// `RunnerPlacementChanged` semantic entry or diverges from an
+    /// authoritative seed, terminal, or compaction lineage.
     RunnerPlacementSnapshotMismatch {
         /// The malformed placement-boundary snapshot.
         snapshot: ContextFrontierId,
@@ -6853,6 +6854,30 @@ fn reconstitute_inner(
             configuration_provenance: record.configuration_provenance.clone(),
             state,
         });
+    }
+
+    if let Some(frontier) = runner_placement_frontier {
+        let placement = &snapshots[&frontier];
+        let authoritative_lineage_matches = initial_seed_frontier
+            .into_iter()
+            .chain(latest_compaction_result)
+            .map(|candidate| &snapshots[&candidate])
+            .chain(
+                turns
+                    .iter()
+                    .filter_map(AcceptedInputTurnSchedulingProjection::terminal_frontier),
+            )
+            .all(|candidate| {
+                candidate.is_semantic_prefix_of(placement)
+                    || placement.is_semantic_prefix_of(candidate)
+            });
+        if !authoritative_lineage_matches {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
+                    snapshot: frontier,
+                },
+            );
+        }
     }
 
     referenced_snapshots.extend(compaction_snapshots);
@@ -16456,6 +16481,46 @@ mod tests {
             failure,
             AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
                 snapshot: malformed.id(),
+            }
+        );
+    }
+
+    /// S09 / S32 / INV-015 / INV-044: a locally valid placement boundary
+    /// cannot branch from a stale starting frontier once the authoritative
+    /// terminal frontier has advanced on a different lineage.
+    #[test]
+    fn s09_s32_inv015_inv044_reconstitution_rejects_divergent_runner_placement_snapshot() {
+        let session = current_session();
+        let failed = accepted_origin(1);
+        let placement_entry = semantic_entry(33);
+        let placement_frontier = frontier(42);
+        let revision =
+            RunnerGeneration::try_from_u64(2).expect("the fixture placement revision is positive");
+        let mut facts = FailedTerminalReconstitutionFacts::matching(&session, failed);
+        facts
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                placement_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: revision,
+                },
+            ));
+        let placement_snapshot = facts.snapshots[0].derive_appending(
+            placement_frontier.id(),
+            vec![placement_entry.reference(&session)],
+        );
+        facts.snapshots.push(placement_snapshot);
+        let input = facts
+            .input()
+            .with_runner_placement_frontier(placement_frontier.id());
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
+                snapshot: placement_frontier.id(),
             }
         );
     }
