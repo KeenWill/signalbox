@@ -138,10 +138,13 @@ test('suspends product navigation sequences while the palette owns keyboard scop
   await page.keyboard.press(`${modifier}+K`)
   const palette = page.getByRole('dialog', { name: 'Command palette' })
   await expect(palette).toBeVisible()
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+  await page.keyboard.press('Shift+T')
   await page.keyboard.press('g')
   await page.keyboard.press('s')
 
   await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
   await expect(palette).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -213,6 +216,7 @@ test('operates the bounded Imports surface and leaves through one command palett
 
   const importRows = page.getByRole('rowgroup', { name: 'Imported conversation rows' })
   await expect(importRows).toHaveAttribute('data-total-loaded', importsProductFixture.loadedImports)
+  expect(await page.evaluate(() => window.__SIGNALBOX_DIAGNOSTICS__)).toBeUndefined()
   const entries = page.getByRole('listbox', { name: 'Imported source entries' })
   await entries.focus()
   await entries.press('End')

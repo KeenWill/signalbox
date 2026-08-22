@@ -42,6 +42,27 @@ describe('browser preferences', () => {
     vi.unstubAllGlobals()
   })
 
+  it('falls back when the browser storage getter itself is denied', () => {
+    const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get: () => {
+        throw new DOMException('denied')
+      },
+    })
+
+    try {
+      expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+      expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
+    } finally {
+      if (originalDescriptor) {
+        Object.defineProperty(globalThis, 'localStorage', originalDescriptor)
+      } else {
+        Reflect.deleteProperty(globalThis, 'localStorage')
+      }
+    }
+  })
+
   it('bounds retained positions and future key overrides', () => {
     const lastLogicalPositions = Object.fromEntries(
       Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS + 3 }, (_, index) => [

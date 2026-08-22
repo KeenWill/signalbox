@@ -199,6 +199,7 @@ export function ImportsWorkspace({
   )
 
   useEffect(() => {
+    if (presentation !== 'standalone') return
     const snapshot: DiagnosticSnapshot = {
       scenario: scenario ? 'imports' : 'production-imports',
       connection:
@@ -235,6 +236,7 @@ export function ImportsWorkspace({
     importsQuery.isError,
     importsQuery.status,
     queryClient,
+    presentation,
     scenario,
     selectedFrontier?.position,
     selectedImport,

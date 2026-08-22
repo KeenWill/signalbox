@@ -344,6 +344,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
       callback: () => invokeCommand(binding.commandId, context),
+      options: { enabled: app.overlay === null },
     })),
   )
   useHotkeySequences(
