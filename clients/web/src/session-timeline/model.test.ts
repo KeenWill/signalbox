@@ -189,6 +189,29 @@ describe('BoundedSessionHistory', () => {
     expect(receivedMaxBytes).toBe(64 * 1024)
   })
 
+  it('preserves immutable bounds when a source mutates its request limits', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async (requestedSessionId, anchor, limits) => {
+        limits.maxItems = Number.POSITIVE_INFINITY
+        limits.maxBytes = Number.POSITIVE_INFINITY
+        return scenario.readWindow(requestedSessionId, anchor, {
+          maxItems: 2,
+          maxBytes: 256,
+        })
+      },
+    }
+
+    await expect(
+      new BoundedSessionHistory(sessionId, source).load(
+        { kind: 'first' },
+        { maxItems: 1, maxBytes: 256 },
+      ),
+    ).rejects.toThrow('requested item ceiling')
+  })
+
   it('budgets scenario windows and descriptors from exact event-kind charges', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const descriptor = await scenario.readDescriptor(sessionId)
