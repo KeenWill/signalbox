@@ -392,6 +392,36 @@ async fn repository_registration_rejects_windows_console_device_path() -> Result
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_registration_rejects_oversized_path_component() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let corpus_digest = [0_u8; 32];
+    let replay_digest = [0_u8; 32];
+    let source_digest = [0_u8; 32];
+    let oversized_component = "a".repeat(256);
+    let source_path = format!("corpora/{oversized_component}");
+
+    sqlx::query(
+        "INSERT INTO evaluation_corpus (
+            corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
+            source_kind, source_repository, source_path, source_sha256
+         ) VALUES ('invalid-oversized-path-component', 'v1', 1, $1, $2, 1,
+                   'repository', 'KeenWill/signalbox', $3, $4)",
+    )
+    .bind(corpus_digest.as_slice())
+    .bind(replay_digest.as_slice())
+    .bind(&source_path)
+    .bind(source_digest.as_slice())
+    .execute(&pool)
+    .await
+    .expect_err("a durable path component beyond the portable byte bound is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn stored_case_identity_requires_nonblank_text() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let database = DatabaseCorpusStore::new(pool.clone());

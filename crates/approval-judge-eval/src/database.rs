@@ -222,11 +222,11 @@ impl DatabaseCorpusStore {
         &self,
         registration: &StoredRegistration,
     ) -> Result<ApprovalJudgeCorpus, CorpusStoreError> {
-        if matches!(
-            &registration.source,
-            CorpusSourceDescriptor::BlobReference { .. }
-        ) {
-            return Err(CorpusStoreError::BlobBackendUnavailable);
+        match &registration.source {
+            CorpusSourceDescriptor::Repository { .. } | CorpusSourceDescriptor::DatabaseNative => {}
+            CorpusSourceDescriptor::BlobReference { .. } => {
+                return Err(CorpusStoreError::BlobBackendUnavailable);
+            }
         }
         let rows = sqlx::query(
             "SELECT case_id, case_json::text AS case_json

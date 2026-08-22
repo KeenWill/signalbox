@@ -1,5 +1,17 @@
 -- Portable evaluation-corpus registrations and their ordered database cases.
 
+-- The UTF-8 byte ceiling also bounds UTF-16 code units because every Unicode
+-- scalar occupies at least as many UTF-8 bytes as UTF-16 code units.
+CREATE FUNCTION evaluation_corpus_path_components_bounded(source_path text)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+STRICT
+RETURN (
+    SELECT bool_and(octet_length(component) <= 255)
+    FROM unnest(string_to_array(source_path, '/')) AS component
+);
+
 CREATE TABLE evaluation_corpus (
     corpus_name text COLLATE "C" NOT NULL,
     corpus_version text COLLATE "C" NOT NULL,
@@ -56,6 +68,7 @@ CREATE TABLE evaluation_corpus (
                 AND source_path !~ '^/'
                 AND source_path !~ '/$'
                 AND source_path !~ '//'
+                AND evaluation_corpus_path_components_bounded(source_path)
                 AND source_path !~ '(^|/)\.{1,2}(/|$)'
                 AND source_path !~ '(^|/)[^/]*[. ](/|$)'
                 AND source_path !~* '(^|/)(CON|PRN|AUX|NUL|CONIN[$]|CONOUT[$]|COM[1-9¹²³]|LPT[1-9¹²³])(\.|/|$)'
