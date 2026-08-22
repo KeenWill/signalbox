@@ -140,6 +140,37 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('activity_page')
   })
 
+  it('rejects an activity feed beyond its generated page ceiling', async () => {
+    const webhook = {
+      action_name: 'opened',
+      disposition: 'projected',
+      event_name: 'pull_request',
+      latest_projected_at_unix_milliseconds: '1724200000000',
+      projection_count: '1',
+      receipt_sequence: '1',
+      received_at_unix_milliseconds: '1724200000000',
+    } as const
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...activityFixture,
+              webhooks: Array.from({ length: 101 }, (_, index) => ({
+                ...webhook,
+                receipt_sequence: String(index + 1),
+              })),
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readRepoWatchActivity('example/repository'),
+    ).rejects.toThrow('at most 100 items')
+  })
+
   it('decodes complete NDJSON attention events without buffering stream history', async () => {
     const body = `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n${JSON.stringify(attentionUpdateFixture)}\n`
     vi.stubGlobal(

@@ -404,7 +404,7 @@ function SessionPanel({
             <span>
               {session.attention.action ? words(session.attention.action) : 'Observe only'}
             </span>
-            <a href={`/attention#${session.attention.session_id}`}>Attention</a>
+            <a href="/attention">Attention fleet</a>
           </li>
         ))}
       </ol>
@@ -436,7 +436,23 @@ export function ActivitySurface() {
   })
   useEffect(() => {
     const first = repositories.data?.repositories[0]?.repository
-    if (!repository && first) setRepository(first)
+    const selectedIsLoaded = repositories.data?.repositories.some(
+      (item) => item.repository === repository,
+    )
+    if (first && !selectedIsLoaded) {
+      setRepository(first)
+      setPullRequestAfter(null)
+      setSelectedPullRequest(null)
+      setHeldAfter(undefined)
+      setObligationAfter(undefined)
+      setSessionBefore(undefined)
+      setEventBefore(undefined)
+      setWebhookBefore(undefined)
+      setIncludeEvents(true)
+      setIncludeWebhooks(true)
+      setActivityPaging(false)
+      setActivityPages([])
+    }
   }, [repositories.data, repository])
 
   const pullRequests = useQuery({
@@ -614,6 +630,9 @@ export function ActivitySurface() {
 
       {repositories.isError && <p role="alert">{errorMessage(repositories.error)}</p>}
       {status && <RepositoryHealth status={status} />}
+      {pullRequests.isError && (
+        <p role="alert">Pull requests: {errorMessage(pullRequests.error)}</p>
+      )}
 
       {pullRequests.data && repository && (
         <>
@@ -662,6 +681,7 @@ export function ActivitySurface() {
         </button>
       )}
 
+      {work.isError && <p role="alert">Work: {errorMessage(work.error)}</p>}
       {work.data && (
         <>
           <WorkTables page={work.data} />
@@ -706,6 +726,7 @@ export function ActivitySurface() {
           </div>
           <span>{rows.length} loaded in browser window</span>
         </header>
+        {activity.isError && <p role="alert">Activity history: {errorMessage(activity.error)}</p>}
         <div className="activity-history-controls">
           <label>
             Filter loaded history

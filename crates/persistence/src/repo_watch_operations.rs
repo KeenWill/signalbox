@@ -350,38 +350,50 @@ impl PostgresRepoWatchOperations {
         repository: RepositorySlug,
         events_before: Option<RepoWatchEventCursor>,
         webhooks_before: Option<u64>,
+        include_events: bool,
+        include_webhooks: bool,
     ) -> Result<RepoWatchActivityPage, RepoWatchOperationsError> {
         let mut transaction = self.read_transaction().await?;
-        let event_rows = sqlx::query(ACTIVITY_EVENTS_SQL)
-            .bind(repository.as_str())
-            .bind(
-                events_before
-                    .map(|cursor| i64::try_from(cursor.cursor_generation))
-                    .transpose()
-                    .map_err(|_| {
-                        RepoWatchOperationsCorruption::Invalid("event cursor generation")
-                    })?,
-            )
-            .bind(
-                events_before
-                    .map(|cursor| i32::try_from(cursor.event_ordinal))
-                    .transpose()
-                    .map_err(|_| RepoWatchOperationsCorruption::Invalid("event cursor ordinal"))?,
-            )
-            .bind(i64::from(max_repo_watch_activity_page_items()) + 1)
-            .fetch_all(&mut *transaction)
-            .await?;
-        let webhook_rows = sqlx::query(ACTIVITY_WEBHOOKS_SQL)
-            .bind(repository.as_str())
-            .bind(
-                webhooks_before
-                    .map(i64::try_from)
-                    .transpose()
-                    .map_err(|_| RepoWatchOperationsCorruption::Invalid("webhook cursor"))?,
-            )
-            .bind(i64::from(max_repo_watch_activity_page_items()) + 1)
-            .fetch_all(&mut *transaction)
-            .await?;
+        let event_rows = if include_events {
+            sqlx::query(ACTIVITY_EVENTS_SQL)
+                .bind(repository.as_str())
+                .bind(
+                    events_before
+                        .map(|cursor| i64::try_from(cursor.cursor_generation))
+                        .transpose()
+                        .map_err(|_| {
+                            RepoWatchOperationsCorruption::Invalid("event cursor generation")
+                        })?,
+                )
+                .bind(
+                    events_before
+                        .map(|cursor| i32::try_from(cursor.event_ordinal))
+                        .transpose()
+                        .map_err(|_| {
+                            RepoWatchOperationsCorruption::Invalid("event cursor ordinal")
+                        })?,
+                )
+                .bind(i64::from(max_repo_watch_activity_page_items()) + 1)
+                .fetch_all(&mut *transaction)
+                .await?
+        } else {
+            Vec::new()
+        };
+        let webhook_rows = if include_webhooks {
+            sqlx::query(ACTIVITY_WEBHOOKS_SQL)
+                .bind(repository.as_str())
+                .bind(
+                    webhooks_before
+                        .map(i64::try_from)
+                        .transpose()
+                        .map_err(|_| RepoWatchOperationsCorruption::Invalid("webhook cursor"))?,
+                )
+                .bind(i64::from(max_repo_watch_activity_page_items()) + 1)
+                .fetch_all(&mut *transaction)
+                .await?
+        } else {
+            Vec::new()
+        };
         let event_has_more = event_rows.len() > usize::from(max_repo_watch_activity_page_items());
         let webhook_has_more =
             webhook_rows.len() > usize::from(max_repo_watch_activity_page_items());
@@ -457,8 +469,18 @@ impl RepoWatchOperationsReader for PostgresRepoWatchOperations {
         repository: RepositorySlug,
         events_before: Option<RepoWatchEventCursor>,
         webhooks_before: Option<u64>,
+        include_events: bool,
+        include_webhooks: bool,
     ) -> Result<RepoWatchActivityPage, Self::Error> {
-        Self::activity(self, repository, events_before, webhooks_before).await
+        Self::activity(
+            self,
+            repository,
+            events_before,
+            webhooks_before,
+            include_events,
+            include_webhooks,
+        )
+        .await
     }
 }
 

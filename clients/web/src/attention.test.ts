@@ -68,6 +68,16 @@ describe('attention projection recovery', () => {
     expect(reduction).toEqual({ kind: 'resync' })
   })
 
+  it('requests resynchronization when an update moves the cursor backward', () => {
+    const reduction = reduceAttentionEvent(snapshot, {
+      kind: 'update',
+      cursor: '16',
+      summaries: [replacement],
+    })
+
+    expect(reduction).toEqual({ kind: 'resync' })
+  })
+
   it('restarts after an explicit resync and marks a cleanly ended monitor stale', async () => {
     const phases: string[] = []
     const projections: WebAttentionSnapshot[] = []
@@ -104,5 +114,26 @@ describe('attention projection recovery', () => {
     })
 
     expect(phases).toEqual(['connecting', 'resyncing', 'failed'])
+  })
+
+  it('resets the immediate resync budget after a recovered projection', async () => {
+    const phases: string[] = []
+    const resync = { kind: 'resync_required', cursor: '18' } as const
+    const recovered = { kind: 'snapshot', snapshot: { ...snapshot, cursor: '19' } } as const
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [resync],
+        [recovered, resync],
+        [recovered, resync],
+        [recovered, resync],
+        [recovered],
+      ]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: () => undefined,
+    })
+
+    expect(phases.at(-1)).toBe('stale')
   })
 })

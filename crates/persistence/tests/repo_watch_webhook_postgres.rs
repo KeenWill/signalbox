@@ -698,9 +698,17 @@ async fn operations_webhook_window_and_activity_are_bounded_and_keyset_paged()
     seed_operations_webhook_burst(&webhook_store).await?;
     let reader = PostgresRepoWatchOperations::new(pool);
     let statuses = reader.repository_statuses(None).await?;
-    let first = reader.activity(repository.clone(), None, None).await?;
+    let first = reader
+        .activity(repository.clone(), None, None, true, true)
+        .await?;
     let second = reader
-        .activity(repository, None, first.webhook_continuation_before)
+        .activity(
+            repository,
+            None,
+            first.webhook_continuation_before,
+            true,
+            true,
+        )
         .await?;
 
     assert_eq!(statuses.repositories.len(), 1);

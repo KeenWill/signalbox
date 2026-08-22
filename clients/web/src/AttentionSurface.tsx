@@ -37,17 +37,20 @@ export function AttentionSurface() {
   const queryClient = useQueryClient()
   const [after, setAfter] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [monitorGeneration, setMonitorGeneration] = useState(0)
   const returnFocus = useRef<HTMLButtonElement>(null)
   const closeFocus = useRef<HTMLButtonElement>(null)
   const attention = useQuery({
     queryKey: queryKey(after),
     queryFn: ({ signal }) => productTransport.readAttention(after ?? undefined, signal),
     gcTime: 0,
+    enabled: after !== null,
   })
   const selected = attention.data?.summaries.find((summary) => summary.session_id === selectedId)
   const workbenchClass = selected ? 'attention-workbench inspector-open' : 'attention-workbench'
 
   useEffect(() => {
+    void monitorGeneration
     if (after !== null) {
       dispatch(actions.attentionSyncSet('idle'))
       return
@@ -63,7 +66,7 @@ export function AttentionSurface() {
       controller.abort()
       dispatch(actions.attentionSyncSet('idle'))
     }
-  }, [after, dispatch, queryClient])
+  }, [after, dispatch, monitorGeneration, queryClient])
 
   useEffect(() => {
     const target = selectedId ? closeFocus : returnFocus
@@ -89,7 +92,13 @@ export function AttentionSurface() {
         <span className={`attention-monitor phase-${phase}`} aria-live="polite">
           <Radio aria-hidden="true" /> {phaseCopy[phase]}
         </span>
-        <button type="button" onClick={() => void attention.refetch()}>
+        <button
+          type="button"
+          onClick={() => {
+            if (after === null) setMonitorGeneration((generation) => generation + 1)
+            else void attention.refetch()
+          }}
+        >
           <RefreshCw aria-hidden="true" /> Refresh snapshot
         </button>
       </div>

@@ -2,7 +2,7 @@
 
 use std::{
     num::NonZeroU64,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -44,7 +44,10 @@ use signalbox_web_contract::{
     WebRepoWatchSettlement, WebRepoWatchWebhookActivity, WebRepoWatchWebhookDisposition,
     WebRepoWatchWebhookWindow, WebRepoWatchWorkPage,
 };
-use sqlx::{PgPool, types::Uuid};
+use sqlx::{
+    PgPool,
+    types::{Uuid, time::OffsetDateTime},
+};
 
 use crate::web_http::{application_error, attention_summary_dto};
 
@@ -265,7 +268,13 @@ async fn activity(
         return invalid_query(code, message);
     }
     match operations
-        .activity(repository, events_before, webhooks_before)
+        .activity(
+            repository,
+            events_before,
+            webhooks_before,
+            include_events,
+            include_webhooks,
+        )
         .await
     {
         Ok(page) => match activity_page_dto(page, include_events, include_webhooks) {
@@ -309,9 +318,9 @@ fn pull_request_number(value: String) -> Result<PullRequestNumber, ()> {
 
 fn timestamp(value: String) -> Result<SystemTime, ()> {
     let milliseconds = value.parse::<u64>().map_err(|_| ())?;
-    UNIX_EPOCH
-        .checked_add(Duration::from_millis(milliseconds))
-        .ok_or(())
+    let nanoseconds = i128::from(milliseconds).checked_mul(1_000_000).ok_or(())?;
+    let database_time = OffsetDateTime::from_unix_timestamp_nanos(nanoseconds).map_err(|_| ())?;
+    Ok(SystemTime::from(database_time))
 }
 
 fn uuid(value: String) -> Result<Uuid, ()> {
@@ -870,7 +879,7 @@ fn projection_error(error: Option<RepoWatchOperationsError>) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{event_cursor, held_cursor, session_cursor, validate_activity_window};
+    use super::{event_cursor, held_cursor, session_cursor, timestamp, validate_activity_window};
 
     #[test]
     fn partial_composite_cursors_fail_closed() {
@@ -887,6 +896,11 @@ mod tests {
 
         assert_eq!(cursor.cursor_generation, 9);
         assert_eq!(cursor.event_ordinal, 7);
+    }
+
+    #[test]
+    fn timestamp_rejects_values_outside_the_database_time_range() {
+        assert!(timestamp(u64::MAX.to_string()).is_err());
     }
 
     #[test]

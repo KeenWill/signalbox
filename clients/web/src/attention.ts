@@ -7,12 +7,25 @@ export type AttentionReduction =
   | { kind: 'projection'; snapshot: WebAttentionSnapshot }
   | { kind: 'resync' }
 
+const MAX_CURSOR = 18_446_744_073_709_551_615n
+
+const cursorValue = (cursor: string): bigint | null => {
+  if (!/^(0|[1-9][0-9]*)$/.test(cursor)) return null
+  const value = BigInt(cursor)
+  return value <= MAX_CURSOR ? value : null
+}
+
 export const reduceAttentionEvent = (
   current: WebAttentionSnapshot | undefined,
   event: WebAttentionStreamEvent,
 ): AttentionReduction => {
   if (event.kind === 'snapshot') return { kind: 'projection', snapshot: event.snapshot }
   if (event.kind === 'resync_required' || !current) return { kind: 'resync' }
+  const currentCursor = cursorValue(current.cursor)
+  const eventCursor = cursorValue(event.cursor)
+  if (currentCursor === null || eventCursor === null || eventCursor <= currentCursor) {
+    return { kind: 'resync' }
+  }
 
   const replacements = new Map(event.summaries.map((summary) => [summary.session_id, summary]))
   const knownSessionIds = new Set(current.summaries.map((summary) => summary.session_id))
@@ -72,6 +85,7 @@ export const synchronizeAttention = async ({
           break
         }
         projection = reduction.snapshot
+        resyncs = 0
         onProjection(projection)
         transition('live')
       }

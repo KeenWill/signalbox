@@ -216,6 +216,7 @@ pub struct WebAttentionSummary {
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSnapshot {
     pub cursor: String,
+    #[schemars(length(max = 64))]
     pub summaries: Vec<WebAttentionSummary>,
     pub continuation_after_session_id: Option<String>,
 }
@@ -228,6 +229,7 @@ pub enum WebAttentionStreamEvent {
     },
     Update {
         cursor: String,
+        #[schemars(length(max = 64))]
         summaries: Vec<WebAttentionSummary>,
     },
     ResyncRequired {
@@ -332,6 +334,7 @@ pub struct WebRepoWatchRepositoryStatus {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebRepoWatchRepositoryStatusPage {
+    #[schemars(length(max = 64))]
     pub repositories: Vec<WebRepoWatchRepositoryStatus>,
     pub continuation_after_repository: Option<String>,
 }
@@ -432,6 +435,7 @@ pub struct WebRepoWatchPullRequest {
 #[serde(deny_unknown_fields)]
 pub struct WebRepoWatchPullRequestPage {
     pub repository: String,
+    #[schemars(length(max = 64))]
     pub pull_requests: Vec<WebRepoWatchPullRequest>,
     pub continuation_after_pull_request: Option<String>,
 }
@@ -504,8 +508,10 @@ pub struct WebRepoWatchObligationCursor {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebRepoWatchWorkPage {
+    #[schemars(length(max = 64))]
     pub held_slots: Vec<WebRepoWatchHeldSlot>,
     pub held_continuation_after: Option<WebRepoWatchHeldCursor>,
+    #[schemars(length(max = 64))]
     pub queued_obligations: Vec<WebRepoWatchQueuedObligation>,
     pub obligation_continuation_after: Option<WebRepoWatchObligationCursor>,
 }
@@ -543,6 +549,7 @@ pub struct WebRepoWatchSessionCursor {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebRepoWatchPullRequestSessionPage {
+    #[schemars(length(max = 64))]
     pub sessions: Vec<WebRepoWatchPullRequestSession>,
     pub continuation_before: Option<WebRepoWatchSessionCursor>,
 }
@@ -579,8 +586,10 @@ pub struct WebRepoWatchEventCursor {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebRepoWatchActivityPage {
+    #[schemars(length(max = 100))]
     pub events: Vec<WebRepoWatchEvent>,
     pub event_continuation_before: Option<WebRepoWatchEventCursor>,
+    #[schemars(length(max = 100))]
     pub webhooks: Vec<WebRepoWatchWebhookActivity>,
     pub webhook_continuation_before_receipt_sequence: Option<String>,
 }
@@ -818,6 +827,9 @@ function assertSchema(root, schema, value, path) {{
   if (schema.type === "array") {{
     if (!Array.isArray(value)) {{
       fail(path, "an array");
+    }}
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {{
+      fail(path, `at most ${{schema.maxItems}} items`);
     }}
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${{path}}[${{index}}]`));
     return;

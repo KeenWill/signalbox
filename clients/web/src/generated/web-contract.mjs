@@ -230,6 +230,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebAttentionSummary"
         },
+        "maxItems": 64,
         "type": "array"
       }
     },
@@ -347,6 +348,7 @@ const schemas = {
             "items": {
               "$ref": "#/$defs/WebAttentionSummary"
             },
+            "maxItems": 64,
             "type": "array"
           }
         },
@@ -451,6 +453,7 @@ const schemas = {
             "items": {
               "$ref": "#/$defs/WebAttentionSummary"
             },
+            "maxItems": 64,
             "type": "array"
           }
         },
@@ -745,6 +748,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebRepoWatchEvent"
         },
+        "maxItems": 100,
         "type": "array"
       },
       "webhook_continuation_before_receipt_sequence": {
@@ -757,6 +761,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebRepoWatchWebhookActivity"
         },
+        "maxItems": 100,
         "type": "array"
       }
     },
@@ -1157,6 +1162,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebRepoWatchPullRequest"
         },
+        "maxItems": 64,
         "type": "array"
       },
       "repository": {
@@ -1430,6 +1436,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebRepoWatchPullRequestSession"
         },
+        "maxItems": 64,
         "type": "array"
       }
     },
@@ -1732,6 +1739,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebRepoWatchRepositoryStatus"
         },
+        "maxItems": 64,
         "type": "array"
       }
     },
@@ -1963,6 +1971,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebRepoWatchHeldSlot"
         },
+        "maxItems": 64,
         "type": "array"
       },
       "obligation_continuation_after": {
@@ -1979,6 +1988,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebRepoWatchQueuedObligation"
         },
+        "maxItems": 64,
         "type": "array"
       }
     },
@@ -2097,6 +2107,9 @@ function assertSchema(root, schema, value, path) {
   if (schema.type === "array") {
     if (!Array.isArray(value)) {
       fail(path, "an array");
+    }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      fail(path, `at most ${schema.maxItems} items`);
     }
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${path}[${index}]`));
     return;

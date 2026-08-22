@@ -95,3 +95,18 @@ test('uses a navigation sheet on a phone viewport and unwinds it with Escape', a
   await expect(openNavigation).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
+
+test('closes the phone navigation sheet after route activation', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicProductTransport(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  const navigation = page.getByRole('dialog', { name: 'Product navigation' })
+  await navigation.getByRole('link', { name: /Sessions/ }).click()
+
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(navigation).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})

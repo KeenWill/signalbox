@@ -4762,7 +4762,7 @@ async fn repo_watch_operations_project_held_queued_and_correlated_sessions()
         )
         .await?;
     let activity = reader
-        .activity(fixture.repository.clone(), None, None)
+        .activity(fixture.repository.clone(), None, None, true, true)
         .await?;
 
     assert_eq!(occupied, RepoWatchRuleEvaluationOutcome::Occupied);

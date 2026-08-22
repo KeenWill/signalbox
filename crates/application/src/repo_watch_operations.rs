@@ -475,6 +475,8 @@ pub trait RepoWatchOperationsReader {
         repository: RepositorySlug,
         events_before: Option<RepoWatchEventCursor>,
         webhooks_before: Option<u64>,
+        include_events: bool,
+        include_webhooks: bool,
     ) -> impl Future<Output = Result<RepoWatchActivityPage, Self::Error>> + Send;
 }
 
