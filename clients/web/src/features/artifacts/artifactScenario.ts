@@ -108,7 +108,7 @@ const videoDescriptor = decodeWebBlobDescriptor({
 })
 
 const generatedText = Array.from(
-  { length: 260 },
+  { length: 180 },
   (_, index) => `line ${String(index + 1).padStart(3, '0')} — bounded incident chronology`,
 ).join('\n')
 

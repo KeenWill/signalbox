@@ -1,8 +1,13 @@
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 
+// Tunable effective ceilings: these keep initial rendering and later operator-requested work
+// predictable. They are presentation budgets, not security boundaries; the owning transport must
+// independently bound bytes received and decoded before content reaches these renderers.
 export const ARTIFACT_PREVIEW_CHARACTERS = 4_000
-export const ARTIFACT_EXPANDED_CHARACTERS = 16_000
 export const ARTIFACT_PREVIEW_LINES = 32
+// The expanded projection is deliberately larger but still finite so one action cannot mount or
+// highlight an entire large artifact. These values can be tuned from measured interaction costs.
+export const ARTIFACT_EXPANDED_CHARACTERS = 16_000
 export const ARTIFACT_EXPANDED_LINES = 200
 
 interface ArtifactIdentity {
@@ -81,15 +86,17 @@ export interface BoundedArtifactText {
 export const boundArtifactText = (content: string, expanded: boolean): BoundedArtifactText => {
   const characterLimit = expanded ? ARTIFACT_EXPANDED_CHARACTERS : ARTIFACT_PREVIEW_CHARACTERS
   const lineLimit = expanded ? ARTIFACT_EXPANDED_LINES : ARTIFACT_PREVIEW_LINES
-  const characterPrefix = content.slice(0, characterLimit)
+  const characters = Array.from(content)
+  const characterPrefix = characters.slice(0, characterLimit).join('')
   const lines = characterPrefix.split('\n', lineLimit + 1)
   const omittedLines = lines.length > lineLimit
   const boundedLines = omittedLines ? lines.slice(0, lineLimit) : lines
   const bounded = boundedLines.join('\n')
+  const boundedCharacterCount = Array.from(bounded).length
 
   return {
     content: bounded,
-    omittedCharacters: Math.max(content.length - bounded.length, 0),
+    omittedCharacters: Math.max(characters.length - boundedCharacterCount, 0),
     omittedLines,
   }
 }

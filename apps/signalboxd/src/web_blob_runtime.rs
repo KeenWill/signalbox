@@ -17,7 +17,7 @@ use signalbox_application::{
     BlobDerivationServiceOutcome, DeterministicBlobDerivationRequest,
     DeterministicBlobDerivationService, DeterministicBlobProducer, UuidV7BlobDerivationIdGenerator,
 };
-use signalbox_blob_store::{BlobPutOutcome, BlobStoreFailureKind, ExpectedBlob};
+use signalbox_blob_store::{BlobPutOutcome, ExpectedBlob};
 use signalbox_domain::{BlobDerivation, BlobDigest, BlobTransformation, BlobTransformationName};
 use signalbox_persistence::{
     blob::{BlobCatalogEntry, BlobCatalogRepository, BlobReplicaRecord, BlobStoreBindingRecord},
@@ -258,20 +258,21 @@ async fn copy_verified_input(
         let Some(store) = registry.recorded_store(replica.store()) else {
             return Err(WebBlobRuntimeError::Integrity);
         };
-        let opened = match store.open(replica.object_key()).await {
-            Ok(opened) if opened.byte_length() == entry.expected().byte_length() => opened,
-            Ok(_) => continue,
-            Err(error) if error.kind() == BlobStoreFailureKind::NotFound => continue,
-            Err(_) => continue,
-        };
-        let copied = tokio::time::timeout(
-            Duration::from_secs(WORKER_TIMEOUT_SECONDS),
+        let copied = tokio::time::timeout(Duration::from_secs(WORKER_TIMEOUT_SECONDS), async {
+            let opened = store
+                .open(replica.object_key())
+                .await
+                .map_err(|_| CandidateCopyError::Read)?;
+            if opened.byte_length() != entry.expected().byte_length() {
+                return Err(CandidateCopyError::Read);
+            }
             copy_input_candidate(
                 opened.into_reader(),
                 destination,
                 entry.expected().byte_length(),
-            ),
-        )
+            )
+            .await
+        })
         .await;
         match copied {
             Ok(Ok(observed_digest)) if observed_digest == digest => return Ok(()),

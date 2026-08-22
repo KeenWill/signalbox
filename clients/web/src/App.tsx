@@ -184,9 +184,9 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
         </header>
         <div className="primary-stack">
           {knownId === 'blobs' ? (
-            <ArtifactWorkbench />
+            <ArtifactWorkbench commandContext={commandContext} />
           ) : knownId === 'attachments' ? (
-            <AttachmentWorkbench />
+            <AttachmentWorkbench commandContext={commandContext} />
           ) : (
             <Transcript
               key={`timeline-${knownId}`}

@@ -799,16 +799,22 @@ function assertCanonicalU64(value, path) {
   }
 }
 
+const rawJsonInteger = Symbol("rawJsonInteger");
+
 function canonicalJson(value) {
+  if (value !== null && typeof value === "object" && Object.hasOwn(value, rawJsonInteger)) {
+    return value[rawJsonInteger];
+  }
   if (Array.isArray(value)) {
-    return value.map(canonicalJson);
+    return `[${value.map(canonicalJson).join(",")}]`;
   }
   if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.keys(value).sort().map((key) => [key, canonicalJson(value[key])]),
-    );
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
   }
-  return value;
+  return JSON.stringify(value);
 }
 
 function assertCanonicalParametersJson(value, path) {
@@ -817,12 +823,32 @@ function assertCanonicalParametersJson(value, path) {
   }
   let parsed;
   try {
-    parsed = JSON.parse(value);
+    parsed = JSON.parse(value, (_key, parsedValue, context) => {
+      if (
+        typeof parsedValue === "number" &&
+        Number.isInteger(parsedValue) &&
+        !Number.isSafeInteger(parsedValue)
+      ) {
+        return { [rawJsonInteger]: context.source };
+      }
+      return parsedValue;
+    });
   } catch {
     fail(path, "canonical JSON");
   }
-  if (JSON.stringify(canonicalJson(parsed)) !== value) {
+  if (canonicalJson(parsed) !== value) {
     fail(path, "canonical JSON");
+  }
+}
+
+function assertDisplayFilename(value, path) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    new TextEncoder().encode(value).length > 1024 ||
+    /\p{Cc}/u.test(value)
+  ) {
+    fail(path, "a nonempty, control-free filename of at most 1024 UTF-8 bytes");
   }
 }
 
@@ -858,6 +884,8 @@ export function decodeWebBlobDescriptor(value) {
   assertSchema(schemas.WebBlobDescriptor, schemas.WebBlobDescriptor, value, "blob_descriptor");
   assertBlobDigest(value.digest, "blob_descriptor.digest");
   assertCanonicalU64(value.byte_length, "blob_descriptor.byte_length");
+  value.display_filename.forEach((filename, index) =>
+    assertDisplayFilename(filename, `blob_descriptor.display_filename[${index}]`));
   value.available_views.forEach((view, index) => {
     assertCanonicalU64(view.byte_length, `blob_descriptor.available_views[${index}].byte_length`);
     const contentPath = `blob_descriptor.available_views[${index}].content_url`;
@@ -866,8 +894,10 @@ export function decodeWebBlobDescriptor(value) {
       if (contentDigest !== value.digest) {
         fail(contentPath, "a route for the descriptor digest");
       }
-    } else if (!view.derivations.some((derivation) => derivation.output_digests.includes(contentDigest))) {
-      fail(contentPath, "a route for an advertised derivation output digest");
+    } else if (!view.derivations.some((derivation) =>
+      derivation.input_digests.includes(value.digest) &&
+      derivation.output_digests.includes(contentDigest))) {
+      fail(contentPath, "a route for a derivation output bound to the descriptor input");
     }
     view.derivations.forEach((derivation, derivationIndex) => {
       const path = `blob_descriptor.available_views[${index}].derivations[${derivationIndex}]`;

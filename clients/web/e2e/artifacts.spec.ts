@@ -73,7 +73,13 @@ test('selects admitted image views without prefetching original bytes', async ({
   const loadOriginal = page.getByRole('button', { name: 'Load original' })
   await loadOriginal.focus()
   await page.keyboard.press('Enter')
-  await expect(page.getByRole('img', { name: 'Original of orbital-map.png' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Original loaded' })).toBeFocused()
+  const original = page.getByRole('img', { name: 'Original of orbital-map.png' })
+  await expect(original).toBeVisible()
+  await expect(original).toHaveAttribute('src', originalPath)
+  await expect
+    .poll(() => original.evaluate((element) => (element as HTMLImageElement).naturalWidth))
+    .toBeGreaterThan(0)
   expect((await originalResponse).headers()['content-type']).toContain('image/png')
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -88,11 +94,11 @@ test('expands text through a bounded keyboard action', async ({ page }) => {
   await expect(expand).toBeFocused()
   await page.keyboard.press('Enter')
   await expect(artifact.getByRole('button', { name: 'Collapse preview' })).toBeFocused()
-  await expect(artifact.getByText(/characters remain outside this bounded view/)).toBeVisible()
+  await expect(artifact.getByText('Complete bounded content shown')).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('keeps remote media behind the persisted ask policy', async ({ page }) => {
+test('keeps remote media unavailable without a bounded owning service', async ({ page }) => {
   const problems = watchBrowser(page)
   let requests = 0
   await page.route(remotePath, async (route) => {
@@ -103,12 +109,10 @@ test('keeps remote media behind the persisted ask policy', async ({ page }) => {
 
   const artifact = page.getByRole('article', { name: 'Artifact remote-status-diagram.png' })
   await expect(artifact.getByLabel('Remote media not loaded')).toBeVisible()
+  await expect(artifact.getByText('remote media unavailable')).toBeVisible()
+  await expect(artifact.getByText('No bytes were fetched.')).toBeVisible()
+  await expect(artifact.getByRole('button', { name: 'Load this remote image' })).toHaveCount(0)
   expect(requests).toBe(0)
-  const load = artifact.getByRole('button', { name: 'Load this remote image' })
-  await load.focus()
-  await page.keyboard.press('Enter')
-  await expect(artifact.getByRole('img', { name: 'Remote status diagram' })).toBeVisible()
-  await expect.poll(() => requests).toBe(1)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -123,7 +127,7 @@ test('blocks remote media without exposing a load action', async ({ page }) => {
   await page.getByRole('combobox', { name: 'Remote media' }).selectOption('block')
 
   const artifact = page.getByRole('article', { name: 'Artifact remote-status-diagram.png' })
-  await expect(artifact.getByText('remote media block')).toBeVisible()
+  await expect(artifact.getByText('remote media unavailable')).toBeVisible()
   await expect(artifact.getByRole('button', { name: 'Load this remote image' })).toHaveCount(0)
   expect(requests).toBe(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
@@ -151,6 +155,26 @@ test('captures desktop dark artifact evidence', async ({ page }, testInfo) => {
   await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
     'artifacts-desktop-dark.png',
   )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('captures below-fold artifact renderer states', async ({ page }, testInfo) => {
+  skipUnlessLinuxChromium(testInfo)
+  const problems = watchBrowser(page)
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.goto('/scenario/blobs')
+
+  for (const [name, screenshot] of [
+    ['Artifact orbital-map.png', 'artifact-image-state.png'],
+    ['Artifact remote-status-diagram.png', 'artifact-remote-unavailable-state.png'],
+    ['Artifact architecture.pdf', 'artifact-unimplemented-state.png'],
+    ['Artifact restricted.capture', 'artifact-blocked-state.png'],
+  ] as const) {
+    const artifact = page.getByRole('article', { name })
+    await artifact.scrollIntoViewIfNeeded()
+    await expect(artifact).toHaveScreenshot(screenshot)
+  }
+
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

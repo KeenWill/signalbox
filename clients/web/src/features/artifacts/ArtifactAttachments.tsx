@@ -1,5 +1,6 @@
 import { FileQuestion, Paperclip, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import type { CommandContext } from '../../commands'
 import { selectApp, useAppSelector } from '../../state'
 import { ArtifactRenderer } from './ArtifactRenderer'
 import { attachmentScenario } from './artifactScenario'
@@ -99,7 +100,7 @@ export function MissingAttachmentState({ placement }: { placement: 'composer' | 
   )
 }
 
-export function AttachmentWorkbench() {
+export function AttachmentWorkbench({ commandContext }: { commandContext: CommandContext }) {
   const remoteMedia = useAppSelector(selectApp).remoteMedia
   const [composerItems, setComposerItems] =
     useState<ReadonlyArray<ArtifactItem>>(attachmentScenario)
@@ -144,7 +145,11 @@ export function AttachmentWorkbench() {
             <strong>{selected?.displayName ?? 'No attachment selected'}</strong>
           </header>
           {selected ? (
-            <ArtifactRenderer artifact={selected} remoteMediaPolicy={remoteMedia} />
+            <ArtifactRenderer
+              artifact={selected}
+              commandContext={commandContext}
+              remoteMediaPolicy={remoteMedia}
+            />
           ) : (
             <p className="attachment-empty">Select an attachment to inspect its typed renderer.</p>
           )}
