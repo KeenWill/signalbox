@@ -50,17 +50,18 @@ use signalboxd::runner_protocol_runtime::{
     RunnerRegistrationFailureCause,
 };
 use signalboxd::{
-    ActivatedTurnPass, BaseDaemonCredentialInputs, BlobStoreRegistry, BlobTools,
-    CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError, DaemonToolCatalog,
-    DaemonToolComposition, DaemonTools, DaemonToolsConstructionError, FatalExecutionSupervisor,
-    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport,
-    HubModelConfiguration, HubModelConfigurationError, LocalProcessListener, LocalSocketError,
-    MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
-    RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
-    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
-    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
-    model_adapter::ConfiguredModelRuntime, usage_limits::UsageLimitedModelCallProvider,
+    ActivatedTurnPass, AttachmentPreparingModelCallProvider, BaseDaemonCredentialInputs,
+    BlobStoreRegistry, BlobTools, CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError,
+    DaemonToolCatalog, DaemonToolComposition, DaemonTools, DaemonToolsConstructionError,
+    FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
+    GitHubCodeHostTransport, HubModelConfiguration, HubModelConfigurationError,
+    LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs, ModelAdapter,
+    OtlpRuntime, PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
+    ProcessRuntimeError, PrometheusServer, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
+    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
+    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
+    TelemetryExportFilter, TelemetryMetrics, model_adapter::ConfiguredModelRuntime,
+    usage_limits::UsageLimitedModelCallProvider,
 };
 use tracing_subscriber::prelude::*;
 
@@ -1568,8 +1569,8 @@ async fn run_hub(
         Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
         None => process_runtime,
     };
-    let process_runtime = match blob_store_registry {
-        Some(ref registry) => process_runtime.with_blob_store_registry(Arc::clone(registry)),
+    let process_runtime = match blob_store_registry.as_ref() {
+        Some(registry) => process_runtime.with_blob_store_registry(Arc::clone(registry)),
         None => process_runtime,
     };
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
@@ -1584,7 +1585,14 @@ async fn run_hub(
         PostgresProviderModelExecution::new(
             model_repository,
             InProcessAttemptDispatchGate::default(),
-            UsageLimitedModelCallProvider::new(provider, &model_configuration),
+            UsageLimitedModelCallProvider::new(
+                AttachmentPreparingModelCallProvider::new(
+                    provider,
+                    scheduler_pool.clone(),
+                    blob_store_registry.clone(),
+                ),
+                &model_configuration,
+            ),
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor)
         .with_approval_judge(

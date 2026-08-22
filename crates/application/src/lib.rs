@@ -54,16 +54,16 @@ pub use list_conversations::{
 };
 pub use load_session::{LoadSessionService, SessionReader};
 pub use model_execution::{
-    AttemptDispatchGate, AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
-    CommitModelCallObservationTransaction, FailPreparedModelCallTransaction,
-    InProcessAttemptDispatchGate, InProcessAttemptDispatchPermit, ModelAttachmentStub,
-    ModelCallAuthorizationReread, ModelCallCapabilityPreparation, ModelCallCredentialReference,
-    ModelCallExecutionError, ModelCallExecutionIdGenerator, ModelCallExecutionOutcome,
-    ModelCallExecutionService, ModelCallInputTokenCount, ModelCallInputTokenCounter,
-    ModelCallProvider, ModelCallTerminalIdentityCandidates, ModelConversationMessage,
-    ModelFrontierRenderingError, ModelToolResultContent, ModelUserContent, ModelUserContentPart,
-    PrepareModelCallOutcome, PrepareModelCallTransaction, PreparedModelOperation,
-    RetainedCapabilityFailureStatus, RetainedModelCallExecutionState,
+    AttachmentPreparationFailure, AttemptDispatchGate, AuthorizeModelCallOutcome,
+    AuthorizeModelCallTransaction, CommitModelCallObservationTransaction,
+    FailPreparedModelCallTransaction, InProcessAttemptDispatchGate, InProcessAttemptDispatchPermit,
+    ModelAttachmentStub, ModelCallAuthorizationReread, ModelCallCapabilityPreparation,
+    ModelCallCredentialReference, ModelCallExecutionError, ModelCallExecutionIdGenerator,
+    ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallInputTokenCount,
+    ModelCallInputTokenCounter, ModelCallProvider, ModelCallTerminalIdentityCandidates,
+    ModelConversationMessage, ModelFrontierRenderingError, ModelToolResultContent,
+    ModelUserContent, ModelUserContentPart, PrepareModelCallOutcome, PrepareModelCallTransaction,
+    PreparedModelOperation, RetainedCapabilityFailureStatus, RetainedModelCallExecutionState,
     RetainedModelCallObservationStatus, ScriptedModelCallCapability, ScriptedModelCallError,
     ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
 };
@@ -110,7 +110,7 @@ pub use scheduler::{
     EligibilitySweepBatch, EligibilityWorkSource, GoalAwareEligibilityPass,
     GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityNudge,
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
-    ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
+    ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit, relinquish_scheduler_capacity,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{

@@ -8,13 +8,14 @@
 use std::{error::Error, fmt, future::Future};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, EligibilityPass, InProcessAttemptDispatchGate,
-    InProcessToolDispatchGate, ModelCallExecutionError, ModelCallExecutionOutcome,
-    ModelCallExecutionService, ModelCallProvider, OperatorFailureClass, ScriptedModelCallError,
-    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnIdGenerator,
-    StartEligibleTurnOutcome, StartEligibleTurnService, StartEligibleTurnTransaction, ToolCatalog,
-    ToolExecutionService, ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor,
-    UuidV7ModelCallExecutionIdGenerator, UuidV7ToolLoopIdGenerator,
+    AttachmentPreparationFailure, ClassifyOperatorFailure, EligibilityPass,
+    InProcessAttemptDispatchGate, InProcessToolDispatchGate, ModelCallExecutionError,
+    ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallProvider, OperatorFailureClass,
+    ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
+    StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
+    StartEligibleTurnTransaction, ToolCatalog, ToolExecutionService, ToolExecutionServiceError,
+    ToolExecutionServiceOutcome, ToolExecutor, UuidV7ModelCallExecutionIdGenerator,
+    UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{
     ActivatedTurn, AssistantText, DirectModelSelection, ModelCallId, ProviderReportedTokenUsage,
@@ -36,6 +37,7 @@ use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepos
 use tokio::sync::watch;
 
 use tracing::Instrument;
+mod attachment_preparation;
 mod blob_read_runtime;
 mod blob_storage_configuration;
 mod blob_storage_runtime;
@@ -60,6 +62,9 @@ mod single_hub;
 mod telemetry;
 pub mod usage_limits;
 
+pub use attachment_preparation::{
+    AttachmentPreparingModelCallProvider, AttachmentPreparingProviderError,
+};
 pub use blob_storage_configuration::{
     BlobStorageClass, BlobStorageConfiguration, BlobStorageConfigurationError,
     BlobStoreConfiguration,
@@ -692,6 +697,17 @@ fn turn_work_span(session: SessionId, turn: TurnId) -> tracing::Span {
     )
 }
 
+fn report_attachment_preparation_unavailable(error: AttachmentPreparationFailure) {
+    let failure_class = error.operator_failure_class();
+    let cause_code = error.operator_failure_cause_code();
+    tracing::warn!(
+        ?failure_class,
+        cause_code,
+        stage = "attachment_preparation",
+        "attachment preparation unavailable; prepared call remains eligible"
+    );
+}
+
 /// Reports one classified failure whose durable commit outcome is unknown, so
 /// startup recovery rather than ordinary scheduler retry regains authority.
 ///
@@ -945,9 +961,17 @@ where
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
+                    | ModelCallExecutionOutcome::AttachmentPreparationFailed { .. }
+                    | ModelCallExecutionOutcome::AttachmentPreparationFailureAlreadyCommitted {
+                        ..
+                    }
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
                     | ModelCallExecutionOutcome::ObservationCommitted(_)
                     | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => return Ok(()),
+                    ModelCallExecutionOutcome::AttachmentUnavailable(unavailable) => {
+                        report_attachment_preparation_unavailable(unavailable);
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -1544,7 +1568,15 @@ where
                     ModelCallExecutionOutcome::Checkpointed(_) => {}
                     ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
+                    | ModelCallExecutionOutcome::AttachmentPreparationFailed { .. }
+                    | ModelCallExecutionOutcome::AttachmentPreparationFailureAlreadyCommitted {
+                        ..
+                    }
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_) => {
+                        return Ok(());
+                    }
+                    ModelCallExecutionOutcome::AttachmentUnavailable(unavailable) => {
+                        report_attachment_preparation_unavailable(unavailable);
                         return Ok(());
                     }
                     ModelCallExecutionOutcome::NoWork => return Ok(()),
@@ -1694,6 +1726,11 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
+                    | ModelCallExecutionOutcome::AttachmentPreparationFailed { .. }
+                    | ModelCallExecutionOutcome::AttachmentUnavailable(_)
+                    | ModelCallExecutionOutcome::AttachmentPreparationFailureAlreadyCommitted {
+                        ..
+                    }
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
                     | ModelCallExecutionOutcome::ObservationCommitted(_)
                     | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => return Ok(()),

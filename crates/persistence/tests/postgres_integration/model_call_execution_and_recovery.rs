@@ -430,6 +430,112 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     Ok(())
 }
 
+/// INV-062: a durable Prepared model call is a reconciliation-sweep hint, so
+/// temporary attachment unavailability can retry without process restart.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv062_prepared_model_call_remains_scheduler_eligible() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8e0_6201));
+    let direct_selection =
+        signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xce0_6201));
+    let mut create_service = CreateSessionService::new(
+        FixedSessionIds::new([session]),
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin()),
+    );
+    let CreateSessionOutcome::Applied(_) = create_service
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x4e0_6201)),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct_selection)),
+        )?)
+        .await?
+    else {
+        panic!("the prepared-call sweep fixture session is created")
+    };
+
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e0_6201));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xae0_6201));
+    let mut submit_service = SubmitInputService::new(
+        FixedSubmitInputIds::new([accepted_input], [turn]),
+        SubmitInputRepository::new(pool.clone()),
+        AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(_),
+    )) = submit_service
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x4e0_6202)),
+            session,
+            UserContent::try_text("attachment retry fixture".to_owned())
+                .expect("fixture user content is admitted"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        )?)
+        .await?
+    else {
+        panic!("the prepared-call sweep fixture input is accepted")
+    };
+
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbe0_6201));
+    let mut activation_service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                0xde0_6201,
+            ))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xee0_6201))],
+            [attempt],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(_) = activation_service.execute(session).await? else {
+        panic!("the prepared-call sweep fixture turn activates")
+    };
+
+    let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xfe0_6201));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        direct_selection,
+        ResolvedProviderTarget::naming(provider_identity),
+    )])
+    .expect("one immutable direct target forms a catalog");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let call = ModelCallId::from_uuid(Uuid::from_u128(0xce0_6202));
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed) = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde0_6202)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xee0_6202)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xfe0_6202)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf0_6201)),
+                    TurnId::from_uuid(Uuid::from_u128(0xdf0_6202)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the fresh model call checkpoints Prepared")
+    };
+    let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+
+    assert_eq!(checkpointed, call);
+    assert!(!continuation);
+    assert_eq!(eligible, vec![session]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S02 / S08 / INV-005 / INV-012 / INV-014 / INV-015 / INV-032 / INV-036: the scripted
 /// application path consumes multiple steering inputs at preparation, renders
 /// them immediately in the process projection and to the provider in acceptance

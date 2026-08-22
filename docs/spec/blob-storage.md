@@ -52,6 +52,12 @@ Provider-neutral ordered attachment stubs and immutable catalog-length
 projection are verified against this implementing change
 (`agent/blob-storage-attachment-rendering`).
 
+Distinct attachment sizing and streamed replica verification, typed
+missing/corrupt closure before send authorization, typed unavailable retry, and
+bounded verification admission, scheduler-capacity handoff, and deadline are
+verified against this implementing change
+(`agent/blob-storage-attachment-preparation`).
+
 The text-only blob-read family, frontier-derived digest authorization, and
 durable per-request and per-turn admission counters are verified against this
 implementing change (`agent/blob-storage-read-tools`).
