@@ -1692,13 +1692,13 @@ where
     }
     if let Some(maximum_bytes) = maximum_attachment_bytes {
         if let Some(observed_bytes) = if matches!(recorded, SubmitInputResult::Applied(_)) {
-            prospective_attachment_frontier_exceeds_bound(
+            Box::pin(prospective_attachment_frontier_exceeds_bound(
                 connection,
                 frontier_command.session(),
                 &prior_queued_inputs,
                 &recorded,
                 maximum_bytes,
-            )
+            ))
             .await?
         } else {
             None
