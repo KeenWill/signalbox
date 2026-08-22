@@ -231,10 +231,9 @@ typed cause and operator need, and prevent partial command-fence or
 commissioned-dispatch identities. Observation projections are decoded as
 complete pairs by the persistence adapter. The function pins the restore-safe
 schema search path. The cross-component behavior using these records is owned by
-[pull-request convergence reconciliation](convergence-reconciliation.md).
-The pull-request target and model-activity advisory fences described in the
-lock inventory below are verified against this PR
-(`agent/daemon-convergence-sweep`).
+[pull-request convergence reconciliation](convergence-reconciliation.md). The
+pull-request target and model-activity advisory fences described in the lock
+inventory below are verified against this PR (`agent/daemon-convergence-sweep`).
 
 ## Relational representation
 
@@ -834,18 +833,17 @@ Locks per transaction, in acquisition order:
   pull-request-commissioned session first takes the transaction-scoped
   pull-request target advisory lock and checks for a competing live session. An
   unseen command then claims the user-global registry, and every user, model,
-  scheduler, and continuation
-  transaction locks the session row `FOR NO KEY UPDATE` before reading the event
-  stream. An applied user transition next locks `session_scheduler` `FOR UPDATE`
-  before recording its receipt or event, so stop and queued-turn activation
-  share one serialization point. Deferred provenance correlation first
-  reacquires the session-row lock before checking the current goal turn and, for
-  scheduler failure, holds the named lifecycle row `FOR SHARE` while checking
-  its unsuccessful terminal disposition. The continuity trigger reacquires the
-  session-row lock before validating the predecessor. Pursuing user transitions
-  then read current defaults and insert their queued goal turn; rejected
-  commands commit without firing the trigger, and exact user-command replay
-  takes no row lock.
+  scheduler, and continuation transaction locks the session row
+  `FOR NO KEY UPDATE` before reading the event stream. An applied user
+  transition next locks `session_scheduler` `FOR UPDATE` before recording its
+  receipt or event, so stop and queued-turn activation share one serialization
+  point. Deferred provenance correlation first reacquires the session-row lock
+  before checking the current goal turn and, for scheduler failure, holds the
+  named lifecycle row `FOR SHARE` while checking its unsuccessful terminal
+  disposition. The continuity trigger reacquires the session-row lock before
+  validating the predecessor. Pursuing user transitions then read current
+  defaults and insert their queued goal turn; rejected commands commit without
+  firing the trigger, and exact user-command replay takes no row lock.
 
 - **StartEligibleTurn** and nonterminal **model-call execution transactions**
   (prepare and authorize): first model-call insertion first takes the
@@ -853,11 +851,11 @@ Locks per transaction, in acquisition order:
   parking takes the pull-request target advisory lock and then that same
   model-activity lock before rechecking activity. The `session_scheduler` row
   `FOR UPDATE` remains the execution transaction's explicit row lock (session
-  existence is checked with a bare `EXISTS`). The session
-  row is locked only `KEY SHARE`, implicitly, by the inserts' foreign keys, and
-  the candidate `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
-  Terminal observation commit and reread, restart recovery, startup recovery,
-  and submit-input interruption first discover whether the target is a delegated
+  existence is checked with a bare `EXISTS`). The session row is locked only
+  `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
+  `turn_lifecycle` row is locked by the guarded `UPDATE` itself. Terminal
+  observation commit and reread, restart recovery, startup recovery, and
+  submit-input interruption first discover whether the target is a delegated
   child. When it is, they lock the immutable parent/child session pair
   `FOR NO KEY UPDATE` in canonical session-ID order before taking the child
   scheduler lock. This is the shared prefix for any path that can record a child
