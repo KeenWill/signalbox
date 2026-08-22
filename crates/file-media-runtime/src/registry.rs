@@ -4,10 +4,10 @@ use crate::{
     BoundedMetadata, CanonicalMediaType, FileInspection, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProviderDeclaration, FileMediaProviderReadRequest,
     FileMediaProviderValidationRequest, FileReadRequest, FileReadResult, InspectionRequest,
-    ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadAccessPattern, ReadContinuation, ReadContinuationCursor, ReadViewBounds, ReaderDeclaration,
-    ReaderIdentity, ReasonCode, StreamingTextFallback, ValidatedFile, ValidationEvidence,
-    VerifiedBlobSource,
+    MAX_READ_OPTIONS_BYTES, MAX_WORKER_WALL_SECONDS, ProbeStrength, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadContinuation,
+    ReadContinuationCursor, ReadViewBounds, ReaderDeclaration, ReaderIdentity, ReasonCode,
+    StreamingTextFallback, ValidatedFile, ValidationEvidence, VerifiedBlobSource,
 };
 
 // numeric-bound: ceiling - bounds process-lifetime provider inventory memory
@@ -173,23 +173,32 @@ impl FileMediaRegistry {
             });
         }
 
-        let mut candidates = Vec::new();
-        let mut malformed = Vec::new();
-        for reader in self.readers.values() {
-            let raw = processor
-                .probe(reader.identity(), source, cancellation)
-                .await?;
-            match sanitize_probe(reader, raw)? {
-                SanitizedProbe::NoMatch => {}
-                SanitizedProbe::Candidate(candidate) => candidates.push(candidate),
-                SanitizedProbe::Malformed {
-                    media_type,
-                    reason_code,
-                } => {
-                    malformed.push((media_type, reason_code));
+        let probes = async {
+            let mut candidates = Vec::new();
+            let mut malformed = Vec::new();
+            for reader in self.readers.values() {
+                let raw = processor
+                    .probe(reader.identity(), source, cancellation)
+                    .await?;
+                match sanitize_probe(reader, raw)? {
+                    SanitizedProbe::NoMatch => {}
+                    SanitizedProbe::Candidate(candidate) => candidates.push(candidate),
+                    SanitizedProbe::Malformed {
+                        media_type,
+                        reason_code,
+                    } => {
+                        malformed.push((media_type, reason_code));
+                    }
                 }
             }
-        }
+            Ok::<_, FileMediaFailure>((candidates, malformed))
+        };
+        let (candidates, mut malformed) = tokio::time::timeout(
+            std::time::Duration::from_secs(MAX_WORKER_WALL_SECONDS),
+            probes,
+        )
+        .await
+        .map_err(|_| FileMediaFailure::ProcessorTimedOut)??;
         if !malformed.is_empty() {
             malformed.sort();
             malformed.dedup();
@@ -431,7 +440,11 @@ impl FileMediaRegistry {
         cancellation: &dyn crate::CancellationSignal,
     ) -> Result<FileReadResult, FileMediaFailure> {
         let initial_request = match &request.input {
-            crate::FileReadInput::Initial { options } if options.is_object() => true,
+            crate::FileReadInput::Initial { options }
+                if options.is_object() && serialized_read_options_fit(options) =>
+            {
+                true
+            }
             crate::FileReadInput::Initial { .. } => {
                 return Err(FileMediaFailure::InvalidViewArguments);
             }
@@ -476,7 +489,10 @@ impl FileMediaRegistry {
             .read(
                 validated.reader(),
                 FileMediaProviderReadRequest {
-                    file: validated.clone(),
+                    source: validated.source().clone(),
+                    detected_media_type: validated.detected_media_type().clone(),
+                    validation: validated.validation(),
+                    metadata: validated.metadata().clone(),
                     view: request.view,
                     input: request.input,
                 },
@@ -485,6 +501,37 @@ impl FileMediaRegistry {
             )
             .await?;
         sanitize_read(reader, view, self.ceilings, initial_request, raw)
+    }
+}
+
+fn serialized_read_options_fit(options: &serde_json::Value) -> bool {
+    serde_json::to_writer(
+        LimitedWriter {
+            written: 0,
+            maximum: MAX_READ_OPTIONS_BYTES,
+        },
+        options,
+    )
+    .is_ok()
+}
+
+struct LimitedWriter {
+    written: usize,
+    maximum: usize,
+}
+
+impl std::io::Write for LimitedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.written = self
+            .written
+            .checked_add(bytes.len())
+            .filter(|total| *total <= self.maximum)
+            .ok_or_else(|| std::io::Error::other("serialized value exceeds its byte ceiling"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -1085,5 +1132,12 @@ mod tests {
         observe_json(&body, 0, &mut observed).expect("the bounded fixture is observable");
 
         assert_eq!(observed.depth, crate::MAX_STRUCTURED_DEPTH);
+    }
+
+    #[test]
+    fn read_option_serialization_stops_at_its_byte_ceiling() {
+        let options = serde_json::json!({ "value": "x".repeat(MAX_READ_OPTIONS_BYTES) });
+
+        assert!(!serialized_read_options_fit(&options));
     }
 }
