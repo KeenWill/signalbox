@@ -619,13 +619,14 @@ async fn stored_blob_registration_metadata_can_be_looked_up() -> Result<(), Box<
     };
 
     let registration = database.registration(&key).await?;
+    let expected_source = CorpusSourceDescriptor::BlobReference {
+        store: None,
+        digest: Sha256Digest::from_bytes(digest),
+        byte_length: expected_blob_byte_length,
+    };
 
     assert_eq!(registration.key(), &key);
-    assert!(matches!(
-        registration.source(),
-        CorpusSourceDescriptor::BlobReference { byte_length, .. }
-            if *byte_length == expected_blob_byte_length
-    ));
+    assert_eq!(registration.source(), &expected_source);
 
     pool.close().await;
     drop(container);
