@@ -91,6 +91,7 @@ function TextBody({ artifact, commandContext }: RendererProps<TextArtifact>) {
       <textarea
         className="artifact-scroll"
         aria-label={`Bounded preview of ${artifact.displayName}`}
+        onFocusCapture={() => selectArtifact(commandContext, artifact.id)}
         readOnly
         value={bounded.content}
       />
@@ -128,6 +129,7 @@ function CodeBody({ artifact, commandContext }: RendererProps<CodeArtifact>) {
       <textarea
         className="artifact-scroll"
         aria-label={`Bounded preview of ${artifact.displayName}`}
+        onFocusCapture={() => selectArtifact(commandContext, artifact.id)}
         readOnly
         value={bounded.content}
       />

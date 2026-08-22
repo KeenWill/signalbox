@@ -139,14 +139,15 @@ test('keyboard-scrolls overflowing artifact content', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('returns Escape focus to the selected artifact heading', async ({ page }) => {
+test('returns Escape focus to the artifact that owns the focused content', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/blobs')
 
+  await page.getByRole('button', { name: /incident-notes\.txt/ }).click()
   const heading = page.getByRole('button', { name: /renderer\.ts/ })
-  await heading.click()
   const preview = page.getByRole('textbox', { name: 'Bounded preview of renderer.ts' })
   await preview.focus()
+  await expect(heading).toHaveAttribute('aria-pressed', 'true')
   await page.keyboard.press('Escape')
   await expect(heading).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
