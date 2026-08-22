@@ -60,7 +60,7 @@ describe('artifact renderer compatibility', () => {
   it('bounds the initial text projection by characters', () => {
     const content = 'x'.repeat(20_000)
 
-    const bounded = boundArtifactText(content, false)
+    const bounded = boundArtifactText(content, Array.from(content).length, false)
 
     expect(bounded.content).toHaveLength(ARTIFACT_PREVIEW_CHARACTERS)
     expect(bounded.omittedCharacters).toBe(content.length - ARTIFACT_PREVIEW_CHARACTERS)
@@ -69,7 +69,7 @@ describe('artifact renderer compatibility', () => {
   it('keeps expansion below the larger hard character ceiling', () => {
     const content = 'x'.repeat(20_000)
 
-    const bounded = boundArtifactText(content, true)
+    const bounded = boundArtifactText(content, Array.from(content).length, true)
 
     expect(bounded.content).toHaveLength(ARTIFACT_EXPANDED_CHARACTERS)
     expect(bounded.omittedCharacters).toBe(content.length - ARTIFACT_EXPANDED_CHARACTERS)
@@ -78,7 +78,7 @@ describe('artifact renderer compatibility', () => {
   it('counts and truncates Unicode by code point without splitting surrogate pairs', () => {
     const content = `${'😀'.repeat(ARTIFACT_PREVIEW_CHARACTERS)}z`
 
-    const bounded = boundArtifactText(content, false)
+    const bounded = boundArtifactText(content, Array.from(content).length, false)
 
     expect(Array.from(bounded.content)).toHaveLength(ARTIFACT_PREVIEW_CHARACTERS)
     expect(bounded.content.endsWith('😀')).toBe(true)

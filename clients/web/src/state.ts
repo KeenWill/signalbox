@@ -19,6 +19,9 @@ interface AppState {
   theme: ThemeMode
   overlay: Overlay
   selectedTimeline: string | null
+  selectedArtifact: string | null
+  expandedArtifacts: Record<string, boolean>
+  originalArtifacts: Record<string, boolean>
   transcriptRange: VisibleRange
   tableRange: VisibleRange
   activitySequence: number
@@ -31,6 +34,9 @@ const initialState: AppState = {
   theme: 'dark',
   overlay: null,
   selectedTimeline: null,
+  selectedArtifact: null,
+  expandedArtifacts: {},
+  originalArtifacts: {},
   transcriptRange: { start: 0, end: 0 },
   tableRange: { start: 0, end: 0 },
   activitySequence: 0,
@@ -67,6 +73,18 @@ const appSlice = createSlice({
     },
     timelineSelected(state, action: { payload: string | null }) {
       state.selectedTimeline = action.payload
+      state.activitySequence += 1
+    },
+    artifactSelected(state, action: { payload: string | null }) {
+      state.selectedArtifact = action.payload
+      state.activitySequence += 1
+    },
+    artifactExpansionSet(state, action: { payload: { id: string; expanded: boolean } }) {
+      state.expandedArtifacts[action.payload.id] = action.payload.expanded
+      state.activitySequence += 1
+    },
+    artifactOriginalRequested(state, action: { payload: string }) {
+      state.originalArtifacts[action.payload] = true
       state.activitySequence += 1
     },
     transcriptRangeSet(state, action: { payload: VisibleRange }) {

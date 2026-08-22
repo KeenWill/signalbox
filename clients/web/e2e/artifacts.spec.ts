@@ -116,20 +116,18 @@ test('keeps remote media unavailable without a bounded owning service', async ({
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('blocks remote media without exposing a load action', async ({ page }) => {
+test('keeps a generic descriptor available as metadata and download', async ({ page }) => {
   const problems = watchBrowser(page)
-  let requests = 0
-  await page.route(remotePath, async (route) => {
-    requests += 1
-    await route.fulfill({ body: previewFixture, contentType: 'image/png' })
-  })
   await page.goto('/scenario/blobs')
-  await page.getByRole('combobox', { name: 'Remote media' }).selectOption('block')
 
-  const artifact = page.getByRole('article', { name: 'Artifact remote-status-diagram.png' })
-  await expect(artifact.getByText('remote media unavailable')).toBeVisible()
-  await expect(artifact.getByRole('button', { name: 'Load this remote image' })).toHaveCount(0)
-  expect(requests).toBe(0)
+  const artifact = page.getByRole('article', { name: 'Artifact trace.bin' })
+  await expect(artifact.getByLabel('No compatible inline renderer')).toBeVisible()
+  await expect(artifact.getByText('metadata fallback')).toBeVisible()
+  await expect(artifact.getByText('application/octet-stream')).toBeVisible()
+  await expect(artifact.getByRole('link', { name: 'Download' })).toHaveAttribute(
+    'href',
+    /display_filename=trace\.bin/,
+  )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -158,24 +156,51 @@ test('captures desktop dark artifact evidence', async ({ page }, testInfo) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('captures below-fold artifact renderer states', async ({ page }, testInfo) => {
+const captureArtifactState = async (
+  page: Page,
+  testInfo: TestInfo,
+  name: string,
+  screenshot: string,
+) => {
   skipUnlessLinuxChromium(testInfo)
   const problems = watchBrowser(page)
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.goto('/scenario/blobs')
-
-  for (const [name, screenshot] of [
-    ['Artifact orbital-map.png', 'artifact-image-state.png'],
-    ['Artifact remote-status-diagram.png', 'artifact-remote-unavailable-state.png'],
-    ['Artifact architecture.pdf', 'artifact-unimplemented-state.png'],
-    ['Artifact restricted.capture', 'artifact-blocked-state.png'],
-  ] as const) {
-    const artifact = page.getByRole('article', { name })
-    await artifact.scrollIntoViewIfNeeded()
-    await expect(artifact).toHaveScreenshot(screenshot)
-  }
-
+  const artifact = page.getByRole('article', { name })
+  await artifact.scrollIntoViewIfNeeded()
+  await expect(artifact).toHaveScreenshot(screenshot)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+}
+
+test('captures the image renderer state', async ({ page }, testInfo) => {
+  await captureArtifactState(page, testInfo, 'Artifact orbital-map.png', 'artifact-image-state.png')
+})
+
+test('captures the remote-unavailable renderer state', async ({ page }, testInfo) => {
+  await captureArtifactState(
+    page,
+    testInfo,
+    'Artifact remote-status-diagram.png',
+    'artifact-remote-unavailable-state.png',
+  )
+})
+
+test('captures the unimplemented renderer state', async ({ page }, testInfo) => {
+  await captureArtifactState(
+    page,
+    testInfo,
+    'Artifact architecture.pdf',
+    'artifact-unimplemented-state.png',
+  )
+})
+
+test('captures the blocked renderer state', async ({ page }, testInfo) => {
+  await captureArtifactState(
+    page,
+    testInfo,
+    'Artifact restricted.capture',
+    'artifact-blocked-state.png',
+  )
 })
 
 test('captures desktop light artifact evidence', async ({ page }, testInfo) => {

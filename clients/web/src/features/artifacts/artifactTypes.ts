@@ -17,12 +17,16 @@ interface ArtifactIdentity {
 
 export interface TextArtifact extends ArtifactIdentity {
   kind: 'text'
+  // The owning input boundary supplies at most the expanded projection and the full count.
   content: string
+  characterCount: number
 }
 
 export interface CodeArtifact extends ArtifactIdentity {
   kind: 'code'
+  // The owning input boundary supplies at most the expanded projection and the full count.
   content: string
+  characterCount: number
   language: string
 }
 
@@ -61,20 +65,30 @@ export interface BoundedArtifactText {
   omittedLines: boolean
 }
 
-export const boundArtifactText = (content: string, expanded: boolean): BoundedArtifactText => {
+export const boundArtifactText = (
+  content: string,
+  totalCharacters: number,
+  expanded: boolean,
+): BoundedArtifactText => {
   const characterLimit = expanded ? ARTIFACT_EXPANDED_CHARACTERS : ARTIFACT_PREVIEW_CHARACTERS
   const lineLimit = expanded ? ARTIFACT_EXPANDED_LINES : ARTIFACT_PREVIEW_LINES
-  const characters = Array.from(content)
-  const characterPrefix = characters.slice(0, characterLimit).join('')
+  let characterPrefix = ''
+  let prefixCharacters = 0
+  for (const character of content) {
+    if (prefixCharacters === characterLimit) break
+    characterPrefix += character
+    prefixCharacters += 1
+  }
   const lines = characterPrefix.split('\n', lineLimit + 1)
   const omittedLines = lines.length > lineLimit
   const boundedLines = omittedLines ? lines.slice(0, lineLimit) : lines
   const bounded = boundedLines.join('\n')
-  const boundedCharacterCount = Array.from(bounded).length
+  let boundedCharacterCount = 0
+  for (const _character of bounded) boundedCharacterCount += 1
 
   return {
     content: bounded,
-    omittedCharacters: Math.max(characters.length - boundedCharacterCount, 0),
+    omittedCharacters: Math.max(totalCharacters - boundedCharacterCount, 0),
     omittedLines,
   }
 }
