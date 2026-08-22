@@ -132,10 +132,13 @@ test('replaces the current bounded page instead of accumulating attention histor
 
   await expect(page.getByRole('listitem')).toHaveCount(3)
   await page.getByRole('button', { name: /Next page/ }).click()
+  const returnToLive = page.getByRole('button', { name: 'Return to live page' })
   await expect(page.getByRole('listitem')).toHaveCount(1)
   await expect(page.getByText(idleSessionId)).toBeVisible()
   await expect(page.getByText(approvalSessionId)).toBeHidden()
-  await expect(page.getByRole('button', { name: 'Return to live page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '1 sessions', level: 2 })).toBeFocused()
+  await returnToLive.click()
+  await expect(page.getByRole('heading', { name: '3 sessions', level: 2 })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

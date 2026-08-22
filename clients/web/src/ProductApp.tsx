@@ -333,6 +333,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               ? 'Operational reads are disabled because the browser could not validate the daemon contract.'
               : 'Operational reads will begin after the daemon contract has been validated.'}
           </p>
+          {bootstrap.isError && (
+            <button type="button" onClick={() => void bootstrap.refetch()}>
+              Retry contract validation
+            </button>
+          )}
         </div>
       </section>
     ) : surface === 'attention' ? (

@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowRight, Radio, RefreshCw, X } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { type AttentionSyncPhase, synchronizeAttention } from './attention'
 import type { WebAttentionSnapshot } from './generated/web-contract.mjs'
 import { ProductRequestError, productTransport } from './product'
@@ -40,6 +40,8 @@ export function AttentionSurface() {
   const [monitorGeneration, setMonitorGeneration] = useState(0)
   const returnFocus = useRef<HTMLButtonElement>(null)
   const closeFocus = useRef<HTMLButtonElement>(null)
+  const pageHeadingFocus = useRef<HTMLHeadingElement>(null)
+  const pageFocusPending = useRef<string | null | undefined>(undefined)
   const attention = useQuery({
     queryKey: queryKey(after),
     queryFn: ({ signal }) => productTransport.readAttention(after ?? undefined, signal),
@@ -74,6 +76,12 @@ export function AttentionSurface() {
     return () => cancelAnimationFrame(frame)
   }, [selectedId])
 
+  useLayoutEffect(() => {
+    if (pageFocusPending.current !== after || !attention.data) return
+    pageFocusPending.current = undefined
+    pageHeadingFocus.current?.focus()
+  }, [after, attention.data])
+
   const open = (summary: AttentionSummary, button: HTMLButtonElement) => {
     returnFocus.current = button
     setSelectedId(summary.session_id)
@@ -83,7 +91,12 @@ export function AttentionSurface() {
     const continuation = attention.data?.continuation_after_session_id
     if (!continuation) return
     setSelectedId(null)
+    pageFocusPending.current = continuation
     setAfter(continuation)
+  }
+  const returnToLivePage = () => {
+    pageFocusPending.current = null
+    setAfter(null)
   }
 
   return (
@@ -122,7 +135,7 @@ export function AttentionSurface() {
 
       {after && (
         <div className="attention-page-controls">
-          <button type="button" onClick={() => setAfter(null)}>
+          <button type="button" onClick={returnToLivePage}>
             Return to live page
           </button>
         </div>
@@ -134,7 +147,9 @@ export function AttentionSurface() {
             <header>
               <div>
                 <span className="eyebrow">Bounded intervention fleet</span>
-                <h2 id="attention-heading">{attention.data.summaries.length} sessions</h2>
+                <h2 id="attention-heading" ref={pageHeadingFocus} tabIndex={-1}>
+                  {attention.data.summaries.length} sessions
+                </h2>
               </div>
               <code>cursor {attention.data.cursor}</code>
             </header>

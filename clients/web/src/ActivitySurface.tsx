@@ -797,16 +797,23 @@ export function ActivitySurface() {
         </div>
       </section>
 
-      {repositories.data?.continuation_after_repository && (
-        <button
-          type="button"
-          onClick={() =>
-            setRepositoryAfter(repositories.data?.continuation_after_repository ?? null)
-          }
-        >
-          Next repository page
-        </button>
-      )}
+      <div className="activity-page-controls">
+        {repositoryAfter && (
+          <button type="button" onClick={() => setRepositoryAfter(null)}>
+            First repository page
+          </button>
+        )}
+        {repositories.data?.continuation_after_repository && (
+          <button
+            type="button"
+            onClick={() =>
+              setRepositoryAfter(repositories.data?.continuation_after_repository ?? null)
+            }
+          >
+            Next repository page
+          </button>
+        )}
+      </div>
     </div>
   )
 }
