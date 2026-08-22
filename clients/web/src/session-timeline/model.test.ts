@@ -1291,7 +1291,7 @@ describe('BoundedSessionHistory', () => {
             },
           ],
           projected_body_bytes: 128,
-          continuation: { type: 'more_at', address: { event_sequence: detailAddress } },
+          continuation: { type: 'more_at', address: { event_sequence: '42' } },
         }),
       ),
     )
