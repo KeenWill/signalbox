@@ -1,14 +1,46 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { SameOriginProductTransport } from './product'
+import { ProductRequestError, readProductSearchState, SameOriginProductTransport } from './product'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '1' },
   capabilities: {
     bounded_json: true,
+    bounded_lexical_search: true,
+    bounded_session_timeline: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
+  limits: {
+    max_json_body_bytes: 65_536,
+    max_ndjson_item_bytes: 262_144,
+    max_search_query_bytes: 512,
+    max_search_page_items: 100,
+    max_search_snippet_bytes: 512,
+    max_timeline_window_bytes: 524_288,
+    max_timeline_window_items: 256,
+  },
+} as const
+
+const searchPageFixture = {
+  results: [
+    {
+      session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d',
+      address: { event_sequence: '901' },
+      source: { kind: 'session', session_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d' },
+      content_class: 'session_metadata',
+      snippet: 'search fixture',
+      highlights: [{ start_byte: 0, end_byte: 6 }],
+    },
+  ],
+  continuation: null,
+} as const
+
+const errorFixture = {
+  error: {
+    code: 'search_projection_unavailable',
+    kind: 'application',
+    message: 'search projection is not configured',
+  },
 } as const
 
 afterEach(() => vi.unstubAllGlobals())
@@ -43,5 +75,54 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('status 503')
+  })
+
+  it('decodes a bounded search page and sends product vocabulary', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(searchPageFixture)))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const page = await new SameOriginProductTransport().search({
+      query: 'natural terms',
+      sessionId: searchPageFixture.results[0].session_id,
+      maxItems: 100,
+      after: { address: '500', projectionId: '42' },
+    })
+
+    expect(page).toEqual(searchPageFixture)
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/search?strategy=lexical&q=natural+terms&max_items=100&session_id=${searchPageFixture.results[0].session_id}&after_address=500&after_projection=42`,
+      expect.objectContaining({ credentials: 'same-origin' }),
+    )
+  })
+
+  it('preserves a typed application search failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(errorFixture), { status: 503 })),
+    )
+
+    const request = new SameOriginProductTransport().search({ query: 'term', maxItems: 10 })
+
+    await expect(request).rejects.toEqual(
+      new ProductRequestError(
+        errorFixture.error.code,
+        errorFixture.error.kind,
+        errorFixture.error.message,
+      ),
+    )
+  })
+})
+
+describe('readProductSearchState', () => {
+  it('keeps only nonempty typed URL fields', () => {
+    expect(
+      readProductSearchState({ q: 'term', session: '', afterAddress: 7, around: '901' }),
+    ).toEqual({
+      q: 'term',
+      session: undefined,
+      afterAddress: undefined,
+      afterProjection: undefined,
+      around: '901',
+    })
   })
 })

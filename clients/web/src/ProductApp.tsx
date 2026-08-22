@@ -20,7 +20,13 @@ import {
   globalHotkeyBindings,
   invokeCommand,
 } from './commands'
-import { type ProductRouteId, productRoutes, productTransport } from './product'
+import {
+  type ProductRouteId,
+  type ProductSearchState,
+  productRoutes,
+  productTransport,
+} from './product'
+import { SearchSurface } from './SearchSurface'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
 const surfaceCopy: Record<
@@ -287,7 +293,13 @@ function ProductToolbar({ context }: { context: CommandContext }) {
   )
 }
 
-export function ProductApp({ surface }: { surface: ProductRouteId }) {
+export function ProductApp({
+  surface,
+  search,
+}: {
+  surface: ProductRouteId
+  search: ProductSearchState
+}) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
@@ -320,11 +332,17 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [app.density, app.theme])
 
   const copy = surfaceCopy[surface]
+  const updateSearch = (next: ProductSearchState) =>
+    void navigate({ to: '/$surface', params: { surface }, search: next })
   const content =
     surface === 'attention' ? (
       <AttentionSurface />
     ) : surface === 'sessions' ? (
       <SessionsSurface />
+    ) : surface === 'search' && bootstrap.data?.capabilities.bounded_lexical_search === false ? (
+      <DeferredSurface surface="search" />
+    ) : surface === 'search' ? (
+      <SearchSurface bootstrap={bootstrap.data} state={search} onStateChange={updateSearch} />
     ) : (
       <DeferredSurface surface={surface} />
     )

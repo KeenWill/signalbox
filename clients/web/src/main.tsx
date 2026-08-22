@@ -13,7 +13,7 @@ import { lazy, StrictMode, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
 import { ProductApp } from './ProductApp'
-import { type ProductRouteId, productRoutes } from './product'
+import { type ProductRouteId, productRoutes, readProductSearchState } from './product'
 import { store } from './state'
 import './app.css'
 
@@ -29,12 +29,14 @@ const indexRoute = createRoute({
 const productRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/$surface',
+  validateSearch: readProductSearchState,
   component: () => {
     const candidate = productRoute.useParams().surface
+    const search = productRoute.useSearch()
     if (!productRoutes.some((route) => route.id === candidate)) {
       return <Navigate to="/$surface" params={{ surface: 'attention' }} replace />
     }
-    return <ProductApp surface={candidate as ProductRouteId} />
+    return <ProductApp surface={candidate as ProductRouteId} search={search} />
   },
 })
 const scenarioRoute = createRoute({
