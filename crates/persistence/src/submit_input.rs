@@ -1676,8 +1676,8 @@ where
         None => {}
     }
     if let Some(maximum_bytes) = maximum_attachment_bytes {
-        if matches!(recorded, SubmitInputResult::Applied(_))
-            && prospective_attachment_frontier_exceeds_bound(
+        if let Some(observed_bytes) = if matches!(recorded, SubmitInputResult::Applied(_)) {
+            prospective_attachment_frontier_exceeds_bound(
                 connection,
                 frontier_command.session(),
                 &prior_queued_inputs,
@@ -1685,11 +1685,14 @@ where
                 maximum_bytes,
             )
             .await?
-        {
+        } else {
+            None
+        } {
             sqlx::query("ROLLBACK TO SAVEPOINT submit_input_attachment_frontier")
                 .execute(&mut *connection)
                 .await?;
-            let rejected = frontier_command.prepare_attachment_bytes_too_large(maximum_bytes);
+            let rejected =
+                frontier_command.prepare_attachment_bytes_too_large(maximum_bytes, observed_bytes);
             let recorded = rejected.result().clone();
             insert_prepared_command(connection, &rejected).await?;
             insert_prepared_effects(connection, rejected).await?;
@@ -1715,7 +1718,7 @@ async fn prospective_attachment_frontier_exceeds_bound(
     prior_queued_inputs: &[AcceptedInputId],
     result: &SubmitInputResult,
     maximum_bytes: NonZeroU64,
-) -> Result<bool, SubmitInputRepositoryError> {
+) -> Result<Option<NonZeroU64>, SubmitInputRepositoryError> {
     let current = match load_session_from_connection(connection, session).await {
         Ok(Some(session)) => session,
         Ok(None) => {
@@ -1979,7 +1982,7 @@ async fn prospective_attachment_frontier_exceeds_bound(
         )?;
     }
     if check_base && total > maximum_bytes.get() {
-        return Ok(true);
+        return Ok(NonZeroU64::new(total));
     }
     for (index, accepted_input) in queued_inputs.iter().enumerate() {
         if let Some(reset_origins) = queued_reset_origins.get(&index) {
@@ -2005,10 +2008,10 @@ async fn prospective_attachment_frontier_exceeds_bound(
                 .unwrap_or(&[]),
         )?;
         if index >= first_changed_queue && total > maximum_bytes.get() {
-            return Ok(true);
+            return Ok(NonZeroU64::new(total));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 async fn delegated_parked_attachment_frontier_origins(
@@ -2245,9 +2248,13 @@ async fn prepare_attachment_admission(
             ))
     })?;
     if aggregate > maximum_bytes.get() {
-        return Ok(Some(
-            command.prepare_attachment_bytes_too_large(maximum_bytes),
-        ));
+        let observed_bytes = NonZeroU64::new(aggregate).ok_or(
+            SubmitInputCorruption::Inconsistent("attachment byte length sum is not positive"),
+        )?;
+        return Ok(Some(command.prepare_attachment_bytes_too_large(
+            maximum_bytes,
+            observed_bytes,
+        )));
     }
     Ok(None)
 }
@@ -6388,6 +6395,13 @@ async fn insert_prepared_command(
     let actor = encode_actor(command.actor());
     let delivery = encode_delivery(command.delivery());
     let result = encode_result(prepared.result(), command.delivery());
+    let result_observed_attachment_bytes = match prepared.result() {
+        SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentBytesTooLarge {
+            observed_bytes,
+            ..
+        }) => Some(Decimal::from(observed_bytes.get())),
+        SubmitInputResult::Applied(_) | SubmitInputResult::Rejected(_) => None,
+    };
 
     sqlx::query(
         "INSERT INTO submit_input_command
@@ -6404,11 +6418,11 @@ async fn insert_prepared_command(
              result_current_defaults_version, result_unknown_alias_id,
              result_selected_defaults_version, result_last_position,
              result_existing_interrupt_command_id, result_blob_digest,
-             result_maximum_attachment_bytes)
+             result_maximum_attachment_bytes, result_observed_attachment_bytes)
          VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
              $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
-             $24, $25, $26, $27, $28, $29, $30, $31)",
+             $24, $25, $26, $27, $28, $29, $30, $31, $32)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(SUBMIT_INPUT_KIND)
@@ -6441,6 +6455,7 @@ async fn insert_prepared_command(
     .bind(result.existing_interrupt_command)
     .bind(result.blob_digest)
     .bind(result.maximum_attachment_bytes)
+    .bind(result_observed_attachment_bytes)
     .execute(&mut *connection)
     .await?;
 
@@ -6952,6 +6967,7 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
         SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentBytesTooLarge {
             session,
             maximum_bytes,
+            observed_bytes: _,
         }) => EncodedResult {
             kind: REJECTED,
             rejection_kind: Some("attachment_byte_budget_exceeded"),
@@ -7269,6 +7285,7 @@ async fn load_complete_rows(
             typed.result_existing_interrupt_command_id,
             typed.result_blob_digest,
             typed.result_maximum_attachment_bytes,
+            typed.result_observed_attachment_bytes,
             accepted.accepting_command_id,
             accepted.accepted_input_id,
             accepted.session_id AS accepted_session_id,
@@ -8380,6 +8397,8 @@ fn decode_complete(
     let result_blob_digest: Option<Vec<u8>> = row.try_get("result_blob_digest")?;
     let result_maximum_attachment_bytes: Option<Decimal> =
         row.try_get("result_maximum_attachment_bytes")?;
+    let result_observed_attachment_bytes: Option<Decimal> =
+        row.try_get("result_observed_attachment_bytes")?;
     let accepted_effect_count: i64 = required(&row, "accepted_effect_count")?;
     let queued_effect_count: i64 = required(&row, "queued_effect_count")?;
 
@@ -8481,6 +8500,7 @@ fn decode_complete(
                 existing_interrupt,
                 result_blob_digest,
                 result_maximum_attachment_bytes,
+                result_observed_attachment_bytes,
             )?
         }
         (APPLIED, Some(_)) | (REJECTED, None) => {
@@ -8755,6 +8775,7 @@ fn decode_rejected(
     existing_interrupt: Option<AppliedInterruptCommandResult>,
     blob_digest: Option<Vec<u8>>,
     maximum_attachment_bytes: Option<Decimal>,
+    observed_attachment_bytes: Option<Decimal>,
 ) -> Result<SubmitInputReconstitutionInput, SubmitInputRepositoryError> {
     if !matches!(
         rejection_kind,
@@ -8769,10 +8790,10 @@ fn decode_rejected(
         return Err(SubmitInputCorruption::Inconsistent("unexpected blob digest result").into());
     }
     if !matches!(rejection_kind, "attachment_byte_budget_exceeded")
-        && maximum_attachment_bytes.is_some()
+        && (maximum_attachment_bytes.is_some() || observed_attachment_bytes.is_some())
     {
         return Err(
-            SubmitInputCorruption::Inconsistent("unexpected attachment maximum result").into(),
+            SubmitInputCorruption::Inconsistent("unexpected attachment byte result").into(),
         );
     }
     match rejection_kind {
@@ -8822,6 +8843,17 @@ fn decode_rejected(
             .ok_or(SubmitInputCorruption::Inconsistent(
                 "result attachment maximum",
             ))?;
+            let observed_bytes = NonZeroU64::new(
+                positive_u64_from_numeric(observed_attachment_bytes.ok_or(
+                    SubmitInputCorruption::Missing("result_observed_attachment_bytes"),
+                )?)
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("result attachment observed bytes")
+                })?,
+            )
+            .ok_or(SubmitInputCorruption::Inconsistent(
+                "result attachment observed bytes",
+            ))?;
             Ok(
                 SubmitInputReconstitutionInput::rejected_attachment_bytes_too_large(
                     SubmitInputRejectedAttachmentBytesTooLargeReconstitutionInput {
@@ -8829,6 +8861,7 @@ fn decode_rejected(
                         stored_actor,
                         result_session,
                         result_maximum_bytes: maximum_bytes,
+                        result_observed_bytes: observed_bytes,
                     },
                 ),
             )

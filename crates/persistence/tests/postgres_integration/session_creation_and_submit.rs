@@ -3264,11 +3264,11 @@ async fn unknown_attachment_fixture() -> Result<UnknownAttachmentFixture, Box<dy
     })
 }
 
-/// INV-012 / INV-061: an unknown attachment is rejected only after the durable
+/// INV-012 / INV-071: an unknown attachment is rejected only after the durable
 /// command identity is claimed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_inv061_unknown_attachment_is_a_post_claim_rejection() -> Result<(), Box<dyn Error>>
+async fn inv012_inv071_unknown_attachment_is_a_post_claim_rejection() -> Result<(), Box<dyn Error>>
 {
     let fixture = unknown_attachment_fixture().await?;
     assert_eq!(
@@ -3467,11 +3467,11 @@ fn distinct_attachment_command(
     )
 }
 
-/// INV-061: repeated references to one digest consume its catalogued length
+/// INV-071: repeated references to one digest consume its catalogued length
 /// only once.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_attachment_admission_counts_a_repeated_digest_once() -> Result<(), Box<dyn Error>> {
+async fn inv071_attachment_admission_counts_a_repeated_digest_once() -> Result<(), Box<dyn Error>> {
     let fixture = attachment_budget_fixture().await?;
     let repeated = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb322)),
@@ -3499,11 +3499,11 @@ async fn inv061_attachment_admission_counts_a_repeated_digest_once() -> Result<(
     Ok(())
 }
 
-/// INV-061: distinct catalogued digest lengths above the deployment maximum
+/// INV-071: distinct catalogued digest lengths above the deployment maximum
 /// produce the typed rejection and durable maximum evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_distinct_attachment_bytes_above_the_maximum_are_rejected()
+async fn inv071_distinct_attachment_bytes_above_the_maximum_are_rejected()
 -> Result<(), Box<dyn Error>> {
     let fixture = attachment_budget_fixture().await?;
     let distinct_command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xb325));
@@ -3521,6 +3521,7 @@ async fn inv061_distinct_attachment_bytes_above_the_maximum_are_rejected()
             SubmitInputRejectedResult::AttachmentBytesTooLarge {
                 session: fixture.session,
                 maximum_bytes: fixture.maximum,
+                observed_bytes: NonZeroU64::new(33).expect("the aggregate is positive"),
             }
         ))
     );
@@ -3657,6 +3658,7 @@ async fn queued_frontier_fixture() -> Result<QueuedFrontierFixture, Box<dyn Erro
         SubmitInputRejectedResult::AttachmentBytesTooLarge {
             session,
             maximum_bytes: maximum,
+            observed_bytes: NonZeroU64::new(14).expect("the aggregate is positive"),
         },
     ));
     let first_outcome = repository
@@ -3677,12 +3679,12 @@ async fn queued_frontier_fixture() -> Result<QueuedFrontierFixture, Box<dyn Erro
     })
 }
 
-/// INV-061: a newly queued input is rejected when the complete prospective
+/// INV-071: a newly queued input is rejected when the complete prospective
 /// rendered frontier, rather than either input alone, exceeds the attachment
 /// verification bound.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_queued_input_checks_the_complete_prospective_attachment_frontier()
+async fn inv071_queued_input_checks_the_complete_prospective_attachment_frontier()
 -> Result<(), Box<dyn Error>> {
     let fixture = queued_frontier_fixture().await?;
     assert_eq!(fixture.first_outcome, fixture.expected);
@@ -3710,11 +3712,11 @@ async fn inv012_queued_frontier_rejection_replays_exactly() -> Result<(), Box<dy
     Ok(())
 }
 
-/// INV-061: a rejected queued frontier rolls back every provisional accepted
+/// INV-071: a rejected queued frontier rolls back every provisional accepted
 /// input and queue-origin effect.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_queued_frontier_rejection_rolls_back_provisional_effects()
+async fn inv071_queued_frontier_rejection_rolls_back_provisional_effects()
 -> Result<(), Box<dyn Error>> {
     let fixture = queued_frontier_fixture().await?;
     let effects: (i64, i64) = sqlx::query_as(
@@ -3840,6 +3842,7 @@ async fn steering_frontier_fixture() -> Result<SteeringFrontierFixture, Box<dyn 
         SubmitInputRejectedResult::AttachmentBytesTooLarge {
             session,
             maximum_bytes: maximum,
+            observed_bytes: NonZeroU64::new(14).expect("the aggregate is positive"),
         },
     ));
     let first_outcome = repository
@@ -3861,11 +3864,11 @@ async fn steering_frontier_fixture() -> Result<SteeringFrontierFixture, Box<dyn 
     })
 }
 
-/// INV-061: pending steering is rejected when it would make a queued
+/// INV-071: pending steering is rejected when it would make a queued
 /// successor's eventual rendered frontier exceed the attachment bound.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_pending_steering_rechecks_affected_queued_attachment_frontiers()
+async fn inv071_pending_steering_rechecks_affected_queued_attachment_frontiers()
 -> Result<(), Box<dyn Error>> {
     let fixture = steering_frontier_fixture().await?;
     assert_eq!(fixture.first_outcome, fixture.expected);
@@ -3893,11 +3896,11 @@ async fn inv012_steering_frontier_rejection_replays_exactly() -> Result<(), Box<
     Ok(())
 }
 
-/// INV-061: a rejected steering frontier rolls back the provisional pending
+/// INV-071: a rejected steering frontier rolls back the provisional pending
 /// steering while preserving the active and queued origins.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_steering_frontier_rejection_rolls_back_provisional_effects()
+async fn inv071_steering_frontier_rejection_rolls_back_provisional_effects()
 -> Result<(), Box<dyn Error>> {
     let fixture = steering_frontier_fixture().await?;
     let effects: (i64, i64, i64) = sqlx::query_as(

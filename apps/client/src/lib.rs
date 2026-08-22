@@ -461,6 +461,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
             detail,
         },
         ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionCommissioned { .. }
         | ServerMessage::SessionPlacementUpdated { .. }
         | ServerMessage::InputSubmitted { .. }
         | ServerMessage::SteeringSubmitted { .. }
@@ -562,6 +563,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
             detail,
         },
         ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionCommissioned { .. }
         | ServerMessage::SessionSpawned { .. }
         | ServerMessage::SessionAwaitRegistered { .. }
         | ServerMessage::ChildResult { .. }
@@ -675,6 +677,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
             detail,
         },
         ServerMessage::SessionCreated { .. }
+        | ServerMessage::SessionCommissioned { .. }
         | ServerMessage::SessionSpawned { .. }
         | ServerMessage::SessionAwaitRegistered { .. }
         | ServerMessage::ChildResult { .. }
