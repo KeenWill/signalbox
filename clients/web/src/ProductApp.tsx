@@ -456,11 +456,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </div>
             <div>
               <dt>Authority</dt>
-              <dd>Daemon</dd>
+              <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
             </div>
             <div>
               <dt>Cache</dt>
-              <dd>Bounded query</dd>
+              <dd>{surface === 'settings' ? 'Local preferences' : 'Bounded query'}</dd>
             </div>
           </dl>
         </aside>

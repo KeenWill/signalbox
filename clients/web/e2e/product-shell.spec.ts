@@ -68,6 +68,10 @@ test('describes Settings as browser-local rather than daemon-backed', async ({ p
   await expect(
     page.getByText('Operational data is not exposed by this daemon contract'),
   ).toHaveCount(0)
+  const inspector = page.getByRole('complementary', { name: 'Inspector' })
+  await expect(inspector.getByText('Browser', { exact: true })).toBeVisible()
+  await expect(inspector.getByText('Local preferences', { exact: true })).toBeVisible()
+  await expect(inspector.getByText('Daemon', { exact: true })).toHaveCount(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
