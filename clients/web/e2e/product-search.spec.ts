@@ -87,7 +87,7 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
   )
 }
 
-test('searches and reveals an unloaded logical address without a mouse', async ({ page }) => {
+test('searches without advertising an unavailable session reveal', async ({ page }) => {
   const problems = watchBrowser(page)
   await useSearchFixture(page)
   await page.goto('/search')
@@ -95,12 +95,19 @@ test('searches and reveals an unloaded logical address without a mouse', async (
 
   await expect(page).toHaveURL(/q=release(?:\+|%20)evidence/)
   await expect(page.getByText('durable release evidence')).toContainText('release')
-  const reveal = page.getByRole('link', { name: 'Reveal in session' }).first()
-  await reveal.focus()
-  await page.keyboard.press('Enter')
-  await expect(page).toHaveURL(new RegExp(`/sessions\\?session=${sessionId}.*around=%22901%22`))
-  await expect(page.getByRole('heading', { name: 'Sessions', level: 1 })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Reveal in session' })).toHaveCount(0)
+  await expect(page.getByText('Session reveal unavailable').first()).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('does not announce query validation before bootstrap limits load', async ({ page }) => {
+  await page.route('**/api/bootstrap', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    await route.fulfill({ json: bootstrapFixture })
+  })
+  await page.goto('/search?q=release')
+
+  await expect(page.getByRole('alert')).toHaveCount(0)
 })
 
 test('replaces the bounded result page through its typed cursor', async ({ page }) => {

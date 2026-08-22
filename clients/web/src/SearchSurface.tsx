@@ -1,5 +1,4 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
 import { ArrowRight, Search } from 'lucide-react'
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react'
 import type { WebContractBootstrap, WebSearchPage } from './generated/web-contract.mjs'
@@ -135,7 +134,7 @@ export function SearchSurface({
           Search
         </button>
       </form>
-      {queryText && !requestIsValid && (
+      {bootstrap !== undefined && queryText && !requestIsValid && (
         <p className="search-notice" role="alert">
           Search text uses {queryBytes} of {queryLimit} allowed UTF-8 bytes.
         </p>
@@ -215,13 +214,7 @@ export function SearchSurface({
                   <p>{highlightedSnippet(result)}</p>
                   <div className="search-result-footer">
                     <span>{result.session_id}</span>
-                    <Link
-                      to="/$surface"
-                      params={{ surface: 'sessions' }}
-                      search={{ session: result.session_id, around: result.address.event_sequence }}
-                    >
-                      Reveal in session <ArrowRight aria-hidden="true" />
-                    </Link>
+                    <span>Session reveal unavailable</span>
                   </div>
                 </li>
               ))}

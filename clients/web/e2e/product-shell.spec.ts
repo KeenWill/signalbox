@@ -123,6 +123,31 @@ test('runs product navigation sequences but leaves Mod+K to an editing field', a
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('suppresses product navigation sequences while an overlay owns input', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+})
+
+test('changes visible product spacing with the density control', async ({ page }) => {
+  await useDeterministicBootstrap(page)
+  await page.goto('/search')
+
+  const surface = page.locator('.surface-body')
+  const compactPadding = await surface.evaluate((element) => getComputedStyle(element).paddingTop)
+  await page.getByRole('button', { name: 'Use comfortable density' }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-density', 'comfortable')
+  const comfortablePadding = await surface.evaluate(
+    (element) => getComputedStyle(element).paddingTop,
+  )
+  expect(comfortablePadding).not.toBe(compactPadding)
+})
+
 test('retries an initial bootstrap failure', async ({ page }) => {
   const problems = watchBrowser(page)
   const expectedFailureMessage =

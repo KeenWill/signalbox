@@ -209,4 +209,10 @@ describe('readProductSearchState', () => {
       around: '901',
     })
   })
+
+  it('preserves JSON-like numeric and boolean query text', () => {
+    expect(readProductSearchState({ q: 2026 }).q).toBe('2026')
+    expect(readProductSearchState({ q: true }).q).toBe('true')
+    expect(readProductSearchState({ q: null }).q).toBe('null')
+  })
 })

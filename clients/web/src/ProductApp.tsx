@@ -350,7 +350,7 @@ export function ProductApp({
     globalHotkeySequenceBindings.map((binding) => ({
       sequence: binding.sequence,
       callback: (event) => {
-        if (isEditableTarget(event.target)) return
+        if (isEditableTarget(event.target) || app.overlay !== null) return
         invokeCommand(binding.commandId, context)
       },
     })),

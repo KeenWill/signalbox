@@ -111,8 +111,15 @@ const validateSearchPageBounds = (
 export const readProductSearchState = (value: Record<string, unknown>): ProductSearchState => {
   const text = (key: keyof ProductSearchState) =>
     typeof value[key] === 'string' && value[key].length > 0 ? value[key] : undefined
+  const query = value.q
+  const q =
+    typeof query === 'string'
+      ? query || undefined
+      : typeof query === 'number' || typeof query === 'boolean' || query === null
+        ? String(query)
+        : undefined
   return {
-    q: text('q'),
+    q,
     session: text('session'),
     afterAddress: text('afterAddress'),
     afterProjection: text('afterProjection'),
