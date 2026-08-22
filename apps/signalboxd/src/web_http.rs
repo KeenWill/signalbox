@@ -249,13 +249,16 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
     let state = WebApiState {
         timeline: pool.map(SessionTimelineRepository::new),
     };
-    let api = Router::new()
-        .route("/bootstrap", get(contract_bootstrap))
+    let session_reads = Router::new()
         .route("/sessions/{session_id}", get(session_descriptor))
         .route(
             "/sessions/{session_id}/timeline",
             get(session_timeline_window),
         )
+        .route_layer(middleware::from_fn(validate_loopback_host));
+    let api = Router::new()
+        .route("/bootstrap", get(contract_bootstrap))
+        .merge(session_reads)
         .with_state(state)
         .fallback(api_not_found);
     let router = Router::new().nest("/api", api);
@@ -272,6 +275,32 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
 #[derive(Clone, Debug)]
 struct WebApiState {
     timeline: Option<SessionTimelineRepository>,
+}
+
+async fn validate_loopback_host(request: Request, next: Next) -> Response {
+    let loopback = request
+        .headers()
+        .get(HOST)
+        .and_then(|host| host.to_str().ok())
+        .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
+        .is_some_and(|authority| {
+            let host = authority.host();
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .strip_prefix('[')
+                    .and_then(|host| host.strip_suffix(']'))
+                    .unwrap_or(host)
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+    if !loopback {
+        return transport_error(
+            StatusCode::FORBIDDEN,
+            "non_loopback_host_rejected",
+            "session reads require a loopback request authority",
+        );
+    }
+    next.run(request).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -1197,6 +1226,7 @@ mod tests {
         let request = Request::get(
             "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?max_items=nope",
         )
+        .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
         let response = production_router(None, None)
@@ -1217,6 +1247,7 @@ mod tests {
         let request = Request::get(
             "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?anchor=first&max_items=1",
         )
+        .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
         let response = production_router(None, None)
@@ -1229,6 +1260,25 @@ mod tests {
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["code"], "invalid_timeline_limits");
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_non_loopback_host_authorities() {
+        let request = Request::get("/api/sessions/00000000-0000-0000-0000-000000000991")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["kind"], "transport");
+        assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
     }
 
     #[test]
