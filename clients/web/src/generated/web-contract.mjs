@@ -105,6 +105,46 @@ const schemas = {
         ],
         "type": "string"
       },
+      "WebAttentionContinuation": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "last_activity",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              },
+              "unix_microseconds": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "unix_microseconds",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "session_identity",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WebAttentionGoalBlock": {
         "additionalProperties": false,
         "properties": {
@@ -150,6 +190,13 @@ const schemas = {
         ],
         "type": "object"
       },
+      "WebAttentionSort": {
+        "enum": [
+          "last_activity_descending",
+          "session_identity_ascending"
+        ],
+        "type": "string"
+      },
       "WebAttentionState": {
         "enum": [
           "active",
@@ -176,6 +223,12 @@ const schemas = {
               }
             ]
           },
+          "active_turn_count": {
+            "type": "string"
+          },
+          "archived": {
+            "type": "boolean"
+          },
           "current_turn_id": {
             "type": [
               "string",
@@ -198,15 +251,31 @@ const schemas = {
           "last_activity": {
             "$ref": "#/$defs/WebAttentionActivity"
           },
+          "queued_turn_count": {
+            "type": "string"
+          },
           "session_id": {
             "type": "string"
           },
           "state": {
             "$ref": "#/$defs/WebAttentionState"
+          },
+          "title_summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title_truncated": {
+            "type": "boolean"
           }
         },
         "required": [
           "session_id",
+          "title_truncated",
+          "archived",
+          "active_turn_count",
+          "queued_turn_count",
           "state",
           "judge",
           "last_activity"
@@ -217,24 +286,36 @@ const schemas = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "properties": {
-      "continuation_after_session_id": {
-        "type": [
-          "string",
-          "null"
+      "continuation": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebAttentionContinuation"
+          },
+          {
+            "type": "null"
+          }
         ]
       },
       "cursor": {
         "type": "string"
+      },
+      "sort": {
+        "$ref": "#/$defs/WebAttentionSort"
       },
       "summaries": {
         "items": {
           "$ref": "#/$defs/WebAttentionSummary"
         },
         "type": "array"
+      },
+      "total": {
+        "type": "string"
       }
     },
     "required": [
       "cursor",
+      "total",
+      "sort",
       "summaries"
     ],
     "title": "WebAttentionSnapshot",
@@ -286,6 +367,46 @@ const schemas = {
         ],
         "type": "string"
       },
+      "WebAttentionContinuation": {
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "last_activity",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              },
+              "unix_microseconds": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "unix_microseconds",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "session_identity",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WebAttentionGoalBlock": {
         "additionalProperties": false,
         "properties": {
@@ -334,27 +455,46 @@ const schemas = {
       "WebAttentionSnapshot": {
         "additionalProperties": false,
         "properties": {
-          "continuation_after_session_id": {
-            "type": [
-              "string",
-              "null"
+          "continuation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionContinuation"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "cursor": {
             "type": "string"
+          },
+          "sort": {
+            "$ref": "#/$defs/WebAttentionSort"
           },
           "summaries": {
             "items": {
               "$ref": "#/$defs/WebAttentionSummary"
             },
             "type": "array"
+          },
+          "total": {
+            "type": "string"
           }
         },
         "required": [
           "cursor",
+          "total",
+          "sort",
           "summaries"
         ],
         "type": "object"
+      },
+      "WebAttentionSort": {
+        "enum": [
+          "last_activity_descending",
+          "session_identity_ascending"
+        ],
+        "type": "string"
       },
       "WebAttentionState": {
         "enum": [
@@ -382,6 +522,12 @@ const schemas = {
               }
             ]
           },
+          "active_turn_count": {
+            "type": "string"
+          },
+          "archived": {
+            "type": "boolean"
+          },
           "current_turn_id": {
             "type": [
               "string",
@@ -404,15 +550,31 @@ const schemas = {
           "last_activity": {
             "$ref": "#/$defs/WebAttentionActivity"
           },
+          "queued_turn_count": {
+            "type": "string"
+          },
           "session_id": {
             "type": "string"
           },
           "state": {
             "$ref": "#/$defs/WebAttentionState"
+          },
+          "title_summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title_truncated": {
+            "type": "boolean"
           }
         },
         "required": [
           "session_id",
+          "title_truncated",
+          "archived",
+          "active_turn_count",
+          "queued_turn_count",
           "state",
           "judge",
           "last_activity"

@@ -186,23 +186,13 @@ process protocol. No process-protocol frame is a browser DTO. The descriptor and
 historical-window route shapes and semantics are owned by
 [Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline).
 
-`GET /api/attention` returns at most 64 session summaries from one read-only
-repeatable-read snapshot, ordered by session identity. A continuation names the
-last session identity and opens the next keyset page; it is not a count-based or
-fixed-tail feed. Each summary carries the current turn classification, exact
-operator action when one is owed, a typed blocked-goal reason and a need summary
-of at most 128 Unicode scalar values, approval-judge outcome counts, and the
-last transaction-timestamped durable activity fact. Exact blocked-goal need text
-remains available from the session detail read rather than entering the hot
-fleet page.
+The bounded session catalog route and row semantics are owned by
+[Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-catalog).
+The projection uses one set query over the selected identities and never
+constructs the fleet by following individual sessions.
 
-Runner loss, recovery ambiguity, reconciliation, approval wait, blocked goal,
-active, queued, and idle remain distinct states. The projection uses one set
-query over the selected identities and never constructs the fleet by following
-individual sessions.
-
-`GET /api/attention/follow` begins with the first coherent attention page and
-its durable change-journal cursor, then emits summary replacements only for
+`GET /api/attention/follow` begins with the coherent hot-session catalog page
+and its durable change-journal cursor, then emits summary replacements only for
 changed session identities. One incremental read examines at most 128 journal
 records. A larger cursor gap emits `resync_required` with the current cursor and
 ends that stream; it never skips records or continues from a partial gap. The

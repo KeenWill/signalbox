@@ -2,11 +2,12 @@
 
 use crate::*;
 use signalbox_application::{
-    AttentionChanges, AttentionCursor, max_attention_change_items, max_attention_snapshot_items,
+    AttentionChanges, AttentionContinuation, AttentionCursor, AttentionQuery, AttentionSort,
+    max_attention_change_items, max_attention_snapshot_items,
 };
 use signalbox_persistence::attention::AttentionRepository;
 
-const FLEET_SIZE: u128 = 514;
+const FLEET_SIZE: u128 = 258;
 const FLEET_SEED: u128 = 0xa770_0000;
 
 async fn create_mixed_scale_fleet(pool: &PgPool) -> Result<(), Box<dyn Error>> {
@@ -36,21 +37,77 @@ fn resync_cursor(changes: AttentionChanges) -> AttentionCursor {
     cursor
 }
 
+fn identity_query(after: Option<SessionId>) -> AttentionQuery {
+    AttentionQuery::try_new(
+        None,
+        Vec::new(),
+        false,
+        AttentionSort::SessionIdentityAscending,
+        after.map(AttentionContinuation::SessionIdentity),
+    )
+    .expect("the fixture catalog query is bounded")
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_mixed_scale_fleet(&pool).await?;
     let repository = AttentionRepository::new(pool.clone());
-    let first = repository.snapshot(None).await?;
-    let second = repository.snapshot(first.continuation_after).await?;
-    let third = repository.snapshot(second.continuation_after).await?;
-    let fourth = repository.snapshot(third.continuation_after).await?;
-    let fifth = repository.snapshot(fourth.continuation_after).await?;
-    let sixth = repository.snapshot(fifth.continuation_after).await?;
-    let seventh = repository.snapshot(sixth.continuation_after).await?;
-    let eighth = repository.snapshot(seventh.continuation_after).await?;
-    let ninth = repository.snapshot(eighth.continuation_after).await?;
+    let first = repository.snapshot(identity_query(None)).await?;
+    let second = repository
+        .snapshot(identity_query(
+            first.summaries.last().map(|row| row.session),
+        ))
+        .await?;
+    let third = repository
+        .snapshot(identity_query(
+            second.summaries.last().map(|row| row.session),
+        ))
+        .await?;
+    let fourth = repository
+        .snapshot(identity_query(
+            third.summaries.last().map(|row| row.session),
+        ))
+        .await?;
+    let fifth = repository
+        .snapshot(identity_query(
+            fourth.summaries.last().map(|row| row.session),
+        ))
+        .await?;
+    let sixth = repository
+        .snapshot(identity_query(
+            fifth.summaries.last().map(|row| row.session),
+        ))
+        .await?;
+    let seventh = repository
+        .snapshot(identity_query(
+            sixth.summaries.last().map(|row| row.session),
+        ))
+        .await?;
+    let eighth = repository
+        .snapshot(identity_query(
+            seventh.summaries.last().map(|row| row.session),
+        ))
+        .await?;
+    let ninth = repository
+        .snapshot(identity_query(
+            eighth.summaries.last().map(|row| row.session),
+        ))
+        .await?;
+    let searched_session = first.summaries[7].session;
+    let searched = repository
+        .snapshot(
+            AttentionQuery::try_new(
+                Some(searched_session.into_uuid().to_string()),
+                Vec::new(),
+                false,
+                AttentionSort::LastActivityDescending,
+                None,
+            )
+            .expect("the exact-identity search is bounded"),
+        )
+        .await?;
 
     assert_eq!(
         first.summaries.len(),
@@ -90,6 +147,12 @@ async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
             .expect("the final page size fits usize")
     );
     assert_eq!(
+        first.total,
+        u64::try_from(FLEET_SIZE).expect("the fleet size fits the exact total")
+    );
+    assert_eq!(searched.total, 1);
+    assert_eq!(searched.summaries[0].session, searched_session);
+    assert_eq!(
         first.summaries.len()
             + second.summaries.len()
             + third.summaries.len()
@@ -102,38 +165,54 @@ async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
         usize::try_from(FLEET_SIZE).expect("the fleet size fits usize")
     );
     assert_eq!(
-        first.continuation_after,
-        Some(first.summaries.last().unwrap().session)
+        first.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            first.summaries.last().unwrap().session
+        ))
     );
     assert_eq!(
-        second.continuation_after,
-        Some(second.summaries.last().unwrap().session)
+        second.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            second.summaries.last().unwrap().session
+        ))
     );
     assert_eq!(
-        third.continuation_after,
-        Some(third.summaries.last().unwrap().session)
+        third.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            third.summaries.last().unwrap().session
+        ))
     );
     assert_eq!(
-        fourth.continuation_after,
-        Some(fourth.summaries.last().unwrap().session)
+        fourth.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            fourth.summaries.last().unwrap().session
+        ))
     );
     assert_eq!(
-        fifth.continuation_after,
-        Some(fifth.summaries.last().unwrap().session)
+        fifth.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            fifth.summaries.last().unwrap().session
+        ))
     );
     assert_eq!(
-        sixth.continuation_after,
-        Some(sixth.summaries.last().unwrap().session)
+        sixth.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            sixth.summaries.last().unwrap().session
+        ))
     );
     assert_eq!(
-        seventh.continuation_after,
-        Some(seventh.summaries.last().unwrap().session)
+        seventh.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            seventh.summaries.last().unwrap().session
+        ))
     );
     assert_eq!(
-        eighth.continuation_after,
-        Some(eighth.summaries.last().unwrap().session)
+        eighth.continuation,
+        Some(AttentionContinuation::SessionIdentity(
+            eighth.summaries.last().unwrap().session
+        ))
     );
-    assert_eq!(ninth.continuation_after, None);
+    assert_eq!(ninth.continuation, None);
     assert!(first.summaries.last().unwrap().session < second.summaries[0].session);
     assert!(second.summaries.last().unwrap().session < third.summaries[0].session);
     assert!(third.summaries.last().unwrap().session < fourth.summaries[0].session);
@@ -154,7 +233,7 @@ async fn oversized_change_burst_requires_resync() -> Result<(), Box<dyn Error>> 
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_attention_session(&pool, 0).await?;
     let repository = AttentionRepository::new(pool.clone());
-    let first = repository.snapshot(None).await?;
+    let first = repository.snapshot(AttentionQuery::hot_page()).await?;
     let changed_session = first.summaries[0].session;
     sqlx::query(
         "INSERT INTO operator_attention_change (session_id, fact_kind)

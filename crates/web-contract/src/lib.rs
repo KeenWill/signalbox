@@ -297,7 +297,12 @@ pub struct WebAttentionActivity {
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSummary {
     pub session_id: String,
+    pub title_summary: Option<String>,
+    pub title_truncated: bool,
+    pub archived: bool,
     pub current_turn_id: Option<String>,
+    pub active_turn_count: String,
+    pub queued_turn_count: String,
     pub state: WebAttentionState,
     pub action: Option<WebAttentionAction>,
     pub goal_block: Option<WebAttentionGoalBlock>,
@@ -305,12 +310,33 @@ pub struct WebAttentionSummary {
     pub last_activity: WebAttentionActivity,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionSort {
+    LastActivityDescending,
+    SessionIdentityAscending,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WebAttentionContinuation {
+    LastActivity {
+        unix_microseconds: String,
+        session_id: String,
+    },
+    SessionIdentity {
+        session_id: String,
+    },
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSnapshot {
     pub cursor: String,
+    pub total: String,
+    pub sort: WebAttentionSort,
     pub summaries: Vec<WebAttentionSummary>,
-    pub continuation_after_session_id: Option<String>,
+    pub continuation: Option<WebAttentionContinuation>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

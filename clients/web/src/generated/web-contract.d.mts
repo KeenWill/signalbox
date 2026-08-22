@@ -20,6 +20,15 @@ type WebAttentionActivityKind = "session" | "turn" | "goal" | "approval_judge" |
 
 type WebAttentionBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure";
 
+type WebAttentionContinuation = {
+  readonly kind: "last_activity";
+  readonly session_id: string;
+  readonly unix_microseconds: string;
+} | {
+  readonly kind: "session_identity";
+  readonly session_id: string;
+};
+
 type WebAttentionGoalBlock = {
   readonly generation: string;
   readonly need_summary: string;
@@ -34,21 +43,30 @@ type WebAttentionJudgeFacts = {
 };
 
 type WebAttentionSnapshot = {
-  readonly continuation_after_session_id?: string | null;
+  readonly continuation?: WebAttentionContinuation | null;
   readonly cursor: string;
+  readonly sort: WebAttentionSort;
   readonly summaries: ReadonlyArray<WebAttentionSummary>;
+  readonly total: string;
 };
+
+type WebAttentionSort = "last_activity_descending" | "session_identity_ascending";
 
 type WebAttentionState = "active" | "queued" | "blocked" | "awaiting_approval" | "ambiguous" | "awaiting_reconciliation" | "runner_lost" | "idle";
 
 type WebAttentionSummary = {
   readonly action?: WebAttentionAction | null;
+  readonly active_turn_count: string;
+  readonly archived: boolean;
   readonly current_turn_id?: string | null;
   readonly goal_block?: WebAttentionGoalBlock | null;
   readonly judge: WebAttentionJudgeFacts;
   readonly last_activity: WebAttentionActivity;
+  readonly queued_turn_count: string;
   readonly session_id: string;
   readonly state: WebAttentionState;
+  readonly title_summary?: string | null;
+  readonly title_truncated: boolean;
 };
 
 type WebContractCapabilities = {
@@ -127,9 +145,11 @@ export type WebSessionTimelineWindow = {
 };
 
 export type WebAttentionSnapshot = {
-  readonly continuation_after_session_id?: string | null;
+  readonly continuation?: WebAttentionContinuation | null;
   readonly cursor: string;
+  readonly sort: WebAttentionSort;
   readonly summaries: ReadonlyArray<WebAttentionSummary>;
+  readonly total: string;
 };
 
 export type WebAttentionStreamEvent = {
