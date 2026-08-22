@@ -1,17 +1,8 @@
 import { expect, type Page, test } from '@playwright/test'
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
-  capabilities: {
-    bounded_json: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
-} as const
+import { webContractBootstrapFixture } from '../src/product.fixture'
 
 const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  page.route('**/api/bootstrap', (route) => route.fulfill({ json: webContractBootstrapFixture }))
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
@@ -35,7 +26,9 @@ test('opens the product at Attention with generated-contract transport status', 
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
   await expect(
-    page.getByText(`${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`),
+    page.getByText(
+      `${webContractBootstrapFixture.contract.name} · ${webContractBootstrapFixture.contract.version}`,
+    ),
   ).toBeVisible()
   await expect(page).toHaveTitle('Attention · Signalbox')
   await expect(page.getByRole('link', { name: /Attention/ })).toHaveAttribute(
@@ -72,6 +65,10 @@ test('describes Settings as browser-local rather than daemon-backed', async ({ p
   await expect(inspector.getByText('Browser', { exact: true })).toBeVisible()
   await expect(inspector.getByText('Local preferences', { exact: true })).toBeVisible()
   await expect(inspector.getByText('Daemon', { exact: true })).toHaveCount(0)
+  const settingsCopy = page.getByRole('heading', {
+    name: 'Local settings are not exposed in this slice',
+  })
+  expect((await settingsCopy.boundingBox())?.width).toBeGreaterThan(200)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -97,6 +94,22 @@ test('completes route switching from the command palette without a mouse', async
   await page.getByRole('button', { name: /Go to Sessions/ }).focus()
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(/\/sessions$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('returns focus to a visible desktop control after closing palette-opened navigation', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await page.getByRole('button', { name: /Open navigation/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

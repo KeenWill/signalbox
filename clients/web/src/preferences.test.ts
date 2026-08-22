@@ -4,6 +4,7 @@ import {
   decodeBrowserPreferences,
   defaultBrowserPreferences,
   loadBrowserPreferences,
+  MAX_BROWSER_PREFERENCES_BYTES,
   MAX_KEY_OVERRIDE_KEY_BYTES,
   MAX_KEY_OVERRIDE_VALUE_BYTES,
   MAX_KEY_OVERRIDES,
@@ -60,6 +61,15 @@ describe('browser preferences', () => {
     vi.stubGlobal('localStorage', {
       getItem: (key: string) =>
         key === BROWSER_PREFERENCES_KEY ? JSON.stringify({ layout: 'focus' }) : null,
+    })
+
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+  })
+
+  it('rejects an oversized stored payload before parsing it', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) =>
+        key === BROWSER_PREFERENCES_KEY ? 'x'.repeat(MAX_BROWSER_PREFERENCES_BYTES + 1) : null,
     })
 
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
