@@ -28,7 +28,7 @@ import {
   productRoutes,
   productTransport,
 } from './product'
-import { selectApp, store, useAppDispatch, useAppSelector } from './state'
+import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
 const surfaceCopy: Record<
   ProductRouteId,
@@ -424,6 +424,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   )
 
   useEffect(() => {
+    if (store.getState().app.overlay === 'help') dispatch(actions.overlaySet(null))
+  }, [dispatch])
+
+  useEffect(() => {
     document.documentElement.dataset.theme = app.theme
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
@@ -470,17 +474,25 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         <div className="surface-question">
           <p>{copy.question}</p>
           <span
-            className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+            className={`contract-state ${
+              surface === 'settings' || bootstrap.isSuccess
+                ? 'ready'
+                : bootstrap.isError
+                  ? 'failed'
+                  : ''
+            }`}
             role="status"
             aria-live="polite"
           >
-            {bootstrap.isSuccess
-              ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
-              : bootstrap.isError
-                ? bootstrap.error instanceof BootstrapContractError
-                  ? 'Incompatible daemon contract'
-                  : 'Transport unavailable'
-                : 'Checking contract…'}
+            {surface === 'settings'
+              ? 'Browser-local preferences'
+              : bootstrap.isSuccess
+                ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
+                : bootstrap.isError
+                  ? bootstrap.error instanceof BootstrapContractError
+                    ? 'Incompatible daemon contract'
+                    : 'Transport unavailable'
+                  : 'Checking contract…'}
           </span>
         </div>
         {content}

@@ -30,6 +30,14 @@ afterEach(() => {
   restoreLocalStorageDescriptor()
 })
 
+const oversizedLogicalPositionsFixture = () =>
+  Object.fromEntries(
+    Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS }, (_, index) => [
+      `session-${index}`,
+      '\0'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES),
+    ]),
+  )
+
 describe('browser preferences', () => {
   it('fails closed to defaults for an unrelated stored value', () => {
     expect(() => decodeBrowserPreferences('not-an-object')).toThrow('preferences must be an object')
@@ -97,17 +105,20 @@ describe('browser preferences', () => {
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
   })
 
+  it('builds the oversized logical-position fixture at its declared bounds', () => {
+    const positions = oversizedLogicalPositionsFixture()
+
+    expect(Object.keys(positions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
+    expect(positions['session-0']).toBe('\0'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES))
+    expect(positions[`session-${MAX_SAVED_LOGICAL_POSITIONS - 1}`]).toBeDefined()
+  })
+
   it('does not persist preferences above the serialized byte ceiling', () => {
     const setItem = vi.fn()
     vi.stubGlobal('localStorage', { setItem })
     const oversized = {
       ...defaultBrowserPreferences,
-      lastLogicalPositions: Object.fromEntries(
-        Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS }, (_, index) => [
-          `session-${index}`,
-          '\0'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES),
-        ]),
-      ),
+      lastLogicalPositions: oversizedLogicalPositionsFixture(),
     }
 
     expect(serializeBrowserPreferences(oversized)).toBeNull()

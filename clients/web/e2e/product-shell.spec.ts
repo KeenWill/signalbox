@@ -58,6 +58,9 @@ test('describes Settings as browser-local rather than daemon-backed', async ({ p
     page.getByRole('heading', { name: 'Local settings are not exposed in this slice' }),
   ).toBeVisible()
   await expect(page.getByText(/do not depend on a daemon read contract/)).toBeVisible()
+  await expect(page.getByRole('status')).toHaveText('Browser-local preferences')
+  await expect(page.getByText('Transport unavailable', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Incompatible daemon contract', { exact: true })).toHaveCount(0)
   await expect(
     page.getByText('Operational data is not exposed by this daemon contract'),
   ).toHaveCount(0)
@@ -73,6 +76,28 @@ test('describes Settings as browser-local rather than daemon-backed', async ({ p
     name: 'Local settings are not exposed in this slice',
   })
   expect((await settingsCopy.boundingBox())?.width).toBeGreaterThan(200)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('clears scenario-only help when browser history returns to the product shell', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Open keyboard help/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  await page.goBack()
+
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/sessions$/)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
