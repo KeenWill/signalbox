@@ -491,7 +491,7 @@ jobs:
   # because each finishes in about a minute.
   #
   # Runner cost, stated plainly: this asks for more runners than the matrix it
-  # replaces. The run matrix currently expands to fourteen shards after the one
+  # replaces. The run matrix currently expands to eighteen shards after the one
   # shared build. The shards compile nothing and run for minutes; the build's
   # single cache key replaces the old per-suite keys that evicted one another.
   postgres-integration-run:

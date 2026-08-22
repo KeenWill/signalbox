@@ -48,11 +48,13 @@ package = "signalbox-persistence"
 features = ["postgres-integration"]
 # The long pole by an order of magnitude: 695 of the 1,134 ignored tests at the
 # original measured baseline. Six shards later crossed the workflow's
-# 15-minute job ceiling on the expanded suite, so eight restore execution room
-# without changing selection or the per-job safety bound.
+# 15-minute job ceiling on the expanded suite, and an eight-shard partition
+# still spent thirteen minutes executing before the fixed job cap cancelled
+# it. Twelve restore execution room without changing selection or the per-job
+# safety bound.
 # Counts are a snapshot, taken with `cargo test --tests -- --ignored --list`;
 # they justify the shard count and nothing depends on them staying exact.
-shards = 8
+shards = 12
 skip = []
 exclude_binaries = ["runner_protocol_postgres"]
 
