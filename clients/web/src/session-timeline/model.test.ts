@@ -103,6 +103,9 @@ describe('BoundedSessionHistory', () => {
     expect(
       () => new BoundedSessionHistory('00000000-00000000-0000-0000-000000000991', scenario),
     ).toThrow('session id must be a UUID')
+    expect(() => new BoundedSessionHistory(`URN:UUID:${sessionId}`, scenario)).toThrow(
+      'session id must be a UUID',
+    )
   })
 
   it('rejects contradictory descriptor boundaries', async () => {
@@ -200,15 +203,18 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
-  it('does not expose mutable retained storage', async () => {
+  it('does not expose mutable retained items', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const history = new BoundedSessionHistory(sessionId, scenario)
     await history.load({ kind: 'first' }, { maxItems: 1, maxBytes: 256 })
     const retained = [...history.retained]
+    const retainedItem = retained[0] as { address: { event_sequence: string } }
 
     retained.splice(0)
+    retainedItem.address.event_sequence = '999'
 
     expect(history.retained).toHaveLength(1)
+    expect(history.retained[0]?.address.event_sequence).toBe('1')
   })
 
   it('rejects a timeline window whose addresses decrease', async () => {
@@ -378,6 +384,20 @@ describe('BoundedSessionHistory', () => {
     await expect(
       source.readWindow(sessionId, { kind: 'first' }, { maxItems: 1, maxBytes: 256 }),
     ).rejects.toThrow('encoded byte ceiling')
+  })
+
+  it('rejects invalid UTF-8 before JSON decoding', async () => {
+    const prefix = new TextEncoder().encode(
+      '{"error":{"kind":"application","code":"projection_failed","message":"',
+    )
+    const suffix = new TextEncoder().encode('"}}')
+    const body = new Uint8Array(prefix.byteLength + 1 + suffix.byteLength)
+    body.set(prefix)
+    body[prefix.byteLength] = 0xff
+    body.set(suffix, prefix.byteLength + 1)
+    const request = async () => new Response(body, { status: 500 })
+
+    await expect(HttpSessionTimelineSource.connect(request)).rejects.toThrow()
   })
 
   it('decodes structured API errors before throwing', async () => {

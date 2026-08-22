@@ -44,6 +44,7 @@ use signalbox_web_contract::{
     WebSearchHighlight, WebSearchPage, WebSearchResult, WebSearchResultSource,
     WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
     WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
+    WebTimelineEventSequence,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -655,7 +656,7 @@ fn parse_window_anchor(
 
 fn address_dto(address: TimelineAddress) -> WebTimelineAddress {
     WebTimelineAddress {
-        event_sequence: address.sequence().get().to_string(),
+        event_sequence: WebTimelineEventSequence::from_nonzero(address.sequence()),
     }
 }
 
