@@ -1898,7 +1898,10 @@ impl ProcessReadRepository {
                 successor_placement.state_kind AS runner_placement_state_kind,
                 successor_placement.pinned_runner_id AS runner_placement_new_runner_id,
                 successor_placement.requested_sandbox_profile AS runner_placement_sandbox_profile,
-                prior_placement.pinned_runner_id AS runner_placement_prior_runner_id,
+                CASE successor_placement.event_kind
+                    WHEN 'runner_replaced' THEN prior_placement.lost_runner_id
+                    ELSE prior_placement.pinned_runner_id
+                END AS runner_placement_prior_runner_id,
                 runner_placement_pointer.context_frontier_id AS runner_placement_context_frontier_id,
                 runner_placement_final.semantic_entry_id AS runner_placement_final_entry_id,
                 delegated_task.task_content AS delegated_task_content,
@@ -4266,7 +4269,10 @@ async fn open_transcript_entry_cursor(
             successor_placement.state_kind AS runner_placement_state_kind,
             successor_placement.pinned_runner_id AS runner_placement_new_runner_id,
             successor_placement.requested_sandbox_profile AS runner_placement_sandbox_profile,
-            prior_placement.pinned_runner_id AS runner_placement_prior_runner_id,
+            CASE successor_placement.event_kind
+                WHEN 'runner_replaced' THEN prior_placement.lost_runner_id
+                ELSE prior_placement.pinned_runner_id
+            END AS runner_placement_prior_runner_id,
             runner_placement_pointer.context_frontier_id AS runner_placement_context_frontier_id,
             runner_placement_final.semantic_entry_id AS runner_placement_final_entry_id,
             delegated_task.task_content AS delegated_task_content,

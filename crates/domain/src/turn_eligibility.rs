@@ -4441,7 +4441,14 @@ fn reconstitute_inner(
                 snapshot: frontier,
             },
         )?;
-        let final_payload = snapshot.ordered_entries().last().and_then(|reference| {
+        let mut appended_entries = snapshot.appended_entries();
+        let appended_entry = if appended_entries.len() == 1 {
+            appended_entries.next()
+        } else {
+            None
+        };
+        let final_entry = snapshot.ordered_entries().next_back();
+        let final_payload = appended_entry.and_then(|reference| {
             semantic_entries
                 .get(&reference)
                 .map(SemanticTranscriptEntry::payload)
@@ -4449,7 +4456,8 @@ fn reconstitute_inner(
         if !matches!(
             final_payload,
             Some(SemanticTranscriptEntryPayload::RunnerPlacementChanged { .. })
-        ) {
+        ) || appended_entry != final_entry
+        {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
                     snapshot: frontier,
@@ -16282,6 +16290,51 @@ mod tests {
             failure,
             AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
                 snapshot: mislabeled.id(),
+            }
+        );
+    }
+
+    /// S32 / INV-015 / INV-044: one placement-boundary snapshot appends
+    /// exactly one placement entry, never a multi-entry placement suffix.
+    #[test]
+    fn s32_inv015_inv044_reconstitution_rejects_multi_entry_runner_placement_snapshot() {
+        let session = current_session();
+        let queued = accepted_origin(1);
+        let first_entry = semantic_entry(40);
+        let second_entry = semantic_entry(41);
+        let malformed = frontier(42);
+        let mut input = queued_input(&session, queued);
+        input
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                first_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: RunnerGeneration::try_from_u64(2)
+                        .expect("the first fixture placement revision is positive"),
+                },
+            ));
+        input
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                second_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: RunnerGeneration::try_from_u64(3)
+                        .expect("the second fixture placement revision is positive"),
+                },
+            ));
+        input
+            .snapshots
+            .push(malformed.snapshot(&session, &[first_entry, second_entry]));
+        input.runner_placement_frontier = Some(malformed.id());
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
+                snapshot: malformed.id(),
             }
         );
     }

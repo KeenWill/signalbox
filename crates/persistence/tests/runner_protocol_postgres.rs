@@ -2893,6 +2893,274 @@ async fn append_denied_request_to_continuing_tool_round_projection(
     Ok(())
 }
 
+/// S32 / INV-015 / INV-044: durable continuation validation treats a runner
+/// placement boundary before a proposal-ordered result as out-of-band.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv015_inv044_continuation_accepts_placement_before_tool_result()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, predecessor_attempt) = insert_running_turn(&pool).await?;
+    let placement = SessionRunnerPlacement::new(
+        session,
+        exact_runner_request(RunnerId::from_uuid(uuid(RUNNER))),
+    );
+    RunnerProtocolStore::new(pool.clone(), catalog())
+        .store_placement(&placement, None, None)
+        .await?;
+    let producing_call = ModelCallId::from_uuid(uuid(0xa171));
+    let request = ToolRequestId::from_uuid(uuid(0xa172));
+    let boundary = ContextFrontierId::from_uuid(uuid(0xa173));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        predecessor_attempt,
+        producing_call,
+        request,
+        boundary,
+    )
+    .await?;
+    let continuation_attempt = TurnAttemptId::from_uuid(uuid(0xa174));
+    let placement_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xa175));
+    let result_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xa176));
+    let result_frontier = ContextFrontierId::from_uuid(uuid(0xa177));
+    let (boundary_count, event_ordinal): (Decimal, Decimal) = sqlx::query_as(
+        "SELECT frontier.member_count, placement.event_ordinal
+           FROM context_frontier AS frontier
+           JOIN runner_current_session_placement AS head
+             ON head.session_id = frontier.owning_session_id
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = head.session_id
+            AND placement.event_ordinal = head.event_ordinal
+          WHERE frontier.owning_session_id = $1
+            AND frontier.context_frontier_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(boundary.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let mut candidate = pool.begin().await?;
+    sqlx::query("ALTER TABLE turn_attempt DISABLE TRIGGER ALL")
+        .execute(&mut *candidate)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(predecessor_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind)
+         VALUES ($1, $2, $3, $4, 'running')",
+    )
+    .bind(continuation_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(predecessor_attempt.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(placement_entry.into_uuid())
+    .bind(Decimal::from(placement.revision().get()))
+    .bind(event_ordinal)
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             tool_result_request_id)
+         VALUES ($1, $2, 'tool_closed_by_turn_end', $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(result_entry.into_uuid())
+    .bind(request.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id,
+             prefix_context_frontier_id, member_count)
+         VALUES ($1, $2, $3, $4 + 2)",
+    )
+    .bind(session.into_uuid())
+    .bind(result_frontier.into_uuid())
+    .bind(boundary.into_uuid())
+    .bind(boundary_count)
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, $3 + 1, $1, $4),
+                ($1, $2, $3 + 2, $1, $5)",
+    )
+    .bind(session.into_uuid())
+    .bind(result_frontier.into_uuid())
+    .bind(boundary_count)
+    .bind(placement_entry.into_uuid())
+    .bind(result_entry.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    let closes: bool = sqlx::query_scalar(
+        "SELECT continuation_frontier_closes_predecessor_tool_round(
+             $1, $2, $3, $4
+         )",
+    )
+    .bind(continuation_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(result_frontier.into_uuid())
+    .fetch_one(&mut *candidate)
+    .await?;
+
+    assert!(closes);
+    candidate.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
+/// S32 / INV-015 / INV-044: durable continuation validation rejects any
+/// additional non-placement entry after the exact proposal-ordered results.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv015_inv044_continuation_rejects_extra_non_placement_suffix()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (session, turn, predecessor_attempt) = insert_running_turn(&pool).await?;
+    let producing_call = ModelCallId::from_uuid(uuid(0xa178));
+    let request = ToolRequestId::from_uuid(uuid(0xa179));
+    let boundary = ContextFrontierId::from_uuid(uuid(0xa17a));
+    attach_continuing_tool_round_projection(
+        &pool,
+        session,
+        turn,
+        predecessor_attempt,
+        producing_call,
+        request,
+        boundary,
+    )
+    .await?;
+    let continuation_attempt = TurnAttemptId::from_uuid(uuid(0xa17b));
+    let result_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xa17c));
+    let extra_entry = SemanticTranscriptEntryId::from_uuid(uuid(0xa17d));
+    let result_frontier = ContextFrontierId::from_uuid(uuid(0xa17e));
+    let boundary_count: Decimal = sqlx::query_scalar(
+        "SELECT member_count
+           FROM context_frontier
+          WHERE owning_session_id = $1 AND context_frontier_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(boundary.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let mut candidate = pool.begin().await?;
+    sqlx::query("ALTER TABLE turn_attempt DISABLE TRIGGER ALL")
+        .execute(&mut *candidate)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended', end_variant = 'without_stop',
+                end_disposition = 'yielded_to_durable_wait'
+          WHERE turn_attempt_id = $1 AND turn_id = $2 AND session_id = $3",
+    )
+    .bind(predecessor_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind)
+         VALUES ($1, $2, $3, $4, 'running')",
+    )
+    .bind(continuation_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(predecessor_attempt.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             tool_result_request_id)
+         VALUES ($1, $2, 'tool_closed_by_turn_end', $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(result_entry.into_uuid())
+    .bind(request.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             cancelled_turn_id)
+         VALUES ($1, $2, 'turn_cancelled', $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(extra_entry.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id,
+             prefix_context_frontier_id, member_count)
+         VALUES ($1, $2, $3, $4 + 2)",
+    )
+    .bind(session.into_uuid())
+    .bind(result_frontier.into_uuid())
+    .bind(boundary.into_uuid())
+    .bind(boundary_count)
+    .execute(&mut *candidate)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, $3 + 1, $1, $4),
+                ($1, $2, $3 + 2, $1, $5)",
+    )
+    .bind(session.into_uuid())
+    .bind(result_frontier.into_uuid())
+    .bind(boundary_count)
+    .bind(result_entry.into_uuid())
+    .bind(extra_entry.into_uuid())
+    .execute(&mut *candidate)
+    .await?;
+    let closes: bool = sqlx::query_scalar(
+        "SELECT continuation_frontier_closes_predecessor_tool_round(
+             $1, $2, $3, $4
+         )",
+    )
+    .bind(continuation_attempt.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .bind(result_frontier.into_uuid())
+    .fetch_one(&mut *candidate)
+    .await?;
+
+    assert!(!closes);
+    candidate.rollback().await?;
+    drop(pool);
+    Ok(())
+}
+
 async fn convert_running_turn_to_delegated_runner_recovery(
     pool: &PgPool,
     session: SessionId,
@@ -16133,8 +16401,7 @@ async fn s32_inv044_inv045_relational_placement_binds_selected_grant() -> Result
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Result<(), Box<dyn Error>>
-{
+async fn s32_inv044_inv045_cross_runner_replacement_round_trips() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
@@ -16195,13 +16462,85 @@ async fn s32_inv044_inv045_cross_runner_grant_predecessor_round_trips() -> Resul
             replacement.grant.as_ref(),
         )
         .await?;
+    let session = replacement.placement.session();
+    let revision = replacement.placement.revision();
+    let event_ordinal: Decimal = sqlx::query_scalar(
+        "SELECT event_ordinal
+           FROM runner_session_placement_record
+          WHERE session_id = $1 AND event_kind = 'runner_replaced'",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let entry = SemanticTranscriptEntryId::from_uuid(uuid(0xb201));
+    let frontier = ContextFrontierId::from_uuid(uuid(0xb202));
+    let mut boundary = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             runner_placement_revision, runner_placement_event_ordinal)
+         VALUES ($1, $2, 'runner_placement_changed', $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(entry.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(event_ordinal)
+    .execute(&mut *boundary)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 1)",
+    )
+    .bind(session.into_uuid())
+    .bind(frontier.into_uuid())
+    .execute(&mut *boundary)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_delta
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(frontier.into_uuid())
+    .bind(entry.into_uuid())
+    .execute(&mut *boundary)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_runner_placement_frontier
+            (session_id, placement_revision, semantic_entry_id,
+             context_frontier_id)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(Decimal::from(revision.get()))
+    .bind(entry.into_uuid())
+    .bind(frontier.into_uuid())
+    .execute(&mut *boundary)
+    .await?;
+    boundary.commit().await?;
     let loaded = store
         .load_placement(SessionId::from_uuid(uuid(SESSION)))
         .await?
         .expect("the cross-runner replacement is durable");
+    let source = signalbox_domain::SemanticTranscriptEntryRef::from_source(session, entry);
+    let transcript_entry = ProcessReadRepository::new(pool.clone())
+        .read_selected_transcript_entries(&[1], &[source])
+        .await?;
+    let expected_entry = ProcessTranscriptEntry::RunnerPlacementChanged {
+        entry_index: 0,
+        source_session: session,
+        entry,
+        prior_runner: first_registration.registration().runner(),
+        new_runner: second_registration.registration().runner(),
+        placement_revision: revision,
+        sandbox: RunnerSandboxProfile::Ambient,
+    };
 
     assert_eq!(loaded.placement(), &replacement.placement);
     assert_eq!(loaded.grant(), replacement.grant.as_ref());
+    assert_eq!(transcript_entry.as_ref(), &[expected_entry]);
     drop(pool);
     Ok(())
 }

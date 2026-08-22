@@ -184,6 +184,229 @@ CREATE TRIGGER session_runner_placement_frontier_rejects_truncate
 BEFORE TRUNCATE ON session_runner_placement_frontier
 FOR EACH STATEMENT EXECUTE FUNCTION reject_immutable_record_change();
 
+-- Placement boundaries are out-of-band while a yielded tool round is being
+-- completed. Match the first proposal-count non-placement entries after the
+-- predecessor boundary as ordered results, allowing placement entries before
+-- or between them while still rejecting every other interruption.
+CREATE OR REPLACE FUNCTION continuation_frontier_closes_predecessor_tool_round(
+    checked_attempt_id uuid,
+    checked_turn_id uuid,
+    checked_session_id uuid,
+    checked_frontier_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+          FROM turn_attempt AS continuation_attempt
+          JOIN model_call AS predecessor_call
+            ON predecessor_call.turn_attempt_id =
+               continuation_attempt.continued_from_attempt_id
+           AND predecessor_call.turn_id = continuation_attempt.turn_id
+           AND predecessor_call.session_id = continuation_attempt.session_id
+           AND predecessor_call.state_kind = 'terminal'
+           AND predecessor_call.terminal_disposition_kind = 'completed'
+          JOIN tool_round AS predecessor_round
+            ON predecessor_round.producing_model_call_id =
+               predecessor_call.model_call_id
+           AND predecessor_round.turn_id = predecessor_call.turn_id
+           AND predecessor_round.session_id = predecessor_call.session_id
+           AND predecessor_round.boundary_kind = 'continuing'
+          JOIN context_frontier AS boundary
+            ON boundary.owning_session_id = predecessor_round.session_id
+           AND boundary.context_frontier_id =
+               predecessor_round.boundary_frontier_id
+         WHERE continuation_attempt.turn_attempt_id = checked_attempt_id
+           AND continuation_attempt.turn_id = checked_turn_id
+           AND continuation_attempt.session_id = checked_session_id
+           AND continuation_attempt.continued_from_attempt_id IS NOT NULL
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS boundary_member
+                  LEFT JOIN context_frontier_member AS checked_member
+                    ON checked_member.owning_session_id =
+                       boundary_member.owning_session_id
+                   AND checked_member.context_frontier_id =
+                       checked_frontier_id
+                   AND checked_member.member_position =
+                       boundary_member.member_position
+                   AND checked_member.source_session_id =
+                       boundary_member.source_session_id
+                   AND checked_member.semantic_entry_id =
+                       boundary_member.semantic_entry_id
+                 WHERE boundary_member.owning_session_id =
+                       predecessor_round.session_id
+                   AND boundary_member.context_frontier_id =
+                       predecessor_round.boundary_frontier_id
+                   AND checked_member.member_position IS NULL
+           )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM generate_series(
+                        0,
+                        predecessor_round.request_count::bigint - 1
+                  ) AS expected(request_ordinal)
+                  JOIN tool_request AS request
+                    ON request.producing_model_call_id =
+                       predecessor_round.producing_model_call_id
+                   AND request.request_ordinal =
+                       expected.request_ordinal
+                  LEFT JOIN LATERAL (
+                        SELECT result_entry.semantic_entry_id,
+                               result_entry.payload_kind,
+                               result_entry.tool_result_request_id,
+                               result_attempt.request_id AS attempt_request_id
+                          FROM context_frontier_member AS result_member
+                          JOIN semantic_transcript_entry AS result_entry
+                            ON result_entry.source_session_id =
+                               result_member.source_session_id
+                           AND result_entry.semantic_entry_id =
+                               result_member.semantic_entry_id
+                          LEFT JOIN tool_attempt AS result_attempt
+                            ON result_attempt.attempt_id =
+                               result_entry.tool_result_attempt_id
+                         WHERE result_member.owning_session_id =
+                               predecessor_round.session_id
+                           AND result_member.context_frontier_id =
+                               checked_frontier_id
+                           AND result_member.member_position >
+                               boundary.member_count
+                           AND result_entry.payload_kind <>
+                               'runner_placement_changed'
+                         ORDER BY result_member.member_position
+                         OFFSET expected.request_ordinal
+                         LIMIT 1
+                  ) AS result ON true
+                 WHERE result.semantic_entry_id IS NULL
+                    OR result.payload_kind NOT IN (
+                        'tool_execution_result',
+                        'tool_denied',
+                        'tool_closed_by_turn_end'
+                    )
+                    OR (
+                        result.tool_result_request_id
+                            IS DISTINCT FROM request.request_id
+                        AND result.attempt_request_id
+                            IS DISTINCT FROM request.request_id
+                    )
+           )
+           AND (
+                SELECT count(*)
+                  FROM context_frontier_member AS suffix_member
+                  JOIN semantic_transcript_entry AS suffix_entry
+                    ON suffix_entry.source_session_id =
+                       suffix_member.source_session_id
+                   AND suffix_entry.semantic_entry_id =
+                       suffix_member.semantic_entry_id
+                 WHERE suffix_member.owning_session_id =
+                       predecessor_round.session_id
+                   AND suffix_member.context_frontier_id =
+                       checked_frontier_id
+                   AND suffix_member.member_position > boundary.member_count
+                   AND suffix_entry.payload_kind <>
+                       'runner_placement_changed'
+           ) = predecessor_round.request_count
+    );
+$$;
+
+-- Runner-recovery cancellation retains the yielded frontier as correlation
+-- identity, but result projection may start from a later compatible placement
+-- frontier. Use that effective projection-base count before validating the
+-- proposal-ordered result suffix and terminal cancellation entry.
+DO $migration$
+DECLARE
+    definition text;
+    updated_definition text;
+    old_member_count CONSTANT text := $old$
+    SELECT member_count
+      INTO base_member_count
+      FROM context_frontier
+     WHERE owning_session_id = checked_session
+       AND context_frontier_id = base_frontier;
+$old$;
+    new_member_count CONSTANT text := $new$
+    IF runner_recovery_effect.command_id IS NOT NULL THEN
+        SELECT max(candidate.member_count)
+          INTO base_member_count
+          FROM (
+                SELECT frontier.context_frontier_id, frontier.member_count
+                  FROM context_frontier AS frontier
+                 WHERE frontier.owning_session_id = checked_session
+                   AND frontier.context_frontier_id = base_frontier
+                UNION ALL
+                SELECT frontier.context_frontier_id, frontier.member_count
+                  FROM session_runner_placement_frontier AS pointer
+                  JOIN context_frontier AS frontier
+                    ON frontier.owning_session_id = pointer.session_id
+                   AND frontier.context_frontier_id =
+                           pointer.context_frontier_id
+                 WHERE pointer.session_id = checked_session
+          ) AS candidate
+         WHERE NOT EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS candidate_member
+                  LEFT JOIN context_frontier_member AS terminal_member
+                    ON terminal_member.owning_session_id = checked_session
+                   AND terminal_member.context_frontier_id =
+                           checked_terminal_frontier
+                   AND terminal_member.member_position =
+                           candidate_member.member_position
+                   AND terminal_member.source_session_id =
+                           candidate_member.source_session_id
+                   AND terminal_member.semantic_entry_id =
+                           candidate_member.semantic_entry_id
+                 WHERE candidate_member.owning_session_id = checked_session
+                   AND candidate_member.context_frontier_id =
+                           candidate.context_frontier_id
+                   AND terminal_member.member_position IS NULL
+         )
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM context_frontier_member AS yielded_member
+                  LEFT JOIN context_frontier_member AS candidate_member
+                    ON candidate_member.owning_session_id = checked_session
+                   AND candidate_member.context_frontier_id =
+                           candidate.context_frontier_id
+                   AND candidate_member.member_position =
+                           yielded_member.member_position
+                   AND candidate_member.source_session_id =
+                           yielded_member.source_session_id
+                   AND candidate_member.semantic_entry_id =
+                           yielded_member.semantic_entry_id
+                 WHERE yielded_member.owning_session_id = checked_session
+                   AND yielded_member.context_frontier_id = base_frontier
+                   AND candidate_member.member_position IS NULL
+         );
+    ELSE
+        SELECT member_count
+          INTO base_member_count
+          FROM context_frontier
+         WHERE owning_session_id = checked_session
+           AND context_frontier_id = base_frontier;
+    END IF;
+$new$;
+BEGIN
+    SELECT pg_get_functiondef(
+        'assert_cancelled_turn_final_state(uuid)'::regprocedure
+    )
+      INTO definition;
+    IF (
+        length(definition) -
+        length(replace(definition, old_member_count, ''))
+    ) / length(old_member_count) <> 1
+    THEN
+        RAISE EXCEPTION
+            'unexpected cancelled-turn projection-base validator';
+    END IF;
+    updated_definition := replace(
+        definition, old_member_count, new_member_count
+    );
+    EXECUTE updated_definition;
+END;
+$migration$;
+
 -- Turn activation treats the latest relocation boundary as part of the
 -- authoritative predecessor prefix. The helper keeps the existing imported
 -- seed and predecessor rules while admitting that one exact intervening

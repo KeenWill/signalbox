@@ -670,7 +670,11 @@ registration cursor before marking prior-process connections lost; the durable
 registration source therefore remains the cause of any resulting
 `AwaitingRunnerRecovery` wait.
 
-Only two user commands consume that state. `ReplaceLostRunner` requires the
+**Committed unimplemented functionality — loss replacement.** No present
+surface provides `ReplaceLostRunner`, installs its successor placement, emits
+`RunnerPlacementChanged`, or installs `session_runner_placement_frontier`. The
+following paragraphs define the checked transaction that a future producer must
+implement. `ReplaceLostRunner` requires the
 expected current placement revision and either a different live exact runner,
 the one pending replacement enrollment it atomically activates, or — for a
 registration-triggered loss alone — a checked re-enrollment of the same runner
@@ -1065,9 +1069,10 @@ from child transcript state nor depend on process-local wake memory.
   (`fatal_mismatch` module) but no aggregate transition or commit path.
 - Dispatch fencing covers model calls, daemon tools, and local runner leases;
   remote runner transport and result envelopes remain deferred.
-- Loss replacement is the only version-one producer of a placement change.
+- Loss replacement is the intended version-one producer of a placement change,
+  but remains committed unimplemented functionality with no present command.
   User-directed relocation of a healthy session, and a working-directory move on
-  the same runner, are committed functionality with no command here yet; the
+  the same runner, likewise have no command here yet; the
   placement-revision, transcript-boundary, and runner-event mechanisms this page
   drives must stay compatible with a relocation that no loss caused
   ([runner protocol and placement](runner-protocol.md#committed-functionality-beyond-version-one)).
