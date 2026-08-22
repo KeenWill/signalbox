@@ -1089,7 +1089,7 @@ impl PostgresModelCallRepository {
         };
         insert_prepared_call(
             connection,
-            &prepared,
+            prepared,
             credential_reference,
             selected.policy.as_ref(),
             self.cache_inclusive_input_targets
