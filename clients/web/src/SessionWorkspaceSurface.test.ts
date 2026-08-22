@@ -41,6 +41,6 @@ describe('Session Workspace projection', () => {
   it('projects result mode without materializing another window', () => {
     const results = visibleSessionItems(fixture.items, 'results')
 
-    expect(results).toEqual([fixture.items[1], fixture.items[2]])
+    expect(results).toEqual([fixture.items[0], fixture.items[1], fixture.items[2]])
   })
 })

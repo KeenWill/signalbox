@@ -1,8 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
-import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
-import { HttpSessionTimelineSource, type SessionWindowAnchor } from './session-timeline/model'
+import {
+  BoundedSessionHistory,
+  HttpSessionTimelineSource,
+  type SessionWindowAnchor,
+} from './session-timeline/model'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -17,38 +21,57 @@ export const visibleSessionItems = (
 ) =>
   detail === 'results'
     ? items.filter((item) =>
-        ['turn_completed', 'turn_failed', 'turn_refused', 'turn_cancelled'].includes(item.kind),
+        [
+          'input_accepted',
+          'turn_completed',
+          'turn_failed',
+          'turn_refused',
+          'turn_cancelled',
+        ].includes(item.kind),
       )
     : items
 
 export function SessionWorkspaceSurface({
   onTimelineIds,
+  windowRequest,
 }: {
   onTimelineIds: (ids: readonly string[]) => void
+  windowRequest: { anchor: 'first' | 'latest'; attempt: number } | null
 }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const [draftId, setDraftId] = useState('')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [manualAnchor, setManualAnchor] = useState<SessionWindowAnchor | null>(null)
+  const [openingPosition, setOpeningPosition] = useState<string | undefined>()
+  const [attempt, setAttempt] = useState(0)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
-  const remembered = sessionId === null ? undefined : app.lastLogicalPositions[sessionId]
+  const rowRefs = useRef(new Map<string, HTMLLIElement>())
   const session = useQuery({
-    queryKey: ['production', 'session-workspace', sessionId, manualAnchor, remembered],
+    queryKey: [
+      'production',
+      'session-workspace',
+      sessionId,
+      manualAnchor,
+      openingPosition,
+      attempt,
+    ],
     queryFn: async ({ signal }) => {
       const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window))
-      const descriptor = await source.readDescriptor(sessionId ?? '', signal)
+      const history = new BoundedSessionHistory(sessionId ?? '', source)
+      const descriptor = await history.describe(signal)
       const active = BigInt(descriptor.work.active_turn_count) !== BigInt(0)
       const anchor: SessionWindowAnchor =
         manualAnchor ??
-        (!active && remembered ? { kind: 'around', eventSequence: remembered } : { kind: 'latest' })
-      const timelineWindow = await source.readWindow(
-        sessionId ?? '',
+        (!active && openingPosition
+          ? { kind: 'around', eventSequence: openingPosition }
+          : { kind: 'latest' })
+      const timelineWindow = await history.load(
         anchor,
         { maxItems: SESSION_WINDOW_ITEMS, maxBytes: SESSION_WINDOW_BYTES },
         signal,
       )
-      return { active, descriptor, window: timelineWindow }
+      return { active, anchor, descriptor, window: timelineWindow }
     },
     enabled: sessionId !== null,
   })
@@ -60,12 +83,24 @@ export function SessionWorkspaceSurface({
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
+  useEffect(() => {
+    if (windowRequest === null || sessionId === null) return
+    setManualAnchor({ kind: windowRequest.anchor })
+    setAttempt((current) => current + 1)
+  }, [sessionId, windowRequest])
+  useEffect(() => {
+    if (app.selectedTimeline !== null) {
+      rowRefs.current.get(app.selectedTimeline)?.scrollIntoView({ block: 'nearest' })
+    }
+  }, [app.selectedTimeline])
 
   const openSession = (event: FormEvent) => {
     event.preventDefault()
     const candidate = draftId.trim().toLowerCase()
     if (!isCanonicalSessionId(candidate)) return
+    setOpeningPosition(app.lastLogicalPositions[candidate])
     setManualAnchor(null)
+    setAttempt((current) => current + 1)
     setExpanded(new Set())
     dispatch(actions.timelineSelected(null))
     setSessionId(candidate)
@@ -128,9 +163,12 @@ export function SessionWorkspaceSurface({
               <span className="eyebrow">Stable timeline identity</span>
               <h2 id="session-workspace-heading">{sessionId}</h2>
               <p>
-                {session.data.active
-                  ? 'Active · opened near latest'
-                  : 'Inactive · restored logical position'}
+                {session.data.active ? 'Active' : 'Inactive'} ·{' '}
+                {session.data.anchor.kind === 'first'
+                  ? 'opened at first'
+                  : session.data.anchor.kind === 'latest'
+                    ? 'opened near latest'
+                    : 'restored logical position'}
               </p>
             </div>
             <dl className="session-telemetry">
@@ -153,10 +191,22 @@ export function SessionWorkspaceSurface({
             </dl>
           </header>
           <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
-            <button type="button" onClick={() => setManualAnchor({ kind: 'first' })}>
+            <button
+              type="button"
+              onClick={() => {
+                setManualAnchor({ kind: 'first' })
+                setAttempt((current) => current + 1)
+              }}
+            >
               <SkipBack aria-hidden="true" /> First <kbd>gg</kbd>
             </button>
-            <button type="button" onClick={() => setManualAnchor({ kind: 'latest' })}>
+            <button
+              type="button"
+              onClick={() => {
+                setManualAnchor({ kind: 'latest' })
+                setAttempt((current) => current + 1)
+              }}
+            >
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
             </button>
             <span>
@@ -169,7 +219,14 @@ export function SessionWorkspaceSurface({
               const id = item.address.event_sequence
               const isExpanded = expanded.has(id)
               return (
-                <li key={id} className={selected === id ? 'selected' : undefined}>
+                <li
+                  key={id}
+                  ref={(node) => {
+                    if (node) rowRefs.current.set(id, node)
+                    else rowRefs.current.delete(id)
+                  }}
+                  className={selected === id ? 'selected' : undefined}
+                >
                   <button
                     type="button"
                     className="session-item-summary"

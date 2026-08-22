@@ -16,4 +16,20 @@ describe('command registry', () => {
 
     expect(selectApp(store.getState()).selectedTimeline).toBe(timelineIds[0])
   })
+
+  it('delegates first and latest commands to the owning server-window loader', () => {
+    const loaded: Array<'first' | 'latest'> = []
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: ['41', '42'],
+      focusTimeline: () => undefined,
+      loadTimelineWindow: (anchor: 'first' | 'latest') => loaded.push(anchor),
+    }
+
+    invokeCommand('selection.first', context)
+    invokeCommand('selection.last', context)
+
+    expect(loaded).toEqual(['first', 'latest'])
+  })
 })

@@ -1062,12 +1062,15 @@ kbd {
   display: grid;
   padding: 0.4rem;
 }
-.command-list button {
+.command-list button,
+.command-list > div {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
   padding: 0.55rem 0.65rem;
+}
+.command-list button {
   border: 0;
   border-radius: 3px;
   background: transparent;
@@ -1078,7 +1081,8 @@ kbd {
 .command-list button:focus-visible {
   background: var(--surface-3);
 }
-.command-list button span {
+.command-list button span,
+.command-list > div span {
   display: grid;
   gap: 0.15rem;
 }

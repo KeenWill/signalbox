@@ -1,10 +1,9 @@
 import * as Dialog from '@radix-ui/react-dialog'
-import { useHotkeys } from '@tanstack/react-hotkeys'
+import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { AlertTriangle, Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react'
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { globalHotkeyBindings } from './commands'
 import {
   type ProductRouteId,
   productRoutes,
@@ -15,6 +14,8 @@ import {
   invokeProductCommand,
   type ProductCommandContext,
   productCommandRegistry,
+  productHotkeyBindings,
+  productHotkeySequenceBindings,
 } from './productCommands'
 import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
@@ -68,7 +69,13 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
   },
 }
 
-function ProductNavigation({ active }: { active: ProductRouteId }) {
+function ProductNavigation({
+  active,
+  onActivate,
+}: {
+  active: ProductRouteId
+  onActivate?: () => void
+}) {
   return (
     <div className="product-navigation">
       <div className="brand">
@@ -84,6 +91,7 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
+            onClick={onActivate}
           >
             <span>{route.label}</span>
             <small>{route.description}</small>
@@ -94,6 +102,7 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
+        onClick={onActivate}
       >
         Scenario studio <span aria-hidden="true">↗</span>
       </Link>
@@ -151,6 +160,53 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
                   </span>
                   <kbd>{command.bindings[0]?.label ?? '—'}</kbd>
                 </button>
+              ))}
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
+function KeyboardHelp({ context }: { context: ProductCommandContext }) {
+  const open = useAppSelector((state) => state.app.overlay === 'help')
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) invokeProductCommand('surface.escape', context)
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content
+          className="dialog-content product-palette"
+          aria-describedby="keyboard-help-description"
+        >
+          <div className="dialog-heading">
+            <div>
+              <Dialog.Title>Keyboard help</Dialog.Title>
+              <Dialog.Description id="keyboard-help-description">
+                Available workstation commands and bindings.
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <button className="icon-button" type="button" aria-label="Close keyboard help">
+                <X />
+              </button>
+            </Dialog.Close>
+          </div>
+          <div className="command-list">
+            {productCommandRegistry
+              .filter((command) => command.id !== 'surface.escape' && command.bindings.length > 0)
+              .map((command) => (
+                <div key={command.id}>
+                  <span>
+                    <strong>{command.title}</strong>
+                    <small>{command.description}</small>
+                  </span>
+                  <kbd>{command.bindings.map((binding) => binding.label).join(' / ')}</kbd>
+                </div>
               ))}
           </div>
         </Dialog.Content>
@@ -262,6 +318,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
+  const [windowRequest, setWindowRequest] = useState<{
+    anchor: 'first' | 'latest'
+    attempt: number
+  } | null>(null)
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
@@ -274,14 +334,30 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       getState: store.getState,
       timelineIds,
       focusTimeline: () => primaryRef.current?.focus(),
+      loadTimelineWindow: (anchor) =>
+        setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
     }),
     [dispatch, navigate, timelineIds],
   )
   useHotkeys(
-    globalHotkeyBindings.map((binding) => ({
+    productHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
-      callback: () => invokeProductCommand(binding.commandId, context),
+      callback: () => {
+        if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
+          invokeProductCommand(binding.commandId, context)
+        }
+      },
+    })),
+  )
+  useHotkeySequences(
+    productHotkeySequenceBindings.map((binding) => ({
+      sequence: binding.sequence,
+      callback: () => {
+        if (store.getState().app.overlay === null) {
+          invokeProductCommand(binding.commandId, context)
+        }
+      },
     })),
   )
 
@@ -295,7 +371,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     surface === 'attention' ? (
       <AttentionSurface />
     ) : surface === 'sessions' ? (
-      <SessionWorkspaceSurface onTimelineIds={updateTimelineIds} />
+      <SessionWorkspaceSurface onTimelineIds={updateTimelineIds} windowRequest={windowRequest} />
     ) : surface === 'settings' ? (
       <SettingsSurface />
     ) : (
@@ -356,6 +432,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         </aside>
       )}
       <CommandPalette context={context} />
+      <KeyboardHelp context={context} />
       <Dialog.Root
         open={app.overlay === 'navigation'}
         onOpenChange={(open) => {
@@ -376,7 +453,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <Dialog.Description id="mobile-navigation-description" className="sr-only">
               Choose a Signalbox surface.
             </Dialog.Description>
-            <ProductNavigation active={surface} />
+            <ProductNavigation
+              active={surface}
+              onActivate={() => dispatch(actions.overlaySet(null))}
+            />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

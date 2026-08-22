@@ -7,6 +7,7 @@ export interface CommandContext {
   getState: () => RootState
   timelineIds: readonly string[]
   focusTimeline: () => void
+  loadTimelineWindow?: (anchor: 'first' | 'latest') => void
 }
 
 export interface CommandBinding {
@@ -101,28 +102,33 @@ export const commandRegistry = [
   },
   {
     id: 'selection.first',
-    title: 'Select first loaded item',
-    description: 'Move to the earliest item in the loaded cursor window.',
+    title: 'Go to first timeline item',
+    description: 'Load the first timeline window or select its first loaded item.',
     category: 'Navigate',
     bindings: [
       { label: 'g g', registration: { kind: 'sequence', sequence: ['G', 'G'] } },
       { label: 'Home' },
     ],
     available: (context) => context.timelineIds.length > 0,
-    run: (context) => context.dispatch(actions.timelineSelected(context.timelineIds[0] ?? null)),
+    run: (context) => {
+      if (context.loadTimelineWindow) context.loadTimelineWindow('first')
+      else context.dispatch(actions.timelineSelected(context.timelineIds[0] ?? null))
+    },
   },
   {
     id: 'selection.last',
-    title: 'Select latest loaded item',
-    description: 'Move to the latest item in the loaded cursor window.',
+    title: 'Go to latest timeline item',
+    description: 'Load the latest timeline window or select its latest loaded item.',
     category: 'Navigate',
     bindings: [
       { label: 'G', registration: { kind: 'hotkey', hotkey: 'Shift+G' } },
       { label: 'End' },
     ],
     available: (context) => context.timelineIds.length > 0,
-    run: (context) =>
-      context.dispatch(actions.timelineSelected(context.timelineIds.at(-1) ?? null)),
+    run: (context) => {
+      if (context.loadTimelineWindow) context.loadTimelineWindow('latest')
+      else context.dispatch(actions.timelineSelected(context.timelineIds.at(-1) ?? null))
+    },
   },
   {
     id: 'layout.toggle',

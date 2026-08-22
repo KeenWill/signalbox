@@ -1,4 +1,6 @@
-import { type CommandContext, type CommandId, commandRegistry, invokeCommand } from './commands'
+import type { HotkeySequence } from '@tanstack/react-hotkeys'
+import type { CommandBinding, CommandContext, CommandId } from './commands'
+import { commandRegistry, invokeCommand } from './commands'
 
 export interface ProductCommandContext extends CommandContext {
   navigate: (path: string) => void
@@ -10,7 +12,12 @@ const productNavigationCommands = [
     title: 'Go to Attention',
     description: 'Open the operator intervention queue.',
     category: 'Navigate',
-    bindings: [{ label: 'g a' }],
+    bindings: [
+      {
+        label: 'g a',
+        registration: { kind: 'sequence', sequence: ['G', 'A'] as HotkeySequence },
+      },
+    ],
     run: (context: ProductCommandContext) => context.navigate('/attention'),
   },
   {
@@ -18,7 +25,12 @@ const productNavigationCommands = [
     title: 'Go to Sessions',
     description: 'Open the bounded session workspace.',
     category: 'Navigate',
-    bindings: [{ label: 'g s' }],
+    bindings: [
+      {
+        label: 'g s',
+        registration: { kind: 'sequence', sequence: ['G', 'S'] as HotkeySequence },
+      },
+    ],
     run: (context: ProductCommandContext) => context.navigate('/sessions'),
   },
   {
@@ -74,13 +86,36 @@ const productNavigationCommands = [
     title: 'Go to Settings',
     description: 'Open browser-local workstation preferences.',
     category: 'Navigate',
-    bindings: [{ label: 'g ,' }],
+    bindings: [
+      {
+        label: 'g ,',
+        registration: { kind: 'sequence', sequence: ['G', ','] as HotkeySequence },
+      },
+    ],
     run: (context: ProductCommandContext) => context.navigate('/settings'),
   },
 ] as const
 
 export const productCommandRegistry = [...productNavigationCommands, ...commandRegistry]
 export type ProductCommandId = (typeof productCommandRegistry)[number]['id']
+
+export const productHotkeyBindings = productCommandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
+    binding.registration?.kind === 'hotkey'
+      ? [{ commandId: command.id, hotkey: binding.registration.hotkey }]
+      : [],
+  )
+})
+
+export const productHotkeySequenceBindings = productCommandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
+    binding.registration?.kind === 'sequence'
+      ? [{ commandId: command.id, sequence: binding.registration.sequence }]
+      : [],
+  )
+})
 
 export const invokeProductCommand = (
   id: ProductCommandId,
