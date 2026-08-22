@@ -1253,7 +1253,7 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                     program: &arguments.program,
                     arguments: &arguments.arguments,
                     working_directory: &arguments.working_directory,
-                    timeout: Duration::ZERO,
+                    timeout: Duration::from_secs(arguments.timeout_seconds),
                     capture_bytes: 0,
                     environment: Some(&environment),
                 },
@@ -1262,7 +1262,10 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                     executable_path: &sandbox_path,
                 },
             );
-            if !process_request_fits_linux_arg_max(&budget_request) {
+            if !process_request_fits_linux_arg_max(
+                self.runner.sandbox_launcher_program(),
+                &budget_request,
+            ) {
                 return Err(SandboxEnvironmentRunError::Arguments);
             }
         }
@@ -1965,18 +1968,24 @@ fn sandbox_environment_fits_linux_arg_max(
 }
 
 #[cfg(target_os = "linux")]
-fn process_request_fits_linux_arg_max(request: &ProcessRequest) -> bool {
+fn process_request_fits_linux_arg_max(supervisor_program: &Path, request: &ProcessRequest) -> bool {
     fn string_bytes(value: &std::ffi::OsStr) -> usize {
         value.as_bytes().len().saturating_add(1)
     }
 
-    let argument_strings = string_bytes(&request.program).saturating_add(
-        request
-            .arguments
-            .iter()
-            .map(|argument| string_bytes(argument))
-            .sum::<usize>(),
-    );
+    let timeout_milliseconds = request.timeout.as_millis().min(u128::from(u64::MAX));
+    let timeout_milliseconds = timeout_milliseconds.to_string();
+    let argument_strings = string_bytes(supervisor_program.as_os_str())
+        .saturating_add(string_bytes(std::ffi::OsStr::new(SUPERVISOR_OUTER_MODE)))
+        .saturating_add(string_bytes(std::ffi::OsStr::new(&timeout_milliseconds)))
+        .saturating_add(string_bytes(&request.program))
+        .saturating_add(
+            request
+                .arguments
+                .iter()
+                .map(|argument| string_bytes(argument))
+                .sum::<usize>(),
+        );
     let environment_strings = request
         .environment
         .iter()
@@ -1988,7 +1997,7 @@ fn process_request_fits_linux_arg_max(request: &ProcessRequest) -> bool {
                 .saturating_add(1)
         })
         .sum::<usize>();
-    let pointer_bytes = (1_usize
+    let pointer_bytes = (4_usize
         .saturating_add(request.arguments.len())
         .saturating_add(request.environment.len())
         .saturating_add(2))
@@ -5512,6 +5521,28 @@ mod tests {
         assert_eq!(observation.recorded_probes(), Vec::new());
         assert_eq!(observation.recorded_requests(), Vec::new());
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_launch_budget_includes_the_supervisor_wrapper() {
+        let request = ProcessRequest {
+            program: OsString::from("p".repeat(MIN_LINUX_ARG_MAX_BYTES - 66)),
+            arguments: Vec::new(),
+            working_directory: PathBuf::from("/workspace"),
+            timeout: Duration::from_secs(30),
+            capture_bytes: 0,
+            environment: BTreeMap::new(),
+            environment_inheritance: ProcessEnvironment::Clear,
+            status_protocol: ProcessStatusProtocol::SandboxDispatch,
+        };
+        let long_supervisor = PathBuf::from("s".repeat(64));
+
+        assert!(process_request_fits_linux_arg_max(Path::new("s"), &request));
+        assert!(!process_request_fits_linux_arg_max(
+            &long_supervisor,
+            &request
+        ));
     }
 
     #[test]
