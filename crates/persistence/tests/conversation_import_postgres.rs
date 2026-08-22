@@ -778,7 +778,7 @@ async fn inv064_one_time_import_migration_installs_only_the_final_schema()
          VALUES ('30000000-0000-4000-8000-000000000065',
                  'replace_session_metadata', 1,
                  '40000000-0000-4000-8000-000000000039',
-                 'owner', false, 'rejected', 'session_not_found',
+                 'user', false, 'rejected', 'session_not_found',
                  '40000000-0000-4000-8000-000000000039');
          INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)

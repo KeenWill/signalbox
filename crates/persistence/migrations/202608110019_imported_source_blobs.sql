@@ -104,7 +104,7 @@ BEGIN
 
     -- Preserve registry identities before deleting imported sessions. Later
     -- typed commands rooted in those sessions disappear through the temporary
-    -- cascades, so their owner-global claims must disappear in the same reset.
+    -- cascades, so their user-global claims must disappear in the same reset.
     FOR table_record IN
         SELECT reset.relation_oid
           FROM imported_reset_table AS reset
