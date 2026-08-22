@@ -12,6 +12,7 @@ export interface CommandContext {
   requestedImportEntry?: string
   selectImportEntry?: (id: string) => void
   navigate?: (path: string) => void
+  transcriptPreferences?: boolean
 }
 
 export interface CommandBinding {
@@ -35,6 +36,8 @@ interface CommandDefinitionShape {
 const always = () => true
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
 const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
+const transcriptDetail = (context: CommandContext) =>
+  scenarioTimeline(context) || context.transcriptPreferences === true
 export const commandRegistry = [
   {
     id: 'navigate.attention',
@@ -334,7 +337,7 @@ export const commandRegistry = [
     description: 'Show every supported timeline record.',
     category: 'View',
     bindings: [],
-    available: scenarioTimeline,
+    available: transcriptDetail,
     run: (context) => context.dispatch(actions.detailSet('full')),
   },
   {
@@ -343,7 +346,7 @@ export const commandRegistry = [
     description: 'Keep origins, tools, progress, warnings, and results compact.',
     category: 'View',
     bindings: [],
-    available: scenarioTimeline,
+    available: transcriptDetail,
     run: (context) => context.dispatch(actions.detailSet('condensed')),
   },
   {
@@ -352,7 +355,7 @@ export const commandRegistry = [
     description: 'Emphasize origins and durable results.',
     category: 'View',
     bindings: [],
-    available: scenarioTimeline,
+    available: transcriptDetail,
     run: (context) => context.dispatch(actions.detailSet('results')),
   },
 ] as const satisfies readonly CommandDefinitionShape[]

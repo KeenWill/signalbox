@@ -35,4 +35,16 @@ describe('command registry', () => {
 
     expect(selectedImportEntry).toBe(importEntryIds[1])
   })
+
+  it('sets transcript detail through the registry in Settings without a timeline', () => {
+    invokeCommand('detail.results', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      transcriptPreferences: true,
+    })
+
+    expect(selectApp(store.getState()).detail).toBe('results')
+  })
 })

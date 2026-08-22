@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
-import { defaultBrowserPreferences } from './preferences'
+import { type CommandContext, invokeCommand } from './commands'
+import { defaultBrowserPreferences, paneSizeBounds } from './preferences'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
 
 function PreferenceGroup({ legend, children }: { legend: string; children: ReactNode }) {
@@ -11,7 +12,7 @@ function PreferenceGroup({ legend, children }: { legend: string; children: React
   )
 }
 
-export function SettingsSurface() {
+export function SettingsSurface({ context }: { context: CommandContext }) {
   const app = useAppSelector(selectApp)
   const dispatch = useAppDispatch()
   return (
@@ -78,7 +79,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'full'}
-              onChange={() => dispatch(actions.detailSet('full'))}
+              onChange={() => invokeCommand('detail.full', context)}
             />
             <span>Full</span>
           </label>
@@ -87,7 +88,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'condensed'}
-              onChange={() => dispatch(actions.detailSet('condensed'))}
+              onChange={() => invokeCommand('detail.condensed', context)}
             />
             <span>Condensed</span>
           </label>
@@ -96,7 +97,7 @@ export function SettingsSurface() {
               type="radio"
               name="detail"
               checked={app.detail === 'results'}
-              onChange={() => dispatch(actions.detailSet('results'))}
+              onChange={() => invokeCommand('detail.results', context)}
             />
             <span>Results</span>
           </label>
@@ -130,8 +131,8 @@ export function SettingsSurface() {
             <output>{app.paneSizes.navigation}px</output>
             <input
               type="range"
-              min="160"
-              max="360"
+              min={paneSizeBounds.navigation.minimum}
+              max={paneSizeBounds.navigation.maximum}
               value={app.paneSizes.navigation}
               onChange={(event) =>
                 dispatch(
@@ -148,8 +149,8 @@ export function SettingsSurface() {
             <output>{app.paneSizes.inspector}px</output>
             <input
               type="range"
-              min="200"
-              max="480"
+              min={paneSizeBounds.inspector.minimum}
+              max={paneSizeBounds.inspector.maximum}
               value={app.paneSizes.inspector}
               onChange={(event) =>
                 dispatch(

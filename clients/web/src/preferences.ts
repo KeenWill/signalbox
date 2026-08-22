@@ -8,6 +8,11 @@ export interface BrowserPreferences {
   paneSizes: { navigation: number; inspector: number }
 }
 
+export const paneSizeBounds = {
+  navigation: { minimum: 160, maximum: 360 },
+  inspector: { minimum: 200, maximum: 480 },
+} as const
+
 export const defaultBrowserPreferences: BrowserPreferences = {
   layout: 'workbench',
   density: 'compact',
@@ -57,14 +62,14 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
       navigation: boundedNumber(
         panes.navigation,
         defaultBrowserPreferences.paneSizes.navigation,
-        160,
-        360,
+        paneSizeBounds.navigation.minimum,
+        paneSizeBounds.navigation.maximum,
       ),
       inspector: boundedNumber(
         panes.inspector,
         defaultBrowserPreferences.paneSizes.inspector,
-        200,
-        480,
+        paneSizeBounds.inspector.minimum,
+        paneSizeBounds.inspector.maximum,
       ),
     },
   }

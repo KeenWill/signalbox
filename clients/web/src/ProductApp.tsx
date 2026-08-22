@@ -334,19 +334,6 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const focusDestination = useCallback(() => {
     requestAnimationFrame(() => primaryRef.current?.focus())
   }, [])
-  const focusScenarioDestination = useCallback(() => {
-    let attempts = 0
-    const focusWhenReady = () => {
-      const destination = document.querySelector<HTMLElement>('main.workspace')
-      if (destination) {
-        destination.focus()
-        return
-      }
-      attempts += 1
-      if (attempts < 60) requestAnimationFrame(focusWhenReady)
-    }
-    requestAnimationFrame(focusWhenReady)
-  }, [])
   useEffect(() => {
     if (app.overlay === 'navigation') restoreNavigationFocusRef.current = true
   }, [app.overlay])
@@ -358,6 +345,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       getState: store.getState,
       timelineIds: surfaceContext?.timelineIds ?? [],
       focusTimeline: surfaceContext?.focusTimeline ?? (() => primaryRef.current?.focus()),
+      transcriptPreferences: surface === 'settings',
       navigate: navigationDisabled
         ? undefined
         : (path) => {
@@ -389,7 +377,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     ) : surface === 'sessions' ? (
       <SessionsSurface />
     ) : surface === 'settings' ? (
-      <SettingsSurface />
+      <SettingsSurface context={context} />
     ) : surface === 'imports' && bootstrap.isSuccess ? (
       <ImportsWorkspace
         api={productImportApi}
@@ -431,7 +419,6 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           disabled={navigationDisabled}
           onNavigate={(destination) => {
             if (destination === 'product') focusDestination()
-            else focusScenarioDestination()
           }}
         />
       </aside>
@@ -531,7 +518,6 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
                 restoreNavigationFocusRef.current = false
                 dispatch(actions.overlaySet(null))
                 if (destination === 'product') focusDestination()
-                else focusScenarioDestination()
               }}
             />
           </Dialog.Content>

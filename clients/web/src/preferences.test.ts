@@ -3,6 +3,7 @@ import {
   decodeBrowserPreferences,
   defaultBrowserPreferences,
   loadBrowserPreferences,
+  paneSizeBounds,
   saveBrowserPreferences,
 } from './preferences'
 
@@ -21,7 +22,10 @@ describe('browser preferences', () => {
 
     expect(decoded.layout).toBe(defaultBrowserPreferences.layout)
     expect(decoded.density).toBe(stored.density)
-    expect(decoded.paneSizes).toEqual({ navigation: 160, inspector: 480 })
+    expect(decoded.paneSizes).toEqual({
+      navigation: paneSizeBounds.navigation.minimum,
+      inspector: paneSizeBounds.inspector.maximum,
+    })
   })
 
   it('falls back when browser storage cannot be read or written', () => {
