@@ -400,93 +400,106 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         provider,
     } = arguments;
     let content = UserContent::try_text(input).map_err(|_| DebugDriverError::InvalidText)?;
-    let (selection, targets, credential_reference, credential_pin, credential_families, provider) =
-        match provider {
-            DebugProvider::Scripted { reply } => {
-                let selection = DirectModelSelection::from_uuid(Uuid::now_v7());
-                let targets =
-                    ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
-                        selection,
-                        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
-                            Uuid::now_v7(),
-                        )),
-                    )])
-                    .map_err(|_| DebugDriverError::UnexpectedOutcome)?;
-                (
-                    selection,
-                    targets,
-                    ModelCallCredentialReference::new("scripted-test"),
-                    SessionCredentialPin::try_new(vec![SessionModelCredential::new(
-                        "scripted-debug",
-                        "scripted-test",
-                    )])
-                    .map_err(|_| DebugDriverError::Configuration)?,
-                    // The scripted provider routes no real family. It carries no
-                    // catalog at all rather than an empty one: an empty catalog
-                    // resolves no family and fails the call as corruption, while
-                    // `None` is what selects the fallback reference.
-                    None,
-                    DebugProviderRuntime::Scripted(
-                        AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?,
-                    ),
-                )
-            }
-            DebugProvider::Anthropic {
+    let (
+        selection,
+        targets,
+        credential_reference,
+        credential_pin,
+        credential_families,
+        automatic_tool_round_limit,
+        provider,
+    ) = match provider {
+        DebugProvider::Scripted { reply } => {
+            let selection = DirectModelSelection::from_uuid(Uuid::now_v7());
+            let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
                 selection,
-                model_configuration_file,
-            } => {
-                let configuration = HubModelConfiguration::read(&model_configuration_file)
-                    .map_err(|_| DebugDriverError::Configuration)?;
-                require_anthropic_selection(&configuration, selection)?;
-                let credential_profile = configuration
-                    .resolve_direct_model(selection)
-                    .ok_or(DebugDriverError::Configuration)?
-                    .credential_profile()
-                    .to_owned();
-                let credential_access = FileCredentialAccess::from_files(
-                    configuration
-                        .file_credential_profiles(ModelAdapter::Anthropic)
-                        .map(|(reference, path)| {
-                            (CredentialReference::new(reference), path.to_path_buf())
-                        }),
-                );
-                let credential_reference = ModelCallCredentialReference::new(credential_profile);
-                let native_message_limit = configuration
-                    .numeric_bounds()
-                    .integer("max_native_message_bytes")
-                    .ok_or(DebugDriverError::Configuration)?
-                    .map(usize::try_from)
-                    .transpose()
-                    .map_err(|_| DebugDriverError::Configuration)?;
-                let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
-                adapter_configuration.exchange_timeout = configuration
-                    .numeric_bounds()
-                    .duration("model_exchange_timeout")
-                    .ok_or(DebugDriverError::Configuration)?;
-                adapter_configuration.model_capabilities =
-                    configuration.runtime_model_capability_catalog();
-                let runtime = AnthropicRuntime::new(adapter_configuration, credential_access)
-                    .map_err(|_| DebugDriverError::Configuration)?;
-                let diagnostic_model_identity_limit = configuration
-                    .numeric_bounds()
-                    .integer("diagnostic_model_identity_limit")
-                    .flatten()
-                    .and_then(|value| usize::try_from(value).ok());
-                let provider = RuntimeModelCallProvider::new(
-                    runtime,
-                    configuration.runtime_model_catalog(),
-                    diagnostic_model_identity_limit,
-                );
-                (
-                    selection,
-                    configuration.target_catalog(),
-                    credential_reference,
-                    configuration.session_credential_pin(),
-                    Some(configuration.credential_family_catalog()),
-                    DebugProviderRuntime::Anthropic(provider),
-                )
-            }
-        };
+                ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::now_v7())),
+            )])
+            .map_err(|_| DebugDriverError::UnexpectedOutcome)?;
+            (
+                selection,
+                targets,
+                ModelCallCredentialReference::new("scripted-test"),
+                SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+                    "scripted-debug",
+                    "scripted-test",
+                )])
+                .map_err(|_| DebugDriverError::Configuration)?,
+                // The scripted provider routes no real family. It carries no
+                // catalog at all rather than an empty one: an empty catalog
+                // resolves no family and fails the call as corruption, while
+                // `None` is what selects the fallback reference.
+                None,
+                None,
+                DebugProviderRuntime::Scripted(
+                    AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?,
+                ),
+            )
+        }
+        DebugProvider::Anthropic {
+            selection,
+            model_configuration_file,
+        } => {
+            let configuration = HubModelConfiguration::read(&model_configuration_file)
+                .map_err(|_| DebugDriverError::Configuration)?;
+            require_anthropic_selection(&configuration, selection)?;
+            let credential_profile = configuration
+                .resolve_direct_model(selection)
+                .ok_or(DebugDriverError::Configuration)?
+                .credential_profile()
+                .to_owned();
+            let credential_access = FileCredentialAccess::from_files(
+                configuration
+                    .file_credential_profiles(ModelAdapter::Anthropic)
+                    .map(|(reference, path)| {
+                        (CredentialReference::new(reference), path.to_path_buf())
+                    }),
+            );
+            let credential_reference = ModelCallCredentialReference::new(credential_profile);
+            let native_message_limit = configuration
+                .numeric_bounds()
+                .integer("max_native_message_bytes")
+                .ok_or(DebugDriverError::Configuration)?
+                .map(usize::try_from)
+                .transpose()
+                .map_err(|_| DebugDriverError::Configuration)?;
+            let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = configuration
+                .numeric_bounds()
+                .duration("model_exchange_timeout")
+                .ok_or(DebugDriverError::Configuration)?;
+            adapter_configuration.model_capabilities =
+                configuration.runtime_model_capability_catalog();
+            let runtime = AnthropicRuntime::new(adapter_configuration, credential_access)
+                .map_err(|_| DebugDriverError::Configuration)?;
+            let diagnostic_model_identity_limit = configuration
+                .numeric_bounds()
+                .integer("diagnostic_model_identity_limit")
+                .flatten()
+                .and_then(|value| usize::try_from(value).ok());
+            let automatic_tool_round_limit = configuration
+                .numeric_bounds()
+                .integer("max_automatic_tool_rounds_per_turn")
+                .ok_or(DebugDriverError::Configuration)?
+                .map(usize::try_from)
+                .transpose()
+                .map_err(|_| DebugDriverError::Configuration)?;
+            let provider = RuntimeModelCallProvider::new(
+                runtime,
+                configuration.runtime_model_catalog(),
+                diagnostic_model_identity_limit,
+            );
+            (
+                selection,
+                configuration.target_catalog(),
+                credential_reference,
+                configuration.session_credential_pin(),
+                Some(configuration.credential_family_catalog()),
+                automatic_tool_round_limit,
+                DebugProviderRuntime::Anthropic(provider),
+            )
+        }
+    };
     let connection_options =
         local_test_connection_options(&database_url).map_err(|_| DebugDriverError::Database)?;
     let pool = PgPoolOptions::new()
@@ -588,6 +601,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                     repository,
                     InProcessAttemptDispatchGate::default(),
                     provider,
+                    automatic_tool_round_limit,
                 ));
             let (pass, pass_failure) =
                 ObservableDebugPass::new(ActivatedTurnPass::new(activation, execution));

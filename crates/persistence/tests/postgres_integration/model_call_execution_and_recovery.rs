@@ -1188,6 +1188,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
             },
         )]),
         InProcessAttemptDispatchGate::default(),
+        None,
     );
 
     assert_eq!(

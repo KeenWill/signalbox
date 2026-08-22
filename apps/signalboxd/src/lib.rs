@@ -1449,19 +1449,23 @@ pub struct PostgresProviderModelExecution<Provider> {
     repository: PostgresModelCallRepository,
     gate: InProcessAttemptDispatchGate,
     provider: Provider,
+    automatic_tool_round_limit: Option<usize>,
 }
 
 impl<Provider> PostgresProviderModelExecution<Provider> {
-    /// Supplies shared persistence, the per-attempt gate, and provider port.
+    /// Supplies shared persistence, the per-attempt gate, provider port, and
+    /// the deployment's explicit automatic tool-round policy.
     pub const fn new(
         repository: PostgresModelCallRepository,
         gate: InProcessAttemptDispatchGate,
         provider: Provider,
+        automatic_tool_round_limit: Option<usize>,
     ) -> Self {
         Self {
             repository,
             gate,
             provider,
+            automatic_tool_round_limit,
         }
     }
 
@@ -1484,6 +1488,7 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
             provider: self.provider,
             catalog,
             executor,
+            automatic_tool_round_limit: self.automatic_tool_round_limit,
             approval_judge: None,
             approval_judge_selection: None,
             approval_judge_configuration: None,
@@ -1507,6 +1512,7 @@ where
         let repository = self.repository.clone();
         let gate = self.gate.clone();
         let provider = self.provider.clone();
+        let automatic_tool_round_limit = self.automatic_tool_round_limit;
         async move {
             let session = activated.session();
             drop(activated);
@@ -1518,6 +1524,7 @@ where
                 repository,
                 provider,
                 gate,
+                automatic_tool_round_limit,
             );
             loop {
                 let outcome = match service.execute(session).await {
@@ -1565,6 +1572,7 @@ pub struct PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
     provider: Provider,
     catalog: Catalog,
     executor: Executor,
+    automatic_tool_round_limit: Option<usize>,
     approval_judge: Option<std::sync::Arc<dyn ApprovalJudgeModel>>,
     approval_judge_selection: Option<DirectModelSelection>,
     approval_judge_configuration: Option<HubModelConfiguration>,
@@ -2082,6 +2090,7 @@ where
         let provider = self.provider.clone();
         let catalog = self.catalog.clone();
         let executor = self.executor.clone();
+        let automatic_tool_round_limit = self.automatic_tool_round_limit;
         let approval_judge = self.approval_judge.clone();
         let approval_judge_selection = self.approval_judge_selection;
         let approval_judge_configuration = self.approval_judge_configuration.clone();
@@ -2095,6 +2104,7 @@ where
                 model_repository,
                 provider,
                 model_gate,
+                automatic_tool_round_limit,
             )
             .with_tool_catalog(catalog.clone());
             let mut tools = ToolExecutionService::new(
@@ -2397,6 +2407,7 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                     },
                 )]),
                 gate,
+                None,
             );
             loop {
                 let outcome = match service.execute(session).await {

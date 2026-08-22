@@ -2073,6 +2073,7 @@ async fn execute_streamed_turn_until(
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2120,6 +2121,7 @@ async fn execute_recorded_turn(
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2197,6 +2199,7 @@ async fn execute_guarded_turn(
             repository,
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(
@@ -2524,6 +2527,7 @@ fn start_fleet_scheduler(
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -3054,6 +3058,7 @@ async fn complete_active_text_turn(
             },
         )]),
         InProcessAttemptDispatchGate::default(),
+        None,
     );
     assert!(matches!(
         service.execute(session).await?,
@@ -8327,6 +8332,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
             repository,
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(
@@ -8467,6 +8473,7 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
             repository,
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(

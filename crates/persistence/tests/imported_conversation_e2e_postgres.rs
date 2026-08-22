@@ -491,6 +491,7 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
             },
         )]),
         InProcessAttemptDispatchGate::default(),
+        None,
     );
     assert_eq!(
         model_service.execute(session).await?,

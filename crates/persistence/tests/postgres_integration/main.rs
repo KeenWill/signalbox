@@ -1495,6 +1495,7 @@ async fn complete_text_turn(
             },
         )]),
         InProcessAttemptDispatchGate::default(),
+        None,
     );
     assert_eq!(
         service.execute(session).await?,

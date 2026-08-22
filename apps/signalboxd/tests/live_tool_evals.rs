@@ -717,6 +717,7 @@ async fn run_case(
         .with_session_credentials(database.credential_families.clone()),
         InProcessAttemptDispatchGate::default(),
         provider,
+        None,
     )
     .with_tool_loop(
         InProcessToolDispatchGate::default(),

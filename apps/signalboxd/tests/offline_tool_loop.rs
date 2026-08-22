@@ -425,6 +425,45 @@ impl ToolLoopFixture {
         FixtureExecution<Catalog, Executor>,
         Arc<ScriptedModel<ModelCallId>>,
     ) {
+        self.execution_with_model_shutdown_and_limit(
+            scripts,
+            catalog,
+            executor,
+            shutdown_after_execute,
+            None,
+        )
+    }
+
+    fn execution_with_tool_round_limit<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        catalog: Catalog,
+        executor: Executor,
+        automatic_tool_round_limit: Option<usize>,
+    ) -> (
+        FixtureExecution<Catalog, Executor>,
+        Arc<ScriptedModel<ModelCallId>>,
+    ) {
+        self.execution_with_model_shutdown_and_limit(
+            scripts,
+            catalog,
+            executor,
+            None,
+            automatic_tool_round_limit,
+        )
+    }
+
+    fn execution_with_model_shutdown_and_limit<Catalog, Executor>(
+        &self,
+        scripts: impl IntoIterator<Item = Script>,
+        catalog: Catalog,
+        executor: Executor,
+        shutdown_after_execute: Option<watch::Sender<bool>>,
+        automatic_tool_round_limit: Option<usize>,
+    ) -> (
+        FixtureExecution<Catalog, Executor>,
+        Arc<ScriptedModel<ModelCallId>>,
+    ) {
         let runtime = Arc::new(ScriptedModel::<ModelCallId>::following(scripts));
         let provider = RuntimeModelCallProvider::new(
             RecordingScriptedModel {
@@ -443,6 +482,7 @@ impl ToolLoopFixture {
                 ),
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                automatic_tool_round_limit,
             )
             .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor),
             runtime,
@@ -488,6 +528,7 @@ impl ToolLoopFixture {
                 ),
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                None,
             )
             .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor)
             .with_approval_judge(judge, None, configuration),
@@ -2500,6 +2541,48 @@ async fn shutdown_checkpoints_after_the_issued_model_before_the_next_tool()
             "tool_execution_result",
             "assistant_text",
             "turn_completed",
+        ]
+    );
+    Ok(())
+}
+
+/// The daemon's required automatic tool-round policy reaches the production
+/// PostgreSQL tool loop and terminalizes before a disallowed provider call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn configured_automatic_tool_round_limit_stops_before_the_next_provider_call()
+-> Result<(), Box<dyn Error>> {
+    const TOOL_NAME: &str = "effect_free";
+    const AUTOMATIC_TOOL_ROUND_LIMIT: usize = 1;
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let executor = RecordingExecutor::completing();
+    let (execution, runtime) = fixture.execution_with_tool_round_limit(
+        [
+            tool_use_script(&[(TOOL_NAME, "{}")]),
+            completion_script("must not be observed"),
+        ],
+        catalog([tool(
+            TOOL_NAME,
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::EffectFree,
+        )]),
+        executor.clone(),
+        Some(AUTOMATIC_TOOL_ROUND_LIMIT),
+    );
+
+    execution
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+
+    assert_eq!(executor.events(), vec![String::from(TOOL_NAME)]);
+    assert_eq!(runtime.received_operations().len(), 1);
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "turn_failed",
         ]
     );
     Ok(())

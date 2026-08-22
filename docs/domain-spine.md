@@ -6922,9 +6922,9 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         observation: Observation,
         provider: Provider,
         gate: Gate,
+        max_automatic_tool_rounds_per_turn: Option<usize>,
     ) -> Self;
     pub fn with_tool_catalog(self, catalog: impl ToolCatalog + 'static) -> Self;
-    pub const fn with_automatic_tool_round_limit(self, limit: Option<usize>) -> Self;
     pub fn from_parts(
         ids: Ids,
         prepare: Prepare,

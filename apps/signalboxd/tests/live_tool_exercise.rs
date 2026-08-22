@@ -315,6 +315,7 @@ async fn run_live_smoke() -> SmokeResult {
         ),
         InProcessAttemptDispatchGate::default(),
         provider,
+        None,
     )
     .with_tool_loop(tool_gate, tool_catalog, tool_executor);
 
