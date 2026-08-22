@@ -81,11 +81,11 @@ test('describes Settings as browser-local rather than daemon-backed', async ({ p
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('keeps Settings single-column without horizontal overflow at intermediate widths', async ({
+test('keeps Settings single-column when a vertical scrollbar reduces content width', async ({
   page,
 }) => {
   const problems = watchBrowser(page)
-  await page.setViewportSize({ width: 800, height: 800 })
+  await page.setViewportSize({ width: 840, height: 480 })
   await page.goto('/settings')
 
   const navigationWidth = page
