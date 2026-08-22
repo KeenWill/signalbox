@@ -114,6 +114,7 @@ function ProductNavigation({
 
 function CommandPalette({ context }: { context: ProductCommandContext }) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
+  const focusTimelineAfterClose = useRef(false)
   return (
     <Dialog.Root
       open={open}
@@ -126,6 +127,12 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
         <Dialog.Content
           className="dialog-content product-palette"
           aria-describedby="product-palette-description"
+          onCloseAutoFocus={(event) => {
+            if (!focusTimelineAfterClose.current) return
+            event.preventDefault()
+            focusTimelineAfterClose.current = false
+            context.focusTimeline()
+          }}
         >
           <div className="dialog-heading">
             <div>
@@ -152,6 +159,9 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
                   key={command.id}
                   type="button"
                   onClick={() => {
+                    focusTimelineAfterClose.current =
+                      command.id.startsWith('selection.') &&
+                      productCommandAvailable(command.id, context)
                     invokeProductCommand('surface.escape', context)
                     invokeProductCommand(command.id, context)
                   }}

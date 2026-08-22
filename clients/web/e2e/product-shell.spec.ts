@@ -320,6 +320,63 @@ test('gives Full and Condensed distinct Session presentations', async ({ page })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('keeps palette selection commands focused on the Session timeline', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/sessions')
+
+  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  await sessionId.fill(sessionWorkspaceFixture.id)
+  await sessionId.press('Enter')
+  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await expect(timeline).toBeVisible()
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Select next timeline item/ }).click()
+
+  await expect(timeline).toBeFocused()
+  await expect(page.getByRole('option', { name: /42 turn activated/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('preserves the saved row when reopening the current Session fails', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let failTimeline = false
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page, () => failTimeline)
+  await page.goto('/sessions')
+
+  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  await sessionId.fill(sessionWorkspaceFixture.id)
+  await sessionId.press('Enter')
+  await page.getByRole('option', { name: /43 turn completed/ }).click()
+
+  failTimeline = true
+  await sessionId.press('Enter')
+  await expect(page.getByRole('alert')).toBeVisible()
+
+  const savedPosition = await page.evaluate(
+    ({ key, id }) => {
+      const stored = JSON.parse(localStorage.getItem(key) ?? '{}') as {
+        lastLogicalPositions?: Record<string, string>
+      }
+      return stored.lastLogicalPositions?.[id]
+    },
+    { key: 'signalbox.web.preferences.v1', id: sessionWorkspaceFixture.id },
+  )
+  expect(savedPosition).toBe('43')
+  expect(problems.pageErrors).toEqual([])
+  expect(
+    problems.consoleErrors.every((message) =>
+      message.includes('Failed to load resource: the server responded with a status of 503'),
+    ),
+  ).toBe(true)
+})
+
 test('clears cached Session projections after a refetch error', async ({ page }) => {
   const problems = watchBrowser(page)
   let failTimeline = false

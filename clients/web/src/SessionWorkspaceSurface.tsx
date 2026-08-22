@@ -246,7 +246,7 @@ export function SessionWorkspaceSurface({
     setOpeningPosition(app.lastLogicalPositions[candidate])
     manualAnchorRef.current = null
     setExpanded(new Set())
-    dispatch(actions.timelineSelected(null))
+    if (!reopeningCurrentSession) dispatch(actions.timelineSelected(null))
     setSessionId(candidate)
     if (reopeningCurrentSession) {
       boundaryRequest.current += 1
