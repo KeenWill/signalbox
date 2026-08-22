@@ -385,7 +385,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       : 'unavailable'
 
   useEffect(() => {
+    const previousTitle = document.title
     document.title = `${copy.title} · Signalbox`
+    return () => {
+      document.title = previousTitle
+    }
   }, [copy.title])
 
   const content =

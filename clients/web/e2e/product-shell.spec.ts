@@ -124,6 +124,19 @@ test('navigates from Attention to Sessions with the shared semantic link', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('restores the scenario title after leaving product routes', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+  await expect(page).toHaveTitle('Attention · Signalbox')
+
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+  await expect(page).toHaveTitle('Signalbox scenarios')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('gates Sessions on the validated bootstrap capability', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.route('**/api/bootstrap', (route) =>
