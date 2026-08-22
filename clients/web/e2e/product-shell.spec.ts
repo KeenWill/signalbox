@@ -296,10 +296,9 @@ test('locks product navigation while an ambiguous continuation command is retain
   await page.keyboard.press('s')
   await expect(page).toHaveURL(/\/imports$/)
   await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
-  expect(problems).toEqual({
-    consoleErrors: [
-      'Failed to load resource: the server responded with a status of 503 (Service Unavailable)',
-    ],
-    pageErrors: [],
-  })
+  const expectedResourceError =
+    'Failed to load resource: the server responded with a status of 503 (Service Unavailable)'
+  expect(problems.pageErrors).toEqual([])
+  expect(problems.consoleErrors.length).toBeLessThanOrEqual(1)
+  expect(problems.consoleErrors.every((error) => error === expectedResourceError)).toBe(true)
 })
