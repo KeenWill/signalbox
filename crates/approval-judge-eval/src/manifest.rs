@@ -1062,6 +1062,7 @@ mod tests {
 
     #[test]
     fn relative_manifest_path_resolves_before_checkout_discovery() {
+        let expected = decode_manifest(SEED_MANIFEST).expect("the seed manifest passes admission");
         let current = std::env::current_dir().expect("the test working directory is available");
         let relative = seed_manifest_path()
             .strip_prefix(&current)
@@ -1070,7 +1071,7 @@ mod tests {
         let loaded = load_manifest_corpus(relative)
             .expect("a relative manifest path discovers the containing checkout");
 
-        assert_eq!(loaded.manifest.name(), "approval-judge-seed");
+        assert_eq!(loaded.manifest.name(), expected.name());
     }
 
     #[test]
