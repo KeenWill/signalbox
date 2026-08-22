@@ -43,10 +43,12 @@ export function AttentionSurface({
   const queryClient = useQueryClient()
   const [after, setAfter] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [monitorGeneration, setMonitorGeneration] = useState(0)
   const returnFocus = useRef<HTMLButtonElement>(null)
   const closeFocus = useRef<HTMLButtonElement>(null)
   const pageHeading = useRef<HTMLHeadingElement>(null)
   const focusReplacement = useRef(false)
+  const focusRevealedList = useRef(false)
   const liveProjection = useRef<WebAttentionSnapshot | undefined>(undefined)
   const attention = useQuery({
     queryKey: queryKey(after),
@@ -62,6 +64,7 @@ export function AttentionSurface({
   const workbenchClass = selected ? 'attention-workbench inspector-open' : 'attention-workbench'
 
   useEffect(() => {
+    void monitorGeneration
     if (after !== null) {
       dispatch(actions.attentionSyncSet('idle'))
       return
@@ -88,10 +91,11 @@ export function AttentionSurface({
       controller.abort()
       dispatch(actions.attentionSyncSet('idle'))
     }
-  }, [after, dispatch, queryClient])
+  }, [after, dispatch, monitorGeneration, queryClient])
 
   useEffect(() => {
-    const target = selectedId ? closeFocus : returnFocus
+    const target = selectedId ? closeFocus : focusRevealedList.current ? pageHeading : returnFocus
+    focusRevealedList.current = false
     const frame = requestAnimationFrame(() => target.current?.focus())
     return () => cancelAnimationFrame(frame)
   }, [selectedId])
@@ -118,7 +122,7 @@ export function AttentionSurface({
   useEffect(() => {
     if (!selectedId || !attention.data || selected) return
     returnFocus.current = null
-    pageHeading.current?.focus()
+    focusRevealedList.current = true
     setSelectedId(null)
   }, [attention.data, selected, selectedId])
 
@@ -139,6 +143,10 @@ export function AttentionSurface({
     setSelectedId(null)
     setAfter(null)
   }
+  const restartMonitor = () => {
+    void attention.refetch()
+    setMonitorGeneration((generation) => generation + 1)
+  }
 
   return (
     <div className="surface-body attention-live-surface">
@@ -146,8 +154,12 @@ export function AttentionSurface({
         <span className={`attention-monitor phase-${phase}`} aria-live="polite">
           <Radio aria-hidden="true" /> {phaseCopy[phase]}
         </span>
-        <button type="button" onClick={() => void attention.refetch()}>
-          <RefreshCw aria-hidden="true" /> Refresh snapshot
+        <button
+          type="button"
+          onClick={phase === 'failed' ? restartMonitor : () => void attention.refetch()}
+        >
+          <RefreshCw aria-hidden="true" />
+          {phase === 'failed' ? 'Restart monitor' : 'Refresh snapshot'}
         </button>
       </div>
 

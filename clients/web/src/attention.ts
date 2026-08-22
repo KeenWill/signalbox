@@ -24,7 +24,14 @@ export const reduceAttentionEvent = (
   if (updateSessionIds.size !== event.summaries.length) return { kind: 'resync' }
   const replacements = new Map(event.summaries.map((summary) => [summary.session_id, summary]))
   const knownSessionIds = new Set(current.summaries.map((summary) => summary.session_id))
-  if (event.summaries.some((summary) => !knownSessionIds.has(summary.session_id))) {
+  const continuation = current.continuation_after_session_id ?? null
+  if (
+    event.summaries.some(
+      (summary) =>
+        !knownSessionIds.has(summary.session_id) &&
+        (continuation === null || summary.session_id <= continuation),
+    )
+  ) {
     return { kind: 'resync' }
   }
   return {
@@ -67,7 +74,13 @@ export const synchronizeAttention = async ({
   try {
     while (!signal.aborted) {
       let restart = false
+      let firstEvent = true
       for await (const event of transport.followAttention(signal)) {
+        if (firstEvent && event.kind !== 'snapshot') {
+          transition('failed')
+          return
+        }
+        firstEvent = false
         const reduction = reduceAttentionEvent(projection, event)
         if (reduction.kind === 'resync') {
           resyncs += 1

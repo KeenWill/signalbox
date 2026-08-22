@@ -132,6 +132,22 @@ const watchBrowser = (page: Page) => {
   return problems
 }
 
+const installRecoveringMonitorScenario = async (page: Page) => {
+  let followRequests = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention/follow', (route) => {
+    followRequests += 1
+    return followRequests === 1
+      ? route.fulfill({ body: '{"kind":', contentType: 'application/x-ndjson' })
+      : route.fulfill({
+          body: `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n`,
+          contentType: 'application/x-ndjson',
+        })
+  })
+  await page.route('**/api/attention', (route) => route.fulfill({ json: attentionFixture }))
+  return () => followRequests
+}
+
 const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
   test.skip(
     testInfo.project.name !== 'chromium' || process.platform !== 'linux',
@@ -213,6 +229,7 @@ test('moves focus to the page heading when refreshed data removes the selection'
   page,
 }) => {
   await installAttentionReplacementScenario(page)
+  await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/attention')
 
   await page
@@ -227,6 +244,17 @@ test('moves focus to the page heading when refreshed data removes the selection'
       level: 2,
     }),
   ).toBeFocused()
+})
+
+test('restarts a failed Attention monitor in place', async ({ page }) => {
+  const followRequests = await installRecoveringMonitorScenario(page)
+  await page.goto('/attention')
+
+  await expect(page.getByText('Monitor unavailable')).toBeVisible()
+  await page.getByRole('button', { name: 'Restart monitor' }).click()
+
+  await expect.poll(followRequests).toBe(2)
+  await expect(page.getByText('Monitor paused')).toBeVisible()
 })
 
 test('captures the dark attention fleet', async ({ page }, testInfo) => {
