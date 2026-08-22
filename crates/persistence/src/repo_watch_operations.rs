@@ -1569,6 +1569,10 @@ fn stack_relationship(
     subject: &signalbox_application::RepoWatchPullRequestState,
     repository: &RepositorySlug,
 ) -> (Option<PullRequestNumber>, u64) {
+    if subject.lifecycle() != RepoWatchPullRequestLifecycle::Open {
+        return (None, 0);
+    }
+
     let open_parent = all
         .iter()
         .find(|candidate| {

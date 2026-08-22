@@ -674,11 +674,15 @@ async fn terminal_disposition_drains_pending_delivery() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-#[tokio::test]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn operations_webhook_window_and_activity_are_bounded_and_keyset_paged()
--> Result<(), Box<dyn Error>> {
-    let (_container, pool) = migrated_postgres().await?;
+async fn operations_webhook_fixture() -> Result<
+    (
+        ContainerAsync<Postgres>,
+        RepositorySlug,
+        PostgresRepoWatchOperations,
+    ),
+    Box<dyn Error>,
+> {
+    let (container, pool) = migrated_postgres().await?;
     let repository = repository()?;
     let event_store = PostgresRepoWatchStore::new(pool.clone());
     event_store
@@ -697,7 +701,32 @@ async fn operations_webhook_window_and_activity_are_bounded_and_keyset_paged()
     let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
     seed_operations_webhook_burst(&webhook_store).await?;
     let reader = PostgresRepoWatchOperations::new(pool);
+    Ok((container, repository, reader))
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operations_webhook_window_counts_recent_projected_deliveries() -> Result<(), Box<dyn Error>>
+{
+    let (_container, _repository, reader) = operations_webhook_fixture().await?;
     let statuses = reader.repository_statuses(None).await?;
+
+    assert_eq!(statuses.repositories.len(), 1);
+    assert_eq!(
+        statuses.repositories[0].previous_five_minutes.received,
+        u64::try_from(OPERATIONS_BURST_COUNT)?
+    );
+    assert_eq!(
+        statuses.repositories[0].previous_five_minutes.projected,
+        u64::try_from(OPERATIONS_BURST_COUNT)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operations_webhook_activity_is_bounded_and_keyset_paged() -> Result<(), Box<dyn Error>> {
+    let (_container, repository, reader) = operations_webhook_fixture().await?;
     let first = reader
         .activity(
             repository.clone(),
@@ -713,15 +742,6 @@ async fn operations_webhook_window_and_activity_are_bounded_and_keyset_paged()
         )
         .await?;
 
-    assert_eq!(statuses.repositories.len(), 1);
-    assert_eq!(
-        statuses.repositories[0].previous_five_minutes.received,
-        u64::try_from(OPERATIONS_BURST_COUNT)?
-    );
-    assert_eq!(
-        statuses.repositories[0].previous_five_minutes.projected,
-        u64::try_from(OPERATIONS_BURST_COUNT)?
-    );
     assert_eq!(
         first.webhooks.len(),
         usize::from(max_repo_watch_activity_page_items())
