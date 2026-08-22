@@ -98,12 +98,12 @@ async fn credential_action_head_is_available(
     Ok(available)
 }
 
-/// INV-007 / INV-009 / INV-012: model-call writers acquire the shared outbox
-/// allocator ahead of credential action heads, preventing a cross-session
-/// reverse-order cycle with tool-result continuation.
+/// INV-007 / INV-009 / INV-012: model-call writers acquire credential action
+/// heads ahead of the shared outbox allocator, serializing one pool before it
+/// can occupy the global append queue.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv007_inv009_inv012_model_call_writers_order_outbox_before_credential_actions()
+async fn inv007_inv009_inv012_model_call_writers_order_credentials_before_outbox()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7720_u128;
@@ -136,7 +136,7 @@ async fn inv007_inv009_inv012_model_call_writers_order_outbox_before_credential_
         }
     });
     assert!(blocked_backends_reached(&pool, 1).await?);
-    assert!(credential_action_head_is_available(&pool, member_reference).await?);
+    assert!(!credential_action_head_is_available(&pool, member_reference).await?);
     allocator_holder.rollback().await?;
     let PrepareInitialModelCallOutcome::Checkpointed(prepared_call) = preparation.await?? else {
         panic!("the released preparation must checkpoint");
@@ -201,7 +201,7 @@ async fn inv007_inv009_inv012_model_call_writers_order_outbox_before_credential_
         }
     });
     assert!(blocked_backends_reached(&pool, 1).await?);
-    assert!(credential_action_head_is_available(&pool, member_reference).await?);
+    assert!(!credential_action_head_is_available(&pool, member_reference).await?);
     allocator_holder.rollback().await?;
     let Some(ModelCallObservationCommitOutcome::PoolExhausted(_)) = observation.await?? else {
         panic!("the sole unavailable member must exhaust its pool");
