@@ -96,7 +96,7 @@ test('selects admitted image views without prefetching original bytes', async ({
     .toBeGreaterThan(0)
   expect((await originalResponse).headers()['content-type']).toContain('image/png')
   await page.keyboard.press('Escape')
-  await expect(page.getByRole('region', { name: 'Blob evidence' })).toBeFocused()
+  await expect(page.getByRole('button', { name: /orbital-map\.png/ })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
