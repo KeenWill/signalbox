@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  MAX_BROWSER_PREFERENCES_BYTES,
   MAX_LOGICAL_POSITION_KEY_BYTES,
   MAX_LOGICAL_POSITION_VALUE_BYTES,
   serializeBrowserPreferences,
@@ -62,7 +63,18 @@ describe('application state', () => {
     expect(positions['recent-overflow']).toBe('cursor')
   })
 
-  it('rejects logical positions that would exceed the serialized preference ceiling', () => {
+  it('rejects session IDs with unordered plain-object key semantics', () => {
+    store.dispatch(actions.logicalPositionRecorded({ sessionId: '1', position: 'numeric' }))
+    store.dispatch(
+      actions.logicalPositionRecorded({ sessionId: '__proto__', position: 'prototype' }),
+    )
+
+    const positions = selectApp(store.getState()).lastLogicalPositions
+    expect(Object.hasOwn(positions, '1')).toBe(false)
+    expect(Object.hasOwn(positions, '__proto__')).toBe(false)
+  })
+
+  it('rejects the first logical position above the serialized preference ceiling', () => {
     recordLogicalPositionFixture('escaped', 128, () =>
       '\0'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES),
     )
@@ -79,8 +91,25 @@ describe('application state', () => {
       keyOverrides: app.keyOverrides,
     })
     expect(serialized).not.toBeNull()
+    expect(new TextEncoder().encode(serialized ?? '').length).toBeLessThanOrEqual(
+      MAX_BROWSER_PREFERENCES_BYTES,
+    )
+    expect(app.lastLogicalPositions['escaped-41']).toBeDefined()
+    expect(app.lastLogicalPositions['escaped-42']).toBeUndefined()
     expect(
-      Object.keys(app.lastLogicalPositions).filter((sessionId) => sessionId.startsWith('escaped-')),
-    ).not.toHaveLength(128)
+      serializeBrowserPreferences({
+        layout: app.layout,
+        density: app.density,
+        detail: app.detail,
+        theme: app.theme,
+        paneSizes: app.paneSizes,
+        remoteMedia: app.remoteMedia,
+        lastLogicalPositions: {
+          ...app.lastLogicalPositions,
+          'escaped-42': '\0'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES),
+        },
+        keyOverrides: app.keyOverrides,
+      }),
+    ).toBeNull()
   })
 })

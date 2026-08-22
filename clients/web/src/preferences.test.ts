@@ -15,7 +15,20 @@ import {
   serializeBrowserPreferences,
 } from './preferences'
 
-afterEach(() => vi.unstubAllGlobals())
+const originalLocalStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+
+const restoreLocalStorageDescriptor = () => {
+  if (originalLocalStorageDescriptor) {
+    Object.defineProperty(globalThis, 'localStorage', originalLocalStorageDescriptor)
+  } else {
+    Reflect.deleteProperty(globalThis, 'localStorage')
+  }
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  restoreLocalStorageDescriptor()
+})
 
 describe('browser preferences', () => {
   it('fails closed to defaults for an unrelated stored value', () => {
@@ -34,13 +47,23 @@ describe('browser preferences', () => {
     )
   })
 
-  it('bounds retained positions and future key overrides', () => {
+  it('bounds retained logical positions', () => {
     const lastLogicalPositions = Object.fromEntries(
       Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS + 3 }, (_, index) => [
         `session-${index}`,
         String(index + 1),
       ]),
     )
+
+    const decoded = decodeBrowserPreferences({
+      ...defaultBrowserPreferences,
+      lastLogicalPositions,
+    })
+
+    expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
+  })
+
+  it('bounds retained key overrides', () => {
     const keyOverrides = Object.fromEntries(
       Array.from({ length: MAX_KEY_OVERRIDES + 2 }, (_, index) => [
         `command-${index}`,
@@ -50,11 +73,9 @@ describe('browser preferences', () => {
 
     const decoded = decodeBrowserPreferences({
       ...defaultBrowserPreferences,
-      lastLogicalPositions,
       keyOverrides,
     })
 
-    expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
     expect(Object.keys(decoded.keyOverrides)).toHaveLength(MAX_KEY_OVERRIDES)
   })
 
@@ -108,7 +129,6 @@ describe('browser preferences', () => {
     expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
   })
   it('guards access to a throwing browser storage getter', () => {
-    const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
     Object.defineProperty(globalThis, 'localStorage', {
       configurable: true,
       get: () => {
@@ -116,13 +136,8 @@ describe('browser preferences', () => {
       },
     })
 
-    try {
-      expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
-      expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
-    } finally {
-      if (originalDescriptor) Object.defineProperty(globalThis, 'localStorage', originalDescriptor)
-      else Reflect.deleteProperty(globalThis, 'localStorage')
-    }
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+    expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
   })
 
   it('rejects logical-position keys and values above their UTF-8 byte ceilings', () => {
