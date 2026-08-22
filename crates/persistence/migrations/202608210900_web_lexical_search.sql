@@ -12,13 +12,14 @@ CREATE TABLE web_search_projection (
     source_id uuid NOT NULL,
     turn_id uuid,
     content_class text COLLATE "C" NOT NULL,
+    projection_ordinal integer NOT NULL DEFAULT 0,
     content_text text NOT NULL,
     search_vector tsvector GENERATED ALWAYS AS (
         to_tsvector('simple', content_text)
     ) STORED,
 
     CONSTRAINT web_search_projection_source_once
-        UNIQUE (source_kind, source_id, content_class),
+        UNIQUE (source_kind, source_id, content_class, projection_ordinal),
     CONSTRAINT web_search_projection_session_fk
         FOREIGN KEY (session_id) REFERENCES session(session_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -47,6 +48,8 @@ CREATE TABLE web_search_projection (
             'tool_result', 'session_metadata', 'attachment_filename',
             'attachment_media_metadata', 'derived_text_artifact'
         )),
+    CONSTRAINT web_search_projection_ordinal_bound
+        CHECK (projection_ordinal BETWEEN 0 AND 4095),
     CONSTRAINT web_search_projection_text_bound
         CHECK (octet_length(content_text) BETWEEN 1 AND 1048576)
 );
@@ -73,7 +76,9 @@ BEGIN
            input.origin_turn_id, 'user_transcript', input.content_text
       FROM accepted_input AS input
      WHERE input.accepted_input_id = NEW.accepted_input_id
-    ON CONFLICT (source_kind, source_id, content_class) DO NOTHING;
+    ON CONFLICT (
+        source_kind, source_id, content_class, projection_ordinal
+    ) DO NOTHING;
     RETURN NULL;
 END
 $$;
@@ -92,15 +97,25 @@ BEGIN
     END IF;
     INSERT INTO web_search_projection (
         source_kind, source_id, session_id, event_sequence,
-        item_kind, item_id, turn_id, content_class, content_text
+        item_kind, item_id, turn_id, content_class,
+        projection_ordinal, content_text
     )
     SELECT 'semantic_entry', entry.semantic_entry_id, entry.source_session_id,
            NEW.event_sequence, 'transcript_entry', entry.semantic_entry_id,
-           NEW.turn_id, 'assistant_transcript', entry.assistant_text_value
+           NEW.turn_id, 'assistant_transcript', chunk.ordinal,
+           substring(
+               entry.assistant_text_value
+               FROM chunk.ordinal * 262144 + 1 FOR 262144
+           )
       FROM semantic_transcript_entry AS entry
+     CROSS JOIN LATERAL generate_series(
+         0, (char_length(entry.assistant_text_value) - 1) / 262144
+     ) AS chunk(ordinal)
      WHERE entry.producing_model_call_id = NEW.model_call_id
        AND entry.payload_kind = 'assistant_text'
-    ON CONFLICT (source_kind, source_id, content_class) DO NOTHING;
+    ON CONFLICT (
+        source_kind, source_id, content_class, projection_ordinal
+    ) DO NOTHING;
     RETURN NULL;
 END
 $$;
@@ -124,7 +139,9 @@ BEGIN
                request.turn_id, 'tool_arguments', request.arguments_text
           FROM tool_request AS request
          WHERE request.producing_model_call_id = NEW.producing_model_call_id
-        ON CONFLICT (source_kind, source_id, content_class) DO NOTHING;
+        ON CONFLICT (
+            source_kind, source_id, content_class, projection_ordinal
+        ) DO NOTHING;
     ELSIF NEW.transition_kind = 'results_projected' THEN
         INSERT INTO web_search_projection (
             source_kind, source_id, session_id, event_sequence,
@@ -138,7 +155,9 @@ BEGIN
          WHERE request.producing_model_call_id = NEW.producing_model_call_id
            AND attempt.result_text IS NOT NULL
            AND attempt.result_text <> ''
-        ON CONFLICT (source_kind, source_id, content_class) DO NOTHING;
+        ON CONFLICT (
+            source_kind, source_id, content_class, projection_ordinal
+        ) DO NOTHING;
     END IF;
     RETURN NULL;
 END
@@ -163,7 +182,9 @@ BEGIN
       FROM semantic_transcript_entry AS entry
      WHERE entry.semantic_entry_id = NEW.summary_entry_id
        AND entry.payload_kind = 'context_summary'
-    ON CONFLICT (source_kind, source_id, content_class) DO NOTHING;
+    ON CONFLICT (
+        source_kind, source_id, content_class, projection_ordinal
+    ) DO NOTHING;
     RETURN NULL;
 END
 $$;
@@ -211,7 +232,9 @@ BEGIN
         'session_metadata', NEW.session_id, NEW.session_id, anchor_sequence,
         'session', NEW.session_id, NULL, 'session_metadata', projected_text
     )
-    ON CONFLICT (source_kind, source_id, content_class) DO UPDATE
+    ON CONFLICT (
+        source_kind, source_id, content_class, projection_ordinal
+    ) DO UPDATE
        SET content_text = EXCLUDED.content_text;
     RETURN NULL;
 END
@@ -238,16 +261,24 @@ SELECT 'accepted_input', input.accepted_input_id, input.session_id,
 
 INSERT INTO web_search_projection (
     source_kind, source_id, session_id, event_sequence,
-    item_kind, item_id, turn_id, content_class, content_text
+    item_kind, item_id, turn_id, content_class,
+    projection_ordinal, content_text
 )
 SELECT 'semantic_entry', entry.semantic_entry_id, entry.source_session_id,
        event.event_sequence, 'transcript_entry', entry.semantic_entry_id,
-       call.turn_id, 'assistant_transcript', entry.assistant_text_value
+       call.turn_id, 'assistant_transcript', chunk.ordinal,
+       substring(
+           entry.assistant_text_value
+           FROM chunk.ordinal * 262144 + 1 FOR 262144
+       )
   FROM semantic_transcript_entry AS entry
   JOIN model_call AS call ON call.model_call_id = entry.producing_model_call_id
   JOIN model_call_transition_outbox_event AS event
     ON event.model_call_id = call.model_call_id
    AND event.call_state_kind = 'terminal'
+ CROSS JOIN LATERAL generate_series(
+     0, (char_length(entry.assistant_text_value) - 1) / 262144
+ ) AS chunk(ordinal)
  WHERE entry.payload_kind = 'assistant_text';
 
 INSERT INTO web_search_projection (
