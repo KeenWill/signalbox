@@ -6530,6 +6530,15 @@ pub enum TimelineTurnLifecycleKind { Activated, Terminalized }
 pub enum TimelineToolState { Prepared, InFlight, Completed, KnownFailed, Ambiguous }
 pub struct TimelineToolAttempt { /* fields */ }
 pub enum TimelineApprovalSource { Policy, Delegate, User }
+pub enum TimelineApprovalDecider {
+    User { command_id: String },
+    Delegate { model_selection_id: String, model_call_id: String },
+}
+pub enum TimelineRunnerSandboxPosture { Unsandboxed, Sandboxed }
+pub enum TimelineRunnerState {
+    Pinned, Suspect, Connected, RunnerLostBeforePin, RunnerLost, Replaced,
+    WorkingDirectoryChanged, Abandoned,
+}
 pub struct TimelineGoalEvent { /* fields */ }
 pub struct TimelineImportedEvidence { /* fields */ }
 pub enum SessionTimelineDetailBody {

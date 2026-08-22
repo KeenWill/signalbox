@@ -523,6 +523,9 @@ const schemas = {
               "approval_judge_escalated": {
                 "type": "boolean"
               },
+              "decider": {
+                "$ref": "#/$defs/WebTimelineApprovalDecider"
+              },
               "decision": {
                 "type": "string"
               },
@@ -560,6 +563,7 @@ const schemas = {
               "tool_name",
               "decision",
               "source",
+              "decider",
               "approval_judge_escalated"
             ],
             "type": "object"
@@ -698,10 +702,10 @@ const schemas = {
                 "type": "string"
               },
               "sandbox_posture": {
-                "type": "string"
+                "$ref": "#/$defs/WebTimelineRunnerSandboxPosture"
               },
               "state": {
-                "type": "string"
+                "$ref": "#/$defs/WebTimelineRunnerState"
               },
               "type": {
                 "const": "runner",
@@ -811,6 +815,48 @@ const schemas = {
           "event_sequence"
         ],
         "type": "object"
+      },
+      "WebTimelineApprovalDecider": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "command_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "user",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "command_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "model_call_id": {
+                "type": "string"
+              },
+              "model_selection_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "delegate",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "model_selection_id",
+              "model_call_id"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WebTimelineApprovalSource": {
         "enum": [
@@ -1075,6 +1121,26 @@ const schemas = {
           }
         },
         "type": "object"
+      },
+      "WebTimelineRunnerSandboxPosture": {
+        "enum": [
+          "unsandboxed",
+          "sandboxed"
+        ],
+        "type": "string"
+      },
+      "WebTimelineRunnerState": {
+        "enum": [
+          "pinned",
+          "suspect",
+          "connected",
+          "runner_lost_before_pin",
+          "runner_lost",
+          "replaced",
+          "working_directory_changed",
+          "abandoned"
+        ],
+        "type": "string"
       },
       "WebTimelineTextExcerpt": {
         "additionalProperties": false,
