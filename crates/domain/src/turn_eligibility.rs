@@ -6867,6 +6867,11 @@ fn reconstitute_inner(
                 ReconstitutedModelCall::Ended(_) => None,
             }))
             .chain(
+                active_model_call_recovery
+                    .iter()
+                    .map(|recovery| recovery.source_snapshot.frontier().snapshot()),
+            )
+            .chain(
                 active_executing_tool_batch
                     .iter()
                     .map(|batch| batch.yielded_frontier),
@@ -12874,6 +12879,44 @@ mod tests {
             assert_input_rejects_unchanged(missing_evidence),
             AcceptedInputSchedulingReconstitutionFailure::RecoveryModelCallMismatch {
                 turn: active.turn(),
+            }
+        );
+    }
+
+    /// S04 / S32 / INV-015 / INV-025 / INV-026 / INV-044: placement cannot
+    /// branch from an older active frontier while an ambiguous ended call
+    /// retains a newer authoritative recovery source.
+    #[test]
+    fn s04_s32_inv015_inv025_inv026_inv044_recovery_rejects_divergent_placement() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let placement_entry = semantic_entry(33);
+        let placement_frontier = frontier(42);
+        let mut input = recovery_wait_continuation_call_input(&session, active);
+        input
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                placement_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: RunnerGeneration::try_from_u64(2)
+                        .expect("the fixture placement revision is positive"),
+                },
+            ));
+        let placement_snapshot = input.snapshots[0].derive_appending(
+            placement_frontier.id(),
+            vec![placement_entry.reference(&session)],
+        );
+        input.snapshots.push(placement_snapshot);
+
+        let failure = assert_input_rejects_unchanged(
+            input.with_runner_placement_frontier(placement_frontier.id()),
+        );
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::RunnerPlacementSnapshotMismatch {
+                snapshot: placement_frontier.id(),
             }
         );
     }

@@ -27,15 +27,15 @@ use signalbox_domain::{
     DurableCommandId, EndedToolAttempt, GoalGeneration, NormalizedToolArguments,
     PreparedDecideToolRequest, PreparedToolBatchDecision, PreparedToolResultProjection,
     ReconstitutedToolAttempt, ResolvedContextFrontierReconstitutionInput,
-    ResolvedContextFrontierSnapshot, SemanticTranscriptEntryPayload, SessionId,
-    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind,
-    ToolAttemptDispatchCorrelation, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
-    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionFailure,
-    ToolBatchReconstitutionInput, ToolDenialReason, ToolDispatchAuthority, ToolDispatchGeneration,
-    ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
-    ToolName, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent,
-    ToolResultText, TurnId,
+    ResolvedContextFrontierSnapshot, RunnerGeneration, SemanticTranscriptEntryPayload,
+    SemanticTranscriptEntryReconstitutionInput, SessionId, ToolApprovalDecision,
+    ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind, ToolAttemptDispatchCorrelation,
+    ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation, ToolAttemptReconstitutionInput,
+    ToolAttemptReconstitutionState, ToolBatch, ToolBatchPhaseReconstitutionInput,
+    ToolBatchReconstitutionFailure, ToolBatchReconstitutionInput, ToolDenialReason,
+    ToolDispatchAuthority, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolRequestId, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, ToolResultContent, ToolResultText, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -47,8 +47,8 @@ use crate::{
     mapping::{
         ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
         dangerous_tool_auto_approval_from_str, durable_command_id_from_uuid,
-        durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
-        tool_approval_decision_source_from_str, tool_approval_posture_from_str,
+        durable_command_id_to_uuid, positive_u64_from_numeric, session_id_from_uuid,
+        session_id_to_uuid, tool_approval_decision_source_from_str, tool_approval_posture_from_str,
         tool_attempt_disposition_from_str, tool_attempt_disposition_to_str,
         tool_attempt_id_from_uuid, tool_attempt_id_to_uuid, tool_request_id_from_uuid,
         tool_request_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
@@ -1394,6 +1394,18 @@ pub(crate) async fn load_active_batch_from_connection(
     let yielded_snapshot = load_snapshot(connection, session, frontier).await?;
     let projection_base_snapshot =
         load_current_runner_placement_snapshot(connection, session).await?;
+    let projection_base_entries = match &projection_base_snapshot {
+        Some(snapshot) => {
+            load_runner_placement_projection_entries(
+                connection,
+                session,
+                &yielded_snapshot,
+                snapshot,
+            )
+            .await?
+        }
+        None => Vec::new(),
+    };
     let requests = load_requests(connection, producing_call, session, turn).await?;
     let approvals = load_approvals(connection, producing_call).await?;
     let attempts = load_attempts(connection, producing_call).await?;
@@ -1458,7 +1470,7 @@ pub(crate) async fn load_active_batch_from_connection(
         phase,
     );
     if let Some(snapshot) = projection_base_snapshot {
-        input = input.with_projection_base_snapshot(snapshot);
+        input = input.with_projection_base_snapshot(snapshot, projection_base_entries);
     }
     input
         .with_retired_attempts(retired_attempts)
@@ -1575,6 +1587,18 @@ pub(crate) async fn load_runner_recovery_cancellation_batch(
     let yielded_snapshot = load_snapshot(connection, session, frontier).await?;
     let projection_base_snapshot =
         load_current_runner_placement_snapshot(connection, session).await?;
+    let projection_base_entries = match &projection_base_snapshot {
+        Some(snapshot) => {
+            load_runner_placement_projection_entries(
+                connection,
+                session,
+                &yielded_snapshot,
+                snapshot,
+            )
+            .await?
+        }
+        None => Vec::new(),
+    };
     let mut input = ToolBatchReconstitutionInput::new(
         session,
         turn,
@@ -1588,7 +1612,7 @@ pub(crate) async fn load_runner_recovery_cancellation_batch(
         },
     );
     if let Some(snapshot) = projection_base_snapshot {
-        input = input.with_projection_base_snapshot(snapshot);
+        input = input.with_projection_base_snapshot(snapshot, projection_base_entries);
     }
     input
         .with_retired_attempts(retired_attempts)
@@ -1642,6 +1666,18 @@ pub(crate) async fn load_recovery_batch_by_attempt(
     let yielded_snapshot = load_snapshot(connection, session, frontier).await?;
     let projection_base_snapshot =
         load_current_runner_placement_snapshot(connection, session).await?;
+    let projection_base_entries = match &projection_base_snapshot {
+        Some(snapshot) => {
+            load_runner_placement_projection_entries(
+                connection,
+                session,
+                &yielded_snapshot,
+                snapshot,
+            )
+            .await?
+        }
+        None => Vec::new(),
+    };
     let mut input = ToolBatchReconstitutionInput::new(
         session,
         turn,
@@ -1655,7 +1691,7 @@ pub(crate) async fn load_recovery_batch_by_attempt(
         },
     );
     if let Some(snapshot) = projection_base_snapshot {
-        input = input.with_projection_base_snapshot(snapshot);
+        input = input.with_projection_base_snapshot(snapshot, projection_base_entries);
     }
     input
         .with_retired_attempts(retired_attempts)
@@ -2024,6 +2060,92 @@ async fn load_current_runner_placement_snapshot(
     )
     .await
     .map(Some)
+}
+
+async fn load_runner_placement_projection_entries(
+    connection: &mut PgConnection,
+    session: SessionId,
+    yielded: &ResolvedContextFrontierSnapshot,
+    candidate: &ResolvedContextFrontierSnapshot,
+) -> Result<Vec<SemanticTranscriptEntryReconstitutionInput>, ToolLoopRepositoryError> {
+    if candidate.is_semantic_prefix_of(yielded) {
+        return Ok(Vec::new());
+    }
+    if !yielded.is_semantic_prefix_of(candidate) {
+        return Err(ToolLoopCorruption::Inconsistent(
+            "tool result and runner placement frontier lineage",
+        )
+        .into());
+    }
+    let rows = sqlx::query(
+        "SELECT member.member_position,
+                member.source_session_id,
+                member.semantic_entry_id,
+                entry.runner_placement_revision
+           FROM resolve_context_frontier_members($1, $2) AS member
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+            AND entry.payload_kind = 'runner_placement_changed'
+           JOIN runner_session_placement_record AS placement
+             ON placement.session_id = entry.source_session_id
+            AND placement.event_ordinal = entry.runner_placement_event_ordinal
+            AND placement.placement_revision = entry.runner_placement_revision
+            AND placement.event_kind IN ('runner_replaced', 'profile_replaced')
+            AND placement.state_kind = 'pinned'
+           JOIN session_runner_placement_frontier AS pointer
+             ON pointer.session_id = entry.source_session_id
+            AND pointer.placement_revision = entry.runner_placement_revision
+            AND pointer.semantic_entry_id = entry.semantic_entry_id
+           JOIN context_frontier AS frontier
+             ON frontier.owning_session_id = pointer.session_id
+            AND frontier.context_frontier_id = pointer.context_frontier_id
+           JOIN context_frontier_member AS final_member
+             ON final_member.owning_session_id = frontier.owning_session_id
+            AND final_member.context_frontier_id = frontier.context_frontier_id
+            AND final_member.member_position = frontier.member_count
+            AND final_member.source_session_id = entry.source_session_id
+            AND final_member.semantic_entry_id = entry.semantic_entry_id
+          WHERE member.member_position > $3
+          ORDER BY member.member_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(candidate.frontier().snapshot().into_uuid())
+    .bind(Decimal::from(
+        u64::try_from(yielded.entry_count())
+            .map_err(|_| ToolLoopCorruption::Inconsistent("frontier count"))?,
+    ))
+    .fetch_all(&mut *connection)
+    .await?;
+    if rows.len() != candidate.entry_count() - yielded.entry_count() {
+        return Err(ToolLoopCorruption::Inconsistent("runner placement projection suffix").into());
+    }
+    rows.into_iter()
+        .map(|row| {
+            let source_session = session_id_from_uuid(required(&row, "source_session_id")?);
+            let revision = positive_u64_from_numeric(required(&row, "runner_placement_revision")?)
+                .ok()
+                .and_then(RunnerGeneration::try_from_u64)
+                .ok_or(ToolLoopCorruption::Inconsistent(
+                    "runner placement semantic revision",
+                ))?;
+            if source_session != session {
+                return Err(
+                    ToolLoopCorruption::Inconsistent("runner placement projection suffix").into(),
+                );
+            }
+            Ok(SemanticTranscriptEntryReconstitutionInput::new(
+                signalbox_domain::SemanticTranscriptEntryId::from_uuid(required(
+                    &row,
+                    "semantic_entry_id",
+                )?),
+                source_session,
+                SemanticTranscriptEntryPayload::RunnerPlacementChanged {
+                    placement_revision: revision,
+                },
+            ))
+        })
+        .collect()
 }
 
 fn select_projection_base_snapshot(
