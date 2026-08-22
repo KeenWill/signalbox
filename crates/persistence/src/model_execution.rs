@@ -29,12 +29,13 @@ use signalbox_domain::{
     ActiveTurnSchedulingReconstitutionInput, AmbiguousModelCallTurn, AssistantResponsePart,
     AssistantText, AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, CancelledModelCallTurn,
     CancelledToolRoundModelCallTurn, CompletedModelCallTurn, ConsumedSteeringReconstitutionInput,
-    ContextHeadroomExhaustedModelCallTurn, CorrelatedModelCallTerminalObservation,
-    CredentialPoolExhaustedModelCallTurn, DelegatedTurnActivationInput,
-    DelegatedWakeTurnActivationInput, DelegationContent, DelegationOutcome, DelegationOutcomeKind,
-    DelegationOutcomeReason, DirectModelSelection, DurableCommandId, FailedModelCallTurn,
-    FailedModelCallTurnIdentities, FastMode, FrozenAliasDefinition, FrozenModelSelection,
-    ModelAlias, ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    ContextFrontierId, ContextHeadroomExhaustedModelCallTurn,
+    CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
+    DelegatedTurnActivationInput, DelegatedWakeTurnActivationInput, DelegationContent,
+    DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason, DirectModelSelection,
+    DurableCommandId, FailedModelCallTurn, FailedModelCallTurnIdentities, FastMode,
+    FrozenAliasDefinition, FrozenModelSelection, ModelAlias, ModelCallDisposition,
+    ModelCallExecution, ModelCallExecutionReconstitutionFailure,
     ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
     ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
@@ -127,6 +128,7 @@ pub struct ReportedModelCallUsage {
     usage: ProviderReportedTokenUsage,
     input_includes_cache_tokens: bool,
     output_is_retained: bool,
+    projected_unreported_content_bytes: u64,
 }
 
 impl ReportedModelCallUsage {
@@ -143,6 +145,12 @@ impl ReportedModelCallUsage {
     /// Whether reported output became assistant transcript for the next call.
     pub const fn output_is_retained(self) -> bool {
         self.output_is_retained
+    }
+
+    /// Returns a conservative byte allowance for model-visible transcript
+    /// material appended after the reported call's input.
+    pub const fn projected_unreported_content_bytes(self) -> u64 {
+        self.projected_unreported_content_bytes
     }
 }
 
@@ -598,44 +606,136 @@ impl PostgresModelCallRepository {
         &self,
         session: SessionId,
         target: ResolvedProviderTarget,
+        prospective_frontier: ContextFrontierId,
     ) -> Result<Option<ReportedModelCallUsage>, ModelCallRepositoryError> {
         let row = sqlx::query(
-            "SELECT usage_input_includes_cache_tokens,
-                    terminal_disposition_kind = 'completed' AS output_is_retained,
+            "WITH latest_call AS (
+                SELECT model_call_id, context_frontier_id,
+                       usage_input_includes_cache_tokens,
+                       terminal_disposition_kind = 'completed' AS output_is_retained,
+                       usage_input_tokens, usage_output_tokens,
+                       usage_cache_creation_input_tokens,
+                       usage_cache_read_input_tokens
+                  FROM model_call
+                 WHERE session_id = $1
+                   AND resolved_provider_model_identity_id = $2
+                   AND state_kind = 'terminal'
+                   AND usage_input_tokens IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM context_compaction AS latest
+                        WHERE latest.session_id = model_call.session_id
+                          AND NOT EXISTS (
+                              SELECT 1
+                                FROM context_compaction AS successor
+                               WHERE successor.session_id = latest.session_id
+                                 AND successor.predecessor_compaction_id =
+                                     latest.context_compaction_id
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1
+                                FROM context_frontier_member AS member
+                               WHERE member.owning_session_id = model_call.session_id
+                                 AND member.context_frontier_id =
+                                     model_call.context_frontier_id
+                                 AND member.source_session_id = latest.session_id
+                                 AND member.semantic_entry_id = latest.summary_entry_id
+                          )
+                   )
+                 ORDER BY model_call_id DESC
+                 LIMIT 1
+             ), prospective_member AS MATERIALIZED (
+                SELECT member.source_session_id, member.semantic_entry_id
+                  FROM context_frontier_member AS member
+                 WHERE member.owning_session_id = $1
+                   AND member.context_frontier_id = $3
+             ), reported_member AS MATERIALIZED (
+                SELECT member.source_session_id, member.semantic_entry_id
+                  FROM latest_call
+                  JOIN context_frontier_member AS member
+                    ON member.owning_session_id = $1
+                   AND member.context_frontier_id = latest_call.context_frontier_id
+             ), unreported_member AS MATERIALIZED (
+                SELECT prospective.source_session_id,
+                       prospective.semantic_entry_id
+                  FROM prospective_member AS prospective
+                EXCEPT
+                SELECT reported.source_session_id,
+                       reported.semantic_entry_id
+                  FROM reported_member AS reported
+             )
+             SELECT usage_input_includes_cache_tokens, output_is_retained,
                     usage_input_tokens, usage_output_tokens,
                     usage_cache_creation_input_tokens,
-                    usage_cache_read_input_tokens
-               FROM model_call
-              WHERE session_id = $1
-                AND resolved_provider_model_identity_id = $2
-                AND state_kind = 'terminal'
-                AND usage_input_tokens IS NOT NULL
-                AND NOT EXISTS (
-                    SELECT 1
-                      FROM context_compaction AS latest
-                     WHERE latest.session_id = model_call.session_id
-                       AND NOT EXISTS (
-                           SELECT 1
-                             FROM context_compaction AS successor
-                            WHERE successor.session_id = latest.session_id
-                              AND successor.predecessor_compaction_id =
-                                  latest.context_compaction_id
-                       )
-                       AND NOT EXISTS (
-                           SELECT 1
-                             FROM context_frontier_member AS member
-                            WHERE member.owning_session_id = model_call.session_id
-                              AND member.context_frontier_id =
-                                  model_call.context_frontier_id
-                              AND member.source_session_id = latest.session_id
-                              AND member.semantic_entry_id = latest.summary_entry_id
-                       )
-                )
-              ORDER BY model_call_id DESC
-              LIMIT 1",
+                    usage_cache_read_input_tokens,
+                    (
+                        SELECT COALESCE(SUM(
+                            CASE entry.payload_kind
+                                WHEN 'imported_entry' THEN
+                                    COALESCE(octet_length(imported.content_encoding), 0)
+                                WHEN 'origin_accepted_input' THEN
+                                    COALESCE(octet_length(input.content_text), 0)
+                                WHEN 'steering_accepted_input' THEN
+                                    COALESCE(octet_length(input.content_text), 0)
+                                WHEN 'context_summary' THEN
+                                    COALESCE(octet_length(entry.context_summary_value), 0)
+                                WHEN 'assistant_text' THEN
+                                    COALESCE(octet_length(entry.assistant_text_value), 0)
+                                WHEN 'assistant_tool_use' THEN
+                                    COALESCE(octet_length(request.tool_name), 0)
+                                    + COALESCE(octet_length(request.arguments_text), 0)
+                                WHEN 'tool_execution_result' THEN
+                                    COALESCE(octet_length(attempt.result_text), 0)
+                                    + COALESCE(octet_length(attempt.error_detail), 0)
+                                WHEN 'tool_denied' THEN
+                                    COALESCE(octet_length(decision.denial_reason), 0)
+                                WHEN 'delegated_task' THEN
+                                    COALESCE(octet_length(task.task_content), 0)
+                                WHEN 'delegation_message' THEN
+                                    COALESCE(octet_length(message.content_text), 0)
+                                WHEN 'delegation_result' THEN
+                                    COALESCE(octet_length(child_result.content_text), 0)
+                                ELSE 0
+                            END
+                        ), 0)::numeric
+                          FROM unreported_member AS prospective
+                          JOIN semantic_transcript_entry AS entry
+                            ON entry.source_session_id = prospective.source_session_id
+                           AND entry.semantic_entry_id = prospective.semantic_entry_id
+                          LEFT JOIN accepted_input AS input
+                            ON input.accepted_input_id = entry.origin_accepted_input_id
+                           AND input.session_id = entry.source_session_id
+                          LEFT JOIN imported_transcript_entry AS imported
+                            ON imported.imported_conversation_id = entry.imported_conversation_id
+                           AND imported.imported_transcript_entry_id =
+                               entry.imported_transcript_entry_id
+                          LEFT JOIN tool_request AS request
+                            ON request.request_id = entry.assistant_tool_request_id
+                           AND request.session_id = entry.source_session_id
+                          LEFT JOIN tool_attempt AS attempt
+                            ON attempt.attempt_id = entry.tool_result_attempt_id
+                           AND attempt.session_id = entry.source_session_id
+                          LEFT JOIN tool_approval_decision AS decision
+                            ON decision.request_id = entry.tool_result_request_id
+                          LEFT JOIN session_delegation_initial_task AS task
+                            ON task.child_session_id = entry.source_session_id
+                           AND task.semantic_entry_id = entry.semantic_entry_id
+                          LEFT JOIN session_message AS message
+                            ON message.message_id = entry.delegation_message_id
+                          LEFT JOIN session_child_result AS child_result
+                            ON child_result.spawning_tool_request_id =
+                               entry.delegation_result_spawning_tool_request_id
+                         WHERE NOT (
+                               entry.payload_kind IN ('assistant_text', 'assistant_tool_use')
+                               AND entry.producing_model_call_id = latest_call.model_call_id
+                               AND latest_call.usage_output_tokens IS NOT NULL
+                           )
+                    ) AS projected_unreported_content_bytes
+               FROM latest_call",
         )
         .bind(session_id_to_uuid(session))
         .bind(target.identity().into_uuid())
+        .bind(prospective_frontier.into_uuid())
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
@@ -664,6 +764,10 @@ impl PostgresModelCallRepository {
                 .with_cache_read_input_tokens(decode("usage_cache_read_input_tokens")?),
             input_includes_cache_tokens: row.try_get("usage_input_includes_cache_tokens")?,
             output_is_retained: row.try_get("output_is_retained")?,
+            projected_unreported_content_bytes: decode("projected_unreported_content_bytes")?
+                .ok_or(ModelCallCorruption::Missing(
+                    "projected unreported transcript content byte count",
+                ))?,
         }))
     }
 

@@ -199,13 +199,18 @@ async fn ambiguous_model_call_usage_is_available_to_pre_activation_compaction()
         )
         .await?;
     let retained = repository
-        .latest_reported_usage(fixture.session, correlation.target())
+        .latest_reported_usage(
+            fixture.session,
+            correlation.target(),
+            correlation.frontier(),
+        )
         .await?
         .expect("ambiguous provider-reported input remains available");
 
     assert_eq!(retained.usage(), reported_usage);
     assert!(!retained.input_includes_cache_tokens());
     assert!(!retained.output_is_retained());
+    assert_eq!(retained.projected_unreported_content_bytes(), 0);
 
     pool.close().await;
     drop(container);

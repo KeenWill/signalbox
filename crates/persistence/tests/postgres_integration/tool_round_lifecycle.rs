@@ -216,15 +216,16 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
         ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
             .expect("one continuation target forms a catalog");
     let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
-    let continuing_repository =
+    let model_repository =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
             .with_continuation_usage_limits([ToolContinuationUsageLimit::new(
                 target,
                 FastMode::Disabled,
                 10,
                 100,
-            )])
-            .tool_loop_repository();
+            )]);
+    let continuing_repository = model_repository.tool_loop_repository();
+    let result_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27));
     let outcome = continuing_repository
         .prepare_continuation(
             fixture.session,
@@ -234,7 +235,7 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
                 vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
                     seed + 0x26,
                 ))],
-                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27)),
+                result_frontier,
                 continuation_call,
                 FailedModelCallTurnIdentities::new(
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
@@ -252,6 +253,14 @@ async fn inv014_tool_continuation_headroom_closes_before_another_call() -> Resul
     };
     assert_eq!(required.producing_call(), fixture.call);
     assert_eq!(required.failed().turn(), fixture.turn);
+    let reported = model_repository
+        .latest_reported_usage(fixture.session, target, result_frontier)
+        .await?
+        .expect("the producing call reported input usage");
+    assert_eq!(
+        reported.projected_unreported_content_bytes(),
+        result_content_bytes
+    );
 
     let stored: (String, Option<Uuid>, Uuid, Decimal, Decimal, Decimal, i64) = sqlx::query_as(
         "SELECT lifecycle.terminal_disposition_kind,

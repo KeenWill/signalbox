@@ -172,6 +172,7 @@ pub(crate) fn reported_usage_requires_compaction(
     usage: ProviderReportedTokenUsage,
     input_includes_cache_tokens: bool,
     output_is_retained: bool,
+    projected_unreported_content_bytes: u64,
     max_output_tokens: u64,
     context_window_tokens: u64,
 ) -> bool {
@@ -191,6 +192,10 @@ pub(crate) fn reported_usage_requires_compaction(
         } else {
             0
         })
+        // CLI-backed adapters expose no tokenizer-only operation. UTF-8
+        // bytes for model-visible transcript additions after the reported
+        // input therefore form a deliberately conservative token allowance.
+        .saturating_add(projected_unreported_content_bytes)
         .saturating_add(max_output_tokens)
         > context_window_tokens
 }
@@ -486,7 +491,7 @@ mod tests {
             .with_output_tokens(Some(5));
 
         assert!(reported_usage_requires_compaction(
-            usage, true, true, 16, 100
+            usage, true, true, 0, 16, 100
         ));
     }
 
@@ -498,10 +503,10 @@ mod tests {
             .with_cache_read_input_tokens(Some(20));
 
         assert!(!reported_usage_requires_compaction(
-            usage, true, true, 15, 100
+            usage, true, true, 0, 15, 100
         ));
         assert!(reported_usage_requires_compaction(
-            usage, false, true, 16, 100
+            usage, false, true, 0, 16, 100
         ));
     }
 
@@ -510,7 +515,7 @@ mod tests {
         let usage = ProviderReportedTokenUsage::unreported().with_output_tokens(Some(100));
 
         assert!(!reported_usage_requires_compaction(
-            usage, true, true, 100, 100
+            usage, true, true, 0, 100, 100
         ));
     }
 
@@ -521,10 +526,24 @@ mod tests {
             .with_output_tokens(Some(10));
 
         assert!(!reported_usage_requires_compaction(
-            usage, true, false, 11, 100
+            usage, true, false, 0, 11, 100
         ));
         assert!(reported_usage_requires_compaction(
-            usage, true, true, 11, 100
+            usage, true, true, 0, 11, 100
+        ));
+    }
+
+    #[test]
+    fn reported_usage_includes_model_visible_content_appended_after_the_call() {
+        let usage = ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(60))
+            .with_output_tokens(Some(5));
+
+        assert!(!reported_usage_requires_compaction(
+            usage, true, true, 0, 10, 100
+        ));
+        assert!(reported_usage_requires_compaction(
+            usage, true, true, 26, 10, 100
         ));
     }
 

@@ -191,7 +191,11 @@ impl ReportedUsageCompaction {
             .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
         let Some(reported) = self
             .model_calls
-            .latest_reported_usage(session, target)
+            .latest_reported_usage(
+                session,
+                target,
+                operation.request().call().frontier().snapshot(),
+            )
             .await
             .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?
         else {
@@ -201,6 +205,7 @@ impl ReportedUsageCompaction {
             reported.usage(),
             reported.input_includes_cache_tokens(),
             reported.output_is_retained(),
+            reported.projected_unreported_content_bytes(),
             u64::from(definition.max_output_tokens()),
             u64::from(definition.context_window_tokens()),
         ) {

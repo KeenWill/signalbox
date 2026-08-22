@@ -10,7 +10,9 @@ Pre-activation reconciliation from durable terminal-call usage is verified
 against this PR (`agent/daemon-live-ambiguous-usage-compaction`).
 
 Same-turn tool-continuation headroom closure is verified against this PR
-(`agent/daemon-live-tool-result-headroom`).
+(`agent/daemon-live-tool-result-headroom`). Queued-turn post-usage transcript
+headroom is verified against this PR
+(`agent/daemon-live-post-usage-transcript-headroom`).
 
 Non-ambiguous execution-failure containment is verified against this PR
 (`agent/daemon-live-nonambiguous-execution-containment`).
@@ -428,19 +430,21 @@ erase usage from a provider round that may have been accepted: ambiguous and
 failed calls therefore protect a resumed session from re-sending a request whose
 reported size already exhausted headroom. If the reported input, interpreted
 with the stored cache-inclusion semantics, plus output only when completion
-retained it as assistant transcript, and the next configured output reservation
-exceeds the context window, the daemon performs one bounded automatic compaction
-before activation. This is a conservative lower-bound trigger: later transcript
-entries can only increase the next input. A queued turn spends at most one
-automatic attempt; if durable evidence says that attempt was already spent, the
-scheduler reports exhaustion and permits activation rather than wedging the
-queue on a compaction it may not repeat. After a nominal completion, the daemon
-retains adapter-reported usage and the completed observation even when reported
-output exceeds `max_output_tokens` or the reported input-plus-output lower bound
-exceeds `context_window_tokens`; it emits a closed operator cause for the
-overage rather than discarding assistant material after the provider has already
-accepted and served the request. Missing usage fields remain missing and are
-never invented. Adapters need no separate counting operation.
+retained it as assistant transcript, a conservative UTF-8 byte allowance for
+model-visible entries appended after that input, and the next configured output
+reservation exceeds the context window, the daemon performs one bounded
+automatic compaction before activation. The allowance counts durable content and
+excludes assistant content from the reporting call when reported output already
+accounts for it. A queued turn spends at most one automatic attempt; if durable
+evidence says that attempt was already spent, the scheduler reports exhaustion
+and permits activation rather than wedging the queue on a compaction it may not
+repeat. After a nominal completion, the daemon retains adapter-reported usage
+and the completed observation even when reported output exceeds
+`max_output_tokens` or the reported input-plus-output lower bound exceeds
+`context_window_tokens`; it emits a closed operator cause for the overage rather
+than discarding assistant material after the provider has already accepted and
+served the request. Missing usage fields remain missing and are never invented.
+Adapters need no separate counting operation.
 
 The same guard runs inside the atomic tool-result continuation transaction
 against the exact completed tool-producing call. It combines reported usage, the
