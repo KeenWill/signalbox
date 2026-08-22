@@ -126,7 +126,7 @@ const sessionWorkspaceFixture = {
                 attempt_id: '00000000-0000-0000-0000-000000000342',
                 state: 'completed',
                 effect_posture: 'read_only',
-                sandbox_posture: 'workspace_read',
+                sandbox_posture: 'sandboxed',
                 result: {
                   text: toolResult,
                   offset_bytes: '0',
@@ -167,9 +167,9 @@ const sessionWorkspaceFixture = {
             tools: [],
             goal_events: [
               {
-                event_kind: 'advanced',
+                event_kind: 'achieved',
                 generation: '7',
-                reason: 'tool completed',
+                reason: null,
                 text: {
                   text: toolGoalText,
                   offset_bytes: '0',
@@ -384,6 +384,32 @@ test('completes route switching from the command palette without a mouse', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('opens product keyboard help from its advertised binding', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.keyboard.press('Shift+/')
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  await expect(page.getByText('Select next timeline item', { exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('moves focus to the primary surface when focus layout hides navigation', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const sessionsLink = page.getByRole('link', { name: /Sessions/ })
+  await sessionsLink.focus()
+  await page.keyboard.press('Shift+W')
+  await expect(page.getByRole('main')).toBeFocused()
+  await expect(sessionsLink).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -445,6 +471,28 @@ test('opens and inspects a bounded production session without a mouse', async ({
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('moves DOM focus with j and k timeline selection', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/sessions')
+  await page.getByRole('textbox', { name: 'Exact session ID' }).fill(sessionWorkspaceFixture.id)
+  await page.getByRole('textbox', { name: 'Exact session ID' }).press('Enter')
+
+  const first = page.getByRole('button', {
+    name: new RegExp(`${sessionWorkspaceFixture.firstAddress} input accepted`),
+  })
+  const tool = page.getByRole('button', {
+    name: new RegExp(`${toolAddress} tool batch transition`),
+  })
+  await first.focus()
+  await page.keyboard.press('j')
+  await expect(tool).toBeFocused()
+  await page.keyboard.press('k')
+  await expect(first).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('continues an oversized typed body without retaining an unbounded page', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -492,7 +540,7 @@ test('inspects closed tool and goal facts without a mouse', async ({ page }) => 
   await expect(page.getByText(toolResult, { exact: true })).toBeVisible()
   await continueDetail.focus()
   await page.keyboard.press('Enter')
-  await expect(page.getByText('tool completed', { exact: true })).toBeVisible()
+  await expect(page.getByText('achieved', { exact: true })).toBeVisible()
   await expect(page.getByText(toolGoalText, { exact: true })).toBeVisible()
   await expect(continueDetail).toBeHidden()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })

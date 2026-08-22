@@ -674,6 +674,56 @@ describe('BoundedSessionHistory', () => {
     ).rejects.toThrow('cannot continue after')
   })
 
+  it('rejects first and latest windows that contradict the descriptor snapshot', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const firstSource: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => descriptor,
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '2' },
+            kind: 'turn_activated',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+    const firstHistory = new BoundedSessionHistory(sessionId, firstSource)
+    await firstHistory.describe()
+    await expect(
+      firstHistory.load({ kind: 'first' }, { maxItems: 1, maxBytes: 256 }),
+    ).rejects.toThrow('descriptor boundary')
+
+    const latestSource: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => descriptor,
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '999999' },
+            kind: 'turn_completed',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+    const latestHistory = new BoundedSessionHistory(sessionId, latestSource)
+    await latestHistory.describe()
+    await expect(
+      latestHistory.load({ kind: 'latest' }, { maxItems: 1, maxBytes: 256 }),
+    ).rejects.toThrow('regressed behind the descriptor boundary')
+  })
+
   it('rejects a window on the wrong side of a strict anchor', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const source: SessionTimelineSource = {
@@ -1217,6 +1267,66 @@ describe('BoundedSessionHistory', () => {
     await expect(
       source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }, cursor),
     ).resolves.toMatchObject({ continuation: { type: 'more_body', body: continuation } })
+  })
+
+  it('rejects advancing fields before the current tool excerpt completes', async () => {
+    const excerptContinuation = {
+      address: { event_sequence: '41' },
+      field: 'tool_arguments',
+      member_index: 0,
+      offset_bytes: '2',
+    } as const
+    const pageContinuation = {
+      address: { event_sequence: '41' },
+      field: 'tool_result',
+      member_index: 0,
+      offset_bytes: '0',
+    } as const
+    const source = await detailSource({
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000141',
+            state: 'proposed',
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000241',
+                tool_name: 'workspace_read',
+                approval_posture: 'auto',
+                approval_judge_escalated: false,
+                operator_required: false,
+                arguments: {
+                  text: '{}',
+                  offset_bytes: '0',
+                  total_bytes: '4',
+                  continuation: excerptContinuation,
+                },
+                attempt_id: null,
+                state: null,
+                effect_posture: null,
+                sandbox_posture: null,
+                result: null,
+                failure: null,
+                cause_code: null,
+              },
+            ],
+            goal_events: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 2,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 2,
+      continuation: { type: 'more_body', body: pageContinuation },
+    })
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('disagrees with its excerpt')
   })
 
   it('rejects a same-field continuation whose excerpt restarts before the request cursor', async () => {

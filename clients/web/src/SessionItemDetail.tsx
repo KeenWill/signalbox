@@ -23,6 +23,35 @@ type GoalEvent = Extract<DetailBody, { type: 'goal_event' }>['event']
 type ToolAttempt = Extract<DetailBody, { type: 'tool_batch' }>['tools'][number]
 type DetailKind = DetailItem['kind']
 
+const delegationUpdateKinds = new Set([
+  'child_spawned',
+  'child_waiting',
+  'child_lifecycle_disposition',
+  'child_result',
+  'session_message',
+])
+const delegationWakeKinds = new Set(['result_wake', 'message_wake'])
+const goalEventKinds = new Set([
+  'commissioned',
+  'blocked',
+  'resumed',
+  'achieved',
+  'user_stopped',
+  'superseded',
+])
+const goalBlockedReasons = new Set([
+  'user_input_required',
+  'external_change_required',
+  'authorization_required',
+  'execution_failure',
+])
+
+const hasCompatibleGoalReason = (event: GoalEvent): boolean =>
+  goalEventKinds.has(event.event_kind) &&
+  (event.event_kind === 'blocked'
+    ? typeof event.reason === 'string' && goalBlockedReasons.has(event.reason)
+    : event.reason == null)
+
 const compatibleKinds = {
   session_created: ['session_created'],
   model_settings: ['session_model_settings_changed', 'turn_model_settings_resolved'],
@@ -62,6 +91,34 @@ export const isCompatibleDetailBody = (kind: DetailKind, body: DetailBody): bool
     } as const
     const expected = lifecycleByKind[kind as keyof typeof lifecycleByKind]
     return expected?.[0] === body.lifecycle && expected[1] === body.cause_code
+  }
+  if (body.type === 'delegation') {
+    return kind === 'delegation_update'
+      ? delegationUpdateKinds.has(body.event_kind)
+      : kind === 'delegation_wake'
+        ? delegationWakeKinds.has(body.event_kind)
+        : false
+  }
+  if (body.type === 'goal_event') {
+    return kind === 'goal_turn_retired' && hasCompatibleGoalReason(body.event)
+  }
+  if (body.type === 'tool_batch') {
+    return kind === 'tool_batch_transition' && body.goal_events.every(hasCompatibleGoalReason)
+  }
+  if (body.type === 'reconciliation') {
+    return (
+      kind === 'turn_reconciliation_required' &&
+      (body.operation_kind === 'model_call' || body.operation_kind === 'tool_attempt') &&
+      body.cause_code === 'ambiguous_operation' &&
+      body.exhausted &&
+      body.operator_required
+    )
+  }
+  if (body.type === 'tool_approval_decision') {
+    return (
+      kind === 'tool_approval_decided' &&
+      (body.source === 'policy' || body.source === body.decider.type)
+    )
   }
   return (compatibleKinds[body.type] as readonly DetailKind[]).includes(kind)
 }

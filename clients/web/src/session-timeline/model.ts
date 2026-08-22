@@ -289,6 +289,7 @@ const isCanonicalCrossFieldContinuation = (
     return (
       body.tools.length === 0 &&
       goal?.text != null &&
+      goal.text.continuation === null &&
       continuation.field === 'goal_text' &&
       continuation.member_index === currentMember + 1
     )
@@ -303,7 +304,7 @@ const isCanonicalCrossFieldContinuation = (
         : currentField === 'tool_failure'
           ? tool.failure
           : null
-  if (currentExcerpt === null) return false
+  if (currentExcerpt == null || currentExcerpt.continuation !== null) return false
   if (continuation.field === 'goal_text') {
     return continuation.member_index === 0
   }
@@ -618,6 +619,19 @@ export class BoundedSessionHistory {
     }
     const firstItemAddress = window.items[0]?.address.event_sequence
     const lastItemAddress = window.items.at(-1)?.address.event_sequence
+    if (anchor.kind === 'first' && this.descriptorValue) {
+      if (firstItemAddress !== this.descriptorValue.first_address.event_sequence) {
+        throw new TypeError('first timeline window does not match the descriptor boundary')
+      }
+    }
+    if (anchor.kind === 'latest' && this.descriptorValue && lastItemAddress) {
+      if (
+        decimalAddress(lastItemAddress) <
+        decimalAddress(this.descriptorValue.latest_address.event_sequence)
+      ) {
+        throw new TypeError('latest timeline window regressed behind the descriptor boundary')
+      }
+    }
     if (anchor.kind === 'first' && window.continuation_before) {
       throw new TypeError('first timeline window cannot continue before its anchor')
     }

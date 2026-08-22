@@ -143,7 +143,6 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
               .filter(
                 (command) =>
                   command.id !== 'surface.escape' &&
-                  command.id !== 'help.open' &&
                   command.id !== 'navigation.open' &&
                   (!('available' in command) || command.available(context)),
               )
@@ -164,6 +163,51 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
                 </button>
               ))}
           </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
+function KeyboardHelp({ context }: { context: ProductCommandContext }) {
+  const open = useAppSelector((state) => state.app.overlay === 'help')
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) invokeProductCommand('surface.escape', context)
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="dialog-content" aria-describedby="product-help-description">
+          <div className="dialog-heading">
+            <div>
+              <Dialog.Title>Keyboard help</Dialog.Title>
+              <Dialog.Description id="product-help-description">
+                Product navigation pauses while a text field or overlay owns input.
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <button className="icon-button" type="button" aria-label="Close keyboard help">
+                <X />
+              </button>
+            </Dialog.Close>
+          </div>
+          <dl className="shortcut-list">
+            {productCommandRegistry
+              .filter((command) => command.id !== 'navigation.open' && command.bindings.length > 0)
+              .map((command) => (
+                <div key={command.id}>
+                  <dt>{command.title}</dt>
+                  <dd>
+                    {command.bindings.map((binding) => (
+                      <kbd key={binding.label}>{binding.label}</kbd>
+                    ))}
+                  </dd>
+                </div>
+              ))}
+          </dl>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -272,6 +316,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
+  const previousLayoutRef = useRef(app.layout)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineActions, setTimelineActions] = useState<Pick<
     ProductCommandContext,
@@ -308,9 +353,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   )
   useHotkeys(
     globalHotkeyBindings
-      .filter(
-        (binding) => binding.commandId !== 'help.open' && binding.commandId !== 'navigation.open',
-      )
+      .filter((binding) => binding.commandId !== 'navigation.open')
       .map((binding) => ({
         hotkey: binding.hotkey,
         callback: () => invokeProductCommand(binding.commandId, context),
@@ -329,6 +372,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     document.documentElement.dataset.theme = app.theme
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
+
+  useEffect(() => {
+    if (previousLayoutRef.current === 'workbench' && app.layout === 'focus') {
+      primaryRef.current?.focus()
+    }
+    previousLayoutRef.current = app.layout
+  }, [app.layout])
 
   const copy = surfaceCopy[surface]
   const content =
@@ -401,6 +451,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         </aside>
       )}
       <CommandPalette context={context} />
+      <KeyboardHelp context={context} />
       <Dialog.Root
         open={app.overlay === 'navigation'}
         onOpenChange={(open) => {

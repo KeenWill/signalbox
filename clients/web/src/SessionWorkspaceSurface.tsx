@@ -146,6 +146,7 @@ export function SessionWorkspaceSurface({
       }
     },
     enabled: sessionId !== null && sessionCapabilitiesAvailable,
+    gcTime: 0,
     placeholderData: (previous) =>
       previous?.descriptor.session_id === sessionId ? previous : undefined,
   })
@@ -177,6 +178,11 @@ export function SessionWorkspaceSurface({
         if (sessionId !== null) {
           dispatch(actions.logicalPositionRecorded({ sessionId, position: eventSequence }))
         }
+        requestAnimationFrame(() => {
+          document
+            .querySelector<HTMLButtonElement>(`[data-timeline-id="${eventSequence}"]`)
+            ?.focus()
+        })
       },
       openTimelineWindow,
     })

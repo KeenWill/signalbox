@@ -190,5 +190,115 @@ describe('Session Workspace projection', () => {
       }),
     ).toBe(true)
     expect(isCompatibleDetailBody('turn_model_settings_resolved', sessionSettings)).toBe(false)
+
+    const delegation = {
+      type: 'delegation',
+      event_kind: 'child_spawned',
+      relationship_id: '00000000-0000-0000-0000-000000000041',
+      subject_id: null,
+      policy: null,
+      outcome: null,
+      reason: null,
+      content: null,
+    } as const
+    expect(isCompatibleDetailBody('delegation_update', delegation)).toBe(true)
+    expect(
+      isCompatibleDetailBody('delegation_update', { ...delegation, event_kind: 'result_wake' }),
+    ).toBe(false)
+    expect(
+      isCompatibleDetailBody('delegation_wake', { ...delegation, event_kind: 'message_wake' }),
+    ).toBe(true)
+    expect(
+      isCompatibleDetailBody('delegation_wake', { ...delegation, event_kind: 'invented' }),
+    ).toBe(false)
+
+    const goalEvent = {
+      type: 'goal_event',
+      turn_id: '00000000-0000-0000-0000-000000000041',
+      event: {
+        event_kind: 'blocked',
+        generation: '1',
+        reason: 'authorization_required',
+        text: null,
+      },
+    } as const
+    expect(isCompatibleDetailBody('goal_turn_retired', goalEvent)).toBe(true)
+    expect(
+      isCompatibleDetailBody('goal_turn_retired', {
+        ...goalEvent,
+        event: { ...goalEvent.event, reason: null },
+      }),
+    ).toBe(false)
+    expect(
+      isCompatibleDetailBody('goal_turn_retired', {
+        ...goalEvent,
+        event: { ...goalEvent.event, event_kind: 'achieved', reason: null },
+      }),
+    ).toBe(true)
+    expect(
+      isCompatibleDetailBody('goal_turn_retired', {
+        ...goalEvent,
+        event: { ...goalEvent.event, event_kind: 'achieved' },
+      }),
+    ).toBe(false)
+
+    const toolBatch = {
+      type: 'tool_batch',
+      turn_id: '00000000-0000-0000-0000-000000000041',
+      producing_model_call_id: '00000000-0000-0000-0000-000000000042',
+      state: 'results_projected',
+      tools: [],
+      goal_events: [goalEvent.event],
+    } as const
+    expect(isCompatibleDetailBody('tool_batch_transition', toolBatch)).toBe(true)
+    expect(
+      isCompatibleDetailBody('tool_batch_transition', {
+        ...toolBatch,
+        goal_events: [{ ...goalEvent.event, reason: null }],
+      }),
+    ).toBe(false)
+
+    const reconciliation = {
+      type: 'reconciliation',
+      turn_id: '00000000-0000-0000-0000-000000000041',
+      operation_id: '00000000-0000-0000-0000-000000000042',
+      operation_kind: 'model_call',
+      attempt_count: '2',
+      cause_code: 'ambiguous_operation',
+      exhausted: true,
+      operator_required: true,
+    } as const
+    expect(isCompatibleDetailBody('turn_reconciliation_required', reconciliation)).toBe(true)
+    expect(
+      isCompatibleDetailBody('turn_reconciliation_required', {
+        ...reconciliation,
+        operation_kind: 'invented',
+      }),
+    ).toBe(false)
+    expect(
+      isCompatibleDetailBody('turn_reconciliation_required', {
+        ...reconciliation,
+        exhausted: false,
+      }),
+    ).toBe(false)
+
+    const approval = {
+      type: 'tool_approval_decision',
+      turn_id: '00000000-0000-0000-0000-000000000041',
+      request_id: '00000000-0000-0000-0000-000000000042',
+      tool_name: 'workspace_read',
+      decision: 'approve',
+      source: 'user',
+      decider: { type: 'user', command_id: '00000000-0000-0000-0000-000000000043' },
+      rationale: null,
+      approval_judge_escalated: false,
+    } as const
+    expect(isCompatibleDetailBody('tool_approval_decided', approval)).toBe(true)
+    expect(
+      isCompatibleDetailBody('tool_approval_decided', { ...approval, source: 'delegate' }),
+    ).toBe(false)
+    expect(isCompatibleDetailBody('tool_approval_decided', { ...approval, source: 'policy' })).toBe(
+      true,
+    )
   })
 })

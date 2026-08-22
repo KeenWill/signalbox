@@ -62,7 +62,7 @@ const sessionEvidenceFixture = {
               attempt_id: '00000000-0000-0000-0000-000000999698',
               state: 'completed',
               effect_posture: 'read_only',
-              sandbox_posture: 'workspace_read',
+              sandbox_posture: 'sandboxed',
               result: null,
               failure: null,
               cause_code: null,
@@ -106,7 +106,7 @@ const sessionEvidenceFixture = {
               attempt_id: '00000000-0000-0000-0000-000000999698',
               state: 'completed',
               effect_posture: 'read_only',
-              sandbox_posture: 'workspace_read',
+              sandbox_posture: 'sandboxed',
               result: {
                 text: toolEvidenceResult,
                 offset_bytes: '0',
@@ -147,9 +147,9 @@ const sessionEvidenceFixture = {
           tools: [],
           goal_events: [
             {
-              event_kind: 'advanced',
+              event_kind: 'achieved',
               generation: '19',
-              reason: 'evidence inspected',
+              reason: null,
               text: null,
             },
           ],
@@ -302,7 +302,7 @@ const captureSessionEvidence = async (page: Page) => {
   await continueDetail.click()
   await expect(page.getByText(toolEvidenceResult, { exact: true })).toBeVisible()
   await continueDetail.click()
-  await expect(page.getByText('evidence inspected', { exact: true })).toBeVisible()
+  await expect(page.getByText('achieved', { exact: true })).toBeVisible()
   await expect(page).toHaveScreenshot('sessions-detail-desktop-dark.png', {
     animations: 'disabled',
   })
