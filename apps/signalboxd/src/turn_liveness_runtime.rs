@@ -1012,19 +1012,63 @@ mod tests {
         StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE, TERMINALIZATIONS_PER_SCAN,
         TerminalizationWindow, TurnLivenessWake, complete_before_shutdown,
         drain_quiescent_rotation, next_turn_liveness_wake, reconcile_turn_liveness,
-        recovery_client_observation_bound,
+        recovery_client_observation_bound, report_automatic_reconciliation_timeout,
     };
     use signalbox_application::{
-        StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
-        TurnLivenessLedger,
+        AutomaticReconciliationAttempt, AutomaticReconciliationOperation,
+        ClaimedAutomaticReconciliation, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
+        TurnLivenessEvidence, TurnLivenessLedger,
     };
-    use signalbox_domain::{AcceptedInputTurnFailureIdentities, SessionId, TurnAttemptId, TurnId};
+    use signalbox_domain::{
+        AcceptedInputTurnFailureIdentities, ModelCallId, SessionId, TurnAttemptId, TurnId,
+    };
     use signalbox_persistence::turn_liveness::TurnLivenessRepositoryError;
     use std::{
-        sync::{Mutex, atomic::AtomicUsize, atomic::Ordering},
+        io::Write,
+        sync::{Arc, Mutex, atomic::AtomicUsize, atomic::Ordering},
         time::Duration,
     };
+    use tracing_subscriber::fmt::MakeWriter;
     use uuid::Uuid;
+
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        fn text(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .expect("the automatic-reconciliation log capture is available")
+                    .clone(),
+            )
+            .expect("automatic-reconciliation diagnostics are UTF-8")
+        }
+    }
+
+    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedLogWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the automatic-reconciliation log capture is available")
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> MakeWriter<'writer> for CapturedLog {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            CapturedLogWriter(Arc::clone(&self.0))
+        }
+    }
 
     fn candidate(seed: u128) -> StaleTurnCandidate {
         StaleTurnCandidate::new(
@@ -1061,6 +1105,46 @@ mod tests {
             rows: 0,
             resume_after: None,
         }
+    }
+
+    /// The live bounded-timeout diagnostics distinguish a claimed attempt from
+    /// an inventory read while retaining `automatic_reconciliation_timed_out`.
+    #[test]
+    fn automatic_reconciliation_timed_out_names_attempt_and_inventory_stages() {
+        const SESSION_SEED: u128 = 0xc001; // numeric-bound: test - timeout diagnostic session identity
+        const TURN_SEED: u128 = 0xc002; // numeric-bound: test - timeout diagnostic turn identity
+        const CALL_SEED: u128 = 0xc003; // numeric-bound: test - timeout diagnostic call identity
+
+        let claimed = ClaimedAutomaticReconciliation::new(
+            SessionId::from_uuid(Uuid::from_u128(SESSION_SEED)),
+            TurnId::from_uuid(Uuid::from_u128(TURN_SEED)),
+            AutomaticReconciliationOperation::ModelCall(ModelCallId::from_uuid(Uuid::from_u128(
+                CALL_SEED,
+            ))),
+            AutomaticReconciliationAttempt::first(),
+        );
+        let captured = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(captured.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            report_automatic_reconciliation_timeout("attempt", Some(claimed));
+            report_automatic_reconciliation_timeout("inventory", None);
+        });
+        let diagnostics = captured.text();
+
+        assert_eq!(
+            diagnostics
+                .matches("cause_code=\"automatic_reconciliation_timed_out\"")
+                .count(),
+            2
+        );
+        assert!(diagnostics.contains("stage=\"attempt\""));
+        assert!(diagnostics.contains("stage=\"inventory\""));
+        assert!(diagnostics.contains("attempt=1"));
     }
 
     /// A page whose every row this pass could not read: no candidates, but

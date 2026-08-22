@@ -650,3 +650,129 @@ async fn finish_attempt(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
+    use signalbox_domain::{ModelCallId, ToolAttemptId};
+    use uuid::Uuid;
+
+    use super::{
+        AutomaticReconciliationFailureKind, AutomaticReconciliationOperation,
+        AutomaticReconciliationRepositoryError, decode_operation,
+    };
+    use crate::model_execution::ModelCallRepositoryError;
+
+    const MODEL_CALL_UUID: u128 = 0xa001; // numeric-bound: test - model-call identity fixture
+    const TOOL_ATTEMPT_UUID: u128 = 0xa002; // numeric-bound: test - tool-attempt identity fixture
+
+    /// The durable row admits exactly one typed operation identity.
+    #[test]
+    fn operation_identity_decoding_is_closed_and_typed() {
+        let model_call_uuid = Uuid::from_u128(MODEL_CALL_UUID);
+        let tool_attempt_uuid = Uuid::from_u128(TOOL_ATTEMPT_UUID);
+
+        let model = decode_operation(Some(model_call_uuid), None)
+            .expect("one model-call identity is admitted");
+        let tool = decode_operation(None, Some(tool_attempt_uuid))
+            .expect("one tool-attempt identity is admitted");
+        let both = decode_operation(Some(model_call_uuid), Some(tool_attempt_uuid))
+            .expect_err("two operation identities are corruption");
+        let neither =
+            decode_operation(None, None).expect_err("an absent operation identity is corruption");
+
+        assert_eq!(
+            model,
+            AutomaticReconciliationOperation::ModelCall(ModelCallId::from_uuid(model_call_uuid))
+        );
+        assert_eq!(
+            tool,
+            AutomaticReconciliationOperation::ToolAttempt(ToolAttemptId::from_uuid(
+                tool_attempt_uuid
+            ))
+        );
+        assert!(matches!(
+            both,
+            AutomaticReconciliationRepositoryError::Corruption("operation identity")
+        ));
+        assert!(matches!(
+            neither,
+            AutomaticReconciliationRepositoryError::Corruption("operation identity")
+        ));
+    }
+
+    /// The live `automatic_reconciliation_database` failure remains an
+    /// ordinary infrastructure failure when no commit acknowledgement was lost.
+    #[test]
+    fn automatic_reconciliation_database_failure_keeps_its_operator_contract() {
+        let error = AutomaticReconciliationRepositoryError::from(sqlx::Error::PoolClosed);
+
+        assert_eq!(
+            error.failure_kind(),
+            AutomaticReconciliationFailureKind::Infrastructure
+        );
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            }
+        );
+        assert_eq!(
+            error.operator_failure_cause_code(),
+            "automatic_reconciliation_database"
+        );
+        assert!(error.source().is_some());
+        assert!(
+            error
+                .to_string()
+                .contains("automatic operation reconciliation failed")
+        );
+    }
+
+    /// The live `automatic_reconciliation_transition` path preserves the
+    /// model transition's caller-or-hub classification and spends integrity budget.
+    #[test]
+    fn automatic_reconciliation_transition_failure_keeps_its_operator_contract() {
+        let error = AutomaticReconciliationRepositoryError::Model(
+            ModelCallRepositoryError::InvalidTransition("automatic recovery fixture"),
+        );
+
+        assert_eq!(
+            error.failure_kind(),
+            AutomaticReconciliationFailureKind::Integrity
+        );
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::CallerOrHubBug
+        );
+        assert_eq!(
+            error.operator_failure_cause_code(),
+            "automatic_reconciliation_transition"
+        );
+        assert!(error.source().is_some());
+        assert!(error.to_string().contains("model-call transition rejected"));
+    }
+
+    /// A lost commit acknowledgement remains distinct from an ordinary
+    /// database failure so the daemon does not double-record the attempt.
+    #[test]
+    fn automatic_reconciliation_commit_failure_retains_ambiguity() {
+        let error = AutomaticReconciliationRepositoryError::Database {
+            commit_ambiguous: true,
+            source: sqlx::Error::PoolClosed,
+        };
+
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            }
+        );
+        assert_eq!(
+            error.failure_kind(),
+            AutomaticReconciliationFailureKind::Infrastructure
+        );
+    }
+}
