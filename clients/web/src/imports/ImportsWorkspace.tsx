@@ -56,11 +56,13 @@ export function ImportsWorkspace({
   scenario,
   presentation = 'standalone',
   onCommandContext,
+  onNavigationDisabledChange,
 }: {
   api: ImportApi
   scenario: boolean
   presentation?: 'standalone' | 'product'
   onCommandContext?: (context: CommandContext | null) => void
+  onNavigationDisabledChange?: (disabled: boolean) => void
 }) {
   const queryClient = useQueryClient()
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
@@ -82,6 +84,11 @@ export function ImportsWorkspace({
   const [pendingCommand, setPendingCommand] = useState<WebImportContinuationRequest | null>(null)
   const queryScope = scenario ? 'scenario' : 'production'
   const hasRetainedCommand = pendingCommand !== null
+
+  useEffect(() => {
+    onNavigationDisabledChange?.(hasRetainedCommand)
+    return () => onNavigationDisabledChange?.(false)
+  }, [hasRetainedCommand, onNavigationDisabledChange])
 
   const listRequest = useMemo(
     () => ({

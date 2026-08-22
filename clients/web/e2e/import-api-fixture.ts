@@ -18,13 +18,16 @@ export const useDeterministicImportApi = async (page: Page) => {
     const segments = url.pathname.split('/').filter(Boolean)
     const importedConversationId = decodeURIComponent(segments[2] ?? '')
 
-    if (segments.length === 2) {
-      const listRequest: WebImportListRequest = {
-        after: url.searchParams.get('after') ?? undefined,
-        format: (url.searchParams.get('format') as WebImportFormat | null) ?? undefined,
-        limit: optionalNumber(url.searchParams.get('limit')),
-        source_session_id: url.searchParams.get('source_session_id') ?? undefined,
-      }
+    if (segments.length === 2 || (segments[2] === 'searches' && request.method() === 'POST')) {
+      const listRequest: WebImportListRequest =
+        segments[2] === 'searches'
+          ? (request.postDataJSON() as WebImportListRequest)
+          : {
+              after: url.searchParams.get('after') ?? undefined,
+              format: (url.searchParams.get('format') as WebImportFormat | null) ?? undefined,
+              limit: optionalNumber(url.searchParams.get('limit')),
+              source_session_id: url.searchParams.get('source_session_id') ?? undefined,
+            }
       await route.fulfill({ json: await api.list(listRequest) })
       return
     }

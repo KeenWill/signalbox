@@ -844,7 +844,7 @@ kbd {
   text-transform: uppercase;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 960px) {
   .imports-shell {
     grid-template-columns: minmax(0, 1fr);
   }

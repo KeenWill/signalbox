@@ -84,10 +84,12 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
 
 function ProductNavigation({
   active,
+  disabled = false,
   onNavigate,
 }: {
   active: ProductRouteId
-  onNavigate?: () => void
+  disabled?: boolean
+  onNavigate?: (destination: 'product' | 'scenario') => void
 }) {
   return (
     <div className="product-navigation">
@@ -104,7 +106,12 @@ function ProductNavigation({
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
-            onClick={onNavigate}
+            aria-disabled={disabled || undefined}
+            tabIndex={disabled ? -1 : undefined}
+            onClick={(event) => {
+              if (disabled) event.preventDefault()
+              else onNavigate?.('product')
+            }}
           >
             <span>{route.label}</span>
             <small>{route.description}</small>
@@ -115,7 +122,12 @@ function ProductNavigation({
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
-        onClick={onNavigate}
+        aria-disabled={disabled || undefined}
+        tabIndex={disabled ? -1 : undefined}
+        onClick={(event) => {
+          if (disabled) event.preventDefault()
+          else onNavigate?.('scenario')
+        }}
       >
         Scenario studio <span aria-hidden="true">↗</span>
       </Link>
@@ -303,7 +315,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
+  const restoreNavigationFocusRef = useRef(true)
   const [importsCommandContext, setImportsCommandContext] = useState<CommandContext | null>(null)
+  const [navigationDisabled, setNavigationDisabled] = useState(false)
   const updateImportsCommandContext = useCallback(
     (nextContext: CommandContext | null) => setImportsCommandContext(nextContext),
     [],
@@ -321,9 +335,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       getState: store.getState,
       timelineIds: surfaceContext?.timelineIds ?? [],
       focusTimeline: surfaceContext?.focusTimeline ?? (() => primaryRef.current?.focus()),
-      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      navigate: navigationDisabled
+        ? undefined
+        : (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
     }
-  }, [dispatch, importsCommandContext, navigate, surface])
+  }, [dispatch, importsCommandContext, navigate, navigationDisabled, surface])
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
@@ -334,6 +350,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     globalHotkeySequenceBindings.map((binding) => ({
       sequence: binding.sequence,
       callback: () => invokeCommand(binding.commandId, context),
+      options: { enabled: app.overlay === null },
     })),
   )
 
@@ -351,6 +368,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         scenario={false}
         presentation="product"
         onCommandContext={updateImportsCommandContext}
+        onNavigationDisabledChange={setNavigationDisabled}
       />
     ) : (
       <DeferredSurface surface={surface} />
@@ -364,7 +382,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   return (
     <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
       <aside className="product-navigation-pane">
-        <ProductNavigation active={surface} />
+        <ProductNavigation active={surface} disabled={navigationDisabled} />
       </aside>
       <main className={`product-main product-main-${surface}`} tabIndex={-1} ref={primaryRef}>
         <header className="product-header">
@@ -436,8 +454,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             className="mobile-navigation"
             aria-describedby="mobile-navigation-description"
             onCloseAutoFocus={(event) => {
-              event.preventDefault()
-              document.querySelector<HTMLElement>('[aria-label="Open navigation"]')?.focus()
+              const returnTarget = document.querySelector<HTMLElement>(
+                '[aria-label="Open navigation"]',
+              )
+              if (restoreNavigationFocusRef.current && returnTarget) {
+                event.preventDefault()
+                returnTarget.focus()
+              }
             }}
           >
             <Dialog.Title className="sr-only">Product navigation</Dialog.Title>
@@ -446,7 +469,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </Dialog.Description>
             <ProductNavigation
               active={surface}
-              onNavigate={() => dispatch(actions.overlaySet(null))}
+              disabled={navigationDisabled}
+              onNavigate={(destination) => {
+                restoreNavigationFocusRef.current = destination === 'product'
+                dispatch(actions.overlaySet(null))
+              }}
             />
           </Dialog.Content>
         </Dialog.Portal>

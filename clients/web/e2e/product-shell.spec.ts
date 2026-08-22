@@ -127,6 +127,44 @@ test('uses the advertised product navigation sequences', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('suspends product navigation sequences while the palette owns keyboard scope', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette).toBeVisible()
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(palette).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('enters Scenario studio from the phone drawer without stale focus restoration', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  await page
+    .getByRole('dialog', { name: 'Product navigation' })
+    .getByRole('link', { name: /Scenario studio/ })
+    .click()
+
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('applies saved presentation preferences on a direct Imports scenario load', async ({
   page,
 }) => {
@@ -190,4 +228,78 @@ test('operates the bounded Imports surface and leaves through one command palett
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(/\/settings$/)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('serves exact source-session searches through the deterministic adapter', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto('/imports')
+
+  const rows = page.getByRole('rowgroup', { name: 'Imported conversation rows' })
+  await expect(rows).toHaveAttribute('data-total-loaded', importsProductFixture.loadedImports)
+  await page
+    .getByRole('textbox', { name: 'Filter imports by exact source session evidence' })
+    .fill('source-session-0')
+  await page.getByRole('checkbox', { name: 'Use exact source session filter' }).check()
+
+  await expect(rows).toHaveAttribute('data-total-loaded', '1')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('switches Imports layout before the product pane clips', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.setViewportSize({ width: 920, height: 844 })
+  await page.goto('/imports')
+
+  const workspace = page.locator('.imports-workspace-product')
+  await expect(workspace).toBeVisible()
+  expect(await workspace.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+    true,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('locks product navigation while an ambiguous continuation command is retained', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.route('**/api/imports/*/continuations', (route) =>
+    route.fulfill({
+      status: 503,
+      json: {
+        error: {
+          kind: 'application',
+          code: 'continuation_commit_ambiguous',
+          message: 'The commit outcome is ambiguous.',
+        },
+      },
+    }),
+  )
+  await page.goto('/imports')
+
+  await page
+    .getByRole('textbox', { name: 'Initial model selection UUID' })
+    .fill('00000000-0000-7000-8000-000000000777')
+  await page.getByRole('button', { name: 'Resume' }).click()
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+
+  const settingsLink = page.getByRole('link', { name: /Settings/ })
+  await expect(settingsLink).toHaveAttribute('aria-disabled', 'true')
+  await settingsLink.click({ force: true })
+  await expect(page).toHaveURL(/\/imports$/)
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/imports$/)
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+  expect(problems).toEqual({
+    consoleErrors: [
+      'Failed to load resource: the server responded with a status of 503 (Service Unavailable)',
+    ],
+    pageErrors: [],
+  })
 })
