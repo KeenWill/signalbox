@@ -13,6 +13,7 @@ type WebContractCapabilities = {
   readonly bounded_json: boolean;
   readonly bounded_lexical_search: boolean;
   readonly bounded_session_timeline: boolean;
+  readonly bounded_usage_cost: boolean;
   readonly ndjson_streaming: boolean;
   readonly same_origin_json_mutations: boolean;
 };
@@ -30,7 +31,13 @@ type WebContractLimits = {
   readonly max_search_snippet_bytes: number;
   readonly max_timeline_window_bytes: number;
   readonly max_timeline_window_items: number;
+  readonly max_usage_aggregate_groups: number;
+  readonly max_usage_call_page_items: number;
 };
+
+type WebDollarAmount = string;
+
+type WebNullableU64 = WebU64 | null;
 
 type WebSearchContentClass = "user_transcript" | "assistant_transcript" | "tool_arguments" | "tool_result" | "session_metadata" | "attachment_filename" | "attachment_media_metadata" | "derived_text_artifact";
 
@@ -112,6 +119,69 @@ type WebTimelineEventSequence = string;
 
 type WebU64 = string;
 
+type WebUsageAggregateGroup = {
+  readonly call_count: WebU64;
+  readonly call_kind: WebUsageCallKind;
+  readonly cost: WebUsageCost;
+  readonly coverage: WebUsageTokenCoverage;
+  readonly input_semantics: WebUsageInputSemantics;
+  readonly model_id: string;
+  readonly provenance: WebUsageProvenance;
+  readonly tokens: WebUsageTokenAxes;
+};
+
+type WebUsageCall = {
+  readonly call_id: string;
+  readonly call_kind: WebUsageCallKind;
+  readonly cost: WebUsageCost;
+  readonly input_semantics: WebUsageInputSemantics;
+  readonly model_id: string;
+  readonly provenance: WebUsageProvenance;
+  readonly recorded_at_micros: WebU64;
+  readonly session_id: string;
+  readonly tokens: WebUsageTokenAxes;
+  readonly turn_id: string;
+};
+
+type WebUsageCallCursor = {
+  readonly call_id: string;
+  readonly recorded_at_micros: WebU64;
+};
+
+type WebUsageCallKind = "model_call" | "approval_judge";
+
+type WebUsageCost = {
+  readonly amount_usd: WebDollarAmount;
+  readonly label: WebUsageCostLabel;
+  readonly rate_version: string;
+  readonly status: "derived";
+} | {
+  readonly reason: WebUsageCostUnavailableReason;
+  readonly status: "unavailable";
+};
+
+type WebUsageCostLabel = "real" | "metered_equivalent";
+
+type WebUsageCostUnavailableReason = "no_token_evidence" | "unknown_input_semantics" | "incomplete_cache_axes" | "invalid_cache_breakdown" | "configuration_unavailable";
+
+type WebUsageInputSemantics = "unknown" | "cache_exclusive" | "cache_inclusive";
+
+type WebUsageProvenance = "reported" | "estimated";
+
+type WebUsageTokenAxes = {
+  readonly cache_creation_input: WebNullableU64;
+  readonly cache_read_input: WebNullableU64;
+  readonly input: WebNullableU64;
+  readonly output: WebNullableU64;
+};
+
+type WebUsageTokenCoverage = {
+  readonly cache_creation_input: boolean;
+  readonly cache_read_input: boolean;
+  readonly input: boolean;
+  readonly output: boolean;
+};
+
 export type WebContractBootstrap = {
   readonly capabilities: WebContractCapabilities;
   readonly contract: WebContractIdentity;
@@ -148,9 +218,21 @@ export type WebSearchPage = {
   readonly results: ReadonlyArray<WebSearchResult>;
 };
 
+export type WebUsageSummary = {
+  readonly groups: ReadonlyArray<WebUsageAggregateGroup>;
+  readonly truncated: boolean;
+};
+
+export type WebUsageCallPage = {
+  readonly calls: ReadonlyArray<WebUsageCall>;
+  readonly continuation?: WebUsageCallCursor | null;
+};
+
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;
 export function decodeWebContractExample(value: unknown): WebContractExample;
 export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;
 export function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;
 export function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;
 export function decodeWebSearchPage(value: unknown): WebSearchPage;
+export function decodeWebUsageSummary(value: unknown): WebUsageSummary;
+export function decodeWebUsageCallPage(value: unknown): WebUsageCallPage;

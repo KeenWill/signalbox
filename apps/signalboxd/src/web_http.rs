@@ -31,25 +31,36 @@ use signalbox_application::{
     SearchContentClass, SearchCursor, SearchPageLimit, SearchQuery, SearchResultSource,
     SearchScope, SearchStrategy, SearchText, SessionTimelineDescriptor, SessionTimelineEventKind,
     SessionTimelineWindow, TimelineAddress, TimelineContinuation, TimelineWindowAnchor,
-    TimelineWindowLimits,
+    TimelineWindowLimits, UsageAggregateGroup, UsageCallCursor, UsageCallEvidence, UsageCallKind,
+    UsageCallOrder, UsageCallPageLimit, UsageCallQuery, UsageInputTokenSemantics, UsageProvenance,
+    UsageQuery, UsageSelection, UsageTimeRange, UsageTimestampMicros, UsageTokenAxes,
 };
-use signalbox_domain::SessionId;
+use signalbox_domain::{
+    ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId,
+};
+use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
 use signalbox_persistence::search::{SearchRepository, SearchRepositoryError};
 use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
 };
+use signalbox_persistence::usage::{UsageRepository, UsageRepositoryError};
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
-    WebContractBootstrap, WebContractExample, WebSearchContentClass, WebSearchCursor,
-    WebSearchHighlight, WebSearchPage, WebSearchResult, WebSearchResultSource,
-    WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
-    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
-    WebTimelineEventSequence, WebU64,
+    WebContractBootstrap, WebContractExample, WebDollarAmount, WebNullableU64,
+    WebSearchContentClass, WebSearchCursor, WebSearchHighlight, WebSearchPage, WebSearchResult,
+    WebSearchResultSource, WebSessionTimelineDescriptor, WebSessionTimelineEventKind,
+    WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
+    WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence, WebU64,
+    WebUsageAggregateGroup, WebUsageCall, WebUsageCallCursor, WebUsageCallKind, WebUsageCallPage,
+    WebUsageCost, WebUsageCostLabel, WebUsageCostUnavailableReason, WebUsageInputSemantics,
+    WebUsageProvenance, WebUsageSummary, WebUsageTokenAxes, WebUsageTokenCoverage,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
 use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
+
+use crate::{BillingKind, HubModelConfiguration, configuration::ModelCallInputUsage};
 
 /// Optional deployment override for the browser listener.
 pub const WEB_BIND_ENVIRONMENT: &str = "SIGNALBOX_WEB_BIND";
@@ -206,8 +217,13 @@ impl WebHttpRuntime {
     pub async fn bind(
         configuration: WebHttpConfiguration,
         pool: PgPool,
+        model_configuration: HubModelConfiguration,
     ) -> Result<Self, WebHttpRuntimeError> {
-        let router = production_router(configuration.asset_root, Some(pool));
+        let router = production_router_with_model_configuration(
+            configuration.asset_root,
+            Some(pool),
+            Some(model_configuration),
+        );
         Self::bind_router(configuration.bind_address, router).await
     }
 
@@ -250,9 +266,19 @@ impl WebHttpRuntime {
 
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
 pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> Router {
+    production_router_with_model_configuration(asset_root, pool, None)
+}
+
+fn production_router_with_model_configuration(
+    asset_root: Option<PathBuf>,
+    pool: Option<PgPool>,
+    model_configuration: Option<HubModelConfiguration>,
+) -> Router {
     let state = WebApiState {
         timeline: pool.clone().map(SessionTimelineRepository::new),
-        search: pool.map(SearchRepository::new),
+        search: pool.clone().map(SearchRepository::new),
+        usage: pool.map(UsageRepository::new),
+        model_configuration,
     };
     let session_reads = Router::new()
         .route("/sessions/{session_id}", get(session_descriptor))
@@ -261,6 +287,8 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
             get(session_timeline_window),
         )
         .route("/search", get(search))
+        .route("/usage/summary", get(usage_summary))
+        .route("/usage/calls", get(usage_calls))
         .route_layer(middleware::from_fn(validate_loopback_host));
     let api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
@@ -282,6 +310,8 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
 struct WebApiState {
     timeline: Option<SessionTimelineRepository>,
     search: Option<SearchRepository>,
+    usage: Option<UsageRepository>,
+    model_configuration: Option<HubModelConfiguration>,
 }
 
 async fn validate_loopback_host(request: Request, next: Next) -> Response {
@@ -504,6 +534,383 @@ fn search_content_class_dto(content: SearchContentClass) -> WebSearchContentClas
             WebSearchContentClass::AttachmentMediaMetadata
         }
         SearchContentClass::DerivedTextArtifact => WebSearchContentClass::DerivedTextArtifact,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UsageSummaryHttpQuery {
+    from_micros: Option<String>,
+    to_micros: Option<String>,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    model_id: Option<String>,
+    provenance: Option<String>,
+    call_kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UsageCallsHttpQuery {
+    from_micros: Option<String>,
+    to_micros: Option<String>,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    model_id: Option<String>,
+    provenance: Option<String>,
+    call_kind: Option<String>,
+    order: String,
+    max_items: String,
+    after_recorded_at_micros: Option<String>,
+    after_call_id: Option<String>,
+}
+
+async fn usage_summary(
+    State(state): State<WebApiState>,
+    query: Result<Query<UsageSummaryHttpQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_usage_query(),
+    };
+    let Some(query) = parse_usage_query(
+        query.from_micros,
+        query.to_micros,
+        query.session_id,
+        query.turn_id,
+        query.model_id,
+        query.provenance,
+        query.call_kind,
+    ) else {
+        return invalid_usage_query();
+    };
+    let (Some(repository), Some(configuration)) = (state.usage, state.model_configuration) else {
+        return usage_unavailable();
+    };
+    match repository.aggregate(query).await {
+        Ok(report) => Json(WebUsageSummary {
+            groups: report
+                .groups
+                .into_iter()
+                .map(|group| usage_aggregate_dto(group, &configuration))
+                .collect(),
+            truncated: report.truncated,
+        })
+        .into_response(),
+        Err(error) => usage_repository_error(error),
+    }
+}
+
+async fn usage_calls(
+    State(state): State<WebApiState>,
+    query: Result<Query<UsageCallsHttpQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_usage_query(),
+    };
+    let scope = parse_usage_query(
+        query.from_micros,
+        query.to_micros,
+        query.session_id,
+        query.turn_id,
+        query.model_id,
+        query.provenance,
+        query.call_kind,
+    );
+    let order = match query.order.as_str() {
+        "newest" => Some(UsageCallOrder::NewestFirst),
+        "oldest" => Some(UsageCallOrder::OldestFirst),
+        _ => None,
+    };
+    let limit = query
+        .max_items
+        .parse::<u16>()
+        .ok()
+        .and_then(|value| UsageCallPageLimit::new(value).ok());
+    let after = match (query.after_recorded_at_micros, query.after_call_id) {
+        (None, None) => Some(None),
+        (Some(recorded_at), Some(call)) => parse_usage_timestamp(&recorded_at)
+            .zip(parse_model_call_id(&call))
+            .map(|(recorded_at, call)| Some(UsageCallCursor { recorded_at, call })),
+        _ => None,
+    };
+    let (Some(scope), Some(order), Some(limit), Some(after)) = (scope, order, limit, after) else {
+        return invalid_usage_query();
+    };
+    let (Some(repository), Some(configuration)) = (state.usage, state.model_configuration) else {
+        return usage_unavailable();
+    };
+    match repository
+        .calls(UsageCallQuery {
+            scope,
+            order,
+            limit,
+            after,
+        })
+        .await
+    {
+        Ok(page) => Json(WebUsageCallPage {
+            calls: page
+                .calls
+                .into_iter()
+                .map(|call| usage_call_dto(call, &configuration))
+                .collect(),
+            continuation: page.next.map(|cursor| WebUsageCallCursor {
+                recorded_at_micros: WebU64::from_u64(cursor.recorded_at.get()),
+                call_id: cursor.call.into_uuid().to_string(),
+            }),
+        })
+        .into_response(),
+        Err(error) => usage_repository_error(error),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_usage_query(
+    from_micros: Option<String>,
+    to_micros: Option<String>,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    model_id: Option<String>,
+    provenance: Option<String>,
+    call_kind: Option<String>,
+) -> Option<UsageQuery> {
+    let from_inclusive = parse_optional(from_micros, parse_usage_timestamp)?;
+    let to_exclusive = parse_optional(to_micros, parse_usage_timestamp)?;
+    let time = UsageTimeRange::new(from_inclusive, to_exclusive).ok()?;
+    let selection = UsageSelection {
+        session: parse_optional(session_id, |value| {
+            uuid::Uuid::parse_str(value).ok().map(SessionId::from_uuid)
+        })?,
+        turn: parse_optional(turn_id, |value| {
+            uuid::Uuid::parse_str(value).ok().map(TurnId::from_uuid)
+        })?,
+        model: parse_optional(model_id, |value| {
+            uuid::Uuid::parse_str(value).ok().map(|identity| {
+                ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(identity))
+            })
+        })?,
+        provenance: parse_optional(provenance, parse_usage_provenance)?,
+        call_kind: parse_optional(call_kind, parse_usage_call_kind)?,
+    };
+    Some(UsageQuery { time, selection })
+}
+
+fn parse_optional<T>(
+    value: Option<String>,
+    parser: impl FnOnce(&str) -> Option<T>,
+) -> Option<Option<T>> {
+    match value {
+        None => Some(None),
+        Some(value) => parser(&value).map(Some),
+    }
+}
+
+fn parse_usage_timestamp(value: &str) -> Option<UsageTimestampMicros> {
+    if value.is_empty()
+        || (value.starts_with('0') && value != "0")
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    UsageTimestampMicros::new(value.parse().ok()?).ok()
+}
+
+fn parse_model_call_id(value: &str) -> Option<ModelCallId> {
+    uuid::Uuid::parse_str(value)
+        .ok()
+        .map(ModelCallId::from_uuid)
+}
+
+fn parse_usage_provenance(value: &str) -> Option<UsageProvenance> {
+    match value {
+        "reported" => Some(UsageProvenance::Reported),
+        "estimated" => Some(UsageProvenance::Estimated),
+        _ => None,
+    }
+}
+
+fn parse_usage_call_kind(value: &str) -> Option<UsageCallKind> {
+    match value {
+        "model_call" => Some(UsageCallKind::ModelCall),
+        "approval_judge" => Some(UsageCallKind::ApprovalJudge),
+        _ => None,
+    }
+}
+
+fn invalid_usage_query() -> Response {
+    application_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_usage_query",
+        "usage parameters are malformed or outside the contract bounds",
+    )
+}
+
+fn usage_unavailable() -> Response {
+    application_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "usage_projection_unavailable",
+        "usage projection or configured rates are not available",
+    )
+}
+
+fn usage_repository_error(error: UsageRepositoryError) -> Response {
+    let failure_class = match &error {
+        UsageRepositoryError::Database(_) => "infrastructure",
+        UsageRepositoryError::Corruption(_) => "fail_closed_corruption",
+    };
+    tracing::error!(failure_class, cause = %error, "usage projection read failed");
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "usage_projection_failed",
+        "the durable usage projection could not be read",
+    )
+}
+
+fn usage_aggregate_dto(
+    group: UsageAggregateGroup,
+    configuration: &HubModelConfiguration,
+) -> WebUsageAggregateGroup {
+    WebUsageAggregateGroup {
+        call_kind: usage_call_kind_dto(group.key.call_kind),
+        model_id: group.key.model.identity().into_uuid().to_string(),
+        provenance: usage_provenance_dto(group.key.provenance),
+        input_semantics: usage_input_semantics_dto(group.key.input_semantics),
+        coverage: WebUsageTokenCoverage {
+            input: group.key.coverage.input,
+            output: group.key.coverage.output,
+            cache_creation_input: group.key.coverage.cache_creation_input,
+            cache_read_input: group.key.coverage.cache_read_input,
+        },
+        call_count: WebU64::from_u64(group.call_count),
+        tokens: usage_tokens_dto(group.tokens),
+        cost: usage_cost_dto(
+            configuration,
+            group.key.model,
+            &group.key.credential_profile,
+            group.key.input_semantics,
+            group.tokens,
+            group.cost_derivation_safe,
+        ),
+    }
+}
+
+fn usage_call_dto(call: UsageCallEvidence, configuration: &HubModelConfiguration) -> WebUsageCall {
+    WebUsageCall {
+        call_kind: usage_call_kind_dto(call.call_kind),
+        call_id: call.call.into_uuid().to_string(),
+        session_id: call.session.into_uuid().to_string(),
+        turn_id: call.turn.into_uuid().to_string(),
+        model_id: call.model.identity().into_uuid().to_string(),
+        provenance: usage_provenance_dto(call.provenance),
+        input_semantics: usage_input_semantics_dto(call.input_semantics),
+        tokens: usage_tokens_dto(call.tokens),
+        recorded_at_micros: WebU64::from_u64(call.recorded_at.get()),
+        cost: usage_cost_dto(
+            configuration,
+            call.model,
+            &call.credential_profile,
+            call.input_semantics,
+            call.tokens,
+            true,
+        ),
+    }
+}
+
+fn usage_cost_dto(
+    configuration: &HubModelConfiguration,
+    model: ResolvedProviderTarget,
+    credential_profile: &str,
+    input_semantics: UsageInputTokenSemantics,
+    tokens: UsageTokenAxes,
+    cost_derivation_safe: bool,
+) -> WebUsageCost {
+    let unavailable = |reason| WebUsageCost::Unavailable { reason };
+    if tokens.coverage()
+        == (signalbox_application::UsageTokenCoverage {
+            input: false,
+            output: false,
+            cache_creation_input: false,
+            cache_read_input: false,
+        })
+    {
+        return unavailable(WebUsageCostUnavailableReason::NoTokenEvidence);
+    }
+    let semantics = match input_semantics {
+        UsageInputTokenSemantics::Unknown => {
+            return unavailable(WebUsageCostUnavailableReason::UnknownInputSemantics);
+        }
+        UsageInputTokenSemantics::CacheExclusive => {
+            ProcessModelCallInputTokenSemantics::CacheExclusive
+        }
+        UsageInputTokenSemantics::CacheInclusive => {
+            if tokens.input.is_none()
+                || tokens.cache_creation_input.is_none()
+                || tokens.cache_read_input.is_none()
+            {
+                return unavailable(WebUsageCostUnavailableReason::IncompleteCacheAxes);
+            }
+            let cache_total = tokens
+                .cache_creation_input
+                .and_then(|creation| tokens.cache_read_input?.checked_add(creation));
+            if cache_total.is_none_or(|cache| tokens.input.is_none_or(|input| input < cache)) {
+                return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
+            }
+            ProcessModelCallInputTokenSemantics::CacheInclusive
+        }
+    };
+    if !cost_derivation_safe {
+        return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
+    }
+    let Some(cost) = configuration.derive_model_call_cost(
+        model,
+        credential_profile,
+        ModelCallInputUsage::from_persisted(tokens.input, Some(semantics)),
+        tokens.output,
+        tokens.cache_creation_input,
+        tokens.cache_read_input,
+    ) else {
+        return unavailable(WebUsageCostUnavailableReason::ConfigurationUnavailable);
+    };
+    WebUsageCost::Derived {
+        amount_usd: WebDollarAmount::from_derived(cost.amount_usd().normalize().to_string()),
+        rate_version: cost.rate_version().to_owned(),
+        label: match cost.billing_kind() {
+            BillingKind::ApiMetered => WebUsageCostLabel::Real,
+            BillingKind::Subscription => WebUsageCostLabel::MeteredEquivalent,
+        },
+    }
+}
+
+const fn usage_call_kind_dto(kind: UsageCallKind) -> WebUsageCallKind {
+    match kind {
+        UsageCallKind::ModelCall => WebUsageCallKind::ModelCall,
+        UsageCallKind::ApprovalJudge => WebUsageCallKind::ApprovalJudge,
+    }
+}
+
+const fn usage_provenance_dto(provenance: UsageProvenance) -> WebUsageProvenance {
+    match provenance {
+        UsageProvenance::Reported => WebUsageProvenance::Reported,
+        UsageProvenance::Estimated => WebUsageProvenance::Estimated,
+    }
+}
+
+const fn usage_input_semantics_dto(semantics: UsageInputTokenSemantics) -> WebUsageInputSemantics {
+    match semantics {
+        UsageInputTokenSemantics::Unknown => WebUsageInputSemantics::Unknown,
+        UsageInputTokenSemantics::CacheExclusive => WebUsageInputSemantics::CacheExclusive,
+        UsageInputTokenSemantics::CacheInclusive => WebUsageInputSemantics::CacheInclusive,
+    }
+}
+
+fn usage_tokens_dto(tokens: UsageTokenAxes) -> WebUsageTokenAxes {
+    WebUsageTokenAxes {
+        input: WebNullableU64::from_option(tokens.input),
+        output: WebNullableU64::from_option(tokens.output),
+        cache_creation_input: WebNullableU64::from_option(tokens.cache_creation_input),
+        cache_read_input: WebNullableU64::from_option(tokens.cache_read_input),
     }
 }
 
@@ -1085,8 +1492,11 @@ mod tests {
         http::{Request, StatusCode, header},
     };
     use http_body_util::BodyExt as _;
+    use signalbox_application::{UsageInputTokenSemantics, UsageTokenAxes};
+    use signalbox_domain::{ProviderModelIdentity, ResolvedProviderTarget};
     use signalbox_web_contract::{
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebContractBootstrap, WebContractExample,
+        WebUsageCost, WebUsageCostUnavailableReason,
     };
     use tokio::sync::{mpsc, watch};
     use tower::ServiceExt as _;
@@ -1094,8 +1504,9 @@ mod tests {
 
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime,
-        deterministic_test_router, ndjson_response, production_router,
+        deterministic_test_router, ndjson_response, production_router, usage_cost_dto,
     };
+    use crate::HubModelConfiguration;
 
     fn loopback_ephemeral() -> SocketAddr {
         "127.0.0.1:0"
@@ -1108,6 +1519,17 @@ mod tests {
             request_id: "transport-test".to_owned(),
             message: "bounded payload".to_owned(),
         }
+    }
+
+    fn example_model_configuration() -> HubModelConfiguration {
+        HubModelConfiguration::parse(crate::configuration::tests::CONFIGURATION)
+            .expect("the shared model configuration fixture is valid")
+    }
+
+    fn rated_example_target() -> ResolvedProviderTarget {
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(uuid::uuid!(
+            "20000000-0000-4000-8000-000000000001"
+        )))
     }
 
     const STATIC_INDEX: &str = "signalbox-static-build";
@@ -1520,6 +1942,107 @@ mod tests {
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["error"]["code"], "search_projection_unavailable");
+    }
+
+    #[tokio::test]
+    async fn valid_usage_filters_are_parsed_before_projection_availability_is_reported() {
+        let request = Request::get(
+            "/api/usage/calls?from_micros=0&to_micros=9223372036854775807&provenance=estimated&call_kind=approval_judge&order=oldest&max_items=100",
+        )
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the response is structured JSON");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "usage_projection_unavailable");
+    }
+
+    #[tokio::test]
+    async fn usage_detail_rejects_a_partial_keyset_cursor() {
+        let request =
+            Request::get("/api/usage/calls?order=newest&max_items=10&after_recorded_at_micros=7")
+                .header(header::HOST, "localhost")
+                .body(Body::empty())
+                .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_usage_query");
+    }
+
+    #[test]
+    fn configured_usage_cost_keeps_rate_version_and_billing_label_separate() {
+        let configuration = example_model_configuration();
+        let tokens = UsageTokenAxes {
+            input: Some(1_000_000),
+            output: None,
+            cache_creation_input: None,
+            cache_read_input: None,
+        };
+        let real = usage_cost_dto(
+            &configuration,
+            rated_example_target(),
+            "anthropic-primary",
+            UsageInputTokenSemantics::CacheExclusive,
+            tokens,
+            true,
+        );
+        let metered_equivalent = usage_cost_dto(
+            &configuration,
+            rated_example_target(),
+            "codex-subscription-primary",
+            UsageInputTokenSemantics::CacheExclusive,
+            tokens,
+            true,
+        );
+        let real = serde_json::to_value(real).expect("real cost serializes");
+        let metered_equivalent =
+            serde_json::to_value(metered_equivalent).expect("equivalent cost serializes");
+
+        assert_eq!(real["status"], "derived");
+        assert_eq!(real["label"], "real");
+        assert_eq!(metered_equivalent["status"], "derived");
+        assert_eq!(metered_equivalent["label"], "metered_equivalent");
+        assert_eq!(real["rate_version"], metered_equivalent["rate_version"]);
+        assert_eq!(real["amount_usd"], metered_equivalent["amount_usd"]);
+    }
+
+    #[test]
+    fn configured_usage_cost_names_incomplete_cache_coverage() {
+        let configuration = example_model_configuration();
+        let cost = usage_cost_dto(
+            &configuration,
+            rated_example_target(),
+            "anthropic-primary",
+            UsageInputTokenSemantics::CacheInclusive,
+            UsageTokenAxes {
+                input: Some(10),
+                output: Some(2),
+                cache_creation_input: None,
+                cache_read_input: Some(3),
+            },
+            true,
+        );
+
+        assert_eq!(
+            cost,
+            WebUsageCost::Unavailable {
+                reason: WebUsageCostUnavailableReason::IncompleteCacheAxes,
+            }
+        );
     }
 
     #[tokio::test]

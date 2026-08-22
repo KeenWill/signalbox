@@ -8,6 +8,7 @@ import {
   decodeWebContractExample,
   decodeWebSessionTimelineDescriptor,
   decodeWebSessionTimelineWindow,
+  decodeWebUsageSummary,
 } from "../../../clients/web/src/generated/web-contract.mjs";
 
 const fixtureUrl = new URL("./fixtures/example.json", import.meta.url);
@@ -41,6 +42,7 @@ test("generated bootstrap decoder rejects another contract version", () => {
           bounded_json: true,
           bounded_lexical_search: true,
           bounded_session_timeline: true,
+          bounded_usage_cost: true,
           same_origin_json_mutations: true,
           ndjson_streaming: true,
         },
@@ -52,6 +54,8 @@ test("generated bootstrap decoder rejects another contract version", () => {
           max_search_snippet_bytes: 512,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
+          max_usage_aggregate_groups: 256,
+          max_usage_call_page_items: 100,
         },
       }),
     /incompatible web contract/,
@@ -120,4 +124,42 @@ test("generated descriptor decoder rejects a fact beyond u64", () => {
       }),
     /unsigned 64-bit integer/,
   );
+});
+
+test("generated usage decoder preserves nullable axes and labeled cost", () => {
+  const summary = decodeWebUsageSummary({
+    groups: [
+      {
+        call_kind: "model_call",
+        model_id: "00000000-0000-0000-0000-000000000041",
+        provenance: "estimated",
+        input_semantics: "cache_exclusive",
+        coverage: {
+          input: true,
+          output: false,
+          cache_creation_input: false,
+          cache_read_input: false,
+        },
+        call_count: "2",
+        tokens: {
+          input: "17",
+          output: null,
+          cache_creation_input: null,
+          cache_read_input: null,
+        },
+        cost: {
+          status: "derived",
+          amount_usd: "0.17",
+          rate_version: "fixture-v2",
+          label: "metered_equivalent",
+        },
+      },
+    ],
+    truncated: false,
+  });
+
+  assert.equal(summary.groups[0].tokens.output, null);
+  assert.equal(summary.groups[0].cost.status, "derived");
+  assert.equal(summary.groups[0].cost.rate_version, "fixture-v2");
+  assert.equal(summary.groups[0].cost.label, "metered_equivalent");
 });

@@ -3765,7 +3765,7 @@ async fn read_bounded_credential_file(path: &Path, maximum_bytes: usize) -> io::
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         collections::HashSet,
         net::SocketAddr,
@@ -3875,7 +3875,7 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const EAGER_WATCH_RULE_ID: &str = "merge-forward-on-base-advance";
     const EAGER_WATCH_HEAD_PATTERN: &str = "^agent/.+$";
     const WATCH_TEMPLATE: &str = "merge-forward";
-    const CONFIGURATION: &str = r#"
+    pub(crate) const CONFIGURATION: &str = r#"
 version = 1
 
 [[credential_profiles]]
