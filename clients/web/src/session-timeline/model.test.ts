@@ -137,6 +137,32 @@ describe('BoundedSessionHistory', () => {
     expect(window.projected_structured_bytes).toBeLessThanOrEqual(256)
   })
 
+  it('caps non-HTTP source limits at the protocol maxima', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    let receivedMaxItems = 0
+    let receivedMaxBytes = 0
+    const source: SessionTimelineSource = {
+      limits: {
+        max_timeline_window_items: 1_000_000,
+        max_timeline_window_bytes: 1_000_000_000,
+      },
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async (requestedSessionId, anchor, limits) => {
+        receivedMaxItems = limits.maxItems
+        receivedMaxBytes = limits.maxBytes
+        return scenario.readWindow(requestedSessionId, anchor, limits)
+      },
+    }
+    const window = await new BoundedSessionHistory(sessionId, source).load(
+      { kind: 'first' },
+      { maxItems: 1_000_000, maxBytes: 1_000_000_000 },
+    )
+
+    expect(receivedMaxItems).toBe(256)
+    expect(receivedMaxBytes).toBe(64 * 1024)
+    expect(window.items).toHaveLength(256)
+  })
+
   it('budgets scenario windows and descriptors from exact event-kind charges', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const descriptor = await scenario.readDescriptor(sessionId)
@@ -173,6 +199,18 @@ describe('BoundedSessionHistory', () => {
     )
 
     expect(window.items.map((item) => item.address.event_sequence)).toEqual(['1', '2', '3', '4'])
+  })
+
+  it('clamps a scenario before anchor beyond the latest address', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const window = await scenario.readWindow(
+      sessionId,
+      { kind: 'before', eventSequence: String(SESSION_FOUNDATION_TOTAL + 1_000) },
+      { maxItems: scenario.limits.max_timeline_window_items, maxBytes: 64 * 1024 },
+    )
+
+    expect(window.items).toHaveLength(scenario.limits.max_timeline_window_items)
+    expect(window.items.at(-1)?.address.event_sequence).toBe(String(SESSION_FOUNDATION_TOTAL))
   })
 
   it('fills a clipped scenario around window at the latest address', async () => {
@@ -277,6 +315,23 @@ describe('BoundedSessionHistory', () => {
 
     expect(history.retained).toHaveLength(1)
     expect(history.retained[0]?.address.event_sequence).toBe('1')
+  })
+
+  it('does not expose its cached descriptor to mutation', async () => {
+    const history = new BoundedSessionHistory(sessionId, new EnormousSessionScenarioSource())
+    const described = await history.describe()
+    const mutableDescribed = described as unknown as {
+      first_address: { event_sequence: string }
+    }
+
+    mutableDescribed.first_address.event_sequence = '999'
+    const cached = history.descriptor
+    expect(cached).toBeDefined()
+    const mutableCached = cached as unknown as { latest_address: { event_sequence: string } }
+    mutableCached.latest_address.event_sequence = '999'
+
+    expect(history.descriptor?.first_address.event_sequence).toBe('1')
+    expect(history.descriptor?.latest_address.event_sequence).toBe(String(SESSION_FOUNDATION_TOTAL))
   })
 
   it('rejects a timeline window whose addresses decrease', async () => {
