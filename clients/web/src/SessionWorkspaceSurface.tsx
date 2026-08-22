@@ -79,12 +79,15 @@ export function SessionWorkspaceSurface({
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
+  const activeAnchorKind = session.data?.anchor.kind
+  const refetchSession = session.refetch
   const navigateTimelineWindow = useCallback(
     (anchor: 'first' | 'latest') => {
       dispatch(actions.timelineSelected(null))
-      setManualAnchor({ kind: anchor })
+      if (activeAnchorKind === anchor) void refetchSession()
+      else setManualAnchor({ kind: anchor })
     },
-    [dispatch],
+    [activeAnchorKind, dispatch, refetchSession],
   )
   useEffect(() => {
     onTimelineWindowNavigation(navigateTimelineWindow)
@@ -237,17 +240,18 @@ export function SessionWorkspaceSurface({
                     type="button"
                     className="session-item-summary"
                     data-timeline-id={id}
-                    aria-expanded={isExpanded}
+                    aria-expanded={detailAvailable ? isExpanded : undefined}
                     onClick={() => {
                       select(id)
                       if (detailAvailable) toggleExpanded(id)
                     }}
                   >
-                    {isExpanded ? (
-                      <ChevronDown aria-hidden="true" />
-                    ) : (
-                      <ChevronRight aria-hidden="true" />
-                    )}
+                    {detailAvailable &&
+                      (isExpanded ? (
+                        <ChevronDown aria-hidden="true" />
+                      ) : (
+                        <ChevronRight aria-hidden="true" />
+                      ))}
                     <span className="session-address">{id}</span>
                     <strong>{item.kind.replaceAll('_', ' ')}</strong>
                     <small>{item.projected_structured_bytes} B</small>

@@ -384,6 +384,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [app.density, app.theme])
 
   const copy = surfaceCopy[surface]
+  const surfaceUnavailable = productSurfaceStates[surface].kind === 'committed-unimplemented'
   const content =
     surface === 'attention' ? (
       <AttentionSurface />
@@ -448,11 +449,19 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </div>
             <div>
               <dt>Authority</dt>
-              <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
+              <dd>
+                {surface === 'settings' ? 'Browser' : surfaceUnavailable ? 'Unavailable' : 'Daemon'}
+              </dd>
             </div>
             <div>
               <dt>Cache</dt>
-              <dd>{surface === 'settings' ? 'Local settings' : 'Bounded query'}</dd>
+              <dd>
+                {surface === 'settings'
+                  ? 'Local settings'
+                  : surfaceUnavailable
+                    ? 'No operational query'
+                    : 'Bounded query'}
+              </dd>
             </div>
           </dl>
         </aside>

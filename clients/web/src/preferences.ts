@@ -48,6 +48,25 @@ const boundedRecord = (value: unknown, maximum: number): Record<string, string> 
   )
 }
 
+const CANONICAL_SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const POSITIVE_DECIMAL_U64 = /^[1-9]\d*$/
+const MAX_U64 = (1n << 64n) - 1n
+
+const boundedLogicalPositions = (value: unknown): Record<string, string> => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(
+        (entry): entry is [string, string] =>
+          CANONICAL_SESSION_ID.test(entry[0]) &&
+          typeof entry[1] === 'string' &&
+          POSITIVE_DECIMAL_U64.test(entry[1]) &&
+          BigInt(entry[1]) <= MAX_U64,
+      )
+      .slice(-MAX_SAVED_LOGICAL_POSITIONS),
+  )
+}
+
 export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => {
   const candidate =
     value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -84,10 +103,7 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
         480,
       ),
     },
-    lastLogicalPositions: boundedRecord(
-      candidate.lastLogicalPositions,
-      MAX_SAVED_LOGICAL_POSITIONS,
-    ),
+    lastLogicalPositions: boundedLogicalPositions(candidate.lastLogicalPositions),
     keyOverrides: boundedRecord(candidate.keyOverrides, MAX_KEY_OVERRIDES),
   }
 }

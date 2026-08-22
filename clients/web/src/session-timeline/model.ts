@@ -509,6 +509,22 @@ export class BoundedSessionHistory {
     ) {
       throw new TypeError('latest timeline window does not match the descriptor boundary')
     }
+    if (anchor.kind === 'first' && this.descriptorValue && lastItemAddress) {
+      const hasLaterItems =
+        decimalAddress(lastItemAddress) <
+        decimalAddress(this.descriptorValue.latest_address.event_sequence)
+      if (hasLaterItems !== (window.continuation_after !== null)) {
+        throw new TypeError('first timeline window continuation contradicts the descriptor')
+      }
+    }
+    if (anchor.kind === 'latest' && this.descriptorValue && firstItemAddress) {
+      const hasEarlierItems =
+        decimalAddress(firstItemAddress) >
+        decimalAddress(this.descriptorValue.first_address.event_sequence)
+      if (hasEarlierItems !== (window.continuation_before !== null)) {
+        throw new TypeError('latest timeline window continuation contradicts the descriptor')
+      }
+    }
     if (anchor.kind === 'first' && window.continuation_before) {
       throw new TypeError('first timeline window cannot continue before its anchor')
     }

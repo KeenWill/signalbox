@@ -525,6 +525,34 @@ describe('BoundedSessionHistory', () => {
     ).rejects.toThrow('cannot continue after')
   })
 
+  it('requires a continuation before a truncated latest window', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => descriptor,
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: descriptor.latest_address,
+            kind: 'turn_completed',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(history.load({ kind: 'latest' }, { maxItems: 1, maxBytes: 256 })).rejects.toThrow(
+      'latest timeline window continuation contradicts the descriptor',
+    )
+  })
+
   it('correlates first and latest windows with described boundaries', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const descriptor = await scenario.readDescriptor(sessionId)
