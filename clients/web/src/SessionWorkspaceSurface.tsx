@@ -49,6 +49,12 @@ import { actions, selectApp, store, useAppDispatch, useAppSelector } from './sta
 const SESSION_WINDOW_ITEMS = 80
 const SESSION_WINDOW_BYTES = 64 * 1024
 type TimelineCapability = 'checking' | 'available' | 'unavailable'
+export interface SessionSelectionEvidence {
+  sessionId: string
+  eventSequence: string
+  kind: string
+  projectedStructuredBytes: number
+}
 
 export const sessionWorkspaceQueryKey = (sessionId: string | null) =>
   ['production', 'session-workspace', sessionId] as const
@@ -137,6 +143,7 @@ export const pruneExpandedSessionItems = (
 export function SessionWorkspaceSurface({
   maxNdjsonRecordBytes,
   onCommandControls,
+  onSelectionEvidence,
   onTimelineIds,
   onTimelineWindowAvailable,
   onWindowRequestConsumed,
@@ -146,6 +153,7 @@ export function SessionWorkspaceSurface({
 }: {
   maxNdjsonRecordBytes: number
   onCommandControls: (controls: SessionCommandControls | null) => void
+  onSelectionEvidence: (evidence: SessionSelectionEvidence | null) => void
   onTimelineIds: (ids: readonly string[]) => void
   onTimelineWindowAvailable: (available: boolean) => void
   onWindowRequestConsumed: () => void
@@ -293,6 +301,22 @@ export function SessionWorkspaceSurface({
   }, [session.refetch, sessionId, synchronizer, timelineCapability])
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
+  useEffect(() => {
+    const selectedItem = combinedItems.find(
+      (item) => item.address.event_sequence === app.selectedTimeline,
+    )
+    onSelectionEvidence(
+      sessionId !== null && selectedItem !== undefined
+        ? {
+            sessionId,
+            eventSequence: selectedItem.address.event_sequence,
+            kind: selectedItem.kind,
+            projectedStructuredBytes: selectedItem.projected_structured_bytes,
+          }
+        : null,
+    )
+  }, [app.selectedTimeline, combinedItems, onSelectionEvidence, sessionId])
+  useEffect(() => () => onSelectionEvidence(null), [onSelectionEvidence])
   useEffect(() => {
     setExpanded((current) => pruneExpandedSessionItems(current, session.data?.window.items ?? []))
   }, [session.data?.window.items])

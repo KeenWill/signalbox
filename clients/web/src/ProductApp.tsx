@@ -28,7 +28,11 @@ import {
   productSurfaceStates,
   productTransport,
 } from './product'
-import { type SessionCommandControls, SessionWorkspaceSurface } from './SessionWorkspaceSurface'
+import {
+  type SessionCommandControls,
+  type SessionSelectionEvidence,
+  SessionWorkspaceSurface,
+} from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
 import { selectApp, store, useAppDispatch, useAppSelector } from './state'
 
@@ -396,11 +400,16 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [sessionControls, setSessionControls] = useState<SessionCommandControls | null>(null)
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
+  const [selectionEvidence, setSelectionEvidence] = useState<SessionSelectionEvidence | null>(null)
   const [windowRequest, setWindowRequest] = useState<{
     anchor: 'first' | 'latest'
     attempt: number
   } | null>(null)
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
+  const updateSelectionEvidence = useCallback(
+    (evidence: SessionSelectionEvidence | null) => setSelectionEvidence(evidence),
+    [],
+  )
   const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
@@ -437,6 +446,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       hotkey: binding.hotkey,
       callback: () => {
         if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
+          if (binding.commandId.startsWith('selection.')) context.focusTimeline()
           invokeCommand(binding.commandId, context)
         }
       },
@@ -447,6 +457,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       sequence: binding.sequence,
       callback: () => {
         if (store.getState().app.overlay === null) {
+          if (binding.commandId.startsWith('selection.')) context.focusTimeline()
           invokeCommand(binding.commandId, context)
         }
       },
@@ -482,6 +493,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <SessionWorkspaceSurface
         maxNdjsonRecordBytes={bootstrap.data?.limits.max_ndjson_item_bytes ?? 65_536}
         onCommandControls={setSessionControls}
+        onSelectionEvidence={updateSelectionEvidence}
         onTimelineIds={updateTimelineIds}
         onTimelineWindowAvailable={setTimelineWindowAvailable}
         onWindowRequestConsumed={consumeWindowRequest}
@@ -554,7 +566,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           <p>
             {surface === 'settings'
               ? 'Presentation preferences are stored locally in this browser.'
-              : 'Select an available operational record to inspect its server-provided evidence.'}
+              : surface === 'sessions' && selectionEvidence !== null
+                ? 'Bounded server-provided timeline projection for the selected record.'
+                : 'Select an available operational record to inspect its server-provided evidence.'}
           </p>
           <dl>
             <div>
@@ -570,6 +584,26 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
                 <dt>Cache</dt>
                 <dd>{cacheLabel}</dd>
               </div>
+            )}
+            {surface === 'sessions' && selectionEvidence !== null && (
+              <>
+                <div>
+                  <dt>Session</dt>
+                  <dd>{selectionEvidence.sessionId}</dd>
+                </div>
+                <div>
+                  <dt>Event</dt>
+                  <dd>{selectionEvidence.eventSequence}</dd>
+                </div>
+                <div>
+                  <dt>Kind</dt>
+                  <dd>{selectionEvidence.kind.replaceAll('_', ' ')}</dd>
+                </div>
+                <div>
+                  <dt>Projected bytes</dt>
+                  <dd>{selectionEvidence.projectedStructuredBytes}</dd>
+                </div>
+              </>
             )}
           </dl>
         </aside>
