@@ -64,6 +64,7 @@ mod telemetry;
 mod turn_liveness_runtime;
 pub mod usage_limits;
 pub mod web_http;
+mod web_repo_watch;
 
 pub use blob_storage_configuration::{
     BlobStorageClass, BlobStorageConfiguration, BlobStorageConfigurationError,

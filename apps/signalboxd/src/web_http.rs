@@ -231,13 +231,14 @@ impl WebHttpRuntime {
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
 pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> Router {
     let state = WebApiState {
-        attention: pool.map(AttentionRepository::new),
+        attention: pool.clone().map(AttentionRepository::new),
     };
     let api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
         .route("/attention", get(attention_snapshot))
         .route("/attention/follow", get(attention_follow))
         .with_state(state)
+        .merge(crate::web_repo_watch::router(pool))
         .fallback(api_not_found);
     let router = Router::new().nest("/api", api);
     match asset_root {
@@ -393,7 +394,7 @@ fn attention_snapshot_dto(snapshot: AttentionSnapshot) -> Result<WebAttentionSna
     })
 }
 
-fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummary, ()> {
+pub(crate) fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummary, ()> {
     let unix_milliseconds = summary
         .last_activity
         .recorded_at
@@ -751,7 +752,11 @@ fn transport_error(status: StatusCode, code: &'static str, message: &'static str
     (status, body).into_response()
 }
 
-fn application_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+pub(crate) fn application_error(
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+) -> Response {
     let body = Json(WebApiErrorResponse {
         error: WebApiError {
             kind: WebApiErrorKind::Application,

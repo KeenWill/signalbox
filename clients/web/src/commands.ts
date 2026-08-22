@@ -54,7 +54,7 @@ export const commandRegistry = [
     title: 'Go to Activity',
     description: 'Open the system-wide event stream.',
     category: 'Navigate',
-    bindings: [],
+    bindings: [{ label: 'g t', registration: { kind: 'sequence', sequence: ['G', 'T'] } }],
     available: productNavigation,
     run: (context) => context.navigate?.('/activity'),
   },

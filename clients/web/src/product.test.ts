@@ -40,6 +40,13 @@ const errorFixture = {
   },
 } as const
 
+const activityFixture = {
+  event_continuation_before: { cursor_generation: '8', event_ordinal: 41 },
+  events: [],
+  webhook_continuation_before_receipt_sequence: null,
+  webhooks: [],
+} as const
+
 afterEach(() => vi.unstubAllGlobals())
 
 describe('SameOriginProductTransport', () => {
@@ -100,6 +107,34 @@ describe('SameOriginProductTransport', () => {
         errorFixture.error.message,
       ),
     )
+  })
+
+  it('encodes both fields of an event cursor and an independently exhausted webhook feed', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(activityFixture)))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const page = await new SameOriginProductTransport().readRepoWatchActivity('owner/repository', {
+      eventBefore: { cursorGeneration: '9', eventOrdinal: 42 },
+      includeEvents: true,
+      includeWebhooks: false,
+    })
+
+    expect(page).toEqual(activityFixture)
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/repository-watch/activity?repository=owner%2Frepository&include_events=true&include_webhooks=false&event_before_cursor_generation=9&event_before_ordinal=42',
+      expect.objectContaining({ credentials: 'same-origin' }),
+    )
+  })
+
+  it('fails closed when a repository-watch response carries an unknown field', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ...activityFixture, invented: true }))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readRepoWatchActivity('owner/repository'),
+    ).rejects.toThrow('activity_page')
   })
 
   it('decodes complete NDJSON attention events without buffering stream history', async () => {

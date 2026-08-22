@@ -1,5 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog'
-import { useHotkeys } from '@tanstack/react-hotkeys'
+import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import {
@@ -14,11 +14,13 @@ import {
   X,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef } from 'react'
+import { ActivitySurface } from './ActivitySurface'
 import { AttentionSurface } from './AttentionSurface'
 import {
   type CommandContext,
   commandRegistry,
   globalHotkeyBindings,
+  globalHotkeySequenceBindings,
   invokeCommand,
 } from './commands'
 import { type ProductRouteId, productRoutes, productTransport } from './product'
@@ -50,7 +52,7 @@ const surfaceCopy: Record<
     eyebrow: 'Repository operations',
     title: 'Activity',
     question: 'What entered the system and how was it handled?',
-    track: '#995 discovery reads',
+    track: '#992 repository-watch projections',
   },
   runners: {
     eyebrow: 'Execution fleet',
@@ -298,6 +300,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       callback: () => invokeCommand(binding.commandId, context),
     })),
   )
+  useHotkeySequences(
+    globalHotkeySequenceBindings.map((binding) => ({
+      sequence: binding.sequence,
+      callback: () => invokeCommand(binding.commandId, context),
+    })),
+  )
 
   useEffect(() => {
     document.documentElement.dataset.theme = app.theme
@@ -308,6 +316,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const content =
     surface === 'attention' ? (
       <AttentionSurface />
+    ) : surface === 'activity' ? (
+      <ActivitySurface />
     ) : surface === 'sessions' ? (
       <SessionsSurface />
     ) : (
