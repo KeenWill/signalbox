@@ -1770,8 +1770,14 @@ function assertTimelineDetailPage(value) {
   ]);
   let expectedBodyContinuation = null;
   let computedProjectedBodyBytes = 0;
+  let previousAddress = null;
   value.items.forEach((item, index) => {
     const path = `timeline_detail_page.items[${index}]`;
+    const address = BigInt(item.address.event_sequence);
+    if (previousAddress !== null && address <= previousAddress) {
+      fail(`${path}.address`, "strictly increasing after the previous item");
+    }
+    previousAddress = address;
     let continuation = null;
     let textBytes = 0;
     switch (item.body.type) {
@@ -1850,8 +1856,16 @@ function assertTimelineDetailPage(value) {
     ) {
       fail("timeline_detail_page.continuation.body", "the excerpt body continuation");
     }
-  } else if (expectedBodyContinuation !== null) {
-    fail("timeline_detail_page.continuation", "more_body for a continued excerpt");
+  } else {
+    if (expectedBodyContinuation !== null) {
+      fail("timeline_detail_page.continuation", "more_body for a continued excerpt");
+    }
+    if (
+      previousAddress !== null &&
+      BigInt(value.continuation.address.event_sequence) <= previousAddress
+    ) {
+      fail("timeline_detail_page.continuation.address", "after the final returned item");
+    }
   }
 }
 

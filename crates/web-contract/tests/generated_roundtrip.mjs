@@ -198,6 +198,33 @@ test("generated detail decoder enforces the projected byte ceiling", () => {
   );
 });
 
+test("generated detail decoder rejects non-monotonic addresses", () => {
+  const page = userInputDetailPage();
+  page.items.push({
+    ...structuredClone(page.items[0]),
+    address: { event_sequence: "7" },
+  });
+  page.projected_body_bytes = 262;
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /strictly increasing/,
+  );
+});
+
+test("generated detail decoder requires more-at to advance", () => {
+  const page = userInputDetailPage();
+  page.continuation = {
+    type: "more_at",
+    address: { event_sequence: "7" },
+  };
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /after the final returned item/,
+  );
+});
+
 test("generated descriptor decoder rejects a fact beyond u64", () => {
   assert.throws(
     () =>
