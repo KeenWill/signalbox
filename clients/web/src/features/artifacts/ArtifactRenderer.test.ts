@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import { imageViewLabel, registeredArtifactKinds, selectImageView } from './ArtifactRenderer'
 import {
+  artifactOriginalIds,
   imageArtifact,
   imageDownloadView,
   imageOriginalView,
@@ -15,6 +16,10 @@ import {
 import { admitRemoteMediaUrl } from './remoteMediaPreference'
 
 describe('artifact renderer compatibility', () => {
+  it('derives original-capable artifact IDs from admitted descriptor views', () => {
+    expect(artifactOriginalIds).toEqual(['orbital-map'])
+  })
+
   it('registers the closed text, code, and image renderer set', () => {
     expect(registeredArtifactKinds).toEqual(['blob', 'code', 'image', 'text'])
   })

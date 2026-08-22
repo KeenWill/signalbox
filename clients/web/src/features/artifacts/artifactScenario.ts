@@ -128,4 +128,10 @@ export const imageArtifact = imageDescriptor
 export const artifactPreviewIds = artifactScenario
   .filter((artifact) => artifact.kind === 'text' || artifact.kind === 'code')
   .map((artifact) => artifact.id)
-export const artifactOriginalIds = ['orbital-map'] as const
+export const artifactOriginalIds = artifactScenario.flatMap((artifact) =>
+  artifact.kind === 'image' &&
+  artifact.source.kind === 'signalbox_blob' &&
+  artifact.source.descriptor.available_views.some((view) => view.kind === 'browser_native')
+    ? [artifact.id]
+    : [],
+)
