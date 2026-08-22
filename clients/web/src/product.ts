@@ -96,7 +96,7 @@ const expectedActionByState: Record<
   idle: null,
 }
 
-const admittedSessionSearch = (value: unknown) => {
+export const admittedSessionSearch = (value: unknown) => {
   if (typeof value === 'string' && value.indexOf(String.fromCharCode(0)) !== -1) {
     return undefined
   }
@@ -162,6 +162,14 @@ const validateSessionPage = (
       throw new Error('session catalog response contains an excluded archived session')
     }
     if (
+      request.search !== undefined &&
+      !summary.title_truncated &&
+      !summary.session_id.includes(request.search) &&
+      !(summary.title_summary?.includes(request.search) ?? false)
+    ) {
+      throw new Error('session catalog response contains a row that contradicts the active search')
+    }
+    if (
       !isCanonicalUnsigned64(summary.active_turn_count) ||
       !isCanonicalUnsigned64(summary.queued_turn_count)
     ) {
@@ -172,6 +180,15 @@ const validateSessionPage = (
     }
     if (summary.state === 'blocked' && summary.goal_block == null) {
       throw new Error('session catalog blocked row is missing blocked-goal evidence')
+    }
+    if (
+      summary.goal_block != null &&
+      summary.state !== 'blocked' &&
+      summary.state !== 'runner_lost'
+    ) {
+      throw new Error(
+        'session catalog response contains goal-block evidence for an unrelated state',
+      )
     }
     const titleScalars =
       typeof summary.title_summary === 'string' ? Array.from(summary.title_summary).length : 0
@@ -230,6 +247,9 @@ const validateSessionPage = (
     }
   }
   if (page.continuation) {
+    if (BigInt(page.total) <= BigInt(page.summaries.length)) {
+      throw new Error('session catalog continuation contradicts the declared total')
+    }
     const boundary = page.summaries.at(-1)
     if (!boundary || page.continuation.session_id !== boundary.session_id) {
       throw new Error('session catalog continuation does not match its returned boundary')

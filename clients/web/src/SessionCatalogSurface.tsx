@@ -2,7 +2,12 @@ import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, Search, X } from 'lucide-react'
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import type { WebAttentionSnapshot } from './generated/web-contract.mjs'
-import { ProductRequestError, type ProductSessionState, productTransport } from './product'
+import {
+  admittedSessionSearch,
+  ProductRequestError,
+  type ProductSessionState,
+  productTransport,
+} from './product'
 import { useAppSelector } from './state'
 
 type SessionSummary = WebAttentionSnapshot['summaries'][number]
@@ -39,6 +44,7 @@ export function SessionCatalogSurface({
   const pageHeading = useRef<HTMLHeadingElement>(null)
   const restorePageFocus = useRef(false)
   const [narrowInspector, setNarrowInspector] = useState(false)
+  const [searchError, setSearchError] = useState<string | null>(null)
   const overlay = useAppSelector((root) => root.app.overlay)
   const sessions = useQuery({
     queryKey: [
@@ -110,6 +116,12 @@ export function SessionCatalogSurface({
     restorePageFocus.current = true
     const form = new FormData(event.currentTarget)
     const q = String(form.get('q') ?? '')
+    if (q.length > 0 && admittedSessionSearch(q) === undefined) {
+      restorePageFocus.current = false
+      setSearchError('Search must be NUL-free and no more than 1,024 UTF-8 bytes.')
+      return
+    }
+    setSearchError(null)
     const sort = form.get('sort') === 'identity' ? 'identity' : undefined
     const archived = form.get('archived') === 'on' ? true : undefined
     onStateChange({ q: q || undefined, sort, archived })
@@ -160,6 +172,11 @@ export function SessionCatalogSurface({
         </label>
         <button type="submit">Apply</button>
       </form>
+      {searchError && (
+        <p className="catalog-notice" role="alert">
+          {searchError}
+        </p>
+      )}
 
       {sessions.isLoading && <p className="catalog-notice">Reading a bounded session page…</p>}
       {sessions.isError && (

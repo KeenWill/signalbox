@@ -47,6 +47,7 @@ const fullActivityPageFixture = () => {
       kind: 'turn' as const,
       unix_milliseconds: String(1_724_200_000_000 - index),
     },
+    title_summary: `release session ${index + 1}`,
   }))
   const boundary = summaries.at(-1)
   if (!boundary) throw new Error('full activity fixture has a boundary')
@@ -362,6 +363,29 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('precedes its activity continuation')
   })
 
+  it('rejects rows that contradict an exact active search', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        search: 'missing exact text',
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('contradicts the active search')
+  })
+
   it('rejects archived rows when the request excludes them', async () => {
     vi.stubGlobal(
       'fetch',
@@ -452,6 +476,38 @@ describe('SameOriginProductTransport', () => {
         includeArchived: false,
       }),
     ).rejects.toThrow('missing blocked-goal evidence')
+  })
+
+  it('rejects goal-block evidence on unrelated states', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              summaries: [
+                {
+                  ...sessionPageFixture.summaries[0],
+                  goal_block: {
+                    generation: '1',
+                    reason: 'user_input_required',
+                    need_summary: 'Choose a target.',
+                  },
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('goal-block evidence for an unrelated state')
   })
 
   it('rejects impossible title truncation flags', async () => {
@@ -625,6 +681,21 @@ describe('SameOriginProductTransport', () => {
         includeArchived: false,
       }),
     ).rejects.toThrow('continuation accompanies a partial page')
+  })
+
+  it('rejects continuations that contradict the declared total', async () => {
+    const pageFixture = fullActivityPageFixture()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ...pageFixture, total: '32' }))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('continuation contradicts the declared total')
   })
 
   it('rejects a response beyond the catalog page ceiling', async () => {

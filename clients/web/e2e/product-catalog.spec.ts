@@ -66,6 +66,12 @@ const firstPage = {
   ],
   total: '48',
 } as const
+const filteredPage = {
+  ...firstPage,
+  continuation: null,
+  summaries: [firstPage.summaries[0]],
+  total: '1',
+} as const
 const secondPage = {
   continuation: null,
   cursor: '18',
@@ -102,7 +108,11 @@ const useCatalogFixture = async (page: Page) => {
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
   await page.route('**/api/sessions?**', (route) => {
     const request = new URL(route.request().url())
-    const response = request.searchParams.has('after_session_id') ? secondPage : firstPage
+    const response = request.searchParams.has('after_session_id')
+      ? secondPage
+      : request.searchParams.has('search')
+        ? filteredPage
+        : firstPage
     return route.fulfill({ json: response })
   })
 }
@@ -120,9 +130,9 @@ test('filters and inspects a session without a mouse, then restores focus', asyn
   await page.goto('/sessions')
   await expect(page.getByRole('heading', { name: `${firstPage.total} sessions` })).toBeVisible()
 
-  await page.getByRole('textbox', { name: 'Search titles' }).fill('release')
+  await page.getByRole('textbox', { name: 'Search titles' }).fill('Release')
   await page.getByRole('textbox', { name: 'Search titles' }).press('Enter')
-  await expect(page).toHaveURL(/q=release/)
+  await expect(page).toHaveURL(/q=Release/)
   const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
   await session.focus()
   await page.keyboard.press('Enter')
@@ -145,7 +155,12 @@ test('preserves meaningful whitespace in exact catalog searches', async ({ page 
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
   await page.route('**/api/sessions?**', (route) => {
     observedSearch = new URL(route.request().url()).searchParams.get('search')
-    return route.fulfill({ json: firstPage })
+    return route.fulfill({
+      json:
+        observedSearch === null
+          ? firstPage
+          : { ...firstPage, continuation: null, summaries: [], total: '0' },
+    })
   })
   await page.goto('/sessions')
 
@@ -157,13 +172,26 @@ test('preserves meaningful whitespace in exact catalog searches', async ({ page 
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('rejects an over-bound search before changing URL state', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+
+  await page.getByRole('textbox', { name: 'Search titles' }).fill('é'.repeat(513))
+  await page.getByRole('button', { name: 'Apply' }).click()
+
+  await expect(page.getByRole('alert')).toHaveText(/no more than 1,024 UTF-8 bytes/)
+  await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBeNull()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('restores focus after filters replace the bounded catalog page', async ({ page }) => {
   const problems = watchBrowser(page)
   await useCatalogFixture(page)
   await page.goto('/sessions')
-  await page.getByRole('textbox', { name: 'Search titles' }).fill('release')
+  await page.getByRole('textbox', { name: 'Search titles' }).fill('Release')
   await page.getByRole('button', { name: 'Apply' }).click()
-  await expect(page.getByRole('heading', { name: `${firstPage.total} sessions` })).toBeFocused()
+  await expect(page.getByRole('heading', { name: `${filteredPage.total} sessions` })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
