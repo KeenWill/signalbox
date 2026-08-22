@@ -57,6 +57,7 @@ export const visibleSessionItems = (
           'turn_refused',
           'turn_cancelled',
           'turn_reconciliation_required',
+          'goal_turn_retired',
         ].includes(item.kind),
       )
     : items

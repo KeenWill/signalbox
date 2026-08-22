@@ -102,6 +102,14 @@ export const productCommandRegistry = [
 ]
 export type ProductCommandId = (typeof productCommandRegistry)[number]['id']
 
+export const productCommandAvailable = (
+  id: ProductCommandId,
+  context: ProductCommandContext,
+): boolean => {
+  const command = productCommandRegistry.find((candidate) => candidate.id === id)
+  return command !== undefined && (!('available' in command) || command.available(context))
+}
+
 export const productHotkeyBindings = productCommandRegistry.flatMap((command) => {
   const bindings: readonly CommandBinding[] = command.bindings
   return bindings.flatMap((binding) =>

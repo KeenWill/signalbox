@@ -14,6 +14,7 @@ import {
 import {
   invokeProductCommand,
   type ProductCommandContext,
+  productCommandAvailable,
   productCommandRegistry,
   productHotkeyBindings,
   productHotkeySequenceBindings,
@@ -360,7 +361,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       hotkey: binding.hotkey,
       callback: () => {
         if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
-          if (binding.commandId.startsWith('selection.')) context.focusTimeline()
+          if (
+            binding.commandId.startsWith('selection.') &&
+            productCommandAvailable(binding.commandId, context)
+          ) {
+            context.focusTimeline()
+          }
           invokeProductCommand(binding.commandId, context)
         }
       },
@@ -371,7 +377,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       sequence: binding.sequence,
       callback: () => {
         if (store.getState().app.overlay === null) {
-          if (binding.commandId.startsWith('selection.')) context.focusTimeline()
+          if (
+            binding.commandId.startsWith('selection.') &&
+            productCommandAvailable(binding.commandId, context)
+          ) {
+            context.focusTimeline()
+          }
           invokeProductCommand(binding.commandId, context)
         }
       },

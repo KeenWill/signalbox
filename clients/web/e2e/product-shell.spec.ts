@@ -109,6 +109,10 @@ test('opens the product at Attention with generated-contract transport status', 
     'aria-current',
     'page',
   )
+  const sessionsLink = page.getByRole('link', { name: /Sessions/ })
+  await sessionsLink.focus()
+  await page.keyboard.press('j')
+  await expect(sessionsLink).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

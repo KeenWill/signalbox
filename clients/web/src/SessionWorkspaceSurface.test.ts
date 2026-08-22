@@ -33,8 +33,13 @@ const fixture = decodeWebSessionTimelineWindow({
       kind: 'turn_reconciliation_required',
       projected_structured_bytes: 96,
     },
+    {
+      address: { event_sequence: '45' },
+      kind: 'goal_turn_retired',
+      projected_structured_bytes: 96,
+    },
   ],
-  projected_structured_bytes: 384,
+  projected_structured_bytes: 480,
   continuation_before: { event_sequence: '41' },
   continuation_after: null,
 })
@@ -59,6 +64,7 @@ describe('Session Workspace projection', () => {
       fixture.items[1],
       fixture.items[2],
       fixture.items[3],
+      fixture.items[4],
     ])
   })
 
@@ -72,7 +78,7 @@ describe('Session Workspace projection', () => {
 
   it('selects the visible row at the successfully loaded boundary', () => {
     expect(boundarySessionItemId(fixture.items, 'full', 'first')).toBe('41')
-    expect(boundarySessionItemId(fixture.items, 'full', 'latest')).toBe('44')
+    expect(boundarySessionItemId(fixture.items, 'full', 'latest')).toBe('45')
     expect(boundarySessionItemId([], 'results', 'latest')).toBeNull()
   })
 
@@ -92,6 +98,6 @@ describe('Session Workspace projection', () => {
   it('retains expansion state only for the current bounded window', () => {
     const expanded = new Set(['40', '41', '44', '45'])
 
-    expect([...pruneExpandedSessionItems(expanded, fixture.items)]).toEqual(['41', '44'])
+    expect([...pruneExpandedSessionItems(expanded, fixture.items)]).toEqual(['41', '44', '45'])
   })
 })
