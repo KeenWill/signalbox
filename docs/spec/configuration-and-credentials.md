@@ -3,7 +3,8 @@
 The browser HTTP listener, same-origin static assets, and generated contract
 bootstrap are verified against this PR (`agent/web-http-transport`). The
 composed bounded session descriptor and historical-window routes are verified
-against this PR (`agent/web-session-timeline`).
+against this PR (`agent/web-session-timeline`). The fleet-attention snapshot and
+monitor stream are verified against this PR (`agent/web-attention-projections`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -184,6 +185,22 @@ different family, or different version rather than interpreting it as the local
 process protocol. No process-protocol frame is a browser DTO. The descriptor and
 historical-window route shapes and semantics are owned by
 [Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline).
+
+The bounded session catalog route and row semantics are owned by
+[Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-catalog).
+The projection uses one set query over the selected identities and never
+constructs the fleet by following individual sessions.
+
+`GET /api/attention/follow` begins with the coherent hot-session catalog page
+and its durable change-journal cursor, then emits summary replacements only for
+changed session identities. One incremental read examines at most 128 journal
+records. A larger cursor gap emits `resync_required` with the current cursor and
+ends that stream; it never skips records or continues from a partial gap. The
+HTTP producer retains only the item currently being encoded and waits between
+empty polls. An initial projection failure returns a typed HTTP error before
+streaming begins. The append-only change journal timestamps commits explicitly;
+historical creation is seeded only from the durable command claim time and never
+inferred from UUID bits.
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and

@@ -4,6 +4,7 @@
 //! depending inward on `signalbox-domain`.
 
 mod approval_judge;
+mod attention;
 mod commissioned_dispatch;
 mod conversation_import;
 mod create_session;
@@ -37,6 +38,15 @@ pub use approval_judge::{
     ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
     ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority,
     ApprovalJudgePullRequestAuthorityInput,
+};
+pub use attention::{
+    AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
+    AttentionChanges, AttentionContinuation, AttentionCursor, AttentionGoalBlock,
+    AttentionJudgeFacts, AttentionQuery, AttentionQueryError, AttentionReader, AttentionSnapshot,
+    AttentionSort, AttentionState, AttentionSummary, max_attention_change_items,
+    max_attention_filter_tags, max_attention_filter_utf8_bytes,
+    max_attention_goal_summary_characters, max_attention_snapshot_items,
+    max_attention_title_characters,
 };
 pub use commissioned_dispatch::{
     CommissionDispatchPreparationError, CommissionDispatchRequest, CommissionedDispatchFence,

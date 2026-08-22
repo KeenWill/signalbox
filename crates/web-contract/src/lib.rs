@@ -565,6 +565,133 @@ pub struct WebApiErrorResponse {
     pub error: WebApiError,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionState {
+    Active,
+    Queued,
+    Blocked,
+    AwaitingApproval,
+    Ambiguous,
+    AwaitingReconciliation,
+    RunnerLost,
+    Idle,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionAction {
+    ProvideGoalNeed,
+    DecideApproval,
+    ReconcileTurn,
+    RestoreRunner,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionActivityKind {
+    Session,
+    Turn,
+    Goal,
+    ApprovalJudge,
+    Runner,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionGoalBlock {
+    pub generation: String,
+    pub reason: WebAttentionBlockedReason,
+    /// At most 128 Unicode scalar values; exact text is in session detail.
+    pub need_summary: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionJudgeFacts {
+    pub actionable: String,
+    pub completed: String,
+    pub escalated: String,
+    pub failed: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionActivity {
+    pub unix_milliseconds: String,
+    pub kind: WebAttentionActivityKind,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionSummary {
+    pub session_id: String,
+    pub title_summary: Option<String>,
+    pub title_truncated: bool,
+    pub archived: bool,
+    pub current_turn_id: Option<String>,
+    pub active_turn_count: String,
+    pub queued_turn_count: String,
+    pub state: WebAttentionState,
+    pub action: Option<WebAttentionAction>,
+    pub goal_block: Option<WebAttentionGoalBlock>,
+    pub judge: WebAttentionJudgeFacts,
+    pub last_activity: WebAttentionActivity,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionSort {
+    LastActivityDescending,
+    SessionIdentityAscending,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WebAttentionContinuation {
+    LastActivity {
+        unix_microseconds: String,
+        session_id: String,
+    },
+    SessionIdentity {
+        session_id: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionSnapshot {
+    pub cursor: String,
+    pub total: String,
+    pub sort: WebAttentionSort,
+    pub summaries: Vec<WebAttentionSummary>,
+    pub continuation: Option<WebAttentionContinuation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WebAttentionStreamEvent {
+    Snapshot {
+        snapshot: WebAttentionSnapshot,
+    },
+    Update {
+        cursor: String,
+        summaries: Vec<WebAttentionSummary>,
+    },
+    ResyncRequired {
+        cursor: String,
+    },
+}
+
 /// One generated file and its repository-relative destination.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GeneratedArtifact {
@@ -612,6 +739,10 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
         canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
     let detail_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineDetailPage).to_value());
+    let attention_snapshot_schema =
+        canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
+    let attention_event_schema =
+        canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value());
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -630,6 +761,8 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
                 &descriptor_schema,
                 &window_schema,
                 &detail_schema,
+                &attention_snapshot_schema,
+                &attention_event_schema,
             )?,
         },
         GeneratedArtifact {
@@ -641,6 +774,8 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
                 &descriptor_schema,
                 &window_schema,
                 &detail_schema,
+                &attention_snapshot_schema,
+                &attention_event_schema,
             )?,
         },
         GeneratedArtifact {
@@ -665,6 +800,8 @@ fn runtime_module(
     descriptor_schema: &Value,
     window_schema: &Value,
     detail_schema: &Value,
+    attention_snapshot_schema: &Value,
+    attention_event_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
         "WebContractBootstrap": bootstrap_schema,
@@ -673,6 +810,8 @@ fn runtime_module(
         "WebSessionTimelineDescriptor": descriptor_schema,
         "WebSessionTimelineWindow": window_schema,
         "WebSessionTimelineDetailPage": detail_schema,
+        "WebAttentionSnapshot": attention_snapshot_schema,
+        "WebAttentionStreamEvent": attention_event_schema,
     });
     schemas.sort_all_objects();
     let schemas = serde_json::to_string_pretty(&schemas)
@@ -861,6 +1000,16 @@ export function decodeWebSessionTimelineDetailPage(value) {{
   assertSchema(schemas.WebSessionTimelineDetailPage, schemas.WebSessionTimelineDetailPage, value, "timeline_detail_page");
   return value;
 }}
+
+export function decodeWebAttentionSnapshot(value) {{
+  assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
+  return value;
+}}
+
+export function decodeWebAttentionStreamEvent(value) {{
+  assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
+  return value;
+}}
 "##,
         contract_name = WEB_CONTRACT_NAME,
         contract_version = WEB_CONTRACT_VERSION,
@@ -874,6 +1023,8 @@ fn declaration_module(
     descriptor_schema: &Value,
     window_schema: &Value,
     detail_schema: &Value,
+    attention_snapshot_schema: &Value,
+    attention_event_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
     let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
@@ -882,6 +1033,16 @@ fn declaration_module(
     let descriptor = typescript_type(descriptor_schema, descriptor_schema, &mut definitions)?;
     let window = typescript_type(window_schema, window_schema, &mut definitions)?;
     let detail = typescript_type(detail_schema, detail_schema, &mut definitions)?;
+    let attention_snapshot = typescript_type(
+        attention_snapshot_schema,
+        attention_snapshot_schema,
+        &mut definitions,
+    )?;
+    let attention_event = typescript_type(
+        attention_event_schema,
+        attention_event_schema,
+        &mut definitions,
+    )?;
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",
     );
@@ -902,8 +1063,14 @@ fn declaration_module(
     output.push_str(&format!(
         "export type WebSessionTimelineDetailPage = {detail};\n\n"
     ));
+    output.push_str(&format!(
+        "export type WebAttentionSnapshot = {attention_snapshot};\n\n"
+    ));
+    output.push_str(&format!(
+        "export type WebAttentionStreamEvent = {attention_event};\n\n"
+    ));
     output.push_str(
-        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\nexport function decodeWebSessionTimelineDetailPage(value: unknown): WebSessionTimelineDetailPage;\n",
+        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\nexport function decodeWebSessionTimelineDetailPage(value: unknown): WebSessionTimelineDetailPage;\nexport function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;\nexport function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;\n",
     );
     Ok(output)
 }

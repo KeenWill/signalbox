@@ -3,7 +3,8 @@
 The bounded browser session descriptor and historical timeline foundation are
 verified against the parent PR (`agent/web-session-timeline`). Typed detail
 bodies and progressive body continuation are verified against the detail stack
-through `agent/web-timeline-detail-bodies`.
+through `agent/web-timeline-detail-bodies`. The bounded browser session catalog
+is verified against `agent/web-session-catalog-follow`.
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -640,6 +641,34 @@ partial session.
 
 Why (fail closed): a fabricated or partial session would mask corruption and
 launder invalid durable state into valid-looking domain values.
+
+## Bounded browser session catalog
+
+`GET /api/sessions` is the one fleet-wide session chooser and attention read
+model. It returns at most 32 rows from one read-only repeatable-read snapshot,
+the exact filtered total, and the durable attention-journal cursor. The total
+counts filtered session and metadata rows; it never scans transcript or timeline
+records. Each row carries session identity, a title summary of at most 128
+Unicode scalar values with an explicit truncation bit, archive posture, current
+turn, active and queued turn counts, the closed current attention state, exact
+operator action when one is owed, bounded blocked-goal and approval-judge facts,
+and the last explicitly timestamped durable activity. No timestamp is inferred
+from UUID identity bits.
+
+The default order is descending last activity with ascending session identity as
+the total tie-breaker. The alternate order is ascending session identity. Both
+use exclusive typed keyset continuations; a continuation for one order is
+invalid under the other. Search is an exact case-sensitive substring of title or
+canonical session UUID. A query may additionally require at most eight exact
+tags, whose combined UTF-8 bytes together with search text are at most 1,024,
+and may include archived sessions. Sort and filter state are client-local inputs
+to these bounded reads, not durable session state.
+
+This extends the fleet attention projection rather than maintaining a second
+session-state classifier. Runner loss, recovery ambiguity, reconciliation,
+approval wait, blocked goal, active, queued, and idle remain distinct. Page and
+change reads derive them from the same durable facts and fail closed on unknown
+states or inconsistent shapes.
 
 ## Bounded browser session timeline
 
