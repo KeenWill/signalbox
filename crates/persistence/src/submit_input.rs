@@ -2126,7 +2126,10 @@ async fn load_delegated_parked_attachment_frontier(
                 ))?
         }
         "running" => {
-            let stop_requested_call: Uuid = required(&row, "stop_requested_model_call_id")?;
+            let stop_requested_call: Option<Uuid> = row.try_get("stop_requested_model_call_id")?;
+            let Some(stop_requested_call) = stop_requested_call else {
+                return Ok(None);
+            };
             let frontier = sqlx::query_scalar::<_, Uuid>(
                 "SELECT context_frontier_id
                    FROM model_call

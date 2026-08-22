@@ -3661,9 +3661,6 @@ async fn queued_frontier_fixture() -> Result<QueuedFrontierFixture, Box<dyn Erro
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0xb332, 0xb331, direct(0xb333)))
         .await?;
-    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
-        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-    };
     let repository =
         SubmitInputRepository::new(pool.clone()).with_maximum_attachment_bytes(maximum);
     Ok(QueuedFrontierFixture {
