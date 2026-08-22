@@ -6031,6 +6031,7 @@ pub struct RepoWatchQueuedObligation {
     pub id: RepoWatchObligationId,
     pub singleton: RepoWatchSingletonKey,
     pub rule: RepoWatchRuleId,
+    pub first_repository: RepositorySlug,
     pub first_event: RepoWatchEventId,
     pub latest_event: RepoWatchEventId,
     pub matched_event_count: u64,

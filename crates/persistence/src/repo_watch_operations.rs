@@ -530,20 +530,21 @@ impl RepoWatchOperationsReader for PostgresRepoWatchOperations {
 }
 
 const HELD_SLOTS_SQL: &str = r#"
-SELECT dispatch_id, singleton_scope, singleton_repository,
+SELECT slot.dispatch_id, singleton_scope, singleton_repository,
        singleton_pull_request_number, singleton_stack_root_pull_request_number,
-       rule_id, held_since, session_ids, blockers
-  FROM repo_watch_held_dispatch_slot
- WHERE repository = $1
-   AND ($2::timestamptz IS NULL OR (held_since, dispatch_id) > ($2, $3))
- ORDER BY held_since, dispatch_id
+       rule_id, current.held_since, session_ids, blockers
+  FROM repo_watch_current_held_dispatch AS current
+  JOIN repo_watch_held_dispatch_slot AS slot USING (dispatch_id)
+ WHERE current.repository = $1
+   AND ($2::timestamptz IS NULL OR (current.held_since, current.dispatch_id) > ($2, $3))
+ ORDER BY current.held_since, current.dispatch_id
  LIMIT $4
 "#;
 
 const OBLIGATIONS_SQL: &str = r#"
 SELECT obligation_id, singleton_scope, singleton_repository,
        singleton_pull_request_number, singleton_stack_root_pull_request_number,
-       rule_id, first_event_id,
+       rule_id, first_repository, first_event_id,
        latest_event_id, matched_event_count, owed_since, latest_match_at,
        failed_attempts, occupying_dispatch_id, occupying_session_ids,
        CASE WHEN eligible_at = 'infinity'::timestamptz THEN NULL ELSE eligible_at END
@@ -565,8 +566,7 @@ SELECT * FROM (
            action.event_id, batch.rule_id, action.template_name
       FROM repo_watch_dispatch_action AS action
       JOIN repo_watch_dispatch_batch AS batch ON batch.dispatch_id = action.dispatch_id
-      JOIN repo_watch_event AS event ON event.event_id = batch.event_id
-     WHERE event.repository = $1 AND event.pull_request_number = $2
+     WHERE action.repository = $1 AND action.pull_request_number = $2
     UNION ALL
     SELECT commissioned.session_id, commissioned.recorded_at AS commissioned_at,
            'operator_commission'::text AS purpose_kind, commissioned.dispatch_id,
@@ -648,11 +648,7 @@ SELECT subject.state_payload,
 const REPOSITORY_STATUS_SQL: &str = r#"
 WITH selected_repositories AS (
     SELECT repository
-      FROM repo_watch_cursor
-     WHERE ($1::text IS NULL OR repository > $1)
-    UNION
-    SELECT repository
-      FROM repo_watch_webhook_delivery
+      FROM repo_watch_repository_key
      WHERE ($1::text IS NULL OR repository > $1)
      ORDER BY repository
      LIMIT $2
@@ -771,8 +767,7 @@ SELECT selected.repository, selected.generation, selected.recorded_at,
   LEFT JOIN LATERAL (
         SELECT batch.dispatch_id, batch.event_id, batch.rule_id, batch.admitted_at
           FROM repo_watch_dispatch_batch AS batch
-          JOIN repo_watch_event AS event ON event.event_id = batch.event_id
-         WHERE event.repository = selected.repository
+         WHERE batch.repository = selected.repository
          ORDER BY batch.admitted_at DESC, batch.dispatch_id DESC LIMIT 1
   ) AS dispatch ON true
   LEFT JOIN LATERAL (
@@ -783,7 +778,7 @@ SELECT selected.repository, selected.generation, selected.recorded_at,
          LIMIT 1
   ) AS settlement ON true
   LEFT JOIN LATERAL (
-        SELECT count(*) FROM repo_watch_held_dispatch_slot
+        SELECT count(*) FROM repo_watch_current_held_dispatch
          WHERE repository = selected.repository
   ) AS held ON true
   LEFT JOIN LATERAL (
@@ -1151,6 +1146,7 @@ fn decode_obligation(row: &PgRow) -> Result<RepoWatchQueuedObligation, RepoWatch
         id: RepoWatchObligationId::from_uuid(row.try_get("obligation_id")?),
         singleton: decode_singleton(row)?,
         rule: decode_rule(row.try_get("rule_id")?)?,
+        first_repository: decode_repository(row.try_get("first_repository")?)?,
         first_event: RepoWatchEventId::from_uuid(row.try_get("first_event_id")?),
         latest_event: RepoWatchEventId::from_uuid(row.try_get("latest_event_id")?),
         matched_event_count: positive(row.try_get("matched_event_count")?, "match count")?,
@@ -1339,8 +1335,8 @@ SELECT selected.pull_request_number,
   LEFT JOIN LATERAL (
         SELECT batch.dispatch_id, batch.event_id, batch.rule_id, batch.admitted_at
           FROM repo_watch_dispatch_batch AS batch
-          JOIN repo_watch_event AS event ON event.event_id = batch.event_id
-         WHERE event.repository = $1 AND event.pull_request_number = selected.pull_request_number
+         WHERE batch.repository = $1
+           AND batch.pull_request_number = selected.pull_request_number
          ORDER BY batch.admitted_at DESC, batch.dispatch_id DESC LIMIT 1
   ) AS dispatch ON true
   LEFT JOIN LATERAL (
@@ -1352,7 +1348,7 @@ SELECT selected.pull_request_number,
          LIMIT 1
   ) AS settlement ON true
   LEFT JOIN LATERAL (
-        SELECT dispatch_id FROM repo_watch_held_dispatch_slot
+        SELECT dispatch_id FROM repo_watch_current_held_dispatch
          WHERE repository = $1 AND pull_request_number = selected.pull_request_number
          ORDER BY held_since DESC, dispatch_id DESC LIMIT 1
   ) AS held ON true
@@ -1394,15 +1390,15 @@ SELECT selected.pull_request_number,
                        )
                ) AS achieved
           FROM repo_watch_dispatch_batch AS batch
-          JOIN repo_watch_event AS event ON event.event_id = batch.event_id
           LEFT JOIN repo_watch_event AS delivered
             ON delivered.event_id = batch.delivered_state_event_id
           LEFT JOIN repo_watch_dispatch_release AS release ON release.dispatch_id = batch.dispatch_id
-         WHERE event.repository = $1 AND event.pull_request_number = selected.pull_request_number
+         WHERE batch.repository = $1
+           AND batch.pull_request_number = selected.pull_request_number
          ORDER BY batch.admitted_at DESC, batch.dispatch_id DESC LIMIT 1
   ) AS latest ON true
   LEFT JOIN LATERAL (
-        SELECT (SELECT count(*) FROM repo_watch_held_dispatch_slot
+        SELECT (SELECT count(*) FROM repo_watch_current_held_dispatch
                  WHERE repository = $1 AND pull_request_number = selected.pull_request_number) AS held_count,
                (SELECT count(*)
                   FROM repo_watch_outstanding_dispatch_obligation AS obligation
@@ -1415,9 +1411,8 @@ SELECT selected.pull_request_number,
         SELECT count(*) AS session_count FROM (
             SELECT action.session_id
               FROM repo_watch_dispatch_action AS action
-              JOIN repo_watch_dispatch_batch AS batch ON batch.dispatch_id = action.dispatch_id
-              JOIN repo_watch_event AS event ON event.event_id = batch.event_id
-             WHERE event.repository = $1 AND event.pull_request_number = selected.pull_request_number
+             WHERE action.repository = $1
+               AND action.pull_request_number = selected.pull_request_number
             UNION ALL
             SELECT commissioned.session_id FROM commissioned_dispatch AS commissioned
              WHERE commissioned.repository = $1
