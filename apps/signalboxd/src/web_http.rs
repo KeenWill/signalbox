@@ -617,11 +617,17 @@ fn parse_detail_query(
         query.cursor_offset.as_deref(),
     ) {
         (None, None, None, None) => None,
-        (Some(address), field, member, offset) => Some(TimelineDetailCursor {
+        (Some(address), None, None, None) => Some(TimelineDetailCursor {
             address: parse_timeline_address(address).ok()?,
-            field: field.map(parse_body_field).transpose().ok()?,
-            member_index: member.unwrap_or("0").parse().ok()?,
-            offset_bytes: offset.unwrap_or("0").parse().ok()?,
+            field: None,
+            member_index: 0,
+            offset_bytes: 0,
+        }),
+        (Some(address), Some(field), Some(member), Some(offset)) => Some(TimelineDetailCursor {
+            address: parse_timeline_address(address).ok()?,
+            field: Some(parse_body_field(field).ok()?),
+            member_index: member.parse().ok()?,
+            offset_bytes: offset.parse().ok()?,
         }),
         _ => return None,
     };
@@ -1954,6 +1960,45 @@ mod tests {
                 offset_bytes: 31,
             })
         );
+    }
+
+    #[test]
+    fn detail_cursors_accept_address_only_item_continuations() {
+        let query = TimelineDetailQuery {
+            max_items: Some(String::from("1")),
+            max_bytes: Some(String::from("256")),
+            cursor_address: Some(String::from("7")),
+            cursor_field: None,
+            cursor_member: None,
+            cursor_offset: None,
+        };
+        let parsed = parse_detail_query(&query).expect("the item cursor is valid");
+
+        assert_eq!(
+            parsed.1,
+            Some(TimelineDetailCursor {
+                address: TimelineAddress::new(
+                    std::num::NonZeroU64::new(7).expect("fixture address is positive")
+                ),
+                field: None,
+                member_index: 0,
+                offset_bytes: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn detail_cursors_reject_incomplete_body_continuations() {
+        let query = TimelineDetailQuery {
+            max_items: Some(String::from("1")),
+            max_bytes: Some(String::from("256")),
+            cursor_address: Some(String::from("7")),
+            cursor_field: Some(String::from("model_response")),
+            cursor_member: None,
+            cursor_offset: Some(String::from("31")),
+        };
+
+        assert!(parse_detail_query(&query).is_none());
     }
 
     #[test]
