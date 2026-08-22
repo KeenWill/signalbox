@@ -12,7 +12,7 @@ export type LayoutMode = 'focus' | 'workbench'
 export type DensityMode = 'compact' | 'comfortable'
 export type DetailMode = 'full' | 'condensed' | 'results'
 export type ThemeMode = 'light' | 'dark'
-export type Overlay = 'palette' | 'help' | 'navigation' | null
+export type Overlay = 'artifact' | 'palette' | 'help' | 'navigation' | null
 
 export interface VisibleRange {
   start: number

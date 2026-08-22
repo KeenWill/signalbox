@@ -5,6 +5,7 @@ import { Link, useNavigate } from '@tanstack/react-router'
 import {
   AlertTriangle,
   Command,
+  FileSearch,
   Menu,
   Moon,
   PanelLeftClose,
@@ -13,7 +14,8 @@ import {
   Sun,
   X,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef } from 'react'
+import { type RefObject, useEffect, useMemo, useRef, useState } from 'react'
+import { ArtifactInspector } from './ArtifactInspector'
 import {
   type CommandContext,
   commandRegistry,
@@ -239,7 +241,15 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   )
 }
 
-function ProductToolbar({ context }: { context: CommandContext }) {
+function ProductToolbar({
+  artifactAvailable,
+  artifactButtonRef,
+  context,
+}: {
+  artifactAvailable: boolean
+  artifactButtonRef: RefObject<HTMLButtonElement | null>
+  context: CommandContext
+}) {
   const app = useAppSelector(selectApp)
   return (
     <div className="toolbar" role="toolbar" aria-label="Application controls">
@@ -250,6 +260,16 @@ function ProductToolbar({ context }: { context: CommandContext }) {
         onClick={() => context.dispatch(actions.overlaySet('navigation'))}
       >
         <Menu />
+      </button>
+      <button
+        ref={artifactButtonRef}
+        className="icon-button"
+        type="button"
+        aria-label="Open artifact inspector"
+        disabled={!artifactAvailable}
+        onClick={() => invokeCommand('artifact.open', context)}
+      >
+        <FileSearch />
       </button>
       <button
         className="icon-button"
@@ -287,16 +307,59 @@ function ProductToolbar({ context }: { context: CommandContext }) {
   )
 }
 
+const INSPECTOR_SHEET_MEDIA = '(max-width: 1080px)'
+
+function useNarrowInspector(): boolean {
+  const [narrow, setNarrow] = useState(() => window.matchMedia(INSPECTOR_SHEET_MEDIA).matches)
+  useEffect(() => {
+    const query = window.matchMedia(INSPECTOR_SHEET_MEDIA)
+    const update = () => setNarrow(query.matches)
+    query.addEventListener('change', update)
+    return () => query.removeEventListener('change', update)
+  }, [])
+  return narrow
+}
+
+function SelectionInspector({ title }: { title: string }) {
+  return (
+    <>
+      <span className="eyebrow">Inspector</span>
+      <h2>Selection details</h2>
+      <p>Select an available operational record to inspect its server-provided evidence.</p>
+      <dl className="selection-inspector-details">
+        <div>
+          <dt>Surface</dt>
+          <dd>{title}</dd>
+        </div>
+        <div>
+          <dt>Authority</dt>
+          <dd>Daemon</dd>
+        </div>
+        <div>
+          <dt>Cache</dt>
+          <dd>Bounded query</dd>
+        </div>
+      </dl>
+    </>
+  )
+}
+
 export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
+  const artifactButtonRef = useRef<HTMLButtonElement>(null)
+  const artifactDigestRef = useRef<HTMLInputElement>(null)
+  const artifactSideWasOpen = useRef(false)
+  const narrowInspector = useNarrowInspector()
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
     staleTime: Number.POSITIVE_INFINITY,
   })
+  const artifactAvailable = bootstrap.data?.capabilities.immutable_blob_content === true
+  const inspectorInSheet = app.layout === 'focus' || narrowInspector
   const context = useMemo<CommandContext>(
     () => ({
       dispatch,
@@ -304,8 +367,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       timelineIds: [],
       focusTimeline: () => primaryRef.current?.focus(),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      openArtifactInspector: artifactAvailable
+        ? () => dispatch(actions.overlaySet('artifact'))
+        : undefined,
     }),
-    [dispatch, navigate],
+    [artifactAvailable, dispatch, navigate],
   )
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
@@ -318,6 +384,16 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     document.documentElement.dataset.theme = app.theme
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
+
+  useEffect(() => {
+    if (app.overlay === 'artifact' && !inspectorInSheet) {
+      artifactSideWasOpen.current = true
+      artifactDigestRef.current?.focus()
+    } else if (artifactSideWasOpen.current && !inspectorInSheet) {
+      artifactSideWasOpen.current = false
+      artifactButtonRef.current?.focus()
+    }
+  }, [app.overlay, inspectorInSheet])
 
   const copy = surfaceCopy[surface]
   const content =
@@ -340,7 +416,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <span className="eyebrow">{copy.eyebrow}</span>
             <h1>{copy.title}</h1>
           </div>
-          <ProductToolbar context={context} />
+          <ProductToolbar
+            artifactAvailable={artifactAvailable}
+            artifactButtonRef={artifactButtonRef}
+            context={context}
+          />
         </header>
         <div className="surface-question">
           <p>{copy.question}</p>
@@ -358,23 +438,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       </main>
       {app.layout === 'workbench' && (
         <aside className="product-inspector" aria-label="Inspector">
-          <span className="eyebrow">Inspector</span>
-          <h2>Selection details</h2>
-          <p>Select an available operational record to inspect its server-provided evidence.</p>
-          <dl>
-            <div>
-              <dt>Surface</dt>
-              <dd>{copy.title}</dd>
-            </div>
-            <div>
-              <dt>Authority</dt>
-              <dd>Daemon</dd>
-            </div>
-            <div>
-              <dt>Cache</dt>
-              <dd>Bounded query</dd>
-            </div>
-          </dl>
+          {app.overlay === 'artifact' && !inspectorInSheet ? (
+            <ArtifactInspector
+              available={artifactAvailable}
+              digestInputRef={artifactDigestRef}
+              onClose={() => dispatch(actions.overlaySet(null))}
+            />
+          ) : (
+            <SelectionInspector title={copy.title} />
+          )}
         </aside>
       )}
       <CommandPalette context={context} />
@@ -399,6 +471,38 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               Choose a Signalbox surface.
             </Dialog.Description>
             <ProductNavigation active={surface} />
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+      <Dialog.Root
+        open={app.overlay === 'artifact' && inspectorInSheet}
+        onOpenChange={(open) => {
+          if (!open) dispatch(actions.overlaySet(null))
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content
+            className="artifact-sheet"
+            aria-describedby="artifact-sheet-description"
+            onOpenAutoFocus={(event) => {
+              event.preventDefault()
+              artifactDigestRef.current?.focus()
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault()
+              artifactButtonRef.current?.focus()
+            }}
+          >
+            <Dialog.Title className="sr-only">Artifact inspector</Dialog.Title>
+            <Dialog.Description id="artifact-sheet-description" className="sr-only">
+              Resolve and inspect an immutable Signalbox blob.
+            </Dialog.Description>
+            <ArtifactInspector
+              available={artifactAvailable}
+              digestInputRef={artifactDigestRef}
+              onClose={() => dispatch(actions.overlaySet(null))}
+            />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

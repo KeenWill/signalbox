@@ -8,6 +8,7 @@ export interface CommandContext {
   timelineIds: readonly string[]
   focusTimeline: () => void
   navigate?: (path: string) => void
+  openArtifactInspector?: () => void
 }
 
 export interface CommandBinding {
@@ -30,6 +31,7 @@ interface CommandDefinitionShape {
 const always = () => true
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
 const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
+const artifactInspector = (context: CommandContext) => context.openArtifactInspector !== undefined
 export const commandRegistry = [
   {
     id: 'navigate.attention',
@@ -111,6 +113,15 @@ export const commandRegistry = [
     bindings: [{ label: 'g ,' }],
     available: productNavigation,
     run: (context) => context.navigate?.('/settings'),
+  },
+  {
+    id: 'artifact.open',
+    title: 'Open artifact inspector',
+    description: 'Resolve and inspect an immutable blob by its server-provided identity.',
+    category: 'Surface',
+    bindings: [],
+    available: artifactInspector,
+    run: (context) => context.openArtifactInspector?.(),
   },
   {
     id: 'palette.open',

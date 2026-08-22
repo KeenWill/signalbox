@@ -1,9 +1,12 @@
 import { expect, type Page, test } from '@playwright/test'
 
 const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
+  contract: { name: 'signalbox.web-http', version: '2' },
   capabilities: {
+    blob_derivations: true,
     bounded_json: true,
+    image_derivatives: true,
+    immutable_blob_content: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
@@ -34,7 +37,9 @@ test('opens the product at Attention with generated-contract transport status', 
 
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
-  await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
+  await expect(
+    page.getByText(`${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`),
+  ).toBeVisible()
   await expect(page.getByRole('link', { name: /Attention/ })).toHaveAttribute(
     'aria-current',
     'page',

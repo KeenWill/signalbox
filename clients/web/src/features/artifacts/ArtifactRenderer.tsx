@@ -22,7 +22,13 @@ const viewByKind = (
 const displayName = (descriptor: WebBlobDescriptor): string =>
   descriptor.display_filename[0] ?? descriptor.digest
 
-function ArtifactRenderer({ descriptor }: { descriptor: WebBlobDescriptor }) {
+export function ArtifactRenderer({
+  compact = false,
+  descriptor,
+}: {
+  compact?: boolean
+  descriptor: WebBlobDescriptor
+}) {
   const [originalRequested, setOriginalRequested] = useState(false)
   const automatic = selectImageView(descriptor)
   const original = viewByKind(descriptor, 'browser_native')
@@ -31,7 +37,10 @@ function ArtifactRenderer({ descriptor }: { descriptor: WebBlobDescriptor }) {
   const derivation = rendered?.derivations[0]
 
   return (
-    <article className="artifact-row" aria-label={`Artifact ${displayName(descriptor)}`}>
+    <article
+      className={compact ? 'artifact-row artifact-row-compact' : 'artifact-row'}
+      aria-label={`Artifact ${displayName(descriptor)}`}
+    >
       <div className="artifact-visual">
         {rendered ? (
           <img
