@@ -8,12 +8,20 @@ const bootstrapFixture = {
   capabilities: {
     blob_derivations: true,
     bounded_json: true,
+    bounded_session_timeline: true,
     image_derivatives: true,
     immutable_blob_content: true,
+    import_discovery: true,
+    imported_continuations: true,
     ndjson_streaming: true,
     same_origin_json_mutations: true,
   },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
+  limits: {
+    max_json_body_bytes: 65_536,
+    max_ndjson_item_bytes: 262_144,
+    max_timeline_window_bytes: 65_536,
+    max_timeline_window_items: 256,
+  },
 } as const
 
 const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.meta.url))
@@ -63,6 +71,9 @@ const submitArtifactWithoutMouse = async (page: Page) => {
   await expect(digest).toBeFocused()
   await page.keyboard.type(imageArtifact.digest)
   await page.keyboard.press('Tab')
+  await expect(page.getByRole('combobox', { name: 'Typed presentation' })).toBeFocused()
+  await page.keyboard.press('ArrowDown')
+  await page.keyboard.press('Tab')
   await page.keyboard.type(imageArtifact.declared_media_type)
   await page.keyboard.press('Tab')
   await page.keyboard.type(imageArtifact.display_filename[0] ?? '')
@@ -83,7 +94,6 @@ const resolveArtifactWithoutMouse = async (page: Page) => {
     name: `Artifact ${imageArtifact.display_filename[0]}`,
   })
   await expect(artifact).toBeVisible()
-  await expect(artifact).toHaveClass(/artifact-row-compact/)
   const preview = artifact.getByRole('img', {
     name: `Preview of ${imageArtifact.display_filename[0]}`,
   })

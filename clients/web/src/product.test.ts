@@ -10,6 +10,8 @@ const bootstrapFixture = {
     bounded_session_timeline: true,
     image_derivatives: true,
     immutable_blob_content: true,
+    import_discovery: true,
+    imported_continuations: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
@@ -124,6 +126,14 @@ describe('product surface availability', () => {
       kind: 'server-backed',
       owningTrack: '#991 session projections',
       facts: ['bounded session descriptors', 'stable-address timeline windows'],
+    })
+  })
+
+  it('marks the available import discovery facts as server-backed', () => {
+    expect(productSurfaceStates.imports).toEqual({
+      kind: 'server-backed',
+      owningTrack: '#995 discovery reads',
+      facts: ['bounded import catalog', 'descriptor and imported-entry windows', 'continuation'],
     })
   })
 })

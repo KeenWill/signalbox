@@ -7,6 +7,7 @@ import {
   decodeWebBlobDescriptor,
   decodeWebContractBootstrap,
   decodeWebContractExample,
+  decodeWebImportListPage,
 } from "../../../clients/web/src/generated/web-contract.mjs";
 
 const fixtureUrl = new URL("./fixtures/example.json", import.meta.url);
@@ -44,6 +45,8 @@ test("generated bootstrap decoder rejects another contract version", () => {
           immutable_blob_content: true,
           blob_derivations: true,
           image_derivatives: true,
+          import_discovery: true,
+          imported_continuations: true,
         },
         limits: {
           max_json_body_bytes: 65536,
@@ -485,4 +488,21 @@ test("generated error decoder preserves the transport application boundary", () 
       }),
     /one recognized variant/,
   );
+});
+
+test("generated imports decoder accepts explicit null evidence and cursor", () => {
+  const page = {
+    items: [
+      {
+        imported_conversation_id: "00000000-0000-7000-8000-000000000001",
+        display_title: null,
+        format: "codex_rollout_jsonl_v1",
+        source_session_id: null,
+        entry_count: 1,
+      },
+    ],
+    next_cursor: null,
+  };
+
+  assert.deepEqual(decodeWebImportListPage(page), page);
 });

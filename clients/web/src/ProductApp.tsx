@@ -23,7 +23,9 @@ import {
   useState,
 } from 'react'
 import { ArtifactInspector } from './ArtifactInspector'
-import { globalHotkeyBindings } from './commands'
+import { type CommandContext, globalHotkeyBindings } from './commands'
+import { HttpImportApi } from './imports/api'
+import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import {
   type ProductRouteId,
   productRoutes,
@@ -38,6 +40,8 @@ import {
 import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
+
+const productImportApi = new HttpImportApi()
 
 const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
   attention: {
@@ -341,6 +345,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const artifactDigestRef = useRef<HTMLInputElement>(null)
   const artifactSideWasOpen = useRef(false)
   const narrowInspector = useNarrowInspector()
+  const [importsCommandContext, setImportsCommandContext] = useState<CommandContext | null>(null)
+  const updateImportsCommandContext = useCallback(
+    (nextContext: CommandContext | null) => setImportsCommandContext(nextContext),
+    [],
+  )
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -348,19 +357,20 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   })
   const artifactAvailable = bootstrap.data?.capabilities.immutable_blob_content === true
   const inspectorInSheet = app.layout === 'focus' || narrowInspector
-  const context = useMemo<ProductCommandContext>(
-    () => ({
+  const context = useMemo<ProductCommandContext>(() => {
+    const surfaceContext = surface === 'imports' ? importsCommandContext : null
+    return {
+      ...surfaceContext,
       dispatch,
       getState: store.getState,
-      timelineIds,
-      focusTimeline: () => primaryRef.current?.focus(),
+      timelineIds: surfaceContext?.timelineIds ?? timelineIds,
+      focusTimeline: surfaceContext?.focusTimeline ?? (() => primaryRef.current?.focus()),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
       openArtifactInspector: artifactAvailable
         ? () => dispatch(actions.overlaySet('artifact'))
         : undefined,
-    }),
-    [artifactAvailable, dispatch, navigate, timelineIds],
-  )
+    }
+  }, [artifactAvailable, dispatch, importsCommandContext, navigate, surface, timelineIds])
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
@@ -391,6 +401,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <SessionWorkspaceSurface onTimelineIds={updateTimelineIds} />
     ) : surface === 'settings' ? (
       <SettingsSurface />
+    ) : surface === 'imports' ? (
+      <ImportsWorkspace
+        api={productImportApi}
+        scenario={false}
+        presentation="product"
+        onCommandContext={updateImportsCommandContext}
+      />
     ) : (
       <DeferredSurface surface={surface} />
     )
@@ -405,7 +422,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <aside className="product-navigation-pane">
         <ProductNavigation active={surface} />
       </aside>
-      <main className="product-main" tabIndex={-1} ref={primaryRef}>
+      <main className={`product-main product-main-${surface}`} tabIndex={-1} ref={primaryRef}>
         <header className="product-header">
           <div>
             <span className="eyebrow">{copy.eyebrow}</span>
