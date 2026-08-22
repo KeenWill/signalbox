@@ -471,14 +471,19 @@ const schemas = {
         "description": "Stable browser-visible location of one durable session event.",
         "properties": {
           "event_sequence": {
-            "description": "Positive global durable event sequence encoded losslessly for JavaScript.",
-            "type": "string"
+            "$ref": "#/$defs/WebTimelineEventSequence",
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript."
           }
         },
         "required": [
           "event_sequence"
         ],
         "type": "object"
+      },
+      "WebTimelineEventSequence": {
+        "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
