@@ -3,8 +3,8 @@
 The browser HTTP listener, same-origin static assets, and generated contract
 bootstrap are verified against this PR (`agent/web-http-transport`). The
 fleet-attention snapshot and monitor stream are verified against this PR
-(`agent/web-attention-projections`). The repository-watch browser projection
-and Activity surface are verified against this PR
+(`agent/web-attention-projections`). The repository-watch browser projection and
+Activity surface are verified against this PR
 (`agent/web-attention-activity-surfaces`).
 
 The daemon model-settings configuration surface is verified against the
@@ -216,11 +216,11 @@ event and webhook collections contain at most 100 rows each. All continuations
 are keyset cursors. A composite cursor is accepted only when every field is
 present, and an excluded activity feed cannot carry a cursor. The activity
 route's independently selectable event and webhook feeds let either history
-finish without restarting the other from its newest page. The DTO keeps
-observed events, actionable events, dispatch attempts, and settled automation
-as distinct facts rather than inferring one from another. The routes call only
-the read-only repository-watch projection and session-attention summary reads;
-they issue no repository-watch command or mutation.
+finish without restarting the other from its newest page. The DTO keeps observed
+events, actionable events, dispatch attempts, and settled automation as distinct
+facts rather than inferring one from another. The routes call only the read-only
+repository-watch projection and session-attention summary reads; they issue no
+repository-watch command or mutation.
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and

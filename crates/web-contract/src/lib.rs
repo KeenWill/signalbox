@@ -623,22 +623,28 @@ impl Error for GenerateWebContractError {}
 /// Returns a closed build-time error when serde cannot encode a generated value
 /// or a DTO schema grows beyond the generator's focused supported shapes.
 pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContractError> {
-    let bootstrap_schema = canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value());
-    let example_schema = canonical_schema(schemars::schema_for!(WebContractExample).to_value());
-    let error_schema = canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value());
-    let attention_snapshot_schema =
-        canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
-    let attention_event_schema =
-        canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value());
-    let repository_status_page_schema =
-        canonical_schema(schemars::schema_for!(WebRepoWatchRepositoryStatusPage).to_value());
-    let pull_request_page_schema =
-        canonical_schema(schemars::schema_for!(WebRepoWatchPullRequestPage).to_value());
-    let work_page_schema = canonical_schema(schemars::schema_for!(WebRepoWatchWorkPage).to_value());
-    let pull_request_session_page_schema =
-        canonical_schema(schemars::schema_for!(WebRepoWatchPullRequestSessionPage).to_value());
-    let activity_page_schema =
-        canonical_schema(schemars::schema_for!(WebRepoWatchActivityPage).to_value());
+    let schema_set = GeneratedSchemaSet {
+        bootstrap: canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value()),
+        example: canonical_schema(schemars::schema_for!(WebContractExample).to_value()),
+        error: canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value()),
+        attention_snapshot: canonical_schema(
+            schemars::schema_for!(WebAttentionSnapshot).to_value(),
+        ),
+        attention_event: canonical_schema(
+            schemars::schema_for!(WebAttentionStreamEvent).to_value(),
+        ),
+        repository_status_page: canonical_schema(
+            schemars::schema_for!(WebRepoWatchRepositoryStatusPage).to_value(),
+        ),
+        pull_request_page: canonical_schema(
+            schemars::schema_for!(WebRepoWatchPullRequestPage).to_value(),
+        ),
+        work_page: canonical_schema(schemars::schema_for!(WebRepoWatchWorkPage).to_value()),
+        pull_request_session_page: canonical_schema(
+            schemars::schema_for!(WebRepoWatchPullRequestSessionPage).to_value(),
+        ),
+        activity_page: canonical_schema(schemars::schema_for!(WebRepoWatchActivityPage).to_value()),
+    };
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -650,39 +656,30 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     Ok(vec![
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.mjs",
-            contents: runtime_module(
-                &bootstrap_schema,
-                &example_schema,
-                &error_schema,
-                &attention_snapshot_schema,
-                &attention_event_schema,
-                &repository_status_page_schema,
-                &pull_request_page_schema,
-                &work_page_schema,
-                &pull_request_session_page_schema,
-                &activity_page_schema,
-            )?,
+            contents: runtime_module(&schema_set)?,
         },
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.d.mts",
-            contents: declaration_module(
-                &bootstrap_schema,
-                &example_schema,
-                &error_schema,
-                &attention_snapshot_schema,
-                &attention_event_schema,
-                &repository_status_page_schema,
-                &pull_request_page_schema,
-                &work_page_schema,
-                &pull_request_session_page_schema,
-                &activity_page_schema,
-            )?,
+            contents: declaration_module(&schema_set)?,
         },
         GeneratedArtifact {
             path: "crates/web-contract/tests/fixtures/example.json",
             contents: example_json,
         },
     ])
+}
+
+struct GeneratedSchemaSet {
+    bootstrap: Value,
+    example: Value,
+    error: Value,
+    attention_snapshot: Value,
+    attention_event: Value,
+    repository_status_page: Value,
+    pull_request_page: Value,
+    work_page: Value,
+    pull_request_session_page: Value,
+    activity_page: Value,
 }
 
 fn canonical_schema(mut schema: Value) -> Value {
@@ -693,29 +690,18 @@ fn canonical_schema(mut schema: Value) -> Value {
     schema
 }
 
-fn runtime_module(
-    bootstrap_schema: &Value,
-    example_schema: &Value,
-    error_schema: &Value,
-    attention_snapshot_schema: &Value,
-    attention_event_schema: &Value,
-    repository_status_page_schema: &Value,
-    pull_request_page_schema: &Value,
-    work_page_schema: &Value,
-    pull_request_session_page_schema: &Value,
-    activity_page_schema: &Value,
-) -> Result<String, GenerateWebContractError> {
+fn runtime_module(schema_set: &GeneratedSchemaSet) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
-        "WebContractBootstrap": bootstrap_schema,
-        "WebContractExample": example_schema,
-        "WebApiErrorResponse": error_schema,
-        "WebAttentionSnapshot": attention_snapshot_schema,
-        "WebAttentionStreamEvent": attention_event_schema,
-        "WebRepoWatchRepositoryStatusPage": repository_status_page_schema,
-        "WebRepoWatchPullRequestPage": pull_request_page_schema,
-        "WebRepoWatchWorkPage": work_page_schema,
-        "WebRepoWatchPullRequestSessionPage": pull_request_session_page_schema,
-        "WebRepoWatchActivityPage": activity_page_schema,
+        "WebContractBootstrap": schema_set.bootstrap,
+        "WebContractExample": schema_set.example,
+        "WebApiErrorResponse": schema_set.error,
+        "WebAttentionSnapshot": schema_set.attention_snapshot,
+        "WebAttentionStreamEvent": schema_set.attention_event,
+        "WebRepoWatchRepositoryStatusPage": schema_set.repository_status_page,
+        "WebRepoWatchPullRequestPage": schema_set.pull_request_page,
+        "WebRepoWatchWorkPage": schema_set.work_page,
+        "WebRepoWatchPullRequestSessionPage": schema_set.pull_request_session_page,
+        "WebRepoWatchActivityPage": schema_set.activity_page,
     });
     schemas.sort_all_objects();
     let schemas = serde_json::to_string_pretty(&schemas)
@@ -920,50 +906,50 @@ export function decodeWebRepoWatchActivityPage(value) {{
     ))
 }
 
-fn declaration_module(
-    bootstrap_schema: &Value,
-    example_schema: &Value,
-    error_schema: &Value,
-    attention_snapshot_schema: &Value,
-    attention_event_schema: &Value,
-    repository_status_page_schema: &Value,
-    pull_request_page_schema: &Value,
-    work_page_schema: &Value,
-    pull_request_session_page_schema: &Value,
-    activity_page_schema: &Value,
-) -> Result<String, GenerateWebContractError> {
+fn declaration_module(schema_set: &GeneratedSchemaSet) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
-    let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
-    let example = typescript_type(example_schema, example_schema, &mut definitions)?;
-    let error = typescript_type(error_schema, error_schema, &mut definitions)?;
+    let bootstrap = typescript_type(
+        &schema_set.bootstrap,
+        &schema_set.bootstrap,
+        &mut definitions,
+    )?;
+    let example = typescript_type(&schema_set.example, &schema_set.example, &mut definitions)?;
+    let error = typescript_type(&schema_set.error, &schema_set.error, &mut definitions)?;
     let attention_snapshot = typescript_type(
-        attention_snapshot_schema,
-        attention_snapshot_schema,
+        &schema_set.attention_snapshot,
+        &schema_set.attention_snapshot,
         &mut definitions,
     )?;
     let attention_event = typescript_type(
-        attention_event_schema,
-        attention_event_schema,
+        &schema_set.attention_event,
+        &schema_set.attention_event,
         &mut definitions,
     )?;
     let repository_status_page = typescript_type(
-        repository_status_page_schema,
-        repository_status_page_schema,
+        &schema_set.repository_status_page,
+        &schema_set.repository_status_page,
         &mut definitions,
     )?;
     let pull_request_page = typescript_type(
-        pull_request_page_schema,
-        pull_request_page_schema,
+        &schema_set.pull_request_page,
+        &schema_set.pull_request_page,
         &mut definitions,
     )?;
-    let work_page = typescript_type(work_page_schema, work_page_schema, &mut definitions)?;
+    let work_page = typescript_type(
+        &schema_set.work_page,
+        &schema_set.work_page,
+        &mut definitions,
+    )?;
     let pull_request_session_page = typescript_type(
-        pull_request_session_page_schema,
-        pull_request_session_page_schema,
+        &schema_set.pull_request_session_page,
+        &schema_set.pull_request_session_page,
         &mut definitions,
     )?;
-    let activity_page =
-        typescript_type(activity_page_schema, activity_page_schema, &mut definitions)?;
+    let activity_page = typescript_type(
+        &schema_set.activity_page,
+        &schema_set.activity_page,
+        &mut definitions,
+    )?;
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",
     );
