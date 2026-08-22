@@ -10,7 +10,9 @@ automatic-reconciliation transaction deadline is verified against this PR
 validation is verified against this PR
 (`agent/daemon-live-frontier-validation-materialization`). Context-compaction
 evidence validation is verified against this PR
-(`agent/daemon-live-context-compaction-validation`).
+(`agent/daemon-live-context-compaction-validation`). Deferred immutable
+tool-round validation scope is verified against this PR
+(`agent/daemon-live-deferred-round-validation-scope`).
 
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
@@ -661,7 +663,10 @@ Representation rules, all enforced in the schema:
   `imported_session_seed` naming its exact seed frontier, and
   turn/attempt/semantic-entry writes re-assert the complete turn final state
   (origin entry, frontier prefix relationships, live-attempt cardinality,
-  failure-entry correlation). Every invalid-interrupt rejection additionally
+  failure-entry correlation). Tool-round construction and every correlated
+  evidence write queue that immutable round's own complete validator; later
+  turn-state checks validate the mutable lifecycle shape without rescanning
+  historical round frontiers. Every invalid-interrupt rejection additionally
   correlates the active phase its receipt claims: the stopping rejections
   through the prior applied interrupt's stopped attempt, and the parked-approval
   rejection directly against its named turn's recorded `awaiting_tool_approval`
