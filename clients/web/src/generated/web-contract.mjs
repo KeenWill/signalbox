@@ -783,19 +783,19 @@ const schemas = {
         "description": "Explicit lifetime size facts used only for browser loading policy.",
         "properties": {
           "item_count": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "projected_structured_bytes": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "projected_text_bytes": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "referenced_blob_bytes": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "referenced_blob_count": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           }
         },
         "required": [
@@ -812,10 +812,10 @@ const schemas = {
         "description": "Current work facts carried by the lightweight session descriptor.",
         "properties": {
           "active_turn_count": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "queued_turn_count": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           }
         },
         "required": [
@@ -842,6 +842,11 @@ const schemas = {
         "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
         "pattern": "^[1-9][0-9]*$",
         "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -855,7 +860,7 @@ const schemas = {
         "$ref": "#/$defs/WebTimelineAddress"
       },
       "observed_through": {
-        "type": "string"
+        "$ref": "#/$defs/WebU64"
       },
       "session_id": {
         "type": "string"
@@ -1132,6 +1137,13 @@ function assertSchema(root, schema, value, path) {
   }
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {
     fail(path, `a string matching ${schema.pattern}`);
+  }
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    BigInt(value) > 18446744073709551615n
+  ) {
+    fail(path, "an unsigned 64-bit integer");
   }
 }
 
