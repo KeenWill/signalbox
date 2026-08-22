@@ -30,6 +30,7 @@ mod turn_liveness;
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
     error::Error,
+    num::NonZeroU64,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},

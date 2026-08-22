@@ -4436,6 +4436,10 @@ pub enum RejectionDetail {
         selection_id: CanonicalUuid,
         requested: ServiceTier,
     },
+    /// One attachment digest was absent from the durable blob catalog.
+    AttachmentBlobNotFound { digest: CanonicalBlobDigest },
+    /// Distinct attachment bytes exceeded the deployment verification bound.
+    AttachmentByteBudgetExceeded { maximum_bytes: CanonicalU64 },
     /// The target session did not exist at command handling.
     SessionNotFound {
         /// Absent target.
@@ -4771,6 +4775,8 @@ impl RejectionDetail {
             | Self::BlobReadRangeOutOfBounds { .. }
             | Self::BulkIngestAlreadyInProgress { .. }
             | Self::SessionNotFound { .. }
+            | Self::AttachmentBlobNotFound { .. }
+            | Self::AttachmentByteBudgetExceeded { .. }
             | Self::UnsupportedReasoningLevel { .. }
             | Self::UnsupportedFastMode { .. }
             | Self::UnsupportedServiceTier { .. }
@@ -8265,7 +8271,11 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         RejectionDetail::DelegationDeliverySequenceExhausted { last, .. } => {
             last.value() == u64::MAX
         }
+        RejectionDetail::AttachmentByteBudgetExceeded { maximum_bytes } => {
+            maximum_bytes.value() > 0
+        }
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::AttachmentBlobNotFound { .. }
         | RejectionDetail::UnsupportedReasoningLevel { .. }
         | RejectionDetail::UnsupportedFastMode { .. }
         | RejectionDetail::UnsupportedServiceTier { .. }
@@ -8367,6 +8377,8 @@ fn validate_conversation_import_detail(
             }
         },
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::AttachmentBlobNotFound { .. }
+        | RejectionDetail::AttachmentByteBudgetExceeded { .. }
         | RejectionDetail::UnsupportedReasoningLevel { .. }
         | RejectionDetail::UnsupportedFastMode { .. }
         | RejectionDetail::UnsupportedServiceTier { .. }
@@ -10522,6 +10534,50 @@ mod tests {
             r#"{"version":1,"request_id":"1","message":{"type":"error","code":"internal","message":"failed","detail":null}}"#
         ))
         .is_err());
+        Ok(())
+    }
+
+    /// INV-033 / INV-071: attachment admission failures carry their exact
+    /// content-silent durable rejection shapes.
+    #[test]
+    fn inv033_inv071_attachment_rejections_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("attachment blob was not found"),
+                detail: ErrorDetail::rejected(RejectionDetail::AttachmentBlobNotFound { digest }),
+            },
+            &format!(
+                "{{\"type\":\"error\",\"code\":\"rejected\",\"message\":\"attachment blob was not found\",\"detail\":{{\"type\":\"attachment_blob_not_found\",\"digest\":\"{digest}\"}}}}"
+            ),
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("attachment byte budget was exceeded"),
+                detail: ErrorDetail::rejected(RejectionDetail::AttachmentByteBudgetExceeded {
+                    maximum_bytes: CanonicalU64::new(32),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"attachment byte budget was exceeded","detail":{"type":"attachment_byte_budget_exceeded","maximum_bytes":"32"}}"#,
+        )?;
+        assert!(
+            ServerFrame::try_new(
+                request(3)?,
+                ServerMessage::Error {
+                    code: ErrorCode::Rejected,
+                    message: String::from("attachment byte budget was exceeded"),
+                    detail: ErrorDetail::rejected(RejectionDetail::AttachmentByteBudgetExceeded {
+                        maximum_bytes: CanonicalU64::new(0),
+                    },),
+                },
+            )
+            .is_err()
+        );
         Ok(())
     }
 

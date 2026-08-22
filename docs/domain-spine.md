@@ -2421,6 +2421,12 @@ impl SubmitInput {
         delivery: DeliveryRequest,
     ) -> Self;
     pub fn prepare_session_not_found(self) -> PreparedSubmitInput;
+    pub fn prepare_blob_not_found(self, digest: BlobDigest) -> PreparedSubmitInput;
+    pub fn prepare_attachment_bytes_too_large(
+        self,
+        maximum_bytes: NonZeroU64,
+        observed_bytes: NonZeroU64,
+    ) -> PreparedSubmitInput;
     pub fn prepare_when_no_active_turn(
         self,
         session: &Session,
@@ -2499,6 +2505,15 @@ impl SubmitInputPendingSteeringAppliedResult {
 }
 
 pub enum SubmitInputRejectedResult {
+    BlobNotFound {
+        session: SessionId,
+        digest: BlobDigest,
+    },
+    AttachmentBytesTooLarge {
+        session: SessionId,
+        maximum_bytes: NonZeroU64,
+        observed_bytes: NonZeroU64,
+    },
     SessionNotFound {
         session: SessionId,
     },
@@ -2631,6 +2646,12 @@ pub struct SubmitInputAppliedPendingSteeringReconstitutionInput {
 pub struct SubmitInputRejectedSessionNotFoundReconstitutionInput {
     /* public named command, actor, and absent-session facts */
 }
+pub struct SubmitInputRejectedBlobNotFoundReconstitutionInput {
+    /* public named command, actor, session, and absent-digest facts */
+}
+pub struct SubmitInputRejectedAttachmentBytesTooLargeReconstitutionInput {
+    /* public named command, actor, session, deployment-maximum, and observed-aggregate facts */
+}
 pub struct SubmitInputRejectedNoActiveTurnReconstitutionInput {
     /* public named command, actor, session, and expected-turn facts */
 }
@@ -2665,6 +2686,12 @@ impl SubmitInputReconstitutionInput {
     ) -> Self;
     pub fn applied_pending_steering(
         input: SubmitInputAppliedPendingSteeringReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_blob_not_found(
+        input: SubmitInputRejectedBlobNotFoundReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_attachment_bytes_too_large(
+        input: SubmitInputRejectedAttachmentBytesTooLargeReconstitutionInput,
     ) -> Self;
     pub fn rejected_safe_point_unavailable_while_stopping(
         input: SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
@@ -2706,6 +2733,8 @@ pub enum SubmitInputReconstitutionFailure {
     AppliedDeliveryIsNotTurnOrigin,
     AppliedDeliveryIsNotNextSafePoint,
     ResultSessionMismatch,
+    RejectedBlobDigestNotReferenced,
+    RejectedAttachmentAggregateWithinBound,
     AcceptedCommandMismatch,
     AcceptedInputMismatch,
     AcceptedSessionMismatch,
@@ -3520,6 +3549,9 @@ impl AcceptedInputSchedulingProjection {
     ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
     pub fn earliest_queued_turn(&self)
         -> Option<&AcceptedInputTurnSchedulingProjection>;
+    pub fn earliest_queued_rendered_base_origins(
+        &self,
+    ) -> Option<Vec<AcceptedInputId>>;
     pub fn resolved_snapshot(
         &self,
         snapshot: ContextFrontierId,
@@ -11115,7 +11147,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: accepted_input                             | 5                                |
 | domain: delivery_request                           | 2                                |
 | domain: user_content                               | 14                               |
-| domain: submit_input                               | 34                               |
+| domain: submit_input                               | 36                               |
 | domain: queue_order                                | 5 (+1 free fn)                   |
 | domain: repo_watch                                 | 51                               |
 | domain: turn_lifecycle                             | 10                               |
@@ -11139,7 +11171,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                               |
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
-| **signalbox-domain total**                         | **816 (+12 free fn)**            |
+| **signalbox-domain total**                         | **818 (+12 free fn)**            |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |

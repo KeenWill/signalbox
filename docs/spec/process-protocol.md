@@ -3,6 +3,9 @@
 The ordered user-content part-array vocabulary is verified against this PR
 (`agent/blob-storage-multipart-algebra`).
 
+The typed attachment catalog and aggregate-byte rejection details are verified
+against this PR (`agent/blob-storage-attachment-admission`).
+
 The typed runner-state session event, daemon outbox projection, authoritative
 session-summary and transcript-snapshot runner projections, and the runner
 request/projection implementation boundary were verified against this PR

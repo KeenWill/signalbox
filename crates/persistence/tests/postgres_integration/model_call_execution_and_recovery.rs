@@ -2511,7 +2511,7 @@ async fn inv007_inv009_turn_storage_migration_backfills_existing_queued_work()
                 AND part.position = 0
                 AND part.part_kind = 'text'
                 AND part.text_value = 'queued before migration'),
-            typed.storage_version = 3
+            typed.storage_version = 4
          FROM turn_lifecycle AS turn
          JOIN accepted_input AS accepted
            ON accepted.accepted_input_id = turn.origin_accepted_input_id

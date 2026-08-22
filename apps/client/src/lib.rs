@@ -364,6 +364,8 @@ fn delegation_rejection_matches(
         RejectionDetail::UnsupportedReasoningLevel { .. }
         | RejectionDetail::UnsupportedFastMode { .. }
         | RejectionDetail::UnsupportedServiceTier { .. }
+        | RejectionDetail::AttachmentBlobNotFound { .. }
+        | RejectionDetail::AttachmentByteBudgetExceeded { .. }
         | RejectionDetail::SessionPlacementCurrentVersionMismatch { .. }
         | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }

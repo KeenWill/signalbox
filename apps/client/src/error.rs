@@ -393,6 +393,14 @@ impl fmt::Display for RejectionDisplay {
                 "unsupported_service_tier selection={selection_id} service_tier={}",
                 service_tier_name(requested)
             ),
+            RejectionDetail::AttachmentBlobNotFound { digest } => {
+                write!(formatter, "attachment_blob_not_found digest={digest}")
+            }
+            RejectionDetail::AttachmentByteBudgetExceeded { maximum_bytes } => write!(
+                formatter,
+                "attachment_byte_budget_exceeded maximum_bytes={}",
+                maximum_bytes.value()
+            ),
             RejectionDetail::SessionNotFound { session_id } => {
                 write!(formatter, "session_not_found session={session_id}")
             }
@@ -798,8 +806,8 @@ const fn conversation_import_rejection_class_name(
 mod tests {
     use expect_test::expect;
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, ConversationImportRejectionClass, ErrorCode, ErrorDetail,
-        FailedModelCallCause, RejectionDetail,
+        CanonicalBlobDigest, CanonicalU64, CanonicalUuid, ConversationImportRejectionClass,
+        ErrorCode, ErrorDetail, FailedModelCallCause, RejectionDetail,
     };
     use uuid::Uuid;
 
@@ -844,6 +852,33 @@ mod tests {
         expect![[r#"
             invalid_request: conversation import was rejected (conversation_import_source_too_large limit_bytes=8 declared_size_bytes=7 actual_size_bytes=9)"#]]
         .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn attachment_admission_evidence_names_only_digest_or_bound() {
+        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
+        let missing = ClientError::remote(
+            ErrorCode::Rejected,
+            "attachment blob was not found".to_owned(),
+            ErrorDetail::rejected(RejectionDetail::AttachmentBlobNotFound { digest }),
+        );
+        assert_eq!(
+            missing.to_string(),
+            format!(
+                "rejected: attachment blob was not found \
+                 (attachment_blob_not_found digest={digest})"
+            )
+        );
+        let over_limit = ClientError::remote(
+            ErrorCode::Rejected,
+            "attachment byte budget was exceeded".to_owned(),
+            ErrorDetail::rejected(RejectionDetail::AttachmentByteBudgetExceeded {
+                maximum_bytes: CanonicalU64::new(1024),
+            }),
+        );
+        expect![[r#"
+            rejected: attachment byte budget was exceeded (attachment_byte_budget_exceeded maximum_bytes=1024)"#]]
+        .assert_eq(&over_limit.to_string());
     }
 
     #[test]
