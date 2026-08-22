@@ -107,6 +107,7 @@ test('filters and inspects a session without a mouse, then restores focus', asyn
   const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
   await session.focus()
   await page.keyboard.press('Enter')
+  await expect.poll(() => new URL(page.url()).searchParams.get('session')).toBe(firstSessionId)
   await expect(
     page.getByRole('heading', { name: firstPage.summaries[0].title_summary, level: 2 }),
   ).toBeVisible()
@@ -134,6 +135,35 @@ test('preserves meaningful whitespace in exact catalog searches', async ({ page 
   await search.press('Enter')
   await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBe(' release ')
   await expect.poll(() => observedSearch).toBe(' release ')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('restores focus after filters replace the bounded catalog page', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/sessions')
+  await page.getByRole('textbox', { name: 'Search titles' }).fill('release')
+  await page.getByRole('button', { name: 'Apply' }).click()
+  await expect(page.getByRole('heading', { name: `${firstPage.total} sessions` })).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('keeps Escape and browser history aligned with the desktop inspector', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useCatalogFixture(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: 'Sessions' }).click()
+  const session = page.getByRole('button', { name: firstPage.summaries[0].title_summary })
+  await session.click()
+  await page.getByRole('heading', { name: `${firstPage.total} sessions` }).focus()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeHidden()
+
+  await session.click()
+  await page.getByRole('button', { name: 'Close session inspector' }).click()
+  await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeHidden()
+  await page.goBack()
+  await expect(page).toHaveURL(/attention/)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

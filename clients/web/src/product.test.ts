@@ -89,6 +89,25 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
+  it('fails closed when the JSON response ceiling contradicts the browser contract', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...bootstrapFixture,
+              limits: { ...bootstrapFixture.limits, max_json_body_bytes: 32_768 },
+            }),
+          ),
+      ),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'JSON response ceiling contradicts',
+    )
+  })
+
   it('reports an unsuccessful HTTP response without decoding its body', async () => {
     vi.stubGlobal(
       'fetch',
@@ -287,6 +306,29 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('outside the JavaScript Date range')
   })
 
+  it('rejects malformed session identities before exposing a page', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: { ...sessionPageFixture.continuation, session_id: 'not-a-session' },
+              summaries: [{ ...sessionPageFixture.summaries[0], session_id: 'not-a-session' }],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('non-canonical session identity')
+  })
+
   it('rejects a continuation that does not match the returned page boundary', async () => {
     vi.stubGlobal(
       'fetch',
@@ -367,7 +409,6 @@ describe('readProductSessionState', () => {
         sort: 'identity',
         archived: true,
         afterSession: sessionId,
-        afterActivity: 7,
         session: '',
       }),
     ).toEqual({
@@ -385,5 +426,18 @@ describe('readProductSessionState', () => {
       readProductSessionState({ q: `release${String.fromCharCode(0)}candidate` }).q,
     ).toBeUndefined()
     expect(readProductSessionState({ q: 'é'.repeat(MAX_SESSION_SEARCH_BYTES) }).q).toBeUndefined()
+  })
+
+  it('drops malformed or sort-incompatible URL continuations', () => {
+    expect(
+      readProductSessionState({ sort: 'identity', afterSession: sessionId, afterActivity: '7' }),
+    ).toMatchObject({ afterSession: undefined, afterActivity: undefined })
+    expect(readProductSessionState({ afterSession: sessionId })).toMatchObject({
+      afterSession: undefined,
+      afterActivity: undefined,
+    })
+    expect(
+      readProductSessionState({ afterSession: 'not-a-session', afterActivity: '7' }),
+    ).toMatchObject({ afterSession: undefined, afterActivity: undefined })
   })
 })

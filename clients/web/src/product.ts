@@ -29,16 +29,33 @@ export interface ProductSessionState {
   session?: string
 }
 
+const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const CANONICAL_UNSIGNED_INTEGER = /^(0|[1-9]\d*)$/
+
+const admittedSessionIdentity = (value: unknown) =>
+  typeof value === 'string' && CANONICAL_UUID.test(value) ? value : undefined
+
+const admittedActivityCursor = (value: unknown) => {
+  if (typeof value !== 'string' || !CANONICAL_UNSIGNED_INTEGER.test(value)) return undefined
+  return BigInt(value) <= MAX_UNSIGNED_64 ? value : undefined
+}
+
 export const readProductSessionState = (value: Record<string, unknown>): ProductSessionState => {
-  const text = (key: keyof ProductSessionState) =>
-    typeof value[key] === 'string' && value[key].length > 0 ? value[key] : undefined
+  const sort = value.sort === 'identity' ? 'identity' : undefined
+  const afterSession = admittedSessionIdentity(value.afterSession)
+  const afterActivity = admittedActivityCursor(value.afterActivity)
+  const validContinuation =
+    sort === 'identity'
+      ? afterSession !== undefined && value.afterActivity === undefined
+      : afterSession !== undefined && afterActivity !== undefined
   return {
     q: admittedSessionSearch(value.q),
-    sort: value.sort === 'identity' ? 'identity' : undefined,
+    sort,
     archived: value.archived === true ? true : undefined,
-    afterSession: text('afterSession'),
-    afterActivity: text('afterActivity'),
-    session: text('session'),
+    afterSession: validContinuation ? afterSession : undefined,
+    afterActivity: validContinuation && sort !== 'identity' ? afterActivity : undefined,
+    session: admittedSessionIdentity(value.session),
   }
 }
 
@@ -110,6 +127,9 @@ const validateSessionPage = (
     throw new Error(`session catalog response exceeds ${MAX_SESSION_PAGE_ITEMS} summaries`)
   }
   for (const summary of page.summaries) {
+    if (!CANONICAL_UUID.test(summary.session_id)) {
+      throw new Error('session catalog response contains a non-canonical session identity')
+    }
     const milliseconds = summary.last_activity.unix_milliseconds
     const numericMilliseconds = Number(milliseconds)
     if (
@@ -175,6 +195,9 @@ export class SameOriginProductTransport implements ProductTransport {
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
     if (!bootstrap.capabilities.bounded_json) {
       throw new Error('bootstrap does not provide bounded JSON responses')
+    }
+    if (bootstrap.limits.max_json_body_bytes !== MAX_PRODUCT_HTTP_RESPONSE_BYTES) {
+      throw new Error('bootstrap JSON response ceiling contradicts the browser contract')
     }
     return bootstrap
   }

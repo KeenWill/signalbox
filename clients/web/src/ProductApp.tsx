@@ -3,7 +3,7 @@ import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { AlertTriangle, Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react'
-import { useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import {
   type CommandContext,
   commandRegistry,
@@ -281,20 +281,43 @@ export function ProductApp({
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
+  const sessionOpenedHere = useRef(false)
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
     staleTime: Number.POSITIVE_INFINITY,
   })
+  const updateSearch = useCallback(
+    (next: ProductSessionState, mode: 'push' | 'close' = 'push') => {
+      if (mode === 'close') {
+        if (sessionOpenedHere.current) {
+          sessionOpenedHere.current = false
+          window.history.back()
+          return
+        }
+        void navigate({ to: '/$surface', params: { surface }, search: next, replace: true })
+        return
+      }
+      if (!search.session && next.session) sessionOpenedHere.current = true
+      void navigate({ to: '/$surface', params: { surface }, search: next })
+    },
+    [navigate, search.session, surface],
+  )
+  const dismissSession = useCallback(() => {
+    updateSearch({ ...search, session: undefined }, 'close')
+  }, [search, updateSearch])
   const context = useMemo<CommandContext>(
     () => ({
       dispatch,
       getState: store.getState,
       timelineIds: [],
-      focusTimeline: () => primaryRef.current?.focus(),
+      focusTimeline: () => {
+        if (search.session) dismissSession()
+        else primaryRef.current?.focus()
+      },
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
     }),
-    [dispatch, navigate],
+    [dismissSession, dispatch, navigate, search.session],
   )
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
@@ -316,9 +339,11 @@ export function ProductApp({
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
 
+  useEffect(() => {
+    if (!search.session) sessionOpenedHere.current = false
+  }, [search.session])
+
   const copy = surfaceCopy[surface]
-  const updateSearch = (next: ProductSessionState) =>
-    void navigate({ to: '/$surface', params: { surface }, search: next })
   const content =
     surface === 'attention' ? (
       <AttentionSurface />

@@ -30,7 +30,7 @@ export function SessionCatalogSurface({
   onStateChange,
 }: {
   state: ProductSessionState
-  onStateChange: (state: ProductSessionState) => void
+  onStateChange: (state: ProductSessionState, mode?: 'push' | 'close') => void
 }) {
   const returnFocus = useRef<HTMLButtonElement>(null)
   const closeFocus = useRef<HTMLButtonElement>(null)
@@ -101,6 +101,7 @@ export function SessionCatalogSurface({
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    restorePageFocus.current = true
     const form = new FormData(event.currentTarget)
     const q = String(form.get('q') ?? '')
     const sort = form.get('sort') === 'identity' ? 'identity' : undefined
@@ -111,7 +112,7 @@ export function SessionCatalogSurface({
     returnFocus.current = button
     onStateChange({ ...state, session: summary.session_id })
   }
-  const closeSession = () => onStateChange({ ...state, session: undefined })
+  const closeSession = () => onStateChange({ ...state, session: undefined }, 'close')
   const nextPage = () => {
     const continuation = sessions.data?.continuation
     if (!continuation) return
@@ -227,7 +228,6 @@ export function SessionCatalogSurface({
               aria-modal={narrowInspector || undefined}
               aria-labelledby="catalog-inspector-heading"
               onKeyDown={(event) => {
-                if (event.key === 'Escape') closeSession()
                 if (event.key === 'Tab' && narrowInspector) {
                   event.preventDefault()
                   closeFocus.current?.focus()
