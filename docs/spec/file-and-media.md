@@ -157,12 +157,12 @@ every supported namespace, explicitly unshares and then disables further user
 namespaces, drops every capability, clears the environment, creates private
 `/proc`, `/dev`, `/tmp`, and `/run`, places `/dev/shm` under its own bounded
 tmpfs mount, and mounts only the exact worker plus the host's dynamic-runtime
-library trees read-only. It exposes no source path,
-catalog, database, daemon socket, configuration, credential, home directory, or
-network namespace. An architecture-checked seccomp filter returns `ENOSYS` for
-`clone3`, permits fallback `clone` only with `CLONE_THREAD`, denies process
-creation, and denies unbudgeted inotify instance and watch allocation. Decoder
-threads remain available while worker descendants stay zero.
+library trees read-only. It exposes no source path, catalog, database, daemon
+socket, configuration, credential, home directory, or network namespace. An
+architecture-checked seccomp filter returns `ENOSYS` for `clone3`, permits
+fallback `clone` only with `CLONE_THREAD`, denies process creation, and denies
+unbudgeted inotify instance and watch allocation. Decoder threads remain
+available while worker descendants stay zero.
 
 Before releasing a dedicated startup gate, the daemon applies hard
 address-space, CPU, core-dump, and descriptor limits to the sandbox process and
@@ -170,15 +170,14 @@ all inherited worker threads. Each invocation first enters its own child of an
 explicitly configured writable delegated cgroup-v2 root, with `pids.max` set to
 the compiled task ceiling before bubblewrap can fork. Construction fails closed
 when that delegated controller cannot be validated. The configured memory
-ceiling is one
-combined budget: half is reserved for address space and half is split between
-the three writable tmpfs mounts, so their maxima cannot add to more than the
-configured value. The daemon independently owns one wall deadline per
-invocation, one inspection-wide deadline across all serial reader probes, and
-one verification-wide deadline across all configured worker probes. It kills the
-isolated process group on timeout or authoritative cancellation. Bounded stderr
-is drained and discarded; it is never parser evidence, telemetry content, or
-model-visible output.
+ceiling is one combined budget: half is reserved for address space and half is
+split between the three writable tmpfs mounts, so their maxima cannot add to
+more than the configured value. The daemon independently owns one wall deadline
+per invocation, one inspection-wide deadline across all serial reader probes,
+and one verification-wide deadline across all configured worker probes. It kills
+the isolated process group on timeout or authoritative cancellation. Bounded
+stderr is drained and discarded; it is never parser evidence, telemetry content,
+or model-visible output.
 
 The worker receives one digest and positive length, then requests exact byte
 ranges over length-delimited standard I/O. The daemon checks every request for
