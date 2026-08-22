@@ -5,6 +5,7 @@ import {
   loadBrowserPreferences,
   MAX_KEY_OVERRIDES,
   MAX_SAVED_LOGICAL_POSITIONS,
+  saveBrowserPreferences,
 } from './preferences'
 
 afterEach(() => vi.unstubAllGlobals())
@@ -22,6 +23,16 @@ describe('browser preferences', () => {
     })
 
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+  })
+
+  it('keeps preferences in memory when browser storage rejects writes', () => {
+    vi.stubGlobal('localStorage', {
+      setItem: () => {
+        throw new DOMException('Storage quota exceeded', 'QuotaExceededError')
+      },
+    })
+
+    expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
   })
 
   it('clamps pane sizes and rejects unknown closed variants', () => {

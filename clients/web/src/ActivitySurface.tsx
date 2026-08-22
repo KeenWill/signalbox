@@ -34,6 +34,23 @@ interface ActivityRow {
   outcome: string
 }
 
+interface RetainedActivityPage {
+  key: string
+  page: WebRepoWatchActivityPage
+}
+
+export const retainActivityPage = (
+  pages: RetainedActivityPage[],
+  key: string,
+  page: WebRepoWatchActivityPage,
+): RetainedActivityPage[] => {
+  const existing = pages.findIndex((candidate) => candidate.key === key)
+  const next = [...pages]
+  if (existing === -1) next.push({ key, page })
+  else next[existing] = { key, page }
+  return next.slice(-8)
+}
+
 // Tunable effective ceiling: virtual rows retain a small viewport overscan.
 const ACTIVITY_OVERSCAN_ROWS = 10
 
@@ -426,7 +443,7 @@ export function ActivitySurface() {
   const [includeEvents, setIncludeEvents] = useState(true)
   const [includeWebhooks, setIncludeWebhooks] = useState(true)
   const [activityPaging, setActivityPaging] = useState(false)
-  const [activityPages, setActivityPages] = useState<WebRepoWatchActivityPage[]>([])
+  const [activityPages, setActivityPages] = useState<RetainedActivityPage[]>([])
   const [filter, setFilter] = useState('')
   const [sort, setSort] = useState<'newest' | 'oldest'>('newest')
 
@@ -517,11 +534,13 @@ export function ActivitySurface() {
 
   useEffect(() => {
     if (!activity.data) return
-    setActivityPages((pages) => {
-      const next = eventBefore || webhookBefore ? [...pages, activity.data] : [activity.data]
-      return next.slice(-8)
-    })
-  }, [activity.data, eventBefore, webhookBefore])
+    const key = JSON.stringify([eventBefore, webhookBefore, includeEvents, includeWebhooks])
+    setActivityPages((pages) =>
+      eventBefore || webhookBefore
+        ? retainActivityPage(pages, key, activity.data)
+        : [{ key, page: activity.data }],
+    )
+  }, [activity.data, eventBefore, includeEvents, includeWebhooks, webhookBefore])
 
   const status = repositories.data?.repositories.find((item) => item.repository === repository)
   const selected = pullRequests.data?.pull_requests.find(
@@ -529,7 +548,8 @@ export function ActivitySurface() {
   )
   const rows = useMemo(() => {
     const unique = new Map<string, ActivityRow>()
-    for (const page of activityPages) {
+    for (const retained of activityPages) {
+      const page = retained.page
       for (const event of page.events) {
         unique.set(`event-${event.id}`, {
           id: `event-${event.id}`,
@@ -621,6 +641,7 @@ export function ActivitySurface() {
               repositories.refetch(),
               pullRequests.refetch(),
               work.refetch(),
+              selectedPullRequest === null ? Promise.resolve() : sessions.refetch(),
               activity.refetch(),
             ])
           }

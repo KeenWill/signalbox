@@ -199,11 +199,15 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
   ): Promise<WebRepoWatchPullRequestPage> {
     const query = new URLSearchParams({ repository })
     if (afterPullRequest) query.set('after_pull_request', afterPullRequest)
-    return this.readJson(
+    const page = await this.readJson(
       this.queryPath('/api/repository-watch/pull-requests', query),
       decodeWebRepoWatchPullRequestPage,
       signal,
     )
+    if (page.repository !== repository) {
+      throw new TypeError('pull-request page repository does not match the requested repository')
+    }
+    return page
   }
 
   async readRepoWatchWork(

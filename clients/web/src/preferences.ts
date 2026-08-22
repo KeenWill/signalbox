@@ -107,5 +107,9 @@ export const loadBrowserPreferences = (): BrowserPreferences => {
 
 export const saveBrowserPreferences = (preferences: BrowserPreferences): void => {
   if (typeof localStorage === 'undefined') return
-  localStorage.setItem(BROWSER_PREFERENCES_KEY, JSON.stringify(preferences))
+  try {
+    localStorage.setItem(BROWSER_PREFERENCES_KEY, JSON.stringify(preferences))
+  } catch {
+    // Keep the in-memory preference when browser storage is denied or full.
+  }
 }

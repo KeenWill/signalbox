@@ -140,6 +140,26 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow('activity_page')
   })
 
+  it('rejects a pull-request page for a different repository', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              repository: 'outside/repository',
+              pull_requests: [],
+              continuation_after_pull_request: null,
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readRepoWatchPullRequests('example/repository'),
+    ).rejects.toThrow('does not match the requested repository')
+  })
+
   it('rejects an activity feed beyond its generated page ceiling', async () => {
     const webhook = {
       action_name: 'opened',

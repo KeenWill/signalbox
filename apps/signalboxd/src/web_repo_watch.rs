@@ -187,6 +187,9 @@ async fn work(State(state): State<RepoWatchApiState>, Query(query): Query<WorkQu
             );
         }
     };
+    let held_after = held_after.map_or(RepoWatchPagePosition::Start, RepoWatchPagePosition::After);
+    let obligation_after =
+        obligation_after.map_or(RepoWatchPagePosition::Start, RepoWatchPagePosition::After);
     match operations
         .work(repository, held_after, obligation_after)
         .await
@@ -252,7 +255,7 @@ async fn activity(
     };
     let webhooks_before = match query
         .webhook_before_receipt_sequence
-        .map(|value| value.parse::<u64>().map_err(|_| ()))
+        .map(|value| postgres_bigint(&value))
         .transpose()
     {
         Ok(cursor) => cursor,
@@ -380,12 +383,20 @@ fn event_cursor(
 ) -> Result<Option<RepoWatchEventCursor>, ()> {
     match (generation, ordinal) {
         (None, None) => Ok(None),
-        (Some(generation), Some(event_ordinal)) => Ok(Some(RepoWatchEventCursor {
-            cursor_generation: generation.parse().map_err(|_| ())?,
-            event_ordinal,
-        })),
+        (Some(generation), Some(event_ordinal)) if i32::try_from(event_ordinal).is_ok() => {
+            Ok(Some(RepoWatchEventCursor {
+                cursor_generation: postgres_bigint(&generation)?,
+                event_ordinal,
+            }))
+        }
         _ => Err(()),
     }
+}
+
+fn postgres_bigint(value: &str) -> Result<u64, ()> {
+    let value = value.parse::<u64>().map_err(|_| ())?;
+    i64::try_from(value).map_err(|_| ())?;
+    Ok(value)
 }
 
 fn unix_milliseconds(value: SystemTime) -> Result<String, ()> {
@@ -725,29 +736,25 @@ fn work_page_dto(page: RepoWatchWorkPage) -> Result<WebRepoWatchWorkPage, ()> {
             .into_iter()
             .map(held_slot_dto)
             .collect::<Result<Vec<_>, _>>()?,
-        held_continuation_after: page
-            .held_continuation_after
-            .map(|cursor| {
-                Ok(WebRepoWatchHeldCursor {
-                    held_since_unix_milliseconds: unix_milliseconds(cursor.held_since)?,
-                    dispatch_id: cursor.dispatch.into_uuid().to_string(),
-                })
-            })
-            .transpose()?,
+        held_continuation_after: match page.held_continuation_after {
+            RepoWatchPagePosition::After(cursor) => Some(WebRepoWatchHeldCursor {
+                held_since_unix_milliseconds: unix_milliseconds(cursor.held_since)?,
+                dispatch_id: cursor.dispatch.into_uuid().to_string(),
+            }),
+            RepoWatchPagePosition::Start | RepoWatchPagePosition::Exhausted => None,
+        },
         queued_obligations: page
             .queued_obligations
             .into_iter()
             .map(obligation_dto)
             .collect::<Result<Vec<_>, _>>()?,
-        obligation_continuation_after: page
-            .obligation_continuation_after
-            .map(|cursor| {
-                Ok(WebRepoWatchObligationCursor {
-                    owed_since_unix_milliseconds: unix_milliseconds(cursor.owed_since)?,
-                    obligation_id: cursor.obligation.into_uuid().to_string(),
-                })
-            })
-            .transpose()?,
+        obligation_continuation_after: match page.obligation_continuation_after {
+            RepoWatchPagePosition::After(cursor) => Some(WebRepoWatchObligationCursor {
+                owed_since_unix_milliseconds: unix_milliseconds(cursor.owed_since)?,
+                obligation_id: cursor.obligation.into_uuid().to_string(),
+            }),
+            RepoWatchPagePosition::Start | RepoWatchPagePosition::Exhausted => None,
+        },
     })
 }
 
@@ -900,7 +907,10 @@ fn projection_error(error: Option<RepoWatchOperationsError>) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{event_cursor, held_cursor, session_cursor, timestamp, validate_activity_window};
+    use super::{
+        event_cursor, held_cursor, postgres_bigint, session_cursor, timestamp,
+        validate_activity_window,
+    };
 
     #[test]
     fn partial_composite_cursors_fail_closed() {
@@ -917,6 +927,15 @@ mod tests {
 
         assert_eq!(cursor.cursor_generation, 9);
         assert_eq!(cursor.event_ordinal, 7);
+    }
+
+    #[test]
+    fn activity_cursors_reject_values_outside_postgres_integer_ranges() {
+        let above_bigint = (i64::MAX as u64 + 1).to_string();
+
+        assert!(postgres_bigint(&above_bigint).is_err());
+        assert!(event_cursor(Some(above_bigint), Some(1)).is_err());
+        assert!(event_cursor(Some("1".to_owned()), Some(i32::MAX as u32 + 1)).is_err());
     }
 
     #[test]
