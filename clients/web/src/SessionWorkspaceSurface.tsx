@@ -86,6 +86,15 @@ export function SessionWorkspaceSurface({
     onTimelineWindowAvailability(session.data !== undefined)
     return () => onTimelineWindowAvailability(false)
   }, [onTimelineWindowAvailability, session.data])
+  useEffect(() => {
+    const windowIds = new Set(
+      session.data?.window.items.map((item) => item.address.event_sequence) ?? [],
+    )
+    setExpanded((current) => {
+      const retained = new Set([...current].filter((id) => windowIds.has(id)))
+      return retained.size === current.size ? current : retained
+    })
+  }, [session.data?.window.items])
   const activeAnchorKind = session.data?.anchor.kind
   const refetchSession = session.refetch
   const navigateTimelineWindow = useCallback(

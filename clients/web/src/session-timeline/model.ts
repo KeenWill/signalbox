@@ -543,7 +543,7 @@ export class BoundedSessionHistory {
       const hasLaterItems =
         decimalAddress(lastItemAddress) <
         decimalAddress(this.descriptorValue.latest_address.event_sequence)
-      if (hasLaterItems !== (window.continuation_after !== null)) {
+      if (hasLaterItems && window.continuation_after === null) {
         throw new TypeError('first timeline window continuation contradicts the descriptor')
       }
     }

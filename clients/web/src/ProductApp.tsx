@@ -6,13 +6,13 @@ import { AlertTriangle, Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } fro
 import {
   type CSSProperties,
   type MouseEvent,
+  type RefObject,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from 'react'
-import { globalHotkeyBindings, globalHotkeySequenceBindings } from './commands'
 import {
   type ProductRouteId,
   productRoutes,
@@ -24,6 +24,7 @@ import {
   type ProductCommandContext,
   type ProductCommandId,
   productCommandRegistry,
+  productHotkeyBindings,
   productHotkeySequenceBindings,
 } from './productCommands'
 import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
@@ -135,7 +136,15 @@ function ProductNavigation({
   )
 }
 
-function CommandPalette({ context }: { context: ProductCommandContext }) {
+function CommandPalette({
+  context,
+  openerRef,
+  fallbackRef,
+}: {
+  context: ProductCommandContext
+  openerRef: RefObject<HTMLElement | null>
+  fallbackRef: RefObject<HTMLElement | null>
+}) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   return (
     <Dialog.Root
@@ -149,6 +158,13 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
         <Dialog.Content
           className="dialog-content product-palette"
           aria-describedby="product-palette-description"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            const opener = openerRef.current
+            if (opener?.isConnected && opener.getClientRects().length > 0) opener.focus()
+            else fallbackRef.current?.focus()
+            openerRef.current = null
+          }}
         >
           <div className="dialog-heading">
             <div>
@@ -347,6 +363,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
   const navigationOpenerRef = useRef<HTMLElement | null>(null)
+  const paletteOpenerRef = useRef<HTMLElement | null>(null)
   const timelineWindowNavigationRef = useRef<(anchor: 'first' | 'latest') => void>(() => {})
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
@@ -382,12 +399,18 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           active instanceof HTMLElement && active !== document.body ? active : null
         dispatch(actions.overlaySet('navigation'))
       },
+      openPalette: () => {
+        const active = document.activeElement
+        paletteOpenerRef.current =
+          active instanceof HTMLElement && active !== document.body ? active : null
+        dispatch(actions.overlaySet('palette'))
+      },
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
     }),
     [dispatch, navigate, surface, timelineIds, timelineWindowAvailable],
   )
   useHotkeys(
-    globalHotkeyBindings.map((binding) => ({
+    productHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
       callback: () => {
         if (binding.commandId === 'surface.escape' || store.getState().app.overlay === null) {
@@ -397,7 +420,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     })),
   )
   useHotkeySequences(
-    [...globalHotkeySequenceBindings, ...productHotkeySequenceBindings].map((binding) => ({
+    productHotkeySequenceBindings.map((binding) => ({
       sequence: [...binding.sequence],
       callback: () => {
         if (store.getState().app.overlay === null) {
@@ -503,7 +526,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           </dl>
         </aside>
       )}
-      <CommandPalette context={context} />
+      <CommandPalette context={context} openerRef={paletteOpenerRef} fallbackRef={primaryRef} />
       <KeyboardHelp context={context} />
       <Dialog.Root
         open={app.overlay === 'navigation'}

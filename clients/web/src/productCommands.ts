@@ -5,6 +5,7 @@ export interface ProductCommandContext extends CommandContext {
   navigate: (path: string) => void
   navigateTimelineWindow: (anchor: 'first' | 'latest') => void
   openNavigation: () => void
+  openPalette: () => void
   timelineWindowAvailable: boolean
 }
 
@@ -14,6 +15,14 @@ const navigateProductSurface = (context: ProductCommandContext, path: string) =>
 }
 
 const productNavigationCommands = [
+  {
+    id: 'palette.open',
+    title: 'Open command palette',
+    description: 'Browse every available application command.',
+    category: 'Surface',
+    bindings: [{ label: 'Mod+K', registration: { kind: 'hotkey', hotkey: 'Mod+K' } }],
+    run: (context: ProductCommandContext) => context.openPalette(),
+  },
   {
     id: 'navigation.open',
     title: 'Open product navigation',
@@ -123,16 +132,25 @@ export const productCommandRegistry = [
   ...commandRegistry.filter(
     (command) =>
       command.id !== 'navigation.open' &&
+      command.id !== 'palette.open' &&
       command.id !== 'selection.first' &&
       command.id !== 'selection.last',
   ),
 ]
 export type ProductCommandId = (typeof productCommandRegistry)[number]['id']
 
-export const productHotkeySequenceBindings = productNavigationCommands.flatMap((command) =>
+export const productHotkeyBindings = productCommandRegistry.flatMap((command) =>
   command.bindings.flatMap((binding) =>
-    binding.registration.kind === 'sequence'
-      ? [{ commandId: command.id, sequence: binding.registration.sequence }]
+    'registration' in binding && binding.registration.kind === 'hotkey'
+      ? [{ commandId: command.id, hotkey: binding.registration.hotkey }]
+      : [],
+  ),
+)
+
+export const productHotkeySequenceBindings = productCommandRegistry.flatMap((command) =>
+  command.bindings.flatMap((binding) =>
+    'registration' in binding && binding.registration.kind === 'sequence'
+      ? [{ commandId: command.id, sequence: [...binding.registration.sequence] }]
       : [],
   ),
 )

@@ -632,6 +632,39 @@ describe('BoundedSessionHistory', () => {
     ).resolves.toMatchObject({ items: [{ address: { event_sequence: appendedAddress } }] })
   })
 
+  it('accepts a first-window continuation created after the descriptor snapshot', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        latest_address: { event_sequence: '1' },
+        observed_through: '1',
+        sizes: { ...descriptor.sizes, item_count: '1' },
+      }),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '1' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 78,
+        continuation_before: null,
+        continuation_after: { event_sequence: '1' },
+      }),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(
+      history.load({ kind: 'first' }, { maxItems: 1, maxBytes: 256 }),
+    ).resolves.toMatchObject({ continuation_after: { event_sequence: '1' } })
+  })
+
   it('rejects a window on the wrong side of a strict anchor', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const source: SessionTimelineSource = {
