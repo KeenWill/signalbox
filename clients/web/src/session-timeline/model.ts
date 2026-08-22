@@ -69,8 +69,16 @@ const boundedLimits = (
   limits: SessionWindowLimits,
   contract: TimelineContractLimits,
 ): SessionWindowLimits => ({
-  maxItems: boundedLimit(limits.maxItems, 1, contract.max_timeline_window_items),
-  maxBytes: boundedLimit(limits.maxBytes, 256, contract.max_timeline_window_bytes),
+  maxItems: boundedLimit(
+    limits.maxItems,
+    1,
+    Math.max(1, Math.min(contract.max_timeline_window_items, MAX_CONTRACT_TIMELINE_WINDOW_ITEMS)),
+  ),
+  maxBytes: boundedLimit(
+    limits.maxBytes,
+    256,
+    Math.max(256, Math.min(contract.max_timeline_window_bytes, MAX_CONTRACT_TIMELINE_WINDOW_BYTES)),
+  ),
 })
 
 const canonicalSessionId = (value: string): string => {
@@ -118,6 +126,16 @@ const cloneTimelineItem = (
 ): WebSessionTimelineWindow['items'][number] => ({
   ...item,
   address: { ...item.address },
+})
+
+const cloneTimelineDescriptor = (
+  descriptor: WebSessionTimelineDescriptor,
+): WebSessionTimelineDescriptor => ({
+  ...descriptor,
+  sizes: { ...descriptor.sizes },
+  first_address: { ...descriptor.first_address },
+  latest_address: { ...descriptor.latest_address },
+  work: { ...descriptor.work },
 })
 
 export class SessionTimelineClientError extends Error {
@@ -201,7 +219,7 @@ export class BoundedSessionHistory {
   }
 
   get descriptor(): WebSessionTimelineDescriptor | undefined {
-    return this.descriptorValue
+    return this.descriptorValue && cloneTimelineDescriptor(this.descriptorValue)
   }
 
   get retained(): WebSessionTimelineWindow['items'] {
@@ -226,8 +244,8 @@ export class BoundedSessionHistory {
     decimalU64(descriptor.sizes.referenced_blob_bytes)
     decimalU64(descriptor.work.active_turn_count)
     decimalU64(descriptor.work.queued_turn_count)
-    this.descriptorValue = descriptor
-    return descriptor
+    this.descriptorValue = cloneTimelineDescriptor(descriptor)
+    return cloneTimelineDescriptor(descriptor)
   }
 
   async load(
@@ -407,7 +425,10 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
         case 'after':
           return Array.from({ length: bounded.maxItems }, (_, offset) => addressed + offset + 1)
         case 'before':
-          return Array.from({ length: bounded.maxItems }, (_, offset) => addressed - offset - 1)
+          return Array.from(
+            { length: bounded.maxItems },
+            (_, offset) => Math.min(addressed, SESSION_FOUNDATION_TOTAL + 1) - offset - 1,
+          )
         case 'around': {
           const candidates = Array.from(
             { length: bounded.maxItems * 2 },
