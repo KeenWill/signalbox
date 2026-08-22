@@ -262,10 +262,17 @@ export class BoundedSessionHistory {
     const anchorAddress =
       'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : undefined
     const bounded = boundedLimits(limits, this.source.limits)
-    const window = await this.source.readWindow(this.sessionId, anchor, bounded, signal)
+    const maxItems = bounded.maxItems
+    const maxBytes = bounded.maxBytes
+    const window = await this.source.readWindow(
+      this.sessionId,
+      anchor,
+      { maxItems, maxBytes },
+      signal,
+    )
     if (canonicalSessionId(window.session_id) !== this.sessionId)
       throw new TypeError('timeline window session mismatch')
-    if (window.items.length > bounded.maxItems) {
+    if (window.items.length > maxItems) {
       throw new TypeError('timeline window exceeds the requested item ceiling')
     }
     if (
@@ -311,7 +318,7 @@ export class BoundedSessionHistory {
     if (projectedStructuredBytes !== window.projected_structured_bytes) {
       throw new TypeError('timeline window byte total does not match its items')
     }
-    if (projectedStructuredBytes > bounded.maxBytes) {
+    if (projectedStructuredBytes > maxBytes) {
       throw new TypeError('timeline window exceeds the requested byte ceiling')
     }
     const firstItemAddress = window.items[0]?.address.event_sequence
