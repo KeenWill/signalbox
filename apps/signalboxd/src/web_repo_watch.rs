@@ -21,8 +21,8 @@ use signalbox_application::{
     RepoWatchPullRequestOperations, RepoWatchPullRequestPage, RepoWatchPullRequestSession,
     RepoWatchPullRequestSessionPage, RepoWatchQueuedObligation, RepoWatchRepositoryStatus,
     RepoWatchRepositoryStatusPage, RepoWatchReviewDecision, RepoWatchSessionCursor,
-    RepoWatchSessionPurpose, RepoWatchWebhookActivity, RepoWatchWebhookDisposition,
-    RepoWatchWebhookWindow, RepoWatchWorkPage,
+    RepoWatchSessionPurpose, RepoWatchSingletonKey, RepoWatchWebhookActivity,
+    RepoWatchWebhookDisposition, RepoWatchWebhookWindow, RepoWatchWorkPage,
 };
 use signalbox_domain::{
     MergeableState, PullRequestNumber, RepoWatchDispatchId, RepoWatchEventKindNameV1,
@@ -629,10 +629,20 @@ fn pull_request_page_dto(
     })
 }
 
+fn singleton_pull_request(singleton: &RepoWatchSingletonKey) -> Option<String> {
+    match singleton {
+        RepoWatchSingletonKey::PullRequest { number, .. } => Some(number.get().to_string()),
+        RepoWatchSingletonKey::Stack {
+            root_pull_request, ..
+        } => Some(root_pull_request.get().to_string()),
+        RepoWatchSingletonKey::Rule | RepoWatchSingletonKey::Repository { .. } => None,
+    }
+}
+
 fn held_slot_dto(slot: RepoWatchHeldSlot) -> Result<WebRepoWatchHeldSlot, ()> {
     Ok(WebRepoWatchHeldSlot {
         dispatch_id: slot.dispatch.into_uuid().to_string(),
-        pull_request: slot.pull_request.map(|number| number.get().to_string()),
+        pull_request: singleton_pull_request(&slot.singleton),
         rule: slot.rule.into_string(),
         held_since_unix_milliseconds: unix_milliseconds(slot.held_since)?,
         session_ids: slot
@@ -675,7 +685,7 @@ fn readiness_dto(
         }
         RepoWatchObligationReadiness::Cooldown { eligible_at } => {
             WebRepoWatchObligationReadiness::Cooldown {
-                eligible_at_unix_milliseconds: unix_milliseconds(eligible_at)?,
+                eligible_at_unix_milliseconds: eligible_at.map(unix_milliseconds).transpose()?,
             }
         }
         RepoWatchObligationReadiness::Parked { parked_at } => {
@@ -691,9 +701,7 @@ fn obligation_dto(
 ) -> Result<WebRepoWatchQueuedObligation, ()> {
     Ok(WebRepoWatchQueuedObligation {
         id: obligation.id.into_uuid().to_string(),
-        pull_request: obligation
-            .pull_request
-            .map(|number| number.get().to_string()),
+        pull_request: singleton_pull_request(&obligation.singleton),
         rule: obligation.rule.into_string(),
         first_event_id: obligation.first_event.into_uuid().to_string(),
         latest_event_id: obligation.latest_event.into_uuid().to_string(),

@@ -469,7 +469,7 @@ pub enum WebRepoWatchObligationReadiness {
         session_ids: Vec<String>,
     },
     Cooldown {
-        eligible_at_unix_milliseconds: String,
+        eligible_at_unix_milliseconds: Option<String>,
     },
     Parked {
         parked_at_unix_milliseconds: String,

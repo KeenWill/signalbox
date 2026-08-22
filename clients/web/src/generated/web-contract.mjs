@@ -1872,7 +1872,10 @@ const schemas = {
           {
             "properties": {
               "eligible_at_unix_milliseconds": {
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "kind": {
                 "const": "cooldown",
@@ -1880,8 +1883,7 @@ const schemas = {
               }
             },
             "required": [
-              "kind",
-              "eligible_at_unix_milliseconds"
+              "kind"
             ],
             "type": "object"
           },
