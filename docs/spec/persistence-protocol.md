@@ -8,7 +8,9 @@ tool-attempt operations is verified against this PR
 automatic-reconciliation transaction deadline is verified against this PR
 (`agent/daemon-live-server-bounded-reconciliation`). Recursive-frontier prefix
 validation is verified against this PR
-(`agent/daemon-live-frontier-validation-materialization`).
+(`agent/daemon-live-frontier-validation-materialization`). Context-compaction
+evidence validation is verified against this PR
+(`agent/daemon-live-context-compaction-validation`).
 
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
@@ -1512,7 +1514,11 @@ unchanged proposal-order and single-result checks admit it as the
 `await_session` result without admitting a second result for the same request.
 Tool-batch outbox decoding and context-compaction evidence count that foreground
 correlation as one tool result; a background result has no tool-result
-correlation and counts as neither one.
+correlation and counts as neither one. Each immutable compaction validates its
+summary's tool balance exactly when it commits. A successor replays prior
+summary structure to derive model-visible order without rescanning those already
+validated balances, then resolves the current boundary's semantic entries
+through their typed source-session and entry key.
 
 An accepted background wait reserves one future recipient delivery position
 until its child result exists. Message and later-wait admission under the same

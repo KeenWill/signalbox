@@ -272,3 +272,40 @@ async fn deep_frontier_prefix_validation_is_bounded_and_exact() -> Result<(), Bo
     drop(container);
     Ok(())
 }
+
+/// INV-015: compaction validates the current model-visible boundary through
+/// typed entry keys and trusts previously committed immutable compactions.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv015_context_compaction_validation_is_current_and_typed() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let validator_shape: (bool, bool, bool) = sqlx::query_as(
+        "SELECT
+            position(
+                'stored compaction summary leaves a tool exchange open'
+                IN pg_get_functiondef(
+                    'require_context_compaction_exact_evidence()'::regprocedure
+                )
+            ) = 0,
+            position(
+                'entry.source_session_id::text'
+                IN pg_get_functiondef(
+                    'require_context_compaction_exact_evidence()'::regprocedure
+                )
+            ) = 0,
+            position(
+                'split_part(visible.reference'
+                IN pg_get_functiondef(
+                    'require_context_compaction_exact_evidence()'::regprocedure
+                )
+            ) > 0",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(validator_shape, (true, true, true));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
