@@ -310,6 +310,54 @@ async fn corpus_registration_requires_nonblank_version() -> Result<(), Box<dyn E
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn corpus_registration_rejects_unicode_whitespace_name() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let corpus_digest = [0_u8; 32];
+    let replay_digest = [0_u8; 32];
+
+    sqlx::query(
+        "INSERT INTO evaluation_corpus (
+            corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
+            source_kind
+         ) VALUES (U&'\00A0', 'v1', 1, $1, $2, 1, 'database_native')",
+    )
+    .bind(corpus_digest.as_slice())
+    .bind(replay_digest.as_slice())
+    .execute(&pool)
+    .await
+    .expect_err("a Unicode-whitespace-only durable name is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn corpus_registration_rejects_unicode_control_version() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let corpus_digest = [0_u8; 32];
+    let replay_digest = [0_u8; 32];
+
+    sqlx::query(
+        "INSERT INTO evaluation_corpus (
+            corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
+            source_kind
+         ) VALUES ('valid-name', U&'v1\0085', 1, $1, $2, 1, 'database_native')",
+    )
+    .bind(corpus_digest.as_slice())
+    .bind(replay_digest.as_slice())
+    .execute(&pool)
+    .await
+    .expect_err("a C1-control-bearing durable version is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn repository_registration_requires_nonblank_repository() -> Result<(), Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let corpus_digest = [0_u8; 32];
@@ -329,6 +377,34 @@ async fn repository_registration_requires_nonblank_repository() -> Result<(), Bo
     .execute(&pool)
     .await
     .expect_err("a durable repository registration with blank provenance is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_registration_rejects_unicode_whitespace_repository()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let corpus_digest = [0_u8; 32];
+    let replay_digest = [0_u8; 32];
+    let source_digest = [0_u8; 32];
+
+    sqlx::query(
+        "INSERT INTO evaluation_corpus (
+            corpus_name, corpus_version, format_version, corpus_digest, replay_digest, case_count,
+            source_kind, source_repository, source_path, source_sha256
+         ) VALUES ('invalid-unicode-repository', 'v1', 1, $1, $2, 1,
+                   'repository', U&'\00A0', 'cases.json', $3)",
+    )
+    .bind(corpus_digest.as_slice())
+    .bind(replay_digest.as_slice())
+    .bind(source_digest.as_slice())
+    .execute(&pool)
+    .await
+    .expect_err("Unicode-whitespace-only durable repository provenance is rejected");
 
     pool.close().await;
     drop(container);
@@ -460,6 +536,29 @@ async fn stored_case_identity_rejects_control_characters() -> Result<(), Box<dyn
     .execute(&pool)
     .await
     .expect_err("a control-bearing durable case identity is rejected");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stored_case_identity_rejects_unicode_control_character() -> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    let database = DatabaseCorpusStore::new(pool.clone());
+    let imported = database.import_manifest(seed_manifest_path()).await?;
+
+    sqlx::query(
+        "UPDATE evaluation_corpus_case
+            SET case_id = U&'control\0085identity'
+          WHERE corpus_name = $1 AND corpus_version = $2 AND replay_position = 0",
+    )
+    .bind(&imported.key().name)
+    .bind(&imported.key().version)
+    .execute(&pool)
+    .await
+    .expect_err("a C1-control-bearing durable case identity is rejected");
 
     pool.close().await;
     drop(container);

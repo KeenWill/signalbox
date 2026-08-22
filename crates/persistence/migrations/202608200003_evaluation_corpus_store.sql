@@ -12,6 +12,31 @@ RETURN (
     FROM unnest(string_to_array(source_path, '/')) AS component
 );
 
+-- Mirrors Rust's Unicode whitespace and control-character admission
+-- independently of the database collation and locale.
+CREATE FUNCTION evaluation_corpus_text_is_nonblank_control_free(value text)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+STRICT
+RETURN (
+    NOT EXISTS (
+        SELECT 1
+        FROM unnest(string_to_array(value, NULL)) AS character
+        WHERE ascii(character) BETWEEN 0 AND 31
+           OR ascii(character) BETWEEN 127 AND 159
+    )
+    AND EXISTS (
+        SELECT 1
+        FROM unnest(string_to_array(value, NULL)) AS character
+        WHERE ascii(character) NOT IN (
+            9, 10, 11, 12, 13, 32, 133, 160, 5760,
+            8232, 8233, 8239, 8287, 12288
+        )
+        AND ascii(character) NOT BETWEEN 8192 AND 8202
+    )
+);
+
 CREATE TABLE evaluation_corpus (
     corpus_name text COLLATE "C" NOT NULL,
     corpus_version text COLLATE "C" NOT NULL,
@@ -33,14 +58,12 @@ CREATE TABLE evaluation_corpus (
     CONSTRAINT evaluation_corpus_name_bounded
         CHECK (
             octet_length(corpus_name) BETWEEN 1 AND 128
-            AND corpus_name !~ '^[[:space:]]*$'
-            AND corpus_name !~ '[[:cntrl:]]'
+            AND evaluation_corpus_text_is_nonblank_control_free(corpus_name)
         ),
     CONSTRAINT evaluation_corpus_version_bounded
         CHECK (
             octet_length(corpus_version) BETWEEN 1 AND 128
-            AND corpus_version !~ '^[[:space:]]*$'
-            AND corpus_version !~ '[[:cntrl:]]'
+            AND evaluation_corpus_text_is_nonblank_control_free(corpus_version)
         ),
     CONSTRAINT evaluation_corpus_format_version_supported
         CHECK (format_version = 1),
@@ -58,12 +81,11 @@ CREATE TABLE evaluation_corpus (
                 source_kind = 'repository'
                 AND source_repository IS NOT NULL
                 AND octet_length(source_repository) BETWEEN 1 AND 2048
-                AND source_repository !~ '^[[:space:]]*$'
-                AND source_repository !~ '[[:cntrl:]]'
+                AND evaluation_corpus_text_is_nonblank_control_free(source_repository)
                 AND source_path IS NOT NULL
                 AND octet_length(source_path) BETWEEN 1 AND 1024
-                AND source_path !~ '^[[:space:]]*$'
-                AND source_path !~ '[[:cntrl:]<>:"|?*]'
+                AND evaluation_corpus_text_is_nonblank_control_free(source_path)
+                AND source_path !~ '[<>:"|?*]'
                 AND strpos(source_path, chr(92)) = 0
                 AND source_path !~ '^/'
                 AND source_path !~ '/$'
@@ -122,8 +144,7 @@ CREATE TABLE evaluation_corpus_case (
     CONSTRAINT evaluation_corpus_case_identity_bounded
         CHECK (
             octet_length(case_id) BETWEEN 1 AND 128
-            AND case_id !~ '^[[:space:]]*$'
-            AND case_id !~ '[[:cntrl:]]'
+            AND evaluation_corpus_text_is_nonblank_control_free(case_id)
         ),
     CONSTRAINT evaluation_corpus_case_position_nonnegative
         CHECK (replay_position >= 0),
