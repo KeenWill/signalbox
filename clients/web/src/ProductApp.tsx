@@ -198,7 +198,12 @@ function KeyboardHelp({ context }: { context: ProductCommandContext }) {
           </div>
           <div className="command-list">
             {productCommandRegistry
-              .filter((command) => command.id !== 'surface.escape' && command.bindings.length > 0)
+              .filter(
+                (command) =>
+                  command.id !== 'surface.escape' &&
+                  command.bindings.length > 0 &&
+                  (!('available' in command) || command.available(context)),
+              )
               .map((command) => (
                 <div key={command.id}>
                   <span>
@@ -317,8 +322,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
-  const timelineRef = useRef<HTMLOListElement>(null)
+  const timelineRef = useRef<HTMLDivElement>(null)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
+  const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
   const [windowRequest, setWindowRequest] = useState<{
     anchor: 'first' | 'latest'
     attempt: number
@@ -335,12 +341,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       dispatch,
       getState: store.getState,
       timelineIds,
+      timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
       focusTimeline: () => (timelineRef.current ?? primaryRef.current)?.focus(),
       loadTimelineWindow: (anchor) =>
         setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
     }),
-    [dispatch, navigate, timelineIds],
+    [dispatch, navigate, surface, timelineIds, timelineWindowAvailable],
   )
   useHotkeys(
     productHotkeyBindings.map((binding) => ({
@@ -375,6 +382,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     ) : surface === 'sessions' ? (
       <SessionWorkspaceSurface
         onTimelineIds={updateTimelineIds}
+        onTimelineWindowAvailable={setTimelineWindowAvailable}
         onWindowRequestConsumed={consumeWindowRequest}
         timelineRef={timelineRef}
         windowRequest={windowRequest}

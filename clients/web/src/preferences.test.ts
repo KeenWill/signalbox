@@ -34,7 +34,7 @@ describe('browser preferences', () => {
     const lastLogicalPositions = Object.fromEntries(
       Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS + 3 }, (_, index) => [
         `session-${index}`,
-        `cursor-${index}`,
+        String(index + 1),
       ]),
     )
     const keyOverrides = Object.fromEntries(
@@ -48,6 +48,19 @@ describe('browser preferences', () => {
 
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
     expect(Object.keys(decoded.keyOverrides)).toHaveLength(MAX_KEY_OVERRIDES)
+  })
+
+  it('discards malformed saved logical positions', () => {
+    const decoded = decodeBrowserPreferences({
+      lastLogicalPositions: {
+        valid: '42',
+        zero: '0',
+        malformed: 'not-a-position',
+        overflow: '18446744073709551616',
+      },
+    })
+
+    expect(decoded.lastLogicalPositions).toEqual({ valid: '42' })
   })
 
   it('falls back to in-memory preferences when browser storage is unavailable', () => {

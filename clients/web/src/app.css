@@ -1201,6 +1201,7 @@ kbd {
 
 .session-workspace-surface {
   display: grid;
+  align-content: start;
   gap: 12px;
 }
 .session-open-form {
@@ -1341,11 +1342,11 @@ kbd {
   background: var(--border);
   list-style: none;
 }
-.session-timeline li {
+.session-timeline [role="option"] {
   background: var(--surface-2);
   box-shadow: inset 2px 0 transparent;
 }
-.session-timeline li.selected {
+.session-timeline [role="option"].selected {
   background: var(--accent-muted);
   box-shadow: inset 2px 0 var(--accent);
 }

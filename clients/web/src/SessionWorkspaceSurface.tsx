@@ -1,13 +1,22 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
-import { type FormEvent, type RefObject, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  type RefObject,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import { invokeCommand } from './commands'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import {
   BoundedSessionHistory,
   HttpSessionTimelineSource,
   type SessionWindowAnchor,
 } from './session-timeline/model'
-import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
+import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const NATIVE_SESSION_ID_PATTERN = String.raw`\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\s*`
@@ -34,13 +43,15 @@ export const visibleSessionItems = (
 
 export function SessionWorkspaceSurface({
   onTimelineIds,
+  onTimelineWindowAvailable,
   onWindowRequestConsumed,
   timelineRef,
   windowRequest,
 }: {
   onTimelineIds: (ids: readonly string[]) => void
+  onTimelineWindowAvailable: (available: boolean) => void
   onWindowRequestConsumed: () => void
-  timelineRef: RefObject<HTMLOListElement | null>
+  timelineRef: RefObject<HTMLDivElement | null>
   windowRequest: { anchor: 'first' | 'latest'; attempt: number } | null
 }) {
   const dispatch = useAppDispatch()
@@ -51,7 +62,7 @@ export function SessionWorkspaceSurface({
   const [openingPosition, setOpeningPosition] = useState<string | undefined>()
   const [attempt, setAttempt] = useState(0)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
-  const rowRefs = useRef(new Map<string, HTMLLIElement>())
+  const rowRefs = useRef(new Map<string, HTMLDivElement>())
   const session = useQuery({
     queryKey: [
       'production',
@@ -88,6 +99,11 @@ export function SessionWorkspaceSurface({
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
+  useEffect(
+    () => onTimelineWindowAvailable(session.data !== undefined),
+    [onTimelineWindowAvailable, session.data],
+  )
+  useEffect(() => () => onTimelineWindowAvailable(false), [onTimelineWindowAvailable])
   useEffect(() => {
     if (windowRequest === null || sessionId === null) return
     setManualAnchor({ kind: windowRequest.anchor })
@@ -122,8 +138,35 @@ export function SessionWorkspaceSurface({
     setSessionId(candidate)
   }
   const selected = app.selectedTimeline
+  const loadWindow = (anchor: 'first' | 'latest') => {
+    setManualAnchor({ kind: anchor })
+    setAttempt((current) => current + 1)
+  }
   const select = (eventSequence: string) => {
     dispatch(actions.timelineSelected(eventSequence))
+  }
+  const handleTimelineKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const command = {
+      ArrowDown: 'selection.next',
+      ArrowUp: 'selection.previous',
+      Home: 'selection.first',
+      End: 'selection.last',
+    }[event.key] as
+      | 'selection.next'
+      | 'selection.previous'
+      | 'selection.first'
+      | 'selection.last'
+      | undefined
+    if (!command) return
+    event.preventDefault()
+    invokeCommand(command, {
+      dispatch,
+      getState: store.getState,
+      timelineIds,
+      timelineWindowAvailable: session.data !== undefined,
+      focusTimeline: () => timelineRef.current?.focus(),
+      loadTimelineWindow: loadWindow,
+    })
   }
   const toggleExpanded = (eventSequence: string) => {
     const next = new Set(expanded)
@@ -204,22 +247,10 @@ export function SessionWorkspaceSurface({
             </dl>
           </header>
           <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
-            <button
-              type="button"
-              onClick={() => {
-                setManualAnchor({ kind: 'first' })
-                setAttempt((current) => current + 1)
-              }}
-            >
+            <button type="button" onClick={() => loadWindow('first')}>
               <SkipBack aria-hidden="true" /> First <kbd>gg</kbd>
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                setManualAnchor({ kind: 'latest' })
-                setAttempt((current) => current + 1)
-              }}
-            >
+            <button type="button" onClick={() => loadWindow('latest')}>
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
             </button>
             <span>
@@ -227,18 +258,29 @@ export function SessionWorkspaceSurface({
               {session.data.window.projected_structured_bytes} B
             </span>
           </div>
-          <ol
+          <div
             className="session-timeline"
             aria-label="Session timeline"
+            aria-activedescendant={
+              selected !== null && timelineIds.includes(selected)
+                ? `session-timeline-option-${selected}`
+                : undefined
+            }
             ref={timelineRef}
+            role="listbox"
             tabIndex={-1}
+            onKeyDown={handleTimelineKeyDown}
           >
             {items.map((item) => {
               const id = item.address.event_sequence
               const isExpanded = expanded.has(id)
               return (
-                <li
+                <div
+                  id={`session-timeline-option-${id}`}
                   key={id}
+                  role="option"
+                  aria-selected={selected === id}
+                  tabIndex={-1}
                   ref={(node) => {
                     if (node) rowRefs.current.set(id, node)
                     else rowRefs.current.delete(id)
@@ -277,10 +319,10 @@ export function SessionWorkspaceSurface({
                       </div>
                     </dl>
                   )}
-                </li>
+                </div>
               )
             })}
-          </ol>
+          </div>
         </section>
       )}
     </div>

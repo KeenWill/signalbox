@@ -43,14 +43,23 @@ const boundedNumber = (value: unknown, fallback: number, minimum: number, maximu
     ? Math.min(Math.max(Math.round(value), minimum), maximum)
     : fallback
 
-const boundedRecord = (value: unknown, maximum: number): Record<string, string> => {
+const boundedRecord = (
+  value: unknown,
+  maximum: number,
+  accepts: (entry: string) => boolean = () => true,
+): Record<string, string> => {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
   return Object.fromEntries(
     Object.entries(value)
-      .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+      .filter(
+        (entry): entry is [string, string] => typeof entry[1] === 'string' && accepts(entry[1]),
+      )
       .slice(-maximum),
   )
 }
+
+const isPositiveDecimalU64 = (value: string): boolean =>
+  /^[1-9]\d{0,19}$/.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n
 
 export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => {
   const candidate =
@@ -96,6 +105,7 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
     lastLogicalPositions: boundedRecord(
       candidate.lastLogicalPositions,
       MAX_SAVED_LOGICAL_POSITIONS,
+      isPositiveDecimalU64,
     ),
     keyOverrides: boundedRecord(candidate.keyOverrides, MAX_KEY_OVERRIDES),
   }

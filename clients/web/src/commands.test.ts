@@ -38,4 +38,21 @@ describe('command registry', () => {
 
     expect(loaded).toEqual(['first', 'latest'])
   })
+
+  it('keeps server-window boundary commands available when Results has no visible rows', () => {
+    const loaded: Array<'first' | 'latest'> = []
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      timelineWindowAvailable: true,
+      focusTimeline: () => undefined,
+      loadTimelineWindow: (anchor: 'first' | 'latest') => loaded.push(anchor),
+    }
+
+    invokeCommand('selection.first', context)
+    invokeCommand('selection.last', context)
+
+    expect(loaded).toEqual(['first', 'latest'])
+  })
 })

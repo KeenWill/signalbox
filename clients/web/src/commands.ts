@@ -6,6 +6,7 @@ export interface CommandContext {
   dispatch: AppDispatch
   getState: () => RootState
   timelineIds: readonly string[]
+  timelineWindowAvailable?: boolean
   focusTimeline: () => void
   loadTimelineWindow?: (anchor: 'first' | 'latest') => void
 }
@@ -109,7 +110,8 @@ export const commandRegistry = [
       { label: 'g g', registration: { kind: 'sequence', sequence: ['G', 'G'] } },
       { label: 'Home' },
     ],
-    available: (context) => context.timelineIds.length > 0,
+    available: (context) =>
+      context.timelineIds.length > 0 || context.timelineWindowAvailable === true,
     run: (context) => {
       if (context.loadTimelineWindow) context.loadTimelineWindow('first')
       else context.dispatch(actions.timelineSelected(context.timelineIds[0] ?? null))
@@ -124,7 +126,8 @@ export const commandRegistry = [
       { label: 'G', registration: { kind: 'hotkey', hotkey: 'Shift+G' } },
       { label: 'End' },
     ],
-    available: (context) => context.timelineIds.length > 0,
+    available: (context) =>
+      context.timelineIds.length > 0 || context.timelineWindowAvailable === true,
     run: (context) => {
       if (context.loadTimelineWindow) context.loadTimelineWindow('latest')
       else context.dispatch(actions.timelineSelected(context.timelineIds.at(-1) ?? null))
