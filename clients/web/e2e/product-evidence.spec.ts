@@ -11,20 +11,51 @@ const bootstrapFixture = {
   capabilities: {
     bounded_json: true,
     bounded_session_timeline: true,
+    bounded_session_timeline_detail: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
   limits: {
     max_json_body_bytes: 65_536,
     max_ndjson_item_bytes: 262_144,
+    max_timeline_detail_items: 128,
+    max_timeline_detail_bytes: 65_536,
     max_timeline_window_items: 256,
     max_timeline_window_bytes: 65_536,
   },
 } as const
 
+const sessionDetailText =
+  'Inspect the current bounded timeline region and preserve stable navigation.'
+const sessionDetailBytes = new TextEncoder().encode(sessionDetailText).byteLength
+
 const sessionEvidenceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
   itemCount: '1000000',
+  detailAddress: '999998',
+  detail: {
+    session_id: '00000000-0000-0000-0000-000000000991',
+    items: [
+      {
+        address: { event_sequence: '999998' },
+        kind: 'input_accepted',
+        body: {
+          type: 'user_input',
+          turn_id: '00000000-0000-0000-0000-000000999998',
+          text: {
+            text: sessionDetailText,
+            offset_bytes: '0',
+            total_bytes: String(sessionDetailBytes),
+            continuation: null,
+          },
+          attachments: [],
+        },
+        projected_body_bytes: sessionDetailBytes,
+      },
+    ],
+    projected_body_bytes: sessionDetailBytes,
+    continuation: null,
+  },
 } as const
 
 const attentionEvidence = { path: '/attention', title: 'Attention', snapshot: 'attention' } as const
@@ -58,14 +89,18 @@ const watchBrowser = (page: Page) => {
 
 const useDeterministicSession = (page: Page) =>
   page.route('**/api/sessions/**', (route) => {
-    if (new URL(route.request().url()).pathname.endsWith('/timeline')) {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith(`/${sessionEvidenceFixture.detailAddress}/detail`)) {
+      return route.fulfill({ json: sessionEvidenceFixture.detail })
+    }
+    if (path.endsWith('/timeline')) {
       return route.fulfill({
         json: {
           session_id: sessionEvidenceFixture.id,
           items: [
             {
               address: { event_sequence: '999998' },
-              kind: 'tool_batch_transition',
+              kind: 'input_accepted',
               projected_structured_bytes: 96,
             },
             {
@@ -136,9 +171,19 @@ const captureSessionEvidence = async (page: Page) => {
   await page.getByRole('button', { name: 'Open workspace' }).click()
   await expect(page.getByRole('heading', { name: sessionEvidenceFixture.id })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
-  await expect(page).toHaveScreenshot('sessions-desktop-dark.png', { animations: 'disabled' })
+  const detail = page.getByRole('button', {
+    name: new RegExp(`${sessionEvidenceFixture.detailAddress} input accepted`),
+  })
+  await detail.focus()
+  await page.keyboard.press('Enter')
+  await expect(page.getByText(sessionEvidenceFixture.detail.items[0].body.text.text)).toBeVisible()
+  await expect(page).toHaveScreenshot('sessions-detail-desktop-dark.png', {
+    animations: 'disabled',
+  })
   await page.getByRole('button', { name: 'Use light theme' }).click()
-  await expect(page).toHaveScreenshot('sessions-desktop-light.png', { animations: 'disabled' })
+  await expect(page).toHaveScreenshot('sessions-detail-desktop-light.png', {
+    animations: 'disabled',
+  })
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
   await expect(page).toHaveScreenshot('sessions-mobile-light.png', { animations: 'disabled' })

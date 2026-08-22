@@ -1372,10 +1372,83 @@ kbd {
 }
 .session-item-detail {
   display: grid;
-  grid-template-columns: minmax(180px, 0.8fr) 1fr;
-  gap: 18px;
+  gap: 8px;
+  padding: 2px 34px 12px 98px;
+}
+.session-detail-state {
   margin: 0;
-  padding: 2px 34px 10px 98px;
+  padding: 4px 34px 12px 98px;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+.session-detail-record {
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+}
+.session-detail-record-heading,
+.session-detail-text header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.65rem;
+}
+.session-detail-record-heading span,
+.session-detail-text header span,
+.session-detail-note {
+  color: var(--text-muted);
+}
+.session-detail-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(90px, 1fr));
+  gap: 1px;
+  margin: 0;
+  background: var(--border);
+}
+.session-detail-facts div {
+  min-width: 0;
+  padding: 7px 8px;
+  background: var(--surface-2);
+}
+.session-detail-facts dd {
+  overflow-wrap: anywhere;
+}
+.session-detail-text pre {
+  max-height: 240px;
+  margin: 0;
+  padding: 9px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font:
+    0.72rem / 1.45 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
+.session-detail-attachments {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 8px;
+  list-style: none;
+}
+.session-detail-attachments li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.65rem;
+}
+.session-detail-note {
+  margin: 0;
+  padding: 9px;
+  font-size: 0.7rem;
+}
+.session-detail-continue {
+  justify-self: start;
 }
 
 @media (max-width: 760px) {
@@ -1401,7 +1474,15 @@ kbd {
     display: none;
   }
   .session-item-detail {
-    grid-template-columns: 1fr;
     padding-left: 84px;
+  }
+  .session-detail-state {
+    padding-left: 84px;
+  }
+  .session-detail-facts {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .session-detail-attachments li {
+    display: grid;
   }
 }

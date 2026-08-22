@@ -395,4 +395,146 @@ describe('BoundedSessionHistory', () => {
       },
     })
   })
+
+  it('reads typed item detail and carries an explicit body continuation', async () => {
+    const detailAddress = '41'
+    const detailLimits = { maxItems: 1, maxBytes: 1024 }
+    const bodyContinuation = {
+      type: 'more_body',
+      body: {
+        address: { event_sequence: detailAddress },
+        field: 'input_text',
+        member_index: 0,
+        offset_bytes: '5',
+      },
+    } as const
+    const firstPageFixture = {
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: detailAddress },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: {
+              text: 'hello',
+              offset_bytes: '0',
+              total_bytes: '11',
+              continuation: bodyContinuation.body,
+            },
+            attachments: [],
+          },
+          projected_body_bytes: 5,
+        },
+      ],
+      projected_body_bytes: 5,
+      continuation: bodyContinuation,
+    } as const
+    const secondPageFixture = {
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: detailAddress },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: firstPageFixture.items[0].body.turn_id,
+            text: {
+              text: ' world',
+              offset_bytes: bodyContinuation.body.offset_bytes,
+              total_bytes: firstPageFixture.items[0].body.text.total_bytes,
+              continuation: null,
+            },
+            attachments: [],
+          },
+          projected_body_bytes: 6,
+        },
+      ],
+      projected_body_bytes: 6,
+      continuation: null,
+    } as const
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            contract: { name: 'signalbox.web-http', version: '1' },
+            capabilities: {
+              bounded_json: true,
+              same_origin_json_mutations: true,
+              ndjson_streaming: true,
+              bounded_session_timeline: true,
+              bounded_session_timeline_detail: true,
+            },
+            limits: {
+              max_json_body_bytes: 1024,
+              max_ndjson_item_bytes: 1024,
+              max_timeline_window_items: 256,
+              max_timeline_window_bytes: 64 * 1024,
+              max_timeline_detail_items: 128,
+              max_timeline_detail_bytes: 64 * 1024,
+            },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify(firstPageFixture)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(secondPageFixture)))
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    const first = await source.readItemDetail(sessionId, detailAddress, detailLimits)
+    const second = await source.readItemDetail(
+      sessionId,
+      detailAddress,
+      detailLimits,
+      first.continuation ?? undefined,
+    )
+    const firstUrl = new URL(String(request.mock.calls[1]?.[0]), 'http://signalbox.test')
+    const secondUrl = new URL(String(request.mock.calls[2]?.[0]), 'http://signalbox.test')
+
+    expect(first).toEqual(firstPageFixture)
+    expect(second).toEqual(secondPageFixture)
+    expect(firstUrl.pathname).toBe(`/api/sessions/${sessionId}/timeline/${detailAddress}/detail`)
+    expect(firstUrl.searchParams.get('max_items')).toBe(String(detailLimits.maxItems))
+    expect(firstUrl.searchParams.get('max_bytes')).toBe(String(detailLimits.maxBytes))
+    expect(secondUrl.searchParams.get('cursor_address')).toBe(
+      bodyContinuation.body.address.event_sequence,
+    )
+    expect(secondUrl.searchParams.get('cursor_field')).toBe(bodyContinuation.body.field)
+    expect(secondUrl.searchParams.get('cursor_member')).toBe(
+      String(bodyContinuation.body.member_index),
+    )
+    expect(secondUrl.searchParams.get('cursor_offset')).toBe(bodyContinuation.body.offset_bytes)
+  })
+
+  it('fails closed when item detail capability is unavailable', async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          contract: { name: 'signalbox.web-http', version: '1' },
+          capabilities: {
+            bounded_json: true,
+            same_origin_json_mutations: true,
+            ndjson_streaming: true,
+            bounded_session_timeline: true,
+            bounded_session_timeline_detail: false,
+          },
+          limits: {
+            max_json_body_bytes: 1024,
+            max_ndjson_item_bytes: 1024,
+            max_timeline_window_items: 256,
+            max_timeline_window_bytes: 64 * 1024,
+            max_timeline_detail_items: 128,
+            max_timeline_detail_bytes: 64 * 1024,
+          },
+        }),
+      ),
+    )
+    const source = await HttpSessionTimelineSource.connect(request)
+
+    await expect(
+      source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('detail capability is unavailable')
+    expect(request).toHaveBeenCalledTimes(1)
+  })
 })

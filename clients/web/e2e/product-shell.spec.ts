@@ -5,12 +5,15 @@ const bootstrapFixture = {
   capabilities: {
     bounded_json: true,
     bounded_session_timeline: true,
+    bounded_session_timeline_detail: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
   },
   limits: {
     max_json_body_bytes: 65_536,
     max_ndjson_item_bytes: 262_144,
+    max_timeline_detail_items: 128,
+    max_timeline_detail_bytes: 65_536,
     max_timeline_window_items: 256,
     max_timeline_window_bytes: 65_536,
   },
@@ -22,6 +25,85 @@ const sessionWorkspaceFixture = {
   latestAddress: '43',
   itemCount: '1000000',
   projectedBytes: 288,
+  detail: {
+    session_id: '00000000-0000-0000-0000-000000000991',
+    items: [
+      {
+        address: { event_sequence: '43' },
+        kind: 'turn_completed',
+        body: {
+          type: 'turn_lifecycle',
+          turn_id: '00000000-0000-0000-0000-000000000043',
+          lifecycle: 'terminalized',
+          cause_code: 'completed',
+        },
+        projected_body_bytes: 64,
+      },
+    ],
+    projected_body_bytes: 64,
+    continuation: null,
+  },
+  inputDetail: {
+    first: {
+      session_id: '00000000-0000-0000-0000-000000000991',
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: {
+              text: 'bounded ',
+              offset_bytes: '0',
+              total_bytes: '14',
+              continuation: {
+                address: { event_sequence: '41' },
+                field: 'input_text',
+                member_index: 0,
+                offset_bytes: '8',
+              },
+            },
+            attachments: [],
+          },
+          projected_body_bytes: 8,
+        },
+      ],
+      projected_body_bytes: 8,
+      continuation: {
+        type: 'more_body',
+        body: {
+          address: { event_sequence: '41' },
+          field: 'input_text',
+          member_index: 0,
+          offset_bytes: '8',
+        },
+      },
+    },
+    second: {
+      session_id: '00000000-0000-0000-0000-000000000991',
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: {
+              text: 'detail',
+              offset_bytes: '8',
+              total_bytes: '14',
+              continuation: null,
+            },
+            attachments: [],
+          },
+          projected_body_bytes: 6,
+        },
+      ],
+      projected_body_bytes: 6,
+      continuation: null,
+    },
+  },
 } as const
 
 const settingsPreferenceFixture = {
@@ -36,7 +118,19 @@ const useDeterministicBootstrap = (page: Page) =>
 
 const useDeterministicSession = async (page: Page) => {
   await page.route('**/api/sessions/**', (route) => {
-    if (new URL(route.request().url()).pathname.endsWith('/timeline')) {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith(`/${sessionWorkspaceFixture.firstAddress}/detail`)) {
+      const cursor = new URL(route.request().url()).searchParams.get('cursor_offset')
+      return route.fulfill({
+        json: cursor
+          ? sessionWorkspaceFixture.inputDetail.second
+          : sessionWorkspaceFixture.inputDetail.first,
+      })
+    }
+    if (path.endsWith(`/${sessionWorkspaceFixture.latestAddress}/detail`)) {
+      return route.fulfill({ json: sessionWorkspaceFixture.detail })
+    }
+    if (path.endsWith('/timeline')) {
       return route.fulfill({
         json: {
           session_id: sessionWorkspaceFixture.id,
@@ -184,10 +278,42 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
-  const completed = page.getByRole('button', { name: /43 turn completed/ })
+  const completed = page.getByRole('button', {
+    name: new RegExp(`${sessionWorkspaceFixture.latestAddress} turn completed`),
+  })
   await completed.focus()
   await page.keyboard.press('Enter')
   await expect(completed).toHaveAttribute('aria-expanded', 'true')
-  await expect(page.getByText('Header only; rich event detail is not exposed')).toBeVisible()
+  await expect(page.getByText(sessionWorkspaceFixture.detail.items[0].body.lifecycle)).toBeVisible()
+  await expect(
+    page.getByText(sessionWorkspaceFixture.detail.items[0].body.cause_code, { exact: true }),
+  ).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('continues an oversized typed body without retaining an unbounded page', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/sessions')
+  await page.getByRole('textbox', { name: 'Exact session ID' }).fill(sessionWorkspaceFixture.id)
+  await page.getByRole('textbox', { name: 'Exact session ID' }).press('Enter')
+  const input = page.getByRole('button', {
+    name: new RegExp(`${sessionWorkspaceFixture.firstAddress} input accepted`),
+  })
+  await input.focus()
+  await page.keyboard.press('Enter')
+  const inputDetail = page.getByRole('region', { name: 'User input' })
+  const firstChunk = sessionWorkspaceFixture.inputDetail.first.items[0].body.text.text.trim()
+  await expect(inputDetail.getByText(firstChunk, { exact: true })).toBeVisible()
+  const continueDetail = page.getByRole('button', { name: 'Load next bounded detail chunk' })
+  await continueDetail.focus()
+  await page.keyboard.press('Enter')
+  await expect(
+    inputDetail.getByText(sessionWorkspaceFixture.inputDetail.second.items[0].body.text.text, {
+      exact: true,
+    }),
+  ).toBeVisible()
+  await expect(inputDetail.getByText(firstChunk, { exact: true })).toBeHidden()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

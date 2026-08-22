@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
+import { SessionItemDetail } from './SessionItemDetail'
 import { HttpSessionTimelineSource, type SessionWindowAnchor } from './session-timeline/model'
 import { actions, selectApp, useAppDispatch, useAppSelector } from './state'
 
@@ -48,7 +49,7 @@ export function SessionWorkspaceSurface({
         { maxItems: SESSION_WINDOW_ITEMS, maxBytes: SESSION_WINDOW_BYTES },
         signal,
       )
-      return { active, descriptor, window: timelineWindow }
+      return { active, descriptor, source, window: timelineWindow }
     },
     enabled: sessionId !== null,
   })
@@ -110,8 +111,9 @@ export function SessionWorkspaceSurface({
             <span className="availability-tag ready">Timeline reads available</span>
             <h2 id="session-entry-heading">Open a known session by immutable identity</h2>
             <p>
-              This branch provides bounded descriptor and timeline reads, but no session catalog,
-              creation operation, or live follow channel. Enter an exact server-issued ID.
+              This branch provides bounded descriptor, timeline, and typed detail reads, but no
+              session catalog, creation operation, or live follow channel. Enter an exact
+              server-issued ID.
             </p>
           </div>
         </section>
@@ -189,18 +191,11 @@ export function SessionWorkspaceSurface({
                     <small>{item.projected_structured_bytes} B</small>
                   </button>
                   {isExpanded && (
-                    <dl className="session-item-detail">
-                      <div>
-                        <dt>Address</dt>
-                        <dd>
-                          {sessionId}:{id}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Projection</dt>
-                        <dd>Header only; rich event detail is not exposed</dd>
-                      </div>
-                    </dl>
+                    <SessionItemDetail
+                      source={session.data.source}
+                      sessionId={sessionId}
+                      item={item}
+                    />
                   )}
                 </li>
               )
