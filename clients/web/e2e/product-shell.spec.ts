@@ -21,7 +21,7 @@ const sessionWorkspaceFixture = {
   firstAddress: '41',
   latestAddress: '43',
   itemCount: '1000000',
-  projectedBytes: 288,
+  projectedBytes: 234,
 } as const
 
 const settingsPreferenceFixture = {
@@ -44,17 +44,17 @@ const useDeterministicSession = async (page: Page) => {
             {
               address: { event_sequence: '41' },
               kind: 'input_accepted',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: 78,
             },
             {
               address: { event_sequence: '42' },
               kind: 'turn_activated',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: 78,
             },
             {
               address: { event_sequence: '43' },
               kind: 'turn_completed',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: 78,
             },
           ],
           projected_structured_bytes: sessionWorkspaceFixture.projectedBytes,
