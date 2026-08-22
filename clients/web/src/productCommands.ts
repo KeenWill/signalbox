@@ -94,9 +94,36 @@ const productNavigationCommands = [
   },
 ] as const
 
+const productTimelineCommands = [
+  {
+    id: 'selection.first',
+    title: 'Open first session window',
+    description: 'Load the server window containing the first session item.',
+    category: 'Navigate',
+    bindings: [{ label: 'g g', registration: { kind: 'sequence', sequence: ['G', 'G'] } }],
+    available: (context: ProductCommandContext) => context.timelineIds.length > 0,
+    run: (context: ProductCommandContext) => context.navigateTimelineWindow('first'),
+  },
+  {
+    id: 'selection.last',
+    title: 'Open latest session window',
+    description: 'Load the server window containing the latest session item.',
+    category: 'Navigate',
+    bindings: [{ label: 'G', registration: { kind: 'hotkey', hotkey: 'Shift+G' } }],
+    available: (context: ProductCommandContext) => context.timelineIds.length > 0,
+    run: (context: ProductCommandContext) => context.navigateTimelineWindow('latest'),
+  },
+] as const
+
 export const productCommandRegistry = [
   ...productNavigationCommands,
-  ...commandRegistry.filter((command) => command.id !== 'navigation.open'),
+  ...productTimelineCommands,
+  ...commandRegistry.filter(
+    (command) =>
+      command.id !== 'navigation.open' &&
+      command.id !== 'selection.first' &&
+      command.id !== 'selection.last',
+  ),
 ]
 export type ProductCommandId = (typeof productCommandRegistry)[number]['id']
 
@@ -114,7 +141,10 @@ export const invokeProductCommand = (
 ): void => {
   const navigationCommand = productNavigationCommands.find((command) => command.id === id)
   if (navigationCommand) navigationCommand.run(context)
-  else if (id === 'selection.first') context.navigateTimelineWindow('first')
-  else if (id === 'selection.last') context.navigateTimelineWindow('latest')
-  else invokeCommand(id as CommandId, context)
+  else {
+    const timelineCommand = productTimelineCommands.find((command) => command.id === id)
+    if (timelineCommand) {
+      if (timelineCommand.available(context)) timelineCommand.run(context)
+    } else invokeCommand(id as CommandId, context)
+  }
 }

@@ -16,6 +16,8 @@ import {
 export const MAX_RETAINED_SESSION_ITEMS = 768
 const MAX_CONTRACT_TIMELINE_WINDOW_ITEMS = 256
 const MAX_CONTRACT_TIMELINE_WINDOW_BYTES = 64 * 1024
+const MAX_CONTRACT_TIMELINE_DETAIL_ITEMS = 128
+const MAX_CONTRACT_TIMELINE_DETAIL_BYTES = 64 * 1024
 const PROJECTED_ITEM_ENVELOPE_BYTES = 64
 const PROJECTED_DETAIL_ENVELOPE_BYTES = 128
 // Hard safety ceiling preventing a regressed endpoint from materializing an
@@ -91,6 +93,9 @@ const validateTextExcerpt = (
   }
   const continuation = excerpt.continuation
   if (continuation) {
+    if (excerptBytes === 0) {
+      throw new TypeError('timeline detail text continuation must make positive byte progress')
+    }
     if (
       continuation.address.event_sequence !== item.address.event_sequence ||
       continuation.field !== field ||
@@ -225,7 +230,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     if (
       bootstrap.capabilities.bounded_session_timeline_detail &&
       (bootstrap.limits.max_timeline_detail_items < 1 ||
-        bootstrap.limits.max_timeline_detail_bytes < 256)
+        bootstrap.limits.max_timeline_detail_items > MAX_CONTRACT_TIMELINE_DETAIL_ITEMS ||
+        bootstrap.limits.max_timeline_detail_bytes < 256 ||
+        bootstrap.limits.max_timeline_detail_bytes > MAX_CONTRACT_TIMELINE_DETAIL_BYTES)
     ) {
       throw new TypeError('bounded session timeline detail limits are invalid')
     }

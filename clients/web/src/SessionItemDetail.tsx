@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { type ReactNode, useState } from 'react'
+import { type ReactNode, useEffect, useRef, useState } from 'react'
 import type {
   WebSessionTimelineDetailPage,
   WebSessionTimelineWindow,
@@ -187,6 +187,7 @@ export function SessionItemDetail({
   item: WebSessionTimelineWindow['items'][number]
 }) {
   const [cursor, setCursor] = useState<NonNullable<WebSessionTimelineDetailPage['continuation']>>()
+  const retryRef = useRef<HTMLButtonElement>(null)
   const detail = useQuery({
     queryKey: ['production', 'session-item-detail', sessionId, item.address.event_sequence, cursor],
     queryFn: ({ signal }) =>
@@ -200,12 +201,15 @@ export function SessionItemDetail({
     gcTime: 0,
     placeholderData: (previousData) => previousData,
   })
+  useEffect(() => {
+    if (detail.isError && cursor) retryRef.current?.focus()
+  }, [cursor, detail.isError])
 
   if (detail.isError) {
     return (
       <div className="session-detail-state" role="alert">
         <p>Detail unavailable: {detail.error.message}</p>
-        <button type="button" onClick={() => void detail.refetch()}>
+        <button ref={retryRef} type="button" onClick={() => void detail.refetch()}>
           Retry typed detail
         </button>
       </div>

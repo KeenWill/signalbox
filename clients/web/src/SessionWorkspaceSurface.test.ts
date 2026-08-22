@@ -25,8 +25,13 @@ const fixture = decodeWebSessionTimelineWindow({
       kind: 'turn_reconciliation_required',
       projected_structured_bytes: 96,
     },
+    {
+      address: { event_sequence: '45' },
+      kind: 'model_call_transition',
+      projected_structured_bytes: 96,
+    },
   ],
-  projected_structured_bytes: 384,
+  projected_structured_bytes: 480,
   continuation_before: { event_sequence: '41' },
   continuation_after: null,
 })
@@ -38,9 +43,9 @@ describe('Session Workspace projection', () => {
     expect(isCanonicalSessionId('not-a-session')).toBe(false)
   })
 
-  it('keeps full and condensed modes over the same bounded window', () => {
+  it('keeps full mode complete and condenses model-call checkpoints', () => {
     expect(visibleSessionItems(fixture.items, 'full')).toBe(fixture.items)
-    expect(visibleSessionItems(fixture.items, 'condensed')).toBe(fixture.items)
+    expect(visibleSessionItems(fixture.items, 'condensed')).toEqual(fixture.items.slice(0, 4))
   })
 
   it('projects result mode without materializing another window', () => {

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { decodeWebContractBootstrap } from '../generated/web-contract.mjs'
 import {
   BoundedSessionHistory,
   EnormousSessionScenarioSource,
@@ -269,6 +270,31 @@ describe('BoundedSessionHistory', () => {
       )
 
     await expect(HttpSessionTimelineSource.connect(request)).rejects.toThrow(
+      'detail limits are invalid',
+    )
+  })
+
+  it('rejects advertised detail ceilings above the protocol maxima', () => {
+    const bootstrap = decodeWebContractBootstrap({
+      contract: { name: 'signalbox.web-http', version: '1' },
+      capabilities: {
+        bounded_json: true,
+        same_origin_json_mutations: true,
+        ndjson_streaming: true,
+        bounded_session_timeline: true,
+        bounded_session_timeline_detail: true,
+      },
+      limits: {
+        max_json_body_bytes: 1024,
+        max_ndjson_item_bytes: 1024,
+        max_timeline_window_items: 256,
+        max_timeline_window_bytes: 64 * 1024,
+        max_timeline_detail_items: 129,
+        max_timeline_detail_bytes: 64 * 1024 + 1,
+      },
+    })
+
+    expect(() => HttpSessionTimelineSource.fromBootstrap(bootstrap)).toThrow(
       'detail limits are invalid',
     )
   })
@@ -827,6 +853,66 @@ describe('BoundedSessionHistory', () => {
     await expect(
       source.readItemDetail(sessionId, detailAddress, { maxItems: 1, maxBytes: 1024 }),
     ).rejects.toThrow('continuation contradicts its body excerpt')
+  })
+
+  it('rejects a text continuation that makes zero byte progress', async () => {
+    const detailAddress = '41'
+    const bootstrap = decodeWebContractBootstrap({
+      contract: { name: 'signalbox.web-http', version: '1' },
+      capabilities: {
+        bounded_json: true,
+        same_origin_json_mutations: true,
+        ndjson_streaming: true,
+        bounded_session_timeline: true,
+        bounded_session_timeline_detail: true,
+      },
+      limits: {
+        max_json_body_bytes: 1024,
+        max_ndjson_item_bytes: 1024,
+        max_timeline_window_items: 256,
+        max_timeline_window_bytes: 64 * 1024,
+        max_timeline_detail_items: 128,
+        max_timeline_detail_bytes: 64 * 1024,
+      },
+    })
+    const continuation = {
+      address: { event_sequence: detailAddress },
+      field: 'input_text',
+      member_index: 0,
+      offset_bytes: '0',
+    } as const
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          session_id: sessionId,
+          items: [
+            {
+              address: { event_sequence: detailAddress },
+              kind: 'input_accepted',
+              body: {
+                type: 'user_input',
+                turn_id: '00000000-0000-0000-0000-000000000041',
+                text: {
+                  text: '',
+                  offset_bytes: '0',
+                  total_bytes: '1',
+                  continuation,
+                },
+                attachments: [],
+              },
+              projected_body_bytes: 128,
+            },
+          ],
+          projected_body_bytes: 128,
+          continuation: { type: 'more_body', body: continuation },
+        }),
+      ),
+    )
+    const source = HttpSessionTimelineSource.fromBootstrap(bootstrap, request)
+
+    await expect(
+      source.readItemDetail(sessionId, detailAddress, { maxItems: 1, maxBytes: 1024 }),
+    ).rejects.toThrow('positive byte progress')
   })
 
   it('rejects an initial text excerpt that does not start at byte zero', async () => {

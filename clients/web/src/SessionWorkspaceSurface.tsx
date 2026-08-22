@@ -32,7 +32,9 @@ export const visibleSessionItems = (
           'turn_reconciliation_required',
         ].includes(item.kind),
       )
-    : items
+    : detail === 'condensed'
+      ? items.filter((item) => item.kind !== 'model_call_transition')
+      : items
 
 export function SessionWorkspaceSurface({
   bootstrap,
@@ -108,7 +110,12 @@ export function SessionWorkspaceSurface({
     dispatch(actions.timelineSelected(eventSequence))
   }
   useEffect(() => {
-    if (selected !== null || timelineIds.length === 0 || !session.data) return
+    if (!session.data) return
+    if (timelineIds.length === 0) {
+      if (selected !== null) dispatch(actions.timelineSelected(null))
+      return
+    }
+    if (selected !== null && timelineIds.includes(selected)) return
     const next = session.data.anchor.kind === 'latest' ? timelineIds.at(-1) : timelineIds[0]
     if (next) dispatch(actions.timelineSelected(next))
   }, [dispatch, selected, session.data, timelineIds])
