@@ -180,7 +180,7 @@ ceilings. The generated browser decoder rejects an unknown field, wrong shape,
 different family, or different version rather than interpreting it as the local
 process protocol. No process-protocol frame is a browser DTO.
 
-`GET /api/attention` returns at most 64 session summaries from one read-only
+`GET /api/attention` returns at most 32 session summaries from one read-only
 repeatable-read snapshot, ordered by session identity. A continuation names the
 last session identity and opens the next keyset page; it is not a count-based or
 fixed-tail feed. Each summary carries the current turn classification, exact
