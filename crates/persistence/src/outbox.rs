@@ -2882,12 +2882,12 @@ pub(crate) enum ToolBatchOutboxState {
     RecoveryRequired(ToolAttemptId),
 }
 
-/// Acquires the global append allocator before a transaction emits its event.
+/// Acquires the global append allocator before another shared lock class.
 ///
-/// Appending an event takes this row through the header trigger. Model-call
-/// transactions that also serialize credential-pool actions take those
-/// profile locks first, then call this boundary once only their own pool can
-/// advance. That keeps unrelated outbox writers out of a credential convoy.
+/// Appending an event takes this row through the header trigger. Transactions
+/// that will both append and take another cross-session lock acquire the
+/// allocator explicitly first so another writer cannot close a reverse-order
+/// cycle around that shared lock.
 pub(crate) async fn lock_sequence_allocator(
     connection: &mut PgConnection,
 ) -> Result<(), sqlx::Error> {
