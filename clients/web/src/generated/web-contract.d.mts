@@ -28,6 +28,8 @@ type WebContractLimits = {
   readonly max_timeline_window_items: number;
 };
 
+type WebSessionId = string;
+
 type WebSessionTimelineEventKind = "session_created" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
 
 type WebSessionTimelineItem = {
@@ -75,7 +77,7 @@ export type WebSessionTimelineDescriptor = {
   readonly first_address: WebTimelineAddress;
   readonly latest_address: WebTimelineAddress;
   readonly observed_through: WebU64;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
   readonly sizes: WebSessionTimelineSizeFacts;
   readonly work: WebSessionWorkFacts;
 };
@@ -85,7 +87,7 @@ export type WebSessionTimelineWindow = {
   readonly continuation_before?: WebTimelineAddress | null;
   readonly items: ReadonlyArray<WebSessionTimelineItem>;
   readonly projected_structured_bytes: number;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
 };
 
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;

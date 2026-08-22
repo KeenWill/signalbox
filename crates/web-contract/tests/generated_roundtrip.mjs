@@ -117,3 +117,38 @@ test("generated descriptor decoder rejects a fact beyond u64", () => {
     /unsigned 64-bit integer/,
   );
 });
+
+test("generated descriptor decoder rejects an invalid session ID", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionTimelineDescriptor({
+        session_id: "not-a-uuid",
+        sizes: {
+          item_count: "1",
+          projected_text_bytes: "0",
+          projected_structured_bytes: "96",
+          referenced_blob_count: "0",
+          referenced_blob_bytes: "0",
+        },
+        first_address: { event_sequence: "1" },
+        latest_address: { event_sequence: "1" },
+        work: { active_turn_count: "0", queued_turn_count: "0" },
+        observed_through: "1",
+      }),
+    /matching/,
+  );
+});
+
+test("generated window decoder rejects an invalid session ID", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionTimelineWindow({
+        session_id: "not-a-uuid",
+        items: [],
+        projected_structured_bytes: 0,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    /matching/,
+  );
+});
