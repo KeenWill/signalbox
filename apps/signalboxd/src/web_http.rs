@@ -11,12 +11,13 @@ use std::{
     fmt, io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use axum::{
     Json, Router,
     body::{Body, Bytes, to_bytes},
-    extract::{DefaultBodyLimit, Path, Query, Request, State, rejection::QueryRejection},
+    extract::{DefaultBodyLimit, Path, Query, RawQuery, Request, State, rejection::QueryRejection},
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
         header::{CONTENT_TYPE, HOST, ORIGIN},
@@ -28,21 +29,28 @@ use axum::{
 use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
-    SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress,
-    TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits,
+    AttentionAction, AttentionActivityKind, AttentionBlockedReason, AttentionChanges,
+    AttentionContinuation, AttentionQuery, AttentionSnapshot, AttentionSort, AttentionState,
+    AttentionSummary, SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow,
+    TimelineAddress, TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits,
+    max_attention_goal_summary_characters, max_attention_title_characters,
 };
 use signalbox_domain::SessionId;
+use signalbox_persistence::attention::{AttentionRepository, AttentionRepositoryError};
 use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
 };
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
+    WebAttentionAction, WebAttentionActivity, WebAttentionActivityKind, WebAttentionBlockedReason,
+    WebAttentionContinuation, WebAttentionGoalBlock, WebAttentionJudgeFacts, WebAttentionSnapshot,
+    WebAttentionSort, WebAttentionState, WebAttentionStreamEvent, WebAttentionSummary,
     WebContractBootstrap, WebContractExample, WebSessionTimelineDescriptor,
     WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
     WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence,
     WebU64,
 };
-use sqlx::PgPool;
+use sqlx::{PgPool, types::Uuid};
 use tokio::{net::TcpListener, sync::watch};
 use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
@@ -247,7 +255,8 @@ impl WebHttpRuntime {
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
 pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> Router {
     let state = WebApiState {
-        timeline: pool.map(SessionTimelineRepository::new),
+        timeline: pool.clone().map(SessionTimelineRepository::new),
+        attention: pool.map(AttentionRepository::new),
     };
     let session_reads = Router::new()
         .route("/sessions/{session_id}", get(session_descriptor))
@@ -255,6 +264,8 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
             "/sessions/{session_id}/timeline",
             get(session_timeline_window),
         )
+        .route("/sessions", get(attention_snapshot))
+        .route("/attention/follow", get(attention_follow))
         .route_layer(middleware::from_fn(validate_loopback_host));
     let api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
@@ -275,6 +286,7 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
 #[derive(Clone, Debug)]
 struct WebApiState {
     timeline: Option<SessionTimelineRepository>,
+    attention: Option<AttentionRepository>,
 }
 
 async fn validate_loopback_host(request: Request, next: Next) -> Response {
@@ -587,6 +599,361 @@ fn event_kind_dto(kind: SessionTimelineEventKind) -> WebSessionTimelineEventKind
     }
 }
 
+#[derive(Debug, Default)]
+struct AttentionSnapshotQuery {
+    search: Option<String>,
+    required_tag: Vec<String>,
+    include_archived: Option<String>,
+    sort: Option<String>,
+    after_session_id: Option<String>,
+    after_activity_unix_microseconds: Option<String>,
+}
+
+async fn attention_snapshot(
+    State(state): State<WebApiState>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let query = match parse_attention_snapshot_query(query.as_deref()) {
+        Ok(query) => query,
+        Err(()) => return invalid_attention_query(),
+    };
+    let Some(repository) = state.attention else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session_catalog_unavailable",
+            "session catalog projection is not configured",
+        );
+    };
+    let query = match parse_attention_query(query) {
+        Ok(query) => query,
+        Err(()) => return invalid_attention_query(),
+    };
+    match repository.snapshot(query).await {
+        Ok(snapshot) => match attention_snapshot_dto(snapshot) {
+            Ok(snapshot) => Json(snapshot).into_response(),
+            Err(()) => attention_projection_error(None),
+        },
+        Err(error) => attention_projection_error(Some(error)),
+    }
+}
+
+fn parse_attention_snapshot_query(raw: Option<&str>) -> Result<AttentionSnapshotQuery, ()> {
+    let mut query = AttentionSnapshotQuery::default();
+    for (key, value) in url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
+        match key.as_ref() {
+            "search" => set_once(&mut query.search, value.into_owned())?,
+            "required_tag" => query.required_tag.push(value.into_owned()),
+            "include_archived" => set_once(&mut query.include_archived, value.into_owned())?,
+            "sort" => set_once(&mut query.sort, value.into_owned())?,
+            "after_session_id" => set_once(&mut query.after_session_id, value.into_owned())?,
+            "after_activity_unix_microseconds" => set_once(
+                &mut query.after_activity_unix_microseconds,
+                value.into_owned(),
+            )?,
+            _ => return Err(()),
+        }
+    }
+    Ok(query)
+}
+
+fn set_once(target: &mut Option<String>, value: String) -> Result<(), ()> {
+    if target.replace(value).is_some() {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn parse_attention_query(query: AttentionSnapshotQuery) -> Result<AttentionQuery, ()> {
+    let sort = match query.sort.as_deref() {
+        None | Some("last_activity_desc") => AttentionSort::LastActivityDescending,
+        Some("session_id_asc") => AttentionSort::SessionIdentityAscending,
+        Some(_) => return Err(()),
+    };
+    let include_archived = match query.include_archived.as_deref() {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => return Err(()),
+    };
+    let after_session = query
+        .after_session_id
+        .map(|value| value.parse::<Uuid>().map(SessionId::from_uuid))
+        .transpose()
+        .map_err(|_| ())?;
+    let after_activity_micros = query
+        .after_activity_unix_microseconds
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .map_err(|_| ())?;
+    let after_activity = after_activity_micros
+        .map(|value| {
+            UNIX_EPOCH
+                .checked_add(Duration::from_micros(value))
+                .ok_or(())
+        })
+        .transpose()?;
+    let continuation = match (sort, after_session, after_activity) {
+        (AttentionSort::LastActivityDescending, None, None)
+        | (AttentionSort::SessionIdentityAscending, None, None) => None,
+        (AttentionSort::LastActivityDescending, Some(session), Some(recorded_at)) => {
+            Some(AttentionContinuation::LastActivity {
+                recorded_at,
+                session,
+            })
+        }
+        (AttentionSort::SessionIdentityAscending, Some(session), None) => {
+            Some(AttentionContinuation::SessionIdentity(session))
+        }
+        _ => return Err(()),
+    };
+    AttentionQuery::try_new(
+        query.search,
+        query.required_tag,
+        include_archived,
+        sort,
+        continuation,
+    )
+    .map_err(|_| ())
+}
+
+fn invalid_attention_query() -> Response {
+    application_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_session_catalog_query",
+        "session catalog query parameters are malformed or outside the contract bounds",
+    )
+}
+
+async fn attention_follow(State(state): State<WebApiState>) -> Response {
+    let Some(repository) = state.attention else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "attention_projection_unavailable",
+            "attention projection is not configured",
+        );
+    };
+    let snapshot = match repository.snapshot(AttentionQuery::hot_page()).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => return attention_projection_error(Some(error)),
+    };
+    let cursor = snapshot.cursor;
+    let snapshot = match attention_snapshot_dto(snapshot) {
+        Ok(snapshot) => snapshot,
+        Err(()) => return attention_projection_error(None),
+    };
+    let source = stream::unfold(
+        (
+            repository,
+            Some(WebAttentionStreamEvent::Snapshot { snapshot }),
+            cursor,
+            AttentionFollowDisposition::Continue,
+        ),
+        |(repository, pending, cursor, disposition)| async move {
+            if let Some(event) = pending {
+                return Some((
+                    event,
+                    (
+                        repository,
+                        None,
+                        cursor,
+                        AttentionFollowDisposition::Continue,
+                    ),
+                ));
+            }
+            if disposition == AttentionFollowDisposition::End {
+                return None;
+            }
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                match repository.changes_after(cursor).await {
+                    Ok(AttentionChanges::Updated { summaries, .. }) if summaries.is_empty() => {}
+                    Ok(AttentionChanges::Updated {
+                        cursor: next,
+                        summaries,
+                    }) => {
+                        let summaries = summaries
+                            .into_iter()
+                            .map(attention_summary_dto)
+                            .collect::<Result<Vec<_>, _>>()
+                            .ok()?;
+                        return Some((
+                            WebAttentionStreamEvent::Update {
+                                cursor: next.value().to_string(),
+                                summaries,
+                            },
+                            (repository, None, next, AttentionFollowDisposition::Continue),
+                        ));
+                    }
+                    Ok(AttentionChanges::ResyncRequired { cursor: next }) => {
+                        return Some((
+                            WebAttentionStreamEvent::ResyncRequired {
+                                cursor: next.value().to_string(),
+                            },
+                            (repository, None, next, AttentionFollowDisposition::End),
+                        ));
+                    }
+                    Err(error) => {
+                        log_attention_projection_error(&error);
+                        return None;
+                    }
+                }
+            }
+        },
+    );
+    ndjson_response(source)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AttentionFollowDisposition {
+    Continue,
+    End,
+}
+
+fn attention_snapshot_dto(snapshot: AttentionSnapshot) -> Result<WebAttentionSnapshot, ()> {
+    let continuation = snapshot
+        .continuation
+        .map(|continuation| match continuation {
+            AttentionContinuation::LastActivity {
+                recorded_at,
+                session,
+            } => Ok(WebAttentionContinuation::LastActivity {
+                unix_microseconds: recorded_at
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| ())?
+                    .as_micros()
+                    .to_string(),
+                session_id: session.into_uuid().to_string(),
+            }),
+            AttentionContinuation::SessionIdentity(session) => {
+                Ok(WebAttentionContinuation::SessionIdentity {
+                    session_id: session.into_uuid().to_string(),
+                })
+            }
+        })
+        .transpose()?;
+    Ok(WebAttentionSnapshot {
+        cursor: snapshot.cursor.value().to_string(),
+        total: snapshot.total.to_string(),
+        sort: match snapshot.sort {
+            AttentionSort::LastActivityDescending => WebAttentionSort::LastActivityDescending,
+            AttentionSort::SessionIdentityAscending => WebAttentionSort::SessionIdentityAscending,
+        },
+        summaries: snapshot
+            .summaries
+            .into_iter()
+            .map(attention_summary_dto)
+            .collect::<Result<Vec<_>, _>>()?,
+        continuation,
+    })
+}
+
+fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummary, ()> {
+    if summary
+        .title_summary
+        .as_ref()
+        .is_some_and(|title| title.chars().count() > usize::from(max_attention_title_characters()))
+    {
+        return Err(());
+    }
+    let unix_milliseconds = summary
+        .last_activity
+        .recorded_at
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ())?
+        .as_millis()
+        .to_string();
+    let goal_block = summary
+        .goal_block
+        .map(|goal| {
+            if goal.need_summary.chars().count()
+                > usize::from(max_attention_goal_summary_characters())
+            {
+                return Err(());
+            }
+            Ok(WebAttentionGoalBlock {
+                generation: goal.generation.to_string(),
+                reason: match goal.reason {
+                    AttentionBlockedReason::UserInputRequired => {
+                        WebAttentionBlockedReason::UserInputRequired
+                    }
+                    AttentionBlockedReason::ExternalChangeRequired => {
+                        WebAttentionBlockedReason::ExternalChangeRequired
+                    }
+                    AttentionBlockedReason::AuthorizationRequired => {
+                        WebAttentionBlockedReason::AuthorizationRequired
+                    }
+                    AttentionBlockedReason::ExecutionFailure => {
+                        WebAttentionBlockedReason::ExecutionFailure
+                    }
+                },
+                need_summary: goal.need_summary,
+            })
+        })
+        .transpose()?;
+    Ok(WebAttentionSummary {
+        session_id: summary.session.into_uuid().to_string(),
+        title_summary: summary.title_summary,
+        title_truncated: summary.title_truncated,
+        archived: summary.archived,
+        current_turn_id: summary
+            .current_turn
+            .map(|turn| turn.into_uuid().to_string()),
+        active_turn_count: summary.active_turn_count.to_string(),
+        queued_turn_count: summary.queued_turn_count.to_string(),
+        state: match summary.state {
+            AttentionState::Active => WebAttentionState::Active,
+            AttentionState::Queued => WebAttentionState::Queued,
+            AttentionState::Blocked => WebAttentionState::Blocked,
+            AttentionState::AwaitingApproval => WebAttentionState::AwaitingApproval,
+            AttentionState::Ambiguous => WebAttentionState::Ambiguous,
+            AttentionState::AwaitingReconciliation => WebAttentionState::AwaitingReconciliation,
+            AttentionState::RunnerLost => WebAttentionState::RunnerLost,
+            AttentionState::Idle => WebAttentionState::Idle,
+        },
+        action: summary.action.map(|action| match action {
+            AttentionAction::ProvideGoalNeed => WebAttentionAction::ProvideGoalNeed,
+            AttentionAction::DecideApproval => WebAttentionAction::DecideApproval,
+            AttentionAction::ReconcileTurn => WebAttentionAction::ReconcileTurn,
+            AttentionAction::RestoreRunner => WebAttentionAction::RestoreRunner,
+        }),
+        goal_block,
+        judge: WebAttentionJudgeFacts {
+            actionable: summary.judge.actionable.to_string(),
+            completed: summary.judge.completed.to_string(),
+            escalated: summary.judge.escalated.to_string(),
+            failed: summary.judge.failed.to_string(),
+        },
+        last_activity: WebAttentionActivity {
+            unix_milliseconds,
+            kind: match summary.last_activity.kind {
+                AttentionActivityKind::Session => WebAttentionActivityKind::Session,
+                AttentionActivityKind::Turn => WebAttentionActivityKind::Turn,
+                AttentionActivityKind::Goal => WebAttentionActivityKind::Goal,
+                AttentionActivityKind::ApprovalJudge => WebAttentionActivityKind::ApprovalJudge,
+                AttentionActivityKind::Runner => WebAttentionActivityKind::Runner,
+            },
+        },
+    })
+}
+
+fn attention_projection_error(error: Option<AttentionRepositoryError>) -> Response {
+    if let Some(error) = error.as_ref() {
+        log_attention_projection_error(error);
+    }
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "attention_projection_failed",
+        "the attention projection could not be read",
+    )
+}
+
+fn log_attention_projection_error(error: &AttentionRepositoryError) {
+    let failure_class = match error {
+        AttentionRepositoryError::Database(_) => "infrastructure",
+        AttentionRepositoryError::Corruption(_) => "fail_closed_corruption",
+    };
+    tracing::error!(failure_class, cause = %error, "attention projection read failed");
+}
+
 /// Builds an in-memory deterministic server with no persistence dependency.
 ///
 /// It uses the same guards, body decoder, generated DTOs, and NDJSON encoder as
@@ -850,17 +1217,14 @@ fn transport_error(status: StatusCode, code: &'static str, message: &'static str
 }
 
 fn application_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
-    (
-        status,
-        Json(WebApiErrorResponse {
-            error: WebApiError {
-                kind: WebApiErrorKind::Application,
-                code: code.to_owned(),
-                message: message.to_owned(),
-            },
-        }),
-    )
-        .into_response()
+    let body = Json(WebApiErrorResponse {
+        error: WebApiError {
+            kind: WebApiErrorKind::Application,
+            code: code.to_owned(),
+            message: message.to_owned(),
+        },
+    });
+    (status, body).into_response()
 }
 
 async fn api_not_found() -> Response {
@@ -882,7 +1246,7 @@ mod tests {
         io::{self, Write as _},
         net::SocketAddr,
         path::PathBuf,
-        time::Duration,
+        time::{Duration, UNIX_EPOCH},
     };
 
     use axum::{
@@ -890,16 +1254,26 @@ mod tests {
         http::{Request, StatusCode, header},
     };
     use http_body_util::BodyExt as _;
-    use signalbox_web_contract::{
-        MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebContractBootstrap, WebContractExample,
+    use signalbox_application::{
+        AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
+        AttentionContinuation, AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts,
+        AttentionSnapshot, AttentionSort, AttentionState, AttentionSummary,
+        max_attention_goal_summary_characters, max_attention_snapshot_items,
+        max_attention_title_characters,
     };
+    use signalbox_domain::{SessionId, TurnId};
+    use signalbox_web_contract::{
+        MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebAttentionStreamEvent, WebContractBootstrap,
+        WebContractExample,
+    };
+    use sqlx::types::Uuid;
     use tokio::sync::{mpsc, watch};
     use tower::ServiceExt as _;
     use url::Url;
 
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime,
-        deterministic_test_router, ndjson_response, production_router,
+        attention_snapshot_dto, deterministic_test_router, ndjson_response, production_router,
     };
 
     fn loopback_ephemeral() -> SocketAddr {
@@ -916,6 +1290,7 @@ mod tests {
     }
 
     const STATIC_INDEX: &str = "signalbox-static-build";
+    const LARGE_REPRESENTATIVE_UNIX_MILLISECONDS: u64 = 9_999_999_999_999;
 
     async fn response_body(response: axum::response::Response) -> Vec<u8> {
         axum::body::to_bytes(response.into_body(), MAX_JSON_BODY_BYTES)
@@ -1290,6 +1665,114 @@ mod tests {
         assert!(super::parse_window_anchor("after", Some(" 5")).is_err());
         assert!(super::parse_window_anchor("after", Some("5 ")).is_err());
         assert!(super::parse_window_anchor("after", Some("5")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn session_catalog_requires_projection_configuration() {
+        let request = Request::get("/api/sessions")
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the typed application failure is JSON");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "session_catalog_unavailable");
+    }
+
+    #[test]
+    fn session_catalog_query_accepts_repeated_exact_tags() {
+        let query =
+            super::parse_attention_snapshot_query(Some("required_tag=rust&required_tag=postgres"))
+                .expect("repeated exact tags are one bounded catalog filter");
+
+        assert_eq!(query.required_tag, ["rust", "postgres"]);
+    }
+
+    #[tokio::test]
+    async fn attention_follow_requires_projection_configuration() {
+        let request = Request::get("/api/attention/follow")
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the typed application failure is JSON");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "attention_projection_unavailable");
+    }
+
+    #[test]
+    fn attention_summary_bound_is_enforced_and_maximum_snapshot_fits_one_ndjson_item() {
+        let session = SessionId::from_uuid(Uuid::from_u128(u128::MAX));
+        let summary = AttentionSummary {
+            session,
+            title_summary: Some(
+                String::from("x").repeat(usize::from(max_attention_title_characters())),
+            ),
+            title_truncated: true,
+            archived: false,
+            current_turn: Some(TurnId::from_uuid(Uuid::from_u128(u128::MAX))),
+            active_turn_count: u64::MAX,
+            queued_turn_count: u64::MAX,
+            state: AttentionState::Blocked,
+            action: Some(AttentionAction::ProvideGoalNeed),
+            goal_block: Some(AttentionGoalBlock {
+                generation: u64::MAX,
+                reason: AttentionBlockedReason::ExternalChangeRequired,
+                need_summary: String::from("🦀")
+                    .repeat(usize::from(max_attention_goal_summary_characters())),
+            }),
+            judge: AttentionJudgeFacts {
+                actionable: u64::MAX,
+                completed: u64::MAX,
+                escalated: u64::MAX,
+                failed: u64::MAX,
+            },
+            last_activity: AttentionActivity {
+                recorded_at: UNIX_EPOCH
+                    + Duration::from_millis(LARGE_REPRESENTATIVE_UNIX_MILLISECONDS),
+                kind: AttentionActivityKind::ApprovalJudge,
+            },
+        };
+        let mut oversized_summary = summary.clone();
+        oversized_summary
+            .goal_block
+            .as_mut()
+            .expect("the maximum summary carries a goal block")
+            .need_summary
+            .push('x');
+        let snapshot = attention_snapshot_dto(AttentionSnapshot {
+            cursor: AttentionCursor::new(u64::MAX),
+            total: u64::MAX,
+            sort: AttentionSort::LastActivityDescending,
+            summaries: vec![summary; usize::from(max_attention_snapshot_items())],
+            continuation: Some(AttentionContinuation::LastActivity {
+                recorded_at: UNIX_EPOCH
+                    + Duration::from_millis(LARGE_REPRESENTATIVE_UNIX_MILLISECONDS),
+                session,
+            }),
+        })
+        .expect("the maximum snapshot timestamp is representable");
+        let mut writer = super::NdjsonItemWriter::new();
+        serde_json::to_writer(&mut writer, &WebAttentionStreamEvent::Snapshot { snapshot })
+            .expect("the maximum snapshot serializes within one item");
+        writer
+            .write_all(b"\n")
+            .expect("the NDJSON terminator fits the item");
+
+        assert!(super::attention_summary_dto(oversized_summary).is_err());
+        assert!(writer.encoded.len() <= MAX_NDJSON_ITEM_BYTES);
     }
 
     #[tokio::test]
