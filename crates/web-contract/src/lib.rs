@@ -315,8 +315,8 @@ pub struct WebRepoWatchEventKindCount {
 #[serde(deny_unknown_fields)]
 pub struct WebRepoWatchRepositoryStatus {
     pub repository: String,
-    pub cursor_generation: String,
-    pub observed_at_unix_milliseconds: String,
+    pub cursor_generation: Option<String>,
+    pub observed_at_unix_milliseconds: Option<String>,
     pub latest_webhook: Option<WebRepoWatchLatestWebhook>,
     pub previous_five_minutes: WebRepoWatchWebhookWindow,
     pub previous_hour: WebRepoWatchWebhookWindow,

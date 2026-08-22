@@ -213,7 +213,7 @@ type WebRepoWatchQueuedObligation = {
 };
 
 type WebRepoWatchRepositoryStatus = {
-  readonly cursor_generation: string;
+  readonly cursor_generation?: string | null;
   readonly event_kind_counts_previous_hour: ReadonlyArray<WebRepoWatchEventKindCount>;
   readonly held_slot_count: string;
   readonly last_actionable_event?: WebRepoWatchEvent | null;
@@ -223,7 +223,7 @@ type WebRepoWatchRepositoryStatus = {
   readonly latest_projection_latency_milliseconds?: string | null;
   readonly latest_webhook?: WebRepoWatchLatestWebhook | null;
   readonly maximum_projection_latency_milliseconds_previous_hour?: string | null;
-  readonly observed_at_unix_milliseconds: string;
+  readonly observed_at_unix_milliseconds?: string | null;
   readonly previous_five_minutes: WebRepoWatchWebhookWindow;
   readonly previous_hour: WebRepoWatchWebhookWindow;
   readonly queued_obligation_count: string;

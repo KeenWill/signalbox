@@ -474,8 +474,8 @@ fn repository_status_dto(
 ) -> Result<WebRepoWatchRepositoryStatus, ()> {
     Ok(WebRepoWatchRepositoryStatus {
         repository: status.repository.into_string(),
-        cursor_generation: status.cursor_generation.to_string(),
-        observed_at_unix_milliseconds: unix_milliseconds(status.observed_at)?,
+        cursor_generation: status.cursor_generation.map(|value| value.to_string()),
+        observed_at_unix_milliseconds: status.observed_at.map(unix_milliseconds).transpose()?,
         latest_webhook: status
             .latest_webhook
             .map(|webhook| {

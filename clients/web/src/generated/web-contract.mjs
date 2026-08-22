@@ -1574,7 +1574,10 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "cursor_generation": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "event_kind_counts_previous_hour": {
             "items": {
@@ -1648,7 +1651,10 @@ const schemas = {
             ]
           },
           "observed_at_unix_milliseconds": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "previous_five_minutes": {
             "$ref": "#/$defs/WebRepoWatchWebhookWindow"
@@ -1665,8 +1671,6 @@ const schemas = {
         },
         "required": [
           "repository",
-          "cursor_generation",
-          "observed_at_unix_milliseconds",
           "previous_five_minutes",
           "previous_hour",
           "event_kind_counts_previous_hour",

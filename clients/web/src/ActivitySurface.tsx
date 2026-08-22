@@ -178,7 +178,7 @@ function RepositoryHealth({ status }: { status: RepositoryStatus }) {
           <span className="eyebrow">Durable ingestion</span>
           <h2 id="ingestion-health-heading">{status.repository}</h2>
         </div>
-        <span>cursor {status.cursor_generation}</span>
+        <span>cursor {status.cursor_generation ?? 'not observed'}</span>
       </header>
       <dl>
         <div>
