@@ -1,0 +1,154 @@
+import { describe, expect, it, vi } from 'vitest'
+import { HttpSearchUsageSource } from './model'
+import {
+  SEARCH_USAGE_FAR_ADDRESS,
+  SEARCH_USAGE_SCENARIO_SESSION_ID,
+  SearchUsageScenarioSource,
+} from './scenario'
+
+const bootstrap = {
+  contract: { name: 'signalbox.web-http', version: '1' },
+  capabilities: {
+    bounded_json: true,
+    same_origin_json_mutations: true,
+    ndjson_streaming: true,
+    bounded_session_timeline: true,
+    bounded_lexical_search: true,
+    bounded_usage_cost: true,
+  },
+  limits: {
+    max_json_body_bytes: 65_536,
+    max_ndjson_item_bytes: 65_536,
+    max_timeline_window_items: 256,
+    max_timeline_window_bytes: 65_536,
+    max_search_query_bytes: 512,
+    max_search_page_items: 100,
+    max_search_snippet_bytes: 512,
+    max_usage_aggregate_groups: 256,
+    max_usage_call_page_items: 100,
+  },
+} as const
+
+const searchPage = {
+  results: [
+    {
+      session_id: SEARCH_USAGE_SCENARIO_SESSION_ID,
+      address: { event_sequence: SEARCH_USAGE_FAR_ADDRESS },
+      source: {
+        kind: 'turn_transcript_entry',
+        semantic_entry_id: '00000000-0000-0000-0000-000000000101',
+        turn_id: '00000000-0000-0000-0000-000000000102',
+      },
+      content_class: 'assistant_transcript',
+      snippet: 'needle in canonical evidence',
+      highlights: [{ start_byte: 0, end_byte: 6 }],
+    },
+  ],
+  continuation: null,
+} as const
+
+const usageSummary = { groups: [], truncated: false } as const
+const usageCalls = { calls: [], continuation: null } as const
+
+const adapterFixture = {
+  searchUrls: [
+    '/api/bootstrap',
+    `/api/search?strategy=lexical&q=needle&max_items=100&session_id=${SEARCH_USAGE_SCENARIO_SESSION_ID}`,
+  ],
+  usageUrls: [
+    '/api/bootstrap',
+    '/api/usage/summary?provenance=reported',
+    '/api/usage/calls?order=newest&max_items=100&provenance=reported',
+  ],
+} as const
+
+const responseFor = (url: string): Response => {
+  if (url === '/api/bootstrap') return Response.json(bootstrap)
+  if (url.startsWith('/api/search?')) return Response.json(searchPage)
+  if (url.startsWith('/api/usage/summary?')) return Response.json(usageSummary)
+  if (url.startsWith('/api/usage/calls?')) return Response.json(usageCalls)
+  return Response.json(
+    { error: { kind: 'application', code: 'unexpected', message: 'unexpected' } },
+    { status: 500 },
+  )
+}
+
+const scriptedFetch = (urls: string[]): typeof fetch =>
+  vi.fn(async (input) => {
+    const url = String(input)
+    urls.push(url)
+    return responseFor(url)
+  }) as typeof fetch
+
+describe('HttpSearchUsageSource', () => {
+  it('uses lexical product parameters for a current-session search', async () => {
+    const urls: string[] = []
+    const source = await HttpSearchUsageSource.connect(scriptedFetch(urls))
+    const page = await source.search({
+      text: 'needle',
+      scope: { kind: 'session', sessionId: SEARCH_USAGE_SCENARIO_SESSION_ID },
+      maxItems: 1_000,
+    })
+
+    expect(urls).toEqual(adapterFixture.searchUrls)
+    expect(page).toEqual(searchPage)
+  })
+
+  it('reads dedicated usage endpoints without requesting transcript material', async () => {
+    const urls: string[] = []
+    const source = await HttpSearchUsageSource.connect(scriptedFetch(urls))
+    await source.usageSummary({ provenance: 'reported' })
+    await source.usageCalls({
+      filters: { provenance: 'reported' },
+      order: 'newest',
+      maxItems: 1_000,
+    })
+
+    expect(urls).toEqual(adapterFixture.usageUrls)
+    expect(urls.some((url) => url.includes('/timeline'))).toBe(false)
+  })
+
+  it('rejects highlight offsets that split UTF-8 code points', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(bootstrap))
+      .mockResolvedValueOnce(
+        Response.json({
+          results: [
+            {
+              ...searchPage.results[0],
+              snippet: 'évidence',
+              highlights: [{ start_byte: 0, end_byte: 1 }],
+            },
+          ],
+          continuation: null,
+        }),
+      ) as typeof fetch
+    const source = await HttpSearchUsageSource.connect(request)
+
+    await expect(
+      source.search({ text: 'evidence', scope: { kind: 'global' }, maxItems: 10 }),
+    ).rejects.toThrow('invalid highlight bounds')
+  })
+})
+
+describe('SearchUsageScenarioSource', () => {
+  it('keeps its lexical cursor ordering stable across bounded pages', async () => {
+    const source = new SearchUsageScenarioSource()
+    const first = await source.search({
+      text: 'needle',
+      scope: { kind: 'global' },
+      maxItems: 2,
+    })
+    const second = await source.search({
+      text: 'needle',
+      scope: { kind: 'global' },
+      maxItems: 2,
+      after: first.continuation,
+    })
+
+    expect(first.results[0]?.address.event_sequence).toBe(SEARCH_USAGE_FAR_ADDRESS)
+    expect(first.continuation?.projection_id).toBe('2')
+    expect(second.results[0]?.address.event_sequence).toBe('777803')
+  })
+})

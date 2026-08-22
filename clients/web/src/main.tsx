@@ -13,10 +13,44 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
 import { Workspace } from './App'
+import { defaultSearchUsageRouteState, type SearchUsageRouteState } from './SearchUsage'
 import { store } from './state'
 import './app.css'
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> })
+
+const routeString = (value: unknown): string | undefined =>
+  typeof value === 'string' ? value : undefined
+
+const validateScenarioSearch = (
+  search: Record<string, unknown>,
+): Partial<SearchUsageRouteState> => {
+  const view = routeString(search.view)
+  const searchScope = routeString(search.searchScope)
+  const usageSession = routeString(search.usageSession)
+  const usageOrder = routeString(search.usageOrder)
+  const provenance = routeString(search.provenance)
+  const callKind = routeString(search.callKind)
+  return {
+    view: view === 'usage' ? 'usage' : view === 'search' ? 'search' : undefined,
+    q: routeString(search.q),
+    searchScope:
+      searchScope === 'session' ? 'session' : searchScope === 'global' ? 'global' : undefined,
+    usageSession:
+      usageSession === 'current' ? 'current' : usageSession === 'all' ? 'all' : undefined,
+    usageOrder: usageOrder === 'oldest' ? 'oldest' : usageOrder === 'newest' ? 'newest' : undefined,
+    provenance:
+      provenance === 'reported' ? 'reported' : provenance === 'estimated' ? 'estimated' : undefined,
+    modelId: routeString(search.modelId),
+    callKind:
+      callKind === 'model_call'
+        ? 'model_call'
+        : callKind === 'approval_judge'
+          ? 'approval_judge'
+          : undefined,
+  }
+}
+
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
@@ -27,8 +61,26 @@ const indexRoute = createRoute({
 const scenarioRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/scenario/$scenarioId',
-  component: () => <Workspace scenarioId={scenarioRoute.useParams().scenarioId} />,
+  validateSearch: validateScenarioSearch,
+  component: ScenarioScreen,
 })
+
+function ScenarioScreen() {
+  const { scenarioId } = scenarioRoute.useParams()
+  const search = scenarioRoute.useSearch()
+  const navigate = scenarioRoute.useNavigate()
+  const route = { ...defaultSearchUsageRouteState, ...search }
+  return (
+    <Workspace
+      key={scenarioId}
+      scenarioId={scenarioId}
+      route={route}
+      onRouteChange={(patch) =>
+        void navigate({ search: (previous) => ({ ...previous, ...patch }), replace: true })
+      }
+    />
+  )
+}
 const router = createRouter({ routeTree: rootRoute.addChildren([indexRoute, scenarioRoute]) })
 // Tunable effective ceiling: retain recently visited scenario projections without growing the
 // development cache for the lifetime of the page.
