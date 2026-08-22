@@ -51,7 +51,8 @@ SELECT s.session_id,
        (SELECT count(*)::numeric FROM turn_lifecycle AS turn
          WHERE turn.session_id = s.session_id
            AND turn.state_kind = 'queued'
-           AND NOT turn.delegation_runtime_terminal)
+           AND NOT turn.delegation_runtime_terminal
+           AND goal_turn_is_runtime_relevant(turn.session_id, turn.turn_id))
   FROM session AS s
   LEFT JOIN (
       SELECT event_sequence, event_kind, session_id FROM outbox_event
@@ -161,3 +162,40 @@ $$;
 CREATE TRIGGER turn_lifecycle_updates_timeline_fact
 AFTER INSERT OR UPDATE OF state_kind, delegation_runtime_terminal ON turn_lifecycle
 FOR EACH ROW EXECUTE FUNCTION update_session_timeline_work_fact();
+
+CREATE FUNCTION retire_session_timeline_goal_work_fact()
+RETURNS trigger LANGUAGE plpgsql
+SET search_path FROM CURRENT AS $$
+DECLARE
+    retired_queued_count numeric(20, 0);
+BEGIN
+    IF NEW.event_kind NOT IN ('user_stopped', 'superseded') THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT count(*)::numeric
+      INTO retired_queued_count
+      FROM goal_turn AS goal
+      JOIN turn_lifecycle AS lifecycle
+        ON lifecycle.session_id = goal.session_id
+       AND lifecycle.turn_id = goal.turn_id
+     WHERE goal.session_id = NEW.session_id
+       AND goal.goal_generation = NEW.generation
+       AND lifecycle.state_kind = 'queued'
+       AND NOT lifecycle.delegation_runtime_terminal;
+
+    IF retired_queued_count > 0 THEN
+        -- Goal retirement later appends an outbox event. Preserve the same
+        -- allocator-then-fact lock order used by every other fact update.
+        PERFORM 1 FROM outbox_sequence_state WHERE singleton FOR UPDATE;
+        UPDATE session_timeline_fact
+           SET queued_turn_count = queued_turn_count - retired_queued_count
+         WHERE session_id = NEW.session_id;
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE TRIGGER goal_event_retires_timeline_work_fact
+AFTER INSERT ON goal_event
+FOR EACH ROW EXECUTE FUNCTION retire_session_timeline_goal_work_fact();
