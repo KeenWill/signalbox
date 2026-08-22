@@ -73,6 +73,10 @@ const schemas = {
             "description": "Stable bounded session descriptors and historical windows are available.",
             "type": "boolean"
           },
+          "bounded_session_timeline_detail": {
+            "description": "Typed item, turn, and contiguous-region detail reads are available.",
+            "type": "boolean"
+          },
           "ndjson_streaming": {
             "description": "Incremental response items use newline-delimited JSON.",
             "type": "boolean"
@@ -86,7 +90,8 @@ const schemas = {
           "bounded_json",
           "same_origin_json_mutations",
           "ndjson_streaming",
-          "bounded_session_timeline"
+          "bounded_session_timeline",
+          "bounded_session_timeline_detail"
         ],
         "type": "object"
       },
@@ -125,6 +130,18 @@ const schemas = {
             "minimum": 0,
             "type": "integer"
           },
+          "max_timeline_detail_bytes": {
+            "description": "Maximum projected typed-body bytes in one detail response.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_timeline_detail_items": {
+            "description": "Maximum detailed timeline records in one response.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "max_timeline_window_bytes": {
             "description": "Maximum projected structured item bytes in one timeline window.",
             "format": "uint32",
@@ -142,7 +159,9 @@ const schemas = {
           "max_json_body_bytes",
           "max_ndjson_item_bytes",
           "max_timeline_window_items",
-          "max_timeline_window_bytes"
+          "max_timeline_window_bytes",
+          "max_timeline_detail_items",
+          "max_timeline_detail_bytes"
         ],
         "type": "object"
       }
@@ -303,6 +322,505 @@ const schemas = {
       "observed_through"
     ],
     "title": "WebSessionTimelineDescriptor",
+    "type": "object"
+  },
+  "WebSessionTimelineDetailPage": {
+    "$defs": {
+      "WebSessionTimelineDetail": {
+        "additionalProperties": false,
+        "description": "One typed body at a stable timeline address.",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "body": {
+            "$ref": "#/$defs/WebSessionTimelineDetailBody"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebSessionTimelineEventKind"
+          },
+          "projected_body_bytes": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "address",
+          "kind",
+          "body",
+          "projected_body_bytes"
+        ],
+        "type": "object"
+      },
+      "WebSessionTimelineDetailBody": {
+        "description": "Typed browser body, distinct from application and persistence projections.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "attachments": {
+                "items": {
+                  "$ref": "#/$defs/WebTimelineBlobReference"
+                },
+                "type": "array"
+              },
+              "text": {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              "turn_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "user_input",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "text",
+              "attachments"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause_code": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model_call_id": {
+                "type": "string"
+              },
+              "model_identity_id": {
+                "type": "string"
+              },
+              "request_context_items": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "response": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineTextExcerpt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/WebTimelineModelCallState"
+              },
+              "turn_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "model_call",
+                "type": "string"
+              },
+              "usage": {
+                "$ref": "#/$defs/WebTimelineModelUsage"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "model_call_id",
+              "state",
+              "model_identity_id",
+              "request_context_items",
+              "usage"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cause_code": {
+                "type": "string"
+              },
+              "lifecycle": {
+                "$ref": "#/$defs/WebTimelineTurnLifecycleKind"
+              },
+              "turn_id": {
+                "type": "string"
+              },
+              "type": {
+                "const": "turn_lifecycle",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "lifecycle",
+              "cause_code"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/WebSessionTimelineEventKind"
+              },
+              "type": {
+                "const": "event_fact",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebSessionTimelineEventKind": {
+        "description": "Closed durable event categories in the browser timeline foundation.",
+        "enum": [
+          "session_created",
+          "session_model_settings_changed",
+          "turn_model_settings_resolved",
+          "input_accepted",
+          "goal_turn_retired",
+          "turn_activated",
+          "turn_failed",
+          "model_call_transition",
+          "tool_batch_transition",
+          "tool_approval_decided",
+          "context_compacted",
+          "turn_completed",
+          "turn_refused",
+          "turn_cancelled",
+          "turn_reconciliation_required",
+          "runner_state_transition",
+          "delegation_update",
+          "delegation_wake"
+        ],
+        "type": "string"
+      },
+      "WebTimelineAddress": {
+        "additionalProperties": false,
+        "description": "Stable browser-visible location of one durable session event.",
+        "properties": {
+          "event_sequence": {
+            "$ref": "#/$defs/WebTimelineEventSequence",
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+          }
+        },
+        "required": [
+          "event_sequence"
+        ],
+        "type": "object"
+      },
+      "WebTimelineBlobReference": {
+        "additionalProperties": false,
+        "description": "Reference-only blob fact carried without blob bytes.",
+        "properties": {
+          "blob_id": {
+            "type": "string"
+          },
+          "length_bytes": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "media_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "blob_id",
+          "length_bytes"
+        ],
+        "type": "object"
+      },
+      "WebTimelineBodyContinuation": {
+        "additionalProperties": false,
+        "description": "Exact continuation within an oversized typed body.",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "field": {
+            "$ref": "#/$defs/WebTimelineBodyField"
+          },
+          "member_index": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "offset_bytes": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "address",
+          "field",
+          "member_index",
+          "offset_bytes"
+        ],
+        "type": "object"
+      },
+      "WebTimelineBodyField": {
+        "description": "Text-bearing field within one typed timeline body.",
+        "enum": [
+          "input_text",
+          "model_response"
+        ],
+        "type": "string"
+      },
+      "WebTimelineDetailContinuation": {
+        "description": "Explicit next position after a bounded detail response.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "address": {
+                "$ref": "#/$defs/WebTimelineAddress"
+              },
+              "type": {
+                "const": "more_at",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "address"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "body": {
+                "$ref": "#/$defs/WebTimelineBodyContinuation"
+              },
+              "type": {
+                "const": "more_body",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "body"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineEventSequence": {
+        "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebTimelineModelCallDisposition": {
+        "description": "Closed terminal model-call disposition.",
+        "enum": [
+          "completed",
+          "known_failed",
+          "refused",
+          "cancelled",
+          "ambiguous"
+        ],
+        "type": "string"
+      },
+      "WebTimelineModelCallState": {
+        "description": "Closed model-call lifecycle checkpoint with terminal disposition in-band.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "prepared",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "in_flight",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "cancellation_requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "disposition": {
+                "$ref": "#/$defs/WebTimelineModelCallDisposition"
+              },
+              "type": {
+                "const": "terminal",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "disposition"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineModelUsage": {
+        "additionalProperties": false,
+        "description": "Independently optional provider-reported usage counts.",
+        "properties": {
+          "cache_creation_input_tokens": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cache_read_input_tokens": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "WebTimelineTextExcerpt": {
+        "additionalProperties": false,
+        "description": "Bounded UTF-8 excerpt with explicit completeness evidence.",
+        "properties": {
+          "continuation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineBodyContinuation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "offset_bytes": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "text": {
+            "type": "string"
+          },
+          "total_bytes": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "text",
+          "offset_bytes",
+          "total_bytes"
+        ],
+        "type": "object"
+      },
+      "WebTimelineTurnLifecycleKind": {
+        "description": "Closed turn lifecycle boundary.",
+        "enum": [
+          "activated",
+          "terminalized"
+        ],
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One bounded item, turn, or contiguous-region detail response.",
+    "properties": {
+      "continuation": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebTimelineDetailContinuation"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "items": {
+        "items": {
+          "$ref": "#/$defs/WebSessionTimelineDetail"
+        },
+        "maxItems": 128,
+        "type": "array"
+      },
+      "projected_body_bytes": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "items",
+      "projected_body_bytes"
+    ],
+    "title": "WebSessionTimelineDetailPage",
     "type": "object"
   },
   "WebSessionTimelineWindow": {
@@ -535,6 +1053,9 @@ function assertSchema(root, schema, value, path) {
     if (!Array.isArray(value)) {
       fail(path, "an array");
     }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      fail(path, `at most ${schema.maxItems} items`);
+    }
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${path}[${index}]`));
     return;
   }
@@ -574,6 +1095,162 @@ function assertSchema(root, schema, value, path) {
   }
 }
 
+function sameTimelineAddress(left, right) {
+  return left.event_sequence === right.event_sequence;
+}
+
+function sameBodyContinuation(left, right) {
+  return (
+    sameTimelineAddress(left.address, right.address) &&
+    left.field === right.field &&
+    left.member_index === right.member_index &&
+    left.offset_bytes === right.offset_bytes
+  );
+}
+
+function assertTimelineExcerpt(excerpt, address, field, path) {
+  const offset = BigInt(excerpt.offset_bytes);
+  const total = BigInt(excerpt.total_bytes);
+  const end = offset + BigInt(new TextEncoder().encode(excerpt.text).byteLength);
+  if (offset > total || end > total) {
+    fail(path, "an excerpt within its declared byte range");
+  }
+  if (excerpt.continuation === undefined || excerpt.continuation === null) {
+    if (end !== total) {
+      fail(path, "complete when no continuation is present");
+    }
+    return null;
+  }
+  const continuation = excerpt.continuation;
+  if (end >= total) {
+    fail(`${path}.continuation`, "present only before the declared body end");
+  }
+  if (!sameTimelineAddress(continuation.address, address) || continuation.field !== field) {
+    fail(`${path}.continuation`, "the same body field at the same address");
+  }
+  if (BigInt(continuation.offset_bytes) !== end) {
+    fail(`${path}.continuation.offset_bytes`, "the byte immediately after the excerpt");
+  }
+  return continuation;
+}
+
+function assertTimelineDetailPage(value) {
+  const maxProjectedBodyBytes = 65536;
+  const detailEnvelopeBytes = 128;
+  const terminalKinds = new Set([
+    "turn_failed",
+    "turn_completed",
+    "turn_refused",
+    "turn_cancelled",
+    "turn_reconciliation_required",
+  ]);
+  const bodyOwnedKinds = new Set([
+    "input_accepted",
+    "model_call_transition",
+    "turn_activated",
+    ...terminalKinds,
+  ]);
+  let expectedBodyContinuation = null;
+  let computedProjectedBodyBytes = 0;
+  let previousAddress = null;
+  value.items.forEach((item, index) => {
+    const path = `timeline_detail_page.items[${index}]`;
+    const address = BigInt(item.address.event_sequence);
+    if (previousAddress !== null && address <= previousAddress) {
+      fail(`${path}.address`, "strictly increasing after the previous item");
+    }
+    previousAddress = address;
+    let continuation = null;
+    let textBytes = 0;
+    switch (item.body.type) {
+      case "user_input":
+        if (item.kind !== "input_accepted") {
+          fail(`${path}.kind`, "input_accepted for a user_input body");
+        }
+        continuation = assertTimelineExcerpt(
+          item.body.text,
+          item.address,
+          "input_text",
+          `${path}.body.text`,
+        );
+        textBytes = new TextEncoder().encode(item.body.text.text).byteLength;
+        break;
+      case "model_call":
+        if (item.kind !== "model_call_transition") {
+          fail(`${path}.kind`, "model_call_transition for a model_call body");
+        }
+        if (item.body.response !== undefined && item.body.response !== null) {
+          continuation = assertTimelineExcerpt(
+            item.body.response,
+            item.address,
+            "model_response",
+            `${path}.body.response`,
+          );
+          textBytes = new TextEncoder().encode(item.body.response.text).byteLength;
+        }
+        break;
+      case "turn_lifecycle":
+        if (item.body.lifecycle === "activated" && item.kind !== "turn_activated") {
+          fail(`${path}.kind`, "turn_activated for an activated lifecycle");
+        }
+        if (item.body.lifecycle === "terminalized" && !terminalKinds.has(item.kind)) {
+          fail(`${path}.kind`, "a terminal turn event for a terminalized lifecycle");
+        }
+        break;
+      case "event_fact":
+        if (item.body.kind !== item.kind || bodyOwnedKinds.has(item.kind)) {
+          fail(`${path}.body.kind`, "the matching header-only event kind");
+        }
+        break;
+    }
+    const computedItemBytes = detailEnvelopeBytes + textBytes;
+    if (item.projected_body_bytes !== computedItemBytes) {
+      fail(`${path}.projected_body_bytes`, `the computed ${computedItemBytes} bytes`);
+    }
+    computedProjectedBodyBytes += computedItemBytes;
+    if (computedProjectedBodyBytes > maxProjectedBodyBytes) {
+      fail("timeline_detail_page.projected_body_bytes", `at most ${maxProjectedBodyBytes} bytes`);
+    }
+    if (continuation !== null) {
+      if (expectedBodyContinuation !== null) {
+        fail(path, "at most one continued body per page");
+      }
+      expectedBodyContinuation = continuation;
+    }
+  });
+  if (value.projected_body_bytes !== computedProjectedBodyBytes) {
+    fail(
+      "timeline_detail_page.projected_body_bytes",
+      `the computed ${computedProjectedBodyBytes} bytes`,
+    );
+  }
+
+  if (value.continuation === undefined || value.continuation === null) {
+    if (expectedBodyContinuation !== null) {
+      fail("timeline_detail_page.continuation", "the excerpt body continuation");
+    }
+    return;
+  }
+  if (value.continuation.type === "more_body") {
+    if (
+      expectedBodyContinuation === null ||
+      !sameBodyContinuation(value.continuation.body, expectedBodyContinuation)
+    ) {
+      fail("timeline_detail_page.continuation.body", "the excerpt body continuation");
+    }
+  } else {
+    if (expectedBodyContinuation !== null) {
+      fail("timeline_detail_page.continuation", "more_body for a continued excerpt");
+    }
+    if (
+      previousAddress !== null &&
+      BigInt(value.continuation.address.event_sequence) <= previousAddress
+    ) {
+      fail("timeline_detail_page.continuation.address", "after the final returned item");
+    }
+  }
+}
+
 export function decodeWebContractBootstrap(value) {
   assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "bootstrap");
   if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "1") {
@@ -599,5 +1276,11 @@ export function decodeWebSessionTimelineDescriptor(value) {
 
 export function decodeWebSessionTimelineWindow(value) {
   assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "timeline_window");
+  return value;
+}
+
+export function decodeWebSessionTimelineDetailPage(value) {
+  assertSchema(schemas.WebSessionTimelineDetailPage, schemas.WebSessionTimelineDetailPage, value, "timeline_detail_page");
+  assertTimelineDetailPage(value);
   return value;
 }

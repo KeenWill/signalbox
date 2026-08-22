@@ -28,19 +28,26 @@ use axum::{
 use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
-    SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress,
-    TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits,
+    SessionTimelineDescriptor, SessionTimelineDetailBody, SessionTimelineDetailPage,
+    SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress, TimelineBodyContinuation,
+    TimelineBodyField, TimelineContinuation, TimelineDetailContinuation, TimelineDetailCursor,
+    TimelineDetailLimits, TimelineModelCallDisposition, TimelineModelCallState,
+    TimelineTextExcerpt, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
 };
-use signalbox_domain::SessionId;
+use signalbox_domain::{SessionId, TurnId};
+use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
 };
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
     WebContractBootstrap, WebContractExample, WebSessionId, WebSessionTimelineDescriptor,
+    WebSessionTimelineDetail, WebSessionTimelineDetailBody, WebSessionTimelineDetailPage,
     WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence,
-    WebU64,
+    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineBlobReference,
+    WebTimelineBodyContinuation, WebTimelineBodyField, WebTimelineDetailContinuation,
+    WebTimelineEventSequence, WebTimelineModelCallDisposition, WebTimelineModelCallState,
+    WebTimelineModelUsage, WebTimelineTextExcerpt, WebTimelineTurnLifecycleKind, WebU64,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -255,6 +262,18 @@ pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> R
             "/sessions/{session_id}/timeline",
             get(session_timeline_window),
         )
+        .route(
+            "/sessions/{session_id}/timeline/{address}/detail",
+            get(session_timeline_item_detail),
+        )
+        .route(
+            "/sessions/{session_id}/turns/{turn_id}/timeline-detail",
+            get(session_timeline_turn_detail),
+        )
+        .route(
+            "/sessions/{session_id}/timeline-detail",
+            get(session_timeline_region_detail),
+        )
         .route_layer(middleware::from_fn(validate_loopback_host));
     let api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
@@ -312,12 +331,37 @@ struct TimelineWindowQuery {
     max_bytes: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimelineDetailQuery {
+    max_items: Option<String>,
+    max_bytes: Option<String>,
+    cursor_address: Option<String>,
+    cursor_field: Option<String>,
+    cursor_member: Option<String>,
+    cursor_offset: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimelineRegionDetailQuery {
+    first: Option<String>,
+    through: Option<String>,
+    max_items: Option<String>,
+    max_bytes: Option<String>,
+    cursor_address: Option<String>,
+    cursor_field: Option<String>,
+    cursor_member: Option<String>,
+    cursor_offset: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum SessionTimelineRequestError {
     InvalidSessionId,
     InvalidAddress,
     InvalidAnchor,
     MissingBounds,
+    InvalidProjectedSessionId,
 }
 
 impl SessionTimelineRequestError {
@@ -347,6 +391,17 @@ impl SessionTimelineRequestError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "session_projection_failed",
                     "an existing session has no durable timeline bound",
+                )
+            }
+            Self::InvalidProjectedSessionId => {
+                tracing::error!(
+                    failure_class = "fail_closed_corruption",
+                    "session timeline projection has an invalid session identity"
+                );
+                application_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session_projection_failed",
+                    "an existing session has an invalid durable identity",
                 )
             }
         }
@@ -421,7 +476,10 @@ async fn session_timeline_window(
         Err(error) => return error.into_response(),
     };
     match repository.read_window(session, anchor, limits).await {
-        Ok(Some(window)) => Json(window_dto(window)).into_response(),
+        Ok(Some(window)) => match window_dto(window) {
+            Ok(window) => Json(window).into_response(),
+            Err(error) => error.into_response(),
+        },
         Ok(None) => application_error(
             StatusCode::NOT_FOUND,
             "session_not_found",
@@ -429,6 +487,189 @@ async fn session_timeline_window(
         ),
         Err(error) => repository_projection_error(error),
     }
+}
+
+async fn session_timeline_item_detail(
+    State(state): State<WebApiState>,
+    Path((session_id, address)): Path<(String, String)>,
+    query: Result<Query<TimelineDetailQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_timeline_detail_query(),
+    };
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    let address = match parse_timeline_address(&address) {
+        Ok(address) => address,
+        Err(error) => return error.into_response(),
+    };
+    let (limits, cursor) = match parse_detail_query(&query) {
+        Some(parsed) => parsed,
+        None => return invalid_timeline_detail_query(),
+    };
+    let Some(repository) = state.timeline else {
+        return session_projection_unavailable();
+    };
+    match repository
+        .read_item_details(session, address, cursor, limits)
+        .await
+    {
+        Ok(Some(page)) => Json(detail_page_dto(page)).into_response(),
+        Ok(None) => timeline_detail_not_found(),
+        Err(error) => repository_projection_error(error),
+    }
+}
+
+async fn session_timeline_turn_detail(
+    State(state): State<WebApiState>,
+    Path((session_id, turn_id)): Path<(String, String)>,
+    query: Result<Query<TimelineDetailQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_timeline_detail_query(),
+    };
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    let turn = match uuid::Uuid::parse_str(&turn_id) {
+        Ok(turn) => TurnId::from_uuid(turn),
+        Err(_) => {
+            return application_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_turn_id",
+                "turn id is not a UUID",
+            );
+        }
+    };
+    let (limits, cursor) = match parse_detail_query(&query) {
+        Some(parsed) => parsed,
+        None => return invalid_timeline_detail_query(),
+    };
+    let Some(repository) = state.timeline else {
+        return session_projection_unavailable();
+    };
+    match repository
+        .read_turn_details(session, turn, cursor, limits)
+        .await
+    {
+        Ok(Some(page)) => Json(detail_page_dto(page)).into_response(),
+        Ok(None) => timeline_detail_not_found(),
+        Err(error) => repository_projection_error(error),
+    }
+}
+
+async fn session_timeline_region_detail(
+    State(state): State<WebApiState>,
+    Path(session_id): Path<String>,
+    query: Result<Query<TimelineRegionDetailQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_timeline_detail_query(),
+    };
+    let session = match parse_session_id(&session_id) {
+        Ok(session) => session,
+        Err(error) => return error.into_response(),
+    };
+    let first = query
+        .first
+        .as_deref()
+        .and_then(|value| parse_timeline_address(value).ok());
+    let through = query
+        .through
+        .as_deref()
+        .and_then(|value| parse_timeline_address(value).ok());
+    let detail_query = TimelineDetailQuery {
+        max_items: query.max_items,
+        max_bytes: query.max_bytes,
+        cursor_address: query.cursor_address,
+        cursor_field: query.cursor_field,
+        cursor_member: query.cursor_member,
+        cursor_offset: query.cursor_offset,
+    };
+    let (Some(first), Some(through), Some((limits, cursor))) =
+        (first, through, parse_detail_query(&detail_query))
+    else {
+        return invalid_timeline_detail_query();
+    };
+    let Some(repository) = state.timeline else {
+        return session_projection_unavailable();
+    };
+    match repository
+        .read_region_details(session, first, through, cursor, limits)
+        .await
+    {
+        Ok(Some(page)) => Json(detail_page_dto(page)).into_response(),
+        Ok(None) => timeline_detail_not_found(),
+        Err(error) => repository_projection_error(error),
+    }
+}
+
+fn parse_detail_query(
+    query: &TimelineDetailQuery,
+) -> Option<(TimelineDetailLimits, Option<TimelineDetailCursor>)> {
+    let max_items = query.max_items.as_deref()?.parse::<u16>().ok()?;
+    let max_bytes = query.max_bytes.as_deref()?.parse::<u32>().ok()?;
+    let limits = TimelineDetailLimits::new(max_items, max_bytes).ok()?;
+    let cursor = match (
+        query.cursor_address.as_deref(),
+        query.cursor_field.as_deref(),
+        query.cursor_member.as_deref(),
+        query.cursor_offset.as_deref(),
+    ) {
+        (None, None, None, None) => None,
+        (Some(address), None, None, None) => Some(TimelineDetailCursor {
+            address: parse_timeline_address(address).ok()?,
+            field: None,
+            member_index: 0,
+            offset_bytes: 0,
+        }),
+        (Some(address), Some(field), Some(member), Some(offset)) => Some(TimelineDetailCursor {
+            address: parse_timeline_address(address).ok()?,
+            field: Some(parse_body_field(field).ok()?),
+            member_index: member.parse().ok()?,
+            offset_bytes: offset.parse().ok()?,
+        }),
+        _ => return None,
+    };
+    Some((limits, cursor))
+}
+
+fn parse_body_field(value: &str) -> Result<TimelineBodyField, ()> {
+    match value {
+        "input_text" => Ok(TimelineBodyField::InputText),
+        "model_response" => Ok(TimelineBodyField::ModelResponse),
+        _ => Err(()),
+    }
+}
+
+fn invalid_timeline_detail_query() -> Response {
+    application_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_timeline_detail_limits",
+        "timeline detail parameters are malformed or outside the contract bounds",
+    )
+}
+
+fn timeline_detail_not_found() -> Response {
+    application_error(
+        StatusCode::NOT_FOUND,
+        "timeline_detail_not_found",
+        "the requested session timeline detail does not exist",
+    )
+}
+
+fn session_projection_unavailable() -> Response {
+    application_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "session_projection_unavailable",
+        "session projection is not configured",
+    )
 }
 
 fn invalid_timeline_query() -> Response {
@@ -441,8 +682,17 @@ fn invalid_timeline_query() -> Response {
 
 fn repository_projection_error(error: SessionTimelineRepositoryError) -> Response {
     let failure_class = match &error {
+        SessionTimelineRepositoryError::InvalidDetailQuery => {
+            return invalid_timeline_detail_query();
+        }
         SessionTimelineRepositoryError::Database(_) => "infrastructure",
         SessionTimelineRepositoryError::Corruption(_) => "fail_closed_corruption",
+        SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Database(_)) => {
+            "infrastructure"
+        }
+        SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Corruption(_)) => {
+            "fail_closed_corruption"
+        }
     };
     tracing::error!(
         failure_class,
@@ -462,21 +712,29 @@ fn parse_session_id(value: &str) -> Result<SessionId, SessionTimelineRequestErro
         .map_err(|_| SessionTimelineRequestError::InvalidSessionId)
 }
 
+fn parse_timeline_address(value: &str) -> Result<TimelineAddress, SessionTimelineRequestError> {
+    if value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || value.starts_with('0')
+    {
+        return Err(SessionTimelineRequestError::InvalidAddress);
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .and_then(std::num::NonZeroU64::new)
+        .map(TimelineAddress::new)
+        .ok_or(SessionTimelineRequestError::InvalidAddress)
+}
+
 fn parse_window_anchor(
     anchor: &str,
     address: Option<&str>,
 ) -> Result<TimelineWindowAnchor, SessionTimelineRequestError> {
     let parsed_address = || {
         address
-            .filter(|value| {
-                !value.is_empty()
-                    && value.bytes().all(|byte| byte.is_ascii_digit())
-                    && !value.starts_with('0')
-            })
-            .and_then(|value| value.parse::<u64>().ok())
-            .and_then(std::num::NonZeroU64::new)
-            .map(TimelineAddress::new)
             .ok_or(SessionTimelineRequestError::InvalidAddress)
+            .and_then(parse_timeline_address)
     };
     match (anchor, address) {
         ("first", None) => Ok(TimelineWindowAnchor::First),
@@ -505,7 +763,7 @@ fn descriptor_dto(
     };
     Ok(WebSessionTimelineDescriptor {
         session_id: WebSessionId::from_canonical(descriptor.session.into_uuid().to_string())
-            .expect("domain session UUID formats canonically"),
+            .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
         sizes: WebSessionTimelineSizeFacts {
             item_count: WebU64::from_u64(descriptor.sizes.item_count),
             projected_text_bytes: WebU64::from_u64(descriptor.sizes.projected_text_bytes),
@@ -525,7 +783,9 @@ fn descriptor_dto(
     })
 }
 
-fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
+fn window_dto(
+    window: SessionTimelineWindow,
+) -> Result<WebSessionTimelineWindow, SessionTimelineRequestError> {
     let continuation_before = match window.continuation_before {
         TimelineContinuation::Exhausted => None,
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
@@ -534,9 +794,9 @@ fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
         TimelineContinuation::Exhausted => None,
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
     };
-    WebSessionTimelineWindow {
+    Ok(WebSessionTimelineWindow {
         session_id: WebSessionId::from_canonical(window.session.into_uuid().to_string())
-            .expect("domain session UUID formats canonically"),
+            .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
         items: window
             .items
             .into_iter()
@@ -549,6 +809,143 @@ fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
         projected_structured_bytes: window.projected_structured_bytes,
         continuation_before,
         continuation_after,
+    })
+}
+
+fn detail_page_dto(page: SessionTimelineDetailPage) -> WebSessionTimelineDetailPage {
+    WebSessionTimelineDetailPage {
+        session_id: page.session.into_uuid().to_string(),
+        items: page
+            .items
+            .into_iter()
+            .map(|item| WebSessionTimelineDetail {
+                address: address_dto(item.address),
+                kind: event_kind_dto(item.kind),
+                body: detail_body_dto(item.body),
+                projected_body_bytes: item.projected_body_bytes,
+            })
+            .collect(),
+        projected_body_bytes: page.projected_body_bytes,
+        continuation: page.continuation.map(|continuation| match continuation {
+            TimelineDetailContinuation::MoreAt(address) => WebTimelineDetailContinuation::MoreAt {
+                address: address_dto(address),
+            },
+            TimelineDetailContinuation::MoreBody(body) => WebTimelineDetailContinuation::MoreBody {
+                body: body_continuation_dto(body),
+            },
+        }),
+    }
+}
+
+fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailBody {
+    match body {
+        SessionTimelineDetailBody::UserInput {
+            turn_id,
+            text,
+            attachments,
+        } => WebSessionTimelineDetailBody::UserInput {
+            turn_id: turn_id.into_uuid().to_string(),
+            text: text_excerpt_dto(text),
+            attachments: attachments
+                .into_iter()
+                .map(|reference| WebTimelineBlobReference {
+                    blob_id: reference.blob_id.to_string(),
+                    length_bytes: WebU64::from_u64(reference.length_bytes),
+                    media_type: reference.media_type,
+                })
+                .collect(),
+        },
+        SessionTimelineDetailBody::ModelCall {
+            turn_id,
+            model_call_id,
+            state,
+            model_identity_id,
+            request_context_items,
+            response,
+            usage,
+            cause_code,
+        } => WebSessionTimelineDetailBody::ModelCall {
+            turn_id: turn_id.into_uuid().to_string(),
+            model_call_id: model_call_id.into_uuid().to_string(),
+            state: model_call_state_dto(state),
+            model_identity_id: model_identity_id.into_uuid().to_string(),
+            request_context_items: WebU64::from_u64(request_context_items),
+            response: response.map(text_excerpt_dto),
+            usage: WebTimelineModelUsage {
+                input_tokens: usage.input_tokens.map(WebU64::from_u64),
+                output_tokens: usage.output_tokens.map(WebU64::from_u64),
+                cache_creation_input_tokens: usage
+                    .cache_creation_input_tokens
+                    .map(WebU64::from_u64),
+                cache_read_input_tokens: usage.cache_read_input_tokens.map(WebU64::from_u64),
+            },
+            cause_code,
+        },
+        SessionTimelineDetailBody::TurnLifecycle {
+            turn_id,
+            lifecycle,
+            cause_code,
+        } => WebSessionTimelineDetailBody::TurnLifecycle {
+            turn_id: turn_id.into_uuid().to_string(),
+            lifecycle: match lifecycle {
+                TimelineTurnLifecycleKind::Activated => WebTimelineTurnLifecycleKind::Activated,
+                TimelineTurnLifecycleKind::Terminalized => {
+                    WebTimelineTurnLifecycleKind::Terminalized
+                }
+            },
+            cause_code,
+        },
+        SessionTimelineDetailBody::EventFact { kind } => WebSessionTimelineDetailBody::EventFact {
+            kind: event_kind_dto(kind),
+        },
+    }
+}
+
+fn model_call_state_dto(state: TimelineModelCallState) -> WebTimelineModelCallState {
+    match state {
+        TimelineModelCallState::Prepared => WebTimelineModelCallState::Prepared {},
+        TimelineModelCallState::InFlight => WebTimelineModelCallState::InFlight {},
+        TimelineModelCallState::CancellationRequested => {
+            WebTimelineModelCallState::CancellationRequested {}
+        }
+        TimelineModelCallState::Terminal(disposition) => WebTimelineModelCallState::Terminal {
+            disposition: match disposition {
+                TimelineModelCallDisposition::Completed => {
+                    WebTimelineModelCallDisposition::Completed
+                }
+                TimelineModelCallDisposition::KnownFailed => {
+                    WebTimelineModelCallDisposition::KnownFailed
+                }
+                TimelineModelCallDisposition::Refused => WebTimelineModelCallDisposition::Refused,
+                TimelineModelCallDisposition::Cancelled => {
+                    WebTimelineModelCallDisposition::Cancelled
+                }
+                TimelineModelCallDisposition::Ambiguous => {
+                    WebTimelineModelCallDisposition::Ambiguous
+                }
+            },
+        },
+    }
+}
+
+fn text_excerpt_dto(excerpt: TimelineTextExcerpt) -> WebTimelineTextExcerpt {
+    WebTimelineTextExcerpt {
+        text: excerpt.text,
+        offset_bytes: WebU64::from_u64(excerpt.offset_bytes),
+        total_bytes: WebU64::from_u64(excerpt.total_bytes),
+        continuation: excerpt.continuation.map(body_continuation_dto),
+    }
+}
+
+fn body_continuation_dto(continuation: TimelineBodyContinuation) -> WebTimelineBodyContinuation {
+    WebTimelineBodyContinuation {
+        address: address_dto(continuation.address),
+        field: match continuation.field {
+            TimelineBodyField::InputText => WebTimelineBodyField::InputText,
+            TimelineBodyField::ModelResponse => WebTimelineBodyField::ModelResponse,
+        },
+        member_index: continuation.member_index,
+        offset_bytes: WebU64::from_u64(continuation.offset_bytes),
     }
 }
 
@@ -892,6 +1289,7 @@ mod tests {
         http::{Request, StatusCode, header},
     };
     use http_body_util::BodyExt as _;
+    use signalbox_application::{TimelineAddress, TimelineBodyField, TimelineDetailCursor};
     use signalbox_web_contract::{
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebContractBootstrap, WebContractExample,
     };
@@ -900,8 +1298,9 @@ mod tests {
     use url::Url;
 
     use super::{
-        DEFAULT_WEB_BIND_ADDRESS, WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime,
-        deterministic_test_router, ndjson_response, production_router,
+        DEFAULT_WEB_BIND_ADDRESS, TimelineDetailQuery, WebHttpConfiguration,
+        WebHttpConfigurationError, WebHttpRuntime, deterministic_test_router, ndjson_response,
+        parse_detail_query, production_router,
     };
 
     fn loopback_ephemeral() -> SocketAddr {
@@ -1265,6 +1664,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_detail_ceiling_uses_the_structured_error_envelope() {
+        let request = Request::get(
+            "/api/sessions/00000000-0000-0000-0000-000000000991/timeline/1/detail?max_items=1",
+        )
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["kind"], "application");
+        assert_eq!(body["error"]["code"], "invalid_timeline_detail_limits");
+    }
+
+    #[tokio::test]
     async fn session_reads_reject_non_loopback_host_authorities() {
         let request = Request::get("/api/sessions/00000000-0000-0000-0000-000000000991")
             .header(header::HOST, "attacker.example")
@@ -1281,6 +1701,70 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"]["kind"], "transport");
         assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    }
+
+    #[test]
+    fn detail_cursors_require_closed_fields_and_canonical_addresses() {
+        let query = TimelineDetailQuery {
+            max_items: Some(String::from("1")),
+            max_bytes: Some(String::from("256")),
+            cursor_address: Some(String::from("7")),
+            cursor_field: Some(String::from("model_response")),
+            cursor_member: Some(String::from("0")),
+            cursor_offset: Some(String::from("31")),
+        };
+        let parsed = parse_detail_query(&query).expect("the closed cursor is valid");
+
+        assert_eq!(
+            parsed.1,
+            Some(TimelineDetailCursor {
+                address: TimelineAddress::new(
+                    std::num::NonZeroU64::new(7).expect("fixture address is positive")
+                ),
+                field: Some(TimelineBodyField::ModelResponse),
+                member_index: 0,
+                offset_bytes: 31,
+            })
+        );
+    }
+
+    #[test]
+    fn detail_cursors_accept_address_only_item_continuations() {
+        let query = TimelineDetailQuery {
+            max_items: Some(String::from("1")),
+            max_bytes: Some(String::from("256")),
+            cursor_address: Some(String::from("7")),
+            cursor_field: None,
+            cursor_member: None,
+            cursor_offset: None,
+        };
+        let parsed = parse_detail_query(&query).expect("the item cursor is valid");
+
+        assert_eq!(
+            parsed.1,
+            Some(TimelineDetailCursor {
+                address: TimelineAddress::new(
+                    std::num::NonZeroU64::new(7).expect("fixture address is positive")
+                ),
+                field: None,
+                member_index: 0,
+                offset_bytes: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn detail_cursors_reject_incomplete_body_continuations() {
+        let query = TimelineDetailQuery {
+            max_items: Some(String::from("1")),
+            max_bytes: Some(String::from("256")),
+            cursor_address: Some(String::from("7")),
+            cursor_field: Some(String::from("model_response")),
+            cursor_member: None,
+            cursor_offset: Some(String::from("31")),
+        };
+
+        assert!(parse_detail_query(&query).is_none());
     }
 
     #[test]
