@@ -861,7 +861,7 @@ impl<Generator, Transaction, Execution> ActivatedTurnPass<Generator, Transaction
         }
     }
 
-    /// Compacts queued turns whose last completed call proves headroom is gone.
+    /// Compacts queued turns whose last terminal call proves headroom is gone.
     pub fn with_reported_usage_compaction(
         mut self,
         compaction: crate::context_guard::ReportedUsageCompaction,

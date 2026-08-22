@@ -825,7 +825,7 @@ the ordered subset the selected model sees.
 
 Explicit compaction chooses an optional through position, defaulting to the
 latest safe boundary. The daemon also compacts before activating queued work
-when the latest completed call's durable provider-reported usage proves that the
+when the latest terminal call's durable provider-reported usage proves that the
 next configured output-token reservation cannot fit in the current selection's
 declared context window. Automatic compaction selects a bounded safe prefix so
 its own summary request does not repeat the complete oversized input. Both paths
