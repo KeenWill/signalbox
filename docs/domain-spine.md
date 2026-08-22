@@ -7176,7 +7176,6 @@ pub enum PullRequestDraftState {
     Draft,
 }
 impl PullRequestDraftState {
-    pub const fn from_provider_flag(draft: bool) -> Self;
     pub const fn is_draft(self) -> bool;
 }
 
