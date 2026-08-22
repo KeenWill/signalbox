@@ -59,15 +59,59 @@ export class ImportDescriptorCorrelationError extends Error {
   }
 }
 
+export class ImportListCorrelationError extends Error {
+  constructor() {
+    super('import catalog page does not correlate with its request')
+    this.name = 'ImportListCorrelationError'
+  }
+}
+
+const correlateListPage = (
+  request: WebImportListRequest,
+  page: WebImportListPage,
+): WebImportListPage => {
+  let previous = request.after ?? undefined
+  for (const item of page.items) {
+    if (
+      (previous !== undefined && item.imported_conversation_id <= previous) ||
+      (request.format !== undefined && request.format !== null && item.format !== request.format)
+    ) {
+      throw new ImportListCorrelationError()
+    }
+    if (request.source_session_id !== undefined && request.source_session_id !== null) {
+      const evidence = item.source_session_id
+      if (
+        evidence === undefined ||
+        evidence === null ||
+        (evidence.completeness === 'complete'
+          ? evidence.leading_text !== request.source_session_id
+          : !request.source_session_id.startsWith(evidence.leading_text))
+      ) {
+        throw new ImportListCorrelationError()
+      }
+    }
+    previous = item.imported_conversation_id
+  }
+  if (
+    page.next_cursor !== undefined &&
+    page.next_cursor !== null &&
+    (page.items.length === 0 || page.next_cursor !== previous)
+  ) {
+    throw new ImportListCorrelationError()
+  }
+  return page
+}
+
 const correlateEntryWindow = (
   importedConversationId: string,
   request: WebImportEntryWindowRequest,
   window: WebImportEntryWindow,
 ): WebImportEntryWindow => {
+  const normalizedAnchor = request.anchor ?? 'first'
   const expectedAnchor =
-    request.anchor === 'first'
+    normalizedAnchor === 'first'
       ? 1
-      : request.anchor === 'latest'
+      : normalizedAnchor === 'latest'
         ? window.last_position
         : request.position
   const positionsCorrelate = window.items.every(
@@ -113,16 +157,17 @@ const queryString = (request: WebImportListRequest | WebImportEntryWindowRequest
 export class HttpImportApi implements ImportApi {
   async list(request: WebImportListRequest, signal?: AbortSignal): Promise<WebImportListPage> {
     if (request.source_session_id !== undefined && request.source_session_id !== null) {
-      const response = await fetch('/api/imports/searches', {
+      const { source_session_id: sourceSessionId, ...catalogRequest } = request
+      const response = await fetch(`/api/imports/searches${queryString(catalogRequest)}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(request),
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+        body: sourceSessionId,
         signal,
       })
-      return decodeResponse(response, decodeWebImportListPage)
+      return correlateListPage(request, await decodeResponse(response, decodeWebImportListPage))
     }
     const response = await fetch(`/api/imports/${queryString(request)}`, { signal })
-    return decodeResponse(response, decodeWebImportListPage)
+    return correlateListPage(request, await decodeResponse(response, decodeWebImportListPage))
   }
 
   async descriptor(

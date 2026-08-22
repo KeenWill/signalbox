@@ -23,6 +23,7 @@ import { store } from '../state'
 import { type ImportApi, ImportApiError, ImportReceiptCorrelationError } from './api'
 import { ImportedEntries } from './ImportedEntries'
 import { ImportsTable } from './ImportsTable'
+import { loadRetainedCommand, storeRetainedCommand } from './retainedCommand'
 import { SCENARIO_IMPORT_TOTAL } from './scenario'
 
 const IMPORT_PAGE_ITEMS = 100
@@ -41,9 +42,9 @@ const formatOptions: ReadonlyArray<{ value: FormatFilter; label: string }> = [
 ]
 
 const isRetryableContinuationError = (error: unknown): boolean =>
-  !(error instanceof ImportReceiptCorrelationError) &&
-  (!(error instanceof ImportApiError) ||
-    ['continuation_commit_ambiguous', 'continuation_unavailable'].includes(error.detail.error.code))
+  error instanceof ImportReceiptCorrelationError ||
+  !(error instanceof ImportApiError) ||
+  ['continuation_commit_ambiguous', 'continuation_unavailable'].includes(error.detail.error.code)
 
 const byteLabel = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`
@@ -65,6 +66,7 @@ export function ImportsWorkspace({
   onNavigationDisabledChange?: (disabled: boolean) => void
 }) {
   const queryClient = useQueryClient()
+  const queryScope = scenario ? 'scenario' : 'production'
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
   const [sourceSession, setSourceSession] = useState('')
   const [sourceSessionFilterEnabled, setSourceSessionFilterEnabled] = useState(false)
@@ -81,8 +83,9 @@ export function ImportsWorkspace({
   )
   const [modelKind, setModelKind] = useState<ModelKind>('direct')
   const [modelSelectionId, setModelSelectionId] = useState(scenario ? SCENARIO_MODEL_SELECTION : '')
-  const [pendingCommand, setPendingCommand] = useState<WebImportContinuationRequest | null>(null)
-  const queryScope = scenario ? 'scenario' : 'production'
+  const [pendingCommand, setPendingCommand] = useState<WebImportContinuationRequest | null>(() =>
+    loadRetainedCommand(queryScope),
+  )
   const hasRetainedCommand = pendingCommand !== null
 
   useEffect(() => {
@@ -146,9 +149,15 @@ export function ImportsWorkspace({
   const continuation = useMutation({
     mutationFn: (request: WebImportContinuationRequest) =>
       api.continueImport(request.frontier.imported_conversation_id, request),
-    onSuccess: () => setPendingCommand(null),
+    onSuccess: () => {
+      storeRetainedCommand(queryScope, null)
+      setPendingCommand(null)
+    },
     onError: (error) => {
-      if (!isRetryableContinuationError(error)) setPendingCommand(null)
+      if (!isRetryableContinuationError(error)) {
+        storeRetainedCommand(queryScope, null)
+        setPendingCommand(null)
+      }
     },
   })
   const resetContinuation = continuation.reset
@@ -293,10 +302,11 @@ export function ImportsWorkspace({
 
   const retryableContinuationFailure =
     continuation.isError && isRetryableContinuationError(continuation.error)
+  const retainedCommandNeedsAction = pendingCommand !== null && !continuation.isPending
   const modelSelectionMissing = modelSelectionId.trim().length === 0
 
   const continueAt = (relationship: WebImportedSessionRelationship) => {
-    if (!selectedFrontier || modelSelectionId.trim().length === 0) return
+    if (hasRetainedCommand || !selectedFrontier || modelSelectionId.trim().length === 0) return
     const request: WebImportContinuationRequest = {
       command_id: crypto.randomUUID(),
       frontier: selectedFrontier,
@@ -306,6 +316,7 @@ export function ImportsWorkspace({
           ? { kind: 'direct', selection_id: modelSelectionId.trim() }
           : { kind: 'alias', alias_id: modelSelectionId.trim() },
     }
+    storeRetainedCommand(queryScope, request)
     setPendingCommand(request)
     continuation.mutate(request)
   }
@@ -315,7 +326,10 @@ export function ImportsWorkspace({
       <div className={`imports-shell imports-shell-${presentation}`}>
         {presentation === 'standalone' && (
           <aside className="navigation-pane imports-navigation">
-            <ScenarioNavigation activeId="imports" disabled={hasRetainedCommand} />
+            <ScenarioNavigation
+              activeId={scenario ? 'imports' : 'production-imports'}
+              disabled={hasRetainedCommand}
+            />
           </aside>
         )}
         <div
@@ -530,7 +544,10 @@ export function ImportsWorkspace({
                     <select
                       aria-label="Initial model selection kind"
                       value={modelKind}
-                      onChange={(event) => setModelKind(event.target.value as ModelKind)}
+                      disabled={hasRetainedCommand}
+                      onChange={(event) => {
+                        if (!hasRetainedCommand) setModelKind(event.target.value as ModelKind)
+                      }}
                     >
                       <option value="direct">Direct model</option>
                       <option value="alias">Model alias</option>
@@ -539,7 +556,10 @@ export function ImportsWorkspace({
                       aria-label="Initial model selection UUID"
                       placeholder="Model selection UUID"
                       value={modelSelectionId}
-                      onChange={(event) => setModelSelectionId(event.target.value)}
+                      disabled={hasRetainedCommand}
+                      onChange={(event) => {
+                        if (!hasRetainedCommand) setModelSelectionId(event.target.value)
+                      }}
                     />
                   </div>
                   <p>
@@ -573,7 +593,7 @@ export function ImportsWorkspace({
                     >
                       Fork
                     </button>
-                    {retryableContinuationFailure && pendingCommand && (
+                    {retainedCommandNeedsAction && pendingCommand && (
                       <>
                         <button type="button" onClick={() => continuation.mutate(pendingCommand)}>
                           Retry exact command
@@ -581,6 +601,7 @@ export function ImportsWorkspace({
                         <button
                           type="button"
                           onClick={() => {
+                            storeRetainedCommand(queryScope, null)
                             setPendingCommand(null)
                             continuation.reset()
                           }}
@@ -590,7 +611,7 @@ export function ImportsWorkspace({
                       </>
                     )}
                   </div>
-                  {retryableContinuationFailure && pendingCommand && (
+                  {retainedCommandNeedsAction && pendingCommand && (
                     <p role="alert">
                       The exact command for import{' '}
                       {pendingCommand.frontier.imported_conversation_id}, position{' '}
@@ -598,7 +619,7 @@ export function ImportsWorkspace({
                       Abandon it before selecting another import or frontier.
                     </p>
                   )}
-                  {continuation.isError && !retryableContinuationFailure && (
+                  {continuation.isError && !retryableContinuationFailure && !pendingCommand && (
                     <p role="alert">
                       The continuation request was rejected and cannot be retried unchanged.
                     </p>
@@ -649,7 +670,8 @@ export function ImportsWorkspace({
       {presentation === 'standalone' && (
         <OverlaySurfaces
           context={commandContext}
-          activeId="imports"
+          activeId={scenario ? 'imports' : 'production-imports'}
+          importsSurface
           navigationDisabled={hasRetainedCommand}
         />
       )}

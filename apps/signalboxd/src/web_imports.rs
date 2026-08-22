@@ -47,7 +47,10 @@ use uuid::Uuid;
 
 use crate::{
     HubModelConfiguration,
-    web_http::{application_error, decode_bounded_json, transport_error, validate_json_mutation},
+    web_http::{
+        application_error, decode_bounded_json, decode_bounded_utf8, transport_error,
+        validate_json_mutation, validate_text_mutation,
+    },
 };
 
 // Tunable effective ceiling: ordinary catalog views ask for a dense first page below the hard cap.
@@ -71,7 +74,7 @@ pub(crate) fn router(pool: PgPool, model_configuration: HubModelConfiguration) -
         .route_layer(middleware::from_fn(validate_json_mutation));
     let searches = Router::new()
         .route("/searches", post(search_imports))
-        .route_layer(middleware::from_fn(validate_json_mutation));
+        .route_layer(middleware::from_fn(validate_text_mutation));
     Router::new()
         .route("/", get(list_imports))
         .route("/{conversation}", get(read_descriptor))
@@ -97,16 +100,25 @@ async fn list_imports(
 
 async fn search_imports(
     State(state): State<WebImportState>,
+    query: Result<Query<WebImportListRequest>, axum::extract::rejection::QueryRejection>,
     request: axum::extract::Request,
 ) -> Response {
-    let request = match decode_bounded_json::<WebImportListRequest>(request).await {
+    let Query(mut catalog_request) = match query {
         Ok(request) => request,
+        Err(_) => return invalid_request("imports search query is malformed"),
+    };
+    if catalog_request.source_session_id.is_some() {
+        return invalid_request("exact source-session filters belong in the search body");
+    }
+    let maximum_bytes = state
+        .model_configuration
+        .conversation_import_max_source_bytes();
+    let source_session_id = match decode_bounded_utf8(request, maximum_bytes).await {
+        Ok(source_session_id) => source_session_id,
         Err(response) => return response,
     };
-    if request.source_session_id.is_none() {
-        return invalid_request("bounded import searches require an exact source session");
-    }
-    execute_list_imports(state, request).await
+    catalog_request.source_session_id = Some(source_session_id);
+    execute_list_imports(state, catalog_request).await
 }
 
 async fn execute_list_imports(state: WebImportState, request: WebImportListRequest) -> Response {
