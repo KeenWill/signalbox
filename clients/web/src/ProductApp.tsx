@@ -321,8 +321,21 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [app.density, app.theme])
 
   const copy = surfaceCopy[surface]
+  const projectionSurface = surface === 'attention' || surface === 'activity'
   const content =
-    surface === 'attention' ? (
+    projectionSurface && !bootstrap.isSuccess ? (
+      <section className="surface-empty" aria-live="polite">
+        <AlertTriangle aria-hidden="true" />
+        <div>
+          <h2>Waiting for a compatible daemon contract</h2>
+          <p>
+            {bootstrap.isError
+              ? 'Operational reads are disabled because the browser could not validate the daemon contract.'
+              : 'Operational reads will begin after the daemon contract has been validated.'}
+          </p>
+        </div>
+      </section>
+    ) : surface === 'attention' ? (
       <AttentionSurface />
     ) : surface === 'activity' ? (
       <ActivitySurface />

@@ -96,9 +96,9 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
 
 export const loadBrowserPreferences = (): BrowserPreferences => {
   if (typeof localStorage === 'undefined') return defaultBrowserPreferences
-  const stored = localStorage.getItem(BROWSER_PREFERENCES_KEY)
-  if (stored === null) return defaultBrowserPreferences
   try {
+    const stored = localStorage.getItem(BROWSER_PREFERENCES_KEY)
+    if (stored === null) return defaultBrowserPreferences
     return decodeBrowserPreferences(JSON.parse(stored))
   } catch {
     return defaultBrowserPreferences

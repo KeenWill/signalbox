@@ -122,6 +122,7 @@ function HistoryTable({ rows }: { rows: ActivityRow[] }) {
             return (
               // biome-ignore lint/a11y: Focus lives on the row's activity link.
               <div
+                id={`activity-${row.original.id}`}
                 className="activity-history-row"
                 role="row"
                 aria-rowindex={virtualRow.index + 2}
