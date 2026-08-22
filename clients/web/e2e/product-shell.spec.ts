@@ -81,9 +81,12 @@ test('preserves a scenario-specific title after leaving the product shell', asyn
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
 
-  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  const scenarioEntry = page.getByRole('link', { name: /Scenario studio/ })
+  await scenarioEntry.focus()
+  await page.keyboard.press('Enter')
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
   await expect(page).toHaveTitle('Streaming session · Signalbox scenarios')
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
