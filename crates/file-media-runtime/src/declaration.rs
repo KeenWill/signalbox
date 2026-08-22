@@ -2,9 +2,8 @@ use std::{error::Error, fmt, future::Future, pin::Pin};
 
 use crate::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileReaderName,
-    FileReaderProviderName, FileReaderRevision, FileUse, ProcessorFailure, ProcessorProbeOutput,
-    ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode, ValidatedFile,
-    ProcessorReadOutput, VerifiedBlobSource,
+    FileReaderProviderName, FileReaderRevision, FileUse, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode, VerifiedBlobSource,
 };
 
 // numeric-bound: ceiling - bounds retained model-facing view-description memory

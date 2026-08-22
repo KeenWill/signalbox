@@ -4,23 +4,27 @@ use std::{
     fmt, fs,
     io::{Read as _, Seek as _, SeekFrom, Write as _},
     os::{
-        fd::{AsRawFd as _, FromRawFd as _},
+        fd::AsRawFd as _,
         unix::{fs::PermissionsExt as _, process::CommandExt as _},
     },
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
-use rustix::process::{Resource, Rlimit, geteuid, getuid};
+use signalbox_file_media_linux_sandbox::{
+    ChildSetup, create_executable_snapshot, install_pre_exec, seal_executable_snapshot,
+};
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProcessCeilings, FileMediaProcessor, FileMediaProcessorFuture,
     FileMediaProviderDeclaration, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_TASKS,
-    ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReaderDeclaration,
-    ReaderIdentity, VerifiedBlobSource,
+    MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_TASKS, ProcessorBoundaryFailure,
+    ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReaderDeclaration, ReaderIdentity, VerifiedBlobSource,
 };
 use tokio::{
     io::AsyncReadExt as _,
@@ -48,6 +52,8 @@ const MAX_WORKER_BINDINGS: usize = 256;
 const MAX_AGGREGATE_EXECUTABLE_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum bytes retained by one sealed executable snapshot.
 const MAX_EXECUTABLE_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
+const TASK_CGROUP_ROOT_ENVIRONMENT: &str = "SIGNALBOX_FILE_MEDIA_CGROUP_ROOT";
+static NEXT_TASK_CGROUP: AtomicU64 = AtomicU64::new(1);
 
 /// One checked mapping from a provider declaration to its worker executable.
 #[derive(Clone, Debug)]
@@ -93,6 +99,7 @@ pub struct SandboxedFileMediaProcessor {
         Arc<BTreeMap<signalbox_file_media_runtime::FileReaderProviderName, Arc<PinnedExecutable>>>,
     worker_declarations: Arc<Vec<(Arc<PinnedExecutable>, Vec<FileMediaProviderDeclaration>)>>,
     readers: Arc<BTreeMap<ReaderIdentity, ReaderDeclaration>>,
+    task_cgroup_root: Arc<PathBuf>,
     ceilings: FileMediaProcessCeilings,
 }
 
@@ -107,9 +114,7 @@ impl SandboxedFileMediaProcessor {
             return Err(SandboxedFileMediaProcessorConstructionError::Unsupported);
         }
         admit_worker_binding_count(bindings.len())?;
-        if !task_ceiling_is_enforceable(getuid().as_raw(), geteuid().as_raw()) {
-            return Err(SandboxedFileMediaProcessorConstructionError::TaskCeiling);
-        }
+        let task_cgroup_root = delegated_task_cgroup_root()?;
         if !FileMediaProcessCeilings::version_one().admits(ceilings) {
             return Err(SandboxedFileMediaProcessorConstructionError::Ceilings);
         }
@@ -165,6 +170,7 @@ impl SandboxedFileMediaProcessor {
             workers: Arc::new(workers),
             worker_declarations: Arc::new(worker_declarations.into_values().collect()),
             readers: Arc::new(readers),
+            task_cgroup_root: Arc::new(task_cgroup_root),
             ceilings,
         })
     }
@@ -346,7 +352,6 @@ impl SandboxedFileMediaProcessor {
         }
     }
 
-    #[allow(unsafe_code)]
     async fn spawn(
         &self,
         worker: &PinnedExecutable,
@@ -355,6 +360,8 @@ impl SandboxedFileMediaProcessor {
         let seccomp = process_creation_filter().map_err(|_| ProcessorFailure::Unavailable)?;
         let (block_read, block_write) =
             startup_pipe().map_err(|_| ProcessorFailure::Unavailable)?;
+        let task_cgroup = InvocationTaskCgroup::create(&self.task_cgroup_root)
+            .map_err(|_| ProcessorFailure::Unavailable)?;
         let profile = sandbox_arguments(
             &worker.proc_path,
             seccomp.as_raw_fd(),
@@ -372,17 +379,22 @@ impl SandboxedFileMediaProcessor {
             .stdout(Stdio::piped())
             .stderr(if probe { Stdio::null() } else { Stdio::piped() })
             .kill_on_drop(true);
-        let ceilings = self.ceilings;
         let seccomp_fd = seccomp.as_raw_fd();
         let block_fd = block_read.as_raw_fd();
+        let cgroup_procs_fd = task_cgroup.procs.as_raw_fd();
         command.as_std_mut().process_group(0);
-        unsafe {
-            // SAFETY: the closure performs direct setrlimit, fcntl, and keyctl
-            // syscalls before exec, and captures only copy-only values.
-            command
-                .as_std_mut()
-                .pre_exec(move || prepare_sandbox_process(ceilings, seccomp_fd, block_fd));
-        }
+        let memory = worker_memory_budget(self.ceilings.memory_bytes());
+        install_pre_exec(
+            command.as_std_mut(),
+            ChildSetup {
+                address_space_bytes: memory.address_space_bytes,
+                cpu_seconds: self.ceilings.cpu_seconds(),
+                file_descriptors: self.ceilings.file_descriptors(),
+                seccomp_fd,
+                startup_gate_fd: block_fd,
+                cgroup_procs_fd,
+            },
+        );
         let child = command.spawn().map_err(|_| ProcessorFailure::Unavailable)?;
         drop(block_read);
         let raw_pid = child.id().ok_or(ProcessorFailure::Unavailable)?;
@@ -393,6 +405,7 @@ impl SandboxedFileMediaProcessor {
             process_group: pid,
             startup: Some(block_write),
             _seccomp: seccomp,
+            task_cgroup,
             armed: true,
         })
     }
@@ -627,6 +640,7 @@ struct RunningWorker {
     process_group: rustix::process::Pid,
     startup: Option<rustix::fd::OwnedFd>,
     _seccomp: fs::File,
+    task_cgroup: InvocationTaskCgroup,
     armed: bool,
 }
 
@@ -650,6 +664,7 @@ impl RunningWorker {
     async fn wait(&mut self) -> Result<std::process::ExitStatus, std::io::Error> {
         let status = self.child.wait().await?;
         self.armed = false;
+        self.task_cgroup.cleanup();
         Ok(status)
     }
 
@@ -669,7 +684,95 @@ impl Drop for RunningWorker {
         if self.armed {
             self.kill_tree();
         }
+        self.task_cgroup.cleanup();
     }
+}
+
+#[derive(Debug)]
+struct InvocationTaskCgroup {
+    path: PathBuf,
+    procs: fs::File,
+    cleaned: bool,
+}
+
+impl InvocationTaskCgroup {
+    fn create(root: &Path) -> Result<Self, std::io::Error> {
+        let sequence = NEXT_TASK_CGROUP.fetch_add(1, Ordering::Relaxed);
+        let path = root.join(format!(
+            "signalbox-file-media-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&path)?;
+        let configured = (|| {
+            fs::write(path.join("pids.max"), MAX_WORKER_TASKS.to_string())?;
+            fs::OpenOptions::new()
+                .write(true)
+                .open(path.join("cgroup.procs"))
+        })();
+        match configured {
+            Ok(procs) => Ok(Self {
+                path,
+                procs,
+                cleaned: false,
+            }),
+            Err(error) => {
+                let _ = fs::remove_dir(&path);
+                Err(error)
+            }
+        }
+    }
+
+    fn cleanup(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        let _ = fs::write(self.path.join("cgroup.kill"), "1");
+        if fs::remove_dir(&self.path).is_ok() {
+            self.cleaned = true;
+        }
+    }
+}
+
+impl Drop for InvocationTaskCgroup {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+fn delegated_task_cgroup_root() -> Result<PathBuf, SandboxedFileMediaProcessorConstructionError> {
+    let configured = std::env::var_os(TASK_CGROUP_ROOT_ENVIRONMENT)
+        .ok_or(SandboxedFileMediaProcessorConstructionError::TaskController)?;
+    let root = fs::canonicalize(configured)
+        .map_err(|_| SandboxedFileMediaProcessorConstructionError::TaskController)?;
+    let controllers = fs::read_to_string(root.join("cgroup.controllers"))
+        .map_err(|_| SandboxedFileMediaProcessorConstructionError::TaskController)?;
+    if !root.is_absolute()
+        || !root.join("cgroup.procs").is_file()
+        || !controllers
+            .split_whitespace()
+            .any(|controller| controller == "pids")
+    {
+        return Err(SandboxedFileMediaProcessorConstructionError::TaskController);
+    }
+
+    let sequence = NEXT_TASK_CGROUP.fetch_add(1, Ordering::Relaxed);
+    let probe = root.join(format!(
+        "signalbox-file-media-admission-{}-{sequence}",
+        std::process::id()
+    ));
+    let admitted = fs::create_dir(&probe)
+        .and_then(|()| fs::write(probe.join("pids.max"), MAX_WORKER_TASKS.to_string()))
+        .and_then(|()| {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(probe.join("cgroup.procs"))
+        })
+        .and_then(|_| fs::remove_dir(&probe));
+    if admitted.is_err() {
+        let _ = fs::remove_dir(&probe);
+        return Err(SandboxedFileMediaProcessorConstructionError::TaskController);
+    }
+    Ok(root)
 }
 
 fn process_descendants(root: rustix::process::Pid) -> Vec<rustix::process::Pid> {
@@ -727,68 +830,8 @@ async fn finish_diagnostics(
     }
 }
 
-fn apply_process_limits(ceilings: FileMediaProcessCeilings) -> Result<(), rustix::io::Errno> {
-    let memory = worker_memory_budget(ceilings.memory_bytes());
-    set_limit(Resource::As, memory.address_space_bytes)?;
-    set_limit(Resource::Cpu, ceilings.cpu_seconds())?;
-    set_limit(Resource::Core, 0)?;
-    set_limit(Resource::Nproc, MAX_WORKER_TASKS)?;
-    set_limit(Resource::Nofile, ceilings.file_descriptors())
-}
-
-#[allow(unsafe_code)]
-fn prepare_sandbox_process(
-    ceilings: FileMediaProcessCeilings,
-    seccomp_fd: i32,
-    block_fd: i32,
-) -> Result<(), std::io::Error> {
-    apply_process_limits(ceilings).map_err(std::io::Error::from)?;
-    inherit_child_descriptor(seccomp_fd)?;
-    inherit_child_descriptor(block_fd)?;
-    detach_session_keyring()
-}
-
 fn startup_pipe() -> Result<(rustix::fd::OwnedFd, rustix::fd::OwnedFd), rustix::io::Errno> {
     rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
-}
-
-#[allow(unsafe_code)]
-fn inherit_child_descriptor(raw_fd: i32) -> Result<(), std::io::Error> {
-    // SAFETY: command setup keeps the captured descriptor alive through pre-exec.
-    let descriptor = unsafe { rustix::fd::BorrowedFd::borrow_raw(raw_fd) };
-    rustix::io::fcntl_setfd(descriptor, rustix::io::FdFlags::empty()).map_err(std::io::Error::from)
-}
-
-#[allow(unsafe_code)]
-fn detach_session_keyring() -> Result<(), std::io::Error> {
-    const KEYCTL_JOIN_SESSION_KEYRING: libc::c_long = 1;
-    // SAFETY: keyctl is invoked with JOIN_SESSION_KEYRING and a null name,
-    // which creates and joins a fresh anonymous session keyring.
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_keyctl,
-            KEYCTL_JOIN_SESSION_KEYRING,
-            std::ptr::null::<libc::c_char>(),
-            0 as libc::c_ulong,
-            0 as libc::c_ulong,
-            0 as libc::c_ulong,
-        )
-    };
-    if result < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn set_limit(resource: Resource, value: u64) -> Result<(), rustix::io::Errno> {
-    rustix::process::setrlimit(
-        resource,
-        Rlimit {
-            current: Some(value),
-            maximum: Some(value),
-        },
-    )
 }
 
 fn sandbox_arguments(
@@ -891,10 +934,6 @@ const fn worker_memory_budget(memory_bytes: u64) -> WorkerMemoryBudget {
         second_tmpfs_bytes,
         shared_memory_bytes,
     }
-}
-
-const fn task_ceiling_is_enforceable(real_uid: u32, effective_uid: u32) -> bool {
-    real_uid != 0 && effective_uid != 0
 }
 
 fn process_creation_filter() -> Result<fs::File, std::io::Error> {
@@ -1208,38 +1247,6 @@ fn admit_worker_binding_count(
     }
 }
 
-#[allow(unsafe_code)]
-fn create_executable_snapshot() -> Result<fs::File, SandboxedFileMediaProcessorConstructionError> {
-    let name = b"signalbox-file-media-worker\0";
-    // SAFETY: memfd_create receives a valid nul-terminated name and fixed flags.
-    let raw_fd = unsafe {
-        libc::syscall(
-            libc::SYS_memfd_create,
-            name.as_ptr().cast::<libc::c_char>(),
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        )
-    };
-    if raw_fd < 0 {
-        return Err(SandboxedFileMediaProcessorConstructionError::Worker);
-    }
-    // SAFETY: the successful syscall returned a new owned file descriptor.
-    Ok(unsafe { fs::File::from_raw_fd(raw_fd as i32) })
-}
-
-#[allow(unsafe_code)]
-fn seal_executable_snapshot(
-    file: &fs::File,
-) -> Result<(), SandboxedFileMediaProcessorConstructionError> {
-    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
-    // SAFETY: fcntl receives an owned descriptor and the documented seal mask.
-    let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) };
-    if result == -1 {
-        Err(SandboxedFileMediaProcessorConstructionError::Worker)
-    } else {
-        Ok(())
-    }
-}
-
 #[derive(Clone, Copy)]
 enum ConstructionTarget {
     Bubblewrap,
@@ -1261,8 +1268,8 @@ pub enum SandboxedFileMediaProcessorConstructionError {
     WorkerBindings,
     /// A process ceiling was zero or exceeded its compiled maximum.
     Ceilings,
-    /// The current identity is exempt from the configured task ceiling.
-    TaskCeiling,
+    /// No validated writable delegated cgroup-v2 task controller was configured.
+    TaskController,
     /// Two worker bindings claimed the same provider.
     DuplicateProvider,
     /// Two worker bindings claimed the same reader identity.
@@ -1280,7 +1287,7 @@ impl fmt::Display for SandboxedFileMediaProcessorConstructionError {
             }
             Self::WorkerBindings => "file-media worker bindings exceed their count ceiling",
             Self::Ceilings => "file-media process ceilings are invalid",
-            Self::TaskCeiling => "file-media task ceiling is unenforceable for this identity",
+            Self::TaskController => "file-media per-invocation task controller is unavailable",
             Self::DuplicateProvider => "file-media worker provider is duplicated",
             Self::DuplicateReader => "file-media worker reader is duplicated",
         })
@@ -1302,7 +1309,7 @@ mod tests {
         MAX_EXECUTABLE_SNAPSHOT_BYTES, MAX_WORKER_BINDINGS, admit_completed,
         admit_executable_snapshot_bytes, admit_worker_binding_count, open_executable_snapshot,
         open_worker_executable, sandbox_arguments, seccomp_instructions, startup_pipe,
-        task_ceiling_is_enforceable, worker_memory_budget,
+        worker_memory_budget,
     };
 
     struct Cancelled;
@@ -1432,13 +1439,6 @@ mod tests {
         let write_flags = rustix::io::fcntl_getfd(&write).expect("write flags are available");
         assert!(read_flags.contains(rustix::io::FdFlags::CLOEXEC));
         assert!(write_flags.contains(rustix::io::FdFlags::CLOEXEC));
-    }
-
-    #[test]
-    fn root_identity_cannot_claim_an_enforced_task_ceiling() {
-        assert!(!task_ceiling_is_enforceable(0, 1_000));
-        assert!(!task_ceiling_is_enforceable(1_000, 0));
-        assert!(task_ceiling_is_enforceable(1_000, 1_000));
     }
 
     #[test]

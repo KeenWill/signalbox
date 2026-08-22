@@ -165,13 +165,15 @@ creation, and denies unbudgeted inotify instance and watch allocation. Decoder
 threads remain available while worker descendants stay zero.
 
 Before releasing a dedicated startup gate, the daemon applies hard
-address-space, CPU, task, core-dump, and descriptor limits to the sandbox
-process and all inherited worker threads. The configured memory ceiling is one
+address-space, CPU, core-dump, and descriptor limits to the sandbox process and
+all inherited worker threads. Each invocation first enters its own child of an
+explicitly configured writable delegated cgroup-v2 root, with `pids.max` set to
+the compiled task ceiling before bubblewrap can fork. Construction fails closed
+when that delegated controller cannot be validated. The configured memory
+ceiling is one
 combined budget: half is reserved for address space and half is split between
 the three writable tmpfs mounts, so their maxima cannot add to more than the
-configured value. Construction fails when either the real or effective UID is 0
-because Linux exempts those identities from `RLIMIT_NPROC`, making the task
-ceiling unenforceable. The daemon independently owns one wall deadline per
+configured value. The daemon independently owns one wall deadline per
 invocation, one inspection-wide deadline across all serial reader probes, and
 one verification-wide deadline across all configured worker probes. It kills the
 isolated process group on timeout or authoritative cancellation. Bounded stderr

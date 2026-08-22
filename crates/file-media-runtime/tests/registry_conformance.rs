@@ -4,7 +4,7 @@
     reason = "conformance fixtures use explicit construction and outcome expectations"
 )]
 
-use std::{future::Future, num::NonZeroU64, pin::pin, str::FromStr, task::Context};
+use std::{future::Future, num::NonZeroU64, str::FromStr};
 
 use signalbox_file_media_runtime::{
     AttachmentKind, CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType,
@@ -205,12 +205,11 @@ impl FileMediaProcessor for SyntheticProcessor {
 }
 
 fn block_on_ready<Output>(future: impl Future<Output = Output>) -> Output {
-    let mut future = pin!(future);
-    let mut context = Context::from_waker(std::task::Waker::noop());
-    match future.as_mut().poll(&mut context) {
-        std::task::Poll::Ready(output) => output,
-        std::task::Poll::Pending => panic!("memory-backed conformance future unexpectedly parked"),
-    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("the conformance runtime is constructed")
+        .block_on(future)
 }
 
 fn media_type(value: &str) -> CanonicalMediaType {

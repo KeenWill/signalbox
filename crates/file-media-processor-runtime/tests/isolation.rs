@@ -215,7 +215,7 @@ async fn available_processor(
         Err(error)
             if std::env::var_os("CI").is_none()
                 && error.downcast_ref::<SandboxedFileMediaProcessorConstructionError>()
-                    == Some(&SandboxedFileMediaProcessorConstructionError::TaskCeiling) =>
+                    == Some(&SandboxedFileMediaProcessorConstructionError::TaskController) =>
         {
             return Ok(None);
         }

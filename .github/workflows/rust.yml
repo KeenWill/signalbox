@@ -371,6 +371,11 @@ jobs:
         run: sudo apt-get install --yes bubblewrap
       - name: Enable unprivileged user namespaces for Bubblewrap
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Delegate the file-media task controller
+        run: |
+          sudo mkdir /sys/fs/cgroup/signalbox-file-media-ci
+          sudo sh -c 'echo +pids > /sys/fs/cgroup/cgroup.subtree_control'
+          sudo chown "$(id -u):[redacted] -g)" /sys/fs/cgroup/signalbox-file-media-ci
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -380,6 +385,7 @@ jobs:
       - name: Run tests
         env:
           SIGNALBOX_RUN_BWRAP_INTEGRATION: "1"
+          SIGNALBOX_FILE_MEDIA_CGROUP_ROOT: /sys/fs/cgroup/signalbox-file-media-ci
         run: cargo test --no-fail-fast --workspace --all-targets --all-features
       - name: Test generated browser contract runtime
         run: node --test crates/web-contract/tests/generated_roundtrip.mjs

@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, error::Error, fmt, num::NonZeroU64, sync::Arc};
 
 use signalbox_file_media_runtime::{
-    FileMediaProvider, FileMediaProviderDeclaration, NeverCancelled, ProcessorFailure,
+    FileMediaProvider, FileMediaProviderDeclaration, FileMediaProviderFailure, NeverCancelled,
     ReaderIdentity, SourceReadError, SourceReadFuture, VerifiedBlobSource,
 };
 use tokio::io::{AsyncWriteExt as _, Stdin, Stdout};
@@ -270,7 +270,7 @@ fn require_source_identity(
     }
 }
 
-fn map_provider_failure(_: ProcessorFailure) -> WorkerServiceError {
+fn map_provider_failure(_: FileMediaProviderFailure) -> WorkerServiceError {
     WorkerServiceError::Provider
 }
 

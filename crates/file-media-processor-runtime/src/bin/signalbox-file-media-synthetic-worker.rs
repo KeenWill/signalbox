@@ -28,34 +28,33 @@ impl FileMediaProvider for SyntheticProvider {
     ) -> FileMediaProviderFuture<'a, ProcessorProbeOutput> {
         Box::pin(async move {
             let length = std::num::NonZeroU64::new(1)
-                .ok_or(signalbox_file_media_runtime::ProcessorFailure::Failed)?;
+                .ok_or(signalbox_file_media_runtime::FileMediaProviderFailure::Failed)?;
             let prefix = source
                 .read_range(0, length)
                 .await
-                .map_err(|_| signalbox_file_media_runtime::ProcessorFailure::Failed)?;
+                .map_err(|_| signalbox_file_media_runtime::FileMediaProviderFailure::Failed)?;
             match prefix.first().copied() {
                 Some(b'C') => std::process::exit(7),
                 Some(b'T') => std::thread::sleep(Duration::from_secs(5)),
                 Some(b'X') => {
-                    let thread_output = std::thread::spawn(|| 1_u8)
-                        .join()
-                        .map_err(|_| signalbox_file_media_runtime::ProcessorFailure::Failed)?;
+                    let thread_output = std::thread::spawn(|| 1_u8).join().map_err(|_| {
+                        signalbox_file_media_runtime::FileMediaProviderFailure::Failed
+                    })?;
                     if thread_output != 1 {
-                        return Err(signalbox_file_media_runtime::ProcessorFailure::Failed);
+                        return Err(signalbox_file_media_runtime::FileMediaProviderFailure::Failed);
                     }
                     let spawned = std::process::Command::new("/signalbox-file-media-worker")
                         .arg("--signalbox-file-media-isolation-probe")
                         .status();
                     if spawned.is_ok() {
-                        return Err(signalbox_file_media_runtime::ProcessorFailure::Failed);
+                        return Err(signalbox_file_media_runtime::FileMediaProviderFailure::Failed);
                     }
                 }
                 Some(b'I') => verify_sandbox_authority()?,
                 Some(b'V') => {
-                    source
-                        .read_range(0, length)
-                        .await
-                        .map_err(|_| signalbox_file_media_runtime::ProcessorFailure::Failed)?;
+                    source.read_range(0, length).await.map_err(|_| {
+                        signalbox_file_media_runtime::FileMediaProviderFailure::Failed
+                    })?;
                 }
                 Some(b'H') => {
                     return Ok(ProcessorProbeOutput::Candidate {
@@ -64,7 +63,7 @@ impl FileMediaProvider for SyntheticProvider {
                     });
                 }
                 Some(_) => {}
-                None => return Err(signalbox_file_media_runtime::ProcessorFailure::Failed),
+                None => return Err(signalbox_file_media_runtime::FileMediaProviderFailure::Failed),
             }
             Ok(ProcessorProbeOutput::Candidate {
                 media_type: String::from("application/x-signalbox-synthetic"),
@@ -106,8 +105,9 @@ impl FileMediaProvider for SyntheticProvider {
     }
 }
 
-fn verify_sandbox_authority() -> Result<(), signalbox_file_media_runtime::ProcessorFailure> {
-    let failed = || signalbox_file_media_runtime::ProcessorFailure::Failed;
+fn verify_sandbox_authority() -> Result<(), signalbox_file_media_runtime::FileMediaProviderFailure>
+{
+    let failed = || signalbox_file_media_runtime::FileMediaProviderFailure::Failed;
     if Path::new("/etc/passwd").exists()
         || std::env::current_dir().map_err(|_| failed())? != Path::new("/tmp")
     {

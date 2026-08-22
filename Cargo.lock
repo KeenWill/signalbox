@@ -3833,6 +3833,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-file-media-linux-sandbox"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "signalbox-file-media-processor-runtime"
 version = "0.0.0"
 dependencies = [
@@ -3842,6 +3849,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "signalbox-file-media-linux-sandbox",
  "signalbox-file-media-runtime",
  "tempfile",
  "tokio",
@@ -3863,6 +3871,7 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
