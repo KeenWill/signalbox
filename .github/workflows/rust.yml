@@ -228,10 +228,37 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Use the node-local cargo target cache
+        # Self-hosted runners expose a persistent per-node cache directory
+        # through /home/runner/_work/_ci-cache, provisioned by the runner pod
+        # template outside this repository. Keying the target dir by
+        # lockfile hash and job keeps compiled dependencies warm across runs on
+        # the same node without two concurrent jobs sharing one cargo lock.
+        # GitHub-hosted runners have no such directory and keep the default.
+        id: nodecache
+        shell: bash
+        run: |
+          cache=/home/runner/_work/_ci-cache
+          if [ -d "$cache/target" ]; then
+            find "$cache/target" -mindepth 2 -maxdepth 2 -type d -mtime +3 -exec rm -rf {} + 2>/dev/null || true
+            key="${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}"
+            job="${{ github.job }}${{ strategy.job-index != '' && format('-{0}', strategy.job-index) || '' }}"
+            target="$cache/target/$key/$job"
+            mkdir -p "$target"
+            echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+            echo "active=true" >> "$GITHUB_OUTPUT"
+            echo "node-local target dir: $target"
+          else
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "no node-local cache directory; using the default target dir"
+          fi
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # With the node-local target dir active, uploading/extracting target
+          # archives through the GitHub cache is pure write amplification.
+          cache-targets: ${{ steps.nodecache.outputs.active != 'true' }}
           shared-key: rust
           save-if: false
       - name: Check workspace
@@ -343,10 +370,37 @@ jobs:
           persist-credentials: false
       # The pinned Signalbox runner image includes Valgrind, so this public-repo
       # job needs neither root access nor an unpinned package installation.
+      - name: Use the node-local cargo target cache
+        # Self-hosted runners expose a persistent per-node cache directory
+        # through /home/runner/_work/_ci-cache, provisioned by the runner pod
+        # template outside this repository. Keying the target dir by
+        # lockfile hash and job keeps compiled dependencies warm across runs on
+        # the same node without two concurrent jobs sharing one cargo lock.
+        # GitHub-hosted runners have no such directory and keep the default.
+        id: nodecache
+        shell: bash
+        run: |
+          cache=/home/runner/_work/_ci-cache
+          if [ -d "$cache/target" ]; then
+            find "$cache/target" -mindepth 2 -maxdepth 2 -type d -mtime +3 -exec rm -rf {} + 2>/dev/null || true
+            key="${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}"
+            job="${{ github.job }}${{ strategy.job-index != '' && format('-{0}', strategy.job-index) || '' }}"
+            target="$cache/target/$key/$job"
+            mkdir -p "$target"
+            echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+            echo "active=true" >> "$GITHUB_OUTPUT"
+            echo "node-local target dir: $target"
+          else
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "no node-local cache directory; using the default target dir"
+          fi
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # With the node-local target dir active, uploading/extracting target
+          # archives through the GitHub cache is pure write amplification.
+          cache-targets: ${{ steps.nodecache.outputs.active != 'true' }}
           shared-key: rust
           save-if: false
       - name: Install Gungraun runner
@@ -409,10 +463,37 @@ jobs:
           printf 'matrix=%s\n' \
             "$(python3 scripts/postgres_integration_suites.py --matrix)" \
             >> "$GITHUB_OUTPUT"
+      - name: Use the node-local cargo target cache
+        # Self-hosted runners expose a persistent per-node cache directory
+        # through /home/runner/_work/_ci-cache, provisioned by the runner pod
+        # template outside this repository. Keying the target dir by
+        # lockfile hash and job keeps compiled dependencies warm across runs on
+        # the same node without two concurrent jobs sharing one cargo lock.
+        # GitHub-hosted runners have no such directory and keep the default.
+        id: nodecache
+        shell: bash
+        run: |
+          cache=/home/runner/_work/_ci-cache
+          if [ -d "$cache/target" ]; then
+            find "$cache/target" -mindepth 2 -maxdepth 2 -type d -mtime +3 -exec rm -rf {} + 2>/dev/null || true
+            key="${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}"
+            job="${{ github.job }}${{ strategy.job-index != '' && format('-{0}', strategy.job-index) || '' }}"
+            target="$cache/target/$key/$job"
+            mkdir -p "$target"
+            echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+            echo "active=true" >> "$GITHUB_OUTPUT"
+            echo "node-local target dir: $target"
+          else
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "no node-local cache directory; using the default target dir"
+          fi
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # With the node-local target dir active, uploading/extracting target
+          # archives through the GitHub cache is pure write amplification.
+          cache-targets: ${{ steps.nodecache.outputs.active != 'true' }}
           shared-key: rust
           save-if: false
       - name: Install cargo-nextest
