@@ -77,6 +77,21 @@ export function SessionCatalogSurface({
   }, [state.session])
 
   useEffect(() => {
+    if (!narrowInspector || !state.session) return
+    const containFocus = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return
+      event.preventDefault()
+      closeFocus.current?.focus()
+    }
+    const frame = requestAnimationFrame(() => closeFocus.current?.focus())
+    document.addEventListener('keydown', containFocus, true)
+    return () => {
+      cancelAnimationFrame(frame)
+      document.removeEventListener('keydown', containFocus, true)
+    }
+  }, [narrowInspector, state.session])
+
+  useEffect(() => {
     if (!sessions.data || !restorePageFocus.current) return
     restorePageFocus.current = false
     const frame = requestAnimationFrame(() => pageHeading.current?.focus())

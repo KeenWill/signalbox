@@ -192,9 +192,11 @@ test('captures desktop dark, desktop light, and responsive catalog evidence', as
   await expect(page).toHaveScreenshot('catalog-desktop-light.png', { animations: 'disabled' })
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
-  await expect(
-    page.getByRole('dialog', { name: firstPage.summaries[0].title_summary }),
-  ).toBeVisible()
+  const mobileInspector = page.getByRole('dialog', {
+    name: firstPage.summaries[0].title_summary,
+  })
+  await expect(mobileInspector).toBeVisible()
+  await expect(mobileInspector).toHaveAttribute('aria-modal', 'true')
   await page.keyboard.press('Tab')
   await expect(page.getByRole('button', { name: 'Close session inspector' })).toBeFocused()
   await expect(page).toHaveScreenshot('catalog-mobile-light.png', { animations: 'disabled' })
