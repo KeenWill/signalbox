@@ -203,6 +203,34 @@ describe('SameOriginProductTransport', () => {
     ).rejects.toThrow(`exceeds ${MAX_SESSION_PAGE_ITEMS} summaries`)
   })
 
+  it('rejects activity timestamps outside the JavaScript Date range', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...sessionPageFixture,
+              continuation: null,
+              summaries: [
+                {
+                  ...sessionPageFixture.summaries[0],
+                  last_activity: { kind: 'turn', unix_milliseconds: '9007199254740991' },
+                },
+              ],
+            }),
+          ),
+      ),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readSessions({
+        sort: 'activity',
+        includeArchived: false,
+      }),
+    ).rejects.toThrow('outside the JavaScript Date range')
+  })
+
   it('rejects a continuation that does not match the returned page boundary', async () => {
     vi.stubGlobal(
       'fetch',

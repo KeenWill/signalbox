@@ -151,7 +151,12 @@ function CommandPalette({ context }: { context: CommandContext }) {
           </div>
           <div className="command-list">
             {commandRegistry
-              .filter((command) => command.id !== 'surface.escape' && command.available(context))
+              .filter(
+                (command) =>
+                  command.id !== 'surface.escape' &&
+                  command.id !== 'palette.open' &&
+                  command.available(context),
+              )
               .map((command) => (
                 <button
                   key={command.id}
@@ -300,7 +305,9 @@ export function ProductApp({
   useHotkeySequences(
     globalHotkeySequenceBindings.map((binding) => ({
       sequence: binding.sequence,
-      callback: () => invokeCommand(binding.commandId, context),
+      callback: () => {
+        if (store.getState().app.overlay === null) invokeCommand(binding.commandId, context)
+      },
     })),
   )
 

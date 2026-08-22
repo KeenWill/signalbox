@@ -109,6 +109,17 @@ const validateSessionPage = (
   if (page.summaries.length > MAX_SESSION_PAGE_ITEMS) {
     throw new Error(`session catalog response exceeds ${MAX_SESSION_PAGE_ITEMS} summaries`)
   }
+  for (const summary of page.summaries) {
+    const milliseconds = summary.last_activity.unix_milliseconds
+    const numericMilliseconds = Number(milliseconds)
+    if (
+      !/^-?(0|[1-9]\d*)$/.test(milliseconds) ||
+      !Number.isSafeInteger(numericMilliseconds) ||
+      !Number.isFinite(new Date(numericMilliseconds).getTime())
+    ) {
+      throw new Error('session catalog activity timestamp is outside the JavaScript Date range')
+    }
+  }
   if (page.continuation) {
     const boundary = page.summaries.at(-1)
     if (!boundary || page.continuation.session_id !== boundary.session_id) {
