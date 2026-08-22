@@ -137,6 +137,20 @@ describe('BoundedSessionHistory', () => {
     expect(window.projected_structured_bytes).toBeLessThanOrEqual(256)
   })
 
+  it('budgets scenario windows and descriptors from exact event-kind charges', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const window = await scenario.readWindow(
+      sessionId,
+      { kind: 'first' },
+      { maxItems: scenario.limits.max_timeline_window_items, maxBytes: 256 },
+    )
+
+    expect(descriptor.sizes.projected_structured_bytes).toBe('80800000')
+    expect(window.items.map((item) => item.address.event_sequence)).toEqual(['1', '2', '3'])
+    expect(window.projected_structured_bytes).toBe(248)
+  })
+
   it('does not fabricate continuations for an empty scenario window', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const window = await scenario.readWindow(
@@ -241,12 +255,15 @@ describe('BoundedSessionHistory', () => {
             same_origin_json_mutations: true,
             ndjson_streaming: true,
             bounded_session_timeline: true,
+            bounded_session_timeline_detail: true,
           },
           limits: {
             max_json_body_bytes: 1024,
             max_ndjson_item_bytes: 1024,
             max_timeline_window_items: 257,
             max_timeline_window_bytes: 64 * 1024 + 1,
+            max_timeline_detail_items: 128,
+            max_timeline_detail_bytes: 64 * 1024,
           },
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },

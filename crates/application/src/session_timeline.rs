@@ -6,7 +6,7 @@
 
 use std::{fmt, future::Future, num::NonZeroU64};
 
-use signalbox_domain::{ModelCallId, ProviderModelIdentity, SessionId, TurnId};
+use signalbox_domain::{BlobDigest, ModelCallId, ProviderModelIdentity, SessionId, TurnId};
 
 /// Returns the hard ceiling on records in one historical window.
 #[must_use]
@@ -400,7 +400,7 @@ pub struct TimelineTextExcerpt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TimelineBlobReference {
     /// Stable blob identity.
-    pub blob_id: String,
+    pub blob_id: BlobDigest,
     /// Exact referenced byte length.
     pub length_bytes: u64,
     /// Optional recorded media type.

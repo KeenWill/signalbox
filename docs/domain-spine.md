@@ -6503,7 +6503,7 @@ pub struct TimelineTextExcerpt {
     pub continuation: Option<TimelineBodyContinuation>,
 }
 pub struct TimelineBlobReference {
-    pub blob_id: String,
+    pub blob_id: BlobDigest,
     pub length_bytes: u64,
     pub media_type: Option<String>,
 }
