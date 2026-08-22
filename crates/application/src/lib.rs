@@ -4,6 +4,7 @@
 //! depending inward on `signalbox-domain`.
 
 mod approval_judge;
+mod blob_derivation;
 mod commissioned_dispatch;
 mod conversation_import;
 mod create_session;
@@ -36,6 +37,11 @@ pub use approval_judge::{
     ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
     ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority,
     ApprovalJudgePullRequestAuthorityInput,
+};
+pub use blob_derivation::{
+    BlobDerivationIdGenerator, BlobDerivationRecordOutcome, BlobDerivationServiceError,
+    BlobDerivationServiceOutcome, BlobDerivationStore, DeterministicBlobDerivationRequest,
+    DeterministicBlobDerivationService, DeterministicBlobProducer, UuidV7BlobDerivationIdGenerator,
 };
 pub use commissioned_dispatch::{
     CommissionDispatchPreparationError, CommissionDispatchRequest, CommissionedDispatchFence,

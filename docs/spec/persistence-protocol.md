@@ -3,6 +3,9 @@
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
 
+The immutable blob-derivation family and migration inventory are verified
+against this PR (`agent/web-blob-delivery`).
+
 The restore-safety search-path pin on check-reachable functions, and the
 catalogue test holding it, were verified against this PR
 (`agent/restore-safe-check-functions`).
@@ -158,8 +161,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — ninety files, `202607180001` through
-`202608200001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — ninety-two files, `202607180001` through
+`202608210200` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -264,6 +267,9 @@ Implemented table families (across the forward-only migrations):
   exact append-only representation, idempotency, and completeness rules are
   owned by [conversation-import](conversation-import.md);
 - `accepted_input`, `queued_input_origin`, `turn_lifecycle`, `turn_attempt`;
+- `blob_derivation` and its ordered input and output satellites, whose complete
+  immutable provenance and deterministic-key convergence are owned by
+  [blob storage](blob-storage.md#browser-delivery-views-and-derivations);
 - `model_call` (execution state owned by
   [model-call-execution](model-call-execution.md), its turn-level
   provider-target pin on `turn_lifecycle`, and its pinned
