@@ -63,6 +63,12 @@ const SERVED_PROVIDER_MODEL: &str = "claude-haiku-4-5-20251001";
 const DATABASE_NAME: &str = "signalboxd_e2e";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+// numeric-bound: test - identifies the first durable recovery event
+const FIRST_RECOVERY_EVENT_COUNT: i64 = 1;
+// numeric-bound: test - identifies the second durable execution-failure block
+const SECOND_FAILURE_EVENT_COUNT: i64 = 2;
+// numeric-bound: test - counts the commissioned turn and its two successors
+const RECOVERY_CYCLE_TURN_COUNT: i64 = 3;
 const GOAL_MODEL_CONFIGURATION: &str = r#"
 version = 1
 
@@ -200,6 +206,31 @@ async fn wait_for_execution_failure_block(pool: &PgPool, session: SessionId) {
         .await
         .unwrap_or(false);
         if blocked {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_goal_event_count(
+    pool: &PgPool,
+    session: SessionId,
+    event_kind: &str,
+    expected: i64,
+) {
+    loop {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*)
+               FROM goal_event
+              WHERE session_id = $1
+                AND event_kind = $2",
+        )
+        .bind(session.into_uuid())
+        .bind(event_kind)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_default();
+        if count >= expected {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -515,10 +546,13 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
 }
 
 /// INV-048: a completed goal turn is followed without user input, and an
-/// unsuccessful successor blocks with scheduler provenance without a retry.
+/// unsuccessful successor blocks with scheduler provenance. This reproduces
+/// the fleet's blocked-after-restart cycle: a fresh daemon re-arms the pending
+/// resumption exactly once, and another failed resume returns to a durable
+/// execution-failure block instead of losing or double-applying the attempt.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_retry()
+async fn s_goal_inv048_restart_rearms_blocked_resumed_blocked_cycle_once()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let configuration = HubModelConfiguration::parse(GOAL_MODEL_CONFIGURATION)?;
@@ -554,9 +588,15 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
 
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let restart_nudge = nudge.clone();
+    let restart_configuration = configuration.clone();
     let _ = nudge.nudge(session);
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
-    let runtime = ScriptedModel::following([goal_completion_script(), goal_refusal_script()]);
+    let runtime = ScriptedModel::following([
+        goal_completion_script(),
+        goal_refusal_script(),
+        goal_refusal_script(),
+    ]);
     let provider =
         RuntimeModelCallProvider::new(runtime.clone(), configuration.runtime_model_catalog());
     let credential_reference = ModelCallCredentialReference::new("scripted-goal-test");
@@ -606,16 +646,63 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
         .load_goal(session)
         .await?
         .expect("the attached goal remains readable");
-    let goal_turn_count: i64 =
+    assert_execution_failure_blocked(&goal);
+    assert_ne!(first_turn.turn(), execution_failure_turn(&goal));
+
+    let restarted =
+        PostgresGoalPassDisposition::new(pool.clone(), restart_configuration, restart_nudge);
+    assert_eq!(
+        restarted
+            .reconcile_automatic_resumptions_after_restart()
+            .await?,
+        usize::try_from(FIRST_RECOVERY_EVENT_COUNT)?
+    );
+    timeout(
+        Duration::from_secs(10),
+        wait_for_goal_event_count(&pool, session, "resumed", FIRST_RECOVERY_EVENT_COUNT),
+    )
+    .await?;
+    assert_eq!(
+        restarted
+            .reconcile_automatic_resumptions_after_restart()
+            .await?,
+        0
+    );
+
+    let observation_pool = pool.clone();
+    let fatal_shutdown = fatal_execution.clone();
+    let shutdown = async move {
+        tokio::select! {
+            () = wait_for_goal_event_count(
+                &observation_pool,
+                session,
+                "blocked",
+                SECOND_FAILURE_EVENT_COUNT,
+            ) => {}
+            () = fatal_shutdown.wait() => {}
+        }
+    };
+    assert_eq!(
+        timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await?,
+        SchedulerLoopExit::Shutdown
+    );
+
+    let recovered_goal = goal_repository
+        .load_goal(session)
+        .await?
+        .expect("the recovered goal remains readable");
+    let recovered_goal_turn_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM goal_turn WHERE session_id = $1")
             .bind(session.into_uuid())
             .fetch_one(&pool)
             .await?;
 
-    assert_execution_failure_blocked(&goal);
-    assert_eq!(goal_turn_count, 2);
-    assert_eq!(runtime.received_operations().len(), 2);
-    assert_ne!(first_turn.turn(), execution_failure_turn(&goal));
+    assert_execution_failure_blocked(&recovered_goal);
+    assert_eq!(recovered_goal_turn_count, RECOVERY_CYCLE_TURN_COUNT);
+    assert_eq!(
+        i64::try_from(runtime.received_operations().len())?,
+        RECOVERY_CYCLE_TURN_COUNT
+    );
 
     pool.close().await;
     drop(container);
