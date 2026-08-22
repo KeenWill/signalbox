@@ -37,6 +37,24 @@ RETURN (
     )
 );
 
+-- Check-reachable functions must resolve identically during logical restore.
+DO $$
+DECLARE
+    signature text;
+BEGIN
+    FOREACH signature IN ARRAY ARRAY[
+        'evaluation_corpus_path_components_bounded(text)',
+        'evaluation_corpus_text_is_nonblank_control_free(text)'
+    ] LOOP
+        EXECUTE format(
+            'ALTER FUNCTION %s SET search_path TO %I, pg_catalog, pg_temp',
+            signature,
+            current_schema
+        );
+    END LOOP;
+END
+$$;
+
 CREATE TABLE evaluation_corpus (
     corpus_name text COLLATE "C" NOT NULL,
     corpus_version text COLLATE "C" NOT NULL,

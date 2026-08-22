@@ -820,7 +820,10 @@ mod tests {
         );
         assert_eq!(
             loaded.registration.source(),
-            &manifest_source(&loaded.manifest)
+            &CorpusSourceDescriptor::Repository {
+                repository: String::from("https://github.com/KeenWill/signalbox"),
+                path: String::from("crates/approval-judge-eval/corpora/seed-v1.json"),
+            }
         );
     }
 
@@ -1177,7 +1180,10 @@ mod tests {
         manifest.integrity.cases.reverse();
         let corpus = crate::decode_corpus(include_bytes!("../corpora/seed-v1.json"))
             .expect("the seed corpus is valid");
-        let source = manifest_source(&manifest);
+        let source = CorpusSourceDescriptor::Repository {
+            repository: String::from("https://github.com/KeenWill/signalbox"),
+            path: String::from("crates/approval-judge-eval/corpora/seed-v1.json"),
+        };
 
         validate_manifest_content(manifest, corpus, source)
             .expect("per-case integrity ordering is not part of manifest validity");
@@ -1205,26 +1211,5 @@ mod tests {
             .expect_err("the version-one case helper rejects unsupported content");
 
         assert!(error.to_string().contains("unsupported"));
-    }
-
-    fn manifest_source(manifest: &CorpusManifest) -> CorpusSourceDescriptor {
-        match &manifest.case_source {
-            ManifestCaseSource::Repository { repository, path } => {
-                CorpusSourceDescriptor::Repository {
-                    repository: repository.clone(),
-                    path: format!("crates/approval-judge-eval/corpora/{path}"),
-                }
-            }
-            ManifestCaseSource::DatabaseNative { .. } => CorpusSourceDescriptor::DatabaseNative,
-            ManifestCaseSource::BlobReference {
-                store,
-                digest,
-                byte_length,
-            } => CorpusSourceDescriptor::BlobReference {
-                store: store.clone(),
-                digest: *digest,
-                byte_length: *byte_length,
-            },
-        }
     }
 }
