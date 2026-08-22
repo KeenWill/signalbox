@@ -14,7 +14,9 @@ evidence validation is verified against this PR
 before recursive turn-start validation is verified against this PR
 (`agent/daemon-live-compaction-leaf-validation-scope`). Deferred immutable
 tool-round validation scope is verified against this PR
-(`agent/daemon-live-deferred-round-validation-scope`).
+(`agent/daemon-live-deferred-round-validation-scope`). Immutable frontier-header
+ancestry before exact prefix-member fallback is verified against this PR
+(`agent/daemon-live-frontier-ancestry-fast-path`).
 
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
@@ -392,9 +394,12 @@ Representation rules, all enforced in the schema:
   sequence. Deferred completeness checks reject missing prefixes, cycles,
   inherited duplicates, gaps, and a resolved count different from the header.
   High-frequency model-call, continuation, turn-start, and terminal-frontier
-  prefix-preservation checks materialize the compared recursive memberships once
-  each before matching their ordered members. Why: append-derived histories
-  store and load each immutable suffix once while preserving the
+  prefix-preservation checks first walk the checked frontier's immutable header
+  ancestry. Reaching the named prefix proves the common append-derived case
+  without expanding complete memberships; an independently constructed frontier
+  falls back to materializing each compared recursive membership once before
+  matching its ordered members. Why: append-derived histories store and load
+  each immutable suffix once while the fallback preserves the exact
   complete-snapshot contract.
 - Closed variant sets are `text` discriminators under `CHECK` constraints, with
   variant payload columns constrained present exactly when the discriminator
