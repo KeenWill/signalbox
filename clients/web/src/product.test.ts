@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ProductRequestError, SameOriginProductTransport } from './product'
+import {
+  MAX_ATTENTION_SNAPSHOT_BYTES,
+  MAX_ATTENTION_SNAPSHOT_ITEMS,
+  ProductRequestError,
+  SameOriginProductTransport,
+} from './product'
 
 const bootstrapFixture = {
   contract: { name: 'signalbox.web-http', version: '1' },
@@ -116,6 +121,32 @@ describe('SameOriginProductTransport', () => {
     })
     await expect(events.next()).resolves.toEqual({ done: false, value: attentionUpdateFixture })
     await expect(events.next()).resolves.toEqual({ done: true, value: undefined })
+  })
+
+  it('rejects an attention snapshot beyond the contract item ceiling', async () => {
+    const summaries = Array.from({ length: MAX_ATTENTION_SNAPSHOT_ITEMS + 1 }, (_, index) => ({
+      ...attentionFixture.summaries[0],
+      session_id: `${sessionId}-${index}`,
+    }))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ...attentionFixture, summaries }))),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
+      'attention snapshot exceeds the contract item ceiling',
+    )
+  })
+
+  it('rejects an attention snapshot before buffering beyond the byte ceiling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(' '.repeat(MAX_ATTENTION_SNAPSHOT_BYTES + 1))),
+    )
+
+    await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
+      'attention snapshot exceeds the contract byte ceiling',
+    )
   })
 
   it('rejects an attention event beyond the advertised NDJSON item ceiling', async () => {

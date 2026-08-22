@@ -1,5 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog'
-import { useHotkeys } from '@tanstack/react-hotkeys'
+import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import {
@@ -13,12 +13,13 @@ import {
   Sun,
   X,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { AttentionSurface } from './AttentionSurface'
 import {
   type CommandContext,
   commandRegistry,
   globalHotkeyBindings,
+  globalHotkeySequenceBindings,
   invokeCommand,
 } from './commands'
 import { type ProductRouteId, productRoutes, productTransport } from './product'
@@ -84,7 +85,13 @@ const surfaceCopy: Record<
   },
 }
 
-function ProductNavigation({ active }: { active: ProductRouteId }) {
+function ProductNavigation({
+  active,
+  onNavigate,
+}: {
+  active: ProductRouteId
+  onNavigate?: () => void
+}) {
   return (
     <div className="product-navigation">
       <div className="brand">
@@ -100,6 +107,7 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
+            onClick={onNavigate}
           >
             <span>{route.label}</span>
             <small>{route.description}</small>
@@ -110,6 +118,7 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
+        onClick={onNavigate}
       >
         Scenario studio <span aria-hidden="true">↗</span>
       </Link>
@@ -277,6 +286,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
+  const surfaceEscape = useRef<(() => boolean) | null>(null)
+  const registerSurfaceEscape = useCallback((handler: (() => boolean) | null) => {
+    surfaceEscape.current = handler
+  }, [])
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -288,6 +301,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       getState: store.getState,
       timelineIds: [],
       focusTimeline: () => primaryRef.current?.focus(),
+      unwindSurface: () => surfaceEscape.current?.() ?? false,
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
     }),
     [dispatch, navigate],
@@ -295,6 +309,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
+      callback: () => invokeCommand(binding.commandId, context),
+    })),
+  )
+  useHotkeySequences(
+    globalHotkeySequenceBindings.map((binding) => ({
+      sequence: binding.sequence,
       callback: () => invokeCommand(binding.commandId, context),
     })),
   )
@@ -306,8 +326,21 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
 
   const copy = surfaceCopy[surface]
   const content =
-    surface === 'attention' ? (
-      <AttentionSurface />
+    surface === 'attention' && bootstrap.isSuccess ? (
+      <AttentionSurface registerEscapeHandler={registerSurfaceEscape} />
+    ) : surface === 'attention' ? (
+      <section className="surface-empty" role={bootstrap.isError ? 'alert' : 'status'}>
+        <div>
+          <h2>
+            {bootstrap.isError ? 'Attention contract unavailable' : 'Checking Attention contract'}
+          </h2>
+          <p>
+            {bootstrap.isError
+              ? 'Attention reads remain disabled until the generated bootstrap contract validates.'
+              : 'Attention reads will begin after the generated bootstrap contract validates.'}
+          </p>
+        </div>
+      </section>
     ) : surface === 'sessions' ? (
       <SessionsSurface />
     ) : (
@@ -383,7 +416,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <Dialog.Description id="mobile-navigation-description" className="sr-only">
               Choose a Signalbox surface.
             </Dialog.Description>
-            <ProductNavigation active={surface} />
+            <ProductNavigation
+              active={surface}
+              onNavigate={() => dispatch(actions.overlaySet(null))}
+            />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

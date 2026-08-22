@@ -1,10 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   decodeBrowserPreferences,
   defaultBrowserPreferences,
+  loadBrowserPreferences,
   MAX_KEY_OVERRIDES,
   MAX_SAVED_LOGICAL_POSITIONS,
 } from './preferences'
+
+afterEach(() => vi.unstubAllGlobals())
 
 describe('browser preferences', () => {
   it('fails closed to defaults for an unrelated stored value', () => {
@@ -44,5 +47,15 @@ describe('browser preferences', () => {
 
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
     expect(Object.keys(decoded.keyOverrides)).toHaveLength(MAX_KEY_OVERRIDES)
+  })
+
+  it('uses defaults when browser storage rejects reads', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
+        throw new Error('denied')
+      },
+    })
+
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
   })
 })

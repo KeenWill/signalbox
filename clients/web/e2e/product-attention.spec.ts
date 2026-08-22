@@ -136,7 +136,23 @@ test('replaces the current bounded page instead of accumulating attention histor
   await expect(page.getByText(idleSessionId)).toBeVisible()
   await expect(page.getByText(approvalSessionId)).toBeHidden()
   await expect(page.getByRole('button', { name: 'Return to live page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '1 sessions', level: 2 })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('closes the inspector with global Escape after focus leaves it', async ({ page }) => {
+  await installAttentionScenario(page)
+  await page.goto('/attention')
+
+  const approval = page.getByRole('button', {
+    name: new RegExp(`awaiting approval.*${approvalSessionId}`),
+  })
+  await approval.click()
+  await page.getByRole('button', { name: 'Refresh snapshot' }).focus()
+  await page.keyboard.press('Escape')
+
+  await expect(page.getByRole('button', { name: 'Close attention inspector' })).toBeHidden()
+  await expect(approval).toBeFocused()
 })
 
 test('captures the dark attention fleet', async ({ page }, testInfo) => {

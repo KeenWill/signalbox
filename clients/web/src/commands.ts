@@ -7,6 +7,7 @@ export interface CommandContext {
   getState: () => RootState
   timelineIds: readonly string[]
   focusTimeline: () => void
+  unwindSurface?: () => boolean
   navigate?: (path: string) => void
 }
 
@@ -36,7 +37,7 @@ export const commandRegistry = [
     title: 'Go to Attention',
     description: 'Open the operator intervention queue.',
     category: 'Navigate',
-    bindings: [{ label: 'g a' }],
+    bindings: [{ label: 'g a', registration: { kind: 'sequence', sequence: ['G', 'A'] } }],
     available: productNavigation,
     run: (context) => context.navigate?.('/attention'),
   },
@@ -45,7 +46,7 @@ export const commandRegistry = [
     title: 'Go to Sessions',
     description: 'Open the bounded session index.',
     category: 'Navigate',
-    bindings: [{ label: 'g s' }],
+    bindings: [{ label: 'g s', registration: { kind: 'sequence', sequence: ['G', 'S'] } }],
     available: productNavigation,
     run: (context) => context.navigate?.('/sessions'),
   },
@@ -108,7 +109,7 @@ export const commandRegistry = [
     title: 'Go to Settings',
     description: 'Open browser-local workstation preferences.',
     category: 'Navigate',
-    bindings: [{ label: 'g ,' }],
+    bindings: [{ label: 'g ,', registration: { kind: 'sequence', sequence: ['G', ','] } }],
     available: productNavigation,
     run: (context) => context.navigate?.('/settings'),
   },
@@ -148,6 +149,7 @@ export const commandRegistry = [
     available: always,
     run: (context) => {
       if (context.getState().app.overlay !== null) context.dispatch(actions.overlaySet(null))
+      else if (context.unwindSurface?.()) return
       else context.focusTimeline()
     },
   },

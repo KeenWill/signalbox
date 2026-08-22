@@ -31,7 +31,11 @@ const activityTime = (unixMilliseconds: string) => {
 
 const queryKey = (after: string | null) => ['production', 'attention', after] as const
 
-export function AttentionSurface() {
+export function AttentionSurface({
+  registerEscapeHandler,
+}: {
+  registerEscapeHandler: (handler: (() => boolean) | null) => void
+}) {
   const dispatch = useAppDispatch()
   const phase = useAppSelector(selectApp).attentionSync
   const queryClient = useQueryClient()
@@ -39,9 +43,15 @@ export function AttentionSurface() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const returnFocus = useRef<HTMLButtonElement>(null)
   const closeFocus = useRef<HTMLButtonElement>(null)
+  const pageHeading = useRef<HTMLHeadingElement>(null)
+  const focusReplacement = useRef(false)
+  const liveProjection = useRef<WebAttentionSnapshot | undefined>(undefined)
   const attention = useQuery({
     queryKey: queryKey(after),
-    queryFn: ({ signal }) => productTransport.readAttention(after ?? undefined, signal),
+    queryFn: async ({ signal }) => {
+      const snapshot = await productTransport.readAttention(after ?? undefined, signal)
+      return after === null ? (liveProjection.current ?? snapshot) : snapshot
+    },
     gcTime: 0,
   })
   const selected = attention.data?.summaries.find((summary) => summary.session_id === selectedId)
@@ -57,9 +67,14 @@ export function AttentionSurface() {
       transport: productTransport,
       signal: controller.signal,
       onPhase: (next) => dispatch(actions.attentionSyncSet(next)),
-      onProjection: (snapshot) => queryClient.setQueryData(queryKey(null), snapshot),
+      onProjection: (snapshot) => {
+        liveProjection.current = snapshot
+        void queryClient.cancelQueries({ queryKey: queryKey(null), exact: true })
+        queryClient.setQueryData(queryKey(null), snapshot)
+      },
     })
     return () => {
+      liveProjection.current = undefined
       controller.abort()
       dispatch(actions.attentionSyncSet('idle'))
     }
@@ -71,6 +86,25 @@ export function AttentionSurface() {
     return () => cancelAnimationFrame(frame)
   }, [selectedId])
 
+  useEffect(() => {
+    if (!selectedId) {
+      registerEscapeHandler(null)
+      return
+    }
+    registerEscapeHandler(() => {
+      setSelectedId(null)
+      return true
+    })
+    return () => registerEscapeHandler(null)
+  }, [registerEscapeHandler, selectedId])
+
+  useEffect(() => {
+    if (!attention.data || !focusReplacement.current) return
+    focusReplacement.current = false
+    const frame = requestAnimationFrame(() => pageHeading.current?.focus())
+    return () => cancelAnimationFrame(frame)
+  }, [attention.data])
+
   const open = (summary: AttentionSummary, button: HTMLButtonElement) => {
     returnFocus.current = button
     setSelectedId(summary.session_id)
@@ -79,8 +113,14 @@ export function AttentionSurface() {
   const nextPage = () => {
     const continuation = attention.data?.continuation_after_session_id
     if (!continuation) return
+    focusReplacement.current = true
     setSelectedId(null)
     setAfter(continuation)
+  }
+  const returnToLivePage = () => {
+    focusReplacement.current = true
+    setSelectedId(null)
+    setAfter(null)
   }
 
   return (
@@ -117,7 +157,9 @@ export function AttentionSurface() {
             <header>
               <div>
                 <span className="eyebrow">Bounded intervention fleet</span>
-                <h2 id="attention-heading">{attention.data.summaries.length} sessions</h2>
+                <h2 id="attention-heading" ref={pageHeading} tabIndex={-1}>
+                  {attention.data.summaries.length} sessions
+                </h2>
               </div>
               <code>cursor {attention.data.cursor}</code>
             </header>
@@ -150,7 +192,7 @@ export function AttentionSurface() {
             )}
             <div className="attention-page-controls">
               {after && (
-                <button type="button" onClick={() => setAfter(null)}>
+                <button type="button" onClick={returnToLivePage}>
                   Return to live page
                 </button>
               )}
@@ -163,13 +205,7 @@ export function AttentionSurface() {
           </section>
 
           {selected && (
-            <aside
-              className="attention-inspector"
-              aria-labelledby="attention-inspector-heading"
-              onKeyDown={(event) => {
-                if (event.key === 'Escape') close()
-              }}
-            >
+            <aside className="attention-inspector" aria-labelledby="attention-inspector-heading">
               <header>
                 <div>
                   <span className="eyebrow">Current obligation</span>

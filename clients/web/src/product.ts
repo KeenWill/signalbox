@@ -10,6 +10,44 @@ import {
 
 // The version-one browser contract fixes the NDJSON item ceiling at 65,536 bytes.
 const MAX_ATTENTION_EVENT_BYTES = 65_536
+export const MAX_ATTENTION_SNAPSHOT_BYTES = 65_536
+export const MAX_ATTENTION_SNAPSHOT_ITEMS = 64
+
+const decodeBoundedAttentionSnapshot = (value: unknown): WebAttentionSnapshot => {
+  const snapshot = decodeWebAttentionSnapshot(value)
+  if (snapshot.summaries.length > MAX_ATTENTION_SNAPSHOT_ITEMS) {
+    throw new TypeError('attention snapshot exceeds the contract item ceiling')
+  }
+  return snapshot
+}
+
+const readBoundedJson = async (response: Response, maximumBytes: number): Promise<unknown> => {
+  if (!response.body) throw new TypeError('attention snapshot response has no body')
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let byteLength = 0
+  try {
+    while (true) {
+      const chunk = await reader.read()
+      if (chunk.done) break
+      byteLength += chunk.value.byteLength
+      if (byteLength > maximumBytes) {
+        await reader.cancel().catch(() => undefined)
+        throw new TypeError('attention snapshot exceeds the contract byte ceiling')
+      }
+      chunks.push(chunk.value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  const encoded = new Uint8Array(byteLength)
+  let offset = 0
+  for (const chunk of chunks) {
+    encoded.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(encoded))
+}
 
 const decodeAttentionLines = async function* (
   body: ReadableStream<Uint8Array>,
@@ -26,7 +64,14 @@ const decodeAttentionLines = async function* (
           if (line.length === 0) throw new TypeError('attention stream contains an empty item')
           const value = JSON.parse(decoder.decode(Uint8Array.from(line)))
           line = []
-          yield decodeWebAttentionStreamEvent(value)
+          const event = decodeWebAttentionStreamEvent(value)
+          if (
+            event.kind === 'snapshot' &&
+            event.snapshot.summaries.length > MAX_ATTENTION_SNAPSHOT_ITEMS
+          ) {
+            throw new TypeError('attention snapshot exceeds the contract item ceiling')
+          }
+          yield event
         } else {
           if (line.length === MAX_ATTENTION_EVENT_BYTES) {
             throw new TypeError('attention stream item exceeds the contract ceiling')
@@ -99,7 +144,9 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw await this.requestError(response)
-    return decodeWebAttentionSnapshot(await response.json())
+    return decodeBoundedAttentionSnapshot(
+      await readBoundedJson(response, MAX_ATTENTION_SNAPSHOT_BYTES),
+    )
   }
 
   async *followAttention(signal?: AbortSignal): AsyncGenerator<WebAttentionStreamEvent> {

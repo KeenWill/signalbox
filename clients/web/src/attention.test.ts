@@ -105,4 +105,25 @@ describe('attention projection recovery', () => {
 
     expect(phases).toEqual(['connecting', 'resyncing', 'failed'])
   })
+
+  it('resets the immediate resync budget after an authoritative projection', async () => {
+    const phases: string[] = []
+    const resync = { kind: 'resync_required', cursor: '18' } as const
+    const recovered = { kind: 'snapshot', snapshot } as const
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [resync],
+        [recovered, resync],
+        [recovered, resync],
+        [recovered, resync],
+        [recovered],
+      ]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: () => undefined,
+    })
+
+    expect(phases.at(-1)).toBe('stale')
+  })
 })

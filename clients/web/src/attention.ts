@@ -72,6 +72,7 @@ export const synchronizeAttention = async ({
           break
         }
         projection = reduction.snapshot
+        if (event.kind === 'snapshot') resyncs = 0
         onProjection(projection)
         transition('live')
       }
