@@ -24,6 +24,13 @@ type TimelineContractLimits = Pick<
   'max_timeline_window_items' | 'max_timeline_window_bytes'
 >
 
+export const hasValidSessionTimelineContract = (bootstrap: WebContractBootstrap): boolean =>
+  bootstrap.capabilities.bounded_session_timeline &&
+  bootstrap.limits.max_timeline_window_items >= 1 &&
+  bootstrap.limits.max_timeline_window_items <= MAX_CONTRACT_TIMELINE_WINDOW_ITEMS &&
+  bootstrap.limits.max_timeline_window_bytes >= 256 &&
+  bootstrap.limits.max_timeline_window_bytes <= MAX_CONTRACT_TIMELINE_WINDOW_BYTES
+
 export type SessionWindowAnchor =
   | { kind: 'first' | 'latest' }
   | { kind: 'before' | 'after' | 'around'; eventSequence: string }
@@ -158,19 +165,17 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     private readonly request: typeof fetch,
   ) {}
 
-  static async connect(request: typeof fetch = fetch): Promise<HttpSessionTimelineSource> {
-    const response = await request('/api/bootstrap')
+  static async connect(
+    request: typeof fetch = fetch,
+    signal?: AbortSignal,
+  ): Promise<HttpSessionTimelineSource> {
+    const response = await request('/api/bootstrap', { signal })
     if (!response.ok) return throwApiError(response)
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
     if (!bootstrap.capabilities.bounded_session_timeline) {
       throw new TypeError('bounded session timeline capability is unavailable')
     }
-    if (
-      bootstrap.limits.max_timeline_window_items < 1 ||
-      bootstrap.limits.max_timeline_window_items > MAX_CONTRACT_TIMELINE_WINDOW_ITEMS ||
-      bootstrap.limits.max_timeline_window_bytes < 256 ||
-      bootstrap.limits.max_timeline_window_bytes > MAX_CONTRACT_TIMELINE_WINDOW_BYTES
-    ) {
+    if (!hasValidSessionTimelineContract(bootstrap)) {
       throw new TypeError('bounded session timeline limits are invalid')
     }
     return new HttpSessionTimelineSource(bootstrap.limits, request)
