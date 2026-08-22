@@ -7,7 +7,6 @@ export interface BrowserPreferences {
   theme: ThemeMode
   paneSizes: { navigation: number; inspector: number }
   lastLogicalPositions: Record<string, string>
-  keyOverrides: Record<string, string>
 }
 
 export const defaultBrowserPreferences: BrowserPreferences = {
@@ -17,19 +16,16 @@ export const defaultBrowserPreferences: BrowserPreferences = {
   theme: 'dark',
   paneSizes: { navigation: 218, inspector: 252 },
   lastLogicalPositions: {},
-  keyOverrides: {},
 }
 
 export const createDefaultBrowserPreferences = (): BrowserPreferences => ({
   ...defaultBrowserPreferences,
   paneSizes: { ...defaultBrowserPreferences.paneSizes },
   lastLogicalPositions: {},
-  keyOverrides: {},
 })
 
 export const BROWSER_PREFERENCES_KEY = 'signalbox.web.preferences.v1'
 export const MAX_SAVED_LOGICAL_POSITIONS = 128
-export const MAX_KEY_OVERRIDES = 64
 
 const oneOf = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T =>
   typeof value === 'string' && allowed.includes(value as T) ? (value as T) : fallback
@@ -104,7 +100,6 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
       ),
     },
     lastLogicalPositions: boundedLogicalPositions(candidate.lastLogicalPositions),
-    keyOverrides: boundedRecord(candidate.keyOverrides, MAX_KEY_OVERRIDES),
   }
 }
 

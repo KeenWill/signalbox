@@ -770,7 +770,7 @@ describe('BoundedSessionHistory', () => {
 
     await expect(
       source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
-    ).rejects.toThrow('fixed body envelope charge')
+    ).rejects.toThrow('body charge does not match')
   })
 
   it('fails closed when item detail capability is unavailable', async () => {

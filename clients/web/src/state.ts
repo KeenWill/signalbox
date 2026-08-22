@@ -138,7 +138,6 @@ const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
       theme: app.theme,
       paneSizes: app.paneSizes,
       lastLogicalPositions: app.lastLogicalPositions,
-      keyOverrides: app.keyOverrides,
     })
   }
   return result

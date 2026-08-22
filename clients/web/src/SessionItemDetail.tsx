@@ -359,6 +359,7 @@ export function SessionItemDetail({
         signal,
       ),
     gcTime: 0,
+    placeholderData: (previous) => previous,
   })
 
   if (detail.isError) {
@@ -398,9 +399,14 @@ export function SessionItemDetail({
         <button
           type="button"
           className="session-detail-continue"
-          onClick={() => setCursor(detail.data.continuation ?? undefined)}
+          aria-disabled={detail.isFetching}
+          onClick={() => {
+            if (!detail.isFetching) setCursor(detail.data.continuation ?? undefined)
+          }}
         >
-          Load next bounded detail chunk
+          {detail.isFetching
+            ? 'Loading next bounded detail chunk…'
+            : 'Load next bounded detail chunk'}
         </button>
       )}
     </div>

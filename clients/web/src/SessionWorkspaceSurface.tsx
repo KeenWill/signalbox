@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { ChevronDown, ChevronRight, Radio, SkipBack, SkipForward } from 'lucide-react'
-import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import type { CommandContext } from './commands'
 import type { WebContractBootstrap, WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import { SessionItemDetail } from './SessionItemDetail'
@@ -18,6 +18,14 @@ const SESSION_WINDOW_ITEMS = 80
 const SESSION_WINDOW_BYTES = 64 * 1024
 
 export const isCanonicalSessionId = (value: string): boolean => SESSION_ID_PATTERN.test(value)
+
+export const hasUsableSessionTimeline = (bootstrap: WebContractBootstrap | undefined): boolean =>
+  bootstrap?.capabilities.bounded_session_timeline === true &&
+  bootstrap.capabilities.bounded_session_timeline_detail === true &&
+  bootstrap.limits.max_timeline_window_items >= 1 &&
+  bootstrap.limits.max_timeline_window_bytes >= 256 &&
+  bootstrap.limits.max_timeline_detail_items >= 1 &&
+  bootstrap.limits.max_timeline_detail_bytes >= 256
 
 export const visibleSessionItems = (
   items: WebSessionTimelineWindow['items'],
@@ -72,14 +80,20 @@ export function SessionWorkspaceSurface({
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [restorePosition, setRestorePosition] = useState<string | undefined>()
   const [manualAnchor, setManualAnchor] = useState<SessionWindowAnchor | null>(null)
+  const [openAttempt, setOpenAttempt] = useState(0)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
-  const sessionCapabilitiesAvailable =
-    bootstrap?.capabilities.bounded_session_timeline === true &&
-    bootstrap.capabilities.bounded_session_timeline_detail === true
+  const sessionCapabilitiesAvailable = hasUsableSessionTimeline(bootstrap)
   const session = useQuery({
-    queryKey: ['production', 'session-workspace', sessionId, manualAnchor, restorePosition],
+    queryKey: [
+      'production',
+      'session-workspace',
+      sessionId,
+      manualAnchor,
+      restorePosition,
+      openAttempt,
+    ],
     queryFn: async ({ signal }) => {
-      const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window))
+      const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window), signal)
       const history = new BoundedSessionHistory(sessionId ?? '', source)
       const descriptor = await history.describe(signal)
       const active = BigInt(descriptor.work.active_turn_count) !== BigInt(0)
@@ -94,6 +108,7 @@ export function SessionWorkspaceSurface({
         signal,
       )
       return {
+        anchor,
         active,
         descriptor,
         restored: !active && restorePosition !== undefined,
@@ -111,6 +126,14 @@ export function SessionWorkspaceSurface({
 
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
+  const openTimelineWindow = useCallback(
+    (anchor: 'first' | 'latest') => {
+      setManualAnchor({ kind: anchor })
+      setExpanded(new Set())
+      dispatch(actions.timelineSelected(null))
+    },
+    [dispatch],
+  )
   useEffect(() => {
     onTimelineActions({
       selectTimeline: (eventSequence) => {
@@ -118,14 +141,21 @@ export function SessionWorkspaceSurface({
           dispatch(actions.logicalPositionRecorded({ sessionId, position: eventSequence }))
         }
       },
-      openTimelineWindow: (anchor) => {
-        setManualAnchor({ kind: anchor })
-        setExpanded(new Set())
-        dispatch(actions.timelineSelected(null))
-      },
+      openTimelineWindow,
     })
     return () => onTimelineActions(null)
-  }, [dispatch, onTimelineActions, sessionId])
+  }, [dispatch, onTimelineActions, openTimelineWindow, sessionId])
+
+  useEffect(() => {
+    if (manualAnchor?.kind !== 'first' && manualAnchor?.kind !== 'latest') return
+    if (session.data?.anchor.kind !== manualAnchor.kind) return
+    const boundary = manualAnchor.kind === 'first' ? timelineIds[0] : timelineIds.at(-1)
+    if (!boundary) return
+    dispatch(actions.timelineSelected(boundary))
+    if (sessionId !== null) {
+      dispatch(actions.logicalPositionRecorded({ sessionId, position: boundary }))
+    }
+  }, [dispatch, manualAnchor, session.data?.anchor.kind, sessionId, timelineIds])
 
   const openSession = (event: FormEvent) => {
     event.preventDefault()
@@ -136,6 +166,7 @@ export function SessionWorkspaceSurface({
     dispatch(actions.timelineSelected(null))
     setRestorePosition(app.lastLogicalPositions[candidate])
     setSessionId(candidate)
+    setOpenAttempt((attempt) => attempt + 1)
   }
   const selected = app.selectedTimeline
   const select = (eventSequence: string) => {
@@ -254,10 +285,10 @@ export function SessionWorkspaceSurface({
             </dl>
           </header>
           <div className="session-window-controls" role="toolbar" aria-label="Timeline window">
-            <button type="button" onClick={() => setManualAnchor({ kind: 'first' })}>
+            <button type="button" onClick={() => openTimelineWindow('first')}>
               <SkipBack aria-hidden="true" /> First <kbd>gg</kbd>
             </button>
-            <button type="button" onClick={() => setManualAnchor({ kind: 'latest' })}>
+            <button type="button" onClick={() => openTimelineWindow('latest')}>
               <SkipForward aria-hidden="true" /> Latest <kbd>G</kbd>
             </button>
             <span>
@@ -275,6 +306,7 @@ export function SessionWorkspaceSurface({
                     type="button"
                     className="session-item-summary"
                     aria-expanded={isExpanded}
+                    aria-current={selected === id ? 'true' : undefined}
                     onClick={() => {
                       select(id)
                       toggleExpanded(id)

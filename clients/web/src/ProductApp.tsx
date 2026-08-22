@@ -102,6 +102,7 @@ function ProductNavigation({
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
+        onClick={onSelect}
       >
         Scenario studio <span aria-hidden="true">↗</span>
       </Link>
@@ -143,6 +144,7 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
                 (command) =>
                   command.id !== 'surface.escape' &&
                   command.id !== 'help.open' &&
+                  command.id !== 'navigation.open' &&
                   (!('available' in command) || command.available(context)),
               )
               .map((command) => (
@@ -300,7 +302,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   )
   useHotkeys(
     globalHotkeyBindings
-      .filter((binding) => binding.commandId !== 'help.open')
+      .filter(
+        (binding) => binding.commandId !== 'help.open' && binding.commandId !== 'navigation.open',
+      )
       .map((binding) => ({
         hotkey: binding.hotkey,
         callback: () => invokeProductCommand(binding.commandId, context),
@@ -372,8 +376,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       {app.layout === 'workbench' && (
         <aside className="product-inspector" aria-label="Inspector">
           <span className="eyebrow">Inspector</span>
-          <h2>Selection details</h2>
-          <p>Select an available operational record to inspect its server-provided evidence.</p>
+          <h2>Surface context</h2>
+          <p>Authority and cache context for the current product surface.</p>
           <dl>
             <div>
               <dt>Surface</dt>

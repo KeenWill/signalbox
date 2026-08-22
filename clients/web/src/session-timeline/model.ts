@@ -143,6 +143,64 @@ const sameBodyContinuation = (left: TimelineBodyCursor, right: TimelineBodyCurso
   left.member_index === right.member_index &&
   left.offset_bytes === right.offset_bytes
 
+const sameDetailContinuation = (left: TimelineDetailCursor, right: TimelineDetailCursor): boolean =>
+  left.type === right.type &&
+  (left.type === 'more_at'
+    ? right.type === 'more_at' && left.address.event_sequence === right.address.event_sequence
+    : right.type === 'more_body' && sameBodyContinuation(left.body, right.body))
+
+const DETAIL_U64_KEYS = new Set([
+  'attempt_count',
+  'cache_creation_input_tokens',
+  'cache_read_input_tokens',
+  'generation',
+  'imported_position',
+  'input_tokens',
+  'length_bytes',
+  'offset_bytes',
+  'output_tokens',
+  'placement_revision',
+  'through_position',
+  'total_bytes',
+])
+
+const validateDetailIntegerFacts = (value: unknown): void => {
+  if (value === null || typeof value !== 'object') return
+  if (Array.isArray(value)) {
+    for (const entry of value) validateDetailIntegerFacts(entry)
+    return
+  }
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (DETAIL_U64_KEYS.has(key) && typeof entry === 'string') decimalU64(entry)
+    validateDetailIntegerFacts(entry)
+  }
+}
+
+const detailExcerptBytes = (value: unknown): number => {
+  if (value === null || typeof value !== 'object') return 0
+  if (Array.isArray(value)) {
+    return value.reduce<number>((total, entry) => total + detailExcerptBytes(entry), 0)
+  }
+  const record = value as Record<string, unknown>
+  let ownBytes = 0
+  if (
+    typeof record.text === 'string' &&
+    typeof record.offset_bytes === 'string' &&
+    typeof record.total_bytes === 'string'
+  ) {
+    const offset = decimalU64(record.offset_bytes)
+    const total = decimalU64(record.total_bytes)
+    ownBytes = new TextEncoder().encode(record.text).byteLength
+    if (offset + BigInt(ownBytes) > total) {
+      throw new TypeError('timeline detail excerpt exceeds its advertised total')
+    }
+  }
+  return (
+    ownBytes +
+    Object.values(record).reduce<number>((total, entry) => total + detailExcerptBytes(entry), 0)
+  )
+}
+
 const bodyContinuations = (value: unknown): TimelineBodyCursor[] => {
   if (value === null || typeof value !== 'object') return []
   if (Array.isArray(value)) return value.flatMap(bodyContinuations)
@@ -174,8 +232,11 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     private readonly request: typeof fetch,
   ) {}
 
-  static async connect(request: typeof fetch = fetch): Promise<HttpSessionTimelineSource> {
-    const response = await request('/api/bootstrap')
+  static async connect(
+    request: typeof fetch = fetch,
+    signal?: AbortSignal,
+  ): Promise<HttpSessionTimelineSource> {
+    const response = await request('/api/bootstrap', { signal })
     if (!response.ok) return throwApiError(response)
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
     if (!bootstrap.capabilities.bounded_session_timeline) {
@@ -267,16 +328,18 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     if (canonicalSessionId(page.session_id) !== canonicalSessionId(sessionId)) {
       throw new TypeError('timeline detail session mismatch')
     }
-    if (page.items.length > bounded.maxItems) {
-      throw new TypeError('timeline detail exceeds the requested item ceiling')
+    if (page.items.length !== 1) {
+      throw new TypeError('timeline item detail must return exactly one item')
     }
     let projectedBodyBytes = 0
     for (const item of page.items) {
       if (item.address.event_sequence !== address) {
         throw new TypeError('item detail returned a different timeline address')
       }
-      if (item.projected_body_bytes < TIMELINE_DETAIL_BODY_ENVELOPE_BYTES) {
-        throw new TypeError('timeline detail omits the fixed body envelope charge')
+      validateDetailIntegerFacts(item.body)
+      const expectedBodyBytes = TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + detailExcerptBytes(item.body)
+      if (item.projected_body_bytes !== expectedBodyBytes) {
+        throw new TypeError('timeline detail body charge does not match its encoded excerpts')
       }
       projectedBodyBytes += item.projected_body_bytes
       if (!Number.isSafeInteger(projectedBodyBytes)) {
@@ -290,6 +353,9 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
       throw new TypeError('timeline detail exceeds the requested byte ceiling')
     }
     if (page.continuation) {
+      if (cursor && sameDetailContinuation(cursor, page.continuation)) {
+        throw new TypeError('timeline detail continuation did not advance')
+      }
       const continuationAddress =
         page.continuation.type === 'more_at'
           ? page.continuation.address.event_sequence
