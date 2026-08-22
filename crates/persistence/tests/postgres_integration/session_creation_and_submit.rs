@@ -2959,6 +2959,21 @@ struct MultipartReplayFixture {
     first: SubmitInputHandlingOutcome,
 }
 
+const MULTIPART_SESSION_COMMAND_ID: u128 = 0x324;
+const MULTIPART_SESSION_ID: u128 = 0x724;
+const MULTIPART_MODEL_SELECTION_ID: u128 = 0x824;
+const MULTIPART_BLOB_NAMESPACE_ID: u128 = 0xb24;
+const MULTIPART_SUBMIT_COMMAND_ID: u128 = 0x325;
+const MULTIPART_ACCEPTED_INPUT_ID: u128 = 0x925;
+const MULTIPART_TURN_ID: u128 = 0xa25;
+const MULTIPART_REPLAY_ACCEPTED_INPUT_ID: u128 = 0x926;
+const MULTIPART_REPLAY_TURN_ID: u128 = 0xa26;
+const MULTIPART_REORDERED_ACCEPTED_INPUT_ID: u128 = 0x927;
+const MULTIPART_REORDERED_TURN_ID: u128 = 0xa27;
+const MULTIPART_METADATA_ACCEPTED_INPUT_ID: u128 = 0x928;
+const MULTIPART_METADATA_TURN_ID: u128 = 0xa28;
+const MULTIPART_ATTACHMENT_PAYLOAD: &[u8] = b"multipart attachment";
+
 #[derive(sqlx::FromRow)]
 struct MultipartProjectionFacts {
     command_projection: Value,
@@ -2974,24 +2989,29 @@ impl MultipartReplayFixture {
 
 async fn multipart_replay_fixture(
     command: SubmitInput,
-    digest: BlobDigest,
+    attachment_payload: &[u8],
 ) -> Result<MultipartReplayFixture, Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(prepared(0x324, 0x724, direct(0x824)))
+        .handle(prepared(
+            MULTIPART_SESSION_COMMAND_ID,
+            MULTIPART_SESSION_ID,
+            direct(MULTIPART_MODEL_SELECTION_ID),
+        ))
         .await?;
 
+    let digest = BlobDigest::digest(attachment_payload);
     let mut catalog = pool.begin().await?;
     sqlx::query(
         "INSERT INTO blob_store_binding (store_name, namespace_id)
          VALUES ('multipart_test', $1)",
     )
-    .bind(Uuid::from_u128(0xb24))
+    .bind(Uuid::from_u128(MULTIPART_BLOB_NAMESPACE_ID))
     .execute(&mut *catalog)
     .await?;
     sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, $2)")
         .bind(digest.as_bytes().as_slice())
-        .bind(Decimal::from(20_u8))
+        .bind(Decimal::from(attachment_payload.len()))
         .execute(&mut *catalog)
         .await?;
     sqlx::query(
@@ -3007,8 +3027,8 @@ async fn multipart_replay_fixture(
     let first = repository
         .handle(
             command.clone(),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x925)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa25))),
+            AcceptedInputId::from_uuid(Uuid::from_u128(MULTIPART_ACCEPTED_INPUT_ID)),
+            Some(TurnId::from_uuid(Uuid::from_u128(MULTIPART_TURN_ID))),
         )
         .await?;
 
@@ -3026,7 +3046,7 @@ async fn multipart_replay_fixture(
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
 -> Result<(), Box<dyn Error>> {
-    let digest = BlobDigest::digest(b"multipart attachment");
+    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
     let before = UserContentPart::try_text(String::from("before"))
         .expect("the fixture leading text is valid");
     let attachment = UserContentPart::Attachment {
@@ -3044,21 +3064,21 @@ async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
     let content = UserContent::try_parts(vec![before, attachment, after])
         .expect("the fixture parts are canonical");
     let command = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0x325)),
-        SessionId::from_uuid(Uuid::from_u128(0x724)),
+        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
+        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
         content,
         DeliveryRequest::StartWhenNoActiveTurn {
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
-    let fixture = multipart_replay_fixture(command, digest).await?;
+    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
     assert_eq!(
         fixture
             .repository
             .handle(
                 fixture.command.clone(),
-                AcceptedInputId::from_uuid(Uuid::from_u128(0x926)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xa26))),
+                AcceptedInputId::from_uuid(Uuid::from_u128(MULTIPART_REPLAY_ACCEPTED_INPUT_ID)),
+                Some(TurnId::from_uuid(Uuid::from_u128(MULTIPART_REPLAY_TURN_ID))),
             )
             .await?,
         fixture.first
@@ -3072,7 +3092,7 @@ async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_durable_multipart_command_reconstructs_the_original_value()
 -> Result<(), Box<dyn Error>> {
-    let digest = BlobDigest::digest(b"multipart attachment");
+    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
     let before = UserContentPart::try_text(String::from("before"))
         .expect("the fixture leading text is valid");
     let attachment = UserContentPart::Attachment {
@@ -3090,14 +3110,14 @@ async fn inv012_durable_multipart_command_reconstructs_the_original_value()
     let content = UserContent::try_parts(vec![before, attachment, after])
         .expect("the fixture parts are canonical");
     let command = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0x325)),
-        SessionId::from_uuid(Uuid::from_u128(0x724)),
+        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
+        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
         content,
         DeliveryRequest::StartWhenNoActiveTurn {
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
-    let fixture = multipart_replay_fixture(command, digest).await?;
+    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
     assert_eq!(
         fixture
             .repository
@@ -3115,7 +3135,7 @@ async fn inv012_durable_multipart_command_reconstructs_the_original_value()
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
-    let digest = BlobDigest::digest(b"multipart attachment");
+    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
     let before = UserContentPart::try_text(String::from("before"))
         .expect("the fixture leading text is valid");
     let attachment = UserContentPart::Attachment {
@@ -3133,14 +3153,14 @@ async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), 
     let content = UserContent::try_parts(vec![before.clone(), attachment.clone(), after.clone()])
         .expect("the fixture parts are canonical");
     let command = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0x325)),
-        SessionId::from_uuid(Uuid::from_u128(0x724)),
+        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
+        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
         content,
         DeliveryRequest::StartWhenNoActiveTurn {
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
-    let fixture = multipart_replay_fixture(command, digest).await?;
+    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
     let reordered = SubmitInput::new(
         fixture.command.command_id(),
         fixture.command.session(),
@@ -3153,8 +3173,10 @@ async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), 
             .repository
             .handle(
                 reordered,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0x927)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xa27))),
+                AcceptedInputId::from_uuid(Uuid::from_u128(MULTIPART_REORDERED_ACCEPTED_INPUT_ID)),
+                Some(TurnId::from_uuid(Uuid::from_u128(
+                    MULTIPART_REORDERED_TURN_ID
+                ))),
             )
             .await?,
         SubmitInputHandlingOutcome::ConflictingReuse {
@@ -3170,7 +3192,7 @@ async fn inv012_reordered_multipart_submit_is_conflicting_reuse() -> Result<(), 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
-    let digest = BlobDigest::digest(b"multipart attachment");
+    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
     let before = UserContentPart::try_text(String::from("before"))
         .expect("the fixture leading text is valid");
     let attachment = UserContentPart::Attachment {
@@ -3188,14 +3210,14 @@ async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(),
     let content = UserContent::try_parts(vec![before.clone(), attachment, after.clone()])
         .expect("the fixture parts are canonical");
     let command = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0x325)),
-        SessionId::from_uuid(Uuid::from_u128(0x724)),
+        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
+        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
         content,
         DeliveryRequest::StartWhenNoActiveTurn {
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
-    let fixture = multipart_replay_fixture(command, digest).await?;
+    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
     let changed_attachment = UserContentPart::Attachment {
         digest,
         kind: AttachmentKind::Document,
@@ -3218,8 +3240,10 @@ async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(),
             .repository
             .handle(
                 changed_metadata,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0x928)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xa28))),
+                AcceptedInputId::from_uuid(Uuid::from_u128(MULTIPART_METADATA_ACCEPTED_INPUT_ID)),
+                Some(TurnId::from_uuid(Uuid::from_u128(
+                    MULTIPART_METADATA_TURN_ID
+                ))),
             )
             .await?,
         SubmitInputHandlingOutcome::ConflictingReuse {
@@ -3236,7 +3260,7 @@ async fn inv012_changed_attachment_metadata_is_conflicting_reuse() -> Result<(),
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_multipart_command_and_accepted_satellites_are_identical()
 -> Result<(), Box<dyn Error>> {
-    let digest = BlobDigest::digest(b"multipart attachment");
+    let digest = BlobDigest::digest(MULTIPART_ATTACHMENT_PAYLOAD);
     let before = UserContentPart::try_text(String::from("before"))
         .expect("the fixture leading text is valid");
     let attachment = UserContentPart::Attachment {
@@ -3254,14 +3278,14 @@ async fn inv012_multipart_command_and_accepted_satellites_are_identical()
     let content = UserContent::try_parts(vec![before, attachment, after])
         .expect("the fixture parts are canonical");
     let command = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0x325)),
-        SessionId::from_uuid(Uuid::from_u128(0x724)),
+        DurableCommandId::from_uuid(Uuid::from_u128(MULTIPART_SUBMIT_COMMAND_ID)),
+        SessionId::from_uuid(Uuid::from_u128(MULTIPART_SESSION_ID)),
         content,
         DeliveryRequest::StartWhenNoActiveTurn {
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
-    let fixture = multipart_replay_fixture(command, digest).await?;
+    let fixture = multipart_replay_fixture(command, MULTIPART_ATTACHMENT_PAYLOAD).await?;
     let mirrored: MultipartProjectionFacts = sqlx::query_as(
         "SELECT
             (SELECT jsonb_agg(
