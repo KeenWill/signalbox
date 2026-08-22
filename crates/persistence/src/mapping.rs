@@ -187,6 +187,34 @@ use crate::{
     outbox::DispatchedRunnerState,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConvergenceSweepStateStorageKind {
+    Observed,
+    RetryWait,
+    Parked,
+}
+
+pub(crate) const fn convergence_sweep_state_to_str(
+    value: ConvergenceSweepStateStorageKind,
+) -> &'static str {
+    match value {
+        ConvergenceSweepStateStorageKind::Observed => "observed",
+        ConvergenceSweepStateStorageKind::RetryWait => "retry_wait",
+        ConvergenceSweepStateStorageKind::Parked => "parked",
+    }
+}
+
+pub(crate) fn convergence_sweep_state_from_str(
+    value: &str,
+) -> Option<ConvergenceSweepStateStorageKind> {
+    match value {
+        "observed" => Some(ConvergenceSweepStateStorageKind::Observed),
+        "retry_wait" => Some(ConvergenceSweepStateStorageKind::RetryWait),
+        "parked" => Some(ConvergenceSweepStateStorageKind::Parked),
+        _ => None,
+    }
+}
+
 pub(crate) const fn convergence_sweep_failure_to_str(
     value: ConvergenceSweepFailureKind,
 ) -> &'static str {
@@ -2365,9 +2393,10 @@ mod tests {
 
     use super::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
-        DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
-        DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
-        PlanEventStorageKind, PositiveOrdinalMappingError, RepoWatchEvaluationOutcomeStorageKind,
+        ConvergenceSweepStateStorageKind, DelegationPolicyStorageKind,
+        DelegationRejectionStorageKind, DelegationUpdateStorageKind, DelegationWakeStorageKind,
+        DurableCommandIdMappingError, DurableCommandKind, PlanEventStorageKind,
+        PositiveOrdinalMappingError, RepoWatchEvaluationOutcomeStorageKind,
         RepoWatchLifecycleCutoffDispositionStorageKind, RepoWatchObligationSettlementStorageKind,
         RunnerLossPropagationStateStorageKind, SessionCreationCauseStorageKind,
         SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
@@ -2381,6 +2410,7 @@ mod tests {
         convergence_sweep_failure_from_str, convergence_sweep_failure_outcome_from_str,
         convergence_sweep_failure_outcome_to_str, convergence_sweep_failure_to_str,
         convergence_sweep_operator_need_from_str, convergence_sweep_operator_need_to_str,
+        convergence_sweep_state_from_str, convergence_sweep_state_to_str,
         defaults_version_from_numeric, defaults_version_to_numeric,
         delegation_message_direction_from_str, delegation_message_direction_to_str,
         delegation_outcome_kind_from_str, delegation_outcome_kind_to_str,
@@ -2420,6 +2450,22 @@ mod tests {
         tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
         turn_id_to_uuid,
     };
+
+    #[test]
+    fn convergence_sweep_state_mapping_is_closed() {
+        let values = [
+            ConvergenceSweepStateStorageKind::Observed,
+            ConvergenceSweepStateStorageKind::RetryWait,
+            ConvergenceSweepStateStorageKind::Parked,
+        ];
+        for value in values {
+            assert_eq!(
+                convergence_sweep_state_from_str(convergence_sweep_state_to_str(value)),
+                Some(value)
+            );
+        }
+        assert_eq!(convergence_sweep_state_from_str("unknown"), None);
+    }
 
     #[test]
     fn convergence_sweep_failure_mappings_are_closed() {

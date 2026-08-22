@@ -49,7 +49,9 @@ of slow complete reconciliation is verified against this PR
 fence and unattended escalation release described below are verified against
 this PR (`agent/headless-approval-escalation`). The operator-commissioned
 dispatch fence and its unattended-escalation coverage are verified against this
-PR (`agent/commissioned-dispatch-fence`).
+PR (`agent/commissioned-dispatch-fence`). External commissioned-session
+obligation blocking and blocker replacement are verified against this PR
+(`agent/daemon-convergence-sweep`).
 
 ## Configuration and credential boundary
 
@@ -685,8 +687,13 @@ back the whole batch. Each record links the triggering event, rule identity and
 version, singleton key, action ordinal, session-template provenance, and newly
 created session. The action ordinal distinguishes sibling sessions without
 letting the first action suppress later actions from the same match. An occupied
-singleton refuses another match and atomically opens one durable delivery
-obligation for that singleton. Further matching facts join its latest-event
+singleton, or an independently commissioned live session owning the same pull
+request, refuses another match and atomically opens one durable delivery
+obligation for that singleton. The obligation records exactly one blocker: the
+occupying repository-watch dispatch or the external commissioned session. If an
+old blocker terminates but another owner is live at redispatch admission, the
+same obligation atomically replaces its blocker and remains non-ready. Further
+matching facts join its latest-event
 projection and increment its count, including a match racing with release, so
 one singleton has at most one outstanding obligation. Their individual terminal
 evaluations remain append-only audit facts. The batch releases the singleton at
@@ -911,7 +918,8 @@ release clause independently; and names every failing clause in `blockers`.
 `repo_watch_outstanding_dispatch_obligation` projection. Each row identifies the
 repository, rule, singleton and pull request or stack root, first and latest
 matched events, collapsed count and timestamps, any occupying dispatch and its
-sessions, cooldown eligibility, present readiness, failed-attempt count, and
+sessions or external blocking session, cooldown eligibility, present readiness,
+failed-attempt count, and
 parking stamp. Rule deactivation settles an obligation without dispatch rather
 than leaving permanently owed work for semantics that are no longer configured;
 terminal-target settlement likewise records why the obligation no longer remains

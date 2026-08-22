@@ -419,12 +419,19 @@ async fn lock_live_pull_request_target(
         .map_err(Into::into)
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct PullRequestTargetRow {
+    repository: String,
+    pull_request_number: Decimal,
+}
+
 pub(crate) async fn lock_competing_pull_request_session(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session: SessionId,
 ) -> Result<Option<SessionId>, sqlx::Error> {
-    let target: Option<(String, Decimal)> = sqlx::query_as(
-        "SELECT repository, pull_request_number
+    let target: Option<PullRequestTargetRow> = sqlx::query_as(
+        "SELECT repository AS repository,
+                pull_request_number AS pull_request_number
            FROM (
                 SELECT repository, pull_request_number, recorded_at
                   FROM commissioned_dispatch
@@ -442,11 +449,21 @@ pub(crate) async fn lock_competing_pull_request_session(
     .bind(session_id_to_uuid(session))
     .fetch_optional(&mut **transaction)
     .await?;
-    let Some((repository, pull_request)) = target else {
+    let Some(PullRequestTargetRow {
+        repository,
+        pull_request_number,
+    }) = target
+    else {
         return Ok(None);
     };
-    lock_pull_request_target(transaction, &repository, &pull_request).await?;
-    live_pull_request_session(transaction, &repository, &pull_request, Some(session)).await
+    lock_pull_request_target(transaction, &repository, &pull_request_number).await?;
+    live_pull_request_session(
+        transaction,
+        &repository,
+        &pull_request_number,
+        Some(session),
+    )
+    .await
 }
 
 pub(crate) async fn lock_pull_request_target(

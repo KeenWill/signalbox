@@ -232,6 +232,9 @@ commissioned-dispatch identities. Observation projections are decoded as
 complete pairs by the persistence adapter. The function pins the restore-safe
 schema search path. The cross-component behavior using these records is owned by
 [pull-request convergence reconciliation](convergence-reconciliation.md).
+The pull-request target and model-activity advisory fences described in the
+lock inventory below are verified against this PR
+(`agent/daemon-convergence-sweep`).
 
 ## Relational representation
 
@@ -827,8 +830,11 @@ Locks per transaction, in acquisition order:
   `turn_lifecycle` row `FOR UPDATE` at commit time, inside the deferred
   source-turn trigger.
 
-- **Goal commands and transitions**: an unseen user command first claims the
-  user-global registry, then every user, model, scheduler, and continuation
+- **Goal commands and transitions**: a pursuit-starting command for a
+  pull-request-commissioned session first takes the transaction-scoped
+  pull-request target advisory lock and checks for a competing live session. An
+  unseen command then claims the user-global registry, and every user, model,
+  scheduler, and continuation
   transaction locks the session row `FOR NO KEY UPDATE` before reading the event
   stream. An applied user transition next locks `session_scheduler` `FOR UPDATE`
   before recording its receipt or event, so stop and queued-turn activation
@@ -842,8 +848,12 @@ Locks per transaction, in acquisition order:
   takes no row lock.
 
 - **StartEligibleTurn** and nonterminal **model-call execution transactions**
-  (prepare and authorize): the `session_scheduler` row `FOR UPDATE` is the only
-  explicit lock (session existence is checked with a bare `EXISTS`). The session
+  (prepare and authorize): first model-call insertion first takes the
+  transaction-scoped model-activity advisory lock keyed by session; inactivity
+  parking takes the pull-request target advisory lock and then that same
+  model-activity lock before rechecking activity. The `session_scheduler` row
+  `FOR UPDATE` remains the execution transaction's explicit row lock (session
+  existence is checked with a bare `EXISTS`). The session
   row is locked only `KEY SHARE`, implicitly, by the inserts' foreign keys, and
   the candidate `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
   Terminal observation commit and reread, restart recovery, startup recovery,

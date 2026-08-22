@@ -14,9 +14,10 @@ use sqlx::{
 };
 
 use crate::mapping::{
-    convergence_sweep_decision_to_str, convergence_sweep_failure_from_str,
-    convergence_sweep_failure_outcome_to_str, convergence_sweep_failure_to_str,
-    convergence_sweep_operator_need_to_str, session_id_from_uuid,
+    ConvergenceSweepStateStorageKind, convergence_sweep_decision_to_str,
+    convergence_sweep_failure_from_str, convergence_sweep_failure_outcome_to_str,
+    convergence_sweep_failure_to_str, convergence_sweep_operator_need_to_str,
+    convergence_sweep_state_from_str, convergence_sweep_state_to_str, session_id_from_uuid,
 };
 
 /// The exact pull-request observation used for movement and dispatch-effect checks.
@@ -274,14 +275,20 @@ impl PostgresConvergenceSweepStore {
         ensure_target(&mut transaction, repository, pull_request).await?;
         sqlx::query(
             "UPDATE convergence_sweep_target
-                SET state_kind = 'observed', failure_kind = NULL,
+                SET state_kind = $3, failure_kind = NULL,
                     consecutive_failures = 0, retry_not_before = NULL,
                     parked_at = NULL, operator_need = NULL
               WHERE repository = $1 AND pull_request_number = $2
-                AND state_kind = 'parked'",
+                AND state_kind = $4",
         )
         .bind(repository.as_str())
         .bind(Decimal::from(pull_request.get()))
+        .bind(convergence_sweep_state_to_str(
+            ConvergenceSweepStateStorageKind::Observed,
+        ))
+        .bind(convergence_sweep_state_to_str(
+            ConvergenceSweepStateStorageKind::Parked,
+        ))
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -446,7 +453,7 @@ impl PostgresConvergenceSweepStore {
         ensure_target(&mut transaction, repository, pull_request).await?;
         let updated = sqlx::query(
             "UPDATE convergence_sweep_target
-                SET state_kind = 'observed', failure_kind = NULL,
+                SET state_kind = $7, failure_kind = NULL,
                     consecutive_failures = 0, retry_not_before = NULL,
                     parked_at = NULL, operator_need = NULL,
                     last_head_sha = $3, last_unresolved_threads = $4,
@@ -475,6 +482,9 @@ impl PostgresConvergenceSweepStore {
         .bind(Decimal::from(observation.unresolved_threads()))
         .bind(dispatch_id)
         .bind(session_id.into_uuid())
+        .bind(convergence_sweep_state_to_str(
+            ConvergenceSweepStateStorageKind::Observed,
+        ))
         .execute(&mut *transaction)
         .await?;
         if updated.rows_affected() != 1 {
@@ -513,7 +523,7 @@ impl PostgresConvergenceSweepStore {
         ensure_target(&mut transaction, repository, pull_request).await?;
         sqlx::query(
             "UPDATE convergence_sweep_target
-                SET state_kind = 'observed', failure_kind = NULL,
+                SET state_kind = $5, failure_kind = NULL,
                     consecutive_failures = 0, retry_not_before = NULL,
                     parked_at = NULL, operator_need = NULL,
                     last_head_sha = $3, last_unresolved_threads = $4,
@@ -524,6 +534,9 @@ impl PostgresConvergenceSweepStore {
         .bind(Decimal::from(pull_request.get()))
         .bind(observation.head_sha().as_str())
         .bind(Decimal::from(observation.unresolved_threads()))
+        .bind(convergence_sweep_state_to_str(
+            ConvergenceSweepStateStorageKind::Observed,
+        ))
         .execute(&mut *transaction)
         .await?;
         insert_event(
@@ -661,7 +674,7 @@ impl PostgresConvergenceSweepStore {
                             WHEN failure_kind = $3
                                 THEN least(consecutive_failures + 1, $5)
                             ELSE 1::smallint END) >= $5
-                        THEN 'parked' ELSE 'retry_wait' END,
+                        THEN $12 ELSE $13 END,
                     failure_kind = $3,
                     consecutive_failures = CASE WHEN $4 THEN $5
                         WHEN failure_kind = $3
@@ -706,7 +719,7 @@ impl PostgresConvergenceSweepStore {
                 ))
           RETURNING consecutive_failures AS consecutive_failures,
                     CASE state_kind
-                        WHEN 'parked' THEN 'parked'
+                        WHEN $12 THEN 'parked'
                         ELSE 'retry_scheduled'
                     END AS parking_kind",
         )
@@ -721,6 +734,12 @@ impl PostgresConvergenceSweepStore {
         .bind(head)
         .bind(threads)
         .bind(expected_inactive_session.map(SessionId::into_uuid))
+        .bind(convergence_sweep_state_to_str(
+            ConvergenceSweepStateStorageKind::Parked,
+        ))
+        .bind(convergence_sweep_state_to_str(
+            ConvergenceSweepStateStorageKind::RetryWait,
+        ))
         .fetch_optional(&mut *transaction)
         .await?;
         let Some(updated) = updated else {
@@ -847,7 +866,9 @@ async fn insert_event(
 fn decode_target_state(
     row: sqlx::postgres::PgRow,
 ) -> Result<ConvergenceSweepTargetState, ConvergenceSweepStoreError> {
-    let state: String = row.try_get("state_kind")?;
+    let state = convergence_sweep_state_from_str(&row.try_get::<String, _>("state_kind")?).ok_or(
+        ConvergenceSweepStoreError::Corruption("invalid sweep state kind"),
+    )?;
     let failure_kind = row
         .try_get::<Option<String>, _>("failure_kind")?
         .map(|value| {
@@ -883,7 +904,7 @@ fn decode_target_state(
         "partial latest dispatch",
     )?;
     Ok(ConvergenceSweepTargetState {
-        parked: state == "parked",
+        parked: state == ConvergenceSweepStateStorageKind::Parked,
         retry_ready: row.try_get("retry_ready")?,
         cool_off_elapsed: row.try_get("cool_off_elapsed")?,
         failure_kind,

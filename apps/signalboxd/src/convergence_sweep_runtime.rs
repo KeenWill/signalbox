@@ -32,7 +32,7 @@ use sqlx::PgPool;
 use tokio::{
     select,
     sync::{Semaphore, watch},
-    time::{MissedTickBehavior, interval, sleep, sleep_until},
+    time::{Instant, MissedTickBehavior, interval, sleep, sleep_until},
 };
 
 use crate::{
@@ -287,21 +287,10 @@ impl ConvergenceSweepRuntime {
                             }
                         }
                         select! {
-                            () = runtime.reconcile_target(target) => {}
-                            _ = sleep_until(scheduled + runtime.interval) => {
-                                tracing::warn!(
-                                    repository = %target.repository.as_str(),
-                                    pull_request = target.pull_request.get(),
-                                    "convergence sweep census exceeded its polling interval"
-                                );
-                                runtime.record_failure(
-                                    target,
-                                    None,
-                                    ConvergenceSweepFailureKind::FactsFetch,
-                                    CensusError::Response,
-                                )
-                                .await;
-                            }
+                            () = runtime.reconcile_target(
+                                target,
+                                scheduled + runtime.interval,
+                            ) => {}
                             changed = shutdown.changed() => {
                                 if changed.is_err() || *shutdown.borrow() { return; }
                             }
@@ -313,7 +302,7 @@ impl ConvergenceSweepRuntime {
             .await;
     }
 
-    async fn reconcile_target(&self, target: &SweepTarget) {
+    async fn reconcile_target(&self, target: &SweepTarget, census_deadline: Instant) {
         let loaded = match self
             .state
             .load_target_with_cool_off(&target.repository, target.pull_request, self.cool_off)
@@ -374,7 +363,17 @@ impl ConvergenceSweepRuntime {
             }
             return;
         }
-        let fetched = match self.fetch(target).await {
+        let fetched = match select! {
+            fetched = self.fetch(target) => fetched,
+            _ = sleep_until(census_deadline) => {
+                tracing::warn!(
+                    repository = %target.repository.as_str(),
+                    pull_request = target.pull_request.get(),
+                    "convergence sweep provider census exceeded its polling interval"
+                );
+                Err(CensusError::Response)
+            }
+        } {
             Ok(fetched) => fetched,
             Err(cause) => {
                 self.record_failure(target, None, ConvergenceSweepFailureKind::FactsFetch, cause)
