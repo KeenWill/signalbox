@@ -47,6 +47,9 @@ const viewByKind = (
 const displayName = (descriptor: WebBlobDescriptor): string =>
   descriptor.display_filename[0] ?? descriptor.digest
 
+const readAsciiTag = (bytes: Uint8Array, offset: number, length = 4): string =>
+  String.fromCharCode(...bytes.subarray(offset, offset + length))
+
 export const readImageDimensions = (
   bytes: Uint8Array,
 ): { width: number; height: number } | null => {
@@ -59,10 +62,10 @@ export const readImageDimensions = (
   }
   if (
     bytes.length >= 25 &&
-    new TextDecoder().decode(bytes.subarray(0, 4)) === 'RIFF' &&
-    new TextDecoder().decode(bytes.subarray(8, 12)) === 'WEBP'
+    readAsciiTag(bytes, 0) === 'RIFF' &&
+    readAsciiTag(bytes, 8) === 'WEBP'
   ) {
-    const kind = new TextDecoder().decode(bytes.subarray(12, 16))
+    const kind = readAsciiTag(bytes, 12)
     if (kind === 'VP8X' && bytes.length >= 30) {
       return {
         width: 1 + view.getUint8(24) + (view.getUint8(25) << 8) + (view.getUint8(26) << 16),
@@ -103,7 +106,12 @@ export const readImageDimensions = (
         offset += 1
         continue
       }
-      if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) {
+      if (
+        marker === 0x01 ||
+        marker === 0xd8 ||
+        marker === 0xd9 ||
+        (marker >= 0xd0 && marker <= 0xd7)
+      ) {
         offset += 1
         continue
       }
@@ -130,8 +138,7 @@ export const readImageDimensions = (
 
 export const isAnimationSafeImageHeader = (bytes: Uint8Array): boolean => {
   if (bytes.length < 12) return false
-  const text = new TextDecoder().decode(bytes)
-  if (text.startsWith('GIF8')) {
+  if (readAsciiTag(bytes, 0) === 'GIF8') {
     if (bytes.length < 14) return false
     let offset = 13
     const packedFields = bytes[10] ?? 0
@@ -169,19 +176,19 @@ export const isAnimationSafeImageHeader = (bytes: Uint8Array): boolean => {
     }
     return false
   }
-  if (text.slice(8, 12) === 'WEBP') {
-    const kind = text.slice(12, 16)
+  if (readAsciiTag(bytes, 8) === 'WEBP') {
+    const kind = readAsciiTag(bytes, 12)
     return (
       kind === 'VP8 ' || kind === 'VP8L' || (kind === 'VP8X' && ((bytes[20] ?? 0) & 0x02) === 0)
     )
   }
   if (bytes[0] === 0xff && bytes[1] === 0xd8) return true
-  if (!(bytes[0] === 0x89 && text.slice(1, 4) === 'PNG')) return false
+  if (!(bytes[0] === 0x89 && readAsciiTag(bytes, 1, 3) === 'PNG')) return false
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   let offset = 8
   while (offset + 12 <= bytes.length) {
     const length = view.getUint32(offset)
-    const kind = text.slice(offset + 4, offset + 8)
+    const kind = readAsciiTag(bytes, offset + 4)
     if (kind === 'acTL') return false
     if (kind === 'IDAT') return true
     const end = offset + 12 + length

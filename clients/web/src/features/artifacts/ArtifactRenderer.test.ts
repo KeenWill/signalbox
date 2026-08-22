@@ -123,6 +123,15 @@ describe('artifact renderer compatibility', () => {
     expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
   })
 
+  it('skips the standalone JPEG TEM marker', () => {
+    const bytes = new Uint8Array([
+      0xff, 0xd8, 0xff, 0x01, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x01, 0xe0, 0x02, 0x80, 0x03, 0x01,
+      0x11, 0x00, 0xff, 0xd9,
+    ])
+
+    expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
+  })
+
   it('admits a valid single-frame GIF and rejects a multi-frame GIF', () => {
     const header = [0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
     const frame = [
@@ -141,6 +150,19 @@ describe('artifact renderer compatibility', () => {
     animatedWebp.set(new TextEncoder().encode('VP8X'), 12)
     animatedWebp[20] = 0x02
     expect(isAnimationSafeImageHeader(animatedWebp)).toBe(false)
+  })
+
+  it('reads PNG chunk tags by byte offset after multibyte metadata', () => {
+    const bytes = new Uint8Array(34)
+    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    const view = new DataView(bytes.buffer)
+    view.setUint32(8, 2)
+    bytes.set(new TextEncoder().encode('tEXt'), 12)
+    bytes.set([0xc3, 0xa9], 16)
+    view.setUint32(22, 0)
+    bytes.set(new TextEncoder().encode('IDAT'), 26)
+
+    expect(isAnimationSafeImageHeader(bytes)).toBe(true)
   })
 
   it('reads bounded extended WebP dimensions for pixel admission', () => {
