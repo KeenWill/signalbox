@@ -245,6 +245,15 @@ kbd {
 .contract-state.failed::before {
   background: var(--danger);
 }
+.bootstrap-retry {
+  padding: 0.28rem 0.48rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: 0.62rem;
+  cursor: pointer;
+}
 .surface-body {
   min-height: 0;
   overflow: auto;
@@ -484,7 +493,7 @@ kbd {
 
 @media (max-width: 1080px) {
   .product-shell {
-    grid-template-columns: 205px minmax(400px, 1fr);
+    grid-template-columns: var(--product-navigation-width, 218px) minmax(400px, 1fr);
   }
   .product-inspector {
     display: none;
@@ -1374,6 +1383,9 @@ kbd {
 .session-item-summary strong {
   font-size: 0.72rem;
   font-weight: 600;
+}
+.session-timeline.presentation-condensed .session-item-summary small {
+  display: none;
 }
 .session-item-detail {
   display: grid;

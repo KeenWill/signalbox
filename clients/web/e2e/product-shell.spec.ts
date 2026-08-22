@@ -154,6 +154,32 @@ test('gates Sessions on the validated bootstrap capability', async ({ page }) =>
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('retries a failed product bootstrap after the daemon recovers', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let attempts = 0
+  await page.route('**/api/bootstrap', (route) => {
+    attempts += 1
+    if (attempts === 1) {
+      return route.fulfill({ status: 503, body: 'temporarily unavailable' })
+    }
+    return route.fulfill({ json: bootstrapFixture })
+  })
+  await page.goto('/sessions')
+
+  await expect(page.getByText('Transport unavailable')).toBeVisible()
+  await page.getByRole('button', { name: 'Retry contract' }).click()
+
+  await expect(page.getByText('Timeline reads available')).toBeVisible()
+  await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
+  expect(attempts).toBe(2)
+  expect(problems.pageErrors).toEqual([])
+  expect(
+    problems.consoleErrors.every((message) =>
+      message.includes('Failed to load resource: the server responded with a status of 503'),
+    ),
+  ).toBe(true)
+})
+
 test('completes route switching from the command palette without a mouse', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -220,5 +246,42 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await completed.click()
   await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeFocused()
   await expect(page.getByText('Header only; rich event detail is not exposed')).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('gives Full and Condensed distinct Session presentations', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicSession(page)
+  await page.goto('/sessions')
+
+  const sessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  await sessionId.fill(sessionWorkspaceFixture.id)
+  await sessionId.press('Enter')
+  await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
+  await expect(page.locator('.session-item-summary small').first()).toBeHidden()
+
+  await page.getByRole('link', { name: /Settings/ }).click()
+  await page.getByRole('radio', { name: 'Full' }).check()
+  await page.getByRole('link', { name: /Sessions/ }).click()
+  const reopenedSessionId = page.getByRole('textbox', { name: 'Exact session ID' })
+  await reopenedSessionId.fill(sessionWorkspaceFixture.id)
+  await reopenedSessionId.press('Enter')
+
+  await expect(page.locator('.session-item-summary small').first()).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('honors the saved navigation width below 1080px', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 900, height: 800 })
+  await page.goto('/settings')
+
+  const navigationWidth = page.locator('.pane-preferences input[type="range"]').first()
+  await navigationWidth.fill('320')
+
+  await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '320px')
+  await expect(page.getByText('320px', { exact: true })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

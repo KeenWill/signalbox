@@ -439,6 +439,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
                 ? 'Transport unavailable'
                 : 'Checking contract…'}
           </span>
+          {bootstrap.isError && (
+            <button
+              type="button"
+              className="bootstrap-retry"
+              onClick={() => void bootstrap.refetch()}
+            >
+              Retry contract
+            </button>
+          )}
         </div>
         {content}
       </main>

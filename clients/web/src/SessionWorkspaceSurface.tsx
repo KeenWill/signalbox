@@ -292,7 +292,7 @@ export function SessionWorkspaceSurface({
             </span>
           </div>
           <div
-            className="session-timeline"
+            className={`session-timeline presentation-${app.detail}`}
             aria-label="Session timeline"
             aria-activedescendant={
               selected !== null && timelineIds.includes(selected)

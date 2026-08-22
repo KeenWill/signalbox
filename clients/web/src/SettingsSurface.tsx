@@ -160,6 +160,7 @@ export function SettingsSurface() {
             <output>{app.paneSizes.navigation}px</output>
             <input
               type="range"
+              aria-label="Navigation width"
               min="160"
               max="360"
               value={app.paneSizes.navigation}
@@ -178,6 +179,7 @@ export function SettingsSurface() {
             <output>{app.paneSizes.inspector}px</output>
             <input
               type="range"
+              aria-label="Inspector width"
               min="200"
               max="480"
               value={app.paneSizes.inspector}
