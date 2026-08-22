@@ -35,6 +35,7 @@ use signalbox_application::{
     TimelineTextExcerpt, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::{SessionId, TurnId};
+use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
 };
@@ -630,10 +631,19 @@ fn invalid_timeline_query() -> Response {
 }
 
 fn repository_projection_error(error: SessionTimelineRepositoryError) -> Response {
+    if matches!(error, SessionTimelineRepositoryError::InvalidDetailQuery) {
+        return invalid_timeline_detail_query();
+    }
     let failure_class = match &error {
         SessionTimelineRepositoryError::Database(_) => "infrastructure",
+        SessionTimelineRepositoryError::InvalidDetailQuery => unreachable!("handled above"),
         SessionTimelineRepositoryError::Corruption(_) => "fail_closed_corruption",
-        SessionTimelineRepositoryError::Outbox(_) => "fail_closed_corruption",
+        SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Database(_)) => {
+            "infrastructure"
+        }
+        SessionTimelineRepositoryError::Outbox(OutboxDispatchError::Corruption(_)) => {
+            "fail_closed_corruption"
+        }
     };
     tracing::error!(
         failure_class,
@@ -781,13 +791,13 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             text,
             attachments,
         } => WebSessionTimelineDetailBody::UserInput {
-            turn_id,
+            turn_id: turn_id.into_uuid().to_string(),
             text: text_excerpt_dto(text),
             attachments: attachments
                 .into_iter()
                 .map(|reference| WebTimelineBlobReference {
                     blob_id: reference.blob_id,
-                    length_bytes: reference.length_bytes.to_string(),
+                    length_bytes: WebU64::from_u64(reference.length_bytes),
                     media_type: reference.media_type,
                 })
                 .collect(),
@@ -802,21 +812,19 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             usage,
             cause_code,
         } => WebSessionTimelineDetailBody::ModelCall {
-            turn_id,
-            model_call_id,
+            turn_id: turn_id.into_uuid().to_string(),
+            model_call_id: model_call_id.into_uuid().to_string(),
             state: model_call_state_dto(state),
-            model_identity_id,
-            request_context_items: request_context_items.to_string(),
+            model_identity_id: model_identity_id.into_uuid().to_string(),
+            request_context_items: WebU64::from_u64(request_context_items),
             response: response.map(text_excerpt_dto),
             usage: WebTimelineModelUsage {
-                input_tokens: usage.input_tokens.map(|value| value.to_string()),
-                output_tokens: usage.output_tokens.map(|value| value.to_string()),
+                input_tokens: usage.input_tokens.map(WebU64::from_u64),
+                output_tokens: usage.output_tokens.map(WebU64::from_u64),
                 cache_creation_input_tokens: usage
                     .cache_creation_input_tokens
-                    .map(|value| value.to_string()),
-                cache_read_input_tokens: usage
-                    .cache_read_input_tokens
-                    .map(|value| value.to_string()),
+                    .map(WebU64::from_u64),
+                cache_read_input_tokens: usage.cache_read_input_tokens.map(WebU64::from_u64),
             },
             cause_code,
         },
@@ -825,7 +833,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             lifecycle,
             cause_code,
         } => WebSessionTimelineDetailBody::TurnLifecycle {
-            turn_id,
+            turn_id: turn_id.into_uuid().to_string(),
             lifecycle: match lifecycle {
                 TimelineTurnLifecycleKind::Activated => WebTimelineTurnLifecycleKind::Activated,
                 TimelineTurnLifecycleKind::Terminalized => {
@@ -870,8 +878,8 @@ fn model_call_state_dto(state: TimelineModelCallState) -> WebTimelineModelCallSt
 fn text_excerpt_dto(excerpt: TimelineTextExcerpt) -> WebTimelineTextExcerpt {
     WebTimelineTextExcerpt {
         text: excerpt.text,
-        offset_bytes: excerpt.offset_bytes.to_string(),
-        total_bytes: excerpt.total_bytes.to_string(),
+        offset_bytes: WebU64::from_u64(excerpt.offset_bytes),
+        total_bytes: WebU64::from_u64(excerpt.total_bytes),
         continuation: excerpt.continuation.map(body_continuation_dto),
     }
 }
@@ -884,7 +892,7 @@ fn body_continuation_dto(continuation: TimelineBodyContinuation) -> WebTimelineB
             TimelineBodyField::ModelResponse => WebTimelineBodyField::ModelResponse,
         },
         member_index: continuation.member_index,
-        offset_bytes: continuation.offset_bytes.to_string(),
+        offset_bytes: WebU64::from_u64(continuation.offset_bytes),
     }
 }
 

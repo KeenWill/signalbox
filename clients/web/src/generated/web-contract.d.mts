@@ -47,7 +47,7 @@ type WebSessionTimelineDetailBody = {
   readonly cause_code?: string | null;
   readonly model_call_id: string;
   readonly model_identity_id: string;
-  readonly request_context_items: string;
+  readonly request_context_items: WebU64;
   readonly response?: WebTimelineTextExcerpt | null;
   readonly state: WebTimelineModelCallState;
   readonly turn_id: string;
@@ -90,7 +90,7 @@ type WebTimelineAddress = {
 
 type WebTimelineBlobReference = {
   readonly blob_id: string;
-  readonly length_bytes: string;
+  readonly length_bytes: WebU64;
   readonly media_type?: string | null;
 };
 
@@ -98,7 +98,7 @@ type WebTimelineBodyContinuation = {
   readonly address: WebTimelineAddress;
   readonly field: WebTimelineBodyField;
   readonly member_index: number;
-  readonly offset_bytes: string;
+  readonly offset_bytes: WebU64;
 };
 
 type WebTimelineBodyField = "input_text" | "model_response";
@@ -127,17 +127,17 @@ type WebTimelineModelCallState = {
 };
 
 type WebTimelineModelUsage = {
-  readonly cache_creation_input_tokens?: string | null;
-  readonly cache_read_input_tokens?: string | null;
-  readonly input_tokens?: string | null;
-  readonly output_tokens?: string | null;
+  readonly cache_creation_input_tokens?: WebU64 | null;
+  readonly cache_read_input_tokens?: WebU64 | null;
+  readonly input_tokens?: WebU64 | null;
+  readonly output_tokens?: WebU64 | null;
 };
 
 type WebTimelineTextExcerpt = {
   readonly continuation?: WebTimelineBodyContinuation | null;
-  readonly offset_bytes: string;
+  readonly offset_bytes: WebU64;
   readonly text: string;
-  readonly total_bytes: string;
+  readonly total_bytes: WebU64;
 };
 
 type WebTimelineTurnLifecycleKind = "activated" | "terminalized";

@@ -6521,9 +6521,14 @@ pub struct TimelineModelUsage {
 }
 pub enum TimelineTurnLifecycleKind { Activated, Terminalized }
 pub enum SessionTimelineDetailBody {
-    UserInput { /* fields */ },
-    ModelCall { /* fields */ },
-    TurnLifecycle { /* fields */ },
+    UserInput { turn_id: TurnId, /* excerpt and references */ },
+    ModelCall {
+        turn_id: TurnId,
+        model_call_id: ModelCallId,
+        model_identity_id: ProviderModelIdentity,
+        /* state, bounded response, usage, and cause */
+    },
+    TurnLifecycle { turn_id: TurnId, /* lifecycle and cause */ },
     EventFact { kind: SessionTimelineEventKind },
 }
 pub struct SessionTimelineDetail {
