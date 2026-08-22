@@ -82,10 +82,9 @@ const appSlice = createSlice({
     },
     logicalPositionRecorded(state, action: { payload: { sessionId: string; position: string } }) {
       if (!isBoundedLogicalPosition(action.payload.sessionId, action.payload.position)) return
-      const nextPositions = {
-        ...state.lastLogicalPositions,
-        [action.payload.sessionId]: action.payload.position,
-      }
+      const nextPositions = { ...state.lastLogicalPositions }
+      delete nextPositions[action.payload.sessionId]
+      nextPositions[action.payload.sessionId] = action.payload.position
       const lastLogicalPositions = Object.fromEntries(
         Object.entries(nextPositions).slice(-MAX_SAVED_LOGICAL_POSITIONS),
       )
