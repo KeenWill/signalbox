@@ -10,7 +10,7 @@ Pre-activation reconciliation from durable terminal-call usage is verified
 against this PR (`agent/daemon-live-ambiguous-usage-compaction`).
 
 Same-turn tool-continuation headroom closure is verified against this PR
-(`agent/daemon-live-in-turn-context-headroom`).
+(`agent/daemon-live-tool-result-headroom`).
 
 Non-ambiguous execution-failure containment is verified against this PR
 (`agent/daemon-live-nonambiguous-execution-containment`).
@@ -442,17 +442,18 @@ overage rather than discarding assistant material after the provider has already
 accepted and served the request. Missing usage fields remain missing and are
 never invented. Adapters need no separate counting operation.
 
-The same lower-bound check runs inside the atomic tool-result continuation
-transaction against the exact completed tool-producing call. When its reported
-usage plus the next configured output reservation exceeds the context window,
-the daemon commits the tool results but prepares no continuation call. It ends
-the turn `Failed` with an append-only context-headroom record naming the
-producing call, reported usage semantics, and configured limits. Automatic goal
-resumption does not charge that daemon-owned boundary against the session's
-attempt budget; the successor queued-turn activation performs the existing
-bounded automatic compaction before calling the provider again. Missing usage
-does not trigger the boundary, and inconsistent producing-call evidence fails
-closed.
+The same guard runs inside the atomic tool-result continuation transaction
+against the exact completed tool-producing call. It combines reported usage, the
+UTF-8 byte length of newly projected result and denial content as a conservative
+token allowance, and the next configured output reservation. When that bound
+exceeds the context window, the daemon commits the tool results but prepares no
+continuation call. It ends the turn `Failed` with an append-only
+context-headroom record naming the producing call, reported usage semantics,
+projected-content allowance, and configured limits. Automatic goal resumption
+does not charge that daemon-owned boundary against the session's attempt budget;
+the successor queued-turn activation performs the existing bounded automatic
+compaction before calling the provider again. Missing usage does not trigger the
+boundary, and inconsistent producing-call evidence fails closed.
 
 The explicit trigger uses the same compaction transaction and provider-call
 lifecycle. An explicit command first resolves its user-global replay state; an
