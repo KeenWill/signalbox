@@ -466,44 +466,115 @@ function assertCanonicalU64(value, path) {{
   }}
 }}
 
-const rawJsonInteger = Symbol("rawJsonInteger");
+const utf8 = new TextEncoder();
 
-function canonicalJson(value) {{
-  if (value !== null && typeof value === "object" && Object.hasOwn(value, rawJsonInteger)) {{
-    return value[rawJsonInteger];
+function compareUtf8(left, right) {{
+  const leftBytes = utf8.encode(left);
+  const rightBytes = utf8.encode(right);
+  const shared = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < shared; index += 1) {{
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] - rightBytes[index];
   }}
-  if (Array.isArray(value)) {{
-    return `[${{value.map(canonicalJson).join(",")}}]`;
+  return leftBytes.length - rightBytes.length;
+}}
+
+function rustFloatSpelling(value) {{
+  if (Object.is(value, -0)) return "-0.0";
+  const sign = value < 0 ? "-" : "";
+  const [mantissa, exponentSource] = Math.abs(value).toExponential().split("e");
+  const exponent = Number(exponentSource);
+  const digits = mantissa.replace(".", "");
+  if (exponent < -4 || exponent >= 16) {{
+    const fraction = digits.slice(1);
+    return `${{sign}}${{digits[0]}}${{fraction === "" ? "" : `.${{fraction}}`}}e${{exponent >= 0 ? "+" : ""}}${{exponent}}`;
   }}
-  if (value !== null && typeof value === "object") {{
-    return `{{${{Object.keys(value)
-      .sort()
-      .map((key) => `${{JSON.stringify(key)}}:${{canonicalJson(value[key])}}`)
-      .join(",")}}}}`;
+  let fixed;
+  if (exponent < 0) {{
+    fixed = `0.${{"0".repeat(-exponent - 1)}}${{digits}}`;
+  }} else if (exponent + 1 < digits.length) {{
+    fixed = `${{digits.slice(0, exponent + 1)}}.${{digits.slice(exponent + 1)}}`;
+  }} else {{
+    fixed = `${{digits}}${{"0".repeat(exponent + 1 - digits.length)}}.0`;
   }}
-  return JSON.stringify(value);
+  return sign + fixed;
+}}
+
+function assertCanonicalJsonNumber(source) {{
+  if (/^-?(?:0|[1-9][0-9]*)$/u.test(source)) {{
+    const integer = BigInt(source);
+    if (integer < -9223372036854775808n || integer > 18446744073709551615n) throw new TypeError();
+    return;
+  }}
+  const number = Number(source);
+  if (!Number.isFinite(number) || rustFloatSpelling(number) !== source) throw new TypeError();
+}}
+
+function parseCanonicalJson(source) {{
+  let cursor = 0;
+  const parseString = () => {{
+    const start = cursor;
+    cursor += 1;
+    while (cursor < source.length) {{
+      if (source[cursor] === "\\") cursor += source[cursor + 1] === "u" ? 6 : 2;
+      else if (source[cursor] === '"') {{
+        cursor += 1;
+        const spelling = source.slice(start, cursor);
+        const decoded = JSON.parse(spelling);
+        if (JSON.stringify(decoded) !== spelling) throw new TypeError();
+        return decoded;
+      }} else cursor += 1;
+    }}
+    throw new TypeError();
+  }};
+  const parseValue = () => {{
+    const byte = source[cursor];
+    if (byte === '"') {{ parseString(); return; }}
+    if (byte === "[") {{
+      cursor += 1;
+      if (source[cursor] === "]") {{ cursor += 1; return; }}
+      while (true) {{
+        parseValue();
+        if (source[cursor] === "]") {{ cursor += 1; return; }}
+        if (source[cursor] !== ",") throw new TypeError();
+        cursor += 1;
+      }}
+    }}
+    if (byte === "{{") {{
+      cursor += 1;
+      if (source[cursor] === "}}") {{ cursor += 1; return; }}
+      let previous;
+      while (true) {{
+        if (source[cursor] !== '"') throw new TypeError();
+        const key = parseString();
+        if (previous !== undefined && compareUtf8(previous, key) >= 0) throw new TypeError();
+        previous = key;
+        if (source[cursor] !== ":") throw new TypeError();
+        cursor += 1;
+        parseValue();
+        if (source[cursor] === "}}") {{ cursor += 1; return; }}
+        if (source[cursor] !== ",") throw new TypeError();
+        cursor += 1;
+      }}
+    }}
+    for (const literal of ["true", "false", "null"]) {{
+      if (source.startsWith(literal, cursor)) {{ cursor += literal.length; return; }}
+    }}
+    const number = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/u.exec(source.slice(cursor))?.[0];
+    if (number === undefined) throw new TypeError();
+    assertCanonicalJsonNumber(number);
+    cursor += number.length;
+  }};
+  parseValue();
+  if (cursor !== source.length) throw new TypeError();
 }}
 
 function assertCanonicalParametersJson(value, path) {{
-  if (new TextEncoder().encode(value).length > 4096) {{
+  if (utf8.encode(value).length > 4096) {{
     fail(path, "canonical JSON of at most 4096 UTF-8 bytes");
   }}
-  let parsed;
   try {{
-    parsed = JSON.parse(value, (_key, parsedValue, context) => {{
-      if (
-        typeof parsedValue === "number" &&
-        Number.isInteger(parsedValue) &&
-        !Number.isSafeInteger(parsedValue)
-      ) {{
-        return {{ [rawJsonInteger]: context.source }};
-      }}
-      return parsedValue;
-    }});
+    parseCanonicalJson(value);
   }} catch {{
-    fail(path, "canonical JSON");
-  }}
-  if (canonicalJson(parsed) !== value) {{
     fail(path, "canonical JSON");
   }}
 }}
@@ -540,11 +611,62 @@ function assertSameOriginBlobUrl(value, path) {{
   if (parsed.origin !== base || !parsed.pathname.startsWith("/api/blobs/") || parsed.hash !== "") {{
     fail(path, "a same-origin blob API path");
   }}
-  const route = /^\/api\/blobs\/(sha256:[0-9a-f]{{64}})\/(?:download|content\/[a-z0-9-]+)$/u.exec(parsed.pathname);
+  const route = /^\/api\/blobs\/(sha256:[0-9a-f]{{64}})\/(download|content\/(?:image-png|image-jpeg|image-gif|image-webp))$/u.exec(parsed.pathname);
   if (route === null) {{
     fail(path, "a canonical blob API route");
   }}
-  return route[1];
+  if (route[2] === "download") {{
+    const mediaTypes = parsed.searchParams.getAll("media_type");
+    const filenames = parsed.searchParams.getAll("display_filename");
+    const known = [...parsed.searchParams.keys()].every((key) => key === "media_type" || key === "display_filename");
+    if (mediaTypes.length !== 1 || mediaTypes[0] === "" || filenames.length > 1 || !known) {{
+      fail(path, "a download route with required media type metadata");
+    }}
+  }} else if (parsed.search !== "") {{
+    fail(path, "a content route without query metadata");
+  }}
+  return {{ digest: route[1], kind: route[2] }};
+}}
+
+function u64Bytes(value) {{
+  const output = new Uint8Array(8);
+  let remaining = BigInt(value);
+  for (let index = 7; index >= 0; index -= 1) {{ output[index] = Number(remaining & 255n); remaining >>= 8n; }}
+  return output;
+}}
+
+function digestBytes(value) {{
+  return Uint8Array.from(value.slice(7).match(/../gu), (pair) => Number.parseInt(pair, 16));
+}}
+
+function sha256(bytes) {{
+  const constants = new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+  const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLength); padded.set(bytes); padded[bytes.length] = 0x80;
+  let bits = BigInt(bytes.length) * 8n;
+  for (let index = paddedLength - 1; index >= paddedLength - 8; index -= 1) {{ padded[index] = Number(bits & 255n); bits >>= 8n; }}
+  const state = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+  const words = new Uint32Array(64);
+  const rotate = (value, count) => (value >>> count) | (value << (32 - count));
+  for (let block = 0; block < paddedLength; block += 64) {{
+    for (let index = 0; index < 16; index += 1) {{ const offset = block + index * 4; words[index] = (padded[offset] << 24) | (padded[offset + 1] << 16) | (padded[offset + 2] << 8) | padded[offset + 3]; }}
+    for (let index = 16; index < 64; index += 1) {{ const x=words[index-15], y=words[index-2]; words[index]=(words[index-16]+(rotate(x,7)^rotate(x,18)^(x>>>3))+words[index-7]+(rotate(y,17)^rotate(y,19)^(y>>>10)))>>>0; }}
+    let [a,b,c,d,e,f,g,h]=state;
+    for (let index=0; index<64; index+=1) {{ const sum1=(h+(rotate(e,6)^rotate(e,11)^rotate(e,25))+((e&f)^(~e&g))+constants[index]+words[index])>>>0; const sum0=(rotate(a,2)^rotate(a,13)^rotate(a,22))>>>0; const majority=((a&b)^(a&c)^(b&c))>>>0; h=g;g=f;f=e;e=(d+sum1)>>>0;d=c;c=b;b=a;a=(sum1+sum0+majority)>>>0; }}
+    for (const [index,value] of [a,b,c,d,e,f,g,h].entries()) state[index]=(state[index]+value)>>>0;
+  }}
+  return [...state].map((word) => word.toString(16).padStart(8, "0")).join("");
+}}
+
+function deterministicCacheKey(derivation) {{
+  const name=utf8.encode(derivation.transformation_name), parameters=utf8.encode(derivation.parameters_json);
+  const version=new Uint8Array(4); new DataView(version.buffer).setUint32(0, derivation.transformation_version);
+  const pieces=[utf8.encode("signalbox.blob-derivation.v1\0"),u64Bytes(derivation.input_digests.length)];
+  derivation.input_digests.forEach((digest)=>pieces.push(digestBytes(digest)));
+  pieces.push(u64Bytes(name.length),name,version,u64Bytes(parameters.length),parameters,digestBytes(derivation.producer.implementation_digest));
+  const framed=new Uint8Array(pieces.reduce((total,piece)=>total+piece.length,0)); let offset=0;
+  pieces.forEach((piece)=>{{ framed.set(piece,offset); offset+=piece.length; }});
+  return `sha256:${{sha256(framed)}}`;
 }}
 
 export function decodeWebBlobDescriptor(value) {{
@@ -556,10 +678,14 @@ export function decodeWebBlobDescriptor(value) {{
   value.available_views.forEach((view, index) => {{
     assertCanonicalU64(view.byte_length, `blob_descriptor.available_views[${{index}}].byte_length`);
     const contentPath = `blob_descriptor.available_views[${{index}}].content_url`;
-    const contentDigest = assertSameOriginBlobUrl(view.content_url, contentPath);
+    const contentRoute = assertSameOriginBlobUrl(view.content_url, contentPath);
+    const contentDigest = contentRoute.digest;
     if (view.kind === "download" || view.kind === "browser_native") {{
       if (contentDigest !== value.digest) {{
         fail(contentPath, "a route for the descriptor digest");
+      }}
+      if ((view.kind === "download") !== (contentRoute.kind === "download")) {{
+        fail(contentPath, "a route matching the advertised view kind");
       }}
     }} else if (!view.derivations.some((derivation) =>
       derivation.input_digests.includes(value.digest) &&
@@ -577,6 +703,9 @@ export function decodeWebBlobDescriptor(value) {{
       if (derivation.producer.class === "deterministic") {{
         assertBlobDigest(derivation.producer.implementation_digest, `${{path}}.producer.implementation_digest`);
         assertBlobDigest(derivation.producer.cache_key, `${{path}}.producer.cache_key`);
+        if (deterministicCacheKey(derivation) !== derivation.producer.cache_key) {{
+          fail(`${{path}}.producer.cache_key`, "the deterministic key for the advertised provenance");
+        }}
       }} else if (derivation.producer.class === "executed") {{
         assertUuid(derivation.producer.execution_id, `${{path}}.producer.execution_id`);
         assertBlobDigest(derivation.producer.implementation_digest, `${{path}}.producer.implementation_digest`);
