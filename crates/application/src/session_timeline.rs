@@ -8,8 +8,8 @@ use std::{fmt, future::Future, num::NonZeroU64};
 
 use signalbox_domain::{
     BlobDigest, ContextCompactionId, ContextFrontierId, DelegationMessageId, DirectModelSelection,
-    DurableCommandId, ModelCallId, ProviderModelIdentity, RunnerId, SemanticTranscriptEntryId,
-    SessionId, ToolAttemptId, ToolRequestId, TurnId,
+    DurableCommandId, ImportedTranscriptEntryId, ModelCallId, ProviderModelIdentity, RunnerId,
+    SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnId,
 };
 
 /// Returns the hard ceiling on records in one historical window.
@@ -470,7 +470,7 @@ pub struct TimelineToolAttempt {
     pub approval_judge_escalated: bool,
     pub operator_required: bool,
     pub effect_posture: Option<TimelineToolEffectPosture>,
-    pub sandbox_posture: Option<String>,
+    pub sandbox_posture: Option<TimelineToolSandboxPosture>,
     pub state: Option<TimelineToolState>,
     pub cause_code: Option<String>,
 }
@@ -488,6 +488,13 @@ pub enum TimelineToolApprovalPosture {
 pub enum TimelineToolEffectPosture {
     EffectFree,
     ExternalEffect,
+}
+
+/// Closed sandbox posture selected for one physical tool attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineToolSandboxPosture {
+    Unsandboxed,
+    Sandboxed,
 }
 
 /// Closed tool-batch projection state exposed by timeline detail.
@@ -692,7 +699,7 @@ pub enum TimelineDelegationDetail {
 /// Imported-frontier provenance; source bytes remain reference-only.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TimelineImportedEvidence {
-    pub imported_entry_id: SemanticTranscriptEntryId,
+    pub imported_entry_id: ImportedTranscriptEntryId,
     pub imported_position: u64,
 }
 

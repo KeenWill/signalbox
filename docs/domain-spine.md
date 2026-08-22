@@ -6595,7 +6595,10 @@ pub enum TimelineDelegationDetail {
     ResultWake { /* fields */ },
     MessageWake { /* fields */ },
 }
-pub struct TimelineImportedEvidence { /* fields */ }
+pub struct TimelineImportedEvidence {
+    pub imported_entry_id: ImportedTranscriptEntryId,
+    pub imported_position: u64,
+}
 pub enum TimelineReconciliationOperation {
     ModelCall(ModelCallId),
     ToolAttempt(ToolAttemptId),

@@ -100,8 +100,7 @@ type WebSessionTimelineDetailBody = {
   readonly attempt_count: WebU64;
   readonly cause_code: string;
   readonly exhausted: boolean;
-  readonly operation_id: string;
-  readonly operation_kind: string;
+  readonly operation: WebTimelineReconciliationOperation;
   readonly operator_required: boolean;
   readonly turn_id: string;
   readonly type: "reconciliation";
@@ -294,6 +293,14 @@ type WebTimelineModelUsage = {
   readonly output_tokens?: WebU64 | null;
 };
 
+type WebTimelineReconciliationOperation = {
+  readonly model_call_id: string;
+  readonly type: "model_call";
+} | {
+  readonly tool_attempt_id: string;
+  readonly type: "tool_attempt";
+};
+
 type WebTimelineRunnerSandboxPosture = "unsandboxed" | "sandboxed";
 
 type WebTimelineRunnerState = "pinned" | "suspect" | "connected" | "runner_lost_before_pin" | "runner_lost" | "replaced" | "working_directory_changed" | "abandoned";
@@ -318,7 +325,7 @@ type WebTimelineToolAttempt = {
   readonly operator_required: boolean;
   readonly request_id: string;
   readonly result?: WebTimelineTextExcerpt | null;
-  readonly sandbox_posture?: string | null;
+  readonly sandbox_posture?: WebTimelineToolSandboxPosture | null;
   readonly state?: WebTimelineToolState | null;
   readonly tool_name: string;
 };
@@ -326,6 +333,8 @@ type WebTimelineToolAttempt = {
 type WebTimelineToolBatchState = "proposed" | "results_projected" | "recovery_required";
 
 type WebTimelineToolEffectPosture = "effect_free" | "external_effect";
+
+type WebTimelineToolSandboxPosture = "unsandboxed" | "sandboxed";
 
 type WebTimelineToolState = "prepared" | "in_flight" | "awaiting_child" | "completed" | "known_failed" | "ambiguous";
 

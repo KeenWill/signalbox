@@ -38,8 +38,8 @@ use signalbox_application::{
     TimelineGoalEventKind, TimelineModelCallDisposition, TimelineModelCallState,
     TimelineReconciliationOperation, TimelineRunnerSandboxPosture, TimelineRunnerState,
     TimelineTextExcerpt, TimelineToolApprovalPosture, TimelineToolAttempt, TimelineToolBatchState,
-    TimelineToolEffectPosture, TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor,
-    TimelineWindowLimits,
+    TimelineToolEffectPosture, TimelineToolSandboxPosture, TimelineToolState,
+    TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_domain::{SessionId, TurnId};
 use signalbox_persistence::outbox::OutboxDispatchError;
@@ -59,9 +59,10 @@ use signalbox_web_contract::{
     WebTimelineDetailContinuation, WebTimelineEventSequence, WebTimelineGoalBlockedReason,
     WebTimelineGoalEvent, WebTimelineGoalEventKind, WebTimelineImportedEvidence,
     WebTimelineModelCallDisposition, WebTimelineModelCallState, WebTimelineModelUsage,
-    WebTimelineRunnerSandboxPosture, WebTimelineRunnerState, WebTimelineTextExcerpt,
-    WebTimelineToolApprovalPosture, WebTimelineToolAttempt, WebTimelineToolBatchState,
-    WebTimelineToolEffectPosture, WebTimelineToolState, WebTimelineTurnLifecycleKind, WebU64,
+    WebTimelineReconciliationOperation, WebTimelineRunnerSandboxPosture, WebTimelineRunnerState,
+    WebTimelineTextExcerpt, WebTimelineToolApprovalPosture, WebTimelineToolAttempt,
+    WebTimelineToolBatchState, WebTimelineToolEffectPosture, WebTimelineToolSandboxPosture,
+    WebTimelineToolState, WebTimelineTurnLifecycleKind, WebU64,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -1018,19 +1019,21 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             operator_required,
             cause_code,
         } => {
-            let (operation_kind, operation_id) = match operation {
+            let operation = match operation {
                 TimelineReconciliationOperation::ModelCall(call) => {
-                    (String::from("model_call"), call.into_uuid().to_string())
+                    WebTimelineReconciliationOperation::ModelCall {
+                        model_call_id: call.into_uuid().to_string(),
+                    }
                 }
-                TimelineReconciliationOperation::ToolAttempt(attempt) => (
-                    String::from("tool_attempt"),
-                    attempt.into_uuid().to_string(),
-                ),
+                TimelineReconciliationOperation::ToolAttempt(attempt) => {
+                    WebTimelineReconciliationOperation::ToolAttempt {
+                        tool_attempt_id: attempt.into_uuid().to_string(),
+                    }
+                }
             };
             WebSessionTimelineDetailBody::Reconciliation {
                 turn_id: turn_id.into_uuid().to_string(),
-                operation_kind,
-                operation_id,
+                operation,
                 attempt_count: WebU64::from_u64(attempt_count),
                 exhausted,
                 operator_required,
@@ -1299,7 +1302,10 @@ fn tool_attempt_dto(attempt: TimelineToolAttempt) -> WebTimelineToolAttempt {
                 WebTimelineToolEffectPosture::ExternalEffect
             }
         }),
-        sandbox_posture: attempt.sandbox_posture,
+        sandbox_posture: attempt.sandbox_posture.map(|posture| match posture {
+            TimelineToolSandboxPosture::Unsandboxed => WebTimelineToolSandboxPosture::Unsandboxed,
+            TimelineToolSandboxPosture::Sandboxed => WebTimelineToolSandboxPosture::Sandboxed,
+        }),
         state: attempt.state.map(|state| match state {
             TimelineToolState::Prepared => WebTimelineToolState::Prepared,
             TimelineToolState::InFlight => WebTimelineToolState::InFlight,
