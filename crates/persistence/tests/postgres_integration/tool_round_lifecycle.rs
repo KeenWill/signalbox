@@ -2,6 +2,29 @@
 
 use crate::*;
 
+async fn lock_tool_continuation_outbox_allocator(
+    pool: &sqlx::PgPool,
+) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT singleton FROM outbox_sequence_state WHERE singleton FOR UPDATE")
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
+}
+
+async fn tool_continuation_order_guard_is_available(
+    pool: &sqlx::PgPool,
+) -> Result<bool, Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    let available: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind("model_call_outbox_order_guard:v1")
+            .fetch_one(&mut *transaction)
+            .await?;
+    transaction.rollback().await?;
+    Ok(available)
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct StoredReclassifiedSteeringFacts {
     disposition_kind: String,
@@ -27,6 +50,106 @@ impl From<Option<Uuid>> for TurnOriginPresence {
 struct ReclassifiedSteeringFacts {
     disposition_kind: String,
     origin: TurnOriginPresence,
+}
+
+/// INV-007 / INV-009 / INV-012: a tool-result continuation takes the shared
+/// model-call ordering guard before its results-projected outbox append can wait
+/// on the allocator. This excludes the allocator-to-guard edge that would
+/// deadlock against counted activation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv007_inv009_inv012_tool_continuation_guards_before_result_outbox()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7ef8;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x22));
+    tool_repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x21)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || continuation_attempt,
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x23));
+    tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let authorized = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    tool_repository
+        .commit_observation(
+            authorized
+                .executor_fence()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(String::from("2026-08-22T04:00:00Z"))
+                            .expect("bounded result"),
+                    ),
+                }),
+        )
+        .await?;
+
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6)));
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one continuation target forms a catalog");
+    let continuing_repository = PostgresToolLoopRepository::with_model_calls(
+        pool.clone(),
+        targets,
+        model_credential_reference(),
+    );
+    let session = fixture.session;
+    let turn = fixture.turn;
+    let producing_call = fixture.call;
+    let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
+    let allocator_holder = lock_tool_continuation_outbox_allocator(&pool).await?;
+    let continuation = tokio::spawn(async move {
+        continuing_repository
+            .prepare_continuation(
+                session,
+                turn,
+                producing_call,
+                signalbox_application::ToolContinuationIdentities::new(
+                    vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                        seed + 0x26,
+                    ))],
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27)),
+                    continuation_call,
+                    FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+                    ),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+                ),
+                |_| panic!("fixture has no pending steering"),
+            )
+            .await
+    });
+    assert!(blocked_backends_reached(&pool, 1).await?);
+    assert!(!tool_continuation_order_guard_is_available(&pool).await?);
+    allocator_holder.rollback().await?;
+    assert_eq!(
+        continuation.await??,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(continuation_call)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 /// S02 / S08 / INV-016 / INV-036: a NextSafePoint input accepted while a tool
