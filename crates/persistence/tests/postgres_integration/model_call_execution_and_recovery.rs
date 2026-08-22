@@ -98,6 +98,19 @@ async fn credential_action_head_is_available(
     Ok(available)
 }
 
+async fn model_call_outbox_order_guard_is_available(
+    pool: &sqlx::PgPool,
+) -> Result<bool, Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    let available: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind("model_call_outbox_order_guard:v1")
+            .fetch_one(&mut *transaction)
+            .await?;
+    transaction.rollback().await?;
+    Ok(available)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn deferred_final_state_validation_claims_are_typed_and_transaction_local()
@@ -138,12 +151,13 @@ async fn deferred_final_state_validation_claims_are_typed_and_transaction_local(
     Ok(())
 }
 
-/// INV-007 / INV-009 / INV-012: model-call writers acquire the shared outbox
-/// allocator ahead of credential action heads, preventing a cross-session
-/// reverse-order cycle with tool-result continuation.
+/// INV-007 / INV-009 / INV-012: model-call writers acquire one ordering guard,
+/// finish credential action locking, and only then wait for the shared outbox
+/// allocator. Counted activation carries proof that it acquired the same guard
+/// before its earlier activation event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv007_inv009_inv012_model_call_writers_order_outbox_before_credential_actions()
+async fn inv007_inv009_inv012_model_call_writers_guard_credential_before_outbox()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7720_u128;
@@ -176,7 +190,8 @@ async fn inv007_inv009_inv012_model_call_writers_order_outbox_before_credential_
         }
     });
     assert!(blocked_backends_reached(&pool, 1).await?);
-    assert!(credential_action_head_is_available(&pool, member_reference).await?);
+    assert!(!model_call_outbox_order_guard_is_available(&pool).await?);
+    assert!(!credential_action_head_is_available(&pool, member_reference).await?);
     allocator_holder.rollback().await?;
     let PrepareInitialModelCallOutcome::Checkpointed(prepared_call) = preparation.await?? else {
         panic!("the released preparation must checkpoint");
@@ -241,7 +256,8 @@ async fn inv007_inv009_inv012_model_call_writers_order_outbox_before_credential_
         }
     });
     assert!(blocked_backends_reached(&pool, 1).await?);
-    assert!(credential_action_head_is_available(&pool, member_reference).await?);
+    assert!(!model_call_outbox_order_guard_is_available(&pool).await?);
+    assert!(!credential_action_head_is_available(&pool, member_reference).await?);
     allocator_holder.rollback().await?;
     let Some(ModelCallObservationCommitOutcome::PoolExhausted(_)) = observation.await?? else {
         panic!("the sole unavailable member must exhaust its pool");

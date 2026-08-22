@@ -477,6 +477,13 @@ pub struct PostgresModelCallRepository {
     cache_inclusive_input_targets: HashSet<ResolvedProviderTarget>,
 }
 
+/// Proof that one model-call transaction serialized before either shared lock class.
+pub(crate) struct ModelCallOutboxOrderGuard {
+    _private: (),
+}
+
+const MODEL_CALL_OUTBOX_ORDER_GUARD: &str = "model_call_outbox_order_guard:v1";
+
 impl PostgresModelCallRepository {
     /// Uses the shared pool, immutable target catalog, and current non-secret
     /// credential reference for calls first pinned by this repository.
@@ -776,6 +783,7 @@ impl PostgresModelCallRepository {
         connection: &mut PgConnection,
         session: SessionId,
         call: ModelCallId,
+        _outbox_order_guard: ModelCallOutboxOrderGuard,
     ) -> Result<(), ModelCallRepositoryError> {
         let execution = require_live_execution_with_targets(
             connection,
@@ -814,7 +822,6 @@ impl PostgresModelCallRepository {
             self.credential_families.as_ref(),
         )
         .await?;
-        outbox::lock_sequence_allocator(connection).await?;
         let selected = select_runtime_pool_credential(
             connection,
             prepared.session(),
@@ -829,6 +836,7 @@ impl PostgresModelCallRepository {
             &self.credential_pools,
         )
         .await?;
+        outbox::lock_sequence_allocator(connection).await?;
         let Some(credential_reference) = selected.reference.as_ref() else {
             // The activated turn remains call-free; the ordinary preparation
             // pass owns the typed pool-exhaustion closure and its identities.
@@ -978,8 +986,8 @@ impl PostgresModelCallRepository {
                     self.credential_families.as_ref(),
                 )
                 .await?;
-                outbox::lock_sequence_allocator(&mut transaction).await?;
-                Some(
+                acquire_model_call_outbox_order_guard(&mut transaction).await?;
+                let selected = Some(
                     select_runtime_pool_credential(
                         &mut transaction,
                         session,
@@ -994,7 +1002,9 @@ impl PostgresModelCallRepository {
                         &self.credential_pools,
                     )
                     .await?,
-                )
+                );
+                outbox::lock_sequence_allocator(&mut transaction).await?;
+                selected
             } else {
                 None
             };
@@ -1248,14 +1258,14 @@ impl PostgresModelCallRepository {
                 successor_attempt,
             } = identities
             {
-                outbox::lock_sequence_allocator(&mut transaction).await?;
                 let cause =
                     provider_failure_cause.ok_or(ModelCallRepositoryError::InvalidTransition(
                         "availability candidates require a classified provider failure",
                     ))?;
-                let Some(policy) =
-                    load_call_pool_policy(&mut transaction, observation.call().into_uuid()).await?
-                else {
+                let policy =
+                    load_call_pool_policy(&mut transaction, observation.call().into_uuid()).await?;
+                let Some(policy) = policy else {
+                    outbox::lock_sequence_allocator(&mut transaction).await?;
                     // The call carried no credential pool, so no configured
                     // action governs this availability cause. Close the turn on
                     // the ordinary terminal path rather than failing the commit.
@@ -1280,6 +1290,9 @@ impl PostgresModelCallRepository {
                         outcome,
                     ))));
                 };
+                acquire_model_call_outbox_order_guard(&mut transaction).await?;
+                lock_credential_pool_action_heads(&mut transaction, &policy).await?;
+                outbox::lock_sequence_allocator(&mut transaction).await?;
                 let action = policy.action(cause);
                 let mut pool_exhausted_name = None;
                 let current_reference = if action == CredentialPoolRuntimeAction::Stay {
@@ -2353,8 +2366,8 @@ where
                 credential_families,
             )
             .await?;
-            outbox::lock_sequence_allocator(connection).await?;
-            Some(
+            acquire_model_call_outbox_order_guard(connection).await?;
+            let selected = Some(
                 select_runtime_pool_credential(
                     connection,
                     session,
@@ -2365,7 +2378,9 @@ where
                     credential_pools,
                 )
                 .await?,
-            )
+            );
+            outbox::lock_sequence_allocator(connection).await?;
+            selected
         } else {
             None
         };
@@ -5443,6 +5458,39 @@ async fn lock_credential_pool_action_head(
     Ok(())
 }
 
+/// Serializes model-call transactions before either credential or outbox locks.
+pub(crate) async fn acquire_model_call_outbox_order_guard(
+    connection: &mut PgConnection,
+) -> Result<ModelCallOutboxOrderGuard, ModelCallRepositoryError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(MODEL_CALL_OUTBOX_ORDER_GUARD)
+        .execute(&mut *connection)
+        .await?;
+    Ok(ModelCallOutboxOrderGuard { _private: () })
+}
+
+/// Takes every action-head lock for one pool in deterministic profile order.
+async fn lock_credential_pool_action_heads(
+    connection: &mut PgConnection,
+    policy: &CredentialPoolRuntimePolicy,
+) -> Result<(), ModelCallRepositoryError> {
+    let members = credential_pool_member_references(policy);
+    let mut locked = members.iter().copied().collect::<Vec<_>>();
+    locked.sort_unstable();
+    for reference in locked {
+        lock_credential_pool_action_head(connection, reference).await?;
+    }
+    Ok(())
+}
+
+fn credential_pool_member_references(policy: &CredentialPoolRuntimePolicy) -> HashSet<&str> {
+    policy
+        .members()
+        .iter()
+        .map(CredentialPoolRuntimeMember::credential_reference)
+        .collect()
+}
+
 /// Reads the durable exclusions governing one pool under its members' locks.
 ///
 /// Selection and the availability-successor test must apply exactly the same
@@ -5456,16 +5504,8 @@ async fn load_durable_pool_exclusions(
     turn: TurnId,
     policy: &CredentialPoolRuntimePolicy,
 ) -> Result<DurablePoolExclusions, ModelCallRepositoryError> {
-    let members = policy
-        .members()
-        .iter()
-        .map(CredentialPoolRuntimeMember::credential_reference)
-        .collect::<HashSet<_>>();
-    let mut locked = members.iter().copied().collect::<Vec<_>>();
-    locked.sort_unstable();
-    for reference in locked {
-        lock_credential_pool_action_head(connection, reference).await?;
-    }
+    let members = credential_pool_member_references(policy);
+    lock_credential_pool_action_heads(connection, policy).await?;
     let mut excluded = sqlx::query_scalar::<_, String>(
         "SELECT credential_reference
            FROM credential_pool_chain_exclusion
