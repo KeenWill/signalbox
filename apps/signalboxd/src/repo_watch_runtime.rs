@@ -848,6 +848,7 @@ async fn monitor_webhook_drain(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut next_inspection = Instant::now() + WEBHOOK_DRAIN_MONITOR_INTERVAL;
+    let mut progress = WebhookDrainProgress::default();
     loop {
         select! {
             biased;
@@ -874,7 +875,12 @@ async fn monitor_webhook_drain(
         // every child before aborting the set, so the daemon could not stop.
         if run_until_shutdown(
             &mut shutdown,
-            inspect_webhook_drain(&repository, &store, WEBHOOK_DRAIN_STALL_THRESHOLD),
+            inspect_webhook_drain(
+                &repository,
+                &store,
+                WEBHOOK_DRAIN_STALL_THRESHOLD,
+                &mut progress,
+            ),
         )
         .await
         .is_none()
@@ -884,10 +890,37 @@ async fn monitor_webhook_drain(
     }
 }
 
+#[derive(Default)]
+struct WebhookDrainProgress {
+    // This is observation state, not recovery authority: pending receipts remain
+    // durable. A fresh daemon deliberately observes one full threshold before
+    // declaring an old queue head stalled.
+    unchanged_head: Option<(NonZeroU64, Instant)>,
+}
+
+impl WebhookDrainProgress {
+    fn observe(&mut self, receipt_sequence: NonZeroU64, observed_at: Instant) -> Option<Duration> {
+        match self.unchanged_head {
+            Some((previous_sequence, unchanged_since)) if previous_sequence == receipt_sequence => {
+                Some(observed_at.saturating_duration_since(unchanged_since))
+            }
+            _ => {
+                self.unchanged_head = Some((receipt_sequence, observed_at));
+                None
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.unchanged_head = None;
+    }
+}
+
 async fn inspect_webhook_drain(
     repository: &RepositorySlug,
     store: &PostgresRepoWatchWebhookStore,
     stall_threshold: Duration,
+    progress: &mut WebhookDrainProgress,
 ) {
     // Identity and receipt only, never the admitted body. This runs on a fixed
     // cadence for every webhook repository, so loading a pending page here
@@ -900,7 +933,10 @@ async fn inspect_webhook_drain(
     );
     let oldest = match inspection.await {
         Ok(Ok(Some(oldest))) => oldest,
-        Ok(Ok(None)) => return,
+        Ok(Ok(None)) => {
+            progress.clear();
+            return;
+        }
         Err(_) => {
             tracing::error!(
                 repository = %repository.as_str(),
@@ -921,7 +957,10 @@ async fn inspect_webhook_drain(
         }
     };
     let pending_for = oldest.pending_for();
-    if pending_for < stall_threshold {
+    let Some(stalled_for) = progress.observe(oldest.receipt().sequence(), Instant::now()) else {
+        return;
+    };
+    if pending_for < stall_threshold || stalled_for < stall_threshold {
         return;
     }
     tracing::error!(
@@ -930,6 +969,7 @@ async fn inspect_webhook_drain(
         delivery_id = %oldest.key().delivery_id(),
         receipt_sequence = oldest.receipt().sequence().get(),
         pending_seconds = pending_for.as_secs(),
+        stalled_seconds = stalled_for.as_secs(),
         cause_code = "webhook_projection_drain_stalled",
         "durable repository-watch webhook delivery remains undispositioned"
     );
@@ -5380,11 +5420,11 @@ mod tests {
         RepositoryWatchWake, ResourceKey, ReviewState, TargetedPollOutcome, TargetedPullRequest,
         Url, UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_RETRY_DELAY,
         WEBHOOK_DRAIN_RETRY_MAX_DELAY, WEBHOOK_PENDING_PAGE_SIZE, WebhookAttemptOutcome,
-        WebhookDrain, WebhookDrainOutcome, WebhookDrainRetry, WebhookPayloadPurgeSchedule,
-        WebhookPollInterrupt, WorkflowName, WorkflowResponse, await_poll_or_interrupt,
-        commit_check_run_search_is_complete, derive_repo_watch_events, dispatch_context_json,
-        initial_poll_deadline, inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
-        normalize_checks_outcome, normalize_pull_request_context, object_id,
+        WebhookDrain, WebhookDrainOutcome, WebhookDrainProgress, WebhookDrainRetry,
+        WebhookPayloadPurgeSchedule, WebhookPollInterrupt, WorkflowName, WorkflowResponse,
+        await_poll_or_interrupt, commit_check_run_search_is_complete, derive_repo_watch_events,
+        dispatch_context_json, initial_poll_deadline, inspect_webhook_drain, next_cadence_deadline,
+        next_repository_wake, normalize_checks_outcome, normalize_pull_request_context, object_id,
         observe_webhook_work_before_drain, owed_dispatch_context_json_parts,
         repository_reconciliation_quantum_exhausted, rule_activation_error, run_until_shutdown,
         supervise_repository_tasks, targeted_pull_requests,
@@ -8201,7 +8241,9 @@ mod tests {
             .with_writer(captured.clone())
             .finish();
 
-        inspect_webhook_drain(&repository, &store, Duration::ZERO)
+        let mut progress = WebhookDrainProgress::default();
+        inspect_webhook_drain(&repository, &store, Duration::ZERO, &mut progress).await;
+        inspect_webhook_drain(&repository, &store, Duration::ZERO, &mut progress)
             .with_subscriber(subscriber)
             .await;
 
@@ -8210,6 +8252,28 @@ mod tests {
         assert!(telemetry.contains("cause_code=\"webhook_projection_drain_stalled\""));
         assert!(telemetry.contains(&admission.key().delivery_id().to_string()));
         Ok(())
+    }
+
+    #[test]
+    fn advancing_webhook_head_resets_the_stall_clock() {
+        let first_sequence = NonZeroU64::new(41).expect("fixture sequence is positive");
+        let next_sequence = NonZeroU64::new(42).expect("fixture sequence is positive");
+        let started_at = Instant::now();
+        let mut progress = WebhookDrainProgress::default();
+
+        assert_eq!(progress.observe(first_sequence, started_at), None);
+        assert_eq!(
+            progress.observe(first_sequence, started_at + Duration::from_secs(31)),
+            Some(Duration::from_secs(31))
+        );
+        assert_eq!(
+            progress.observe(next_sequence, started_at + Duration::from_secs(32)),
+            None
+        );
+        assert_eq!(
+            progress.observe(next_sequence, started_at + Duration::from_secs(90)),
+            Some(Duration::from_secs(58))
+        );
     }
 
     #[tokio::test]
