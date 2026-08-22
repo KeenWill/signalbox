@@ -31,6 +31,7 @@ use sqlx::PgPool;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     sync::Semaphore,
+    time::Instant,
 };
 
 use crate::{BlobStorageClass, BlobStoreRegistry};
@@ -254,11 +255,12 @@ async fn copy_verified_input(
     if entry.expected().byte_length() > MAX_IMAGE_INPUT_BYTES {
         return Err(WebBlobRuntimeError::ProducerFailed);
     }
+    let deadline = Instant::now() + Duration::from_secs(WORKER_TIMEOUT_SECONDS);
     for replica in entry.replicas() {
         let Some(store) = registry.recorded_store(replica.store()) else {
             return Err(WebBlobRuntimeError::Integrity);
         };
-        let copied = tokio::time::timeout(Duration::from_secs(WORKER_TIMEOUT_SECONDS), async {
+        let copied = tokio::time::timeout_at(deadline, async {
             let opened = store
                 .open(replica.object_key())
                 .await
