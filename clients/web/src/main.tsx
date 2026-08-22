@@ -9,7 +9,16 @@ import {
   Outlet,
   RouterProvider,
 } from '@tanstack/react-router'
-import { Component, lazy, type ReactNode, StrictMode, Suspense, useMemo } from 'react'
+import {
+  Component,
+  lazy,
+  type ReactNode,
+  StrictMode,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+} from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
 import { ProductApp } from './ProductApp'
@@ -51,12 +60,18 @@ class ScenarioChunkBoundary extends Component<
 function ScenarioRoute() {
   const scenarioId = scenarioRoute.useParams().scenarioId
   const ScenarioWorkspace = useMemo(() => createScenarioWorkspace(), [])
+  const routeRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    routeRef.current?.focus()
+  }, [])
   return (
-    <ScenarioChunkBoundary onRetry={() => window.location.reload()}>
-      <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
-        <ScenarioWorkspace scenarioId={scenarioId} />
-      </Suspense>
-    </ScenarioChunkBoundary>
+    <div ref={routeRef} className="scenario-route" tabIndex={-1}>
+      <ScenarioChunkBoundary onRetry={() => window.location.reload()}>
+        <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
+          <ScenarioWorkspace scenarioId={scenarioId} />
+        </Suspense>
+      </ScenarioChunkBoundary>
+    </div>
   )
 }
 

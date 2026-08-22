@@ -197,6 +197,7 @@ test('closes the phone navigation sheet before entering Scenario studio', async 
   await navigation.getByRole('link', { name: /Scenario studio/ }).click()
   await expect(page).toHaveURL(/\/scenario\/streaming$/)
   await expect(navigation).toBeHidden()
+  await expect(page.locator('.scenario-route')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

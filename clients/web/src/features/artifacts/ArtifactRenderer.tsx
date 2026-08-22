@@ -131,7 +131,44 @@ export const readImageDimensions = (
 export const isAnimationSafeImageHeader = (bytes: Uint8Array): boolean => {
   if (bytes.length < 12) return false
   const text = new TextDecoder().decode(bytes)
-  if (text.startsWith('GIF8')) return false
+  if (text.startsWith('GIF8')) {
+    if (bytes.length < 14) return false
+    let offset = 13
+    const packedFields = bytes[10] ?? 0
+    if ((packedFields & 0x80) !== 0) offset += 3 * 2 ** ((packedFields & 0x07) + 1)
+    let frames = 0
+    const skipSubBlocks = () => {
+      while (offset < bytes.length) {
+        const length = bytes[offset] ?? 0
+        offset += 1
+        if (length === 0) return true
+        offset += length
+        if (offset > bytes.length) return false
+      }
+      return false
+    }
+    while (offset < bytes.length) {
+      const marker = bytes[offset]
+      offset += 1
+      if (marker === 0x3b) return frames === 1
+      if (marker === 0x21) {
+        if (offset >= bytes.length) return false
+        offset += 1
+        if (!skipSubBlocks()) return false
+        continue
+      }
+      if (marker !== 0x2c || offset + 9 > bytes.length) return false
+      frames += 1
+      if (frames > 1) return false
+      const packed = bytes[offset + 8] ?? 0
+      offset += 9
+      if ((packed & 0x80) !== 0) offset += 3 * 2 ** ((packed & 0x07) + 1)
+      if (offset >= bytes.length) return false
+      offset += 1
+      if (!skipSubBlocks()) return false
+    }
+    return false
+  }
   if (text.slice(8, 12) === 'WEBP') {
     const kind = text.slice(12, 16)
     return (

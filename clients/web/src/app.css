@@ -61,6 +61,9 @@ body,
 body {
   background: var(--canvas);
 }
+.scenario-route {
+  height: 100%;
+}
 button,
 input {
   font: inherit;

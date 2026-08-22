@@ -123,8 +123,18 @@ describe('artifact renderer compatibility', () => {
     expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
   })
 
-  it('keeps animation-capable originals download-only', () => {
-    expect(isAnimationSafeImageHeader(new TextEncoder().encode('GIF89a fixture'))).toBe(false)
+  it('admits a valid single-frame GIF and rejects a multi-frame GIF', () => {
+    const header = [0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
+    const frame = [
+      0x2c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00,
+    ]
+    expect(isAnimationSafeImageHeader(new Uint8Array([...header, ...frame, 0x3b]))).toBe(true)
+    expect(isAnimationSafeImageHeader(new Uint8Array([...header, ...frame, ...frame, 0x3b]))).toBe(
+      false,
+    )
+  })
+
+  it('keeps other animation-capable originals download-only', () => {
     const animatedWebp = new Uint8Array(30)
     animatedWebp.set(new TextEncoder().encode('RIFF'), 0)
     animatedWebp.set(new TextEncoder().encode('WEBP'), 8)
