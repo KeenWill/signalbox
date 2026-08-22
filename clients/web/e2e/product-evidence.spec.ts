@@ -1,20 +1,11 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { webContractBootstrapFixture } from '../src/product.fixture'
 
 interface RouteEvidence {
   path: string
   title: string
   snapshot: string
 }
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
-  capabilities: {
-    bounded_json: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 262_144 },
-} as const
 
 const attentionEvidence = { path: '/attention', title: 'Attention', snapshot: 'attention' } as const
 const sessionsEvidence = { path: '/sessions', title: 'Sessions', snapshot: 'sessions' } as const
@@ -34,7 +25,7 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
 }
 
 const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  page.route('**/api/bootstrap', (route) => route.fulfill({ json: webContractBootstrapFixture }))
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
