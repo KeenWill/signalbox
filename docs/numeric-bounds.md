@@ -12,6 +12,12 @@ The 118 rows partition as 35 guards, 8 derived bounds, 62 configuration
 policies, 9 representation facts, and 4 test fixtures. Source locations are
 maintained with the implementation slices that move or delete declarations.
 
+The numeric-bound gate accepts only structural guards, values mechanically
+derived from guards, representation facts, and test fixtures from this
+classified set. Exact pre-existing daemon and persistence candidates omitted
+from the commissioned audit remain outside the blocking set; any newly named
+bound in either root fails closed.
+
 ## Guards and derived bounds
 
 | Source                                                         | Constant                                    | Tier    | Pathological case prevented or derivation                                                       |

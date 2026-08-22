@@ -31,24 +31,32 @@ The whole attribute run is read, so an intervening attribute and a compound
 and their constants really are production.
 
 The blocking scope is deliberately smaller than the inventory: production
-constants in application orchestration, provider-neutral model runtime,
-process wire contracts, the terminal client review loop, and code-host tools.
-``ENFORCED_ROOTS`` is the exact scope. Other workspace bounds remain visible in
-the success count but are deferred rather than silently claimed as compliant.
+constants in the daemon, terminal client, application orchestration,
+provider-neutral model runtime, persistence, process wire contracts, and
+code-host tools. ``ENFORCED_ROOTS`` is the exact scope. Other workspace bounds
+remain visible in the success count but are deferred rather than silently
+claimed as compliant.
+
+The two roots added by the required-bounds commission contained pre-existing
+candidates outside its authoritative 118-row classification. Their exact
+path/name pairs remain outside the blocking set; the baseline is exact so any
+new candidate in those roots still fails closed instead of silently expanding
+that historical omission.
 
 An in-scope declaration must be immediately preceded by one of:
 
-    // numeric-bound: ceiling - protects against unbounded retained input
-    // numeric-bound: tunable - controls the default exchange wait
+    // numeric-bound: guard - prevents one wire frame from exhausting memory
     // numeric-bound: not-a-bound - fixed decimal representation maximum
 
-``docs/style.md`` defines all three kinds and owns the semantic question of
-which one a given constant deserves. The kind and one-line rationale are
-mechanically required here; review decides whether they are true.
+``docs/style.md`` defines both kinds and owns the semantic question of which one
+a given constant deserves. The kind and one-line rationale are mechanically
+required here; review decides whether they are true. Deployment policy is not a
+legal constant declaration: ``ceiling``, ``tunable``, and ``interval`` markers
+are therefore rejected.
 
 A mechanically derived bound may use the narrow escape
 
-    // numeric-bound: derived ceiling from MAX_SOURCE_CHARACTERS
+    // numeric-bound: derived guard from MAX_SOURCE_CHARACTERS
 
 only when its initializer references the named bound by its bare name and that
 name resolves to a direct declaration of the same kind. This keeps self-evident
@@ -69,10 +77,10 @@ it refuses: a name reachable only through a ``use`` from outside the file leaves
 the escape unproven and the declaration is rejected.
 
 Every other boundary-named constant the initializer reads must resolve, in the
-same scope, to the inherited kind. A value assembled from a ceiling and a
-tunable inherits no single rationale, and one assembled from a contributor this
-scan cannot see is unproven rather than proven; either way the escape is
-unavailable and the constant declares its own kind.
+same scope, to a guard. A value assembled from a guard and a representation fact
+does not inherit one rationale, and one assembled from a contributor this scan
+cannot see is unproven rather than proven; either way the escape is unavailable
+and the constant declares its own kind.
 
 Because discovery is deliberately lexical, a fixed representation fact whose
 name contains a boundary token may declare ``not-a-bound`` with a one-line
@@ -114,11 +122,112 @@ BOUNDARY_TOKENS = frozenset(
 )
 ENFORCED_ROOTS = (
     "apps/client/src",
+    "apps/signalboxd/src",
     "crates/application/src",
     "crates/model-provider-runtime/src",
     "crates/model-runtime/src",
+    "crates/persistence/src",
     "crates/process-protocol/src",
     "crates/tools-code-host/src",
+)
+# These exact candidates predate the commissioned 118-row classification and
+# were not assigned a ruled tier. Keeping the baseline exact means a new
+# boundary-named constant in either newly enforced root still fails closed,
+# while the gate does not invent a semantic classification for omitted work.
+PREEXISTING_UNCLASSIFIED_BOUNDS = frozenset(
+    {
+        ("apps/signalboxd/src/bin/approval-judge-eval.rs", "MAX_PAID_CALLS"),
+        ("apps/signalboxd/src/blob_storage_configuration.rs", "MAX_S3_LOCATION_BYTES"),
+        ("apps/signalboxd/src/configuration.rs", "MAX_REPOSITORY_WATCH_RULES"),
+        ("apps/signalboxd/src/configuration.rs", "MAX_REPOSITORY_WATCH_ACTIONS"),
+        ("apps/signalboxd/src/configuration.rs", "MAX_COMPACTION_PROMPT_UTF8_BYTES"),
+        ("apps/signalboxd/src/configuration.rs", "DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES"),
+        ("apps/signalboxd/src/configuration.rs", "MAX_WATCHED_REPOSITORIES"),
+        ("apps/signalboxd/src/configuration.rs", "MAX_SIGNAL_REVIEWERS"),
+        ("apps/signalboxd/src/credential_pools.rs", "MAX_HEADROOM_RESERVE_PERCENT"),
+        ("apps/signalboxd/src/credential_pools.rs", "MAX_CREDENTIAL_DELIVERY_PATH_UTF8_BYTES"),
+        ("apps/signalboxd/src/credential_pools.rs", "MAX_CREDENTIAL_CATALOG_NAME_UTF8_BYTES"),
+        ("apps/signalboxd/src/credential_pools.rs", "MAX_CREDENTIAL_POOL_MEMBERS"),
+        ("apps/signalboxd/src/credential_pools.rs", "MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS"),
+        ("apps/signalboxd/src/daemon_tools.rs", "MAX_RETAINED_SESSION_WORKSPACES"),
+        ("apps/signalboxd/src/lib.rs", "MAX_QUOTED_CONTEXT_BYTES"),
+        ("apps/signalboxd/src/process_runtime.rs", "PROCESS_UPDATE_CAPACITY"),
+        ("apps/signalboxd/src/process_runtime.rs", "MAX_ACTIVE_CONNECTIONS"),
+        ("apps/signalboxd/src/process_runtime.rs", "MAX_BUFFERED_INBOUND_FRAMES"),
+        ("apps/signalboxd/src/process_runtime.rs", "MAX_CONCURRENT_IMPORTS"),
+        ("apps/signalboxd/src/process_runtime.rs", "MAX_IMPORT_ADMISSION_WAITERS"),
+        ("apps/signalboxd/src/process_runtime.rs", "MAX_CONCURRENT_REVIEW_COMMANDS"),
+        ("apps/signalboxd/src/process_runtime.rs", "MAX_CONCURRENT_BLOB_READS"),
+        ("apps/signalboxd/src/process_runtime.rs", "BULK_INGEST_IDLE_TIMEOUT"),
+        ("apps/signalboxd/src/process_runtime.rs", "BULK_INGEST_SESSION_TIMEOUT"),
+        ("apps/signalboxd/src/process_runtime.rs", "BLOB_READ_TIMEOUT"),
+        ("apps/signalboxd/src/process_runtime.rs", "MAX_SUBMITTED_INPUT_BYTES"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "DEFAULT_REQUEST_TIMEOUT"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "MAX_RESULT_PAGES"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "MAX_RESPONSE_BYTES"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "MAX_CREDENTIAL_BYTES"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "MAX_ENTITY_TAG_BYTES"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "MAX_REQUESTS_PER_POLL"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "MAX_CACHED_RESOURCES"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "MAX_CONCURRENT_PULL_REQUEST_FETCHES"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "MAX_CHECK_SUITES_PER_COMMIT_CHECK_RUN_SEARCH"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "MAX_POLL_WIRE_BYTES"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "MAX_CACHED_WIRE_BYTES"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "WEBHOOK_DRAIN_RETRY_MAX_DELAY"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "WEBHOOK_DRAIN_RETRY_MAX_DOUBLINGS"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "WEBHOOK_DRAIN_STALL_THRESHOLD"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "WEBHOOK_DRAIN_ATTEMPT_TIMEOUT"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "WEBHOOK_ATTEMPT_TIMEOUT"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "WEBHOOK_DRAIN_MONITOR_QUERY_TIMEOUT"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "WEBHOOK_DRAIN_PAGE_LIMIT"),
+        ("apps/signalboxd/src/repo_watch_runtime.rs", "MAX_WEBHOOK_TERMINAL_ATTEMPTS"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "MAX_EVENT_NAME_BYTES"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "MAX_ACTION_NAME_BYTES"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "MAX_WEBHOOK_SECRET_BYTES"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "MAX_WEBHOOK_BODY_BYTES"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "MAX_WEBHOOK_IN_FLIGHT"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "MAX_WEBHOOK_IN_FLIGHT_BYTES"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "MAX_WEBHOOK_DELIVERIES_PER_MINUTE"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "MAX_WEBHOOK_CONNECTIONS"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "MAX_WEBHOOK_HEADER_BYTES"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "MAX_WEBHOOK_HEADER_COUNT"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "MAX_WEBHOOK_HEAD_BUFFER_BYTES"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "WEBHOOK_CONNECTION_READ_TIMEOUT"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "WEBHOOK_BODY_READ_TIMEOUT"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "WEBHOOK_BODY_BUDGET_GRANULE_BYTES"),
+        ("apps/signalboxd/src/repo_watch_webhook_runtime.rs", "WEBHOOK_BODY_BUDGET_GRANULES"),
+        ("apps/signalboxd/src/runner_protocol_runtime.rs", "HANDSHAKE_TIMEOUT"),
+        ("apps/signalboxd/src/runner_protocol_runtime.rs", "CONNECTION_DRAIN_TIMEOUT"),
+        ("apps/signalboxd/src/runner_protocol_runtime.rs", "MAXIMUM_CONCURRENT_CONNECTIONS"),
+        ("apps/signalboxd/src/single_hub.rs", "GUARD_CHECK_TIMEOUT"),
+        ("apps/signalboxd/src/telemetry.rs", "OTLP_MAX_QUEUED_SPANS"),
+        ("apps/signalboxd/src/telemetry.rs", "OTLP_MAX_EXPORT_BATCH"),
+        ("apps/signalboxd/src/telemetry.rs", "OTLP_EXPORT_TIMEOUT"),
+        ("apps/signalboxd/src/telemetry.rs", "OTLP_SHUTDOWN_TIMEOUT"),
+        ("apps/signalboxd/src/telemetry.rs", "MAX_ENDPOINT_BYTES"),
+        ("apps/signalboxd/src/telemetry.rs", "MAX_HEADER_FILE_BYTES"),
+        ("apps/signalboxd/src/telemetry.rs", "MAX_HEADER_COUNT"),
+        ("apps/signalboxd/src/telemetry.rs", "MAX_HEADER_NAME_BYTES"),
+        ("apps/signalboxd/src/telemetry.rs", "MAX_HEADER_VALUE_BYTES"),
+        ("apps/signalboxd/src/telemetry.rs", "MAX_SCRAPE_REQUEST_BYTES"),
+        ("apps/signalboxd/src/telemetry.rs", "MAX_SCRAPE_CONNECTIONS"),
+        ("apps/signalboxd/src/telemetry.rs", "SCRAPE_CONNECTION_TIMEOUT"),
+        ("crates/persistence/src/conversation_import_codec.rs", "MAX_CONTAINER_DEPTH"),
+        ("crates/persistence/src/hub_fence.rs", "FENCED_POOL_MAX_CONNECTIONS"),
+        ("crates/persistence/src/model_execution.rs", "MAX_AVAILABILITY_BACKOFF"),
+        ("crates/persistence/src/model_execution.rs", "MAX_EXPONENTIAL_BACKOFF"),
+        ("crates/persistence/src/repo_watch.rs", "MAX_EVENT_PAGE_SIZE"),
+        ("crates/persistence/src/repo_watch_dispatch_obligation.rs", "DISPATCH_RETRY_BACKOFF_CAP"),
+        ("crates/persistence/src/repo_watch_dispatch_obligation.rs", "DISPATCH_RETRY_MAX_DOUBLINGS"),
+        ("crates/persistence/src/repo_watch_dispatch_obligation.rs", "MAX_PARK_RELEASE_ACTOR_CHARS"),
+        ("crates/persistence/src/repo_watch_webhook.rs", "MAX_PENDING_PAGE_SIZE"),
+        ("crates/persistence/src/repo_watch_webhook.rs", "MAX_PENDING_PAGE_BYTES"),
+        ("crates/persistence/src/repo_watch_webhook.rs", "MAX_WEBHOOK_NAME_BYTES"),
+        ("crates/persistence/src/repo_watch_webhook.rs", "MAX_OUTCOME_CODE_BYTES"),
+        ("crates/persistence/src/runner_protocol.rs", "PAGE_LIMIT"),
+    }
 )
 # The optional leading qualifier makes `std::time::Duration` and bare
 # `Duration` one declaration to this scan, and the signed `NonZeroI*` family is
@@ -190,11 +299,11 @@ LOCAL_USE = re.compile(
 # its path, so this deliberately matches the qualified spelling too.
 IMPORTED_NAME = re.compile(r"\b(?P<name>[A-Z][A-Z0-9_]*)\b")
 DIRECT_DECLARATION = re.compile(
-    r"^\s*// numeric-bound: (?P<kind>guard|ceiling|tunable|not-a-bound) - "
+    r"^\s*// numeric-bound: (?P<kind>guard|not-a-bound) - "
     r"(?P<rationale>\S.*)$"
 )
 DERIVED_DECLARATION = re.compile(
-    r"^\s*// numeric-bound: derived (?P<kind>guard|ceiling|tunable) from "
+    r"^\s*// numeric-bound: derived (?P<kind>guard) from "
     r"(?P<source>[A-Z][A-Z0-9_]*)\s*$"
 )
 DECLARATION_SITE = re.compile(r"\bconst\s+$")
@@ -630,8 +739,12 @@ def inventory(root: Path) -> tuple[list[Bound], list[Import]]:
 
 def is_enforced(bound: Bound) -> bool:
     path = bound.path.as_posix()
-    return not bound.test_only and any(
-        path == root or path.startswith(f"{root}/") for root in ENFORCED_ROOTS
+    return (
+        not bound.test_only
+        and (path, bound.name) not in PREEXISTING_UNCLASSIFIED_BOUNDS
+        and any(
+            path == root or path.startswith(f"{root}/") for root in ENFORCED_ROOTS
+        )
     )
 
 
