@@ -35,4 +35,36 @@ describe('command registry', () => {
 
     expect(selectedImportEntry).toBe(importEntryIds[1])
   })
+
+  it('sets transcript detail through the registry in Settings without a timeline', () => {
+    invokeCommand('detail.results', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      transcriptPreferences: true,
+    })
+
+    expect(selectApp(store.getState()).detail).toBe('results')
+  })
+
+  it('sets exact presentation preferences through registered commands', () => {
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      presentationPreferences: true,
+    }
+
+    invokeCommand('layout.focus', context)
+    invokeCommand('density.comfortable', context)
+    invokeCommand('theme.light', context)
+
+    expect(selectApp(store.getState())).toMatchObject({
+      layout: 'focus',
+      density: 'comfortable',
+      theme: 'light',
+    })
+  })
 })

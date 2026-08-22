@@ -1,0 +1,96 @@
+import type { DensityMode, DetailMode, LayoutMode, ThemeMode } from './state'
+
+export interface BrowserPreferences {
+  layout: LayoutMode
+  density: DensityMode
+  detail: DetailMode
+  theme: ThemeMode
+  paneSizes: { navigation: number; inspector: number }
+}
+
+export const paneSizeBounds = {
+  navigation: { minimum: 160, maximum: 360 },
+  inspector: { minimum: 200, maximum: 480 },
+} as const
+
+export const defaultBrowserPreferences: BrowserPreferences = {
+  layout: 'workbench',
+  density: 'compact',
+  detail: 'condensed',
+  theme: 'dark',
+  paneSizes: { navigation: 218, inspector: 252 },
+}
+
+export const createDefaultBrowserPreferences = (): BrowserPreferences => ({
+  ...defaultBrowserPreferences,
+  paneSizes: { ...defaultBrowserPreferences.paneSizes },
+})
+
+export const BROWSER_PREFERENCES_KEY = 'signalbox.web.preferences.v1'
+
+const oneOf = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T =>
+  typeof value === 'string' && allowed.includes(value as T) ? (value as T) : fallback
+
+const boundedNumber = (value: unknown, fallback: number, minimum: number, maximum: number) =>
+  typeof value === 'number' && Number.isFinite(value)
+    ? Math.min(Math.max(Math.round(value), minimum), maximum)
+    : fallback
+
+export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => {
+  const candidate =
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {}
+  const panes =
+    candidate.paneSizes !== null && typeof candidate.paneSizes === 'object'
+      ? (candidate.paneSizes as Record<string, unknown>)
+      : {}
+  return {
+    layout: oneOf(candidate.layout, ['focus', 'workbench'], defaultBrowserPreferences.layout),
+    density: oneOf(
+      candidate.density,
+      ['compact', 'comfortable'],
+      defaultBrowserPreferences.density,
+    ),
+    detail: oneOf(
+      candidate.detail,
+      ['full', 'condensed', 'results'],
+      defaultBrowserPreferences.detail,
+    ),
+    theme: oneOf(candidate.theme, ['light', 'dark'], defaultBrowserPreferences.theme),
+    paneSizes: {
+      navigation: boundedNumber(
+        panes.navigation,
+        defaultBrowserPreferences.paneSizes.navigation,
+        paneSizeBounds.navigation.minimum,
+        paneSizeBounds.navigation.maximum,
+      ),
+      inspector: boundedNumber(
+        panes.inspector,
+        defaultBrowserPreferences.paneSizes.inspector,
+        paneSizeBounds.inspector.minimum,
+        paneSizeBounds.inspector.maximum,
+      ),
+    },
+  }
+}
+
+export const loadBrowserPreferences = (): BrowserPreferences => {
+  try {
+    if (typeof localStorage === 'undefined') return createDefaultBrowserPreferences()
+    const stored = localStorage.getItem(BROWSER_PREFERENCES_KEY)
+    if (stored === null) return createDefaultBrowserPreferences()
+    return decodeBrowserPreferences(JSON.parse(stored))
+  } catch {
+    return createDefaultBrowserPreferences()
+  }
+}
+
+export const saveBrowserPreferences = (preferences: BrowserPreferences): void => {
+  try {
+    if (typeof localStorage === 'undefined') return
+    localStorage.setItem(BROWSER_PREFERENCES_KEY, JSON.stringify(preferences))
+  } catch {
+    // Preferences remain available in Redux when browser storage is unavailable.
+  }
+}

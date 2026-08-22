@@ -39,17 +39,19 @@ export function ImportedEntries({
   logicalEntryCount,
   selected,
   commandContext,
+  density,
 }: {
   entries: readonly WebImportedEntry[]
   logicalEntryCount: number
   selected: WebImportContinuationReference | null
   commandContext: CommandContext
+  density: 'compact' | 'comfortable'
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
     count: entries.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 58,
+    estimateSize: () => (density === 'comfortable' ? 74 : 58),
     overscan: IMPORT_ENTRY_OVERSCAN_ROWS,
     getItemKey: (index) => entries[index]?.frontier.imported_entry_id ?? index,
   })

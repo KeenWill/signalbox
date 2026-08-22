@@ -19,7 +19,7 @@ import type {
 } from '../generated/web-contract.mjs'
 import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
-import { store } from '../state'
+import { selectApp, store, useAppSelector } from '../state'
 import { type ImportApi, ImportApiError, ImportReceiptCorrelationError } from './api'
 import { ImportedEntries } from './ImportedEntries'
 import { ImportsTable } from './ImportsTable'
@@ -52,8 +52,22 @@ const byteLabel = (bytes: number): string => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
 }
 
-export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: boolean }) {
+export function ImportsWorkspace({
+  api,
+  scenario,
+  presentation = 'standalone',
+  onCommandContext,
+  onNavigationDisabledChange,
+}: {
+  api: ImportApi
+  scenario: boolean
+  presentation?: 'standalone' | 'product'
+  onCommandContext?: (context: CommandContext | null) => void
+  onNavigationDisabledChange?: (disabled: boolean) => void
+}) {
   const queryClient = useQueryClient()
+  const app = useAppSelector(selectApp)
+  const density = app.density
   const queryScope = scenario ? 'scenario' : 'production'
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
   const [sourceSession, setSourceSession] = useState('')
@@ -75,6 +89,11 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     loadRetainedCommand(queryScope),
   )
   const hasRetainedCommand = pendingCommand !== null
+
+  useEffect(() => {
+    onNavigationDisabledChange?.(hasRetainedCommand)
+    return () => onNavigationDisabledChange?.(false)
+  }, [hasRetainedCommand, onNavigationDisabledChange])
 
   const listRequest = useMemo(
     () => ({
@@ -168,20 +187,32 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     }),
     [importEntryIds, selectImportEntry, selectedFrontier?.imported_entry_id],
   )
+  useEffect(() => {
+    onCommandContext?.(commandContext)
+    return () => onCommandContext?.(null)
+  }, [commandContext, onCommandContext])
   useHotkeys(
-    [...surfaceHotkeyBindings, ...importHotkeyBindings].map((binding) => ({
-      hotkey: binding.hotkey,
-      callback: () => invokeCommand(binding.commandId, commandContext),
-    })),
+    [...(presentation === 'standalone' ? surfaceHotkeyBindings : []), ...importHotkeyBindings].map(
+      (binding) => ({
+        hotkey: binding.hotkey,
+        callback: () => invokeCommand(binding.commandId, commandContext),
+        options: { enabled: app.overlay === null },
+      }),
+    ),
   )
   useHotkeySequences(
-    [...surfaceHotkeySequenceBindings, ...importHotkeySequenceBindings].map((binding) => ({
+    [
+      ...(presentation === 'standalone' ? surfaceHotkeySequenceBindings : []),
+      ...importHotkeySequenceBindings,
+    ].map((binding) => ({
       sequence: binding.sequence,
       callback: () => invokeCommand(binding.commandId, commandContext),
+      options: { enabled: app.overlay === null },
     })),
   )
 
   useEffect(() => {
+    if (presentation !== 'standalone') return
     const snapshot: DiagnosticSnapshot = {
       scenario: scenario ? 'imports' : 'production-imports',
       connection:
@@ -218,6 +249,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     importsQuery.isError,
     importsQuery.status,
     queryClient,
+    presentation,
     scenario,
     selectedFrontier?.position,
     selectedImport,
@@ -295,29 +327,36 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
 
   return (
     <>
-      <div className="imports-shell">
-        <aside className="navigation-pane imports-navigation">
-          <ScenarioNavigation
-            activeId={scenario ? 'imports' : 'production-imports'}
-            disabled={hasRetainedCommand}
-          />
-        </aside>
-        <main className="imports-workspace">
-          <header className="imports-header">
-            <IconCommand
-              id="navigation.open"
-              context={commandContext}
-              label="Open scenarios"
-              className="icon-button imports-mobile-navigation"
-            >
-              <Menu />
-            </IconCommand>
-            <div>
-              <span className="eyebrow">Immutable imported evidence</span>
-              <h1>Imports</h1>
-            </div>
-            <span className="window-count">100-row keyset pages · 101-entry windows</span>
-          </header>
+      <div className={`imports-shell imports-shell-${presentation}`}>
+        {presentation === 'standalone' && (
+          <aside className="navigation-pane imports-navigation">
+            <ScenarioNavigation
+              activeId={scenario ? 'imports' : 'production-imports'}
+              disabled={hasRetainedCommand}
+            />
+          </aside>
+        )}
+        <div
+          className={`imports-workspace imports-workspace-${presentation}`}
+          role={presentation === 'standalone' ? 'main' : undefined}
+        >
+          {presentation === 'standalone' && (
+            <header className="imports-header">
+              <IconCommand
+                id="navigation.open"
+                context={commandContext}
+                label="Open scenarios"
+                className="icon-button imports-mobile-navigation"
+              >
+                <Menu />
+              </IconCommand>
+              <div>
+                <span className="eyebrow">Immutable imported evidence</span>
+                <h1>Imports</h1>
+              </div>
+              <span className="window-count">100-row keyset pages · 101-entry windows</span>
+            </header>
+          )}
           <section className="imports-catalog" aria-labelledby="imports-catalog-heading">
             <header className="section-header imports-catalog-header">
               <div>
@@ -399,6 +438,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                 rows={imports.items}
                 selectedId={selectedImport}
                 onSelect={selectImport}
+                density={density}
               />
             )}
           </section>
@@ -625,19 +665,22 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     }
                     selected={selectedFrontier}
                     commandContext={commandContext}
+                    density={density}
                   />
                 )}
               </div>
             </div>
           </section>
-        </main>
+        </div>
       </div>
-      <OverlaySurfaces
-        context={commandContext}
-        activeId={scenario ? 'imports' : 'production-imports'}
-        importsSurface
-        navigationDisabled={hasRetainedCommand}
-      />
+      {presentation === 'standalone' && (
+        <OverlaySurfaces
+          context={commandContext}
+          activeId={scenario ? 'imports' : 'production-imports'}
+          importsSurface
+          navigationDisabled={hasRetainedCommand}
+        />
+      )}
     </>
   )
 }
