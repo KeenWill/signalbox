@@ -123,6 +123,13 @@ pub struct WebContractExample {
 #[serde(transparent)]
 pub struct WebTimelineEventSequence(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
 
+fn canonical_u64(value: &str) -> Option<u64> {
+    let canonical = !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'));
+    canonical.then(|| value.parse::<u64>().ok()).flatten()
+}
+
 impl WebTimelineEventSequence {
     /// Encodes one already-validated positive durable-event sequence.
     #[must_use]
@@ -143,16 +150,44 @@ impl<'de> Deserialize<'de> for WebTimelineEventSequence {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        let canonical = !value.is_empty()
-            && value.bytes().all(|byte| byte.is_ascii_digit())
-            && !value.starts_with('0');
-        let positive = value
-            .parse::<u64>()
-            .ok()
-            .and_then(std::num::NonZeroU64::new);
-        if !canonical || positive.is_none() {
+        let positive = canonical_u64(&value).and_then(std::num::NonZeroU64::new);
+        if positive.is_none() {
             return Err(de::Error::custom(
                 "timeline event sequence must be a canonical positive u64",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Checked unsigned 64-bit value encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebU64(#[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))] String);
+
+impl WebU64 {
+    /// Encodes one unsigned 64-bit value in canonical decimal form.
+    #[must_use]
+    pub fn from_u64(value: u64) -> Self {
+        Self(value.to_string())
+    }
+
+    /// Returns the canonical unsigned decimal wire spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebU64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if canonical_u64(&value).is_none() {
+            return Err(de::Error::custom(
+                "wire value must be a canonical unsigned 64-bit integer",
             ));
         }
         Ok(Self(value))
@@ -171,19 +206,19 @@ pub struct WebTimelineAddress {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineSizeFacts {
-    pub item_count: String,
-    pub projected_text_bytes: String,
-    pub projected_structured_bytes: String,
-    pub referenced_blob_count: String,
-    pub referenced_blob_bytes: String,
+    pub item_count: WebU64,
+    pub projected_text_bytes: WebU64,
+    pub projected_structured_bytes: WebU64,
+    pub referenced_blob_count: WebU64,
+    pub referenced_blob_bytes: WebU64,
 }
 
 /// Current work facts carried by the lightweight session descriptor.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionWorkFacts {
-    pub active_turn_count: String,
-    pub queued_turn_count: String,
+    pub active_turn_count: WebU64,
+    pub queued_turn_count: WebU64,
 }
 
 /// Browser descriptor for one authoritative bounded session projection.
@@ -195,7 +230,7 @@ pub struct WebSessionTimelineDescriptor {
     pub first_address: WebTimelineAddress,
     pub latest_address: WebTimelineAddress,
     pub work: WebSessionWorkFacts,
-    pub observed_through: String,
+    pub observed_through: WebU64,
 }
 
 /// Closed durable event categories in the browser timeline foundation.
@@ -670,6 +705,13 @@ function assertSchema(root, schema, value, path) {{
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {{
     fail(path, `a string matching ${{schema.pattern}}`);
   }}
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    BigInt(value) > 18446744073709551615n
+  ) {{
+    fail(path, "an unsigned 64-bit integer");
+  }}
 }}
 
 export function decodeWebContractBootstrap(value) {{
@@ -857,7 +899,8 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        WebContractBootstrap, WebContractExample, WebTimelineEventSequence, generated_artifacts,
+        WebContractBootstrap, WebContractExample, WebTimelineEventSequence, WebU64,
+        generated_artifacts,
     };
 
     #[track_caller]
@@ -920,5 +963,14 @@ mod tests {
             serde_json::from_str::<WebTimelineEventSequence>(r#""18446744073709551616""#).is_err()
         );
         assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""1""#).is_ok());
+    }
+
+    #[test]
+    fn unsigned_wire_value_rejects_invalid_spellings() {
+        assert!(serde_json::from_str::<WebU64>(r#""+1""#).is_err());
+        assert!(serde_json::from_str::<WebU64>(r#""01""#).is_err());
+        assert!(serde_json::from_str::<WebU64>(r#""18446744073709551616""#).is_err());
+        assert!(serde_json::from_str::<WebU64>(r#""0""#).is_ok());
+        assert!(serde_json::from_str::<WebU64>(r#""18446744073709551615""#).is_ok());
     }
 }
