@@ -15,10 +15,7 @@ use signalbox_process_protocol::{
 };
 use uuid::Uuid;
 
-use crate::{
-    ConversationsPageRequest, MAX_METADATA_PAGE_SIZE, MIN_METADATA_PAGE_SIZE,
-    SessionMetadataPageRequest,
-};
+use crate::{ConversationsPageRequest, SessionMetadataPageRequest};
 
 /// The specification's ordinary default metadata page size.
 const DEFAULT_SEARCH_RESULT_LIMIT: &str = "50";
@@ -2539,7 +2536,7 @@ fn delegation_text_argument(
 }
 
 fn template_name(value: &str) -> Result<String, String> {
-    // numeric-bound: tunable - mirrors the canonical session-template name grammar
+    // numeric-bound: guard - mirrors the canonical session-template name wire grammar
     const MAX_UTF8_BYTES: usize = 128;
 
     let first_is_admitted = value
@@ -2585,14 +2582,7 @@ fn conversation_cursor(value: &str) -> Result<ConversationCursor, String> {
 }
 
 fn metadata_page_size(value: &str) -> Result<CanonicalU64, String> {
-    let parsed = canonical_u64(value)?;
-    if !(MIN_METADATA_PAGE_SIZE..=MAX_METADATA_PAGE_SIZE).contains(&parsed.value()) {
-        return Err(format!(
-            "the result limit must be from {MIN_METADATA_PAGE_SIZE} through \
-             {MAX_METADATA_PAGE_SIZE}"
-        ));
-    }
-    Ok(parsed)
+    canonical_u64(value)
 }
 
 fn canonical_u64(value: &str) -> Result<CanonicalU64, String> {
@@ -3514,9 +3504,9 @@ mod tests {
     }
 
     #[test]
-    fn search_rejects_a_result_limit_outside_the_admitted_page_bound() {
-        assert!(parse(["search", "--limit", "0"].map(Into::into)).is_err());
-        assert!(parse(["search", "--limit", "101"].map(Into::into)).is_err());
+    fn search_defers_canonical_result_limit_policy_to_the_daemon() {
+        assert!(parse(["search", "--limit", "0"].map(Into::into)).is_ok());
+        assert!(parse(["search", "--limit", "101"].map(Into::into)).is_ok());
     }
 
     #[test]
@@ -3675,9 +3665,9 @@ mod tests {
     }
 
     #[test]
-    fn conversations_rejects_a_result_limit_outside_the_admitted_page_bound() {
-        assert!(parse(["conversations", "--limit", "0"].map(Into::into)).is_err());
-        assert!(parse(["conversations", "--limit", "101"].map(Into::into)).is_err());
+    fn conversations_defers_canonical_result_limit_policy_to_the_daemon() {
+        assert!(parse(["conversations", "--limit", "0"].map(Into::into)).is_ok());
+        assert!(parse(["conversations", "--limit", "101"].map(Into::into)).is_ok());
     }
 
     #[test]
