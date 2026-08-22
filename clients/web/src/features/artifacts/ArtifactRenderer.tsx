@@ -48,11 +48,13 @@ export const selectImageView = (descriptor: WebBlobDescriptor): WebBlobAvailable
     descriptor.available_views.find((view) => view.kind === kind),
   ).find((view) => view !== undefined)
 
-export const imageViewLabel = (kind: WebBlobViewKind): string => {
-  if (kind === 'browser_native') return 'Original'
-  if (kind === 'thumbnail') return 'Thumbnail'
-  return 'Preview'
-}
+export const imageViewLabel = (kind: WebBlobViewKind): string =>
+  ({
+    browser_native: 'Original',
+    preview: 'Preview',
+    thumbnail: 'Thumbnail',
+    download: 'Download',
+  })[kind]
 
 export const selectBlobView = (
   descriptor: WebBlobDescriptor,
@@ -112,6 +114,7 @@ function TextBody({ artifact, commandContext }: RendererProps<TextArtifact>) {
       <textarea
         className="artifact-scroll"
         aria-label={`Bounded preview of ${artifact.displayName}`}
+        onFocusCapture={() => selectArtifact(commandContext, artifact.id)}
         readOnly
         value={bounded.content}
       />
@@ -149,6 +152,7 @@ function CodeBody({ artifact, commandContext }: RendererProps<CodeArtifact>) {
       <textarea
         className="artifact-scroll"
         aria-label={`Bounded preview of ${artifact.displayName}`}
+        onFocusCapture={() => selectArtifact(commandContext, artifact.id)}
         readOnly
         value={bounded.content}
       />
@@ -542,7 +546,12 @@ export function ArtifactWorkbench({ commandContext }: { commandContext: CommandC
   const remoteMedia = useAppSelector(selectApp).remoteMedia
   const dispatch = useAppDispatch()
   return (
-    <section className="artifact-panel" aria-labelledby="artifact-heading">
+    <section
+      className="artifact-panel"
+      aria-labelledby="artifact-heading"
+      data-command-focus-target
+      tabIndex={-1}
+    >
       <header className="section-header artifact-panel-heading">
         <div>
           <span className="eyebrow">Typed capability projection</span>

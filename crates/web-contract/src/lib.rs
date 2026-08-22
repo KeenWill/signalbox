@@ -101,7 +101,7 @@ impl WebContractBootstrap {
                 same_origin_json_mutations: true,
                 ndjson_streaming: true,
                 immutable_blob_content,
-                blob_derivations: immutable_blob_content,
+                blob_derivations: image_derivatives,
                 image_derivatives,
                 bounded_session_timeline,
             },
@@ -828,6 +828,9 @@ export function decodeWebBlobDescriptor(value) {{
     const contentRoute = assertSameOriginBlobUrl(view.content_url, contentPath);
     const contentDigest = contentRoute.digest;
     if (view.kind === "download" || view.kind === "browser_native") {{
+      if (view.derivations.length !== 0) {{
+        fail(`blob_descriptor.available_views[${{index}}].derivations`, "empty for an original representation");
+      }}
       if (contentDigest !== value.digest) {{
         fail(contentPath, "a route for the descriptor digest");
       }}
@@ -1079,11 +1082,23 @@ mod tests {
         let available = WebContractBootstrap::for_runtime(true, true, true);
 
         assert!(!unavailable.capabilities.immutable_blob_content);
+        assert!(!unavailable.capabilities.blob_derivations);
         assert!(!unavailable.capabilities.image_derivatives);
         assert!(!unavailable.capabilities.bounded_session_timeline);
         assert!(available.capabilities.immutable_blob_content);
+        assert!(available.capabilities.blob_derivations);
         assert!(available.capabilities.image_derivatives);
         assert!(available.capabilities.bounded_session_timeline);
+    }
+
+    #[test]
+    fn blob_derivation_capability_requires_exposed_derivative_views() {
+        let bootstrap = WebContractBootstrap::for_runtime(true, false, true);
+
+        assert!(bootstrap.capabilities.immutable_blob_content);
+        assert!(!bootstrap.capabilities.blob_derivations);
+        assert!(!bootstrap.capabilities.image_derivatives);
+        assert!(bootstrap.capabilities.bounded_session_timeline);
     }
 
     #[test]

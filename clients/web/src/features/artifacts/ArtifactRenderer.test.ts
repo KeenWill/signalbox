@@ -24,6 +24,13 @@ import {
 } from './artifactTypes'
 import { admitRemoteMediaUrl } from './remoteMediaPreference'
 
+const download = imageArtifact.available_views[0]
+const browserNative = imageArtifact.available_views[1]
+const preview = imageArtifact.available_views[2]
+if (!download || !browserNative || !preview) {
+  throw new Error('the image artifact fixture must contain download, original, and preview views')
+}
+
 describe('artifact renderer compatibility', () => {
   it('derives preview command IDs only from artifacts with omitted preview content', () => {
     expect(artifactPreviewIds).toEqual(['incident-notes', 'renderer-source'])
@@ -49,7 +56,11 @@ describe('artifact renderer compatibility', () => {
     expect(imagePreviewView.kind).toBe('preview')
     const descriptor: WebBlobDescriptor = {
       ...imageArtifact,
-      available_views: [{ ...imagePreviewView, media_type: 'application/octet-stream' }],
+      available_views: [
+        download,
+        browserNative,
+        { ...preview, media_type: 'application/octet-stream' },
+      ],
     }
 
     expect(selectImageView(descriptor)?.kind).toBe('preview')
@@ -69,6 +80,17 @@ describe('artifact renderer compatibility', () => {
     expect(selectViewDerivation(imageArtifact, view)?.derivation_id).toBe(
       authoritative?.derivation_id,
     )
+  })
+
+  it('names a thumbnail fallback as a thumbnail', () => {
+    const thumbnail = { ...preview, kind: 'thumbnail' as const }
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      available_views: [download, thumbnail],
+    }
+
+    expect(selectImageView(descriptor)?.kind).toBe('thumbnail')
+    expect(imageViewLabel('thumbnail')).toBe('Thumbnail')
   })
 
   it('does not create an inline renderer from an image-like MIME string', () => {
