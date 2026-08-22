@@ -13,7 +13,7 @@ import {
 import type { ComponentType, ReactNode } from 'react'
 import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import { useAppSelector } from '../../state'
+import { actions, useAppDispatch, useAppSelector } from '../../state'
 import { artifactScenario } from './artifactScenario'
 import {
   ARTIFACT_PREVIEW_CHARACTERS,
@@ -180,13 +180,13 @@ function BoundedFooter({
 }
 
 function SignalboxImageBody({ artifact, commandContext }: RendererProps<SignalboxImageArtifact>) {
-  const originalRequested = useAppSelector((state) =>
-    Boolean(state.app.originalArtifacts[artifact.id]),
-  )
+  const dispatch = useAppDispatch()
+  const originalState = useAppSelector((state) => state.app.originalArtifacts[artifact.id])
   const { descriptor } = artifact.source
   const automatic = selectImageView(descriptor)
   const original = viewByKind(descriptor, 'browser_native')
   const download = viewByKind(descriptor, 'download')
+  const originalRequested = originalState === 'loading' || originalState === 'loaded'
   const rendered = originalRequested && original ? original : automatic
   const derivation = rendered?.derivations[0]
 
@@ -198,6 +198,16 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
             src={rendered.content_url}
             alt={`${imageViewLabel(rendered.kind)} of ${artifact.displayName}`}
             loading="lazy"
+            onLoad={() => {
+              if (rendered.kind === 'browser_native' && originalState === 'loading') {
+                dispatch(actions.artifactOriginalSettled({ id: artifact.id, result: 'loaded' }))
+              }
+            }}
+            onError={() => {
+              if (rendered.kind === 'browser_native') {
+                dispatch(actions.artifactOriginalSettled({ id: artifact.id, result: 'failed' }))
+              }
+            }}
           />
         ) : (
           <FileQuestion aria-label="No compatible inline renderer" />
@@ -212,14 +222,24 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
         {original && (
           <button
             type="button"
-            aria-pressed={originalRequested}
+            aria-pressed={originalState === 'loaded'}
+            aria-disabled={originalState === 'loading'}
             onClick={() =>
               invokeArtifactAction(commandContext, 'artifact.original.load', artifact.id)
             }
           >
             <Maximize2 aria-hidden="true" />
-            {originalRequested ? 'Original loaded' : 'Load original'}
+            {originalState === 'loading'
+              ? 'Loading original'
+              : originalState === 'loaded'
+                ? 'Original loaded'
+                : originalState === 'failed'
+                  ? 'Retry original'
+                  : 'Load original'}
           </button>
+        )}
+        {originalState === 'failed' && (
+          <p role="status">Original image failed to load. The preview remains available.</p>
         )}
         {download && (
           <a href={download.content_url} download={artifact.displayName}>
